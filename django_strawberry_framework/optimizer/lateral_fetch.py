@@ -1058,7 +1058,9 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
       expression qual, an ``is_empty()`` hook, an M2M through filter, or a
       keyset shape's filter still downgrades;
     - an ordering that is not plain local concrete columns (expressions,
-      ``__`` traversals, or multi-table parent columns);
+      ``__`` traversals, or multi-table parent columns), a relation name the
+      compiler orders by its model's ``Meta.ordering`` included: it arrives
+      expanded into those terms (``utils/querysets.py::expand_relation_order``);
     - a ``defer()``-shaped projection (the ``.only()`` walker contract is
       the supported shape), selected multi-table parent columns, or a
       composite/columnless primary key.
@@ -1199,8 +1201,11 @@ def _order_columns(
     relation traversals, and names that are not local concrete fields
     downgrade to windowed: the lateral branch cannot render ``OVER (ORDER BY
     )`` (or an ``ORDER BY  LIMIT`` page), while the windowed body it mirrors
-    renders a valid orderless window for the same request. A random order never
-    arrives: the planner leaves it to the per-parent pipeline
+    renders a valid orderless window for the same request. A relation name
+    arrives as the planner expanded it (``utils/querysets.py::expand_relation_order``):
+    its own key column when the compiler orders it so, else the related
+    ``Meta.ordering`` terms, which downgrade here. A random order never arrives:
+    the planner leaves it to the per-parent pipeline
     (``optimizer/plans.py::has_random_term``).
     """
     if not order_by:

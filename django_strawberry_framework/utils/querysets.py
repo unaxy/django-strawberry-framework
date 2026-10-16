@@ -89,11 +89,20 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeGuard, TypeVar, cast, overload
 
 from asgiref.sync import sync_to_async
+from django.core.exceptions import FieldError
 from django.db import models, router
 from django.db.models import Prefetch, sql
 from django.db.models import query as django_query
 from django.db.models.constants import LOOKUP_SEP
-from django.db.models.expressions import Combinable, Exists, F, OrderBy, RawSQL
+from django.db.models.expressions import (
+    BaseExpression,
+    Combinable,
+    Exists,
+    Expression,
+    F,
+    OrderBy,
+    RawSQL,
+)
 from django.db.models.fields.reverse_related import ForeignObjectRel
 from django.db.models.lookups import Lookup
 from django.db.models.query import (
@@ -129,7 +138,7 @@ from ._queryset_private import (
     set_queryset_prefetch_lookups,
     set_queryset_sticky_filter,
 )
-from .relations import leading_relation_hops
+from .relations import leading_relation_hops, order_column_paths
 from .typing import MISSING_ATTRIBUTE
 from .write_transaction import (
     current_write_pipeline,
@@ -141,6 +150,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from typing import Literal, Protocol, TypeAlias
 
+    from django.db.models.options import Options
     from django.db.models.query import BaseIterable
 
     from django_strawberry_framework.filters.sets import FilterSet
@@ -378,6 +388,176 @@ def applied_order(query: sql.Query, model: type[models.Model]) -> tuple[str | Co
     field's offset guard classifies it (``list_field.py::_selected_ordering``).
     """
     return tuple(query.order_by) or default_order(query, model)
+
+
+class _UnexpandableOrderError(Exception):
+    """An order name the compiler reads as written: it rejects the expansion, or cannot run it."""
+
+
+def related_order_substitute(
+    final_field: ModelField,
+    related_opts: Options[models.Model] | None,
+    name: str,
+) -> Sequence[str | Combinable] | None:
+    """Return the related ``Meta.ordering`` the compiler orders an order name by, or ``None``.
+
+    The condition ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name``
+    tests once ``Query.names_to_path`` has resolved every piece of ``name`` (the
+    name without its direction, no transform left over): ``final_field`` - the
+    join field of the last hop, which for a many-to-many is the through table's
+    key to the target - is a relation, the model the path ends on
+    (``related_opts``) declares ``Meta.ordering``, and the name is neither that
+    field's ``attname`` (``"author_id"``) nor ``"pk"``. A reverse relation has no
+    ``attname``, which the compiler reads as ``None`` too.
+    """
+    if (
+        final_field.is_relation
+        and related_opts is not None
+        and related_opts.ordering
+        and getattr(final_field, "attname", None) != name.rsplit(LOOKUP_SEP, maxsplit=1)[-1]
+        and name != "pk"
+    ):
+        return related_opts.ordering
+    return None
+
+
+def _expanded_order_name(
+    query: sql.Query,
+    name: str,
+    *,
+    descending: bool,
+    opts: Options[models.Model],
+    prefix: str,
+    start: object,
+    seen: set[tuple[object, ...]],
+) -> list[str | F | Expression]:
+    """Expand one order name the way ``SQLCompiler.find_ordering_name`` does, as order terms.
+
+    Resolves ``name`` against ``opts`` with ``Query.names_to_path``, the walk the
+    compiler's ``setup_joins`` runs, and returns terms spelled from ``query``'s
+    model (``prefix`` is the relation path the expansion descended through)
+    that the compiler and ``Query.resolve_ref`` both read as the same columns or
+    expression. A name the compiler does not expand is spelled as the columns it
+    orders by: a carrier-backed relation as its carriers
+    (``utils/relations.py::order_column_paths``), a ``"pk"`` reached through a
+    relation as that model's key column. Raises ``_UnexpandableOrderError`` where
+    the compiler raises: a name that resolves to no field (a related ``"?"``), a
+    relation step it already took (``"Infinite loop caused by ordering."``,
+    keyed like the compiler's ``already_seen``: the ``join_cols`` of the join a
+    step starts from and of every join it adds, each the ``(lhs, rhs)`` column
+    pairs ``django/db/models/sql/datastructures.py::Join`` reads off its
+    ``join_field``), or an ordering item that is neither a name nor an order
+    expression.
+    """
+    try:
+        path, final_field, _targets, rest = query.names_to_path(
+            name.split(LOOKUP_SEP),
+            opts,
+            allow_many=True,
+            fail_on_missing=False,
+        )
+    except FieldError:
+        raise _UnexpandableOrderError(name) from None
+    # A transform left over (``rest``) is never expanded, nor spelled by carriers.
+    terminal: object = None if rest else final_field
+    related_opts: Options[models.Model] | None = path[-1].to_opts if path and not rest else None
+    ordering = (
+        None if related_opts is None else related_order_substitute(final_field, related_opts, name)
+    )
+    if related_opts is None or ordering is None:
+        sign = "-" if descending else ""
+        # ``"pk"`` inside a related ordering is never expanded there; spelled from the
+        # outer query it must name the key column, or a relation key would expand.
+        spelled = opts.pk.attname if prefix and name == "pk" else name
+        return [f"{sign}{column}" for column in order_column_paths(f"{prefix}{spelled}", terminal)]
+    step = (
+        start,
+        *(
+            tuple((lhs.column, rhs.column) for lhs, rhs in hop.join_field.get_joining_fields())
+            for hop in path
+        ),
+    )
+    if step in seen:
+        raise _UnexpandableOrderError(name)
+    seen.add(step)
+    nested = f"{prefix}{name}{LOOKUP_SEP}"
+    expanded: list[str | F | Expression] = []
+    for item in ordering:
+        if isinstance(item, str):
+            expanded.extend(
+                _expanded_order_name(
+                    query,
+                    item.removeprefix("-"),
+                    descending=descending != item.startswith("-"),
+                    opts=related_opts,
+                    prefix=nested,
+                    start=step[-1],
+                    seen=seen,
+                ),
+            )
+            continue
+        if not isinstance(item, (F, BaseExpression)):
+            # The compiler calls ``asc()`` on any other item and fails there.
+            raise _UnexpandableOrderError(name)
+        # An ``OrderBy`` is lifted as written - ``-relation`` does not invert it - while a
+        # bare expression takes the relation term's direction.
+        ordered = item if isinstance(item, OrderBy) else item.desc() if descending else item.asc()
+        expanded.append(ordered.prefix_references(nested))
+    return expanded
+
+
+def expand_relation_order(
+    order_by: Iterable[str | F | Expression],
+    query: sql.Query,
+) -> list[str | F | Expression]:
+    """Return ``order_by`` with every relation-name term replaced by what the compiler orders by.
+
+    ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name`` does not
+    order a STRING term ending on a relation by the relation's key when the
+    related model declares ``Meta.ordering`` (unless the name is the field's
+    ``attname``, as a multi-column ``ForeignObject``'s always is, which keeps
+    its carrier columns): it substitutes that ordering,
+    recursively, a ``-`` inverting each string and bare-expression item while an
+    ``OrderBy`` item keeps its own direction. An expression term never takes that
+    path (``Query.resolve_ref`` reads ``F("author")`` as the key column), and
+    neither does a ``Window`` order (it resolves every string as such an ``F``),
+    so a window ordered by the terms as written numbers its rows in a different
+    order than the statement compiling them. Every term returned here is read the
+    same way by both: a column path, or an expression with its references
+    spelled from ``query``'s model.
+
+    A string the compiler reads before the field path (an annotation, an
+    ``extra`` name) stays as written, and so does a name ``Query.names_to_path``
+    cannot resolve (``"?"``) or whose expansion the compiler rejects (a related
+    ``"?"``, an ordering loop): the compiler reads it as written wherever it is
+    compiled, raising Django's own ``FieldError`` where Django raises one.
+    """
+    return [spelled for term in order_by for spelled in _expanded_order_term(term, query)]
+
+
+def _expanded_order_term(
+    term: str | F | Expression,
+    query: sql.Query,
+) -> Sequence[str | F | Expression]:
+    """Expand one ``expand_relation_order`` term, or return it as written."""
+    if not isinstance(term, str):
+        return (term,)
+    name = term.removeprefix("-")
+    if name in query.annotations or name in query.extra:
+        # The compiler reads these before the field path, as the term written.
+        return (term,)
+    try:
+        return _expanded_order_name(
+            query,
+            name,
+            descending=term.startswith("-"),
+            opts=query.get_meta(),
+            prefix="",
+            start=None,
+            seen=set(),
+        )
+    except _UnexpandableOrderError:
+        return (term,)
 
 
 def initial_queryset(type_cls: type[DjangoType]) -> models.QuerySet[models.Model]:

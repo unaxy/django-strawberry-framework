@@ -68,7 +68,7 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import connection
-from django.db.models import QuerySet
+from django.db.models import Model, QuerySet
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Lower, Random
 from django.http import HttpRequest
@@ -1590,6 +1590,49 @@ def test_unanchorable_hook_order_raises_the_root_keyset_error_nested(
     schema = _hook_order_schema(
         shape,
         hook_order,
+        optimizer=optimizer,
+        strictness=strictness,
+    )
+    root = _post_holder(schema, "{ children(first: 1) { edges { cursor } } }")
+    nested = _post_holder(schema, _nested_hook_query(shape), variables={"first": 1})
+    assert [error["message"] for error in root["errors"]] == [_UNANCHORABLE_ORDER]
+    assert [error["message"] for error in nested["errors"]] == [_UNANCHORABLE_ORDER]
+
+
+#: Per hook shape, the relation the child orders by and the ``Meta.ordering`` its model
+#: declares, which Django compiles that relation name into.
+_RELATION_HOOK_ORDERS: dict[str, tuple[str, type[Model], tuple[str, ...]]] = {
+    "fk": ("periodical", models.Periodical, ("-name",)),
+    "m2m": ("shelf", models.Shelf, ("-code",)),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("optimizer", "strictness"),
+    [(True, "off"), (False, "off"), (True, "raise")],
+    ids=["planned", "unplanned", "strict"],
+)
+@pytest.mark.parametrize("shape", ["fk", "m2m"])
+def test_relation_name_hook_order_stays_unanchorable_under_a_related_ordering(
+    shape: str,
+    *,
+    optimizer: bool,
+    strictness: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relation name is refused as a keyset order even though Django orders it by columns.
+
+    The related model's ``Meta.ordering`` is what the name compiles into, but the
+    keyset vocabulary reads the order as written, at the root and nested alike: a
+    relation is no cursor column, so both raise the root keyset error on every mount.
+    """
+    relation, related_model, related_ordering = _RELATION_HOOK_ORDERS[shape]
+    monkeypatch.setattr(related_model._meta, "ordering", related_ordering)
+    _seed_hook_order_rows(shape, with_b=False)
+    schema = _hook_order_schema(
+        shape,
+        (relation,),
         optimizer=optimizer,
         strictness=strictness,
     )
