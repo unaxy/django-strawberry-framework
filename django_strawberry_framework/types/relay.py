@@ -894,18 +894,20 @@ def _install_typename_closure(
     inherited through a subclass's MRO - for a consumer override.
     """
     if strategy == "type":
+        # Strawberry's own ``Node.resolve_typename`` (``info.path.typename``): the name the
+        # executing schema published for the type. Read once here, off the hot path; the
+        # cast restates the classmethod's declared signature, which ``__func__`` reads ``Any``.
+        node_default = cast(
+            "Callable[[type[object], object, Info[object, object]], str]",
+            relay.Node.resolve_typename.__func__,
+        )
 
         def resolve_typename(
             cls: type[_RelayDjangoType],
             root: object,
             info: Info[object, object],
         ) -> str:
-            # Strawberry's own ``Node.resolve_typename`` (``info.path.typename``):
-            # the name the executing schema published for the type.
-            return require(
-                call_method(relay.Node.resolve_typename, "__func__", cls, root, info),
-                is_str,
-            )
+            return node_default(cls, root, info)
 
     else:
 

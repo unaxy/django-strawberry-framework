@@ -107,6 +107,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_exact_pair,
     is_str,
     read_attr,
+    require,
 )
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
@@ -230,11 +231,11 @@ def _resolved_max_request_body_bytes(value: object) -> int | None:
 def _declared_content_length(request: HttpRequest) -> int | None:
     """Return the request's declared ``CONTENT_LENGTH`` as an ``int``, or ``None``.
 
-    ``None`` covers both unmeasurable shapes: the header is absent (read as
-    ``""``) or is not a number; ``int`` raises ``ValueError`` on either, and
-    ``TypeError`` on a non-string a hand-built ``META`` carries. All fall
-    through to the counted check rather than being trusted, which is the
-    fail-safe direction - an unparseable declaration must not buy a larger body.
+    ``None`` covers every unmeasurable shape: the header is absent, is a
+    non-string a hand-built ``META`` carries, or is a string ``int`` refuses with
+    ``ValueError``. All fall through to the counted check rather than being
+    trusted, which is the fail-safe direction - an unparseable declaration must
+    not buy a larger body.
     """
     declared: object = request.META.get("CONTENT_LENGTH")
     if not is_str(declared):
@@ -420,11 +421,6 @@ class _RawBodyRequestAdapter(DjangoHTTPRequestAdapter):
         return self.request.body
 
 
-async def _settled_response(response: object) -> object:
-    """Return a view callback's response, awaited first when the callback returned a coroutine."""
-    return await response if is_awaitable(response) else response
-
-
 @overload
 def _boundary_view(
     upstream_view: Callable[..., Coroutine[object, object, HttpResponseBase]],
@@ -479,8 +475,7 @@ def _boundary_view(upstream_view: Callable[..., object]) -> Callable[..., object
         if not is_exact_pair(prepared) or prepared[0] is not mount:
             return None
         delattr(request, _BOUNDARY_PREPARED_VIEW)
-        dispatch = read_attr(prepared[1], "dispatch", None)
-        return dispatch if callable(dispatch) else None
+        return require(read_attr(prepared[1], "dispatch"), callable)
 
     # The arm follows the callback Django will call, never ``view_is_async``: that
     # reads the HTTP handlers, and ``AsyncGraphQLView`` defines none - its
@@ -494,8 +489,10 @@ def _boundary_view(upstream_view: Callable[..., object]) -> Callable[..., object
 
         @wraps(upstream_view)
         async def async_view(request: HttpRequest, *args: object, **kwargs: object) -> object:
-            dispatch = prepared_dispatch(request) or upstream_view
-            return await _settled_response(dispatch(request, *args, **kwargs))
+            dispatch = prepared_dispatch(request)
+            if dispatch is None:
+                dispatch = upstream_view
+            return await require(dispatch(request, *args, **kwargs), is_awaitable)
 
         view = async_view
     else:

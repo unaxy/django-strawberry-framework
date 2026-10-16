@@ -102,7 +102,7 @@ from django_strawberry_framework.utils._narrowing import (
     list_of,
     read_attr,
 )
-from django_strawberry_framework.utils.typing import call_forwarded, is_marked_coroutine_function
+from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -370,7 +370,7 @@ def _package_view_instance(view_func: object) -> object:
     except Exception:  # noqa: BLE001 - a read that cannot answer has recognized nothing
         return None
     try:
-        return call_forwarded(view_class, (), initkwargs)
+        return object_result(view_class, **initkwargs)
     except TypeError:
         return None
 

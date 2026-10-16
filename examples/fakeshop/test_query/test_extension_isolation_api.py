@@ -487,7 +487,8 @@ def _ambiguous_schema() -> DjangoSchema:
 
 def _ladder_schema(factory: Callable[[], object]) -> DjangoSchema:
     """A schema whose one entry is ``factory``, accepted at construction."""
-    return DjangoSchema(query=_ResourceQuery, extensions=[factory])
+    # basedpyright: trust boundary: a factory the per-operation check refuses, built on purpose
+    return DjangoSchema(query=_ResourceQuery, extensions=[factory])  # pyright: ignore[reportArgumentType]
 
 
 def _survivor_schema() -> DjangoSchema:

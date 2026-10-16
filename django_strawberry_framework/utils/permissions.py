@@ -50,7 +50,7 @@ from django_strawberry_framework.exceptions import (
     _safe_type_name,
 )
 
-from ._narrowing import dict_items, is_dict, is_mapping, mapping_get, read_attr
+from ._narrowing import dict_items, is_dict, is_mapping, is_str, mapping_get, read_attr, require
 from .input_values import (
     LEAF,
     RELATED,
@@ -340,8 +340,9 @@ def resolve_auth_aliases() -> frozenset[str]:
     # ``AUTH_USER_MODEL`` is ``"app_label.ModelName"``; resolving it through the
     # same ``_safe_get_model`` as the other auth models keeps ONE code path (an
     # uninstalled / misconfigured model is skipped, never an error).
-    # ``AUTH_USER_MODEL`` is a ``str`` setting; anything else names no model and is skipped.
-    user_app_label, _, user_model_name = str(django_setting("AUTH_USER_MODEL")).partition(".")
+    # ``AUTH_USER_MODEL`` is a ``str`` setting (``"app_label.ModelName"``).
+    auth_user_model = require(django_setting("AUTH_USER_MODEL"), is_str)
+    user_app_label, _, user_model_name = auth_user_model.partition(".")
     candidates = [
         _safe_get_model(user_app_label, user_model_name),
         _safe_get_model("auth", "Permission"),

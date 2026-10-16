@@ -582,8 +582,8 @@ def test_the_declared_length_reader_is_none_for_every_unmeasurable_shape(
     ``None`` is the fail-safe direction: an unmeasurable declaration falls
     through to the counted check rather than being trusted, so a hostile client
     cannot buy a larger body by omitting or corrupting the header. An absent
-    header reads as ``""``, so it fails ``int`` with the same ``ValueError`` as
-    ``"not-a-number"``.
+    header is not a string, so it reads as ``None`` before ``int`` is asked, and
+    ``"not-a-number"`` reads as ``None`` through ``int``'s ``ValueError``.
     """
     request = RequestFactory().post("/graphql/", data=b"x" * 16, content_type="application/json")
     if content_length is None:

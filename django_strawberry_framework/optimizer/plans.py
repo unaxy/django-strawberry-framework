@@ -685,8 +685,8 @@ def deferred_loading_of(queryset: object) -> tuple[frozenset[str], bool] | None:
     future Django rename has one fix.
 
     Returns ``None`` when the state is unreadable: the attribute is missing
-    (a non-QuerySet input, e.g. a test double) or the tuple shape is
-    malformed.
+    (a non-QuerySet input, e.g. a test double), the tuple shape is
+    malformed, or a name in the field set is not a string.
     """
     query = read_attr(queryset, "query", None)
     deferred_loading = read_attr(query, "deferred_loading", None)

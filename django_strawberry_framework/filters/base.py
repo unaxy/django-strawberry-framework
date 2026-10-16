@@ -1863,6 +1863,6 @@ class RelatedFilter(RelatedSetTargetMixin, ModelChoiceFilter):
         if self.queryset is None:
             target = self.filterset
             model = read_attr(read_attr(target, "_meta", None), "model", None)
-            if is_model_class(model):
-                return base_queryset(model)
+            if model is not None:
+                return base_queryset(require(model, is_model_class))
         return super().get_queryset(request)

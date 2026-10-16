@@ -492,6 +492,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_public_types.py    # Script tests for the public-API type-completeness gate in ``scripts/check_public_types.py``.
 ├── test_check_spec_glossary.py   # Script tests for the spec terms-CSV glossary gate.
 ├── test_check_trailing_commas.py # Script tests for the ``source-layout`` gate in ``scripts/check_trailing_commas.py``.
+├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
 ├── test_ci_governance.py         # Governance tests for the CI workflow definitions.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
@@ -641,6 +642,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_init.py              # Package-init tests pinning the ``utils`` package's re-export surface.
     ├── test_input_values.py      # Tests for the neutral set-input traversal substrate (``utils/input_values.py``).
     ├── test_inputs.py            # Tests for the shared generated-input substrate (``utils/inputs.py``).
+    ├── test_narrowing.py         # Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
     ├── test_permissions.py       # Tests for input permissions, relation-path gates, and Django/Channels request decoding.
     ├── test_policies.py          # ``utils/policies.py::resolve_policy`` - the shared schema-construction resolver.
     ├── test_querysets.py         # Tests for the shared query-source / visibility substrate (``utils/querysets.py``).
@@ -773,6 +775,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_public_types.py    # Script tests for the public-API type-completeness gate in ``scripts/check_public_types.py``.
 ├── test_check_spec_glossary.py   # Script tests for the spec terms-CSV glossary gate.
 ├── test_check_trailing_commas.py # Script tests for the ``source-layout`` gate in ``scripts/check_trailing_commas.py``.
+├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
 ├── test_ci_governance.py         # Governance tests for the CI workflow definitions.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
@@ -927,6 +930,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_init.py              # Package-init tests pinning the ``utils`` package's re-export surface.
     ├── test_input_values.py      # Tests for the neutral set-input traversal substrate (``utils/input_values.py``).
     ├── test_inputs.py            # Tests for the shared generated-input substrate (``utils/inputs.py``).
+    ├── test_narrowing.py         # Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
     ├── test_permissions.py       # Tests for input permissions, relation-path gates, and Django/Channels request decoding.
     ├── test_policies.py          # ``utils/policies.py::resolve_policy`` - the shared schema-construction resolver.
     ├── test_querysets.py         # Tests for the shared query-source / visibility substrate (``utils/querysets.py``).

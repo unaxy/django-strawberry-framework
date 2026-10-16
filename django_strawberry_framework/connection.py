@@ -152,11 +152,12 @@ from .utils.querysets import (
     reject_awaitable_sync_source,
     reject_residual_async_source,
 )
-from .utils.typing import call_forwarded, is_async_callable, object_result, unwrap_container_type
+from .utils.typing import is_async_callable, object_result, unwrap_container_type
 
 if TYPE_CHECKING:
     from typing import Literal, TypeAlias
 
+    from strawberry.relay.types import NodeIterableType
     from strawberry.types.base import WithStrawberryObjectDefinition
     from strawberry.types.field import StrawberryField
     from typing_extensions import Self
@@ -377,7 +378,8 @@ def _edge_over(
     ``Edge`` annotates ``node`` with the GraphQL ``Node`` type the connection serves; the
     Python value is the model row the type resolves, so it is handed over verbatim.
     """
-    return call_forwarded(edge_class, (), {"node": node, "cursor": cursor})
+    # The cast is the annotation gap the docstring names: the row stands for its Node type.
+    return edge_class(node=cast("relay.Node", node), cursor=cursor)
 
 
 def _offset_edge_over(
@@ -385,8 +387,11 @@ def _offset_edge_over(
     node: object,
     offset: int,
 ) -> relay.Edge[relay.Node]:
-    """Build one edge over ``node`` at ``offset``, its cursor minted by the edge class itself."""
-    return call_forwarded(edge_class.resolve_edge, (node,), {"cursor": offset})
+    """Build one edge over ``node`` at ``offset``, its cursor minted by the edge class itself.
+
+    The row stands for its Node type, as in :func:`_edge_over`.
+    """
+    return edge_class.resolve_edge(cast("relay.Node", node), cursor=offset)
 
 
 @functools.cache
@@ -919,21 +924,18 @@ def _consume_fallback(
         cap=max_results,
         prefix=_offset_cursor_prefix(cls),
     )
-    # Forwarded verbatim: ``ListConnection`` slices a ``__getitem__``-only source its iterable
-    # annotation leaves out. ``_pipeline_sync`` / ``_pipeline_async`` refuse a non-iterable
-    # first (``_guard_non_queryset_iterable``); a direct call passes it through.
-    conn = call_forwarded(
-        super(DjangoConnection, cls).resolve_connection,
-        (nodes,),
-        {
-            "info": info,
-            "before": before,
-            "after": after,
-            "first": first,
-            "last": last,
-            "max_results": max_results,
-            **kwargs,
-        },
+    # The cast states the source as ``ListConnection`` takes it: it slices a ``__getitem__``-only
+    # source its iterable annotation leaves out. ``_pipeline_sync`` / ``_pipeline_async`` refuse
+    # a non-iterable first (``_guard_non_queryset_iterable``); a direct call passes it through.
+    conn = super(DjangoConnection, cls).resolve_connection(
+        cast("NodeIterableType[relay.Node]", nodes),
+        info=info,
+        before=before,
+        after=after,
+        first=first,
+        last=last,
+        max_results=max_results,
+        **kwargs,
     )
     if inspect.isawaitable(conn):
         return _attach_count_async(conn, nodes, want_count=want_count)

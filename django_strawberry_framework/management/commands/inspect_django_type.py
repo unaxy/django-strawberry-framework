@@ -62,7 +62,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import _PACKAGE_SCALAR_MAP
 from django_strawberry_framework.types.base import DjangoType, _is_relay_shaped
 from django_strawberry_framework.types.converters import SCALAR_MAP, _field_output_type_for
-from django_strawberry_framework.utils._narrowing import is_str
+from django_strawberry_framework.utils._narrowing import is_str, require
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 
 if typing.TYPE_CHECKING:
@@ -146,9 +146,9 @@ class Command(BaseCommand):
         # argparse hands ``--schema`` over as a string, or ``None`` when it was not given.
         schema = options.get("schema")
         schema_object = None
-        if is_str(schema):
+        if schema is not None:
             schema_object = import_module_symbol_or_command_error(
-                schema,
+                require(schema, is_str),
                 default_symbol_name="schema",
             )
 

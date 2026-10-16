@@ -277,9 +277,7 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
     invalid_fields: list[object] = []
     for name, field in basis.items():
         try:
-            invalid_name = (
-                not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name)
-            )
+            invalid_name = not is_str(name) or not name.isidentifier() or keyword.iskeyword(name)
         except BaseException:  # noqa: BLE001 - hostile object, contained by design
             invalid_name = True
         if invalid_name:

@@ -52,6 +52,8 @@ from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, TypeGuard, TypeVar
 
+from django_strawberry_framework.exceptions import _safe_type_name
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, ItemsView, Iterator
     from enum import Enum
@@ -308,14 +310,18 @@ _InstanceT = TypeVar("_InstanceT")
 def require_instance(value: object, cls: type[_InstanceT], /) -> _InstanceT:
     """Return ``value`` as the ``cls`` instance it must be, raising ``TypeError`` when it is not."""
     if not isinstance(value, cls):
-        raise TypeError(f"expected an instance of {cls!r}")
+        raise TypeError(
+            f"expected an instance of {_safe_type_name(cls)}, got {_safe_type_name(value)}",
+        )
     return value
 
 
 def require(value: object, predicate: Callable[[object], TypeIs[_InstanceT]], /) -> _InstanceT:
     """Return ``value`` as the type ``predicate`` proves, raising ``TypeError`` when it does not."""
     if not predicate(value):
-        raise TypeError("the value is not of the type its source guarantees")
+        raise TypeError(
+            f"expected the type the source guarantees, got {_safe_type_name(value)}",
+        )
     return value
 
 

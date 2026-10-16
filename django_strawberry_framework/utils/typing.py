@@ -168,8 +168,8 @@ MISSING_ATTRIBUTE: Final = _MissingAttribute.MISSING
 def object_result(call: "Callable[..., object]", /, *args: object, **kwargs: object) -> object:
     """Return ``call(*args, **kwargs)`` as the ``object`` it is, whatever its stub declares.
 
-    For an upstream method a stub types ``-> Any``: the result is narrowed like any other
-    value the package did not build.
+    For an upstream method a stub types ``-> Any``, or a class whose constructor no stub
+    describes: the result is narrowed like any other value the package did not build.
     """
     return call(*args, **kwargs)
 
@@ -184,8 +184,8 @@ def call_forwarded(
     The override that spells its parameters ``*args: object, **kwargs: object``
     takes whatever the installed upstream version accepts, so a parameter
     upstream adds later passes through, and the arguments are checked where they
-    belong: by ``method`` itself when it runs. ``views.py``'s CSRF continuations
-    forward the same way.
+    belong: by ``method`` itself when it runs. Only for that verbatim forward: a
+    call the package composes itself spells its arguments, so the checker sees them.
     """
     return method(*args, **kwargs)
 

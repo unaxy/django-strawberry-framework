@@ -47,9 +47,8 @@ from django_strawberry_framework.utils._narrowing import (
     is_dict,
     is_list_or_tuple,
     read_attr,
-    require,
 )
-from django_strawberry_framework.utils.typing import call_forwarded, object_result
+from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Generator, Mapping
@@ -57,6 +56,14 @@ if TYPE_CHECKING:
 
     from django.contrib.auth.models import _User
     from django.test.client import _MonkeyPatchedASGIResponse, _MonkeyPatchedWSGIResponse
+    from graphql import GraphQLFormattedError
+
+    class _ResponseBody(TypedDict, total=False):
+        """A decoded GraphQL response body, as the engine's typed triple takes its members."""
+
+        errors: list[GraphQLFormattedError] | None
+        data: dict[str, object] | None
+        extensions: dict[str, object] | None
 
     class _ClientPostKwargs(TypedDict, total=False):
         """The keyword arguments the clients' ``request()`` forwards to ``Client.post``."""
@@ -169,21 +176,17 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
         it - the async color still owns its own ``await self.request(...)``.
         """
         # Upstream's ``_decode`` returns the decoded body ``Any``; a GraphQL response body is a
-        # JSON object, whose members the engine's typed triple takes as they were decoded.
-        data = require(
+        # JSON object, whose members the engine's typed triple takes as they were decoded, so
+        # the cast names that shape rather than checking it.
+        body = cast(
+            "_ResponseBody",
             object_result(self._decode, resp, type="multipart" if files else "json"),
-            is_dict,
         )
-
-        response = call_forwarded(
-            Response,
-            (),
-            {
-                "errors": data.get("errors"),
-                "data": data.get("data"),
-                "extensions": data.get("extensions"),
-                "response": resp,
-            },
+        response = Response(
+            errors=body.get("errors"),
+            data=body.get("data"),
+            extensions=body.get("extensions"),
+            response=resp,
         )
 
         if assert_no_errors and response.errors is not None:
