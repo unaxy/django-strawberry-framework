@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
     from django.db import models
+    from typing_extensions import TypeIs
 
     from .types.base import DjangoType
     from .types.definition import DjangoTypeDefinition, GlobalIDStrategy
@@ -489,6 +490,10 @@ class TypeRegistry:
                 else:
                     self._primaries[model] = pre_primary
             raise
+
+    def is_registered_type(self, probe: object) -> TypeIs[type[DjangoType]]:
+        """Return whether ``probe`` is a ``DjangoType`` this registry holds (a model or a definition)."""
+        return self.model_for_type(probe) is not None or self.get_definition(probe) is not None
 
     def get_definition(self, type_cls: object) -> DjangoTypeDefinition | None:
         """Return the collected definition for ``type_cls``, or ``None``."""

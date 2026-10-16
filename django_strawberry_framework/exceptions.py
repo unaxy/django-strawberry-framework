@@ -293,10 +293,11 @@ class DjangoStrawberryFrameworkError(Exception):
         try:
             rendered = str.__str__(super().__str__())
         except BaseException:  # noqa: BLE001 - hostile object, contained by design
+            args: tuple[object, ...] = self.args
             rendered = (
-                f"<unprintable {_safe_type_name(self.args[0])}>"
-                if len(self.args) == 1
-                else "(" + ", ".join(_safe_arg_repr(a) for a in self.args) + ")"
+                f"<unprintable {_safe_type_name(args[0])}>"
+                if len(args) == 1
+                else "(" + ", ".join(_safe_arg_repr(a) for a in args) + ")"
             )
         return rendered
 
@@ -306,7 +307,8 @@ class DjangoStrawberryFrameworkError(Exception):
         try:
             rendered = str.__str__(super().__repr__())
         except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            args = ", ".join(_safe_arg_repr(a) for a in self.args)
+            exception_args: tuple[object, ...] = self.args
+            args = ", ".join(_safe_arg_repr(a) for a in exception_args)
             rendered = f"{_safe_type_name(self)}({args})"
         return rendered
 

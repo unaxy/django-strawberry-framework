@@ -81,8 +81,9 @@ from django_strawberry_framework.mutations.sets import (
     resolver_seams,
 )
 from django_strawberry_framework.registry import register_subsystem_clear
-from django_strawberry_framework.utils._narrowing import is_class
+from django_strawberry_framework.utils._narrowing import is_class, read_attr, require
 from django_strawberry_framework.utils.inputs import make_shape_build_cache
+from django_strawberry_framework.utils.typing import call_forwarded
 
 from .inputs import (
     FORM,
@@ -107,6 +108,7 @@ if TYPE_CHECKING:
 
     from django.db import models
     from strawberry.types import Info
+    from typing_extensions import TypeIs
 
     from django_strawberry_framework.mutations.sets import DeclarationRegistry
     from django_strawberry_framework.types.base import DjangoType
@@ -208,17 +210,22 @@ def _default_mutation_get_form_fields(
     nested ``Meta`` object after declaration, but that cannot change the input
     shape or the form class the default constructor binds.
     """
-    meta_snapshot = cls.__dict__.get("_mutation_meta")
+    meta_snapshot: object = cls.__dict__.get("_mutation_meta")
     if meta_snapshot is not None:
-        form_class = getattr(meta_snapshot, "form_class", None)
+        form_class = read_attr(meta_snapshot, "form_class", None)
     else:
-        form_meta = getattr(cls, "Meta", None)
-        form_class = getattr(form_meta, "form_class", None)
+        form_meta = read_attr(cls, "Meta", None)
+        form_class = read_attr(form_meta, "form_class", None)
     if form_class is None:
         raise ConfigurationError(
             f"{cls.__name__}.get_form_fields() cannot resolve Meta.form_class.",
         )
-    return get_form_fields(form_class)
+    return get_form_fields(require(form_class, _is_form_class))
+
+
+def _is_form_class(value: object) -> TypeIs[FormClass]:
+    """Whether ``value`` is a ``Form`` or ``ModelForm`` subclass, asked of its real type."""
+    return is_class(value) and issubclass(value, (forms.Form, forms.ModelForm))
 
 
 def _mutation_form_fields(
@@ -485,8 +492,10 @@ def _default_get_form(
     """
     # Both flavors' ``_validate_meta`` store a ``require_subclass``-checked form class.
     form_class = cast("FormClass", type(self)._mutation_meta.form_class)
-    return form_class(
-        **self.get_form_kwargs(info, data=data, files=files, instance=instance),
+    return call_forwarded(
+        form_class,
+        (),
+        self.get_form_kwargs(info, data=data, files=files, instance=instance),
     )
 
 

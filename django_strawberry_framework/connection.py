@@ -116,7 +116,7 @@ from .optimizer.selections import (
 from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
 from .types.resolvers import _check_n1
-from .utils._narrowing import is_list
+from .utils._narrowing import is_list, read_attr, require, require_instance
 from .utils.connections import (
     CONNECTION_FILTER_KWARG,
     CONNECTION_ORDER_KWARG,
@@ -146,12 +146,13 @@ from .utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
     base_queryset,
+    is_manager,
     prepared_resolver_source,
     reject_async_iterable_in_sync_context,
     reject_awaitable_sync_source,
     reject_residual_async_source,
 )
-from .utils.typing import is_async_callable, unwrap_container_type
+from .utils.typing import call_forwarded, is_async_callable, object_result, unwrap_container_type
 
 if TYPE_CHECKING:
     from typing import Literal, TypeAlias
@@ -364,6 +365,28 @@ def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
         "type[relay.Edge[relay.Node]]",
         unwrap_container_type(field_def.resolve_type(type_definition=type_def)),
     )
+
+
+def _edge_over(
+    edge_class: type[relay.Edge[relay.Node]],
+    node: object,
+    cursor: str,
+) -> relay.Edge[relay.Node]:
+    """Build one edge over ``node`` under an already-minted ``cursor``.
+
+    ``Edge`` annotates ``node`` with the GraphQL ``Node`` type the connection serves; the
+    Python value is the model row the type resolves, so it is handed over verbatim.
+    """
+    return call_forwarded(edge_class, (), {"node": node, "cursor": cursor})
+
+
+def _offset_edge_over(
+    edge_class: type[relay.Edge[relay.Node]],
+    node: object,
+    offset: int,
+) -> relay.Edge[relay.Node]:
+    """Build one edge over ``node`` at ``offset``, its cursor minted by the edge class itself."""
+    return call_forwarded(edge_class.resolve_edge, (node,), {"cursor": offset})
 
 
 @functools.cache
@@ -650,9 +673,10 @@ def _resolve_from_window(
         # row number. Edges are constructed directly (``resolve_edge`` would re-encode the
         # cursor under the edge class's offset ``CURSOR_PREFIX``).
         edges = [
-            edge_class(
-                node=cls.resolve_node(node, info=info, **kwargs),
-                cursor=encode_keyset_cursor(
+            _edge_over(
+                edge_class,
+                object_result(cls.resolve_node, node, info=info, **kwargs),
+                encode_keyset_cursor(
                     keyset_state.columns,
                     node,
                     fingerprint=keyset_state.fingerprint,
@@ -662,9 +686,10 @@ def _resolve_from_window(
         ]
     else:
         edges = [
-            edge_class.resolve_edge(
-                cls.resolve_node(node, info=info, **kwargs),
-                cursor=getattr(node, WINDOW_ROW_NUMBER) - 1,
+            _offset_edge_over(
+                edge_class,
+                object_result(cls.resolve_node, node, info=info, **kwargs),
+                require_instance(read_attr(node, WINDOW_ROW_NUMBER), int) - 1,
             )
             for node in page_rows
         ]
@@ -683,7 +708,7 @@ def _resolve_from_window(
     # page-relative to pre-seek, so the counted shape reads the annotated
     # POST-SEEK count instead (missing annotation = plan drift: fall back
     # rather than serve a wrong flag).
-    first_rn: int = getattr(page_rows[0], WINDOW_ROW_NUMBER)
+    first_rn = require_instance(read_attr(page_rows[0], WINDOW_ROW_NUMBER), int)
     if range_plan.next_page_probe:
         has_next_page = probe_row_seen
     elif keyset_seek_supplied:
@@ -825,10 +850,7 @@ def _consume_window(
 
 def _consume_fallback(
     cls: type[_ConnectionT],
-    # basedpyright: the resolver's value reaches ListConnection.resolve_connection, whose
-    # iterable union it may not meet; ``_pipeline_sync`` / ``_pipeline_async`` refuse a
-    # non-iterable first (``_guard_non_queryset_iterable``), a direct call passes it through
-    nodes: Any,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - meets the resolver's iterable union
+    nodes: object,
     *,
     info: Info[object, object],
     before: str | None,
@@ -897,15 +919,21 @@ def _consume_fallback(
         cap=max_results,
         prefix=_offset_cursor_prefix(cls),
     )
-    conn = super(DjangoConnection, cls).resolve_connection(
-        nodes,
-        info=info,
-        before=before,
-        after=after,
-        first=first,
-        last=last,
-        max_results=max_results,
-        **kwargs,
+    # Forwarded verbatim: ``ListConnection`` slices a ``__getitem__``-only source its iterable
+    # annotation leaves out. ``_pipeline_sync`` / ``_pipeline_async`` refuse a non-iterable
+    # first (``_guard_non_queryset_iterable``); a direct call passes it through.
+    conn = call_forwarded(
+        super(DjangoConnection, cls).resolve_connection,
+        (nodes,),
+        {
+            "info": info,
+            "before": before,
+            "after": after,
+            "first": first,
+            "last": last,
+            "max_results": max_results,
+            **kwargs,
+        },
     )
     if inspect.isawaitable(conn):
         return _attach_count_async(conn, nodes, want_count=want_count)
@@ -1097,9 +1125,10 @@ def _resolve_keyset_connection(
             rows = list(reversed(rows))
         edge_class = _window_edge_class(cls)
         edges = [
-            edge_class(
-                node=cls.resolve_node(row, info=info, **kwargs),
-                cursor=encode_keyset_cursor(columns, row, fingerprint=fingerprint),
+            _edge_over(
+                edge_class,
+                object_result(cls.resolve_node, row, info=info, **kwargs),
+                encode_keyset_cursor(columns, row, fingerprint=fingerprint),
             )
             for row in rows
         ]
@@ -1431,15 +1460,19 @@ def _build_total_count_connection(
     or after delegating slicing to the base (spec-030 Decision 4).
     """
 
-    @strawberry.field(description="Total number of nodes in the connection.")
-    def total_count(self: object) -> int:
+    def _total_count(self: object) -> int:
         # The field renders ``Int!`` (the ``__annotations__`` below win for the
         # SDL); ``-> int`` is the honest return type because the count path is
         # QuerySet-only (the connection field's spec-030 Decision 7 rule raises a ``GraphQLError``
         # before a non-queryset return can reach ``totalCount``). The attribute
         # is always set by ``resolve_connection`` when the field is selected
         # over a queryset source.
-        return cast("int", getattr(self, _TOTAL_COUNT_ATTR))
+        return require_instance(read_attr(self, _TOTAL_COUNT_ATTR), int)
+
+    total_count = strawberry.field(
+        resolver=_total_count,
+        description="Total number of nodes in the connection.",
+    )
 
     def _populate(namespace: dict[str, object]) -> None:
         namespace["__annotations__"] = {"total_count": int}
@@ -2253,7 +2286,7 @@ def _build_relation_connection_resolver(
     to_attr = _relation_connection_to_attr(relation_field_name)
 
     def _resolve(root: object, info: Info[object, object], **kwargs: object) -> object:
-        source: object = getattr(root, accessor_name).all()
+        source = require(read_attr(root, accessor_name), is_manager).all()
         # Per-response-key window first (divergent aliases): the attr
         # is a pure function of ``info.path.key`` - the resolve-time twin of
         # the response key the walker planned under. ``probe_attr`` tracks

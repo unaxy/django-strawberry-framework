@@ -29,7 +29,7 @@ it runs, and resolves through that schema's own type map.
 
 Type source: the field's schema type comes from the consumer's class-body
 annotation at the assignment site, exactly as spelled above - both factories'
-resolvers return ``Any``, so there is no framework-side fallback. Omitting the
+resolvers carry an ``Any`` return annotation, so there is no framework-side fallback. Omitting the
 annotation (``node = DjangoNodeField()``) surfaces at ``strawberry.Schema(...)``
 build as graphql-core's ``TypeError: Query fields cannot be resolved.
 Unexpected type 'typing.Any'`` - that message means "annotate the assignment".
@@ -559,9 +559,7 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
         # GlobalID-annotated argument is parsed by Strawberry's ``convert_argument``
         # BEFORE the resolver runs, so malformed ids would never reach the package.
         id_: Annotated[strawberry.ID, strawberry.argument(name="id")],
-        # basedpyright: Strawberry reads this annotation for an unannotated assignment; Any keeps
-        # the module docstring's "Unexpected type 'typing.Any'" build error (object changes it)
-    ) -> Any:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - Strawberry reads this annotation
+    ) -> object:
         # The cooperative deadline (spec-047) before the decode: a refetch is a
         # visibility-scoped query, and the decode is the step that makes one
         # inevitable.
@@ -596,6 +594,10 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
             return _await_and_stamp(resolved, result)
         return _stamp_node_type(resolved, result)
 
+    # Strawberry reads the resolver's return annotation when the assignment carries none,
+    # and ``Any`` is what keeps the module docstring's "Unexpected type 'typing.Any'" build
+    # error for an unannotated assignment.
+    _resolve.__annotations__["return"] = Any
     return strawberry.field(
         resolver=_resolve,
         description=description,
@@ -667,9 +669,7 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
         # Raw strings for the same reason as ``DjangoNodeField``'s ``id``
         # argument.
         ids: list[strawberry.ID],
-        # basedpyright: Strawberry reads this annotation for an unannotated assignment; Any keeps
-        # the module docstring's "Unexpected type 'typing.Any'" build error (object changes it)
-    ) -> Any:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - Strawberry reads this annotation
+    ) -> object:
         if not ids:
             # Zero database access (spec Edge cases).
             return []
@@ -744,6 +744,10 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
             ]
         return _interleave(positions, per_type)
 
+    # Strawberry reads the resolver's return annotation when the assignment carries none,
+    # and ``Any`` is what keeps the module docstring's "Unexpected type 'typing.Any'" build
+    # error for an unannotated assignment.
+    _resolve.__annotations__["return"] = Any
     return strawberry.field(
         resolver=_resolve,
         description=description,

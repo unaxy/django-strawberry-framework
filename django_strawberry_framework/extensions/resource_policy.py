@@ -140,12 +140,16 @@ from django_strawberry_framework.utils._narrowing import (
     is_mapping,
     is_memoryview,
     mapping_get,
+    read_attr,
+    require_instance,
 )
 from django_strawberry_framework.utils.context import restored_context_keys
 from django_strawberry_framework.utils.inputs import RELATION_MULTI
 from django_strawberry_framework.utils.policies import copy_policy
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.typing import (
+    graphql_fields,
+    graphql_input_fields,
     graphql_type_of,
     inline_fragment_type_condition,
     is_graphql_list,
@@ -153,6 +157,10 @@ from django_strawberry_framework.utils.typing import (
 )
 
 from .operation_state import OperationState, _OperationBoundExtension
+
+#: graphql-core's ``value_from_ast_untyped``: typed ``Any``; it is the Python value a
+#: literal (or the variable it names) spells.
+_value_from_ast: Callable[..., object] = value_from_ast_untyped
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -164,7 +172,6 @@ if TYPE_CHECKING:
         GraphQLArgument,
         GraphQLField,
         GraphQLInputField,
-        GraphQLInputFieldMap,
         GraphQLNamedType,
         GraphQLSchema,
         GraphQLType,
@@ -459,7 +466,7 @@ class _ValueBudget:
         it reads it (:meth:`_charge_upload`), which is the only place that can
         say what an unusable answer there means.
         """
-        limit: int = getattr(self.policy, bound)
+        limit = require_instance(read_attr(self.policy, bound), int)
         if charged > limit:
             raise ResourceLimitExceeded(bound, limit, charged, detail)
 
@@ -490,7 +497,7 @@ class _ValueBudget:
         this bounds, and a refusal to measure is a typed rejection of the bound
         being measured rather than whatever the container raised.
         """
-        limit: int = getattr(self.policy, bound)
+        limit = require_instance(read_attr(self.policy, bound), int)
         collected: list[_MemberT] = []
         try:
             for member in members():
@@ -686,10 +693,10 @@ class _ValueBudget:
                 width,
                 "an input object carries more fields than the policy allows",
             )
-            # graphql-core's ``cached_property`` types ``fields`` ``Any``; the property
-            # itself returns a ``GraphQLInputFieldMap``.
-            field_map: GraphQLInputFieldMap | None = (
-                node_type.fields if isinstance(node_type, GraphQLInputObjectType) else None
+            field_map = (
+                graphql_input_fields(node_type)
+                if isinstance(node_type, GraphQLInputObjectType)
+                else None
             )
             child_path = (*path, mapping)
             for name, item in entries:
@@ -1048,8 +1055,7 @@ def _field_definition(
             return TypeMetaFieldDef
     if not isinstance(parent_type, (GraphQLObjectType, GraphQLInterfaceType)):
         return None
-    # graphql-core's own ``cached_property`` erases the ``GraphQLFieldMap`` it returns.
-    return cast("GraphQLField | None", parent_type.fields.get(name))
+    return graphql_fields(parent_type).get(name)
 
 
 def _page_bound(
@@ -1073,7 +1079,7 @@ def _page_bound(
     for argument in node.arguments:
         if argument.name.value not in ("first", "last"):
             continue
-        value: object = value_from_ast_untyped(argument.value, variables)
+        value = _value_from_ast(argument.value, variables)
         if type(value) is int and value >= 0:
             return min(value, policy.max_page_size)
     return policy.max_page_size
@@ -1119,16 +1125,14 @@ def _is_connection_type(candidate: object) -> bool:
     """
     if not isinstance(candidate, GraphQLObjectType):
         return False
-    # graphql-core's ``cached_property`` types ``fields`` ``Any``; the property itself
-    # returns a ``GraphQLFieldMap``.
-    edges: GraphQLField | None = candidate.fields.get(_CONNECTION_MARKER_FIELD)
+    edges = graphql_fields(candidate).get(_CONNECTION_MARKER_FIELD)
     if edges is None:
         return False
     unwrapped = unwrap_non_null(graphql_type_of(edges))
     if not is_graphql_list(unwrapped):
         return False
     edge = get_named_type(unwrapped.of_type)
-    return isinstance(edge, GraphQLObjectType) and set(edge.fields) >= _EDGE_MARKER_FIELDS
+    return isinstance(edge, GraphQLObjectType) and set(graphql_fields(edge)) >= _EDGE_MARKER_FIELDS
 
 
 def _variable_names(value_node: ValueNode) -> Iterator[str]:
@@ -1227,7 +1231,7 @@ class _DocumentWalk:
                 carried = dict.fromkeys(_variable_names(argument.value))
             self.values.charge(
                 None if argument_def is None else graphql_type_of(argument_def),
-                value_from_ast_untyped(argument.value, carried),
+                _value_from_ast(argument.value, carried),
                 in_mutation=self.in_mutation,
                 argument=argument.name.value,
                 specs=specs,
@@ -1307,7 +1311,7 @@ class _DocumentWalk:
                 continue
             self.values.charge(
                 _declared_input_type(graphql_schema, var_def.type),
-                value_from_ast_untyped(var_def.default_value),
+                _value_from_ast(var_def.default_value),
                 in_mutation=self.in_mutation,
                 argument=name,
             )
@@ -1671,7 +1675,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         explicit = self._policy
         if explicit is not None:
             return explicit
-        schema_policy: object = getattr(self.execution_context.schema, "resource_policy", None)
+        schema_policy = read_attr(self._hook_context().schema, "resource_policy", None)
         return (
             schema_policy
             if isinstance(schema_policy, ResourcePolicy)
@@ -1703,7 +1707,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         runner to resume anything: its stream keeps upstream's behavior.
         """
         policy = self._resolved_policy()
-        context = self.execution_context.context
+        context = read_attr(self._hook_context(), "context")
         # The absent-vs-``None`` distinction and the put-it-back-on-exception
         # rule are ``utils/context.py``'s (``restored_context_keys``), which is
         # where the ``MISSING`` sentinel that decides "clear" from "restore"
@@ -1720,7 +1724,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
                 # ``cast``: the budget armed just above is what this reads back.
                 scan_document_text(
                     cast("ResourcePolicy", armed_resource_policy()),
-                    self.execution_context.query,
+                    self._hook_context().query,
                 )
                 yield
             finally:
@@ -1770,7 +1774,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         own answer rather than a field the rest of the chain writes.
         """
         yield
-        execution_context = self.execution_context
+        execution_context = self._hook_context()
         document = execution_context.graphql_document
         if document is None:
             return
@@ -1805,7 +1809,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         plain ``strawberry.Schema`` whose consumer placed a validation cache
         after this extension has :meth:`on_execute` as the backstop instead.
         """
-        restate_admission_verdict(self.execution_context)
+        restate_admission_verdict(self._hook_context())
         yield
 
     @override

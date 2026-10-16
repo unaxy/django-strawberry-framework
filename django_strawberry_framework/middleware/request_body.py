@@ -81,7 +81,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from asgiref.sync import markcoroutinefunction
 from cross_web import HTTPException
-from django.conf import settings
 from django.http import HttpResponse
 from django.middleware.csrf import CsrfViewMiddleware
 from django.utils.module_loading import import_string
@@ -94,15 +93,28 @@ from django_strawberry_framework._boundary_ordering import (
     _BOUNDARY_PREPARED_VIEW,
     _boundary_middleware_request,
 )
+from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils.typing import is_marked_coroutine_function
+from django_strawberry_framework.utils._narrowing import (
+    is_class,
+    is_dict,
+    is_str,
+    list_of,
+    read_attr,
+)
+from django_strawberry_framework.utils.typing import call_forwarded, is_marked_coroutine_function
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from django.http import HttpRequest, HttpResponseBase
+    from typing_extensions import TypeIs
 
 __all__ = ("GraphQLRequestBodyBoundaryMiddleware",)
+
+#: Django's ``import_string``: django-stubs types its result ``Any``; a ``MIDDLEWARE``
+#: entry names a class or a function middleware.
+_import_entry: Callable[[str], object] = import_string
 
 
 #: The ``ConfigurationError`` text for a chain that would defeat the ordering.
@@ -258,6 +270,11 @@ class GraphQLRequestBodyBoundaryMiddleware:
         return None
 
 
+def _is_initkwargs(value: object) -> TypeIs[dict[str, object]]:
+    """Whether ``value`` is a ``dict`` of keyword arguments: every key a ``str``."""
+    return is_dict(value) and all(is_str(key) for key in value)
+
+
 def _package_view_instance(view_func: object) -> object:
     """Return the package view instance whose boundary this callback's mount would run.
 
@@ -332,9 +349,10 @@ def _package_view_instance(view_func: object) -> object:
     still fails there - as it would with this middleware uninstalled. It stays
     narrow for that reason while the reads above are guarded broadly: a class that
     cannot be built from the kwargs it names is a determined answer, and a read
-    that raises is no answer at all. The two ``isinstance`` tests stay ahead of the
-    probe and the construction, so the read is taken off a class rather than off an
-    arbitrary object - which narrows whose attribute machinery can run, a class's own
+    that raises is no answer at all. The class test (asked of the value's real type)
+    and the ``str``-keyed ``dict`` test stay ahead of the probe and the
+    construction, so the read is taken off a class rather than off an arbitrary
+    object - which narrows whose attribute machinery can run, a class's own
     metaclass and descriptors rather than any object's ``__getattr__``, and does
     not eliminate it - and so it is only ever a class that gets called. There is
     deliberately no ``or {}`` default: an absent attribute means "not ours", never
@@ -343,16 +361,16 @@ def _package_view_instance(view_func: object) -> object:
     try:
         if not getattr(view_func, _BOUNDARY_MARKER, False):
             return None
-        view_class = getattr(view_func, "view_class", None)
-        initkwargs = getattr(view_func, "view_initkwargs", None)
-        if not isinstance(view_class, type) or not isinstance(initkwargs, dict):
+        view_class = read_attr(view_func, "view_class", None)
+        initkwargs = read_attr(view_func, "view_initkwargs", None)
+        if not is_class(view_class) or not _is_initkwargs(initkwargs):
             return None
         if not callable(getattr(view_class, _BOUNDARY_METHOD, None)):
             return None
     except Exception:  # noqa: BLE001 - a read that cannot answer has recognized nothing
         return None
     try:
-        return view_class(**initkwargs)
+        return call_forwarded(view_class, (), initkwargs)
     except TypeError:
         return None
 
@@ -375,8 +393,8 @@ def _require_boundary_before_csrf() -> None:
     still protects the endpoint.
     """
     boundary_index = csrf_index = None
-    for index, path in enumerate(settings.MIDDLEWARE):
-        entry: object = import_string(path)
+    for index, path in enumerate(list_of(django_setting("MIDDLEWARE"))):
+        entry = _import_entry(str(path))
         if not isinstance(entry, type):
             continue
         if issubclass(entry, GraphQLRequestBodyBoundaryMiddleware) and boundary_index is None:

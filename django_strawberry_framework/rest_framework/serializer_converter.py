@@ -61,7 +61,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from types import GenericAlias
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
@@ -89,6 +89,7 @@ from django_strawberry_framework.types.converters import (
     convert_scalar,
     scalar_for_field,
 )
+from django_strawberry_framework.utils._narrowing import enum_value
 from django_strawberry_framework.utils.converters import (
     convert_with_mro,
     finish_field_conversion,
@@ -110,9 +111,16 @@ from django_strawberry_framework.utils.inputs import RELATION_MULTI as RELATION_
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE as RELATION_SINGLE  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import SCALAR as SCALAR  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import FieldConversionBase, InputFieldSpec
+from django_strawberry_framework.utils.querysets import to_python_value
 from django_strawberry_framework.utils.strings import graphql_camel_name, pascal_case
 
-from .accessors import child_relation_of, declared_fields_of, is_serializer, list_child_of
+from .accessors import (
+    child_relation_of,
+    choices_of,
+    declared_fields_of,
+    is_serializer,
+    list_child_of,
+)
 
 if TYPE_CHECKING:
     from enum import Enum
@@ -955,7 +963,7 @@ def _stored_choice_value(column: ConcreteField, value: object) -> object:
     (``""`` over an ``IntegerField``) is returned unchanged, so it matches no member.
     """
     try:
-        return column.to_python(value)
+        return to_python_value(column, value)
     except BaseException:  # noqa: BLE001 - hostile object, contained by design
         return value
 
@@ -1026,8 +1034,7 @@ def _reject_choice_values_the_column_does_not_list(field: DRFField, column: Conc
     if choice is None or not column.choices:
         return
     listed_values = choice_column_values(column)
-    # drf-stubs: ``ChoiceField.choices`` is the flattened ``dict`` of value -> display.
-    declared: Mapping[object, object] = choice.choices
+    declared = choices_of(choice)
     admitted = [value for value in declared if value is not None]
     blank_from_allow_blank = choice.allow_blank and "" not in admitted
     if blank_from_allow_blank:
@@ -1208,7 +1215,7 @@ def _is_enumerable_serializer_choice(field: DRFField) -> bool:
 
 def _enum_member_map(enum_cls: type[Enum]) -> dict[str, object]:
     """Return an enum's ``{member_name: value}`` map (for the choice-enum collision check)."""
-    return {member.name: member.value for member in enum_cls}
+    return {member.name: enum_value(member) for member in enum_cls}
 
 
 def _serializer_choice_enum(field: DRFField, type_name: str) -> type[Enum]:
@@ -1242,8 +1249,7 @@ def _serializer_choice_enum(field: DRFField, type_name: str) -> type[Enum]:
     enum_name = f"{type_name}{pascal_case(field_name)}Enum"
     # Callers reach this only through ``_is_enumerable_serializer_choice``.
     choice = cast("serializers.ChoiceField", serializer_choice_source(field))
-    # drf-stubs: ``ChoiceField.choices`` is the flattened ``dict`` of value -> display.
-    choices: Mapping[object, object] = choice.choices
+    choices = choices_of(choice)
     enum_cls = build_enum_from_choices(
         list(choices.items()),
         enum_name,

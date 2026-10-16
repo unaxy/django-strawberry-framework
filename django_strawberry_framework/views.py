@@ -86,7 +86,6 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from cross_web import DjangoHTTPRequestAdapter, HTTPException
-from django.conf import settings
 from django.utils.decorators import classonlymethod
 from django.views.decorators.csrf import csrf_protect
 from strawberry.django.views import AsyncGraphQLView, GraphQLView
@@ -101,11 +100,16 @@ from django_strawberry_framework._boundary_ordering import (
     _CSRF_ORDERING_EXEMPTION,
 )
 from django_strawberry_framework._request_body import body_exceeds_limit
-from django_strawberry_framework.conf import max_request_body_bytes_setting
+from django_strawberry_framework.conf import django_setting, max_request_body_bytes_setting
 from django_strawberry_framework.exceptions import ConfigurationError, describe_value
-from django_strawberry_framework.utils._narrowing import is_exact_pair
+from django_strawberry_framework.utils._narrowing import (
+    is_awaitable,
+    is_exact_pair,
+    is_str,
+    read_attr,
+)
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
-from django_strawberry_framework.utils.typing import is_marked_coroutine_function
+from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -232,9 +236,12 @@ def _declared_content_length(request: HttpRequest) -> int | None:
     through to the counted check rather than being trusted, which is the
     fail-safe direction - an unparseable declaration must not buy a larger body.
     """
+    declared: object = request.META.get("CONTENT_LENGTH")
+    if not is_str(declared):
+        return None
     try:
-        return int(request.META.get("CONTENT_LENGTH", ""))
-    except (TypeError, ValueError):
+        return int(declared)
+    except ValueError:
         return None
 
 
@@ -335,7 +342,7 @@ def _form_encoding_is_utf8(request: HttpRequest) -> bool:
     """
     if _declared_charset_is_unhonourable(request):
         return False
-    return _canonicalizes_to_utf8(request.encoding or settings.DEFAULT_CHARSET)
+    return _canonicalizes_to_utf8(request.encoding or str(django_setting("DEFAULT_CHARSET")))
 
 
 def _is_multipart_form_post(request: HttpRequest) -> bool:
@@ -413,6 +420,11 @@ class _RawBodyRequestAdapter(DjangoHTTPRequestAdapter):
         return self.request.body
 
 
+async def _settled_response(response: object) -> object:
+    """Return a view callback's response, awaited first when the callback returned a coroutine."""
+    return await response if is_awaitable(response) else response
+
+
 @overload
 def _boundary_view(
     upstream_view: Callable[..., Coroutine[object, object, HttpResponseBase]],
@@ -458,14 +470,17 @@ def _boundary_view(upstream_view: Callable[..., object]) -> Callable[..., object
     """
     mount = object()
 
-    # basedpyright: the view instance the middleware stored on the request (an untyped
-    # attribute); its dispatch is sync on one view, a coroutine on the other
-    def prepared_view(request: HttpRequest) -> Any:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - untyped request attribute
-        prepared = getattr(request, _BOUNDARY_PREPARED_VIEW, None)
+    def prepared_dispatch(request: HttpRequest) -> Callable[..., object] | None:
+        """Return the ``dispatch`` of the view the middleware prepared for ``request``, if any.
+
+        Its dispatch is sync on one view and returns a coroutine on the other.
+        """
+        prepared = read_attr(request, _BOUNDARY_PREPARED_VIEW, None)
         if not is_exact_pair(prepared) or prepared[0] is not mount:
             return None
         delattr(request, _BOUNDARY_PREPARED_VIEW)
-        return prepared[1]
+        dispatch = read_attr(prepared[1], "dispatch", None)
+        return dispatch if callable(dispatch) else None
 
     # The arm follows the callback Django will call, never ``view_is_async``: that
     # reads the HTTP handlers, and ``AsyncGraphQLView`` defines none - its
@@ -479,20 +494,18 @@ def _boundary_view(upstream_view: Callable[..., object]) -> Callable[..., object
 
         @wraps(upstream_view)
         async def async_view(request: HttpRequest, *args: object, **kwargs: object) -> object:
-            instance = prepared_view(request)
-            if instance is None:
-                return await upstream_view(request, *args, **kwargs)
-            return await instance.dispatch(request, *args, **kwargs)
+            dispatch = prepared_dispatch(request) or upstream_view
+            return await _settled_response(dispatch(request, *args, **kwargs))
 
         view = async_view
     else:
 
         @wraps(upstream_view)
         def sync_view(request: HttpRequest, *args: object, **kwargs: object) -> object:
-            instance = prepared_view(request)
-            if instance is None:
+            dispatch = prepared_dispatch(request)
+            if dispatch is None:
                 return upstream_view(request, *args, **kwargs)
-            return instance.dispatch(request, *args, **kwargs)
+            return dispatch(request, *args, **kwargs)
 
         view = sync_view
 
@@ -866,7 +879,7 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
                 data = data.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise HTTPException(400, _JSON_PARSE_REASON) from exc
-        return super().parse_json(data)
+        return object_result(super().parse_json, data)
 
 
 def _run_after_csrf_check(
@@ -1000,8 +1013,26 @@ async def _async_run_after_csrf_check(
 #: The two continuations, wrapped once at import so each transport carries one
 #: long-lived ``CsrfViewMiddleware`` instance rather than building one per
 #: request.
-_csrf_protected_run = csrf_protect(_run_after_csrf_check)
-_csrf_protected_async_run = csrf_protect(_async_run_after_csrf_check)
+#: ``csrf_protect`` keeps the wrapped function's signature; each binding names the one
+#: response type its transport's ``run`` hands back.
+_csrf_protected_run: Callable[
+    [
+        HttpRequest,
+        Callable[..., HttpResponseBase],
+        tuple[object, ...],
+        dict[str, object],
+    ],
+    HttpResponseBase,
+] = csrf_protect(_run_after_csrf_check)
+_csrf_protected_async_run: Callable[
+    [
+        HttpRequest,
+        Callable[..., Awaitable[object]],
+        tuple[object, ...],
+        dict[str, object],
+    ],
+    Awaitable[object],
+] = csrf_protect(_async_run_after_csrf_check)
 
 
 def _evaluate_request_user(request: HttpRequest) -> None:
@@ -1168,7 +1199,7 @@ class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context
 
     @override
     # basedpyright: upstream overloads run(HttpRequest) to two response types; this must meet both
-    async def run(self, request: HttpRequest, *args: object, **kwargs: object) -> Any:  # pyright: ignore[reportExplicitAny]
+    async def run(self, request: HttpRequest, *args: object, **kwargs: object) -> Any:  # pyright: ignore[reportExplicitAny, reportAny]
         """Enforce the request boundary, evaluate the actor, run CSRF, then upstream's ``run``.
 
         The sync twin's docstring is the contract for the boundary and CSRF

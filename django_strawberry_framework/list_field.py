@@ -90,9 +90,17 @@ from .resource_policy import (
 )
 from .types import DjangoType
 from .types.base import _is_relay_shaped
-from .utils._narrowing import is_class, is_list_or_tuple, is_set_or_frozenset
+from .utils._narrowing import (
+    is_class,
+    is_list_or_tuple,
+    is_set_or_frozenset,
+    is_str,
+    is_tuple,
+    list_of,
+)
 from .utils.directives import validated_field_directives
 from .utils.execution_mode import async_execution, operation_is_async
+from .utils.input_values import UNSET
 from .utils.querysets import (
     VisibleRowExists,
     apply_orderset_async,
@@ -108,7 +116,7 @@ from .utils.querysets import (
     reject_residual_async_source,
     wrap_async_queryset_adapter,
 )
-from .utils.typing import is_async_callable
+from .utils.typing import graphql_fields, is_async_callable
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -116,7 +124,6 @@ if TYPE_CHECKING:
     from django.db.models.expressions import Expression
     from django.db.models.options import Options
     from django.db.models.sql.query import Query
-    from graphql import GraphQLArgument
     from typing_extensions import Never
 
     from .orders.sets import OrderSet
@@ -399,9 +406,7 @@ def _published_wire_name(
             f"Failed to read the schema field for argument {parameter_name!r}: {exc}",
         ) from exc
     try:
-        # graphql-core's ``cached_property`` types ``fields`` ``Any``; the property
-        # itself returns a ``GraphQLFieldMap``, whose fields carry a ``GraphQLArgumentMap``.
-        published_args: dict[str, GraphQLArgument] = parent_type.fields[field_name].args
+        published_args = graphql_fields(parent_type)[field_name].args
         for wire_name, graphql_argument in published_args.items():
             extensions: Mapping[str, object] = graphql_argument.extensions or {}
             if extensions.get(GraphQLCoreConverter.DEFINITION_BACKREF) is arg_def:
@@ -469,7 +474,7 @@ def _normalize_list_arguments(
     trusted_max_rows: bool,
     offset: object = None,
     limit: object = None,
-    order_by: object = strawberry.UNSET,
+    order_by: object = UNSET,
 ) -> _ListArguments:
     """Normalize and validate pagination arguments against effective resource policy ceilings.
 
@@ -492,9 +497,9 @@ def _normalize_list_arguments(
         ``django_strawberry_framework/utils/querysets.py::require_orderset_class``
         at pipeline execution time.
     """
-    offset_supplied = offset is not None and offset is not strawberry.UNSET
-    limit_supplied = limit is not None and limit is not strawberry.UNSET
-    order_by_supplied = order_by is not None and order_by is not strawberry.UNSET
+    offset_supplied = offset is not None and offset is not UNSET
+    limit_supplied = limit is not None and limit is not UNSET
+    order_by_supplied = order_by is not None and order_by is not UNSET
     any_argument_supplied = offset_supplied or limit_supplied or order_by_supplied
 
     norm_offset = None if not offset_supplied else offset
@@ -992,7 +997,7 @@ def _is_deterministic_order_term(
             return False
         return all(
             _is_deterministic_order_term(query, source, opts, seen, prefix)
-            for source in term.get_source_expressions()
+            for source in list_of(term.get_source_expressions())
             if source is not None
         )
     if isinstance(term, str):
@@ -1154,12 +1159,18 @@ def _is_deterministic_order_condition(
     value is read for the SQL it carries at any depth a lookup can hold one.
     """
     for child in condition.children:
-        if not isinstance(child, tuple):
+        if not is_tuple(child):
             if not _is_deterministic_order_value(query, child, opts, seen, prefix):
                 return False
             continue
         lookup, value = child
-        if not _is_deterministic_order_predicate_reference(query, lookup, opts, prefix):
+        # A ``Q`` child's left-hand side is a lookup string; anything else proves nothing.
+        if not is_str(lookup) or not _is_deterministic_order_predicate_reference(
+            query,
+            lookup,
+            opts,
+            prefix,
+        ):
             return False
         if not _is_deterministic_order_value(query, value, opts, seen, prefix):
             return False
@@ -1324,7 +1335,7 @@ def _argument_record(
     trusted_max_rows: bool,
     offset: object = None,
     limit: object = None,
-    order_by: object = strawberry.UNSET,
+    order_by: object = UNSET,
 ) -> tuple[object, Info[object, object], _ListArguments]:
     """Extract root, info, and normalize list arguments for any resolver invocation."""
     root, info = _resolver_root_and_info(args, kwargs)
@@ -1687,7 +1698,7 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
             *args: object,
             offset: object = None,
             limit: object = None,
-            order_by: object = strawberry.UNSET,
+            order_by: object = UNSET,
             **kwargs: object,
         ) -> object:
             _, info, args_record = _argument_record(
@@ -1756,7 +1767,7 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
                 *args: object,
                 offset: object = None,
                 limit: object = None,
-                order_by: object = strawberry.UNSET,
+                order_by: object = UNSET,
                 **kwargs: object,
             ) -> object:
                 root, info, args_record = _argument_record(
@@ -1802,7 +1813,7 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
                 *args: object,
                 offset: object = None,
                 limit: object = None,
-                order_by: object = strawberry.UNSET,
+                order_by: object = UNSET,
                 **kwargs: object,
             ) -> object:
                 root, info, args_record = _argument_record(

@@ -28,6 +28,7 @@ the same dig from plan-time graphql-core ``info`` and resolve-time Strawberry
 import enum
 import functools
 import inspect
+import operator
 from typing import TYPE_CHECKING, Any, Final, TypeGuard, TypeVar, cast, get_args, get_origin
 
 from asgiref.sync import iscoroutinefunction
@@ -36,8 +37,10 @@ from strawberry.schema import Schema
 from strawberry.types.base import StrawberryContainer
 from typing_extensions import Never
 
+from ._narrowing import read_attr
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Mapping
     from typing import Protocol, TypeAlias
 
     from django.db import models
@@ -45,7 +48,9 @@ if TYPE_CHECKING:
         GraphQLArgument,
         GraphQLEnumType,
         GraphQLField,
+        GraphQLFieldMap,
         GraphQLInputField,
+        GraphQLInputFieldMap,
         GraphQLInputObjectType,
         GraphQLInterfaceType,
         GraphQLObjectType,
@@ -105,14 +110,34 @@ if TYPE_CHECKING:
         | GraphQLList[GraphQLType]
     )
 
+    def graphql_fields(_owner: GraphQLObjectType | GraphQLInterfaceType, /) -> GraphQLFieldMap:
+        """Return an object or interface type's ``fields``, by name.
+
+        graphql-core declares the property ``GraphQLFieldMap`` but builds it in its own
+        ``cached_property``, which the checker reads as ``Any``.
+        """
+        ...
+
+    def graphql_input_fields(_owner: GraphQLInputObjectType, /) -> GraphQLInputFieldMap:
+        """Return an input object type's ``fields``, by name (as ``graphql_fields`` does)."""
+        ...
+
+else:
+    graphql_fields = operator.attrgetter("fields")
+    graphql_input_fields = operator.attrgetter("fields")
+
 __all__ = (
     "MAX_TYPE_WRAPPER_DEPTH",
     "MISSING_ATTRIBUTE",
+    "call_forwarded",
+    "graphql_fields",
+    "graphql_input_fields",
     "graphql_type_of",
     "inline_fragment_type_condition",
     "is_async_callable",
     "is_graphql_list",
     "is_marked_coroutine_function",
+    "object_result",
     "return_type_of",
     "schema_config_from_info",
     "strawberry_schema_from_info",
@@ -138,6 +163,31 @@ MISSING_ATTRIBUTE: Final = _MissingAttribute.MISSING
 ``getattr(value, name, MISSING_ATTRIBUTE) is MISSING_ATTRIBUTE`` is the one-lookup form of
 ``hasattr`` followed by ``getattr``: both swallow only ``AttributeError``.
 """
+
+
+def object_result(call: "Callable[..., object]", /, *args: object, **kwargs: object) -> object:
+    """Return ``call(*args, **kwargs)`` as the ``object`` it is, whatever its stub declares.
+
+    For an upstream method a stub types ``-> Any``: the result is narrowed like any other
+    value the package did not build.
+    """
+    return call(*args, **kwargs)
+
+
+def call_forwarded(
+    method: "Callable[..., _T]",
+    args: tuple[object, ...],
+    kwargs: "Mapping[str, object]",
+) -> _T:
+    """Call ``method`` with arguments a caller handed an override, forwarded verbatim.
+
+    The override that spells its parameters ``*args: object, **kwargs: object``
+    takes whatever the installed upstream version accepts, so a parameter
+    upstream adds later passes through, and the arguments are checked where they
+    belong: by ``method`` itself when it runs. ``views.py``'s CSRF continuations
+    forward the same way.
+    """
+    return method(*args, **kwargs)
 
 
 def strawberry_schema_from_schema(schema: object) -> object:
@@ -178,12 +228,12 @@ def schema_config_from_info(info: object) -> "StrawberryConfig | None":
     that means "engine default" (``None`` into ``SliceMetadata``) or a terminal
     numeric default (``resolve_relay_max_results``).
     """
-    schema = getattr(info, "schema", None)
+    schema = read_attr(info, "schema", None)
     if schema is None:
         return None
-    config = getattr(strawberry_schema_from_info(info), "config", None)
+    config = read_attr(strawberry_schema_from_info(info), "config", None)
     if config is None:
-        config = getattr(schema, "config", None)
+        config = read_attr(schema, "config", None)
     # Both reads land on a Strawberry schema's ``config`` attribute.
     return cast("StrawberryConfig | None", config)
 
@@ -309,7 +359,7 @@ def unwrap_graphql_type(gql_type: object) -> object:
 
     """
     for _ in range(MAX_TYPE_WRAPPER_DEPTH + 1):
-        inner = getattr(gql_type, "of_type", MISSING_ATTRIBUTE)
+        inner = read_attr(gql_type, "of_type", MISSING_ATTRIBUTE)
         if inner is MISSING_ATTRIBUTE:
             return gql_type
         gql_type = inner
@@ -444,7 +494,7 @@ def unwrap_return_type(rt: object) -> object:
         ``int`` -> ``int`` (no wrapper to peel).
 
     """
-    inner = getattr(rt, "of_type", MISSING_ATTRIBUTE)
+    inner = read_attr(rt, "of_type", MISSING_ATTRIBUTE)
     if inner is not MISSING_ATTRIBUTE:
         return inner
     if get_origin(rt) is list:

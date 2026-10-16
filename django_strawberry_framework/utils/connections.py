@@ -50,14 +50,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
-import strawberry
 from graphql import GraphQLError
 from strawberry.relay.utils import SliceMetadata, from_base64, to_base64
 
 from django_strawberry_framework.exceptions import DjangoStrawberryFrameworkError, OptimizerError
 from django_strawberry_framework.resource_policy import effective_bound, policy_from_info
 
-from .input_values import is_inactive_value
+from .input_values import UNSET, is_inactive_value
 from .typing import schema_config_from_info
 
 if TYPE_CHECKING:
@@ -179,7 +178,7 @@ def is_supplied(value: object) -> bool:
     strawberry, so the traversal primitives stay usable below the schema
     layer); only the ``UNSET`` sentinel binding lives here.
     """
-    return not is_inactive_value(value, unset_sentinel=strawberry.UNSET)
+    return not is_inactive_value(value, unset_sentinel=UNSET)
 
 
 def is_backward_shape(first: object, last: object) -> bool:

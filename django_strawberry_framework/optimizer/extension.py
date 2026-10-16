@@ -30,7 +30,6 @@ type-tracing through graphql-core wrappers.
 
 import datetime
 import decimal
-import inspect
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -57,11 +56,13 @@ from django_strawberry_framework.extensions.operation_state import (
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils._narrowing import (
     is_abstract_set,
+    is_awaitable,
     is_list,
     is_mapping,
     is_set_or_frozenset,
     is_str,
     is_tuple,
+    read_attr,
 )
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.querysets import (
@@ -790,11 +791,11 @@ def _collect_schema_reachable_types(schema: object) -> "set[type[DjangoType]]":
         visited_type_names.add(type_name)
         # Check if this type is a DjangoType. The lookup is read by name: any schema
         # object that carries ``get_type_by_name`` answers it.
-        lookup = getattr(strawberry_schema, "get_type_by_name", MISSING_ATTRIBUTE)
-        definition = None if lookup is MISSING_ATTRIBUTE else lookup(type_name)
+        lookup = read_attr(strawberry_schema, "get_type_by_name", MISSING_ATTRIBUTE)
+        definition = lookup(type_name) if callable(lookup) else None
         if definition is not None:
-            origin = getattr(definition, "origin", None)
-            if origin is not None and registry.get_definition(origin) is not None:
+            origin = read_attr(definition, "origin", None)
+            if registry.is_registered_type(origin) and registry.get_definition(origin) is not None:
                 reachable.add(origin)
         # Recurse into fields.
         # A graphql-core object / interface / input type's ``fields`` map names to fields.
@@ -880,8 +881,8 @@ def _resolve_model_from_return_type(info: "GraphQLResolveInfo") -> _OriginAndMod
     definition = strawberry_schema.get_type_by_name(type_name)
     if definition is None:
         return None
-    origin = getattr(definition, "origin", None)
-    if origin is None:
+    origin = read_attr(definition, "origin", None)
+    if not registry.is_registered_type(origin):
         return None
     model = registry.model_for_type(origin)
     if model is None:
@@ -1171,9 +1172,9 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         exactly this reason.
         """
         result = _next(root, info, *args, **kwargs)
-        if info.path.prev is not None:
+        if read_attr(info.path, "prev") is not None:
             return result
-        if inspect.isawaitable(result):
+        if is_awaitable(result):
 
             async def _async_optimize() -> object:
                 return self._optimize(await result, info)
@@ -1462,7 +1463,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # parent and nested-connection plans coexist without collision.
         # ``DST_OPTIMIZER_PLAN`` stays LAST-WINS introspection data (not a
         # correctness sentinel - do not union it).
-        context: object = info.context
+        context = read_attr(info, "context")
         _stash_for_optimizer(context, DST_OPTIMIZER_PLAN, plan)
         fk_id_elisions = plan.finalized_fk_id_elisions
         if fk_id_elisions is None:

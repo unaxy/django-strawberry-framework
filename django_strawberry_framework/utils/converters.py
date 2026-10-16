@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from typing_extensions import override
 
+from ._narrowing import type_mro
 from .inputs import SCALAR, FieldConversionBase
 
 if TYPE_CHECKING:
@@ -64,12 +65,6 @@ class _MroContinue:
 
 
 MRO_CONTINUE = _MroContinue()
-
-
-class _MroGetter(Protocol):
-    """``type.__dict__["__mro__"]``: the getset descriptor behind ``type.__mro__``."""
-
-    def __get__(self, instance: type[object], /) -> tuple[type[object], ...]: ...
 
 
 class _RequiredFlagField(Protocol):
@@ -156,8 +151,7 @@ def convert_with_mro(
     # equality implementation, and ordinary dict membership would invoke it
     # before the converter can reach its parent or typed fallthrough.
     registry_entries = dict(scalar_registry)
-    mro_getter: _MroGetter = type.__dict__["__mro__"]
-    for klass in mro_getter.__get__(type(field)):
+    for klass in type_mro(type(field)):
         for registered, converter in registry_entries.items():
             if registered is klass:
                 return converter

@@ -132,10 +132,11 @@ from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.extensions.runner import SchemaExtensionsRunner
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.exceptions import ConfigurationError, _safe_type_name
 from django_strawberry_framework.utils.execution_mode import OperationMode, bind_operation_mode
 from django_strawberry_framework.utils.operation_lease import OperationLease
 from django_strawberry_framework.utils.private_state import PrivateAuthority
+from django_strawberry_framework.utils.typing import call_forwarded
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Generator, Iterable
@@ -518,8 +519,7 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
 
     @property
     @override
-    # basedpyright: None outside an operation; SchemaExtension types it non-Optional for hooks
-    def execution_context(self) -> Any:  # pyright: ignore[reportExplicitAny]
+    def execution_context(self) -> ExecutionContext | None:
         """The engine context of the operation this extension is answering here.
 
         Two answers in one order: the state the package runner bound for this
@@ -531,6 +531,21 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
         """
         state = self._operation_state()
         return None if state is None else state.execution_context
+
+    def _hook_context(self) -> ExecutionContext:
+        """Return the engine context of the operation a hook is running for.
+
+        A hook runs inside an operation, so ``execution_context`` answers there.
+        Read anywhere else there is no operation to answer for, and the read is
+        refused rather than handed ``None``.
+        """
+        context = self.execution_context
+        if context is None:
+            raise ConfigurationError(
+                f"{_safe_type_name(self)} read its operation context outside an operation; "
+                "only its hooks run inside one.",
+            )
+        return context
 
     @execution_context.setter
     @override
@@ -894,11 +909,15 @@ class _ResumedStream(Generic[_FrameT]):
         with self._runner.resumed():
             return await self._source.asend(value)
 
-    # basedpyright: verbatim athrow forward; spelled-out args pass 3.12's deprecated 3-arg form
-    async def athrow(self, *args: Any, **kwargs: Any) -> _FrameT:  # pyright: ignore[reportExplicitAny]
-        """Throw into the stream, bound so its teardown reads its own operation."""
+    async def athrow(self, *args: object, **kwargs: object) -> _FrameT:
+        """Throw into the stream, bound so its teardown reads its own operation.
+
+        Forwarded verbatim: spelling the parameters out would hand the source
+        the ``(type, value, traceback)`` form Python 3.12 deprecates for a
+        caller that used the one-argument form.
+        """
         with self._runner.resumed():
-            return await self._source.athrow(*args, **kwargs)
+            return await call_forwarded(self._source.athrow, args, kwargs)
 
     async def aclose(self) -> None:
         """Close the stream, bound so every scope it unwinds tears its own state down.
@@ -968,13 +987,13 @@ class DjangoExtensionsRunner(SchemaExtensionsRunner):
 
     @override
     # basedpyright: returns _BoundScope, not the base's OperationContextManager
-    def operation(self) -> Any:  # pyright: ignore[reportExplicitAny]
+    def operation(self) -> Any:  # pyright: ignore[reportExplicitAny, reportAny]
         """Return the operation scope, with this operation's bindings around it."""
         return _BoundScope(self._scope(), self._operation_states, super().operation())
 
     @override
     # basedpyright: returns _BoundScope, not the base's StreamResultContextManager
-    def on_stream_result(self, result: object) -> Any:  # pyright: ignore[reportExplicitAny]
+    def on_stream_result(self, result: object) -> Any:  # pyright: ignore[reportExplicitAny, reportAny]
         """Return the streaming-result scope, bound so the runner's contract is complete."""
         # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result
         # aliases in an ImportError fallback, so StreamExecutionResult carries Unknown

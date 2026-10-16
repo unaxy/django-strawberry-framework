@@ -53,7 +53,7 @@ from django_filters import (
     MultipleChoiceFilter,
     NumberFilter,
 )
-from django_filters.constants import EMPTY_VALUES
+from django_filters import constants as _filter_constants
 from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
 from django_filters.utils import get_model_field
@@ -85,7 +85,13 @@ from django_strawberry_framework.types.relay import (
     node_definition_for_published_name,
     published_node_type_name,
 )
-from django_strawberry_framework.utils._narrowing import is_class, is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import (
+    is_class,
+    is_list_or_tuple,
+    is_str,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
     GLOBALID_INVALID_ERROR_CODE,
@@ -93,8 +99,16 @@ from django_strawberry_framework.utils.errors import (
     coded_error_extensions,
 )
 from django_strawberry_framework.utils.querysets import base_queryset, coerce_field_value_or_none
-from django_strawberry_framework.utils.relations import relation_kind, relation_link
-from django_strawberry_framework.utils.typing import strawberry_schema_from_info
+from django_strawberry_framework.utils.relations import (
+    is_model_class,
+    relation_kind,
+    relation_link,
+)
+from django_strawberry_framework.utils.typing import object_result, strawberry_schema_from_info
+
+#: django-filter's ``EMPTY_VALUES``: the values a filter treats as "not supplied". The stub
+#: types the constant ``Any``; it is a tuple of values.
+EMPTY_VALUES = require(read_attr(_filter_constants, "EMPTY_VALUES"), is_list_or_tuple)
 
 # The three framework strategies whose emitted GlobalID a filter input CAN
 # decode + validate (``model`` / ``type`` / ``type+model``). Derived from the
@@ -147,6 +161,20 @@ class TypedFilter(Filter):
     """
 
 
+def _applied_filter_method(
+    method: Callable[[models.QuerySet[_M], str | None, object], models.QuerySet[_M]],
+    qs: models.QuerySet[_M],
+    field_name: str | None,
+    value: object,
+) -> models.QuerySet[_M]:
+    """Call a filter's ``method``: django-filter's ``(queryset, name, value) -> queryset`` contract.
+
+    The stub types the bound method ``Callable[..., Any]``; this states the call shape
+    django-filter documents and invokes it with.
+    """
+    return method(qs, field_name, value)
+
+
 class _EmptyListAwareFilterMethod(FilterMethod):
     """``FilterMethod`` that treats an empty list as a real value.
 
@@ -163,7 +191,7 @@ class _EmptyListAwareFilterMethod(FilterMethod):
         """Apply the custom method, treating empty list as a real value."""
         if value is None:
             return qs
-        return self.method(qs, self.f.field_name, value)
+        return _applied_filter_method(self.method, qs, self.f.field_name, value)
 
 
 def _install_empty_list_aware_method(
@@ -493,7 +521,7 @@ class _EnumMemberFieldMixin(Field):
         if isinstance(value, EnumMemberValue):
             super().clean(value.value)
             return value
-        return super().clean(value)
+        return object_result(super().clean, value)
 
 
 class _EnumMemberFilterMixin(Filter):
@@ -986,11 +1014,11 @@ def resolve_globalid_target_definition(
     segments = field_name.split("__")
 
     for i, raw_segment in enumerate(segments):
-        current_model = getattr(current_def, "model", None)
-        pk_field = getattr(getattr(current_model, "_meta", None), "pk", None)
-        pk_name = getattr(pk_field, "name", None)
+        current_model = read_attr(current_def, "model", None)
+        pk_field = read_attr(read_attr(current_model, "_meta", None), "pk", None)
+        pk_name = read_attr(pk_field, "name", None)
         segment = raw_segment
-        if pk_name is not None and raw_segment == "pk":
+        if is_str(pk_name) and raw_segment == "pk":
             segment = pk_name
 
         # Only a scalar primary key is the definition's own Relay id; a relation
@@ -1097,12 +1125,12 @@ def _filter_schema(filter_instance: Filter) -> Schema | None:
     published. ``None`` for a filterset built outside the apply pipeline (a
     direct unit-test construction), where no schema exists to consult.
     """
-    owner = getattr(filter_instance, "parent", None)
+    owner = read_attr(filter_instance, "parent", None)
     while owner is not None:
-        info = getattr(owner, "_apply_info", None)
+        info = read_attr(owner, "_apply_info", None)
         if info is not None:
             return strawberry_schema_from_info(info)
-        owner = getattr(owner, "_projection_owner", None)
+        owner = read_attr(owner, "_projection_owner", None)
     return None
 
 
@@ -1337,7 +1365,7 @@ class _AbsentGlobalIDMultipleChoiceWidget(SelectMultiple):
         """Return ``None`` for an absent key; defer to ``SelectMultiple`` otherwise."""
         if name not in data:
             return None
-        return super().value_from_datadict(data, files, name)
+        return object_result(super().value_from_datadict, data, files, name)
 
 
 @final
@@ -1834,7 +1862,7 @@ class RelatedFilter(RelatedSetTargetMixin, ModelChoiceFilter):
         """
         if self.queryset is None:
             target = self.filterset
-            model = getattr(getattr(target, "_meta", None), "model", None)
-            if model is not None:
+            model = read_attr(read_attr(target, "_meta", None), "model", None)
+            if is_model_class(model):
                 return base_queryset(model)
         return super().get_queryset(request)

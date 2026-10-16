@@ -74,6 +74,7 @@ from typing_extensions import override
 
 from .conf import resource_policy_setting
 from .exceptions import ConfigurationError, DjangoStrawberryFrameworkError, describe_value
+from .utils._narrowing import read_attr
 from .utils.context import get_context_value, stash_on_context
 from .utils.errors import coded_error_extensions
 from .utils.operation_lease import OperationLease
@@ -436,7 +437,7 @@ class ResourcePolicy:
         one built from settings - one gate, not two that can drift.
         """
         for field in fields(self):
-            value: object = getattr(self, field.name)
+            value = read_attr(self, field.name)
             if field.name == "execution_deadline_seconds":
                 if value is None or _is_valid_deadline(value):
                     continue
@@ -466,13 +467,14 @@ class ResourcePolicy:
                 )
         candidate = replace(self, **overrides)
         for name in overrides:
-            current: float | None = getattr(self, name)
-            value: float | None = getattr(candidate, name)
-            if name == "execution_deadline_seconds":
-                widens = value is None and current is not None
-                widens = widens or (value is not None and current is not None and value > current)
+            current = read_attr(self, name)
+            value = read_attr(candidate, name)
+            # Both policies passed ``__post_init__``, so each bound is an exact number or,
+            # for the deadline alone, ``None`` (no deadline): dropping one widens it.
+            if _is_builtin_number(value) and _is_builtin_number(current):
+                widens = value > current
             else:
-                widens = value is not None and current is not None and value > current
+                widens = value is None and current is not None
             if widens:
                 raise ConfigurationError(
                     f"ResourcePolicy.{name} may only be narrowed: the request policy "

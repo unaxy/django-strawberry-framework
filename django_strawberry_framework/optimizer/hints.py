@@ -34,6 +34,7 @@ from django_strawberry_framework.exceptions import (
     _safe_predicate,
     _safe_type_name,
 )
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.relations import safe_truthy
 
 # The shared public strategy-selection type (and the validator it feeds) are
@@ -186,7 +187,7 @@ class OptimizerHint:
         been rejected here.
         """
         flag_names = ("force_select", "force_prefetch", "skip")
-        invalid_flags = [name for name in flag_names if type(getattr(self, name)) is not bool]
+        invalid_flags = [name for name in flag_names if type(read_attr(self, name)) is not bool]
         if invalid_flags:
             raise ConfigurationError(
                 "OptimizerHint force_select, force_prefetch, and skip flags must be bool values; "

@@ -34,7 +34,7 @@ function-locally (the repo's established cross-package seam, see
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, ValidationError
 from django.db import models
@@ -42,7 +42,7 @@ from django.utils.functional import Promise
 
 from django_strawberry_framework.exceptions import _safe_predicate, _safe_text, _unprintable
 
-from ._narrowing import is_iterable, is_list_or_tuple, is_set_or_frozenset
+from ._narrowing import is_iterable, is_list_or_tuple, is_set_or_frozenset, list_of, read_attr
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -237,18 +237,16 @@ def _str_list(value: object) -> list[str]:
     return [_safe_text(item) for item in items]
 
 
-# basedpyright: EAFP; ``error.messages`` / ``error.message`` are read inside the surrounding
-# try/except, which is the guard
-def _validation_messages(error: Any) -> list[object]:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - foreign validation leaf; EAFP
+def _validation_messages(error: object) -> list[object]:
     """Read one Django validation leaf's messages without trusting its metadata."""
     try:
-        msgs = error.messages
+        msgs = read_attr(error, "messages")
         if _is_text_atom(msgs):
             return [msgs]
-        listed = list(msgs)
+        listed = list_of(msgs)
     except BaseException:  # noqa: BLE001 - hostile object, contained by design
         try:
-            msg = error.message
+            msg = read_attr(error, "message")
             if is_list_or_tuple(msg) or is_set_or_frozenset(msg):
                 return list(msg)
         except BaseException:  # noqa: BLE001 - hostile object, contained by design
@@ -259,11 +257,10 @@ def _validation_messages(error: Any) -> list[object]:  # pyright: ignore[reportE
         return listed
 
 
-# basedpyright: EAFP; ``leaf.code`` is read inside the surrounding try/except, which is the guard
-def _validation_code(leaf: Any) -> object:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - foreign validation leaf; EAFP
+def _validation_code(leaf: object) -> object:
     """Read one Django validation leaf's code, dropping hostile or empty values."""
     try:
-        code = leaf.code
+        code = read_attr(leaf, "code")
         cleaned = code or None
     except BaseException:  # noqa: BLE001 - hostile object, contained by design
         return None
@@ -280,12 +277,12 @@ def _validation_leaves(error: object) -> tuple[object, ...]:
     back to treating the error itself as the single leaf.
     """
     try:
-        error_list = getattr(error, "error_list", None)
+        error_list = read_attr(error, "error_list", None)
         if error_list is None:
             return (error,)
         if _is_text_atom(error_list):
             return (error_list,)
-        return tuple(error_list)
+        return tuple(list_of(error_list))
     except BaseException:  # noqa: BLE001 - hostile object, contained by design
         return (error,)
 

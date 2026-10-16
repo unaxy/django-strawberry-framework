@@ -46,23 +46,21 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast, get_origin
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast, get_origin
 
 import strawberry
-from django.db import models
 from strawberry import relay
-from strawberry.types.base import StrawberryList
+from strawberry.types.base import StrawberryList, StrawberryObjectDefinition
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import (
     ConfigurationError,
     _safe_arg_repr,
-    _safe_attr,
     _safe_class_name,
     _safe_predicate,
 )
 from django_strawberry_framework.registry import register_subsystem_clear, registry
-from django_strawberry_framework.utils._narrowing import is_class
+from django_strawberry_framework.utils._narrowing import is_class, list_of, read_attr
 from django_strawberry_framework.utils.imports import import_attr
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
@@ -70,6 +68,7 @@ from django_strawberry_framework.utils.inputs import (
     make_shape_build_cache,
     normalize_field_name_sequence,
 )
+from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.typing import unwrap_return_type
 
 from .inputs import (
@@ -90,15 +89,17 @@ from .operations import (
     NON_DELETE_WRITE_OPERATIONS,
     non_delete_operation_error,
 )
-from .permissions import DjangoModelPermission, run_permission_classes
+from .permissions import DjangoModelPermission, is_permission_class, run_permission_classes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
     from typing import Protocol, TypeAlias
 
+    from django.db import models
     from strawberry.types import Info
     from strawberry.types.base import WithStrawberryObjectDefinition
     from strawberry.types.field import StrawberryField
+    from typing_extensions import TypeIs
 
     from django_strawberry_framework.forms.inputs import FormClass
     from django_strawberry_framework.forms.sets import DjangoFormMutation
@@ -394,7 +395,7 @@ def require_model_class(name: str, model: object, *, base_label: str) -> type[mo
     ``DjangoMutation {name} resolved model must be a Django model class``
     message stays byte-identical.
     """
-    if is_class(model) and issubclass(model, models.Model):
+    if is_model_class(model):
         return model
     raise ConfigurationError(
         f"{base_label} {name} resolved model must be a Django model class; got {_safe_arg_repr(model)}.",
@@ -451,7 +452,7 @@ def resolve_backed_model_or_raise(
     """
     model = cls._resolve_model(meta)
     if model is None:
-        backing: object = getattr(meta, key)
+        backing = read_attr(meta, key)
         raise ConfigurationError(
             f"{base_label} {_safe_class_name(cls)}.Meta.{key} {_safe_class_name(backing)} resolves no model; "
             f"a {noun} must set Meta.model so the mutation has a model + a DjangoType to return.",
@@ -796,6 +797,14 @@ _mutation_registry = _mutation_declaration_registry.store
 register_subsystem_clear(clear_mutation_registry, owner="mutations.declarations")
 
 
+def _is_input_type(value: object) -> TypeIs[type[WithStrawberryObjectDefinition]]:
+    """Whether ``value`` is a ``@strawberry.input``-decorated class."""
+    if not is_class(value):
+        return False
+    definition = read_attr(value, "__strawberry_definition__", None)
+    return isinstance(definition, StrawberryObjectDefinition) and definition.is_input
+
+
 def _validate_input_class(
     mutation_name: str,
     input_class: object,
@@ -804,7 +813,7 @@ def _validate_input_class(
     model: type[models.Model],
     fields: tuple[str, ...] | None,
     exclude: tuple[str, ...] | None,
-) -> None:
+) -> type[WithStrawberryObjectDefinition]:
     """Validate a consumer ``input_class`` / ``partial_input_class``.
 
     Two checks (spec-036 Decision 5 error-shapes + Decision 6
@@ -822,15 +831,14 @@ def _validate_input_class(
        ``build_mutation_input``. A field whose python-name is not in that set
        raises ``ConfigurationError`` naming the divergence + the expected scheme.
     """
-    definition = getattr(input_class, "__strawberry_definition__", None)
-    if definition is None or not getattr(definition, "is_input", False):
+    if not _is_input_type(input_class):
         raise ConfigurationError(
             f"DjangoMutation {mutation_name}.Meta.{attr_name} must be a "
             f"@strawberry.input-decorated type; got {_safe_arg_repr(input_class)}.",
         )
 
     expected = _expected_input_attr_names(model, fields=fields, exclude=exclude)
-    supplied = {field.python_name for field in definition.fields}
+    supplied = {field.python_name for field in input_class.__strawberry_definition__.fields}
     diverging = sorted(supplied - expected)
     if diverging:
         raise ConfigurationError(
@@ -840,6 +848,7 @@ def _validate_input_class(
             f"`<field>_id`, M2M uses the field name). Expected names: "
             f"{sorted(expected)!r}.",
         )
+    return input_class
 
 
 def _expected_input_attr_names(
@@ -1004,8 +1013,7 @@ class _ValidatedMutationMeta:
 
 def _validate_permission_classes(
     mutation_name: str,
-    # basedpyright: EAFP: arbitrary consumer value; the try/except around ``list`` guards
-    value: Any,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - arbitrary consumer value; EAFP
+    value: object,
     *,
     unset_default: tuple[WritePermissionClass, ...] = (DjangoModelPermission,),
     base_label: str = "DjangoMutation",
@@ -1049,26 +1057,27 @@ def _validate_permission_classes(
             f"permission classes (e.g. [DjangoModelPermission]); got {_safe_arg_repr(value)}.",
         )
     try:
-        classes = list(value)
+        classes = list_of(value)
     except BaseException as exc:
         raise ConfigurationError(
             f"{base_label} {mutation_name}.Meta.permission_classes must be a sequence of "
             f"permission classes (e.g. [DjangoModelPermission]); got {_safe_arg_repr(value)}.",
         ) from exc
+    validated: list[WritePermissionClass] = []
     for entry in classes:
-        has_perm = _safe_attr(entry, "has_permission")
-        if not isinstance(entry, type) or not callable(has_perm):
+        if not is_permission_class(entry):
             raise ConfigurationError(
                 f"{base_label} {mutation_name}.Meta.permission_classes entry "
                 f"{_safe_arg_repr(entry)} is not a permission class exposing has_permission; "
                 "each entry must be a class with a "
                 "has_permission(info, mutation, operation, data, instance) method.",
             )
+        validated.append(entry)
     # The validated snapshot is stored IMMUTABLE: a mutable list reachable from
     # the mutation class could be emptied or reordered by a ``has_permission``
     # hook (which receives the mutation class), turning deny-closed into the
     # allow-any posture for every later request. The walk reads this snapshot.
-    return tuple(classes)
+    return tuple(validated)
 
 
 def validate_select_for_update(flavor: str, mutation_name: str, meta: type[object]) -> bool:
@@ -1086,7 +1095,7 @@ def validate_select_for_update(flavor: str, mutation_name: str, meta: type[objec
     safe to leave in place regardless of backend. A non-bool is a clear
     class-creation error.
     """
-    select_for_update = getattr(meta, "select_for_update", True)
+    select_for_update = read_attr(meta, "select_for_update", True)
     if not isinstance(select_for_update, bool):
         raise ConfigurationError(
             f"{flavor} {mutation_name}.Meta.select_for_update must be a bool; got "
@@ -1386,9 +1395,9 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
                     "silently ignored at the bind. Remove it.",
                 )
 
-        input_class = getattr(meta, "input_class", None)
+        input_class = read_attr(meta, "input_class", None)
         if input_class is not None:
-            _validate_input_class(
+            input_class = _validate_input_class(
                 name,
                 input_class,
                 attr_name="input_class",
@@ -1396,9 +1405,9 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
                 fields=fields,
                 exclude=exclude,
             )
-        partial_input_class = getattr(meta, "partial_input_class", None)
+        partial_input_class = read_attr(meta, "partial_input_class", None)
         if partial_input_class is not None:
-            _validate_input_class(
+            partial_input_class = _validate_input_class(
                 name,
                 partial_input_class,
                 attr_name="partial_input_class",
@@ -1518,10 +1527,8 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         self,
         info: Info,
         operation: str,
-        # basedpyright: consumer hook: a narrower base fails an override typing its own data
-        data: Any,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - consumer hook; an override narrows it
-        # basedpyright: consumer hook: an override typing ``Item | None`` fails a narrower base
-        instance: Any = None,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - consumer hook; an override narrows it
+        data: object,
+        instance: object = None,
     ) -> bool:
         """Return whether the request is authorized for ``operation`` (spec-036 Decision 15).
 
@@ -1668,8 +1675,9 @@ def _materialize_input_for(
     if operation_kind is None:
         return None  # delete: id-only, no input.
 
-    consumer_input = getattr(meta, _OPERATION_INPUT_OVERRIDE_ATTR[meta.operation])
-    if consumer_input is not None:
+    consumer_input = read_attr(meta, _OPERATION_INPUT_OVERRIDE_ATTR[meta.operation])
+    # The snapshot holds a validated input class or ``None``.
+    if _is_input_type(consumer_input):
         return _materialize_merged_input(
             mutation_name,
             meta,
@@ -1898,7 +1906,7 @@ def _strawberry_field_shape(field: StrawberryField) -> tuple[int, object]:
         if isinstance(type_, StrawberryList):
             depth += 1
         # Read by name: the probe above admits any wrapper that carries ``of_type``.
-        type_ = getattr(type_, "of_type")  # noqa: B009
+        type_ = read_attr(type_, "of_type")
     return depth, type_
 
 

@@ -74,13 +74,13 @@ import contextlib
 import copy
 from typing import TYPE_CHECKING, TypeVar
 
-from django.conf import settings
 from graphql import GraphQLError
 from graphql.execution import ExecutionResult as GraphQLExecutionResult
 from strawberry.types.execution import ExecutionResult as StrawberryExecutionResult
 from typing_extensions import override
 
 from django_strawberry_framework import logger
+from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.error_policy import (
     _PACKAGE_ERROR_POLICY,
     ErrorPolicy,
@@ -265,7 +265,7 @@ def masking_is_active(policy: ErrorPolicy) -> bool:
     except Exception:  # noqa: BLE001 - consumer code may raise anything
         return True
     try:
-        debug: object = settings.DEBUG
+        debug = django_setting("DEBUG")
     except Exception:  # noqa: BLE001 - consumer code may raise anything
         debug = None
     return enabled and debug is not True
@@ -446,7 +446,7 @@ class DjangoErrorPolicyExtension(_OperationBoundExtension[OperationState]):
                     "The error policy could not adopt the safe execution result; the "
                     "response is replaced with the policy message alone (fail closed).",
                 )
-                self.execution_context.result = degraded_result(policy)
+                self._hook_context().result = degraded_result(policy)
 
     @override
     def on_operation(self) -> Iterator[None]:

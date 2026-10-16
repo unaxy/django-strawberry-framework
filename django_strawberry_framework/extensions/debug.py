@@ -106,6 +106,7 @@ from typing_extensions import override
 
 from django_strawberry_framework import logger
 from django_strawberry_framework.exceptions import ConfigurationError, describe_value
+from django_strawberry_framework.utils._narrowing import list_of, read_attr
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 
 from .operation_state import OperationState, _OperationBoundExtension
@@ -361,12 +362,12 @@ def _collect_exceptions(execution_result: object) -> "list[_DebugExceptionRow]":
     """
     if execution_result is None:
         return []
-    errors = getattr(execution_result, "errors", None)
+    errors = read_attr(execution_result, "errors", None)
     if errors is None:
         return []
     rows: list[_DebugExceptionRow] = []
-    for error in errors:
-        if getattr(error, "original_error", None) is None:
+    for error in list_of(errors):
+        if not isinstance(error, GraphQLError) or error.original_error is None:
             continue
         rows.append(_serialize_exception(_terminal_original_error(error)))
     return rows

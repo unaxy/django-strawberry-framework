@@ -45,6 +45,13 @@ from django_strawberry_framework.exceptions import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.resource_policy import check_deadline
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    instance_dict,
+    is_str,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.execution_mode import async_execution
 
 # ``SyncMisuseError`` moved to ``utils/querysets.py``; the
@@ -270,7 +277,7 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> None:
     """
     type_cls._id_attr = None
     try:
-        id_attr: str = relay.Node.resolve_id_attr.__func__(type_cls)
+        id_attr = require(call_method(relay.Node.resolve_id_attr, "__func__", type_cls), is_str)
     except NodeIDAnnotationError:
         id_attr = "pk"
     setattr(type_cls, _RELAY_ID_ATTR_SLOT, id_attr)
@@ -348,9 +355,9 @@ def _resolve_id_default(
     if id_attr == "pk":
         id_attr = root.__class__._meta.pk.attname
     try:
-        return str(root.__dict__[id_attr])
+        return str(instance_dict(root)[id_attr])
     except KeyError:
-        return str(getattr(root, id_attr))
+        return str(read_attr(root, id_attr))
 
 
 def _coerce_node_id(node_id: object) -> object:
@@ -790,11 +797,11 @@ def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     ``custom`` - the intended semantics. Only a consumer-declared method is an
     override.
     """
-    existing = getattr(type_cls, "resolve_typename", None)
-    existing_func = getattr(existing, "__func__", None)
+    existing = read_attr(type_cls, "resolve_typename", None)
+    existing_func = read_attr(existing, "__func__", None)
     if existing is None or existing_func is None:
         return False
-    if getattr(existing_func, _FRAMEWORK_CLOSURE_MARKER, False):
+    if read_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER, False):
         return False
     node_func = getattr(relay.Node.resolve_typename, "__func__", None)
     return existing_func is not node_func
@@ -887,7 +894,6 @@ def _install_typename_closure(
     inherited through a subclass's MRO - for a consumer override.
     """
     if strategy == "type":
-        node_default = relay.Node.resolve_typename.__func__
 
         def resolve_typename(
             cls: type[_RelayDjangoType],
@@ -896,7 +902,10 @@ def _install_typename_closure(
         ) -> str:
             # Strawberry's own ``Node.resolve_typename`` (``info.path.typename``):
             # the name the executing schema published for the type.
-            return node_default(cls, root, info)
+            return require(
+                call_method(relay.Node.resolve_typename, "__func__", cls, root, info),
+                is_str,
+            )
 
     else:
 
@@ -1111,7 +1120,7 @@ def _order_nodes(
     single exception type for the "required missing id" semantic.
     ``required=False`` emits ``None`` for missing keys.
     """
-    index = {str(getattr(obj, id_attr)): obj for obj in results}
+    index = {str(read_attr(obj, id_attr)): obj for obj in results}
     output: list[_ModelT | None] = []
     model = model_for(cls)
     for key in coerced_keys:

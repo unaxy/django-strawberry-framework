@@ -14,6 +14,15 @@ from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
+from django_strawberry_framework.utils._narrowing import (
+    dict_items,
+    is_dict,
+    is_list,
+    is_str,
+    list_of,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
     queryset_hints,
@@ -35,14 +44,14 @@ from django_strawberry_framework.utils.relations import (
     relation_kind,
 )
 from django_strawberry_framework.utils.strings import snake_case
-from django_strawberry_framework.utils.typing import schema_config_from_info
+from django_strawberry_framework.utils.typing import graphql_fields, schema_config_from_info
 
 from . import logger
 from . import nested_planner as _nested_planner
 from .field_meta import FieldMeta
 from .hints import OptimizerHint, _PrefetchAny, hint_is_skip
 from .join_taxonomy import classify_relation_join
-from .nested_planner import _coerce_pagination_int
+from .nested_planner import _argument_value, _coerce_pagination_int
 from .nested_planner import (
     plan_connection_relation as _plan_nested_connection_relation,
 )
@@ -79,6 +88,7 @@ if TYPE_CHECKING:
     from strawberry.types import Info
     from strawberry.types.field import StrawberryField
     from strawberry.types.nodes import Arguments
+    from typing_extensions import TypeIs
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
@@ -587,7 +597,7 @@ def _hook_info(info: GraphQLResolveInfo | None, target_type: type[DjangoType]) -
         )
     strawberry_field = cast(
         "StrawberryField",
-        info.parent_type.fields[info.field_name].extensions[
+        graphql_fields(info.parent_type)[info.field_name].extensions[
             GraphQLCoreConverter.DEFINITION_BACKREF
         ],
     )
@@ -1814,12 +1824,12 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
             # Keep duplicate selections as defensive as the first-seen
             # construction below; Strawberry currently provides a list here,
             # but some tests and future integration shims may omit it.
-            merged.selections = list(merged.selections) + list(
+            merged.selections = list_of(read_attr(merged, "selections")) + list(
                 getattr(sel, "selections", None) or [],
             )
             response_key = _response_key(sel)
-            # The first-seen branch below built this as a ``list[str]``.
-            merged_keys: list[str] = merged._optimizer_response_keys
+            # The first-seen branch below built this as a list of response keys.
+            merged_keys = require(read_attr(merged, "_optimizer_response_keys"), is_list)
             if response_key not in merged_keys:
                 merged_keys.append(response_key)
             _merge_runtime_prefixes(merged, sel)
@@ -1881,12 +1891,20 @@ def _record_response_key_arguments(merged: SimpleNamespace, selection: FieldSele
     response_key = _response_key(selection)
     payload: Arguments = getattr(selection, "arguments", None) or {}
     # ``_merge_aliased_selections`` built this map from response keys to payloads.
-    per_key: dict[str, Arguments] = merged._optimizer_response_key_arguments
+    per_key = require(read_attr(merged, "_optimizer_response_key_arguments"), _is_payload_by_key)
     if response_key in per_key and _normalized_alias_payload(
         per_key[response_key],
     ) != _normalized_alias_payload(payload):
         merged._optimizer_response_key_argument_conflict = True
     per_key[response_key] = payload
+
+
+def _is_payload_by_key(value: object) -> TypeIs[dict[str, Arguments]]:
+    """Whether ``value`` maps each response key to that occurrence's argument payload."""
+    return is_dict(value) and all(
+        is_str(key) and is_dict(payload) and all(is_str(name) for name in payload)
+        for key, payload in dict_items(value)
+    )
 
 
 def _normalized_alias_payload(payload: Arguments) -> Arguments:
@@ -1907,7 +1925,7 @@ def _normalized_alias_payload(payload: Arguments) -> Arguments:
     normalized = dict(payload)
     for bound in ("first", "last"):
         if bound in normalized:
-            normalized[bound] = _coerce_pagination_int(normalized[bound])
+            normalized[bound] = _coerce_pagination_int(_argument_value(normalized, bound))
     return normalized
 
 
@@ -1969,10 +1987,11 @@ def _merge_runtime_prefixes(merged: SimpleNamespace, selection: FieldSelection) 
     if incoming is None:
         return
     # The first-seen merge branch stored a list of runtime-path tuples or ``None``.
-    carried: list[tuple[str, ...]] | None = merged._optimizer_runtime_prefixes
-    if carried is None:
+    stored = read_attr(merged, "_optimizer_runtime_prefixes")
+    if stored is None:
         merged._optimizer_runtime_prefixes = incoming
         return
+    carried = require(stored, is_list)
     for prefix in incoming:
         if prefix not in carried:
             carried.append(prefix)

@@ -51,7 +51,13 @@ from django_strawberry_framework.keyset import (
     keyset_contract_error,
     order_fingerprint,
 )
-from django_strawberry_framework.utils._narrowing import is_dict
+from django_strawberry_framework.utils._narrowing import (
+    is_dict,
+    is_str,
+    list_of,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.connections import (
     assert_window_fetch_mode,
     window_range_plan,
@@ -682,13 +688,13 @@ def deferred_loading_of(queryset: object) -> tuple[frozenset[str], bool] | None:
     (a non-QuerySet input, e.g. a test double) or the tuple shape is
     malformed.
     """
-    query = getattr(queryset, "query", None)
-    deferred_loading = getattr(query, "deferred_loading", None)
+    query = read_attr(queryset, "query", None)
+    deferred_loading = read_attr(query, "deferred_loading", None)
     if deferred_loading is None:
         return None
     try:
-        field_set, defer_flag = deferred_loading
-        return frozenset(field_set), bool(defer_flag)
+        field_set, defer_flag = list_of(deferred_loading)
+        return frozenset(require(name, is_str) for name in list_of(field_set)), bool(defer_flag)
     except (TypeError, ValueError):
         return None
 
@@ -1147,8 +1153,8 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
     meta: Options[models.Model] | None = getattr(model, "_meta", None)
     if meta is None:
         return False
-    pk = getattr(meta, "pk", None)
-    if pk is not None and ref in ("pk", getattr(pk, "attname", None)):
+    pk = read_attr(meta, "pk", None)
+    if pk is not None and ref in ("pk", read_attr(pk, "attname", None)):
         return True
     if "__" in ref:
         # A relation traversal (e.g. ``shelf__code``) is not the model's own
@@ -1336,7 +1342,7 @@ def _is_random_term(term: object, query: Query) -> bool:
         return any(_is_random_condition_child(child, query) for child in children)
     if isinstance(term, BaseExpression):
         return isinstance(term, Random) or any(
-            _is_random_term(source, query) for source in term.get_source_expressions()
+            _is_random_term(source, query) for source in list_of(term.get_source_expressions())
         )
     # Anything else draws nothing unless it is ``"?"`` or an alias of a random term.
     return term == "?" or (

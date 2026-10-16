@@ -87,7 +87,7 @@ from django_strawberry_framework.utils.inputs import (
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
-from .accessors import child_relation_of
+from .accessors import child_relation_of, choices_of
 from .serializer_converter import (
     NESTED_MULTI,
     NESTED_SINGLE,
@@ -434,8 +434,7 @@ def _fingerprint_choices(field: DRFField) -> tuple[tuple[str, ...], bool] | None
     """
     choice = serializer_choice_source(field)
     if choice is not None:
-        # drf-stubs: ``ChoiceField.choices`` is the flattened ``dict`` of value -> display.
-        choices: Mapping[object, object] = choice.choices
+        choices = choices_of(choice)
         return tuple(str(value) for value in choices), bool(choice.allow_blank)
     return None
 

@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING
 
 from .conf import error_policy_setting
 from .exceptions import ConfigurationError, describe_value
+from .utils._narrowing import read_attr
 from .utils.policies import canonical_policy, resolve_policy
 
 if TYPE_CHECKING:
@@ -118,7 +119,7 @@ class ErrorPolicy:
                 f"ErrorPolicy.enabled must be a bool; got {describe_value(self.enabled)}.",
             )
         for name in ("message", "correlation_extension_key"):
-            value: object = getattr(self, name)
+            value = read_attr(self, name)
             if type(value) is not str or not value:
                 raise ConfigurationError(
                     f"ErrorPolicy.{name} must be a non-empty string; got {describe_value(value)}.",

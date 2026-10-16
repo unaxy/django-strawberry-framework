@@ -123,6 +123,7 @@ from django_strawberry_framework.mutations.resolvers import (
     save_or_field_errors,
 )
 from django_strawberry_framework.mutations.sets import backing_model_of
+from django_strawberry_framework.utils._narrowing import call_method, is_str, list_of, read_attr
 from django_strawberry_framework.utils.errors import (
     build_error_key_map,
     save_time_error_key_map,
@@ -184,7 +185,7 @@ if TYPE_CHECKING:
 _FORM_ASYNC_RECOURSE = sync_pipeline_recourse("form mutation")
 
 
-def _to_form_key_value(obj: models.Model, form_field: forms.Field | None) -> object:
+def _to_form_key_value(obj: object, form_field: forms.Field | None) -> object:
     """Convert a resolved relation object to its form-key value via ``to_field_name``.
 
     A ``ModelChoiceField`` / ``ModelMultipleChoiceField`` with ``to_field_name``
@@ -192,11 +193,10 @@ def _to_form_key_value(obj: models.Model, form_field: forms.Field | None) -> obj
     to_field_name)``), not the pk; an unset ``to_field_name`` keys by ``obj.pk``.
     So the bound form's ``to_python`` resolves the same value the decode produced.
     """
-    to_field_name = getattr(form_field, "to_field_name", None)
-    if to_field_name:
+    to_field_name = read_attr(form_field, "to_field_name", None)
+    if is_str(to_field_name) and to_field_name:
         try:
-            if hasattr(obj, "serializable_value"):
-                return obj.serializable_value(to_field_name)
+            return call_method(obj, "serializable_value", to_field_name)
         except (AttributeError, FieldDoesNotExist):
             pass
     return getattr(obj, "pk", obj)
@@ -496,8 +496,10 @@ def _reconstruct_partial_data(
             continue
         if _is_model_multiple_choice_field(form_field) and name in m2m_field_names:
             try:
-                related_objs = getattr(instance, name).all()
-                m2m_data[name] = [_to_form_key_value(obj, form_field) for obj in related_objs]
+                related_objs = call_method(read_attr(instance, name), "all")
+                m2m_data[name] = [
+                    _to_form_key_value(obj, form_field) for obj in list_of(related_objs)
+                ]
             except (AttributeError, ObjectDoesNotExist):
                 pass
         elif (
@@ -507,7 +509,7 @@ def _reconstruct_partial_data(
             and not _stored_key_is_form_key(links[name], form_field)
         ):
             try:
-                related = getattr(instance, name, None)
+                related = read_attr(instance, name, None)
             except (AttributeError, ObjectDoesNotExist):
                 related = None
             if related is not None:
@@ -624,7 +626,7 @@ def _unstorable_blank_fields(
     for field in instance._meta.concrete_fields:
         if field.name not in form.fields or not field.editable or field.primary_key:
             continue
-        value = getattr(instance, field.attname)
+        value = read_attr(instance, field.attname)
         if field.blank and value == "" and not field.empty_strings_allowed:
             unstorable_fields.append(field)
     return unstorable_fields

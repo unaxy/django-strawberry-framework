@@ -67,7 +67,7 @@ import contextlib
 import functools
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, NoReturn, TypeVar, cast
 
 import strawberry
 from asgiref.sync import AsyncToSync, async_to_sync, sync_to_async
@@ -80,6 +80,7 @@ from strawberry.types.graphql import OperationType
 from typing_extensions import override
 
 from . import logger
+from ._graphql_core_patches import _is_awaitable
 from .error_policy import _PACKAGE_ERROR_POLICY, ErrorPolicy, resolve_error_policy
 from .exceptions import ConfigurationError, describe_value
 from .extensions.error_policy import (
@@ -97,6 +98,7 @@ from .utils._narrowing import is_class, is_mapping, mapping_get
 from .utils.execution_mode import OperationMode, async_execution
 from .utils.policies import copy_policy
 from .utils.private_state import PrivateAuthority, PrivateMembership
+from .utils.typing import call_forwarded
 from .utils.write_transaction import managed_write_transaction, resolve_write_alias
 
 if TYPE_CHECKING:
@@ -124,6 +126,11 @@ if TYPE_CHECKING:
 
         def close(self) -> object: ...
 
+    class _RawHandleOwner(Protocol):
+        """A Django connection as far as its raw handle goes; django-stubs types the slot ``Any``."""
+
+        connection: _DBAPIConnection | None
+
 
 #: What one window's ``run`` produces, handed back unchanged.
 _WindowT = TypeVar("_WindowT")
@@ -136,6 +143,11 @@ _CLOSED_WINDOW_MESSAGE = (
     "The database connection was closed before the mutation's transaction could "
     "commit; nothing was written."
 )
+
+
+async def _settled(value: object, context: ExecutionContext) -> object:
+    """Return ``value``, awaited first when ``context.is_awaitable`` reads it as pending."""
+    return await value if _is_awaitable(value, context) else value
 
 
 def _close_thread_connections() -> None:
@@ -154,10 +166,15 @@ def _close_thread_connections() -> None:
     for connection in connections.all(initialized_only=True):
         with contextlib.suppress(DatabaseError):
             connection.close()
-        handle: _DBAPIConnection | None = connection.connection
-        if handle is not None:
-            _ = handle.close()
-            connection.connection = None
+        _drop_raw_handle(connection)
+
+
+def _drop_raw_handle(owner: _RawHandleOwner) -> None:
+    """Close the raw handle ``owner`` still holds, if any, and clear the slot."""
+    handle = owner.connection
+    if handle is not None:
+        _ = handle.close()
+        owner.connection = None
 
 
 def _window_drained() -> None:
@@ -425,10 +442,7 @@ class DjangoMutationExecutionContext(ExecutionContext):
         async def complete() -> object:
             if cancelled:
                 raise asyncio.CancelledError
-            result = execute_field(parent_type, source, field_nodes, path)
-            if self.is_awaitable(result):
-                result = await result
-            return result
+            return await _settled(execute_field(parent_type, source, field_nodes, path), self)
 
         caller = getattr(AsyncToSync.executors, "current", None)
 
@@ -838,15 +852,21 @@ class DjangoSchema(strawberry.Schema):
 
     def __init__(
         self,
-        # basedpyright: verbatim forward to Schema.__init__; uncapped strawberry may add params
-        *args: Any,  # pyright: ignore[reportExplicitAny]
+        *args: object,
         resource_policy: ResourcePolicy | Mapping[str, object] | None = None,
         error_policy: ErrorPolicy | Mapping[str, object] | None = None,
-        # basedpyright: verbatim forward to Schema.__init__; uncapped strawberry may add params
-        **kwargs: Any,  # pyright: ignore[reportExplicitAny]
+        extensions: Iterable[object] | None = None,
+        execution_context_class: type[ExecutionContext] | None = None,
+        config: StrawberryConfig | None = None,
+        **kwargs: object,
     ) -> None:
-        """Build the schema, settling the two policies and forwarding the rest to Strawberry."""
-        entries, declared_resource = _consumer_extension_entries(kwargs.get("extensions"))
+        """Build the schema, settling the two policies and forwarding the rest to Strawberry.
+
+        ``extensions``, ``execution_context_class`` and ``config`` are Strawberry's
+        own arguments, read here before they are forwarded. Every other argument is
+        forwarded verbatim, so a parameter an uncapped Strawberry adds passes through.
+        """
+        entries, declared_resource = _consumer_extension_entries(extensions)
         if declared_resource is not None and resource_policy is not None:
             raise ConfigurationError(
                 "A schema's resource policy is declared once. This one is declared "
@@ -859,10 +879,7 @@ class DjangoSchema(strawberry.Schema):
             resource_policy if declared_resource is None else declared_resource,
         )
         resolved_error = resolve_error_policy(error_policy)
-        _refuse_incremental_execution(kwargs.get("config"))
-        if kwargs.get("execution_context_class") is None:
-            kwargs["execution_context_class"] = DjangoMutationExecutionContext
-        kwargs["extensions"] = entries
+        _refuse_incremental_execution(config)
         if _SCHEMA_ENFORCEMENT.settled(self):
             # A constructed schema is reachable from every resolver it serves,
             # and so is its ``__init__``. Running it again would replace the
@@ -885,9 +902,16 @@ class DjangoSchema(strawberry.Schema):
                 error_policy=resolved_error,
             ),
         )
+        forwarded: dict[str, object] = {
+            **kwargs,
+            "execution_context_class": execution_context_class or DjangoMutationExecutionContext,
+            "config": config,
+        }
         # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result aliases
-        # in an ImportError fallback, so Schema.__init__'s signature carries Unknown
-        super().__init__(*args, **kwargs)  # pyright: ignore[reportUnknownMemberType]
+        # in an ImportError fallback, so Schema.__init__'s signature carries Unknown; the other
+        # arguments are forwarded verbatim, and ``extensions`` carries the instances Strawberry
+        # accepts at run time but leaves out of its annotation
+        super().__init__(*args, extensions=entries, **forwarded)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
 
     @property
     @override
@@ -1132,8 +1156,7 @@ class DjangoSchema(strawberry.Schema):
         )
 
     @override
-    # basedpyright: verbatim forward to Schema.execute_sync; uncapped strawberry may add params
-    def execute_sync(self, *args: Any, **kwargs: Any) -> StrawberryExecutionResult:  # pyright: ignore[reportExplicitAny]
+    def execute_sync(self, *args: object, **kwargs: object) -> StrawberryExecutionResult:
         """Run the operation synchronously and mask what is RETURNED.
 
         The masking extension's teardown answers for a result upstream assigned
@@ -1145,11 +1168,10 @@ class DjangoSchema(strawberry.Schema):
         ``None``. No extension can reach that result, because none is still
         running when it is built - so the schema masks the value it hands back.
         """
-        return self._masked_return(super().execute_sync(*args, **kwargs))
+        return self._masked_return(call_forwarded(super().execute_sync, args, kwargs))
 
     @override
-    # basedpyright: verbatim forward to Schema.execute; uncapped strawberry may add params
-    async def execute(self, *args: Any, **kwargs: Any) -> StrawberryExecutionResult:  # pyright: ignore[reportExplicitAny]
+    async def execute(self, *args: object, **kwargs: object) -> StrawberryExecutionResult:
         """Run the operation asynchronously and mask what is RETURNED.
 
         The async twin of :meth:`execute_sync`, for the same reason and with the
@@ -1160,7 +1182,7 @@ class DjangoSchema(strawberry.Schema):
         here - each frame is masked at the transport's result source - and
         nothing about this override touches them.
         """
-        return self._masked_return(await super().execute(*args, **kwargs))
+        return self._masked_return(await call_forwarded(super().execute, args, kwargs))
 
     def _masked_return(self, result: StrawberryExecutionResult) -> StrawberryExecutionResult:
         """Apply this schema's error policy to one returned execution result.
@@ -1211,10 +1233,8 @@ class DjangoSchema(strawberry.Schema):
         self,
         execution_context: StrawberryExecutionContext,
         extensions_runner: SchemaExtensionsRunner,
-        # basedpyright: verbatim forward to Schema._stream; uncapped strawberry may add params
-        *args: Any,  # pyright: ignore[reportExplicitAny]
-        # basedpyright: verbatim forward to Schema._stream; uncapped strawberry may add params
-        **kwargs: Any,  # pyright: ignore[reportExplicitAny]
+        *args: object,
+        **kwargs: object,
     ) -> AsyncGenerator[object, None]:
         """Stream the operation's frames with this operation bound in every task.
 
@@ -1234,7 +1254,8 @@ class DjangoSchema(strawberry.Schema):
         """
         # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result aliases
         # in an ImportError fallback, so StreamResult carries Unknown
-        source = super()._stream(execution_context, extensions_runner, *args, **kwargs)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        upstream_args = (execution_context, extensions_runner, *args)
+        source = call_forwarded(super()._stream, upstream_args, kwargs)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
         if issubclass(type(extensions_runner), DjangoExtensionsRunner):
             # The cast is the exact-type check above, a narrowing the checker cannot read.
             # basedpyright: ``source`` carries the StreamResult Unknown from Strawberry's alias rebinding

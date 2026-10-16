@@ -66,16 +66,21 @@ from django.utils.encoding import force_str
 from strawberry.django.views import BaseView
 from typing_extensions import override
 
-from django_strawberry_framework.utils._narrowing import is_dict
+from django_strawberry_framework.utils._narrowing import call_method, is_dict
 from django_strawberry_framework.utils.imports import require_optional_module
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType
 
     from debug_toolbar.panels import Panel
     from debug_toolbar.toolbar import DebugToolbar
     from django.http.request import HttpRequest
     from django.http.response import HttpResponse
+
+#: ``json.loads``: typeshed types the decoded document ``Any``; it is whatever JSON
+#: the body held.
+_load_json: Callable[..., object] = json.loads
 
 # The single django-debug-toolbar install-hint string (spec-042 Decision 5).
 # Every toolbar-absent raise routes through ``require_debug_toolbar()`` so the
@@ -196,7 +201,7 @@ def _get_payload(
 
     try:
         content = force_str(response.content, encoding=response.charset)
-        payload: object = json.loads(content, object_pairs_hook=collections.OrderedDict)
+        payload = _load_json(content, object_pairs_hook=collections.OrderedDict)
     except (json.JSONDecodeError, LookupError, UnicodeError):
         return None
     if not is_dict(payload):
@@ -311,7 +316,7 @@ class DebugToolbarMiddleware(_DebugToolbarMiddleware):
             return response
 
         try:
-            operation_name: object = json.loads(request.body).get("operationName")
+            operation_name = call_method(_load_json(request.body), "get", "operationName")
         except Exception:  # noqa: BLE001 - upstream verbatim: any unreadable body degrades to "inject"
             operation_name = None
 

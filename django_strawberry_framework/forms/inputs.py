@@ -77,6 +77,7 @@ from django_strawberry_framework.types.converters import (
     build_enum_from_choices,
     choice_column_pairs,
 )
+from django_strawberry_framework.utils._narrowing import dict_of, is_str
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     build_strawberry_input_class,
@@ -239,11 +240,7 @@ def get_form_fields(form_class: FormClass) -> dict[str, forms.Field]:
         ) from exc
 
 
-def _form_field_basis(
-    form_class: FormClass,
-    # basedpyright: EAFP: a consumer hook's return; the try/except around ``dict`` guards it
-    form_fields: Any = None,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - consumer hook return; EAFP
-) -> dict[str, forms.Field]:
+def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict[str, forms.Field]:
     """Return the validated field basis used by every form-input operation.
 
     ``form_fields`` is the optional stable mapping supplied by a mutation's
@@ -258,7 +255,7 @@ def _form_field_basis(
     """
     try:
         source = get_form_fields(form_class) if form_fields is None else form_fields
-        basis = dict(source)
+        basis = dict_of(source)
     except BaseException as exc:
         raise ConfigurationError(
             f"DjangoFormMutation for {form_class.__name__} get_form_fields() must return "
@@ -280,10 +277,8 @@ def _form_field_basis(
     invalid_fields: list[object] = []
     for name, field in basis.items():
         try:
-            # basedpyright: trust boundary: a consumer ``get_form_fields`` hook can return a
-            # mapping with any keys
             invalid_name = (
-                not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name)  # pyright: ignore[reportUnnecessaryIsInstance]
+                not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name)
             )
         except BaseException:  # noqa: BLE001 - hostile object, contained by design
             invalid_name = True
@@ -305,7 +300,12 @@ def _form_field_basis(
             f"[{', '.join(_safe_arg_repr(name) for name in invalid_names)}], invalid "
             f"fields [{', '.join(_safe_arg_repr(name) for name in invalid_fields)}].",
         )
-    return basis
+    # Every entry passed both checks above, so this keeps them all, typed as they were proved.
+    return {
+        name: field
+        for name, field in basis.items()
+        if is_str(name) and isinstance(field, forms.Field)
+    }
 
 
 def normalize_form_field_basis(

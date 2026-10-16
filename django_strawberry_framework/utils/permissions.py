@@ -38,11 +38,11 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, cast
 
 from django.apps import apps
-from django.conf import settings
 from django.db import router
 from django.db.models.constants import LOOKUP_SEP
 from django.http import HttpRequest
 
+from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import (
     ConfigurationError,
     _safe_arg_repr,
@@ -50,7 +50,7 @@ from django_strawberry_framework.exceptions import (
     _safe_type_name,
 )
 
-from ._narrowing import dict_items, is_dict, is_mapping, mapping_get
+from ._narrowing import dict_items, is_dict, is_mapping, mapping_get, read_attr
 from .input_values import (
     LEAF,
     RELATED,
@@ -183,7 +183,7 @@ class ChannelsRequestAdapter:
 
     def __getattr__(self, name: str) -> object:
         """Delegate every non-scope attribute to the original context value."""
-        return getattr(self._request, name)
+        return read_attr(self._request, name)
 
 
 def _channels_scope(request: object) -> Mapping[object, object] | None:
@@ -340,9 +340,8 @@ def resolve_auth_aliases() -> frozenset[str]:
     # ``AUTH_USER_MODEL`` is ``"app_label.ModelName"``; resolving it through the
     # same ``_safe_get_model`` as the other auth models keeps ONE code path (an
     # uninstalled / misconfigured model is skipped, never an error).
-    # django-stubs declares ``AUTH_USER_MODEL: str`` (``conf/global_settings.pyi``).
-    auth_user_model: str = settings.AUTH_USER_MODEL
-    user_app_label, _, user_model_name = auth_user_model.partition(".")
+    # ``AUTH_USER_MODEL`` is a ``str`` setting; anything else names no model and is skipped.
+    user_app_label, _, user_model_name = str(django_setting("AUTH_USER_MODEL")).partition(".")
     candidates = [
         _safe_get_model(user_app_label, user_model_name),
         _safe_get_model("auth", "Permission"),

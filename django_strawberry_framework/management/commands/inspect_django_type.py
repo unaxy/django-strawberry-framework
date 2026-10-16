@@ -62,6 +62,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import _PACKAGE_SCALAR_MAP
 from django_strawberry_framework.types.base import DjangoType, _is_relay_shaped
 from django_strawberry_framework.types.converters import SCALAR_MAP, _field_output_type_for
+from django_strawberry_framework.utils._narrowing import is_str
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 
 if typing.TYPE_CHECKING:
@@ -140,11 +141,12 @@ class Command(BaseCommand):
         )
 
     @override
-    def handle(self, *args: object, **options: typing.Any) -> None:
+    def handle(self, *args: object, **options: object) -> None:
         """Import the schema (if given), resolve the type, and print its field table."""
+        # argparse hands ``--schema`` over as a string, or ``None`` when it was not given.
         schema = options.get("schema")
         schema_object = None
-        if schema is not None:
+        if is_str(schema):
             schema_object = import_module_symbol_or_command_error(
                 schema,
                 default_symbol_name="schema",
@@ -158,9 +160,10 @@ class Command(BaseCommand):
             scalar_map=getattr(config, "scalar_map", None),
         )
 
-        target = self._resolve_type(options["type"], name_converter)
+        type_name = str(options["type"])
+        target = self._resolve_type(type_name, name_converter)
         if not (isinstance(target, type) and issubclass(target, DjangoType)):
-            raise CommandError(f"{options['type']} is not a DjangoType subclass")
+            raise CommandError(f"{type_name} is not a DjangoType subclass")
 
         # ``DjangoType`` declares the attribute; the package's registration writes it.
         definition: DjangoTypeDefinition | None = getattr(
@@ -683,7 +686,7 @@ def _render_annotation(annotation: object, scalar_namer: _ScalarNamer = _scalar_
             return _render_annotation(args[0], scalar_namer).rstrip("!")
         return " | ".join(_render_annotation(a, scalar_namer).rstrip("!") for a in args)
     if typing.get_origin(annotation) is list:
-        inner: object
-        (inner,) = typing.get_args(annotation)
+        list_args: tuple[object, ...] = typing.get_args(annotation)
+        (inner,) = list_args
         return f"[{_render_annotation(inner, scalar_namer)}]!"
     return f"{scalar_namer(annotation)}!"

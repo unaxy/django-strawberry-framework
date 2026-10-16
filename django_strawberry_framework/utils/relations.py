@@ -18,7 +18,7 @@ from django_strawberry_framework.exceptions import (
     _safe_attr,
     _safe_type_name,
 )
-from django_strawberry_framework.utils._narrowing import is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import is_class, is_list_or_tuple
 from django_strawberry_framework.utils.typing import MISSING_ATTRIBUTE
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from django.db.models.lookups import Lookup, Transform
     from django.db.models.query_utils import PathInfo
+    from typing_extensions import TypeIs
 
     from .typing import ConcreteField, ForeignKeyField, ModelField
 
@@ -42,6 +43,7 @@ __all__ = [
     "is_forward_concrete_relation",
     "is_forward_many_to_many",
     "is_many_side_relation_kind",
+    "is_model_class",
     "is_single_column_foreign_key",
     "m2m_through_link_fields",
     "m2m_through_model",
@@ -57,6 +59,12 @@ __all__ = [
     "safe_truthy",
     "validate_lookup_expr",
 ]
+
+
+def is_model_class(value: object) -> TypeIs[type[models.Model]]:
+    """Return whether ``value`` is a Django model class, asked of its real type."""
+    return is_class(value) and issubclass(value, models.Model)
+
 
 RelationKind: TypeAlias = Literal[
     "many",

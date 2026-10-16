@@ -18,7 +18,7 @@ schema cannot emit a value the parser would reject.
 """
 
 import re
-from typing import TYPE_CHECKING, Any, NewType
+from typing import TYPE_CHECKING, NewType
 
 import strawberry
 from strawberry.file_uploads.scalars import Upload
@@ -27,6 +27,7 @@ from strawberry.schema.config import StrawberryConfig
 from strawberry.types.scalar import ScalarDefinition
 
 from .exceptions import _safe_arg_repr, _safe_attr, _safe_type_name
+from .utils.typing import call_forwarded
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -141,9 +142,7 @@ _PACKAGE_SCALAR_MAP: dict[object, ScalarDefinition] = {
 def strawberry_config(
     *,
     extra_scalar_map: "Mapping[object, ScalarDefinition] | None" = None,
-    # basedpyright: forwarded verbatim to StrawberryConfig, whose dataclass fields vary across
-    # the uncapped supported strawberry range, so its keyword types cannot be pinned here
-    **config_kwargs: Any,  # pyright: ignore[reportExplicitAny]
+    **config_kwargs: object,
 ) -> StrawberryConfig:
     """Build a fresh ``StrawberryConfig`` registering django-strawberry-framework scalars.
 
@@ -196,7 +195,9 @@ def strawberry_config(
             "Define a Strawberry custom scalar of a different NewType / class "
             "to register under a separate key.",
         )
-    return StrawberryConfig(scalar_map=merged, **config_kwargs)
+    # Forwarded verbatim: ``StrawberryConfig``'s dataclass fields vary across the uncapped
+    # supported Strawberry range, so their keyword types cannot be pinned here.
+    return call_forwarded(StrawberryConfig, (), {"scalar_map": merged, **config_kwargs})
 
 
 def _safe_scalar_map_key_label(key: object) -> str:

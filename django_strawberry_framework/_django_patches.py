@@ -121,6 +121,7 @@ from django.db import connections
 from django.test.testcases import SimpleTestCase
 
 from .conf import upstream_patches_enabled
+from .utils._narrowing import read_attr
 
 if TYPE_CHECKING:
     from django.db.backends.base.base import BaseDatabaseWrapper
@@ -256,8 +257,12 @@ def _validate_upstream_shape() -> str:
     unverifiable body must not be silently superseded.
     """
     descriptor = _original_remove_databases_failures
-    function = getattr(descriptor, "__func__", None)
-    if _DatabaseFailure is None or not isinstance(descriptor, classmethod) or function is None:
+    function = read_attr(descriptor, "__func__", None)
+    if (
+        _DatabaseFailure is None
+        or not isinstance(descriptor, classmethod)
+        or not callable(function)
+    ):
         raise RuntimeError(
             "Cannot apply django-strawberry-framework's Django patch: expected "
             "django.test.testcases._DatabaseFailure and "
@@ -374,9 +379,9 @@ def _patched_remove_databases_failures(cls: type[SimpleTestCase]) -> None:
             continue
         connection = connections[alias]
         for name, _ in _disallowed_connection_methods(cls, connection):
-            method: object = getattr(connection, name)
+            method = read_attr(connection, name)
             if _is_database_failure(method):
-                setattr(connection, name, method.wrapped)
+                setattr(connection, name, read_attr(method, "wrapped"))
 
 
 setattr(_patched_remove_databases_failures, _PATCH_OWNER_ATTRIBUTE, _PATCH_OWNER)
@@ -396,10 +401,10 @@ def _patch_is_installed() -> bool:
     state" contract - if a third party reverted the class attribute
     after a prior ``apply()`` call, the next ``apply()`` re-installs.
     """
-    installed = SimpleTestCase.__dict__.get("_remove_databases_failures")
+    installed: object = SimpleTestCase.__dict__.get("_remove_databases_failures")
     if installed is None:
         return False
-    return getattr(installed, "__func__", None) is _patched_remove_databases_failures
+    return read_attr(installed, "__func__", None) is _patched_remove_databases_failures
 
 
 def apply() -> None:

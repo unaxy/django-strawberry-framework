@@ -252,6 +252,11 @@ ignore = [
 # handler that logs the exception.
 logger-objects = ["django_strawberry_framework.logger"]
 
+[tool.ruff.lint.flake8-boolean-trap]
+# ``read_attr`` is ``getattr`` typed ``object``: its positional default is ``getattr``'s, which
+# the rule already allows.
+extend-allowed-calls = ["django_strawberry_framework.utils._narrowing.read_attr"]
+
 [tool.ruff.lint.mccabe]
 # Ratchet at the current maximum: no new function may exceed the most complex one today.
 max-complexity = 45
@@ -519,8 +524,8 @@ reportUnusedFunction = "none"
 reportImportCycles = "none"
 reportUninitializedInstanceVariable = "none"
 # The ratchet, off until their sites are fixed (turn one on to list them): `reportAny` is
-# on in the scripts/ and root-file environments below, the last two in those and the
-# package's, and `reportUnusedCallResult` in the example project outside its tests.
+# on in the scripts/, root-file and package environments below, the last two in those, and
+# `reportUnusedCallResult` in the example project outside its tests.
 reportAny = "none"
 reportUnannotatedClassAttribute = "none"
 reportUnusedCallResult = "none"
@@ -540,12 +545,14 @@ reportUnusedCallResult = "error"
 [[tool.basedpyright.executionEnvironments]]
 root = "django_strawberry_framework/rest_framework"
 extraPaths = ["."]
+reportAny = "error"
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "django_strawberry_framework"
 extraPaths = ["."]
+reportAny = "error"
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 
@@ -608,7 +615,7 @@ reportUnusedCallResult = "error"
 # diagnostic instead); one below it fails until the budget is lowered to match, and a rule at
 # zero leaves `ignores` (marked `# Locked` above once it is on in every environment).
 [tool.type-suppressions]
-cast = 438
+cast = 430
 
 [tool.type-suppressions.ignores]
 reportArgumentType = 306
@@ -616,7 +623,8 @@ reportAssignmentType = 32
 reportAttributeAccessIssue = 142
 reportCallIssue = 15
 reportDeprecated = 2
-reportExplicitAny = 95
+reportAny = 5
+reportExplicitAny = 62
 reportFunctionMemberAccess = 5
 reportGeneralTypeIssues = 5
 reportIncompatibleMethodOverride = 59
@@ -630,9 +638,9 @@ reportPropertyTypeMismatch = 5
 reportReturnType = 26
 reportUndefinedVariable = 5
 reportUnknownArgumentType = 14
-reportUnknownMemberType = 47
+reportUnknownMemberType = 46
 reportUnknownVariableType = 32
-reportUnnecessaryIsInstance = 12
+reportUnnecessaryIsInstance = 11
 reportUnsafeMultipleInheritance = 14
 reportUntypedFunctionDecorator = 2
 

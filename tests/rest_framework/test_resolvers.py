@@ -114,7 +114,14 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
 )
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types import relay as relay_module
-from django_strawberry_framework.utils._narrowing import is_class, is_list, is_mapping, is_tuple
+from django_strawberry_framework.utils._narrowing import (
+    is_class,
+    is_list,
+    is_mapping,
+    is_tuple,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
@@ -125,7 +132,7 @@ from django_strawberry_framework.utils.inputs import (
     RELATION_SINGLE,
     InputFieldSpec,
 )
-from django_strawberry_framework.utils.querysets import SyncMisuseError
+from django_strawberry_framework.utils.querysets import SyncMisuseError, is_queryset
 from django_strawberry_framework.utils.write_transaction import (
     authorization_phase,
     managed_write_transaction,
@@ -135,7 +142,13 @@ from django_strawberry_framework.utils.write_transaction import (
     write_pipeline,
 )
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import ClaimsClassBase, ClassReadRaises, ModelSerializerBase, run_capturing
+from tests._idioms import (
+    ClaimsClassBase,
+    ClassReadRaises,
+    ModelSerializerBase,
+    is_object_dict,
+    run_capturing,
+)
 from tests._info import make_info, unread_info
 
 if TYPE_CHECKING:
@@ -157,6 +170,13 @@ if TYPE_CHECKING:
     _PkRelation: TypeAlias = (
         serializers.RelatedField[_ModelT, _ModelT, object] | serializers.ManyRelatedField
     )
+
+
+def _serializer_context(kwargs: dict[str, object]) -> dict[object, object]:
+    """Return the ``context`` dict the merged serializer kwargs carry."""
+    context = kwargs["context"]
+    assert is_object_dict(context)
+    return context
 
 
 def _hook_ctx(
@@ -266,8 +286,8 @@ def _child_relation(field: object) -> DRFRelatedField:
 
 def _validator_queryset_db(validator: UniqueValidator | UniqueTogetherValidator) -> str | None:
     """The alias a DRF uniqueness validator's queryset is pinned to (``None``: router decides)."""
-    # basedpyright: drf-stubs types both validators' ``queryset`` as the bare generic ``QuerySet``
-    return queryset_db(validator.queryset)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    # drf-stubs types both validators' ``queryset`` as the bare generic ``QuerySet``.
+    return queryset_db(require(read_attr(validator, "queryset"), is_queryset))
 
 
 @pytest.fixture(autouse=True)
@@ -1063,7 +1083,7 @@ def test_merged_kwargs_sets_framework_request_unconditionally() -> None:
         hook_context=_hook_ctx(),
     )
     assert kwargs["data"] == {"name": "X"}
-    assert kwargs["context"]["request"] is request
+    assert _serializer_context(kwargs)["request"] is request
 
 
 @pytest.mark.django_db
@@ -1124,8 +1144,8 @@ def test_merged_kwargs_merges_override_context_keys_keeping_framework_request() 
         alias="default",
         hook_context=_hook_ctx(),
     )
-    assert kwargs["context"]["extra"] == "value"  # the override key is kept
-    assert kwargs["context"]["request"] is request  # the framework request wins
+    assert _serializer_context(kwargs)["extra"] == "value"  # the override key is kept
+    assert _serializer_context(kwargs)["request"] is request  # the framework request wins
 
 
 @pytest.mark.django_db
@@ -1314,7 +1334,7 @@ def test_merged_kwargs_override_echoing_the_same_request_object_is_tolerated() -
         alias="default",
         hook_context=_hook_ctx(),
     )
-    assert kwargs["context"]["request"] is request
+    assert _serializer_context(kwargs)["request"] is request
 
 
 @pytest.mark.django_db
@@ -1333,7 +1353,7 @@ def test_merged_kwargs_bare_httprequest_info_context_fallback() -> None:
         alias="default",
         hook_context=_hook_ctx(),
     )
-    assert kwargs["context"]["request"] is bare_request
+    assert _serializer_context(kwargs)["request"] is bare_request
 
 
 # ===========================================================================
@@ -3327,8 +3347,8 @@ def test_merged_kwargs_write_alias_equal_by_text_is_accepted(override: str) -> N
         alias="default",
         hook_context=_hook_ctx(),
     )
-    assert type(kwargs["context"]["write_alias"]) is str
-    assert kwargs["context"]["write_alias"] == "default"
+    assert type(_serializer_context(kwargs)["write_alias"]) is str
+    assert _serializer_context(kwargs)["write_alias"] == "default"
 
 
 @pytest.mark.django_db
@@ -3343,7 +3363,7 @@ def test_merged_kwargs_sets_write_alias_in_context() -> None:
         alias="default",
         hook_context=_hook_ctx(),
     )
-    assert kwargs["context"]["write_alias"] == "default"
+    assert _serializer_context(kwargs)["write_alias"] == "default"
 
 
 @pytest.mark.django_db
@@ -6327,11 +6347,11 @@ def test_merged_serializer_kwargs_preserves_custom_context_keys() -> None:
         alias="default",
         hook_context=hook_ctx,
     )
-    assert kwargs["context"]["request"] is req
-    assert kwargs["context"]["write_alias"] == "default"
-    assert kwargs["context"]["format"] == "json"
-    assert kwargs["context"]["view"] == "custom_view"
-    assert kwargs["context"]["custom_flag"] is True
+    assert _serializer_context(kwargs)["request"] is req
+    assert _serializer_context(kwargs)["write_alias"] == "default"
+    assert _serializer_context(kwargs)["format"] == "json"
+    assert _serializer_context(kwargs)["view"] == "custom_view"
+    assert _serializer_context(kwargs)["custom_flag"] is True
 
 
 def test_serializer_errors_to_field_errors_never_returns_empty_envelope() -> None:

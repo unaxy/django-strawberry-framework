@@ -60,6 +60,7 @@ from django_strawberry_framework.exceptions import ConfigurationError, _safe_arg
 from django_strawberry_framework.forms.sets import iter_form_mutations
 from django_strawberry_framework.utils.directives import validated_field_directives
 from django_strawberry_framework.utils.execution_mode import async_execution
+from django_strawberry_framework.utils.input_values import UNSET
 
 from .inputs import INPUTS_MODULE_PATH
 from .operations import operation_takes_data, operation_takes_id
@@ -299,10 +300,10 @@ def DjangoMutationField(  # noqa: N802  # PascalCase for the field-factory famil
     takes_id = mutation_cls._mutation_meta.operation != "form"
 
     def _resolve(info: Info[object, object], **kwargs: object) -> object:
-        data = kwargs.get("data", strawberry.UNSET)
+        data = kwargs.get("data", UNSET)
         call_kwargs: dict[str, object] = {"data": data}
         if takes_id:
-            call_kwargs["id"] = kwargs.get("id", strawberry.UNSET)
+            call_kwargs["id"] = kwargs.get("id", UNSET)
         if async_execution():
             return mutation_cls.resolve_async(info, **call_kwargs)
         return mutation_cls.resolve_sync(info, **call_kwargs)

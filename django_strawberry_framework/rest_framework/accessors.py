@@ -17,23 +17,36 @@ from typing import TYPE_CHECKING
 
 from rest_framework import serializers
 
+from django_strawberry_framework.utils._narrowing import dict_of, read_attr
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from typing_extensions import TypeIs
 
-    from .serializer_converter import DRFField, DRFRelatedField, DRFSerializer
+    from .serializer_converter import DRFBaseSerializer, DRFField, DRFRelatedField, DRFSerializer
 
 __all__ = (
     "base_fields",
     "bound_fields",
     "child_relation_of",
+    "choices_of",
     "declared_fields_of",
     "is_drf_field",
     "is_serializer",
     "list_child_of",
     "serializer_errors",
+    "validated_data_of",
 )
+
+
+def choices_of(field: serializers.ChoiceField) -> dict[object, object]:
+    """Return a copy of ``field.choices``: the flattened value -> display mapping.
+
+    drf-stubs declares ``choices`` as ``property(_get_choices, _set_choices)``, which the
+    checker reads as ``Any``; the read itself is the ordinary attribute read.
+    """
+    return dict_of(read_attr(field, "choices"))
 
 
 def bound_fields(serializer: DRFSerializer) -> Mapping[str, DRFField]:
@@ -86,3 +99,11 @@ def is_serializer(value: object) -> TypeIs[DRFSerializer]:
 def is_drf_field(value: object) -> TypeIs[DRFField]:
     """Return whether ``value`` is a DRF ``serializers.Field`` (any serializer or field)."""
     return isinstance(value, serializers.Field)
+
+
+def validated_data_of(serializer: DRFBaseSerializer) -> object:
+    """Return ``serializer.validated_data``: whatever its ``validate()`` returned.
+
+    drf-stubs types the read ``Any``; DRF hands back the value as ``validate()`` built it.
+    """
+    return read_attr(serializer, "validated_data")

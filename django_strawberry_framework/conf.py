@@ -45,7 +45,7 @@ from django.conf import settings as django_settings
 from django.test.signals import setting_changed
 
 from django_strawberry_framework.exceptions import ConfigurationError, _safe_type_name
-from django_strawberry_framework.utils._narrowing import is_exact_dict, is_mapping
+from django_strawberry_framework.utils._narrowing import is_exact_dict, is_mapping, read_attr
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -512,6 +512,16 @@ def upstream_patches_enabled(dependency: str) -> bool:
         f"`{APPLY_UPSTREAM_PATCHES_KEY}` must be a bool or a mapping of dependency names "
         f"to bools; got {_safe_type_name(configured)}.",
     )
+
+
+def django_setting(name: str) -> object:
+    """Return the Django setting ``name``, read at call time.
+
+    ``django.conf.settings`` answers every read through ``__getattr__``, which
+    django-stubs types ``Any``; this is the ``object`` the project configured. A
+    missing setting raises ``AttributeError``, as the attribute read does.
+    """
+    return read_attr(django_settings, name)
 
 
 def nested_connection_strategy_setting() -> object:

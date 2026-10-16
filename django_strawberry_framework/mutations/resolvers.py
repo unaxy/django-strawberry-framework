@@ -82,14 +82,13 @@ import datetime
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-import strawberry
-from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import ProtectedError, RestrictedError
 from django.utils import timezone
 from graphql import GraphQLError
 
+from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import _safe_arg_repr
 from django_strawberry_framework.optimizer.extension import (
     apply_connection_optimization,
@@ -98,6 +97,7 @@ from django_strawberry_framework.optimizer.extension import (
 from django_strawberry_framework.relay import GlobalIDDecode, decode_model_global_id
 from django_strawberry_framework.resource_policy import check_deadline
 from django_strawberry_framework.types.relay import implements_relay_node
+from django_strawberry_framework.utils._narrowing import call_method, list_of, pk_of, read_attr
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
     FIELD_ERROR_CODE_NOT_FOUND,
@@ -110,6 +110,7 @@ from django_strawberry_framework.utils.errors import (
     null_field_error,
     validation_error_to_field_errors,
 )
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import FILE, RELATION_MULTI, RELATION_SINGLE
 from django_strawberry_framework.utils.permissions import auth_aliases_for_permission_classes
 from django_strawberry_framework.utils.querysets import (
@@ -212,8 +213,8 @@ if TYPE_CHECKING:
             mutation_cls: _MutationClassT_contra,
             info: Info[object, object],
             *,
-            data: object = strawberry.UNSET,
-            id: object = strawberry.UNSET,  # noqa: A002
+            data: object = UNSET,
+            id: object = UNSET,  # noqa: A002
         ) -> object: ...
 
     class _AsyncResolverEntry(Protocol[_MutationClassT_contra]):
@@ -224,8 +225,8 @@ if TYPE_CHECKING:
             mutation_cls: _MutationClassT_contra,
             info: Info[object, object],
             *,
-            data: object = strawberry.UNSET,
-            id: object = strawberry.UNSET,  # noqa: A002
+            data: object = UNSET,
+            id: object = UNSET,  # noqa: A002
         ) -> Coroutine[object, object, object]: ...
 
 
@@ -366,7 +367,7 @@ def run_write_pipeline_sync(
         # the live ``instance.pk`` a hook could have re-pointed. The companion
         # ``target_state`` snapshot (the loaded concrete field values) backs the
         # serializer flavor's pre-save in-memory drift rejection.
-        authorized_pk = None if instance is None else instance.pk
+        authorized_pk = None if instance is None else pk_of(instance)
         pipeline_context = require_write_pipeline()
         pipeline_context.authorized_pk = authorized_pk
         pipeline_context.target_state = (
@@ -406,11 +407,11 @@ def run_write_pipeline_sync(
                 if instance is not None and authorized_pk is not None:
                     reject_substituted_row(
                         cast("type[models.Model]", model),
-                        instance.pk,
+                        pk_of(instance),
                         authorized_pk,
                         message=(
                             f"{mutation_cls.__name__}: the located instance's pk changed from "
-                            f"{_safe_arg_repr(authorized_pk)} to {_safe_arg_repr(instance.pk)} during "
+                            f"{_safe_arg_repr(authorized_pk)} to {_safe_arg_repr(pk_of(instance))} during "
                             "authorization; an update must "
                             "write the row that was authorized, never a substituted one."
                         ),
@@ -442,12 +443,12 @@ def run_write_pipeline_sync(
             if meta.operation == "update":
                 reject_substituted_row(
                     cast("type[models.Model]", model),
-                    saved_row.pk,
+                    pk_of(saved_row),
                     authorized_pk,
                     message=(
                         f"{mutation_cls.__name__}: the write step returned "
                         f"{cast('type[models.Model]', model).__name__} "
-                        f"pk={_safe_arg_repr(saved_row.pk)}, but the located, "
+                        f"pk={_safe_arg_repr(pk_of(saved_row))}, but the located, "
                         f"authorized row is pk={_safe_arg_repr(authorized_pk)}; an update must write "
                         "the row that was "
                         "authorized, never a substituted one."
@@ -456,7 +457,7 @@ def run_write_pipeline_sync(
 
             obj = refetch_optimized(
                 cast("type[DjangoType]", primary_type),
-                saved_row.pk,
+                pk_of(saved_row),
                 info,
                 alias=using,
                 force_load=False,
@@ -634,7 +635,11 @@ def _make_aware_if_naive(value: object) -> object:
     instance (``date`` is the parent, not the child), and an already-aware ``datetime``
     is left unchanged.
     """
-    if settings.USE_TZ and isinstance(value, datetime.datetime) and timezone.is_naive(value):
+    if (
+        django_setting("USE_TZ")
+        and isinstance(value, datetime.datetime)
+        and timezone.is_naive(value)
+    ):
         return timezone.make_aware(value)
     return value
 
@@ -858,9 +863,9 @@ def _unique_constraint_groups(model: type[models.Model]) -> list[set[str]]:
     """
     groups: list[set[str]] = []
     for constraint in model._meta.constraints:
-        fields = getattr(constraint, "fields", None)
+        fields = read_attr(constraint, "fields", None)
         if fields:
-            groups.append(set(fields))
+            groups.append({str(name) for name in list_of(fields)})
     groups.extend(set(together) for together in model._meta.unique_together)
     groups.extend(
         {field.name}
@@ -884,7 +889,7 @@ def _assign_m2m(instance: models.Model, m2m_assignments: _M2MAssignments) -> Non
     inside the transaction, after ``save()``.
     """
     for m2m_name, keys in m2m_assignments:
-        getattr(instance, m2m_name).set(keys)
+        _ = call_method(read_attr(instance, m2m_name), "set", keys)
 
 
 def refetch_optimized(
@@ -1225,11 +1230,11 @@ def _delete_write_step(
     authorized_pk = pipeline_context.authorized_pk
     reject_substituted_row(
         model_for(primary_type),
-        instance.pk,
+        pk_of(instance),
         authorized_pk,
         message=(
             f"{mutation_cls.__name__}: the located instance's pk changed from "
-            f"{_safe_arg_repr(authorized_pk)} to {_safe_arg_repr(instance.pk)} during "
+            f"{_safe_arg_repr(authorized_pk)} to {_safe_arg_repr(pk_of(instance))} during "
             "authorization; a delete must "
             "remove the row that was located and authorized, never a substituted one."
         ),
@@ -1615,8 +1620,8 @@ def make_resolver_entries(
         mutation_cls: _MutationClassT,
         info: Info[object, object],
         *,
-        data: object = strawberry.UNSET,
-        id: object = strawberry.UNSET,  # noqa: A002
+        data: object = UNSET,
+        id: object = UNSET,  # noqa: A002
     ) -> object:
         """Normalize the ``UNSET``-default kwargs to ``sync_body``'s positional args."""
         return sync_body(mutation_cls, info, data, id)
@@ -1625,8 +1630,8 @@ def make_resolver_entries(
         mutation_cls: _MutationClassT,
         info: Info[object, object],
         *,
-        data: object = strawberry.UNSET,
-        id: object = strawberry.UNSET,  # noqa: A002
+        data: object = UNSET,
+        id: object = UNSET,  # noqa: A002
     ) -> object:
         """Run ``sync_body`` in one ``sync_to_async(thread_sensitive=True)`` call."""
         return await run_pipeline_async(sync_body, mutation_cls, info, data, id)

@@ -41,7 +41,7 @@ triggers the collection pipeline, which:
 import inspect
 import re
 import typing
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from typing import (
     TYPE_CHECKING,
@@ -75,6 +75,7 @@ from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.hints import OptimizerHint
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import (
+    class_dict,
     is_abstract_set,
     is_class,
     is_dict,
@@ -959,7 +960,7 @@ class DjangoType:
         queryset: models.QuerySet[Any, Any],  # pyright: ignore[reportExplicitAny]
         # basedpyright: an override annotates ``info: strawberry.Info``, which object rejects; the
         # shared visibility runners also serve public helpers taking any info, which Info rejects
-        info: Any,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401
+        info: Any,  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401
         # basedpyright: an override returns ``super().get_queryset(...)`` as its own model's
         # queryset, which a concrete return rejects and a TypeVar return forbids non-generically
     ) -> models.QuerySet[Any, Any]:  # pyright: ignore[reportExplicitAny]
@@ -1149,11 +1150,11 @@ def _consumer_assigned_fields(
     """
     relation_assigned: set[str] = set()
     scalar_assigned: set[str] = set()
-    class_dict: Mapping[str, object] = cls.__dict__
+    namespace = class_dict(cls)
     for field in fields:
-        if field.name not in class_dict:
+        if field.name not in namespace:
             continue
-        value = class_dict[field.name]
+        value = namespace[field.name]
         if _guarded_isinstance(value, StrawberryField):
             if field.is_relation:
                 relation_assigned.add(field.name)

@@ -78,6 +78,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_str,
     is_tuple,
     list_iter,
+    read_attr,
     tuple_iter,
 )
 from django_strawberry_framework.utils.directives import validated_field_directives
@@ -87,6 +88,7 @@ from django_strawberry_framework.utils.errors import (
     null_field_error,
 )
 from django_strawberry_framework.utils.execution_mode import async_execution
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.permissions import request_from_info
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 from django_strawberry_framework.utils.sessions import actor_transition
@@ -1227,13 +1229,13 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     # checks below prove its type. Each check asks the value's real type, which a
     # ``__class__`` property cannot restate, and iteration runs through the base
     # ``list`` / ``tuple`` slot, which a subclass's ``__iter__`` cannot replace.
-    username_field: object = getattr(user_model, "USERNAME_FIELD")  # noqa: B009
+    username_field = read_attr(user_model, "USERNAME_FIELD")
     if not is_str(username_field):
         raise ConfigurationError(
             f"register_mutation() needs {model_name}.USERNAME_FIELD to be a field "
             f"name string; got {_safe_arg_repr(username_field)}.",
         )
-    required_fields: object = getattr(user_model, "REQUIRED_FIELDS")  # noqa: B009
+    required_fields = read_attr(user_model, "REQUIRED_FIELDS")
     if issubclass(type(required_fields), list) and is_list(required_fields):
         entries = list_iter(required_fields)
     elif issubclass(type(required_fields), tuple) and is_tuple(required_fields):
@@ -1379,7 +1381,7 @@ def _run_register_pipeline_sync(
         mutation_cls,
         info,
         data,
-        strawberry.UNSET,
+        UNSET,
         decode_step=lambda instance: _register_decode_step(mutation_cls, data, info, instance),
         write_step=lambda instance, decoded: _register_write_step(
             mutation_cls,

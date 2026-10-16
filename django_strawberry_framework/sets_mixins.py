@@ -60,6 +60,7 @@ from .exceptions import (
     _safe_predicate,
     _safe_type_name,
 )
+from .utils._narrowing import call_method, list_of, read_attr
 from .utils.input_values import SetInputTraversal, is_inactive_value
 from .utils.permissions import (
     active_permission_targets,
@@ -71,6 +72,10 @@ from .utils.permissions import (
     verbatim_path,
 )
 from .utils.strings import pascal_case_or_raise
+
+#: Django's ``import_string``: django-stubs types its result ``Any``; a lazy reference names
+#: an arbitrary object, which the family gate then checks.
+_import_object: Callable[[str], object] = import_string
 
 if TYPE_CHECKING:
     from .filters.sets import FilterSetMetaclass
@@ -166,11 +171,11 @@ class LazyRelatedClassMixin:
         """
         if isinstance(class_ref, str):
             try:
-                return import_string(class_ref)
+                return _import_object(class_ref)
             except ImportError:
                 if bound_class:
                     path = f"{bound_class.__module__}.{class_ref}"
-                    return import_string(path)
+                    return _import_object(path)
                 raise
         elif callable(class_ref) and not isinstance(class_ref, type):
             return class_ref()
@@ -231,7 +236,7 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
         a failed read leaves the slot resolved and re-raises on every retry,
         the same observable behavior the inline family gates had.
         """
-        target = getattr(self, self._target_attr)
+        target = read_attr(self, self._target_attr)
         # ``_bind_owner`` is the one writer of the owner slot, and it stores a set class.
         owner: type[object] | None = getattr(self, self._owner_attr, None)
         resolved = self.resolve_lazy_class(target, owner)
@@ -444,7 +449,7 @@ def reject_captured_branches(
                 or long_relation[: len(short_relation)] != short_relation
             ):
                 continue
-            target: object = getattr(short, target_attr)
+            target = read_attr(short, target_attr)
             remainder = long_relation[len(short_relation) :]
             if not isinstance(target, type) or not _target_reaches(
                 target,
@@ -490,7 +495,7 @@ def _target_reaches(
         relation = _declared_relation(name, declaration)
         if relation is None or relation[: len(remainder)] != remainder[: len(relation)]:
             continue
-        child: object = getattr(declaration, target_attr)
+        child = read_attr(declaration, target_attr)
         # A ``None`` placeholder target generates no input, so no path runs through it.
         if not isinstance(child, type):
             continue
@@ -576,8 +581,8 @@ def should_cache_expansion(cls: type[object], *, related_attr: str, target_slot:
     value never depends on which class expanded first.
     """
     return related_attr in cls.__dict__ and all(
-        not isinstance(getattr(entry, target_slot), str)
-        for entry in getattr(cls, related_attr).values()
+        not isinstance(read_attr(entry, target_slot), str)
+        for entry in list_of(call_method(read_attr(cls, related_attr), "values"))
     )
 
 

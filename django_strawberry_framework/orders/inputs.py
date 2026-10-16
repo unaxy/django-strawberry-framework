@@ -34,6 +34,7 @@ from django_strawberry_framework.exceptions import (
     _safe_type_name,
 )
 from django_strawberry_framework.registry import register_subsystem_clear
+from django_strawberry_framework.utils._narrowing import is_str, list_of, read_attr, require
 from django_strawberry_framework.utils.input_values import RELATED, iter_active_fields
 from django_strawberry_framework.utils.inputs import (
     GeneratedInputFieldSpec,
@@ -181,16 +182,17 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     ``ForeignObject`` links, in model field order; it excludes reverse
     relations, M2M managers, ``GenericRelation`` and ``GenericForeignKey``.
     """
-    meta = getattr(model, "_meta", None)
-    if meta is None or not callable(getattr(meta, "get_fields", None)):
+    meta = read_attr(model, "_meta", None)
+    get_fields = read_attr(meta, "get_fields", None)
+    if meta is None or not callable(get_fields):
         raise ConfigurationError(
             f"Expected a Django Model class with '_meta.get_fields()'; "
             f"got {_safe_type_name(model)} ({_safe_arg_repr(model)}).",
         )
     return [
-        f.name
-        for f in meta.get_fields()
-        if (getattr(f, "column", None) is not None and not getattr(f, "many_to_many", False))
+        require(read_attr(f, "name"), is_str)
+        for f in list_of(get_fields())
+        if (read_attr(f, "column", None) is not None and not read_attr(f, "many_to_many", False))
         or carrier_backed_link(f) is not None
     ]
 
