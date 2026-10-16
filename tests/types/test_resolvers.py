@@ -1422,7 +1422,7 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
         item_obj = await Item.objects.acreate(name="Visible Item", category=cat)
         cat_with_cache = SimpleNamespace(
             _prefetched_objects_cache={"items": [item_obj]},
-            items=Item.objects.filter(category=cat),
+            items=cat.items,
         )
         many_res_unscoped = many_resolver(cat_with_cache, unscoped_info)
         if inspect.isawaitable(many_res_unscoped):
@@ -1492,7 +1492,7 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
         many_resolver = _make_relation_resolver(many_field, parent_type=CustomCategoryType)
         cat_with_cache = SimpleNamespace(
             _prefetched_objects_cache={"items": [item]},
-            items=Item.objects.filter(category=cat),
+            items=cat.items,
         )
         many_unscoped_info = make_info(path=response_path("other", "items"), context={})
         res_many_unscoped = many_resolver(cat_with_cache, many_unscoped_info)

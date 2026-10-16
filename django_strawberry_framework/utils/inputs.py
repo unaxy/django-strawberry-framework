@@ -996,23 +996,26 @@ def normalize_field_name_sequence(
             f"{flavor} Meta.{label} must be a readable sequence of field name strings; "
             f"got {_safe_type_name(value)}.",
         ) from exc
-    non_strings = [name for name in entries if not is_str(name)]
+    names: list[str] = []
+    non_strings: list[object] = []
+    for name in entries:
+        if is_str(name):
+            names.append(str.__str__(name) if type(name) is not str else name)
+        else:
+            non_strings.append(name)
     if non_strings:
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be a sequence of field name strings; "
             "got non-string entry(ies): "
             f"[{', '.join(_safe_arg_repr(name) for name in non_strings)}].",
         )
-    names = tuple(
-        str.__str__(name) if type(name) is not str else name for name in entries if is_str(name)
-    )
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     if duplicates:
         raise ConfigurationError(
             f"{flavor} Meta.{label} declares duplicate field name(s): "
             f"{duplicates!r}. Each field may appear at most once.",
         )
-    return names
+    return tuple(names)
 
 
 def resolve_effective_fields(

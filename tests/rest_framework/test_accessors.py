@@ -16,11 +16,13 @@ from django_strawberry_framework.rest_framework.accessors import (
     base_fields,
     bound_fields,
     child_relation_of,
+    choices_of,
     declared_fields_of,
     is_drf_field,
     is_serializer,
     list_child_of,
     serializer_errors,
+    validated_data_of,
 )
 from django_strawberry_framework.utils._narrowing import is_dict
 
@@ -72,6 +74,24 @@ def test_serializer_errors_are_the_validation_errors() -> None:
 
     assert is_dict(errors)
     assert set(errors) == {"title", "tags"}
+
+
+def test_validated_data_is_what_validation_built() -> None:
+    """``validated_data_of`` is ``serializer.validated_data``, coerced by the fields."""
+    serializer = _NoteSerializer(data={"title": "Note", "tags": [1, "2"]})
+
+    assert serializer.is_valid()
+    assert validated_data_of(serializer) == {"title": "Note", "tags": [1, 2]}
+
+
+def test_choices_of_is_a_copy_of_the_value_display_mapping() -> None:
+    """``choices_of`` is the field's value -> display mapping, in order, as a copy."""
+    field = serializers.ChoiceField(choices=[("b", "Bee"), ("a", "Ay")])
+    choices = choices_of(field)
+    choices["c"] = "Sea"
+
+    assert list(choices) == ["b", "a", "c"]
+    assert list(choices_of(field).items()) == [("b", "Bee"), ("a", "Ay")]
 
 
 def test_predicates_tell_serializers_and_fields_apart() -> None:

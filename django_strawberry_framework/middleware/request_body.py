@@ -101,6 +101,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_str,
     list_of,
     read_attr,
+    require,
 )
 from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
 
@@ -394,7 +395,7 @@ def _require_boundary_before_csrf() -> None:
     """
     boundary_index = csrf_index = None
     for index, path in enumerate(list_of(django_setting("MIDDLEWARE"))):
-        entry = _import_entry(str(path))
+        entry = _import_entry(require(path, is_str))
         if not isinstance(entry, type):
             continue
         if issubclass(entry, GraphQLRequestBodyBoundaryMiddleware) and boundary_index is None:

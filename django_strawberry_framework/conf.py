@@ -18,6 +18,10 @@ signal (pytest-django's ``del settings.DJANGO_STRAWBERRY_FRAMEWORK``
 deletes without emitting ``setting_changed``), the next read rebuilds
 from the live value instead of keeping a stale cache.
 
+``django_setting(name)`` is the package's one read of a plain Django setting
+(``DEBUG``, ``MIDDLEWARE``, ``SESSION_ENGINE``, ...): ``django.conf.settings`` read
+at call time, typed ``object`` for the caller to narrow.
+
 Defensive ``None`` stance (package-wide). Two top-level
 consumer-input seams coerce ``None`` (and the missing-key case) to an
 empty mapping rather than raising: ``DJANGO_STRAWBERRY_FRAMEWORK =

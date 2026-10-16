@@ -2308,6 +2308,40 @@ def test_lookup_direct_rhs_hook_scan_reads_past_a_metaclass_mro_property() -> No
     assert fired == []
 
 
+def test_lookup_direct_rhs_hook_scan_reads_past_a_metaclass_dict_property() -> None:
+    """The hook scan reads each class namespace through ``type``'s own descriptor.
+
+    The ``__dict__`` twin of the ``__mro__`` case above: a metaclass declaring
+    ``__dict__`` as a property could run code during the scan, and answer an empty
+    namespace that hides the hook the class really defines.
+    """
+    fired: list[str] = []
+
+    def _empty_namespace(cls: type) -> dict[str, object]:  # must never run
+        del cls
+        fired.append("__dict__")
+        return {}
+
+    def _hook(self: object, name: str) -> None:  # must never run
+        del self
+        fired.append(name)
+
+    # Built through ``type`` because the checker forbids redeclaring ``type.__dict__``.
+    empty_dict_meta = type("_EmptyDictMeta", (type,), {"__dict__": property(_empty_namespace)})
+    hooked_rhs = empty_dict_meta("_HookedRhs", (), {"__getattr__": _hook})
+
+    source = Category.objects.filter(name="keep")
+    str(source.query)
+    _where_leaf(source.query).rhs = hooked_rhs()
+    sealed, defect = _seal_or_defect(source, Category, None)
+    assert sealed is None
+    assert defect == (
+        "untrusted",
+        "where clause lookup rhs defines the '__getattr__' attribute hook",
+    )
+    assert fired == []
+
+
 def test_lookup_direct_rhs_plain_object_fails_closed() -> None:
     """A direct lookup RHS that is not plain query data fails closed.
 

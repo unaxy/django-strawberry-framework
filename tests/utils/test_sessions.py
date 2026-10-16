@@ -85,7 +85,8 @@ def test_session_store_class_reports_an_unreadable_setting_as_configuration_erro
         def __getattr__(self, name: str) -> object:
             raise KeyError(name)
 
-    monkeypatch.setattr("django_strawberry_framework.utils.sessions.settings", _RaisingSettings())
+    # ``conf.django_setting`` is the package's one Django-settings read.
+    monkeypatch.setattr("django_strawberry_framework.conf.django_settings", _RaisingSettings())
     with pytest.raises(ConfigurationError, match="SESSION_ENGINE could not be read"):
         session_store_class()
 
