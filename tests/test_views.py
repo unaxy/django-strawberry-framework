@@ -571,10 +571,12 @@ def test_the_cap_admits_the_builtin_int_exactly(subclass_value: int, rung: str) 
         pytest.param(None, None, id="absent"),
         pytest.param("not-a-number", None, id="unparseable"),
         pytest.param("", None, id="empty"),
+        pytest.param(4096, None, id="non-string-int"),
+        pytest.param(b"4096", None, id="non-string-bytes"),
     ],
 )
 def test_the_declared_length_reader_is_none_for_every_unmeasurable_shape(
-    content_length: str | None,
+    content_length: object,
     expected: int | None,
 ) -> None:
     """An absent or garbage ``CONTENT_LENGTH`` reads as ``None``, never as a number.
@@ -582,8 +584,10 @@ def test_the_declared_length_reader_is_none_for_every_unmeasurable_shape(
     ``None`` is the fail-safe direction: an unmeasurable declaration falls
     through to the counted check rather than being trusted, so a hostile client
     cannot buy a larger body by omitting or corrupting the header. An absent
-    header is not a string, so it reads as ``None`` before ``int`` is asked, and
-    ``"not-a-number"`` reads as ``None`` through ``int``'s ``ValueError``.
+    header is not a string, so it reads as ``None`` before ``int`` is asked, as does
+    a non-string a hand-built ``META`` carries (a real WSGI or ASGI header is always
+    text, and ``int`` would accept these); ``"not-a-number"`` reads as ``None``
+    through ``int``'s ``ValueError``.
     """
     request = RequestFactory().post("/graphql/", data=b"x" * 16, content_type="application/json")
     if content_length is None:

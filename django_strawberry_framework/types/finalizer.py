@@ -55,7 +55,6 @@ from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 import strawberry
 from strawberry import relay
-from strawberry.types.base import StrawberryObjectDefinition
 from strawberry.types.field import StrawberryField
 from strawberry.utils.str_converters import to_camel_case
 
@@ -73,7 +72,12 @@ from django_strawberry_framework.registry import (
     iter_subsystem_clears,
     registry,
 )
-from django_strawberry_framework.utils._narrowing import class_dict, read_attr, require_instance
+from django_strawberry_framework.utils._narrowing import (
+    class_dict,
+    list_of,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils.imports import loaded_attr
 from django_strawberry_framework.utils.relations import instance_accessor
 from django_strawberry_framework.utils.typing import object_result
@@ -279,12 +283,11 @@ def _field_surface_names(type_cls: type[DjangoType]) -> dict[str, str]:
     inherited_surface: dict[str, str] = {}
     for base in reversed(type_cls.__mro__[1:]):
         definition = read_attr(base, "__strawberry_definition__", None)
-        if not isinstance(definition, StrawberryObjectDefinition):
+        if definition is None:
             continue
-        for field in definition.fields:
-            # Strawberry names a field late, so an unnamed one is skipped below.
-            python_name = read_attr(field, "python_name", None)
-            graphql_name = field.graphql_name
+        for field in list_of(read_attr(definition, "fields")):
+            python_name = read_attr(field, "python_name")
+            graphql_name = read_attr(field, "graphql_name")
             label = python_name if python_name is not None else graphql_name
             if label is None:
                 continue

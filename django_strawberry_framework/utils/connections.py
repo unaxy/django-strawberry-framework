@@ -174,9 +174,9 @@ def is_supplied(value: object) -> bool:
     ``value is not None and value is not strawberry.UNSET`` at 15 sites across
     the two connection modules - the exact inverse, hand-written each time.
 
-    The rule lives in ``input_values.py`` (which deliberately imports no
-    strawberry, so the traversal primitives stay usable below the schema
-    layer); only the ``UNSET`` sentinel binding lives here.
+    The rule lives in ``input_values.py``, which takes the sentinel as an
+    argument; this passes ``input_values.UNSET``, Strawberry's ``UNSET`` typed
+    ``UnsetType``.
     """
     return not is_inactive_value(value, unset_sentinel=UNSET)
 

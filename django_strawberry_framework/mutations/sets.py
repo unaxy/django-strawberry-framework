@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast, get_origin
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeGuard, TypeVar, cast, get_origin
 
 import strawberry
 from strawberry import relay
@@ -99,7 +99,6 @@ if TYPE_CHECKING:
     from strawberry.types import Info
     from strawberry.types.base import WithStrawberryObjectDefinition
     from strawberry.types.field import StrawberryField
-    from typing_extensions import TypeIs
 
     from django_strawberry_framework.forms.inputs import FormClass
     from django_strawberry_framework.forms.sets import DjangoFormMutation
@@ -797,8 +796,12 @@ _mutation_registry = _mutation_declaration_registry.store
 register_subsystem_clear(clear_mutation_registry, owner="mutations.declarations")
 
 
-def _is_input_type(value: object) -> TypeIs[type[WithStrawberryObjectDefinition]]:
-    """Whether ``value`` is a ``@strawberry.input``-decorated class."""
+def _is_input_type(value: object) -> TypeGuard[type[WithStrawberryObjectDefinition]]:
+    """Whether ``value`` is a ``@strawberry.input``-decorated class.
+
+    ``TypeGuard``: a decorated OUTPUT type is a ``WithStrawberryObjectDefinition`` too,
+    and answers ``False``.
+    """
     if not is_class(value):
         return False
     definition = read_attr(value, "__strawberry_definition__", None)
@@ -1679,14 +1682,14 @@ def _materialize_input_for(
         return None  # delete: id-only, no input.
 
     consumer_input = read_attr(meta, _OPERATION_INPUT_OVERRIDE_ATTR[meta.operation])
-    # The snapshot holds a validated input class or ``None``.
-    if _is_input_type(consumer_input):
+    if consumer_input is not None:
+        # The snapshot holds a validated input class or ``None``.
         return _materialize_merged_input(
             mutation_name,
             meta,
             primary_type,
             operation_kind,
-            consumer_input,
+            cast("type[WithStrawberryObjectDefinition]", consumer_input),
         )
 
     # Derive the shape ONCE: ``mutation_input_shape`` single-sources the

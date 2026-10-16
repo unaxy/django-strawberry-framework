@@ -62,7 +62,6 @@ from django_strawberry_framework.utils._narrowing import (
     is_exact_list,
     is_exact_pair,
     read_attr,
-    require,
 )
 from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
 from django_strawberry_framework.utils.inputs import promote_set_meta_fields, read_set_meta_fields
@@ -369,6 +368,17 @@ def _order_paths(orderset: type[object]) -> Iterable[str]:
     return cast("type[OrderSet]", orderset)._expand_meta_fields().keys()
 
 
+def _classify_declared_path(model: object, field_path: str) -> None:
+    """Validate a ``Meta.fields`` path against ``Meta.model``, raising ``PathResolutionError``.
+
+    A ``model`` that is not a model class resolves no segment, so it is refused as
+    ``classify_path`` refuses a model lacking the path's first segment.
+    """
+    if not is_model_class(model):
+        raise PathResolutionError(model, field_path, field_path.split(LOOKUP_SEP, maxsplit=1)[0])
+    _ = classify_path(model, field_path)
+
+
 class OrderSetMetaclass(type):
     """Discover ``RelatedOrder`` declarations and bind them to the new class.
 
@@ -635,7 +645,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
                 )
             if model is not None:
                 try:
-                    _ = classify_path(require(model, is_model_class), field_path)
+                    _classify_declared_path(model, field_path)
                 except PathResolutionError as exc:
                     raise ConfigurationError(
                         f"OrderSet {cls.__qualname__}.Meta.fields contains invalid "

@@ -7,7 +7,7 @@ A split suite run on a tree other sessions are editing can drop modules from eve
 Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit and the CI lint job) refuses a
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any count off `[tool.type-suppressions]`: the ignore
-comments per unlocked rule and the `typing.cast` calls (439) may only fall, and the budget falls with them. A rule
+comments per unlocked rule and the `typing.cast` calls (440) may only fall, and the budget falls with them. A rule
 whose last ignore is cleared leaves the budget and gains the marker.
 
 Progress: 25 done, 9 to do. Ignore comments: 838 lines (1897 at the start of 0.0.15's ignore sweep).

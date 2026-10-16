@@ -142,7 +142,11 @@ if TYPE_CHECKING:
         ...
 
     def is_awaitable(_value: object, /) -> TypeIs[Awaitable[object]]:
-        """Return whether ``await`` accepts the value (``inspect.isawaitable``)."""
+        """Return whether ``await`` accepts the value (``inspect.isawaitable``).
+
+        A generator-based coroutine (``@types.coroutine``) answers ``True`` without being an
+        ``Awaitable`` instance; ``await`` is the one operation the narrowing licenses.
+        """
         ...
 
     class _AttrReader(Protocol):

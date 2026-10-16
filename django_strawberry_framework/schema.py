@@ -1435,9 +1435,8 @@ def _refuse_incremental_execution(config: StrawberryConfig | None) -> None:
 
     The flag is read the way Strawberry reads it - by truthiness, from the
     ``config=`` argument - because that is what decides whether Strawberry takes
-    the incremental path. ``config`` cannot arrive positionally: the ``extensions``
-    and ``execution_context_class`` arguments before it are always supplied by
-    keyword from :meth:`DjangoSchema.__init__`.
+    the incremental path. ``config`` is a keyword-only parameter of
+    :meth:`DjangoSchema.__init__`, so it is the only spelling that reaches it.
     """
     if config is None or not config.enable_experimental_incremental_execution:
         return

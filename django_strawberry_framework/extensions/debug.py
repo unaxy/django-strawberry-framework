@@ -355,9 +355,10 @@ def _collect_exceptions(execution_result: object) -> "list[_DebugExceptionRow]":
 
     The single owner of the ``result is None`` / ``errors is None`` guards
     (on the sync parse/validation paths teardown runs before any result
-    exists) and the ``original_error is not None`` filter (graphql-core's
-    marker distinguishing an execution exception from a pure parse/validation
-    error). Result-error order is preserved and distinct outer errors are
+    exists) and the filter that keeps a ``GraphQLError`` whose ``original_error``
+    is not ``None`` (graphql-core's marker distinguishing an execution exception
+    from a pure parse/validation error; a result's errors are always
+    ``GraphQLError`` instances). Result-error order is preserved and distinct outer errors are
     never speculatively deduplicated.
     """
     if execution_result is None:

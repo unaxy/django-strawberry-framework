@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from django.db import models
+    from typing_extensions import TypeIs
 
     from django_strawberry_framework.utils.typing import ConcreteField
 
@@ -240,6 +241,15 @@ def get_form_fields(form_class: FormClass) -> dict[str, forms.Field]:
         ) from exc
 
 
+def _is_form_field(value: object) -> TypeIs[forms.Field]:
+    """Whether ``value`` is a ``forms.Field``; ``False`` when the check itself raises.
+
+    ``isinstance`` asks the value's real type before any ``__class__`` read, so a raising
+    read only ever hides a value whose real type is not a field.
+    """
+    return _safe_predicate(isinstance, value, forms.Field)
+
+
 def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict[str, forms.Field]:
     """Return the validated field basis used by every form-input operation.
 
@@ -275,16 +285,20 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
     # typed boundary as the raw exception.
     invalid_names: list[object] = []
     invalid_fields: list[object] = []
+    valid: dict[str, forms.Field] = {}
     for name, field in basis.items():
         try:
-            invalid_name = not is_str(name) or not name.isidentifier() or keyword.iskeyword(name)
+            valid_name = is_str(name) and name.isidentifier() and not keyword.iskeyword(name)
         except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            invalid_name = True
-        if invalid_name:
+            valid_name = False
+        if not valid_name:
             invalid_names.append(name)
-        # The same hook can map a name to any value.
-        if not _safe_predicate(isinstance, field, forms.Field):
+        # The same hook can map a name to any value. ``is_str`` cannot raise, so it restates
+        # the name check for the checker.
+        if not _is_form_field(field):
             invalid_fields.append(name)
+        elif valid_name and is_str(name):
+            valid[name] = field
     if invalid_names or invalid_fields:
         # Each entry renders through ``_safe_arg_repr``: this message is assembled
         # at the raise site, so a hook-supplied key with a hostile ``__repr__``
@@ -298,12 +312,7 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
             f"[{', '.join(_safe_arg_repr(name) for name in invalid_names)}], invalid "
             f"fields [{', '.join(_safe_arg_repr(name) for name in invalid_fields)}].",
         )
-    # Every entry passed both checks above, so this keeps them all, typed as they were proved.
-    return {
-        name: field
-        for name, field in basis.items()
-        if is_str(name) and isinstance(field, forms.Field)
-    }
+    return valid
 
 
 def normalize_form_field_basis(
