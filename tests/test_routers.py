@@ -6922,9 +6922,9 @@ class _ScriptedTransport:
         exception = self._iter_exception
 
         async def generator() -> AsyncIterator[dict[str, object]]:
+            for _ in ():  # an async generator that fails before its first yield
+                yield {}
             raise exception
-            # basedpyright: the yield only makes this an async generator; the raise ends it first
-            yield {}  # pyright: ignore[reportUnreachable]
 
         return generator()
 

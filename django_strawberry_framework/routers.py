@@ -212,6 +212,17 @@ _router_class: type[ProtocolTypeRouter] | None = None
 _ROUTER_CLASS_LOCK = threading.Lock()
 
 
+def _require_django_application(value: object) -> None:
+    """Refuse a ``django_application`` that is not callable, ``None`` included.
+
+    The annotation is the contract; this is the boundary for a caller with no type
+    checker, documented in ``docs/README.md`` (``None`` or any non-callable is a
+    ``ConfigurationError``), per GOAL.md "Trust boundary" configuration validation.
+    """
+    if not callable(value):
+        raise ConfigurationError(_MISSING_DJANGO_APPLICATION_HINT)
+
+
 def _validated_websocket_url_pattern(value: object) -> str:
     """Validate the WebSocket URL regex before Django installs a route.
 
@@ -536,11 +547,7 @@ def _build_router_class_uncached() -> type[ProtocolTypeRouter]:
             # ``callable(None)`` is already False, so the migrant who carried
             # ``django_application=None`` over from 0.0.14 lands on the prose
             # here rather than on a bare ``TypeError``.
-            if not callable(django_application):
-                # basedpyright: the annotation is the contract; this rejects a caller with no type
-                # checker, documented in ``docs/README.md`` (``None`` or any non-callable is a
-                # ``ConfigurationError``), per GOAL.md "Trust boundary" configuration validation.
-                raise ConfigurationError(_MISSING_DJANGO_APPLICATION_HINT)  # pyright: ignore[reportUnreachable]
+            _require_django_application(django_application)
 
             websocket_url_pattern = _validated_websocket_url_pattern(websocket_url_pattern)
 

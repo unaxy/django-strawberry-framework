@@ -21,7 +21,7 @@ import sys
 import types
 import uuid
 from collections.abc import Iterator
-from typing import Annotated, get_args
+from typing import TYPE_CHECKING, Annotated, get_args
 
 import pytest
 import strawberry
@@ -40,6 +40,9 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.base import _build_annotations
 from tests._idioms import definition_raises, resolver_function
+
+if TYPE_CHECKING:
+    from tests.types.fixtures.lazy_relation_target_module import LazyItemType
 
 # Dotted path of the module holding the ``strawberry.lazy`` relation-override
 # target. Bound once for the ``sys.modules`` eviction and the assertions; the
@@ -399,13 +402,12 @@ def test_cross_module_lazy_relation_override_types_the_field_as_the_referenced_c
     lazy_relation_target_module = importlib.import_module(_LAZY_TARGET_MODULE)
 
     class CategoryType(DjangoType):
-        # ``LazyItemType`` is deliberately not imported into this module: the
+        # ``LazyItemType`` is imported for checkers only, never at run time: the
         # reference resolves through the lazy module path, which is the whole
         # point of the escape hatch.
         items: list[
             Annotated[
-                # basedpyright: deliberately unimported; resolves via the strawberry.lazy path
-                "LazyItemType",  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+                "LazyItemType",
                 strawberry.lazy("tests.types.fixtures.lazy_relation_target_module"),
             ]
         ]
@@ -472,13 +474,12 @@ def test_cross_module_lazy_relation_override_wins_over_the_registered_primary_ty
     assert registry.get(Item) is PrimaryItemType
 
     class CategoryType(DjangoType):
-        # ``LazyItemType`` is deliberately not imported into this module: the
+        # ``LazyItemType`` is imported for checkers only, never at run time: the
         # reference resolves through the lazy module path, which is the whole
         # point of the escape hatch.
         items: list[
             Annotated[
-                # basedpyright: deliberately unimported; resolves via the strawberry.lazy path
-                "LazyItemType",  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+                "LazyItemType",
                 strawberry.lazy("tests.types.fixtures.lazy_relation_target_module"),
             ]
         ]

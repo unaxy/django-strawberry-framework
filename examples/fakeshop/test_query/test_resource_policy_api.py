@@ -77,7 +77,7 @@ import threading
 import warnings
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from contextlib import contextmanager
-from functools import cache, partial
+from functools import _lru_cache_wrapper, cache, partial
 from typing import TYPE_CHECKING, NewType
 
 import pytest
@@ -4018,8 +4018,10 @@ def _empty_validation_cache() -> None:
     any schema, so "cold" is a state of the process rather than of the mount and
     naming a row cold proves nothing unless the row puts the process in it.
     """
-    # basedpyright: upstream annotates the lru_cache wrapper it returns as a bare Callable
-    _get_validate_cache(None).cache_clear()  # pyright: ignore[reportFunctionMemberAccess]
+    store = _get_validate_cache(None)
+    # Upstream annotates the ``lru_cache`` wrapper it returns as a bare ``Callable``.
+    assert isinstance(store, _lru_cache_wrapper)
+    store.cache_clear()
 
 
 CACHE_MOUNTS = {

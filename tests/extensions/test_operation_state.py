@@ -39,7 +39,6 @@ from collections.abc import (
     Iterable,
     Iterator,
 )
-from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, TypedDict
 
@@ -145,12 +144,12 @@ class _SilentProbe(_OperationBoundExtension[OperationState]):
 
 
 class _Unbuilt(_OperationBoundExtension[OperationState]):
-    """A subclass whose ``__init__`` never reaches the one that settles the carrier."""
+    """An operation-bound extension built by ``_unbuilt``, with no settled carrier."""
 
-    # basedpyright: the stand-in skips the base constructor on purpose: the test
-    # proves a subclass with no settled carrier is refused
-    def __init__(self) -> None:  # pyright: ignore[reportMissingSuperCall]
-        pass
+
+def _unbuilt() -> _Unbuilt:
+    """An ``_Unbuilt`` whose constructor never ran, as a subclass that skipped ``super`` leaves it."""
+    return _Unbuilt.__new__(_Unbuilt)
 
 
 def test_a_subclass_that_skipped_the_base_constructor_is_refused_not_approximated() -> None:
@@ -160,7 +159,7 @@ def test_a_subclass_that_skipped_the_base_constructor_is_refused_not_approximate
     to put the operation's state, so every read would answer with whatever was
     left over. Refusing names the omission; falling back would reintroduce it.
     """
-    extension = _Unbuilt()
+    extension = _unbuilt()
     with pytest.raises(ConfigurationError, match="has to call super"):
         _ = extension.execution_context
 
@@ -327,7 +326,7 @@ def test_a_binding_that_fails_partway_unwinds_the_ones_already_made() -> None:
     into whatever the task did next.
     """
     good = _Probe()
-    schema = DjangoSchema(query=_Query, extensions=[lambda: good, partial(_Unbuilt)])
+    schema = DjangoSchema(query=_Query, extensions=[lambda: good, _unbuilt])
 
     with pytest.raises(ConfigurationError, match="has to call super"):
         schema.execute_sync("{ hello }")
@@ -340,7 +339,7 @@ def test_a_binding_that_fails_partway_unwinds_the_ones_already_made() -> None:
 async def test_a_binding_that_fails_partway_unwinds_on_the_async_path_too() -> None:
     """The async twin: one primitive, two protocol adapters, one decision."""
     good = _Probe()
-    schema = DjangoSchema(query=_Query, extensions=[lambda: good, partial(_Unbuilt)])
+    schema = DjangoSchema(query=_Query, extensions=[lambda: good, _unbuilt])
 
     with pytest.raises(ConfigurationError, match="has to call super"):
         await schema.execute("{ hello }")
@@ -397,9 +396,9 @@ async def test_a_hook_that_raises_while_setting_up_resets_on_the_async_path_too(
     class _RaisingSetup(SchemaExtension):
         @override
         async def on_operation(self) -> AsyncIterator[None]:
+            for _ in ():  # an async generator hook that fails before its first yield
+                yield
             raise RuntimeError("setup refused")
-            # basedpyright: the yield only makes this hook an async generator; it never runs
-            yield  # pyright: ignore[reportUnreachable]
 
     shared = _Probe()
     schema = DjangoSchema(query=_Query, extensions=[lambda: shared, _RaisingSetup])

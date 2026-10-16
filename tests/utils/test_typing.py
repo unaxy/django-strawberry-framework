@@ -557,11 +557,11 @@ def test_unwrap_non_null_raises_on_a_cyclic_non_null_chain() -> None:
     """
 
     class _CyclicNonNull(GraphQLNonNull[GraphQLNullableType]):
-        # basedpyright: GraphQLNonNull's constructor refuses a non-null wrapped type, so the
-        # cyclic chain under test can only be built by skipping it
-        def __init__(self) -> None:  # pyright: ignore[reportMissingSuperCall]
-            # basedpyright: a non-null wrapping a non-null is the malformed chain under test
-            self.of_type = self  # pyright: ignore[reportAttributeAccessIssue]
+        """A non-null wrapper built without its constructor, which refuses a non-null type."""
+
+    chain = _CyclicNonNull.__new__(_CyclicNonNull)
+    # basedpyright: a non-null wrapping a non-null is the malformed chain under test
+    chain.of_type = chain  # pyright: ignore[reportAttributeAccessIssue]
 
     with pytest.raises(RuntimeError, match="unwrap_non_null"):
-        unwrap_non_null(_CyclicNonNull())
+        unwrap_non_null(chain)

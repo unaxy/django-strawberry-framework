@@ -3811,12 +3811,7 @@ async def test_shared_singleton_answers_each_operation_with_its_own_context() ->
 
 
 class _UnsettledOptimizer(DjangoOptimizerExtension):
-    """A subclass whose ``__init__`` never reaches the one that settles the record."""
-
-    # basedpyright: the stand-in skips the optimizer's constructor on purpose: the test
-    # proves a subclass with no settled configuration record is handled
-    def __init__(self) -> None:  # pyright: ignore[reportMissingSuperCall]
-        pass
+    """An optimizer subclass the test builds without its constructor, so no record is settled."""
 
 
 def test_a_resolver_cannot_rewrite_the_optimizer_configuration_for_a_later_request() -> None:
@@ -3854,7 +3849,8 @@ def test_an_optimizer_that_settled_no_configuration_reads_the_zero_argument_shap
     for is refused before either value is spent
     (``tests/extensions/test_operation_state.py``).
     """
-    extension = _UnsettledOptimizer()
+    # Built without ``__init__``, as a subclass that skipped ``super().__init__`` leaves it.
+    extension = _UnsettledOptimizer.__new__(_UnsettledOptimizer)
 
     assert extension.strictness == "off"
     assert (

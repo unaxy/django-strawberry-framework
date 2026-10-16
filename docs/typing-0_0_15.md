@@ -5,12 +5,12 @@ rules still switched off and the `# pyright: ignore[...]` comments still in the 
 Each item is fixed at the root, gated (both passes 0 errors, full suite in one pass at 100% coverage), then committed.
 A split suite run on a tree other sessions are editing can drop modules from every part, so it is not a coverage gate.
 Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit and the CI lint job) refuses a
-`# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 62 rules on everywhere with no
+`# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any count off `[tool.type-suppressions]`: the ignore
 comments per unlocked rule and the `typing.cast` calls (438) may only fall, and the budget falls with them. A rule
 whose last ignore is cleared leaves the budget and gains the marker.
 
-Progress: 24 done, 9 to do. Ignore comments: 872 lines (1897 at the start of 0.0.15's ignore sweep).
+Progress: 25 done, 9 to do. Ignore comments: 865 lines (1897 at the start of 0.0.15's ignore sweep).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -82,6 +82,14 @@ Progress: 24 done, 9 to do. Ignore comments: 872 lines (1897 at the start of 0.0
 - [x] 9. `reportUnusedCallResult` on everywhere but the tests: the example project outside its test folders (122
   sites) joins scripts/, the package and the root files. A result taken only for the call's side effect is bound to
   `_`; a `setdefault` chain on factory `**fields` is one dict merge; a `QueryDict` key is `del`eted, not popped
+- [x] 34. `reportUnreachable` locked: a trust-boundary check on an annotated argument moves into a validator that
+  takes `object` (`_require_django_application`, `_registered_field_class`, `_required_acknowledgement`,
+  `_require_callable_wrapper`), as `_validated_websocket_url_pattern` already did; an async generator that fails
+  before its first yield loops over `()` first. Same pass: a test double that skips its constructor is built with
+  `cls.__new__(cls)` instead of an `__init__` that never calls `super` (5 of 7 `reportMissingSuperCall`); the two
+  raising-`__dict__` querysets share `tests/_idioms.py::UnreadableStateQuerySet`; the `strawberry.lazy` target is
+  imported under `TYPE_CHECKING`, Strawberry's documented spelling; the validation-cache wrapper is narrowed with
+  `isinstance(..., _lru_cache_wrapper)` (7 ignore lines)
 
 ## To do: rules still off
 
@@ -127,6 +135,16 @@ Survey verdicts recorded so nothing is re-tried blind:
   with their real reasons (typeshed deprecates `asyncio.iscoroutinefunction` from 3.11; asgiref picks its check by
   `hasattr`)
 
+- Item 34, kept budgeted (each at its floor): `reportMissingSuperCall` 2 (the `TYPE_CHECKING` router and consumer
+  declarations; a forwarding `super().__init__` body trades it for four ruff `ARG002` or six `reportArgumentType`);
+  `reportPropertyTypeMismatch` 5 (setters that take a lazy target or the stop-aware schema wrapper and getters
+  that return the resolved value, the django-filter idiom); `reportFunctionMemberAccess` 5 (the `__test__` pytest
+  guard spec-043 Decision 7 fixes, and the django-filter `Filter.method` stub); `reportGeneralTypeIssues` 5
+  (resolver-only Strawberry fields typed from run-time annotations, a class annotation would win over them; the
+  hostile `__dict__`, the refused sync iteration, the string `_meta.model`); `reportInvalidTypeArguments` 5 (`FilterInput[...]` / `OrderInput[...]`
+  refusing a non-set, and `DjangoConnection`'s unbounded `NodeType`); `reportUndefinedVariable` 5 (unresolvable
+  annotation strings that are the input under test)
+
 ## Waiting on you
 
 - [ ] 23. Draft a djangorestframework-stubs issue for `ModelSerializer.Meta` (`Meta: ClassVar[type[object]]`)? It would
@@ -163,7 +181,7 @@ strawberry_django does?
 
 ## Ignore breakdown
 
-Lines carrying `# pyright: ignore[...]`: 872 (950 rule hits): tests 624, package 178, examples 69,
+Lines carrying `# pyright: ignore[...]`: 865 (932 rule hits): tests 624, package 172, examples 68,
 scripts 1. The tables below were measured at 881 lines.
 
 ### By cause

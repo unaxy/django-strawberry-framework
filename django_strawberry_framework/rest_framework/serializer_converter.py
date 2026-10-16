@@ -260,6 +260,32 @@ _CONVERT_MULTIPLE_CHOICE: SerializerFieldConverter = make_kind_converter(
 )
 
 
+def _is_field_class(value: object) -> TypeGuard[type[DRFField]]:
+    """Whether ``value`` is a ``serializers.Field`` subclass."""
+    return isinstance(value, type) and issubclass(value, serializers.Field)
+
+
+def _registered_field_class(field_class: object, converter: object) -> type[DRFField]:
+    """Return ``field_class`` as a ``serializers.Field`` subclass; raise on it or a bad ``converter``.
+
+    A ``converter`` is bad when it is not callable.
+
+    The annotations are the contract; these checks are the boundary for a caller with no
+    type checker, per GOAL.md "Trust boundary": configuration is validated at registration.
+    """
+    if not _is_field_class(field_class):
+        raise ConfigurationError(
+            "register_serializer_field_converter: field_class must be a serializers.Field "
+            f"subclass; got {field_class!r}.",
+        )
+    if not callable(converter):
+        raise ConfigurationError(
+            f"register_serializer_field_converter: converter for {field_class.__name__!r} must be "
+            f"a callable(field) -> SerializerFieldConversion; got {converter!r}.",
+        )
+    return field_class
+
+
 def register_serializer_field_converter(
     field_class: type[object],
     converter: SerializerFieldConverter,
@@ -282,21 +308,7 @@ def register_serializer_field_converter(
     Mirrors the read-side ``types/converters.py::SCALAR_MAP`` extension hook (a mutable
     module dict); the registration persists for the process.
     """
-    # basedpyright: trust boundary: ``field_class: type[object]`` is the public contract; the
-    # class check validates a consumer call that breaks it
-    if not (isinstance(field_class, type) and issubclass(field_class, serializers.Field)):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raise ConfigurationError(
-            "register_serializer_field_converter: field_class must be a serializers.Field "
-            f"subclass; got {field_class!r}.",
-        )
-    if not callable(converter):
-        # basedpyright: the ``SerializerFieldConverter`` annotation is the contract; the check
-        # rejects a caller without a type checker, per GOAL.md "Trust boundary": configuration is
-        # validated at construction
-        raise ConfigurationError(  # pyright: ignore[reportUnreachable]
-            f"register_serializer_field_converter: converter for {field_class.__name__!r} must be "
-            f"a callable(field) -> SerializerFieldConversion; got {converter!r}.",
-        )
+    field_class = _registered_field_class(field_class, converter)
     if field_class in _SERIALIZER_FIELD_CONVERTERS and not override:
         raise ConfigurationError(
             f"A serializer-field converter is already registered for {field_class.__name__!r}; "

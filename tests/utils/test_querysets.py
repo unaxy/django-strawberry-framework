@@ -158,6 +158,7 @@ from tests._django_private import (
 from tests._idioms import (
     ClaimsClassBase,
     ClassReadRaisesBase,
+    UnreadableStateQuerySet,
     is_object_list,
     module_binding,
 )
@@ -6275,18 +6276,8 @@ def test_validate_post_orderset_result_contains_an_unreadable_instance_dictionar
     """A hostile QuerySet ``__dict__`` descriptor becomes a typed seal defect."""
     DummyType = _declared_type(Category, "DummyType")
 
-    class UnreadableStateQuerySet(models.QuerySet[Category]):
-        # basedpyright: the hostile shape under test; a raising __dict__ descriptor is what the
-        # seal must turn into a defect, and the checker forbids redeclaring the Final __dict__
-        @property  # pyright: ignore[reportGeneralTypeIssues]
-        @override
-        # basedpyright: the hostile shape under test, a ``__dict__`` property whose read raises;
-        # the checker rejects any property overriding a base class attribute
-        def __dict__(self) -> dict[str, object]:  # pyright: ignore[reportIncompatibleVariableOverride]
-            raise RuntimeError("consumer descriptor ran")
-
     source_qs = Category.objects.all()
-    candidate = UnreadableStateQuerySet(
+    candidate = UnreadableStateQuerySet[Category](
         model=Category,
         query=source_qs.query.clone(),
         using=source_qs.db,

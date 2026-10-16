@@ -29,6 +29,16 @@ if TYPE_CHECKING:
     from django.db.backends.base.base import BaseDatabaseWrapper
 
 
+def _require_callable_wrapper(wrapper: object) -> None:
+    """Refuse a non-callable ``wrapper`` with the ``TypeError`` the wrap site documents.
+
+    The annotation is the contract; this is the boundary for a caller with no type
+    checker, per GOAL.md "Trust boundary" configuration validation.
+    """
+    if not callable(wrapper):
+        raise TypeError("safe_wrap_connection_method() received a non-callable wrapper")
+
+
 def safe_wrap_connection_method(
     connection: "BaseDatabaseWrapper",
     method_name: str,
@@ -139,13 +149,7 @@ def safe_wrap_connection_method(
             machinery at the next ``connection.<method>()`` call.
 
     """
-    if not callable(wrapper):
-        # basedpyright: the annotation is the contract; this rejects a caller with no type
-        # checker, documented in this docstring's ``Raises:``, per GOAL.md "Trust boundary"
-        # configuration validation.
-        raise TypeError(  # pyright: ignore[reportUnreachable]
-            "safe_wrap_connection_method() received a non-callable wrapper",
-        )
+    _require_callable_wrapper(wrapper)
     current: object = getattr(connection, method_name)
     if _is_database_failure(current):
         return False
