@@ -62,6 +62,7 @@ from django.db.models import Case, Exists, F, OuterRef, Q, When
 from django.db.models.constants import LOOKUP_SEP
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.querysets import VisibleRowExists
 from django_strawberry_framework.utils.relations import (
     m2m_through_link_fields,
@@ -493,8 +494,9 @@ def visible_value_path(expression: object) -> str | None:
             guarded = True
             continue
         if type(node) is When:
-            name: object = getattr(node.result, "name", None)
-            if type(node.result) is F and type(name) is str:
+            result = read_attr(node, "result")
+            name = read_attr(result, "name", None)
+            if type(result) is F and type(name) is str:
                 path = name
         sources = getattr(node, "get_source_expressions", None)
         if callable(sources):

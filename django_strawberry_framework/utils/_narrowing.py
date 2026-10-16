@@ -30,18 +30,34 @@ The typed slots (``dict_items``, ``list_iter``, ...) are the builtin base
 methods themselves at runtime, so a subclass override of ``items`` /
 ``__iter__`` still cannot decide what a walk sees; under the checker they are
 declared generic over the container they read.
+
+The typed reads (``read_attr``, ``call_method``, ``pk_of``, ``enum_value``,
+``dict_of``, ``list_of``, ``instance_dict``) are, at runtime, ``getattr`` (read, or
+read and called), ``operator.attrgetter("pk")`` / ``("value")``, ``dict``, ``list``
+and an ``object.__getattribute__(value, "__dict__")`` read. Typeshed declares a
+``getattr`` read, an enum member's ``value`` and an ``object.__getattribute__`` read
+``Any``, django-stubs declares ``Model.pk`` ``Any``, and ``dict`` / ``list`` of an
+``object`` match no overload; under the checker each answers in ``object`` terms,
+which the caller narrows like any other consumer value.
+
+``require_instance`` / ``require`` are the narrowing for a value whose source
+guarantees its class but types it loosely: each checks the guarantee (``isinstance``,
+or a ``TypeIs`` predicate for a generic class) and raises ``TypeError`` the moment it
+stops holding.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING, TypeGuard, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import ItemsView, Iterator
-    from typing import TypeVar
+    from collections.abc import Awaitable, Callable, ItemsView, Iterator
+    from enum import Enum
+    from typing import Protocol, overload
 
+    from django.db.models import Model
     from typing_extensions import TypeIs
 
     _KeyT = TypeVar("_KeyT")
@@ -111,7 +127,67 @@ if TYPE_CHECKING:
         """``Mapping.get`` read through the ABC's own method."""
         ...
 
+    def type_mro(_cls: type[object], /) -> tuple[type[object], ...]:
+        """``type.__mro__`` read through ``type``'s own getset descriptor, past any metaclass."""
+        ...
+
+    def class_dict(_cls: type[object], /) -> Mapping[str, object]:
+        """``type.__dict__`` read through ``type``'s own getset descriptor, past any metaclass."""
+        ...
+
+    def type_attr(_cls: type[object], _name: str, /) -> object:
+        """``type.__getattribute__``: an attribute read that skips a metaclass ``__getattribute__``."""
+        ...
+
+    def is_awaitable(_value: object, /) -> TypeIs[Awaitable[object]]:
+        """Return whether ``await`` accepts the value (``inspect.isawaitable``)."""
+        ...
+
+    class _AttrReader(Protocol):
+        """``getattr``'s two call shapes, each answering ``object``."""
+
+        @overload
+        def __call__(self, value: object, name: str, /) -> object: ...
+        @overload
+        def __call__(
+            self,
+            value: object,
+            name: str,
+            default: object,
+            /,
+        ) -> object: ...
+
+    #: ``getattr``, its read typed ``object``.
+    read_attr: _AttrReader
+
+    def pk_of(_row: Model, /) -> object:
+        """Return a model row's ``pk``, typed ``object``."""
+        ...
+
+    def dict_of(_value: object, /) -> dict[object, object]:
+        """Return ``dict(value)``, raising whatever ``dict`` raises for a value it cannot copy."""
+        ...
+
+    def call_method(_value: object, _name: str, /, *_args: object) -> object:
+        """Return ``value.<name>(*args)``: the lookup and the call each raise what they raise."""
+        ...
+
+    def list_of(_value: object, /) -> list[object]:
+        """Return ``list(value)``, raising whatever ``list`` raises for a value it cannot iterate."""
+        ...
+
+    def enum_value(_member: Enum, /) -> object:
+        """Return an enum member's ``value``, typed ``object`` (typeshed declares it ``Any``)."""
+        ...
+
+    def instance_dict(_value: object, /) -> dict[str, object]:
+        """Return the value's own ``__dict__``, read past any ``__getattribute__`` its class defines."""
+        ...
+
 else:
+    import inspect
+    from operator import attrgetter
+
     is_dict = dict.__instancecheck__
     is_list = list.__instancecheck__
     is_tuple = tuple.__instancecheck__
@@ -128,12 +204,34 @@ else:
     set_iter = set.__iter__
     frozenset_iter = frozenset.__iter__
     mapping_get = Mapping.get
+    type_mro = type.__dict__["__mro__"].__get__
+    class_dict = type.__dict__["__dict__"].__get__
+    type_attr = type.__getattribute__
+    is_awaitable = inspect.isawaitable
+    read_attr = getattr
+    pk_of = attrgetter("pk")
+    enum_value = attrgetter("value")
+    dict_of = dict
+    list_of = list
+
+    def instance_dict(value: object, /) -> dict[str, object]:
+        return object.__getattribute__(value, "__dict__")
+
+    def call_method(value: object, name: str, /, *args: object) -> object:
+        return getattr(value, name)(*args)
+
 
 __all__ = (
+    "call_method",
+    "class_dict",
     "dict_get",
     "dict_items",
+    "dict_of",
+    "enum_value",
     "frozenset_iter",
+    "instance_dict",
     "is_abstract_set",
+    "is_awaitable",
     "is_class",
     "is_dict",
     "is_exact_dict",
@@ -155,9 +253,16 @@ __all__ = (
     "is_text_or_bytes",
     "is_tuple",
     "list_iter",
+    "list_of",
     "mapping_get",
+    "pk_of",
+    "read_attr",
+    "require",
+    "require_instance",
     "set_iter",
     "tuple_iter",
+    "type_attr",
+    "type_mro",
 )
 
 
@@ -195,6 +300,23 @@ def is_class(value: object) -> TypeIs[type[object]]:
     type cannot be restated by a ``__class__`` property on the value.
     """
     return issubclass(type(value), type)
+
+
+_InstanceT = TypeVar("_InstanceT")
+
+
+def require_instance(value: object, cls: type[_InstanceT], /) -> _InstanceT:
+    """Return ``value`` as the ``cls`` instance it must be, raising ``TypeError`` when it is not."""
+    if not isinstance(value, cls):
+        raise TypeError(f"expected an instance of {cls!r}")
+    return value
+
+
+def require(value: object, predicate: Callable[[object], TypeIs[_InstanceT]], /) -> _InstanceT:
+    """Return ``value`` as the type ``predicate`` proves, raising ``TypeError`` when it does not."""
+    if not predicate(value):
+        raise TypeError("the value is not of the type its source guarantees")
+    return value
 
 
 def is_str(value: object) -> TypeIs[str]:

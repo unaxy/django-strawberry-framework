@@ -22,6 +22,7 @@ public ``django_strawberry_framework.testing`` import crash.
 from typing import TYPE_CHECKING
 
 from django_strawberry_framework._django_patches import _is_database_failure
+from django_strawberry_framework.utils._narrowing import read_attr
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -150,7 +151,7 @@ def safe_wrap_connection_method(
 
     """
     _require_callable_wrapper(wrapper)
-    current: object = getattr(connection, method_name)
+    current = read_attr(connection, method_name)
     if _is_database_failure(current):
         return False
     setattr(connection, method_name, wrapper)

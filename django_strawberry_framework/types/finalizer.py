@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 import strawberry
 from strawberry import relay
+from strawberry.types.base import StrawberryObjectDefinition
 from strawberry.types.field import StrawberryField
 from strawberry.utils.str_converters import to_camel_case
 
@@ -72,8 +73,10 @@ from django_strawberry_framework.registry import (
     iter_subsystem_clears,
     registry,
 )
+from django_strawberry_framework.utils._narrowing import class_dict, read_attr, require_instance
 from django_strawberry_framework.utils.imports import loaded_attr
 from django_strawberry_framework.utils.relations import instance_accessor
+from django_strawberry_framework.utils.typing import object_result
 
 from .base import DEFAULT_RELATION_SHAPE
 from .converters import resolved_relation_annotation
@@ -275,11 +278,12 @@ def _field_surface_names(type_cls: type[DjangoType]) -> dict[str, str]:
     """
     inherited_surface: dict[str, str] = {}
     for base in reversed(type_cls.__mro__[1:]):
-        definition = getattr(base, "__strawberry_definition__", None)
-        if definition is None:
+        definition = read_attr(base, "__strawberry_definition__", None)
+        if not isinstance(definition, StrawberryObjectDefinition):
             continue
         for field in definition.fields:
-            python_name = field.python_name
+            # Strawberry names a field late, so an unnamed one is skipped below.
+            python_name = read_attr(field, "python_name", None)
             graphql_name = field.graphql_name
             label = python_name if python_name is not None else graphql_name
             if label is None:
@@ -293,7 +297,7 @@ def _field_surface_names(type_cls: type[DjangoType]) -> dict[str, str]:
     for name in _annotation_names(type_cls):
         own_surface[name] = to_camel_case(name)
 
-    for name, value in vars(type_cls).items():
+    for name, value in class_dict(type_cls).items():
         if not isinstance(value, StrawberryField):
             continue
         own_surface[name] = (
@@ -606,7 +610,7 @@ def _register_relation_connection_teardown(
     generated_resolver = cast("StrawberryResolver[object]", field_obj.base_resolver).wrapped_func  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
     def teardown() -> None:
-        current: object = type_cls.__dict__.get(generated, _MISSING_CLASS_MEMBER)
+        current = class_dict(type_cls).get(generated, _MISSING_CLASS_MEMBER)
         if current is field_obj or current is generated_resolver:
             delattr(type_cls, generated)
 
@@ -808,8 +812,11 @@ def _synthesize_relation_connections() -> None:
                 )
             annotations = type_cls.__annotations__
             annotations_snapshot = dict(annotations)
-            list_resolver: object = type_cls.__dict__.get(name, _MISSING_CLASS_MEMBER)
-            field_obj: StrawberryField = relay.connection(
+            list_resolver = class_dict(type_cls).get(name, _MISSING_CLASS_MEMBER)
+            # Strawberry types the resolver-form ``relay.connection`` ``-> Any``; it builds the
+            # connection's ``StrawberryField``.
+            connection_field = object_result(
+                relay.connection,
                 _connection_type_for(target_type, target_definition),
                 # The resolver reads rows off the instance, so it gets the
                 # ACCESSOR (``get_accessor_name()``); ``name`` (the related
@@ -839,6 +846,7 @@ def _synthesize_relation_connections() -> None:
                     target_definition,
                 ),
             )
+            field_obj = require_instance(connection_field, StrawberryField)
             setattr(field_obj, _SYNTHESIZED_RELATION_CONNECTION_MARKER, True)
             setattr(type_cls, generated, field_obj)
             _register_relation_connection_teardown(
@@ -1880,7 +1888,7 @@ class _SidecarBindingSpec(Generic[_SetT]):
     unregistered-``RelatedFilter``-target walk (``None`` for orders).
     """
 
-    definition_attr: str
+    read_set: Callable[[DjangoTypeDefinition], _SetT | None]
     expand_label_noun: str
     related_noun: str
     bind_owner: Callable[[_SetT, DjangoTypeDefinition], None]
@@ -1974,8 +1982,7 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
     for _type_cls, definition in registry.iter_definitions():
         if definition.finalized:
             continue
-        # ``definition_attr`` names this family's ``DjangoTypeDefinition`` sidecar slot.
-        set_cls: _SetT | None = getattr(definition, spec.definition_attr)
+        set_cls = spec.read_set(definition)
         if set_cls is None:
             continue
         spec.bind_owner(set_cls, definition)
@@ -2075,7 +2082,7 @@ def _bind_ordersets() -> None:
 
     _bind_sidecar_sets(
         _SidecarBindingSpec(
-            definition_attr="orderset_class",
+            read_set=lambda definition: definition.orderset_class,
             expand_label_noun="orderset",
             related_noun="related-order",
             bind_owner=_bind_orderset_owner,
@@ -2221,7 +2228,7 @@ def _bind_filtersets() -> None:
 
     _bind_sidecar_sets(
         _SidecarBindingSpec(
-            definition_attr="filterset_class",
+            read_set=lambda definition: definition.filterset_class,
             expand_label_noun="filterset",
             related_noun="related-filter",
             bind_owner=_bind_filterset_owner,

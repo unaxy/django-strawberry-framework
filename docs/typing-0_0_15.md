@@ -7,10 +7,10 @@ A split suite run on a tree other sessions are editing can drop modules from eve
 Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit and the CI lint job) refuses a
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any count off `[tool.type-suppressions]`: the ignore
-comments per unlocked rule and the `typing.cast` calls (438) may only fall, and the budget falls with them. A rule
+comments per unlocked rule and the `typing.cast` calls (430) may only fall, and the budget falls with them. A rule
 whose last ignore is cleared leaves the budget and gains the marker.
 
-Progress: 25 done, 9 to do. Ignore comments: 865 lines (1897 at the start of 0.0.15's ignore sweep).
+Progress: 25 done, 9 to do. Ignore comments: 829 lines (1897 at the start of 0.0.15's ignore sweep).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -101,9 +101,19 @@ of them.
   script parses into a typed `argparse.Namespace` subclass, JSON goes through a `Callable[[str], object]` alias and
   is narrowed, and `scripts/_kanban_lib.py::fetch_graphql_data` returns `dict[str, object]`; the kanban and glossary
   payloads enter their `TypedDict`s through a `cast` per decoded list (three in `fetch_dashboard_data`, one in
-  `fetch_glossary_data`), each tagged with the query that fixes the row shape. Still off for the package (645: `*args` / `**kwargs`
-  forwards, `getattr`, `strawberry.UNSET`, `Model.pk`), tests (2977) and examples (5542, about 2000 of them from
-  `testing/client.py`'s public `Response.response: Any`)
+  `fetch_glossary_data`), each tagged with the query that fixes the row shape. On for the package too (648 sites
+  to 5 suppressions): an upstream ``Any`` read goes through a typed slot in `utils/_narrowing.py` (`read_attr` for
+  `getattr`, `pk_of`, `enum_value`, `dict_of` / `list_of`, `instance_dict`, `class_dict` / `type_mro` /
+  `type_attr`, `call_method`, `is_awaitable`) and is narrowed, or through `require_instance` / `require` when its
+  source guarantees the class; `strawberry.UNSET` is `utils/input_values.py::UNSET` typed `UnsetType`; settings
+  reads go through `conf.py::django_setting`; a verbatim forward is `*args: object, **kwargs: object` and
+  `utils/typing.py::call_forwarded`; a stub's `-> Any` call is `utils/typing.py::object_result`; graphql-core's
+  field maps are `graphql_fields` / `graphql_input_fields`. The 5 suppressions each sit on an existing
+  `reportExplicitAny` line: the module `__getattr__` (the dormant `apps/products/fields.py` subclasses a planned
+  `AdvancedFieldSet` through it), `DjangoType.get_queryset`'s `info` (item 24), the async view's `run` (Strawberry
+  overloads `run(HttpRequest)` to two response types) and the runner's `operation` / `on_stream_result` (they wrap
+  upstream's scopes rather than subclass them). Still off for tests (2977) and examples (5542, about 2000 of them
+  from `testing/client.py`'s public `Response.response: Any`)
 - [ ] 8. `reportUnannotatedClassAttribute`: 8365 (package 0, tests 6684, examples 1681, scripts 0, root 0); on for
   scripts/, the package and the root files (their execution environments in `pyproject.toml`)
 
@@ -181,7 +191,7 @@ strawberry_django does?
 
 ## Ignore breakdown
 
-Lines carrying `# pyright: ignore[...]`: 865 (932 rule hits): tests 624, package 172, examples 68,
+Lines carrying `# pyright: ignore[...]`: 829 (902 rule hits): tests 623, package 137, examples 68,
 scripts 1. The tables below were measured at 881 lines.
 
 ### By cause

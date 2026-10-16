@@ -127,7 +127,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, Final, Literal, TypeVar, cast, overload
 
 from django.core.exceptions import FieldDoesNotExist
 from django.core.files import File
@@ -152,11 +152,16 @@ from django_strawberry_framework.mutations.resolvers import (
 )
 from django_strawberry_framework.mutations.sets import backing_model_of
 from django_strawberry_framework.utils._narrowing import (
+    dict_of,
     is_dict,
     is_list,
     is_list_or_tuple,
     is_mapping,
     is_str,
+    list_of,
+    pk_of,
+    read_attr,
+    require,
 )
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
@@ -171,6 +176,7 @@ from django_strawberry_framework.utils.errors import (
 from django_strawberry_framework.utils.inputs import optional_input_field
 from django_strawberry_framework.utils.permissions import request_from_info
 from django_strawberry_framework.utils.querysets import (
+    is_manager,
     related_visibility_queryset,
     sync_pipeline_recourse,
 )
@@ -178,6 +184,7 @@ from django_strawberry_framework.utils.relations import (
     is_forward_many_to_many,
     is_single_column_foreign_key,
 )
+from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.utils.write_transaction import (
     assert_no_target_drift,
     base_locked_queryset,
@@ -196,7 +203,13 @@ from django_strawberry_framework.utils.write_values import (
     decoded_into,
 )
 
-from .accessors import bound_fields, child_relation_of, is_drf_field, serializer_errors
+from .accessors import (
+    bound_fields,
+    child_relation_of,
+    is_drf_field,
+    serializer_errors,
+    validated_data_of,
+)
 from .hook_context import SerializerHookContext, UploadMetadata
 from .inputs import (
     raise_writable_source_ownership_errors,
@@ -253,11 +266,35 @@ if TYPE_CHECKING:
         @property
         def instance(self) -> object: ...
 
+    class _Saving(Protocol):
+        """A bound serializer as far as ``save()`` goes: it returns what ``create()`` / ``update()`` did."""
+
+        def save(self, **kwargs: object) -> object: ...
+
+    class _RunValidation(Protocol):
+        """A field's ``run_validation``, as the relation-intent recording wraps it."""
+
+        def __call__(self, data: object = ...) -> object: ...
+
+    class _RowSource(Protocol):
+        """A validator's ``queryset``: a queryset or a manager, either of which ``all()`` re-reads."""
+
+        def all(self) -> QuerySet[models.Model, object]: ...
+
+    class _QuerysetValidator(Protocol):
+        """A DRF validator that reads the database through a ``queryset`` (``UniqueValidator`` and kin)."""
+
+        queryset: _RowSource
+
     #: Any ``File``, binary or text.
     _FileAny: TypeAlias = File[bytes] | File[str]
 else:
     # ``File`` has no ``__class_getitem__`` at runtime: the hint stays the class.
     _FileAny = File
+
+
+#: One serializer's validators, kept in their own type through the queryset pinning.
+_ValidatorT = TypeVar("_ValidatorT")
 
 
 # The omission sentinel the reserved serializer-kwarg checks use: it keeps an
@@ -317,7 +354,7 @@ def _decode_relation_single(
         info=info,
         async_recourse=_SERIALIZER_ASYNC_RECOURSE,
         skip=lambda candidate: candidate is None,
-        project=lambda obj: obj.pk,
+        project=pk_of,
     )
 
 
@@ -445,8 +482,7 @@ def _decode_input_object(
 
 def _decode_nested(
     spec: InputFieldSpec,
-    # basedpyright: EAFP: a client input value; the try/except around ``list`` guards it
-    value: Any,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - reason above
+    value: object,
     info: Info[object, object],
     *,
     path_prefix: str,
@@ -466,7 +502,7 @@ def _decode_nested(
         return None, None
     if spec.kind == NESTED_MULTI:
         try:
-            items = list(value)
+            items = list_of(value)
         except Exception:  # noqa: BLE001 - consumer code may raise anything
             return None, field_error(
                 path_prefix,
@@ -1003,8 +1039,7 @@ def _merged_serializer_kwargs(
     instance: models.Model | None,
     alias: str,
     hook_context: SerializerHookContext,
-    # basedpyright: splatted into ``serializer_class(**kwargs)``, whose stub types every kwarg
-) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
+) -> dict[str, object]:
     """Construct the serializer kwargs through ``get_serializer_kwargs`` + the framework merge.
 
     Calls the overridable CONSTRUCTOR-ONLY hook ``get_serializer_kwargs(info,
@@ -1491,6 +1526,11 @@ def _scope_relation_querysets_to_visibility(
     _scope_specs_over_serializer(_write_surface_specs(mutation_cls), serializer, info)
 
 
+def _reads_a_queryset(validator: object) -> TypeIs[_QuerysetValidator]:
+    """Whether ``validator`` holds a ``queryset`` it reads during ``is_valid()``."""
+    return read_attr(validator, "queryset", None) is not None
+
+
 def _pin_validator_querysets(serializer: DRFField, alias: str, *, path: str = "") -> None:
     """Recursively pin every queryset-backed DRF validator to the write alias.
 
@@ -1503,17 +1543,15 @@ def _pin_validator_querysets(serializer: DRFField, alias: str, *, path: str = ""
     while concurrent requests cannot rewrite one another's validator routing.
     """
 
-    # basedpyright: the copy's ``.queryset`` is written; drf-stubs' Validator declares none
-    def _pinned(validators: Any, owner: str) -> list[Any]:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - reason above
-        pinned: list[object] = []
+    def _pinned(validators: Iterable[_ValidatorT], owner: str) -> list[_ValidatorT]:
+        pinned: list[_ValidatorT] = []
         for validator in validators:
-            queryset = getattr(validator, "queryset", None)
-            if queryset is None:
+            if not _reads_a_queryset(validator):
                 pinned.append(validator)
                 continue
             local_validator = copy.copy(validator)
             local_validator.queryset = pin_write_queryset(
-                queryset.all(),
+                local_validator.queryset.all(),
                 alias,
                 owner=f"{owner} {type(validator).__name__} queryset",
             )
@@ -1654,7 +1692,7 @@ def _assert_save_kwargs_no_shadow(
     The shadowed names are read from the save-kwargs side, whose keys ``_hook_mapping`` already
     proved plain ``str``, so the message never renders a key a custom ``validate()`` returned.
     """
-    validated_keys = set(serializer.validated_data)
+    validated_keys = set(list_of(validated_data_of(serializer)))
     shadowed = sorted(key for key in save_kwargs if key in validated_keys)
     if shadowed:
         raise ConfigurationError(
@@ -1902,14 +1940,23 @@ def _record_field_intent(
     key_attname: str | None,
 ) -> None:
     """Shadow ``field.run_validation`` with a recording wrapper (per-instance, never shared)."""
-    original = field.run_validation
+    field.run_validation = _recording_validation(field.run_validation, ledger, path, key_attname)
+
+
+def _recording_validation(
+    original: _RunValidation,
+    ledger: _RelationIntentLedger,
+    path: str,
+    key_attname: str | None,
+) -> _RunValidation:
+    """Return ``original`` wrapped to record what each call returns under ``path``."""
 
     def _recording(data: object = serializers.empty) -> object:
         value = original(data)
         ledger.record(path, _relation_intent_snapshot(value, key_attname))
         return value
 
-    field.run_validation = _recording
+    return _recording
 
 
 def _assert_relation_intent(
@@ -1949,7 +1996,7 @@ def _assert_relation_intent(
         mutation_cls,
         _write_surface_specs(mutation_cls),
         serializer,
-        serializer.validated_data,
+        validated_data_of(serializer),
         ledger,
         path="",
         manifest=manifest,
@@ -2096,10 +2143,14 @@ def _m2m_membership_snapshot(
     for spec, model_field, source in _attestable_m2m_fields(mutation_cls, model):
         del spec
         del model_field
-        snapshot[source] = frozenset(
-            getattr(instance, source).all().using(alias).values_list("pk", flat=True),
-        )
+        snapshot[source] = _related_pks(instance, source, alias)
     return snapshot
+
+
+def _related_pks(instance: models.Model, source: str, alias: str) -> frozenset[object]:
+    """Return the pks ``instance``'s ``source`` many-to-many accessor holds on ``alias``."""
+    manager = require(read_attr(instance, source), is_manager)
+    return frozenset(manager.all().using(alias).values_list("pk", flat=True))
 
 
 def _attestable_m2m_fields(
@@ -2214,13 +2265,13 @@ def _attest_saved_relations(
             fk_checks.append((spec.target_name, model_field, relation_keys[spec.target_name]))
 
     if fk_checks:
-        row = (
+        row = dict_of(
             model._base_manager.using(alias)
             .values(*[model_field.attname for _, model_field, _ in fk_checks])
-            .get(pk=saved.pk)
+            .get(pk=pk_of(saved)),
         )
         for target_name, model_field, expected_key in fk_checks:
-            db_value: object = row[model_field.attname]
+            db_value = row[model_field.attname]
             if expected_key is None:
                 intact = db_value is None
             else:
@@ -2241,9 +2292,7 @@ def _attest_saved_relations(
     m2m_fields = _attestable_m2m_fields(mutation_cls, model)
     for spec, model_field, source in m2m_fields:
         del model_field
-        current = frozenset(
-            getattr(saved, source).all().using(alias).values_list("pk", flat=True),
-        )
+        current = _related_pks(saved, source, alias)
         if spec.target_name in relation_keys:
             expected = relation_keys[spec.target_name]
             if current != expected:
@@ -2326,7 +2375,7 @@ def _write_witness(
         written.append(
             (
                 instance,
-                instance.pk,
+                pk_of(instance),
                 created,
                 using,
             ),
@@ -2339,6 +2388,11 @@ def _write_witness(
     finally:
         _ = post_save.disconnect(_record, sender=model)
         _ = pre_save.disconnect(_block_cross_alias)
+
+
+def _saved(serializer: _Saving, save_kwargs: Mapping[str, object]) -> object:
+    """Return ``serializer.save(**save_kwargs)``; drf-stubs types the result ``Any``."""
+    return serializer.save(**save_kwargs)
 
 
 def _checked_saved_result(
@@ -2404,10 +2458,10 @@ def _checked_saved_result(
             "never written through the serializer (a spoofed saved-looking instance would "
             "launder some other row through the re-fetch).",
         )
-    if saved.pk is None or saved._state.adding:
+    if pk_of(saved) is None or saved._state.adding:
         raise ConfigurationError(
             f"SerializerMutation {mutation_cls.__name__}: {name}.save() returned an unsaved "
-            f"{model.__name__} (pk={saved.pk!r}, adding={saved._state.adding!r}); the "
+            f"{model.__name__} (pk={pk_of(saved)!r}, adding={saved._state.adding!r}); the "
             "serializer's create()/update() must persist and return the written row - a "
             "never-persisted instance with a spoofed pk would launder an existing row "
             "through the re-fetch.",
@@ -2423,10 +2477,10 @@ def _checked_saved_result(
     # Canonical pk-field equality (``to_python`` both sides), never a ``str()``
     # comparison: a UUID pk stringifies in more than one spelling of the SAME
     # row, and a forged pk of the wrong shape must read as a mismatch.
-    if authorized_pk is not None and not pks_match(model, saved.pk, authorized_pk):
+    if authorized_pk is not None and not pks_match(model, pk_of(saved), authorized_pk):
         raise ConfigurationError(
             f"SerializerMutation {mutation_cls.__name__}: {name}.save() returned "
-            f"{model.__name__} pk={saved.pk!r}, but the located, authorized row is "
+            f"{model.__name__} pk={pk_of(saved)!r}, but the located, authorized row is "
             f"pk={authorized_pk!r}; an update must write the row that was authorized, never "
             "a substituted one.",
         )
@@ -2434,7 +2488,7 @@ def _checked_saved_result(
         row is saved
         and created is (authorized_pk is None)
         and using == alias
-        and pks_match(model, row_pk, saved.pk)
+        and pks_match(model, row_pk, pk_of(saved))
         for row, row_pk, created, using in written
     )
     if not matching_write:
@@ -2489,7 +2543,7 @@ def _serializer_write_step(
     # to snapshotting at step entry - still before any of THIS step's hooks run.
     authorized_pk = pipeline.authorized_pk
     if authorized_pk is None and instance is not None:
-        authorized_pk = instance.pk
+        authorized_pk = pk_of(instance)
     # The frozen hook context every consumer hook receives INSTEAD of the live,
     # mutable located instance: the operation kind, the
     # pinned alias, and the authorized pk snapshot.
@@ -2563,7 +2617,7 @@ def _guarded_serializer_write(
         alias=alias,
         hook_context=hook_context,
     )
-    serializer = serializer_class(**kwargs)
+    serializer = call_forwarded(serializer_class, (), kwargs)
 
     # PROVE the schema-time write surface (GraphQL input + Meta.injected_fields)
     # and the runtime serializer AGREE before ``is_valid()`` runs, so a schema hook that
@@ -2644,7 +2698,7 @@ def _guarded_serializer_write(
         # The write phase opens for exactly ``serializer.save()``; everything
         # before this point was database-read-only under the phased alias guard.
         with pipeline_write_phase():
-            saved = serializer.save(**save_kwargs)
+            saved = _saved(serializer, save_kwargs)
 
     # The save runs inside its OWN savepoint (a nested ``atomic`` - the same
     # containment ``forced_save_or_field_errors`` uses), rolled back BEFORE a

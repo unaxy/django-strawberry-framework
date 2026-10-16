@@ -95,12 +95,14 @@ from django.core import signing
 from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import models
 from django.utils.crypto import salted_hmac
+from django.utils.encoding import force_bytes
 from graphql import GraphQLError
 from strawberry.relay.utils import from_base64, to_base64
 
 from .exceptions import ConfigurationError
-from .utils._narrowing import is_dict, is_list
+from .utils._narrowing import is_dict, is_list, list_of, read_attr
 from .utils.imports import require_optional_module
+from .utils.typing import object_result
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -416,7 +418,7 @@ def serialize_cursor_value(field: ConcreteField, value: object) -> str:
 def _deserialize_cursor_value(field: ConcreteField, raw: object, argument: str) -> object:
     """Invert ``serialize_cursor_value``; malformed/non-canonical values raise."""
     try:
-        value: object = field.to_python(raw)
+        value = object_result(field.to_python, raw)
         # Re-serializing after ``to_python`` validates the exact field-authored
         # wire shape. Authenticated payloads cannot be forged, but this still
         # detects model-field drift between mint and decode (and malformed
@@ -459,19 +461,25 @@ def _is_supported_cursor_field(field: ConcreteField) -> bool:
 @lru_cache(maxsize=1)
 def _cursor_crypto_types() -> tuple[type[AESSIV], type[Exception]]:
     """Load the soft crypto dependency only when keyset cursors are exercised."""
-    exceptions = require_optional_module(
+    _ = require_optional_module(
         "cryptography.exceptions",
         install_hint=_CRYPTOGRAPHY_INSTALL_HINT,
     )
-    aead = require_optional_module(
+    _ = require_optional_module(
         "cryptography.hazmat.primitives.ciphers.aead",
         install_hint=_CRYPTOGRAPHY_INSTALL_HINT,
     )
-    return aead.AESSIV, exceptions.InvalidTag
+    # Both modules imported above, so these name them rather than load them.
+    from cryptography.exceptions import InvalidTag  # noqa: PLC0415 - soft dependency
+    from cryptography.hazmat.primitives.ciphers.aead import (  # noqa: PLC0415 - soft dependency
+        AESSIV as _AESSIV,
+    )
+
+    return _AESSIV, InvalidTag
 
 
 @cache
-def _cursor_aessiv(secret_key: str | bytes) -> AESSIV:
+def _cursor_aessiv(secret_key: object) -> AESSIV:
     """Build and cache the authenticated-encryption primitive for one configured secret.
 
     The private caller supplies only ``SECRET_KEY`` and ``SECRET_KEY_FALLBACKS``.
@@ -482,7 +490,7 @@ def _cursor_aessiv(secret_key: str | bytes) -> AESSIV:
     digest = salted_hmac(
         _CURSOR_ENCRYPTION_SALT,
         _CURSOR_ENCRYPTION_CONTEXT,
-        secret=secret_key,
+        secret=force_bytes(secret_key),
         algorithm="sha512",
     ).digest()
     return aessiv(digest)
@@ -491,7 +499,7 @@ def _cursor_aessiv(secret_key: str | bytes) -> AESSIV:
 def _encrypt_cursor_payload(payload: dict[str, str | list[str]]) -> str:
     """Serialize and authenticated-encrypt one cursor payload."""
     serialized = signing.JSONSerializer().dumps(payload)
-    encrypted = _cursor_aessiv(settings.SECRET_KEY).encrypt(
+    encrypted = _cursor_aessiv(read_attr(settings, "SECRET_KEY")).encrypt(
         serialized,
         [_CURSOR_ENCRYPTION_CONTEXT],
     )
@@ -509,7 +517,10 @@ def _decrypt_cursor_payload(value: str, argument: str) -> object:
     except (UnicodeEncodeError, binascii.Error, ValueError):
         raise _invalid_cursor_error(argument) from None
     _aessiv, invalid_tag = _cursor_crypto_types()
-    secrets = (settings.SECRET_KEY, *getattr(settings, "SECRET_KEY_FALLBACKS", ()))
+    secrets = (
+        read_attr(settings, "SECRET_KEY"),
+        *list_of(read_attr(settings, "SECRET_KEY_FALLBACKS", ())),
+    )
     for secret_key in secrets:
         try:
             serialized = _cursor_aessiv(secret_key).decrypt(
@@ -519,7 +530,7 @@ def _decrypt_cursor_payload(value: str, argument: str) -> object:
         except invalid_tag:
             continue
         try:
-            return signing.JSONSerializer().loads(serialized)
+            return object_result(signing.JSONSerializer().loads, serialized)
         except (TypeError, ValueError):
             raise _invalid_cursor_error(argument) from None
     raise _invalid_cursor_error(argument)
@@ -546,7 +557,7 @@ def encode_keyset_cursor(
     """
     values: list[str] = []
     for column in columns:
-        value: object = getattr(row, column.value_source)
+        value = read_attr(row, column.value_source)
         if value is None:
             raise keyset_contract_error(
                 "require non-nullable ordering columns; a NULL value was read "

@@ -23,13 +23,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from strawberry import relay
 
 from django_strawberry_framework.exceptions import _safe_text
 
-from ._narrowing import dict_items, is_dict, is_list, list_iter
+from ._narrowing import dict_items, enum_value, is_dict, is_list, list_iter, list_of
 from .errors import (
     FIELD_ERROR_CODE_INVALID,
     field_error,
@@ -168,7 +168,7 @@ def raw_choice_value(value: object) -> object:
 
 def _raw_choice_scalar(value: object) -> object:
     """Unwrap one non-list value: an enum member to its value, a ``str`` to the base ``str``."""
-    raw_value: object = value.value if isinstance(value, Enum) else value
+    raw_value = enum_value(value) if isinstance(value, Enum) else value
     return str.__str__(raw_value) if isinstance(raw_value, str) else raw_value
 
 
@@ -349,9 +349,7 @@ RELATION_ID_ATOM_TYPES = (
 
 
 def materialize_relation_id_container(
-    # basedpyright: EAFP; ``list(values)`` on wire input runs inside the surrounding
-    # try/except, which is the guard
-    values: Any,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - wire input; EAFP
+    values: object,
     graphql_name: str,
 ) -> tuple[list[object], None] | tuple[None, FieldError]:
     """Materialize a relation-id container, or return the uniform field-keyed error.
@@ -373,7 +371,7 @@ def materialize_relation_id_container(
     if isinstance(values, RELATION_ID_ATOM_TYPES):
         return None, relation_field_error(graphql_name)
     try:
-        return list(values), None
+        return list_of(values), None
     except BaseException:  # noqa: BLE001 - hostile object, contained by design
         return None, relation_field_error(graphql_name)
 

@@ -164,6 +164,20 @@ def test_a_subclass_that_skipped_the_base_constructor_is_refused_not_approximate
         _ = extension.execution_context
 
 
+def test_a_hook_context_read_outside_an_operation_is_refused() -> None:
+    """``execution_context`` answers ``None`` outside an operation; a hook's read refuses instead.
+
+    A hook only runs inside an operation, so the read it makes is the one place
+    ``None`` is not an answer: it would surface as a bare ``AttributeError`` on
+    whatever the hook reached for next.
+    """
+    extension = _SilentProbe()
+
+    assert extension.execution_context is None
+    with pytest.raises(ConfigurationError, match="outside an operation"):
+        _ = extension._hook_context()
+
+
 def test_an_assignment_under_a_django_schema_records_nothing_to_be_read_later() -> None:
     """The engine's assignment is compatibility glue, not a source of state.
 

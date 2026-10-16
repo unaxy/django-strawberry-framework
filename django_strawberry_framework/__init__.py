@@ -52,6 +52,7 @@ from .types.converters import (
     DjangoImagePathType,
     DjangoImageType,
 )
+from .utils._narrowing import read_attr as _read_attr
 from .utils.connections import PaginationArgumentError
 
 # Do not import or root-export DjangoDebugExtension here: its public
@@ -113,7 +114,7 @@ if TYPE_CHECKING:
 
 
 # basedpyright: PEP 562 module __getattr__; a lazy re-export is whatever the named attribute is
-def __getattr__(name: str) -> Any:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - lazy re-export is whatever the attribute is
+def __getattr__(name: str) -> Any:  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401 - lazy re-export is whatever the attribute is
     """Resolve the DRF-soft-dependency names lazily through the DRF import guard (spec-039 Decision 12).
 
     PEP 562 module-level ``__getattr__``: ``from django_strawberry_framework import
@@ -138,7 +139,7 @@ def __getattr__(name: str) -> Any:  # pyright: ignore[reportExplicitAny]  # noqa
 
         _ = require_drf()
         submodule, attr = target
-        return getattr(import_module(submodule, __name__), attr)
+        return _read_attr(import_module(submodule, __name__), attr)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

@@ -11,6 +11,9 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+#: Django's ``import_string``: django-stubs types its result ``Any``; it is an arbitrary object.
+_import_object: "Callable[[str], object]" = import_string
+
 
 def import_or_command_error(importer: "Callable[[], T]") -> T:
     """Run ``importer`` and re-raise ``ImportError``/``AttributeError`` as ``CommandError``.
@@ -55,7 +58,6 @@ def import_string_or_command_error(dotted_path: str) -> object:
     _validate_absolute_module_path(dotted_path, module_name, label="dotted object path")
 
     def _import() -> object:
-        # django-stubs types ``import_string`` as returning ``Any``; it is an arbitrary object.
-        return import_string(dotted_path)
+        return _import_object(dotted_path)
 
     return import_or_command_error(_import)

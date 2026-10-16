@@ -100,9 +100,9 @@ import contextlib
 import dataclasses
 from typing import TYPE_CHECKING, TypeVar, cast
 
-from django.conf import settings
 from django.utils.module_loading import import_string
 
+from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import (
     ConfigurationError,
     _safe_type_name,
@@ -233,7 +233,7 @@ def session_store_class() -> type[SessionBase]:
     path or the rejection message is being assembled.
     """
     try:
-        engine: object = settings.SESSION_ENGINE
+        engine = django_setting("SESSION_ENGINE")
     except (
         AttributeError,
         KeyError,

@@ -59,11 +59,13 @@ from django_strawberry_framework.resource_policy import (
     bounded_rows_async,
     check_deadline,
 )
+from django_strawberry_framework.utils._narrowing import is_str, read_attr, require
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
     initial_queryset,
+    is_manager,
     materialized_rows,
     normalized_row_source,
 )
@@ -169,7 +171,7 @@ def _build_fk_id_stub(root: object, field_meta: FieldMeta) -> object:
     if _fk_attname_is_deferred(root, field_meta.attname):
         return _FK_ELISION_UNSAFE
     try:
-        related_id: object = getattr(root, field_meta.attname)
+        related_id = read_attr(root, field_meta.attname)
     except AttributeError:
         return None
     if related_id is None:
@@ -456,8 +458,8 @@ def _visible_related_object(
     if related is None:
         return None
     source = initial_queryset(target_type)
-    alias = getattr(getattr(related, "_state", None), "db", None)
-    if alias is not None:
+    alias = read_attr(read_attr(related, "_state", None), "db", None)
+    if is_str(alias):
         source = source.using(alias)
     pk = getattr(related, "pk", None)
     source = source.filter(pk=pk)
@@ -662,10 +664,7 @@ def _make_relation_resolver(
                         parent_type,
                         field_name,
                     ):
-                        manager_rows: models.QuerySet[models.Model] = getattr(
-                            root,
-                            accessor_name,
-                        ).all()
+                        manager_rows = require(read_attr(root, accessor_name), is_manager).all()
                         return _visible_many_rows(manager_rows, visibility_type, info)
                     # The cache entry is a queryset, and reading what it has
                     # already fetched through ``getattr`` would dispatch a
@@ -684,7 +683,7 @@ def _make_relation_resolver(
             # materializing the whole relation and discarding the tail
             # (``resource_policy.py::bounded_rows``). Building the queryset is
             # lazy, so it is safe to do before the async branch below.
-            source: models.QuerySet[models.Model] = getattr(root, accessor_name).all()
+            source = require(read_attr(root, accessor_name), is_manager).all()
             # A relation the optimizer planned is prefetched on the queryset that
             # produced this very instance, so Django keeps it in the instance's own
             # cache and the key read above serves it. Whatever reaches this line
@@ -737,7 +736,7 @@ def _make_relation_resolver(
 
                 async def _resolve_async() -> object:
                     try:
-                        related: object = await sync_to_async(getattr, thread_sensitive=True)(
+                        related: object = await sync_to_async(read_attr, thread_sensitive=True)(
                             root,
                             accessor_name,
                         )
@@ -755,7 +754,7 @@ def _make_relation_resolver(
                 return _resolve_async()
 
             try:
-                related: object = getattr(root, accessor_name)
+                related = read_attr(root, accessor_name)
             except reverse_does_not_exist:
                 return None
             if visibility_type is not None and related is not None:
@@ -813,7 +812,7 @@ def _make_relation_resolver(
 
                 async def _resolve_async() -> object:
                     try:
-                        related: object = await sync_to_async(getattr, thread_sensitive=True)(
+                        related: object = await sync_to_async(read_attr, thread_sensitive=True)(
                             root,
                             field_name,
                         )
@@ -833,7 +832,7 @@ def _make_relation_resolver(
                 return _resolve_async()
 
             try:
-                related: object = getattr(root, field_name)
+                related = read_attr(root, field_name)
             except related_does_not_exist:
                 return None
             if visibility_type is None or related is None:
@@ -884,7 +883,7 @@ def _make_relation_resolver(
 
             async def _resolve_async() -> object:
                 try:
-                    related: object = await sync_to_async(getattr, thread_sensitive=True)(
+                    related: object = await sync_to_async(read_attr, thread_sensitive=True)(
                         root,
                         field_name,
                     )
@@ -907,7 +906,7 @@ def _make_relation_resolver(
             return _resolve_async()
 
         try:
-            related = getattr(root, field_name)
+            related = read_attr(root, field_name)
         except related_does_not_exist:
             return None
         if visibility_type is not None and related is not None:
@@ -971,7 +970,7 @@ def _make_file_resolver(field: "ModelField") -> _FileResolver:
     field_name = field.name
 
     def file_resolver(root: object) -> object:
-        value: object = getattr(root, field_name)
+        value = read_attr(root, field_name)
         return value or None
 
     return _name_resolver(file_resolver, field_name)

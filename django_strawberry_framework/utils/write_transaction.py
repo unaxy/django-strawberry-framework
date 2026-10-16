@@ -84,16 +84,25 @@ from django_strawberry_framework.exceptions import (
 )
 from django_strawberry_framework.utils.errors import FIELD_ERROR_CODE_CONFLICT, field_error
 
-from ._narrowing import is_dict, is_list_or_tuple, is_set_or_frozenset, is_str
+from ._narrowing import (
+    call_method,
+    is_dict,
+    is_list_or_tuple,
+    is_set_or_frozenset,
+    is_str,
+    list_of,
+    pk_of,
+    read_attr,
+)
 from ._queryset_private import queryset_db
 from .canonical import base_container_values, canonical_sort_key
+from .typing import object_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Sequence
+    from collections.abc import Callable, Generator, Iterable
     from typing import Protocol, TypeAlias
 
     from django.db import models
-    from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.models import QuerySet
     from typing_extensions import TypeIs
 
@@ -384,8 +393,8 @@ def _enforce_read_only_barrier(barrier_alias: str) -> Callable[[], None]:
     with connection.cursor() as cursor:
         cursor.execute("PRAGMA query_only")
         # A DB-API row (PEP 249): a sequence, or ``None`` when no row came back.
-        row: Sequence[object] | None = cursor.fetchone()
-        previously_on = bool(row[0]) if row else False
+        row = call_method(cursor, "fetchone")
+        previously_on = bool(list_of(row)[0]) if row else False
         cursor.execute("PRAGMA query_only = ON")
     restore = "ON" if previously_on else "OFF"
 
@@ -797,7 +806,7 @@ def column_values_match(field: ConcreteField, first: object, second: object) -> 
     mismatch, never an exception the caller must handle.
     """
     try:
-        return field.to_python(first) == field.to_python(second)
+        return object_result(field.to_python, first) == object_result(field.to_python, second)
     except Exception:  # noqa: BLE001 - consumer code may raise anything
         return False
 
@@ -1116,7 +1125,7 @@ def snapshot_target_state(instance: models.Model) -> dict[str, object]:
     """
     deferred = instance.get_deferred_fields()
     return {
-        field.attname: _snapshot_field_value(getattr(instance, field.attname))
+        field.attname: _snapshot_field_value(read_attr(instance, field.attname))
         for field in instance._meta.concrete_fields
         if field.attname not in deferred
     }
@@ -1144,7 +1153,7 @@ def assert_no_target_drift(owner: str, instance: models.Model) -> None:
         if attname in deferred:
             continue
         try:
-            current: object = getattr(instance, attname)
+            current = read_attr(instance, attname)
             if isinstance(value, _ValueSnapshot):
                 # Each by-value wrapper owns its own re-comparison, so this dispatch
                 # cannot fall out of step with ``_snapshot_field_value``'s capture
@@ -1275,12 +1284,11 @@ def forced_update_conflict_errors(
     Anything else re-raises: a genuine database error must propagate and roll
     the transaction back, never be swallowed into a retryable envelope.
     """
-    # ``transaction.get_connection`` returns ``connections[using]`` (untyped in the stubs).
-    connection: BaseDatabaseWrapper = transaction.get_connection(using=alias)
+    connection = connections[alias]
     if not connection.needs_rollback:
         model = type(instance)
         try:
-            row_present = model._base_manager.using(alias).filter(pk=instance.pk).exists()
+            row_present = model._base_manager.using(alias).filter(pk=pk_of(instance)).exists()
         except DatabaseError:
             # The probe itself failed (a poisoned transaction the flag did not
             # reflect): the ORIGINAL error is the one that must propagate.

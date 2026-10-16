@@ -14,9 +14,8 @@ from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
-from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import connections, models
 from django.db.models.expressions import Col
@@ -24,12 +23,14 @@ from django.db.models.sql.query import Query
 from graphql import GraphQLError
 from strawberry import relay
 
+from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.keyset import (
     CursorState,
     KeysetSeek,
     declared_cursor_state_for_definition,
     decode_keyset_cursor,
 )
+from django_strawberry_framework.utils._narrowing import is_str, list_of
 from django_strawberry_framework.utils.connections import (
     ConnectionWindowBounds,
     FetchMode,
@@ -505,7 +506,7 @@ def _model_index_shapes(meta: Options[models.Model]) -> tuple[list[list[tuple[st
     """
     shapes: list[list[tuple[str, bool]]] = []
     saw_uninspectable = False
-    for index in meta.indexes:
+    for index in list_of(meta.indexes):
         terms = _index_leading_terms(meta, index)
         if terms is None:
             saw_uninspectable = True
@@ -741,7 +742,7 @@ def _advise_composite_index(
     ):
         return
     columns = _describe_index_columns(equality, effective_order)
-    log = logger.warning if settings.DEBUG else logger.debug
+    log = logger.warning if django_setting("DEBUG") else logger.debug
     log(
         "Optimizer: nested connection on %s.%s has no represented index covering the "
         "window's leading columns %s; a composite index on (%s) would let the database "
@@ -877,24 +878,40 @@ def _connection_node_selections(
     return connection_node_children(sel, runtime_prefixes=runtime_paths, names=names)
 
 
-# basedpyright: EAFP int() probe of a raw AST / variable value; int() is typed
-# ConvertibleToInt and a non-castable value is returned unchanged
-def _coerce_pagination_int(value: Any) -> Any:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - raw value returned unchanged
-    """Coerce a pagination ``first`` / ``last`` argument to ``int`` when int-like.
+def _argument_value(arguments: Mapping[str, object], name: str) -> object:
+    """Return the selection's ``name`` argument, or ``None`` when it was not given."""
+    return arguments.get(name)
+
+
+def _cursor_argument(arguments: Mapping[str, object], name: str) -> str | None:
+    """Return the selection's ``name`` cursor argument, ``None`` when it was not given.
+
+    A validated operation hands a ``String`` argument over as a ``str`` (an inline
+    literal) or the ``str`` its variable coerced to.
+    """
+    value = arguments.get(name)
+    return value if is_str(value) else None
+
+
+def _coerce_pagination_int(value: object) -> int | None:
+    """Coerce a pagination ``first`` / ``last`` argument to the ``int`` it spells, else ``None``.
 
     An inline Int literal arrives as the raw token string; a resolved variable is
-    already an ``int``. Coerce an ``int``-castable string to ``int`` so the slice
-    arithmetic fires; pass ``None`` and anything non-int-castable through
-    untouched so ``SliceMetadata.from_arguments`` reaches its own
-    ``isinstance(..., int)`` gate (skipping the bound, the shipped behavior for a
-    malformed value) rather than the walker pre-judging it.
+    already an ``int``. An ``int``-castable string is coerced so the slice
+    arithmetic fires. Anything else answers ``None``: every reader of a page
+    argument (``page_arguments``, ``is_backward_shape``, the bound checks and
+    ``SliceMetadata.from_arguments``) gates on ``isinstance(..., int)``, so a
+    malformed value is read exactly as an absent one, which is the shipped
+    behavior (the bound is skipped) without the walker pre-judging it.
     """
-    if value is None or isinstance(value, int):
+    if isinstance(value, int):
         return value
+    if not is_str(value):
+        return None
     try:
         return int(value)
-    except (TypeError, ValueError):
-        return value
+    except ValueError:
+        return None
 
 
 def _connection_window_slice_from_arguments(
@@ -952,13 +969,13 @@ def _connection_window_slice_from_arguments(
     # argument coercion hides at the field boundary). This coercion is
     # plan-time-only and deliberately NOT folded into the shared helper, whose
     # resolver caller already receives ``int`` arguments from Strawberry.
-    first = _coerce_pagination_int(arguments.get("first"))
-    last = _coerce_pagination_int(arguments.get("last"))
+    first = _coerce_pagination_int(_argument_value(arguments, "first"))
+    last = _coerce_pagination_int(_argument_value(arguments, "last"))
     try:
         bounds = derive_connection_window_bounds(
             info,
-            before=arguments.get("before"),
-            after=arguments.get("after"),
+            before=_cursor_argument(arguments, "before"),
+            after=_cursor_argument(arguments, "after"),
             first=first,
             last=last,
             max_results=_relay_max_results_from_info(info),
@@ -995,10 +1012,10 @@ def _keyset_window_slice_from_arguments(
       (``last`` / ``before:``) the v1 keyset window does not plan - a real
       per-parent access that must stay strictness-visible.
     """
-    first = _coerce_pagination_int(arguments.get("first"))
-    last = _coerce_pagination_int(arguments.get("last"))
-    after = arguments.get("after")
-    before = arguments.get("before")
+    first = _coerce_pagination_int(_argument_value(arguments, "first"))
+    last = _coerce_pagination_int(_argument_value(arguments, "last"))
+    after = _cursor_argument(arguments, "after")
+    before = _cursor_argument(arguments, "before")
     seek: KeysetSeek | None = None
     try:
         # Validate both cursors before classifying a valid backward shape as

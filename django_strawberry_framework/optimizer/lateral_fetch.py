@@ -83,11 +83,17 @@ from django.db.models.sql.where import AND, WhereNode
 from typing_extensions import override
 
 from django_strawberry_framework.keyset import keyset_seek_sql
-from django_strawberry_framework.utils._narrowing import is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_list_or_tuple,
+    list_of,
+    read_attr,
+)
 from django_strawberry_framework.utils.connections import (
     assert_window_fetch_mode_for,
     window_range_plan,
 )
+from django_strawberry_framework.utils.typing import object_result
 
 from .join_taxonomy import LateralJoinShape
 from .nested_fetch import (
@@ -107,12 +113,11 @@ from .plans import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from typing import TypeAlias
 
     from django.db import models
     from django.db.backends.base.base import BaseDatabaseWrapper
-    from django.db.models.lookups import Lookup
     from django.db.models.options import Options
     from django.db.models.sql.query import Query
     from django.utils.tree import Node, _NodeChildren
@@ -557,7 +562,8 @@ def _fetch_lateral_rows(queryset: LateralQuerySet) -> list[models.Model] | None:
         parent_ids,
         quote_name=connection.ops.quote_name,
         parent_cast=spec.parent_link_field.db_type(connection),
-        prepare_value=lambda field, value: field.get_db_prep_value(
+        prepare_value=lambda field, value: object_result(
+            field.get_db_prep_value,
             value,
             connection,
             prepared=False,
@@ -571,8 +577,8 @@ def _fetch_lateral_rows(queryset: LateralQuerySet) -> list[models.Model] | None:
         # ``_ExecuteParameters``
         cursor.execute(sql, params)  # pyright: ignore[reportArgumentType]
         # DB-API ``fetchall`` returns the result rows as sequences of column values.
-        raw_rows: Sequence[Sequence[object]] = cursor.fetchall()
-        fetched = _apply_lateral_converters(spec, raw_rows, connection)
+        raw_rows = call_method(cursor, "fetchall")
+        fetched = _apply_lateral_converters(spec, list_of(raw_rows), connection)
     return [_instantiate_row(spec, row, queryset.db) for row in fetched]
 
 
@@ -590,7 +596,7 @@ def _deduplicate_parent_ids(parent_ids: list[object]) -> list[object]:
 
 def _apply_lateral_converters(
     spec: LateralWindowSpec,
-    rows: Sequence[Sequence[object]],
+    rows: Iterable[object],
     connection: BaseDatabaseWrapper,
 ) -> list[tuple[object, ...]]:
     """Apply Django's backend + field converter chain to raw cursor rows."""
@@ -608,7 +614,7 @@ def _apply_lateral_converters(
             converters[position] = (chain, expression)
     converted: list[tuple[object, ...]] = []
     for raw_row in rows:
-        row = list(raw_row)
+        row = list_of(raw_row)
         for position, (chain, expression) in converters.items():
             value = row[position]
             for converter in chain:
@@ -851,7 +857,7 @@ def _keyset_seek_quals_match(nodes: _NodeChildren, spec: LateralWindowSpec) -> b
         if target.model._meta.db_table != spec.db_table:
             return False
         # A qual carrying ``lookup_name`` is a ``Lookup``.
-        rhs: object = cast("Lookup[object]", node).rhs
+        rhs = read_attr(node, "rhs")
         return not hasattr(rhs, "resolve_expression") and rhs == plan.values[index]
 
     def is_cmp(node: object, index: int) -> bool:
@@ -921,11 +927,13 @@ def _visibility_quals_match(
     """
     if not nodes:
         return None
-    compiler = queryset.query.get_compiler(using=queryset.db)
+    compiler = object_result(queryset.query.get_compiler, using=queryset.db)
     residual = WhereNode(nodes, AND)
     try:
-        residual_compiled = compiler.compile(residual)
-        stored_compiled = compiler.compile(spec.visibility_where)
+        # django-stubs types ``compile`` over ``BaseExpression``; it compiles any node with an
+        # ``as_sql``, a ``WhereNode`` included.
+        residual_compiled = call_method(compiler, "compile", residual)
+        stored_compiled = call_method(compiler, "compile", spec.visibility_where)
     except (EmptyResultSet, FullResultSet):
         return None
     if residual_compiled != stored_compiled:
@@ -951,7 +959,7 @@ def _parent_in_values(node: object, *, column: str, table: str) -> list[object] 
     if target.model._meta.db_table != table:
         return None
     # A qual carrying ``lookup_name`` is a ``Lookup``.
-    rhs: object = cast("Lookup[object]", node).rhs
+    rhs = read_attr(node, "rhs")
     if not is_list_or_tuple(rhs):
         return None
     if any(hasattr(value, "resolve_expression") for value in rhs):

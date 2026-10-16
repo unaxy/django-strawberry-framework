@@ -206,6 +206,11 @@ class DjangoImageType(DjangoFileType):
         return _safe_file_attr(lambda: root.height)
 
 
+def _filesystem_path(root: strawberry.Parent[FieldFile]) -> str | None:
+    """Return the absolute filesystem path, or ``None`` if storage cannot produce one."""
+    return _safe_file_attr(lambda: root.path)
+
+
 @strawberry.type
 class _FileSystemPathFields:
     """The single definition of the opt-in ``path`` subfield (spec-048 Decision 1).
@@ -222,17 +227,14 @@ class _FileSystemPathFields:
     description a consumer's SDL will carry.
     """
 
-    @strawberry.field(
+    path: str | None = strawberry.field(
+        resolver=_filesystem_path,
         description=(
             "SECURITY: the file's absolute path on the server filesystem. Opted in "
             "per column via Meta.filesystem_path_fields; it is deployment metadata, "
             "not client data. Null when the storage backend cannot produce one."
         ),
     )
-    @staticmethod
-    def path(root: strawberry.Parent[FieldFile]) -> str | None:
-        """Return the absolute filesystem path, or ``None`` if storage cannot produce one."""
-        return _safe_file_attr(lambda: root.path)
 
 
 @strawberry.type

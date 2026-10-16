@@ -34,18 +34,14 @@ deliberately NOT caught: ``KeyboardInterrupt`` / ``SystemExit`` must keep
 propagating.
 """
 
-from typing import Any
-
 from django_strawberry_framework.exceptions import ConfigurationError, _safe_type_name
 
-from ._narrowing import is_text_or_bytes
+from ._narrowing import is_text_or_bytes, list_of
 
 __all__ = ("validated_field_directives",)
 
 
-# basedpyright: EAFP; ``tuple(directives)`` runs inside the surrounding try/except, which is
-# the guard
-def validated_field_directives(label: str, directives: Any) -> tuple[object, ...]:  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - arbitrary consumer value; EAFP
+def validated_field_directives(label: str, directives: object) -> tuple[object, ...]:
     """Return ``directives`` as a tuple, or raise the typed construction-time reject.
 
     ``label`` names the consuming factory (``"DjangoListField"``,
@@ -62,7 +58,7 @@ def validated_field_directives(label: str, directives: Any) -> tuple[object, ...
     # ``__class__`` read, and deployment-supplied code can make that raise too.
     try:
         if not is_text_or_bytes(directives):
-            return tuple(directives)
+            return tuple(list_of(directives))
     except Exception as exc:
         # Naming the escaping exception's TYPE (never its message, which a
         # hostile ``__str__`` owns) keeps the diagnostic useful without

@@ -24,6 +24,8 @@ import importlib
 import sys
 from typing import TYPE_CHECKING, TypeVar
 
+from ._narrowing import read_attr
+
 if TYPE_CHECKING:
     from types import ModuleType
 
@@ -82,8 +84,7 @@ def import_attr_if_importable(module_path: str, attr_name: str) -> object | None
         module = importlib.import_module(module_path)
     except ImportError:
         return None
-    attr: object = getattr(module, attr_name)
-    return attr
+    return read_attr(module, attr_name)
 
 
 def loaded_attr(module_path: str, attr_name: str) -> object | None:
@@ -100,8 +101,7 @@ def loaded_attr(module_path: str, attr_name: str) -> object | None:
     module = sys.modules.get(module_path)
     if module is None:
         return None
-    attr: object = getattr(module, attr_name)
-    return attr
+    return read_attr(module, attr_name)
 
 
 def import_attr(module_path: str, attr_name: str) -> object:
@@ -119,7 +119,7 @@ def import_attr(module_path: str, attr_name: str) -> object:
     """
     module_path = _plain_text(module_path)
     attr_name = _plain_text(attr_name)
-    return getattr(importlib.import_module(module_path), attr_name)
+    return read_attr(importlib.import_module(module_path), attr_name)
 
 
 def require_optional_module(module_name: str, *, install_hint: str) -> ModuleType:

@@ -39,7 +39,7 @@ from django_filters import (
 from django_filters import RangeFilter as _DjangoRangeFilter
 from django_filters.filters import BaseCSVFilter
 from django_filters.utils import get_model_field
-from strawberry import UNSET, relay
+from strawberry import relay
 
 from django_strawberry_framework.conf import hide_flat_filters_setting
 from django_strawberry_framework.exceptions import (
@@ -49,9 +49,18 @@ from django_strawberry_framework.exceptions import (
 )
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.types.converters import scalar_for_field
-from django_strawberry_framework.utils._narrowing import is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import (
+    dict_of,
+    enum_value,
+    is_list_or_tuple,
+    read_attr,
+)
 from django_strawberry_framework.utils.converters import MRO_CONTINUE, convert_with_mro
-from django_strawberry_framework.utils.input_values import is_inactive_value, iter_input_items
+from django_strawberry_framework.utils.input_values import (
+    UNSET,
+    is_inactive_value,
+    iter_input_items,
+)
 from django_strawberry_framework.utils.inputs import (
     GeneratedInputFieldSpec,
     build_strawberry_input_class,
@@ -481,7 +490,7 @@ def _element_annotation(
         return _choice_enum_from_filter(filter_instance, type_name, model_field)
     if model_field is not None:
         return _scalar_from_model_field(model_field)
-    form_field = getattr(filter_instance, "field", None)
+    form_field = read_attr(filter_instance, "field", None)
     return (
         _scalar_from_form_field(form_field)
         if form_field is not None
@@ -571,7 +580,7 @@ def convert_filter_to_input_annotation(
     ``_build_range_input_class``). ``None`` (direct converter callers) keeps the
     unqualified ``<Field>RangeInputType`` name.
     """
-    required = bool(filter_instance.extra.get("required", False))
+    required = bool(dict_of(filter_instance.extra).get("required", False))
 
     def _gid_multi(_filter: Filter) -> object:
         return list[str]
@@ -615,8 +624,8 @@ def convert_filter_to_input_annotation(
         # Catch-all scalar branch. ``Filter(method=...)`` filters land
         # here when their ``field_class`` is a recognized form field; an
         # unknown form-field shape raises per spec-027 Decision 4.
-        form_field = getattr(matched, "field", None)
-        method = getattr(matched, "method", None)
+        form_field = read_attr(matched, "field", None)
+        method = read_attr(matched, "method", None)
         if method is not None and form_field is None:
             raise ConfigurationError(
                 f"Filter(method={_safe_arg_repr(method)}) on {_safe_arg_repr(matched)} exposes no "
@@ -742,7 +751,7 @@ def normalize_input_value(
         # filter takes each enum member as a typed value no form-data sentinel can
         # reinterpret; a raw value (not a member) keeps django-filter's handling.
         if isinstance(matched, _EnumMemberFilterMixin) and isinstance(raw_value, enum.Enum):
-            return EnumMemberValue(raw_value.value)
+            return EnumMemberValue(enum_value(raw_value))
         return _unwrap_enum_member(raw_value)
 
     return convert_with_mro(
@@ -840,7 +849,7 @@ def _unwrap_enum_member(value: object) -> object:
     ``ListFilter`` would need its own per-level walk.
     """
     if isinstance(value, enum.Enum):
-        return value.value
+        return enum_value(value)
     return value
 
 

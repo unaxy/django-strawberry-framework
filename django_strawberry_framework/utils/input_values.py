@@ -34,11 +34,22 @@ families import it without a cycle -- same contract as ``utils/permissions.py``
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import TYPE_CHECKING, Final, NoReturn, cast
+
+from strawberry.types.unset import UnsetType
 
 from django_strawberry_framework.exceptions import ConfigurationError, _safe_attr, _safe_type_name
 
-from ._narrowing import dict_get, dict_items, is_dict, is_list, is_mapping, is_str, list_iter
+from ._narrowing import (
+    dict_get,
+    dict_items,
+    is_dict,
+    is_list,
+    is_mapping,
+    is_str,
+    list_iter,
+    read_attr,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -133,7 +144,7 @@ def iter_input_items(input_value: object) -> list[tuple[str, object]] | None:
     for name in names:
         field_name = _field_name(name, input_value=input_value)
         try:
-            value: object = getattr(input_value, field_name)
+            value = read_attr(input_value, field_name)
         except BaseException as exc:
             raise _walk_error(input_value, "a dataclass field value could not be read") from exc
         items.append((field_name, value))
@@ -156,6 +167,12 @@ def input_field_value(input_value: object, name: str) -> object:
         return getattr(input_value, field_name, None)
     except BaseException as exc:
         raise _walk_error(input_value, "a field value could not be read") from exc
+
+
+#: ``strawberry.UNSET``, typed as the instance it is. Strawberry annotates its sentinel ``Any``
+#: so it can default a field of any type; ``UnsetType()`` hands back that one instance, so
+#: ``value is UNSET`` holds for every ``strawberry.UNSET`` the engine supplies.
+UNSET: Final[UnsetType] = UnsetType()
 
 
 def is_inactive_value(value: object, *, unset_sentinel: object = None) -> bool:

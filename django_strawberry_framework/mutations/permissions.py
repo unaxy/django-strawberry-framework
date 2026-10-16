@@ -26,9 +26,10 @@ across read and write.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_arg_repr
+from django_strawberry_framework.exceptions import ConfigurationError, _safe_arg_repr, _safe_attr
+from django_strawberry_framework.utils._narrowing import call_method, read_attr
 from django_strawberry_framework.utils.permissions import request_from_info
 from django_strawberry_framework.utils.querysets import reject_async_in_sync_context
 
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
     from django.db import models
     from strawberry.types import Info
+    from typing_extensions import TypeIs
 
     from django_strawberry_framework.forms.sets import DjangoFormMutation
 
@@ -118,12 +120,17 @@ def _require_sync_bool_auth_result(value: object, *, owner: str, method: str) ->
     return allowed
 
 
+def is_permission_class(value: object) -> TypeIs[WritePermissionClass]:
+    """Whether ``value`` is a permission class: a class with a callable ``has_permission``."""
+    return isinstance(value, type) and callable(_safe_attr(value, "has_permission"))
+
+
 def run_permission_classes(
     mutation_self: DjangoMutation | DjangoFormMutation,
     info: Info[object, object],
     operation: str,
     data: object,
-    instance: models.Model | None,
+    instance: object,
 ) -> bool:
     """Run every ``Meta.permission_classes`` entry; deny as soon as one denies.
 
@@ -191,10 +198,8 @@ class DjangoModelPermission:
         info: Info,
         mutation: type[_ModelResolvingMutation],
         operation: str,
-        # basedpyright: consumer hook: a narrower base fails an override typing its own data
-        data: Any,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - consumer hook; an override narrows it
-        # basedpyright: consumer hook: an override typing ``Item | None`` fails a narrower base
-        instance: Any = None,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401 - consumer hook; an override narrows it
+        data: object,
+        instance: object = None,
     ) -> bool:
         """Return whether the request user holds the model perm for ``operation``.
 
@@ -208,7 +213,7 @@ class DjangoModelPermission:
         """
         del data, instance  # accepted for the spec signature; unused by the model check.
         request = request_from_info(info, family_label="DjangoMutation")
-        user = getattr(request, "user", None)
+        user = read_attr(request, "user", None)
         if user is None:
             return False
         # Class-creation validation already required the seam to resolve a model.
@@ -219,7 +224,7 @@ class DjangoModelPermission:
         # is the same authorization-bypass class ``_require_sync_bool_auth_result``
         # closes for ``has_permission`` / ``check_permission`` (0.0.14 auth hardening).
         return _require_sync_bool_auth_result(
-            user.has_perm(codename),
+            call_method(user, "has_perm", codename),
             owner=type(user).__name__,
             method="has_perm",
         )

@@ -360,6 +360,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/utils/test_init.py",
     "tests/utils/test_input_values.py",
     "tests/utils/test_inputs.py",
+    "tests/utils/test_narrowing.py",
     "tests/utils/test_permissions.py",
     "tests/utils/test_policies.py",
     "tests/utils/test_querysets.py",

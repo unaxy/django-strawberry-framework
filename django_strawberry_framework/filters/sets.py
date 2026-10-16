@@ -53,7 +53,6 @@ from django_filters.conf import settings as _df_settings
 from django_filters.exceptions import FieldLookupError
 from django_filters.utils import get_model_field, resolve_field, try_dbfield
 from graphql import GraphQLError
-from strawberry import UNSET
 from typing_extensions import override
 
 from django_strawberry_framework.conf import max_flat_filters_setting
@@ -82,7 +81,16 @@ from django_strawberry_framework.sets_mixins import (
     should_cache_expansion,
 )
 from django_strawberry_framework.types.relay import implements_relay_node
-from django_strawberry_framework.utils._narrowing import dict_items, is_dict, is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import (
+    class_dict,
+    dict_items,
+    dict_of,
+    is_dict,
+    is_list_or_tuple,
+    is_str,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
     coded_error_extensions,
@@ -92,6 +100,7 @@ from django_strawberry_framework.utils.input_values import (
     LEAF,
     LOGIC,
     RELATED,
+    UNSET,
     SetInputTraversal,
     is_inactive_value,
     iter_active_fields,
@@ -121,10 +130,12 @@ from django_strawberry_framework.utils.relations import (
     ClassifiedPath,
     classify_path,
     is_many_side_relation_kind,
+    is_model_class,
     leading_relation_hops,
     path_traverses_to_many,
     relation_kind,
 )
+from django_strawberry_framework.utils.typing import call_forwarded
 
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
@@ -164,14 +175,14 @@ from .inputs import (
 _LOGIC_PYTHON_ATTRS: frozenset[str] = frozenset(op.python_attr for op in LOGIC_OPERATORS)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Generator, ItemsView, Iterator, Mapping, Sequence
     from types import MethodType
     from typing import TypeAlias
 
     from django.forms import Field as FormField
     from django.http import HttpRequest
     from django_filters.filterset import FilterSetOptions
-    from typing_extensions import Self
+    from typing_extensions import Self, TypeIs
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
@@ -190,6 +201,24 @@ else:
 
 _M = TypeVar("_M", bound=models.Model)
 _EntryT = TypeVar("_EntryT")
+
+if TYPE_CHECKING:
+
+    def _try_dbfield(
+        _fn: Callable[[type[ModelField]], _EntryT | None],
+        _field_class: type[ModelField],
+        /,
+    ) -> _EntryT | None:
+        """django-filter's ``try_dbfield``, typed as upstream calls ``fn``: with each MRO class.
+
+        The stub types ``fn`` as taking a field instance and ``field_class`` as a ``Field``
+        subclass; upstream calls ``fn`` with each CLASS on the MRO, and ``filter_for_lookup``
+        passes it a reverse relation's ``ForeignObjectRel`` class too.
+        """
+        ...
+
+else:
+    _try_dbfield = try_dbfield
 
 
 # Process-lifetime memo for ``_lookups_for_field``, keyed by field CLASS.
@@ -240,11 +269,7 @@ def _lookups_for_field(model_field: ModelField | None) -> list[str]:
     field_class = type(model_field)
     cached = _lookups_for_field_class_cache.get(field_class)
     if cached is None:
-        cached = [
-            lookup_expr
-            for lookup_expr, lookup in model_field.get_lookups().items()
-            if not issubclass(lookup, models.Transform)
-        ]
+        cached = _non_transform_lookups(model_field.get_lookups())
         _lookups_for_field_class_cache[field_class] = cached
     return list(cached)
 
@@ -361,7 +386,7 @@ def _forward_relation_extra(field: ForeignKeyField) -> dict[str, object]:
     return {
         "queryset": filterset.remote_queryset(field),
         "to_field_name": field.remote_field.field_name,
-        "null_label": _df_settings.NULL_CHOICE_LABEL if field.null else None,
+        "null_label": read_attr(_df_settings, "NULL_CHOICE_LABEL") if field.null else None,
     }
 
 
@@ -383,7 +408,7 @@ def _reverse_o2o_extra(field: OneToOneRel) -> dict[str, object]:
         # calls it for a ``ForeignObjectRel`` too (``related_model`` + limit choices). It rejects a
         # reverse relation for ``Field``
         "queryset": filterset.remote_queryset(field),  # pyright: ignore[reportArgumentType]
-        "null_label": _df_settings.NULL_CHOICE_LABEL if field.null else None,
+        "null_label": read_attr(_df_settings, "NULL_CHOICE_LABEL") if field.null else None,
     }
 
 
@@ -497,11 +522,7 @@ def _entry_by_mro(
     ``field_class``'s MRO, so each read is one of ``table``'s values. The one place this
     module calls it, so the stub's gaps are stated once.
     """
-    # basedpyright: typeshed types ``try_dbfield``'s ``fn`` as taking a field instance and
-    # ``field_class`` as a ``Field`` subclass; upstream calls ``fn`` with each CLASS on the MRO
-    # and ``filter_for_lookup`` passes it a reverse relation's ``ForeignObjectRel`` class too.
-    # It rejects a class-keyed ``dict.get`` as ``fn`` and a ``ForeignObjectRel`` class
-    return try_dbfield(table.get, field_class)  # pyright: ignore[reportArgumentType]
+    return _try_dbfield(table.get, field_class)
 
 
 # ======================================================================
@@ -1187,7 +1208,7 @@ def _null_value_is_absent(filter_instance: ChoiceFilter) -> bool:
     if issubclass(field_class, forms.ModelChoiceField):
         absent = None
     elif issubclass(field_class, forms.TypedChoiceField):
-        absent = filter_instance.extra.get("empty_value", "")
+        absent = dict_of(filter_instance.extra).get("empty_value", "")
     if null_value is None or absent is None:
         return null_value is absent
     if type(null_value) is not str or type(absent) is not str:
@@ -1667,7 +1688,7 @@ def _relation_key_value(value: object, attname: str) -> object:
     instead. Every other value (a raw key, a GlobalID) passes unchanged.
     """
     if isinstance(value, models.Model):
-        return getattr(value, attname)
+        return read_attr(value, attname)
     if is_list_or_tuple(value):
         return [_relation_key_value(member, attname) for member in value]
     if isinstance(value, models.QuerySet):
@@ -1909,6 +1930,38 @@ def _flat_filter_limit() -> int:
     return limit
 
 
+def _non_transform_lookups(lookups: Mapping[str, object]) -> list[str]:
+    """Return the lookup names in ``lookups`` whose class is not a ``Transform``."""
+    return [
+        lookup_expr
+        for lookup_expr, lookup in lookups.items()
+        if not (isinstance(lookup, type) and issubclass(lookup, models.Transform))
+    ]
+
+
+def _cleaned_items(form: forms.BaseForm) -> ItemsView[str, object]:
+    """Return the bound filter form's ``cleaned_data`` items; django-stubs types the values ``Any``."""
+    return form.cleaned_data.items()
+
+
+def _own_related_filters(filterset: type[object]) -> Mapping[str, RelatedFilter]:
+    """Return the ``related_filters`` the metaclass stored in ``filterset``'s own namespace.
+
+    Read from the class's own ``__dict__``, so an inherited map is never mistaken for the
+    set's own; a set the metaclass stored none on declares none.
+    """
+    stored = class_dict(filterset).get("related_filters")
+    return {} if stored is None else require(stored, _is_related_filter_map)
+
+
+def _is_related_filter_map(value: object) -> TypeIs[dict[str, RelatedFilter]]:
+    """Whether ``value`` is a ``dict`` of ``RelatedFilter`` declarations keyed by field name."""
+    return is_dict(value) and all(
+        is_str(name) and isinstance(declaration, RelatedFilter)
+        for name, declaration in dict_items(value)
+    )
+
+
 def _reachable_filtersets(filterset: type[FilterSet], scope: _ExpansionScope) -> frozenset[int]:
     """Return the ids of ``filterset`` and every filter set its ``RelatedFilter`` declarations reach.
 
@@ -1926,7 +1979,7 @@ def _reachable_filtersets(filterset: type[FilterSet], scope: _ExpansionScope) ->
     pending = [filterset]
     while pending:
         current = pending.pop()
-        declarations: Mapping[str, RelatedFilter] = current.__dict__.get("related_filters", {})
+        declarations = _own_related_filters(current)
         for declaration in declarations.values():
             target = declaration.filterset
             if target is not None and id(target) not in reached:
@@ -2340,10 +2393,7 @@ class FilterSet(
             if model is not None:
                 # The metaclass stores ``related_filters`` from
                 # ``sets_mixins.py::collect_related_declarations`` (``RelatedFilter`` only).
-                related_filters_val: Mapping[str, RelatedFilter] = cls.__dict__.get(
-                    "related_filters",
-                    OrderedDict(),
-                )
+                related_filters_val = _own_related_filters(cls)
                 reject_captured_branches(
                     cls,
                     related_filters_val,
@@ -2488,10 +2538,7 @@ class FilterSet(
         # ``related_filters`` yet. Expanding an inherited map here would leak
         # removed relations into django-filter's class-level ``base_filters``
         # snapshot.
-        declarations: Mapping[str, RelatedFilter] = cls.__dict__.get(
-            "related_filters",
-            OrderedDict(),
-        )
+        declarations = _own_related_filters(cls)
         own = len(filters)
         for filter_name, f in declarations.items():
             _require_relation_path(cls, filter_name, f)
@@ -2844,11 +2891,17 @@ class FilterSet(
             # ``MultipleChoiceField``, NOT a model-backed field), which needs
             # no ``queryset`` and accepts an empty ``choices`` set, so the
             # forwarded extras can never leave it under-configured.
-            own_pk_replacement = own_pk_filter_class(
-                field_name=default.field_name,
-                lookup_expr=default.lookup_expr,
-                distinct=requires_distinct,
-                **default.extra,
+            # ``Filter.__init__`` keeps every kwarg but these three in ``extra``, so the
+            # forwarded extras never repeat one of them.
+            own_pk_replacement = call_forwarded(
+                own_pk_filter_class,
+                (),
+                {
+                    "field_name": default.field_name,
+                    "lookup_expr": default.lookup_expr,
+                    "distinct": requires_distinct,
+                    **default.extra,
+                },
             )
             _stamp(own_pk_replacement, "package_replacement")
             return own_pk_replacement
@@ -3025,11 +3078,7 @@ class FilterSet(
         result (``try_dbfield``). The ownership oracle and the relation null test read
         this same merged map, so neither can drift from upstream's selection.
         """
-        merged_defaults = dict(cls.FILTER_DEFAULTS)
-        overrides = getattr(cls._meta, "filter_overrides", None)
-        if overrides:
-            merged_defaults.update(overrides)
-        return merged_defaults
+        return {**cls.FILTER_DEFAULTS, **cls._meta.filter_overrides}
 
     @classmethod
     def _null_test_filter_for_relation(
@@ -3497,8 +3546,8 @@ class FilterSet(
                 if pair is not None:
                     target_definition, _ = pair
                     return getattr(target_definition, "origin", None)
-        related_model = getattr(field, "related_model", None)
-        if related_model is None:
+        related_model = read_attr(field, "related_model", None)
+        if not is_model_class(related_model):
             return None
         # ``registry.get`` owns the primary-first precedence (its first
         # return state IS the declared primary; the lone-type fallback is
@@ -5115,8 +5164,7 @@ class FilterSet(
         candidates: Mapping[str, CandidateFilterMetadata] = (
             snapshot.candidates if snapshot is not None else {}
         )
-        cleaned_data: Mapping[str, object] = self.form.cleaned_data
-        for name, value in cleaned_data.items():
+        for name, value in _cleaned_items(self.form):
             candidate = candidates.get(name)
             filter_instance = self._filter_named(name)
             if type(self)._flat_leaf_walk(filter_instance) is not None:

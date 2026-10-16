@@ -366,7 +366,7 @@ import asyncio
 import contextlib
 import math
 import time
-from typing import TYPE_CHECKING, Any, TypeVar, cast, get_origin
+from typing import TYPE_CHECKING, TypeVar, cast, get_origin
 
 from django.core.exceptions import DisallowedHost
 from django.http import HttpRequest
@@ -380,7 +380,7 @@ from .extensions.error_policy import (
     masking_is_active,
     schema_error_policy,
 )
-from .utils._narrowing import is_class
+from .utils._narrowing import is_class, read_attr
 from .utils.sessions import (
     actor_lease,
     connection_was_authenticated,
@@ -388,6 +388,7 @@ from .utils.sessions import (
     scope_key,
     session_store_class,
 )
+from .utils.typing import call_forwarded
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, MutableMapping
@@ -1579,24 +1580,23 @@ class _StopAwareSchema:
         self._schema: BaseSchema = schema
         self._consumer: _RevocationOwner = consumer
 
-    # basedpyright: verbatim forward to BaseSchema.subscribe; uncapped strawberry may add params
-    async def subscribe(self, *args: Any, **kwargs: Any) -> AsyncGenerator[object, None]:  # pyright: ignore[reportExplicitAny]
+    async def subscribe(self, *args: object, **kwargs: object) -> AsyncGenerator[object, None]:
         """Return the real schema's subscription results, wrapped so they can stop.
 
-        The seam the legacy ``graphql-ws`` handler reads.
+        The seam the legacy ``graphql-ws`` handler reads. Forwarded verbatim, so
+        a parameter an uncapped Strawberry adds passes through.
         """
-        return self._stoppable(await self._schema.subscribe(*args, **kwargs))
+        return self._stoppable(await call_forwarded(self._schema.subscribe, args, kwargs))
 
-    # basedpyright: verbatim forward to BaseSchema.stream; uncapped strawberry may add params
-    async def stream(self, *args: Any, **kwargs: Any) -> AsyncGenerator[object, None]:  # pyright: ignore[reportExplicitAny]
+    async def stream(self, *args: object, **kwargs: object) -> AsyncGenerator[object, None]:
         """Return the real schema's streamed results, wrapped so they can stop.
 
         The seam ``graphql-transport-ws`` reads, for EVERY operation type rather
-        than subscriptions alone.
+        than subscriptions alone. Forwarded verbatim, as ``subscribe`` is.
         """
         # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result
         # aliases in an ImportError fallback, so ``BaseSchema.stream``'s result carries Unknown
-        return self._stoppable(await self._schema.stream(*args, **kwargs))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        return self._stoppable(await call_forwarded(self._schema.stream, args, kwargs))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
 
     def _stoppable(self, source: AsyncGenerator[object, None]) -> AsyncGenerator[object, None]:
         """Wrap one upstream result source in the connection's stop-and-mask seam.
@@ -1785,11 +1785,6 @@ def _declares_hooks(base: object, hooks: tuple[str, ...]) -> bool:
     return is_class(origin) and all(callable(getattr(origin, hook, None)) for hook in hooks)
 
 
-def _class_attribute(owner: type[object], name: str) -> object:
-    """Read ``name`` off ``owner`` as the unproven ``object`` it is until a predicate checks it."""
-    return getattr(owner, name)
-
-
 def _is_consumer_base(base: object) -> TypeIs[type[RevalidatingGraphQLWSConsumer]]:
     """Whether ``base`` can be the revalidating consumer's base (its teardown and mount exist).
 
@@ -1842,12 +1837,12 @@ def build_revalidating_consumer_class(
     # variables typed over the view's own ``Context`` / ``RootValue`` type variables,
     # which a read through the class leaves unbound, and the adapter as a factory.
     consumer_base: object = base_consumer_cls
-    transport_ws_handler_base = _class_attribute(
+    transport_ws_handler_base = read_attr(
         base_consumer_cls,
         "graphql_transport_ws_handler_class",
     )
-    graphql_ws_handler_base = _class_attribute(base_consumer_cls, "graphql_ws_handler_class")
-    websocket_adapter_base = _class_attribute(base_consumer_cls, "websocket_adapter_class")
+    graphql_ws_handler_base = read_attr(base_consumer_cls, "graphql_ws_handler_class")
+    websocket_adapter_base = read_attr(base_consumer_cls, "websocket_adapter_class")
     if not (
         _is_consumer_base(consumer_base)
         and _is_transport_ws_handler_base(transport_ws_handler_base)

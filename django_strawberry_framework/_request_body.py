@@ -127,24 +127,10 @@ from io import BytesIO
 from typing import TYPE_CHECKING
 
 from . import logger
+from .utils._narrowing import call_method, read_attr
 
 if TYPE_CHECKING:
-    from typing import Protocol
-
     from django.http import HttpRequest
-
-    class _ProbeStream(Protocol):
-        """The three calls the size probe makes on a request's byte source.
-
-        A foreign stream may lack any of them; the probe's callers guard each call
-        (EAFP) rather than checking, so the shape is declared for the type checker only.
-        """
-
-        def tell(self) -> object: ...
-
-        def seek(self, offset: int, whence: int = 0, /) -> object: ...
-
-        def close(self) -> None: ...
 
 
 __all__ = ("body_exceeds_limit",)
@@ -279,7 +265,7 @@ def body_exceeds_limit(request: HttpRequest, limit: int) -> bool:
     """
     if hasattr(request, "_body"):
         return len(request._body) > limit
-    stream = getattr(request, "_stream", None)
+    stream = read_attr(request, "_stream", None)
     if stream is None or getattr(request, "_read_started", False):
         return False
     remaining = _measured_remaining(stream)
@@ -291,7 +277,7 @@ def body_exceeds_limit(request: HttpRequest, limit: int) -> bool:
     return remaining > limit
 
 
-def _measured_remaining(stream: _ProbeStream) -> int | _Probe:
+def _measured_remaining(stream: object) -> int | _Probe:
     """Return the unread byte count of ``stream``, or which way the probe failed.
 
     Three outcomes, never two: a positive ``int``,
@@ -412,7 +398,7 @@ def _measured_remaining(stream: _ProbeStream) -> int | _Probe:
     if not _declares_seekable(stream):
         return _Probe.UNMEASURABLE
     try:
-        position = stream.tell()
+        position = call_method(stream, "tell")
     except Exception:  # noqa: BLE001 - a probe that cannot report a position has not moved one
         return _Probe.UNMEASURABLE
     if type(position) is not int:
@@ -420,7 +406,7 @@ def _measured_remaining(stream: _ProbeStream) -> int | _Probe:
     if _lacks_seek(stream):
         return _Probe.UNMEASURABLE
     try:
-        end = stream.seek(0, os.SEEK_END)
+        end = call_method(stream, "seek", 0, os.SEEK_END)
     except Exception:  # noqa: BLE001 - the position is now unknown rather than known-intact
         end = None
         probed = False
@@ -488,7 +474,7 @@ def _lacks_seek(stream: object) -> bool:
         return False
 
 
-def _position_restored(stream: _ProbeStream, position: object) -> bool:
+def _position_restored(stream: object, position: object) -> bool:
     """Whether ``stream`` is provably back at ``position``.
 
     Verified with ``tell()`` rather than inferred from a ``seek`` that did not
@@ -499,14 +485,14 @@ def _position_restored(stream: _ProbeStream, position: object) -> bool:
     if type(position) is not int:
         return False
     try:
-        _ = stream.seek(position)
-        restored = stream.tell()
+        _ = call_method(stream, "seek", position)
+        restored = call_method(stream, "tell")
         return type(restored) is int and restored == position
     except Exception:  # noqa: BLE001 - an unverifiable restore is a failed restore
         return False
 
 
-def _bounded_read_exceeds_limit(request: HttpRequest, stream: _ProbeStream, limit: int) -> bool:
+def _bounded_read_exceeds_limit(request: HttpRequest, stream: object, limit: int) -> bool:
     """Measure by reading, and answer fail-closed if the stream will not be read.
 
     The bounded read's error boundary, kept separate from the read itself so that
@@ -546,7 +532,7 @@ def _bounded_read_exceeds_limit(request: HttpRequest, stream: _ProbeStream, limi
         return True
 
 
-def _measured_by_bounded_read(request: HttpRequest, stream: _ProbeStream, limit: int) -> bool:
+def _measured_by_bounded_read(request: HttpRequest, stream: object, limit: int) -> bool:
     """Read at most ``limit + 1`` bytes of ``stream``; report whether that exceeds ``limit``.
 
     Reads through ``request.read`` rather than ``stream.read`` so Django keeps
@@ -590,7 +576,7 @@ def _measured_by_bounded_read(request: HttpRequest, stream: _ProbeStream, limit:
         read_so_far += len(chunk)
     if read_so_far > limit:
         return True
-    stream.close()
+    _ = call_method(stream, "close")
     request._stream = BytesIO(b"".join(chunks))
     # basedpyright: django-stubs omits HttpRequest._read_started, which HttpRequest.read reads; the
     # omission reads as an unknown attribute

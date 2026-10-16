@@ -58,9 +58,10 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from django_strawberry_framework.exceptions import _safe_attr, _safe_call
+from django_strawberry_framework.utils._narrowing import call_method, is_str, read_attr, require
 from django_strawberry_framework.utils.relations import (
     RelationKind,
     is_single_column_foreign_key,
@@ -256,13 +257,14 @@ def _m2m_join_columns(field: object) -> tuple[str, ...]:
     and keys ``rel_obj_attr`` on those), so the related row contributes no link
     column of its own.
     """
-    # basedpyright: EAFP; ``related_model._meta`` is read inside the try/except below, which
-    # is the guard (synthetic doubles carry no model class)
-    related_model: Any = _safe_attr(field, "related_model")  # pyright: ignore[reportExplicitAny]
+    # ``related_model._meta`` is read inside the try/except below, which is the guard
+    # (synthetic doubles carry no model class).
+    related_model = _safe_attr(field, "related_model")
     if related_model is None:
         return ()
     try:
-        return (cast("str", related_model._meta.pk.attname),)
+        pk = read_attr(read_attr(related_model, "_meta"), "pk")
+        return (require(read_attr(pk, "attname"), is_str),)
     except BaseException:  # noqa: BLE001 - hostile object, contained by design
         return ()
 
@@ -284,15 +286,16 @@ def _generic_child_attname(field: object, name_attr: str) -> str | None:
     ``get_field`` resolves for a genuine ``GenericRelation``, so no defensive
     ``FieldDoesNotExist`` swallow is needed once both inputs exist.
     """
-    # basedpyright: EAFP; ``related_model._meta`` is read inside the try/except below, which
-    # is the guard (synthetic doubles carry no model class)
-    related_model: Any = _safe_attr(field, "related_model")  # pyright: ignore[reportExplicitAny]
+    # ``related_model._meta`` is read inside the try/except below, which is the guard
+    # (synthetic doubles carry no model class).
+    related_model = _safe_attr(field, "related_model")
     child_field_name = _safe_attr(field, name_attr)
     if related_model is None or child_field_name is None:
         return None
     try:
         # A resolved child field's ``attname`` is its column name, a string.
-        return cast("str", related_model._meta.get_field(child_field_name).attname)
+        child = call_method(read_attr(related_model, "_meta"), "get_field", child_field_name)
+        return require(read_attr(child, "attname"), is_str)
     except BaseException:  # noqa: BLE001 - hostile object, contained by design
         return None
 

@@ -49,6 +49,7 @@ from django_strawberry_framework.exceptions import (
 )
 
 from ._narrowing import (
+    call_method,
     dict_items,
     is_dict,
     is_frozenset,
@@ -58,9 +59,12 @@ from ._narrowing import (
     is_set_or_frozenset,
     is_str,
     is_tuple,
+    list_of,
+    read_attr,
 )
 from .canonical import base_container_values, canonical_sort_key
 from .imports import import_attr_if_importable
+from .input_values import UNSET
 
 # ``utils/strings.py`` is the owner of ``graphql_camel_name``;
 # re-imported here (the ``as`` form marks the explicit re-export) so existing
@@ -195,7 +199,7 @@ def optional_input_field(
     if widen:
         # Every flavor's converted annotation is a runtime annotation.
         annotation = cast("OptionalWidenable", annotation) | None
-        field_kwargs["default"] = strawberry.UNSET
+        field_kwargs["default"] = UNSET
     return annotation, field_kwargs
 
 
@@ -628,11 +632,10 @@ def _lazy_target(value: object) -> object:
     instead.
     """
     while issubclass(type(value), LazyObject):
-        lazy = cast("LazyObject[object]", value)
         # ``_wrapped`` / ``_setup`` are Django's own unwrap protocol (``empty`` until first use).
-        if lazy._wrapped is empty:
-            lazy._setup()
-        value = cast("object", lazy._wrapped)
+        if read_attr(value, "_wrapped") is empty:
+            _ = call_method(value, "_setup")
+        value = read_attr(value, "_wrapped")
     return value
 
 
@@ -932,9 +935,7 @@ def name_set_input_type_name(
 
 
 def normalize_field_name_sequence(
-    # basedpyright: EAFP; ``tuple(value)`` on an arbitrary Meta value runs inside the
-    # surrounding try/except, which is the guard
-    value: Any,  # pyright: ignore[reportExplicitAny]  # noqa: ANN401
+    value: object,
     *,
     label: str = "fields",
     flavor: str,
@@ -989,20 +990,22 @@ def normalize_field_name_sequence(
             "field order nondeterministic.",
         )
     try:
-        names = tuple(value)
+        entries = list_of(value)
     except BaseException as exc:
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be a readable sequence of field name strings; "
             f"got {_safe_type_name(value)}.",
         ) from exc
-    non_strings = [name for name in names if not is_str(name)]
+    non_strings = [name for name in entries if not is_str(name)]
     if non_strings:
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be a sequence of field name strings; "
             "got non-string entry(ies): "
             f"[{', '.join(_safe_arg_repr(name) for name in non_strings)}].",
         )
-    names = tuple(str.__str__(name) if type(name) is not str else name for name in names)
+    names = tuple(
+        str.__str__(name) if type(name) is not str else name for name in entries if is_str(name)
+    )
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     if duplicates:
         raise ConfigurationError(
@@ -1127,8 +1130,8 @@ def iter_provided_input_fields(data: object) -> Iterator[tuple[str, object, Stra
     fields: Sequence[StrawberryField] = getattr(definition, "fields", ())
     for field in fields:
         python_name = field.python_name
-        value: object = getattr(data, python_name, strawberry.UNSET)
-        if value is strawberry.UNSET:
+        value: object = getattr(data, python_name, UNSET)
+        if value is UNSET:
             continue
         yield python_name, value, field
 

@@ -43,7 +43,13 @@ from typing_extensions import override
 
 from django_strawberry_framework.conf import testing_endpoint_setting
 from django_strawberry_framework.exceptions import _safe_arg_repr
-from django_strawberry_framework.utils._narrowing import is_dict, is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import (
+    is_dict,
+    is_list_or_tuple,
+    read_attr,
+    require,
+)
+from django_strawberry_framework.utils.typing import call_forwarded, object_result
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Generator, Mapping
@@ -162,13 +168,22 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
         factors BELOW the not-calling-``super().query()`` decision, not around
         it - the async color still owns its own ``await self.request(...)``.
         """
-        data = self._decode(resp, type="multipart" if files else "json")
+        # Upstream's ``_decode`` returns the decoded body ``Any``; a GraphQL response body is a
+        # JSON object, whose members the engine's typed triple takes as they were decoded.
+        data = require(
+            object_result(self._decode, resp, type="multipart" if files else "json"),
+            is_dict,
+        )
 
-        response = Response(
-            errors=data.get("errors"),
-            data=data.get("data"),
-            extensions=data.get("extensions"),
-            response=resp,
+        response = call_forwarded(
+            Response,
+            (),
+            {
+                "errors": data.get("errors"),
+                "data": data.get("data"),
+                "extensions": data.get("extensions"),
+                "response": resp,
+            },
         )
 
         if assert_no_errors and response.errors is not None:
@@ -634,7 +649,8 @@ class GraphQLTestMixin:
         """
         details = msg if msg is not None else {"errors": resp.errors, "data": resp.data}
         # The mixin delegates to the host TestCase's assertions, so a bare `assert` would be wrong.
-        self.assertEqual(resp.response.status_code, 200, details)  # noqa: PT009
+        status_code = read_attr(read_attr(resp, "response"), "status_code")
+        self.assertEqual(status_code, 200, details)  # noqa: PT009
         self.assertIsNone(resp.errors, details)  # noqa: PT009
 
     def assertResponseHasErrors(  # noqa: N802 - unittest/graphene assertion vocabulary

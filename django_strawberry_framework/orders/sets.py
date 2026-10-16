@@ -38,7 +38,6 @@ from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
-from strawberry import UNSET
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import (
@@ -59,8 +58,13 @@ from django_strawberry_framework.sets_mixins import (
     require_re_readable_field_declaration,
     should_cache_expansion,
 )
-from django_strawberry_framework.utils._narrowing import is_exact_list, is_exact_pair
-from django_strawberry_framework.utils.input_values import SetInputTraversal
+from django_strawberry_framework.utils._narrowing import (
+    is_exact_list,
+    is_exact_pair,
+    read_attr,
+    require,
+)
+from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
 from django_strawberry_framework.utils.inputs import promote_set_meta_fields, read_set_meta_fields
 from django_strawberry_framework.utils.permissions import (
     set_bound_type,
@@ -76,6 +80,7 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.relations import (
     classify_path,
+    is_model_class,
     leading_relation_hops,
     non_pk_forward_link,
     order_column_paths,
@@ -587,7 +592,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             # level with the other ``.inputs`` symbols; ``inputs.py`` only
             # TYPE_CHECKING-imports ``OrderSet``, so the runtime cycle stays
             # inert without a deferred local import.
-            model = getattr(meta, "model", None)
+            model = read_attr(meta, "model", None)
             if model is None:
                 raise ConfigurationError(
                     f"{cls.__name__}.Meta.fields = '__all__' requires Meta.model "
@@ -612,7 +617,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             subject="OrderSet",
             accepted="'__all__' or a re-readable collection of field names",
         )
-        model = getattr(meta, "model", None)
+        model = read_attr(meta, "model", None)
         # ``require_re_readable_field_declaration`` refused anything but a collection.
         for field_path in cast("Collection[object]", meta_fields):
             # Entry-TYPE validation is unconditional: a model-less related-only
@@ -630,7 +635,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
                 )
             if model is not None:
                 try:
-                    _ = classify_path(model, field_path)
+                    _ = classify_path(require(model, is_model_class), field_path)
                 except PathResolutionError as exc:
                     raise ConfigurationError(
                         f"OrderSet {cls.__qualname__}.Meta.fields contains invalid "
