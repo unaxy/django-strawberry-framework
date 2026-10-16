@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast, get_origin
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast, get_origin
 
 import strawberry
 from strawberry import relay
@@ -1527,8 +1527,10 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         self,
         info: Info,
         operation: str,
-        data: object,
-        instance: object = None,
+        # basedpyright: consumer hook: a narrower base fails an override typing its own data
+        data: Any,  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401 - consumer hook; an override narrows it
+        # basedpyright: consumer hook: an override typing ``Item | None`` fails a narrower base
+        instance: Any = None,  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401 - consumer hook; an override narrows it
     ) -> bool:
         """Return whether the request is authorized for ``operation`` (spec-036 Decision 15).
 
@@ -1560,7 +1562,8 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         shared with the plain ``DjangoFormMutation`` (which is not a
         ``DjangoMutation`` subclass), so the authorization seam cannot fork.
         """
-        return run_permission_classes(self, info, operation, data, instance)
+        # basedpyright: the consumer-hook Any parameters above, handed on to the shared walk
+        return run_permission_classes(self, info, operation, data, instance)  # pyright: ignore[reportAny]
 
 
 if TYPE_CHECKING:

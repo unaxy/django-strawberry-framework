@@ -2275,6 +2275,39 @@ def test_lookup_direct_rhs_attribute_hook_never_dispatches() -> None:
     assert fired == []
 
 
+def test_lookup_direct_rhs_hook_scan_reads_past_a_metaclass_mro_property() -> None:
+    """The hook scan reads the MRO through ``type``'s own descriptor, never a metaclass's.
+
+    ``type.__getattribute__`` still consults a metaclass DATA descriptor, so a metaclass
+    declaring ``__mro__`` as a property could run code during the scan meant to reject
+    the type, and answer an MRO that hides the class defining the hook. ``type``'s own
+    getset descriptor answers the real MRO without dispatching anything.
+    """
+    fired: list[str] = []
+
+    class _LyingMroMeta(type):
+        @property
+        @override
+        def __mro__(cls) -> tuple[type[object], ...]:  # must never run
+            fired.append("__mro__")
+            return (object,)
+
+    class _HookedRhs(metaclass=_LyingMroMeta):
+        def __getattr__(self, name: str) -> None:  # must never run
+            fired.append(name)
+
+    source = Category.objects.filter(name="keep")
+    str(source.query)
+    _where_leaf(source.query).rhs = _HookedRhs()
+    sealed, defect = _seal_or_defect(source, Category, None)
+    assert sealed is None
+    assert defect == (
+        "untrusted",
+        "where clause lookup rhs defines the '__getattr__' attribute hook",
+    )
+    assert fired == []
+
+
 def test_lookup_direct_rhs_plain_object_fails_closed() -> None:
     """A direct lookup RHS that is not plain query data fails closed.
 

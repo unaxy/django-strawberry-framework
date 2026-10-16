@@ -77,6 +77,7 @@ from django_strawberry_framework.types.resolvers import (
     _make_relation_resolver,
     _visible_related_object,
 )
+from django_strawberry_framework.utils._narrowing import is_iterable
 from tests._info import make_info, response_path, unread_info
 
 if TYPE_CHECKING:
@@ -118,21 +119,20 @@ def _isolate_registry() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 def test_make_relation_resolver_many_side_is_named_resolve_field() -> None:
-    """Generated many-side resolver is named ``resolve_<field>``.
+    """Generated many-side resolver is named ``resolve_<field>`` and reads the relation's manager.
 
     Payload and SQL live in ``examples/fakeshop/test_query/test_products_visibility_api.py``.
     """
-    fake_field = SimpleNamespace(name="items", many_to_many=False, one_to_many=True)
-    resolver = _make_relation_resolver(_as_field(fake_field))
+    services.seed_data(1)
+    category = Category.objects.first()
+    assert category is not None
+    resolver = _make_relation_resolver(Category._meta.get_field("items"))
     assert resolver.__name__ == "resolve_items"
-
-    class FakeManager:
-        def all(self) -> list[int]:
-            return [1, 2, 3]
-
-    fake_info = make_info()
-    assert resolver(SimpleNamespace(items=FakeManager()), fake_info) == [1, 2, 3]
+    rows = resolver(category, make_info())
+    assert is_iterable(rows)
+    assert list(rows) == list(category.items.all())
 
 
 def test_make_relation_resolver_forward_is_named_resolve_field() -> None:

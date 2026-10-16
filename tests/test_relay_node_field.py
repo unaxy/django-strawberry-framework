@@ -14,6 +14,7 @@ contracts, ``SyncMisuseError`` discrimination (``original_error`` is not a wire
 field), and the public-export surface.
 """
 
+import re
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from typing import NoReturn, SupportsIndex
 
@@ -103,6 +104,24 @@ def _schema_with(
 _NODE_QUERY = "query ($id: ID!) { node(id: $id) { __typename ... on CategoryNode { name } } }"
 _CATEGORY_QUERY = "query ($id: ID!) { category(id: $id) { name } }"
 _CATEGORIES_QUERY = "query ($ids: [ID!]!) { categories(ids: $ids) { name } }"
+
+
+@pytest.mark.parametrize("factory", [DjangoNodeField, DjangoNodesField], ids=["node", "nodes"])
+def test_an_unannotated_assignment_fails_the_schema_build_on_the_resolver_any(
+    factory: Callable[[], object],
+) -> None:
+    """An assignment with no annotation takes the resolver's ``Any`` return and fails the build.
+
+    Strawberry falls back to the resolver's return annotation when the assignment
+    carries none; the factories' resolvers carry ``Any`` there, so graphql-core
+    refuses the field with the message the module docstring documents as
+    "annotate the assignment", rather than building a field of some other type.
+    """
+    category_node = _make_node_type("CategoryNode")
+    query_cls = strawberry.type(type("Query", (), {"node": factory()}))
+    finalize_django_types()
+    with pytest.raises(TypeError, match=re.escape("Unexpected type 'typing.Any'")):
+        strawberry.Schema(query=query_cls, config=strawberry_config(), types=[category_node])
 
 
 # ---------------------------------------------------------------------------

@@ -85,9 +85,11 @@ from typing_extensions import override
 from django_strawberry_framework.keyset import keyset_seek_sql
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    is_iterable,
     is_list_or_tuple,
     list_of,
     read_attr,
+    require,
 )
 from django_strawberry_framework.utils.connections import (
     assert_window_fetch_mode_for,
@@ -578,7 +580,7 @@ def _fetch_lateral_rows(queryset: LateralQuerySet) -> list[models.Model] | None:
         cursor.execute(sql, params)  # pyright: ignore[reportArgumentType]
         # DB-API ``fetchall`` returns the result rows as sequences of column values.
         raw_rows = call_method(cursor, "fetchall")
-        fetched = _apply_lateral_converters(spec, list_of(raw_rows), connection)
+        fetched = _apply_lateral_converters(spec, require(raw_rows, is_iterable), connection)
     return [_instantiate_row(spec, row, queryset.db) for row in fetched]
 
 

@@ -105,6 +105,7 @@ from django.db.models.expressions import (
 )
 from django.db.models.fields.reverse_related import ForeignObjectRel
 from django.db.models.lookups import Lookup
+from django.db.models.manager import BaseManager
 from django.db.models.query import (
     FlatValuesListIterable,
     ModelIterable,
@@ -211,12 +212,13 @@ if TYPE_CHECKING:
         @property
         def join_field(self) -> _JoiningRelation: ...
 
-    def is_manager(_value: object, /) -> TypeIs[models.Manager[models.Model]]:
-        """Return whether the value is a model ``Manager`` (a related manager included)."""
-        ...
+    def is_manager(_value: object, /) -> TypeIs[BaseManager[models.Model]]:
+        """Return whether the value is a model manager (a related manager included).
 
-    def is_queryset(_value: object, /) -> TypeIs[models.QuerySet[models.Model, object]]:
-        """Return whether the value is a ``QuerySet`` (subclasses included)."""
+        ``BaseManager`` rather than ``Manager``: Django builds a related manager by
+        subclassing the target's default manager class, which a
+        ``BaseManager.from_queryset(...)`` declaration leaves outside ``Manager``.
+        """
         ...
 
     class _PythonCoercing(Protocol):
@@ -227,8 +229,7 @@ if TYPE_CHECKING:
             ...
 
 else:
-    is_manager = models.Manager.__instancecheck__
-    is_queryset = models.QuerySet.__instancecheck__
+    is_manager = BaseManager.__instancecheck__
 
 
 # Django < 6.0 has no module-level constant; ``QuerySet._filter_or_exclude``

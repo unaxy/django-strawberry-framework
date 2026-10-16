@@ -26,7 +26,7 @@ across read and write.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from django_strawberry_framework.exceptions import ConfigurationError, _safe_arg_repr, _safe_attr
 from django_strawberry_framework.utils._narrowing import call_method, read_attr
@@ -130,7 +130,7 @@ def run_permission_classes(
     info: Info[object, object],
     operation: str,
     data: object,
-    instance: object,
+    instance: models.Model | None,
 ) -> bool:
     """Run every ``Meta.permission_classes`` entry; deny as soon as one denies.
 
@@ -198,8 +198,10 @@ class DjangoModelPermission:
         info: Info,
         mutation: type[_ModelResolvingMutation],
         operation: str,
-        data: object,
-        instance: object = None,
+        # basedpyright: consumer hook: a narrower base fails an override typing its own data
+        data: Any,  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401 - consumer hook; an override narrows it
+        # basedpyright: consumer hook: an override typing ``Item | None`` fails a narrower base
+        instance: Any = None,  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401 - consumer hook; an override narrows it
     ) -> bool:
         """Return whether the request user holds the model perm for ``operation``.
 

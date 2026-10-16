@@ -127,7 +127,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Final, Literal, TypeGuard, TypeVar, cast, overload
 
 from django.core.exceptions import FieldDoesNotExist
 from django.core.files import File
@@ -184,7 +184,6 @@ from django_strawberry_framework.utils.relations import (
     is_forward_many_to_many,
     is_single_column_foreign_key,
 )
-from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.utils.write_transaction import (
     assert_no_target_drift,
     base_locked_queryset,
@@ -227,7 +226,7 @@ from .serializer_converter import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Iterator, Mapping
+    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
     from typing import Protocol, TypeAlias
 
     from django.db import models
@@ -1526,8 +1525,12 @@ def _scope_relation_querysets_to_visibility(
     _scope_specs_over_serializer(_write_surface_specs(mutation_cls), serializer, info)
 
 
-def _reads_a_queryset(validator: object) -> TypeIs[_QuerysetValidator]:
-    """Whether ``validator`` holds a ``queryset`` it reads during ``is_valid()``."""
+def _reads_a_queryset(validator: object) -> TypeGuard[_QuerysetValidator]:
+    """Whether ``validator`` holds a ``queryset`` it reads during ``is_valid()``.
+
+    ``TypeGuard``: a held ``queryset`` is read as a row source without checking its
+    shape, and a validator holding none says nothing about its type.
+    """
     return read_attr(validator, "queryset", None) is not None
 
 
@@ -1549,9 +1552,10 @@ def _pin_validator_querysets(serializer: DRFField, alias: str, *, path: str = ""
             if not _reads_a_queryset(validator):
                 pinned.append(validator)
                 continue
+            queryset = validator.queryset
             local_validator = copy.copy(validator)
             local_validator.queryset = pin_write_queryset(
-                local_validator.queryset.all(),
+                queryset.all(),
                 alias,
                 owner=f"{owner} {type(validator).__name__} queryset",
             )
@@ -2531,8 +2535,12 @@ def _serializer_write_step(
     validation branch builds its key map on that failure path only; a successful
     write never builds one.
     """
-    # Class validation gated ``Meta.serializer_class`` to a ``ModelSerializer`` subclass.
-    serializer_class = cast("type[DRFSerializer]", mutation_cls._mutation_meta.serializer_class)
+    # Class validation gated ``Meta.serializer_class`` to a ``ModelSerializer`` subclass; it is
+    # called with the merged kwargs mapping, which no static signature can check.
+    serializer_class = cast(
+        "Callable[..., DRFSerializer]",
+        mutation_cls._mutation_meta.serializer_class,
+    )
     pipeline = require_write_pipeline()
     alias = pipeline.alias
     # The authorized pk is an IMMUTABLE snapshot captured by the pipeline skeleton
@@ -2581,7 +2589,7 @@ def _guarded_serializer_write(
     instance: models.Model | None,
     provided_data: dict[str, object],
     *,
-    serializer_class: type[DRFSerializer],
+    serializer_class: Callable[..., DRFSerializer],
     alias: str,
     authorized_pk: object,
     hook_context: SerializerHookContext,
@@ -2617,7 +2625,7 @@ def _guarded_serializer_write(
         alias=alias,
         hook_context=hook_context,
     )
-    serializer = call_forwarded(serializer_class, (), kwargs)
+    serializer = serializer_class(**kwargs)
 
     # PROVE the schema-time write surface (GraphQL input + Meta.injected_fields)
     # and the runtime serializer AGREE before ``is_valid()`` runs, so a schema hook that

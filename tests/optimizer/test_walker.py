@@ -3559,20 +3559,19 @@ def test_window_slice_from_first_after_literals() -> None:
 
 
 def test_window_slice_coerces_int_literal_strings() -> None:
-    """``_coerce_pagination_int`` turns int-like strings to ints; passes others through.
+    """``_coerce_pagination_int`` turns int-like strings to ints; anything else reads as absent.
 
     Guards the literal-vs-variable divergence: an inline Int literal arrives as
     a string (``"2"``), a resolved variable as an ``int`` (``2``); both must drive
-    the slice. A non-int-castable value passes through so
-    ``SliceMetadata.from_arguments`` reaches its own ``isinstance`` gate (the
-    shipped malformed-value behavior) rather than the walker pre-judging it.
+    the slice. A malformed value answers ``None``, which every page-argument
+    reader treats exactly as an absent bound (the shipped malformed-value
+    behavior: the bound is skipped).
     """
     assert _coerce_pagination_int("2") == 2
     assert _coerce_pagination_int(2) == 2
     assert _coerce_pagination_int(None) is None
-    # Non-int-castable passes through untouched (SliceMetadata's isinstance gate
-    # then skips the bound - the shipped behavior for a malformed value).
-    assert _coerce_pagination_int("oops") == "oops"
+    assert _coerce_pagination_int("oops") is None
+    assert _coerce_pagination_int(2.5) is None
 
 
 def test_relay_max_results_from_optimizer_info_shapes() -> None:

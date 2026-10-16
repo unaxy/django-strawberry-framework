@@ -135,7 +135,6 @@ from django_strawberry_framework.utils.relations import (
     path_traverses_to_many,
     relation_kind,
 )
-from django_strawberry_framework.utils.typing import call_forwarded
 
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
@@ -2890,18 +2889,16 @@ class FilterSet(
             # backs onto ``_GlobalIDMultipleChoiceField`` (a plain
             # ``MultipleChoiceField``, NOT a model-backed field), which needs
             # no ``queryset`` and accepts an empty ``choices`` set, so the
-            # forwarded extras can never leave it under-configured.
-            # ``Filter.__init__`` keeps every kwarg but these three in ``extra``, so the
-            # forwarded extras never repeat one of them.
-            own_pk_replacement = call_forwarded(
-                own_pk_filter_class,
-                (),
-                {
-                    "field_name": default.field_name,
-                    "lookup_expr": default.lookup_expr,
-                    "distinct": requires_distinct,
-                    **default.extra,
-                },
+            # forwarded extras can never leave it under-configured. ``extra`` is
+            # django-filter's ``dict[str, Any]``, which no constructor parameter can type,
+            # so the cast takes the extras unchecked as ``Filter.__init__`` itself does; the
+            # three named kwargs keep the call's duplicate-keyword refusal.
+            build_own_pk_filter = cast("Callable[..., Filter]", own_pk_filter_class)
+            own_pk_replacement = build_own_pk_filter(
+                field_name=default.field_name,
+                lookup_expr=default.lookup_expr,
+                distinct=requires_distinct,
+                **default.extra,
             )
             _stamp(own_pk_replacement, "package_replacement")
             return own_pk_replacement
@@ -3078,7 +3075,9 @@ class FilterSet(
         result (``try_dbfield``). The ownership oracle and the relation null test read
         this same merged map, so neither can drift from upstream's selection.
         """
-        return {**cls.FILTER_DEFAULTS, **cls._meta.filter_overrides}
+        # ``dict(...)`` takes the overrides exactly as upstream's ``dict.update`` does: a
+        # mapping, or an iterable of ``(field class, entry)`` pairs.
+        return {**cls.FILTER_DEFAULTS, **dict(cls._meta.filter_overrides)}
 
     @classmethod
     def _null_test_filter_for_relation(

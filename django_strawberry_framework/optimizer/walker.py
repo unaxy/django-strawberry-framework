@@ -15,10 +15,7 @@ from strawberry.utils.str_converters import to_camel_case
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils._narrowing import (
-    dict_items,
-    is_dict,
     is_list,
-    is_str,
     list_of,
     read_attr,
     require,
@@ -88,7 +85,6 @@ if TYPE_CHECKING:
     from strawberry.types import Info
     from strawberry.types.field import StrawberryField
     from strawberry.types.nodes import Arguments
-    from typing_extensions import TypeIs
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
@@ -1890,21 +1886,17 @@ def _record_response_key_arguments(merged: SimpleNamespace, selection: FieldSele
     """
     response_key = _response_key(selection)
     payload: Arguments = getattr(selection, "arguments", None) or {}
-    # ``_merge_aliased_selections`` built this map from response keys to payloads.
-    per_key = require(read_attr(merged, "_optimizer_response_key_arguments"), _is_payload_by_key)
+    # ``_merge_aliased_selections`` built this map from response keys to payloads; the cast
+    # restates that, where re-validating the whole map on every merge would cost O(keys).
+    per_key = cast(
+        "dict[str, Arguments]",
+        read_attr(merged, "_optimizer_response_key_arguments"),
+    )
     if response_key in per_key and _normalized_alias_payload(
         per_key[response_key],
     ) != _normalized_alias_payload(payload):
         merged._optimizer_response_key_argument_conflict = True
     per_key[response_key] = payload
-
-
-def _is_payload_by_key(value: object) -> TypeIs[dict[str, Arguments]]:
-    """Whether ``value`` maps each response key to that occurrence's argument payload."""
-    return is_dict(value) and all(
-        is_str(key) and is_dict(payload) and all(is_str(name) for name in payload)
-        for key, payload in dict_items(value)
-    )
 
 
 def _normalized_alias_payload(payload: Arguments) -> Arguments:

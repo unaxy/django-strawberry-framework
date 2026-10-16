@@ -18,8 +18,8 @@ def test_require_instance_returns_an_instance_of_the_class_unchanged() -> None:
 
 
 def test_require_instance_refuses_a_value_of_another_class() -> None:
-    """A value outside the class raises ``TypeError`` naming the class it had to be."""
-    with pytest.raises(TypeError, match=r"^expected an instance of <class 'int'>$"):
+    """A value outside the class raises ``TypeError`` naming the class it had to be and its own."""
+    with pytest.raises(TypeError, match=r"^expected an instance of int, got str$"):
         _ = require_instance("1", int)
 
 
@@ -31,6 +31,6 @@ def test_require_returns_a_value_the_predicate_accepts_unchanged() -> None:
 
 
 def test_require_refuses_a_value_the_predicate_rejects() -> None:
-    """A value the predicate rejects raises ``TypeError``."""
-    with pytest.raises(TypeError, match=r"^the value is not of the type its source guarantees$"):
+    """A value the predicate rejects raises ``TypeError`` naming the value's type."""
+    with pytest.raises(TypeError, match=r"^expected the type the source guarantees, got int$"):
         _ = require(1, is_str)

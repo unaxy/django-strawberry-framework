@@ -119,6 +119,12 @@ if TYPE_CHECKING:
     #: the package's ``graphql-core<3.3`` pin excludes.
     DjangoStreamResult: TypeAlias = AsyncGenerator[StrawberryExecutionResult, None]
 
+    #: One ``extensions=`` entry as Strawberry resolves it: an instance answers for itself,
+    #: and anything else (a class, a factory) is called once per operation for one.
+    _ExtensionEntry: TypeAlias = (
+        SchemaExtension | type[SchemaExtension] | Callable[[], SchemaExtension]
+    )
+
     from .mutations.sets import WriteMutationClass
 
     class _DBAPIConnection(Protocol):
@@ -855,7 +861,7 @@ class DjangoSchema(strawberry.Schema):
         *args: object,
         resource_policy: ResourcePolicy | Mapping[str, object] | None = None,
         error_policy: ErrorPolicy | Mapping[str, object] | None = None,
-        extensions: Iterable[object] | None = None,
+        extensions: Iterable[_ExtensionEntry] | None = None,
         execution_context_class: type[ExecutionContext] | None = None,
         config: StrawberryConfig | None = None,
         **kwargs: object,
@@ -902,9 +908,11 @@ class DjangoSchema(strawberry.Schema):
                 error_policy=resolved_error,
             ),
         )
+        if execution_context_class is None:
+            execution_context_class = DjangoMutationExecutionContext
         forwarded: dict[str, object] = {
             **kwargs,
-            "execution_context_class": execution_context_class or DjangoMutationExecutionContext,
+            "execution_context_class": execution_context_class,
             "config": config,
         }
         # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result aliases
@@ -1156,7 +1164,16 @@ class DjangoSchema(strawberry.Schema):
         )
 
     @override
-    def execute_sync(self, *args: object, **kwargs: object) -> StrawberryExecutionResult:
+    def execute_sync(
+        self,
+        query: str | None,
+        variable_values: dict[str, object] | None = None,
+        context_value: object = None,
+        root_value: object = None,
+        operation_name: str | None = None,
+        allowed_operation_types: Iterable[OperationType] | None = None,
+        operation_extensions: dict[str, object] | None = None,
+    ) -> StrawberryExecutionResult:
         """Run the operation synchronously and mask what is RETURNED.
 
         The masking extension's teardown answers for a result upstream assigned
@@ -1168,10 +1185,28 @@ class DjangoSchema(strawberry.Schema):
         ``None``. No extension can reach that result, because none is still
         running when it is built - so the schema masks the value it hands back.
         """
-        return self._masked_return(call_forwarded(super().execute_sync, args, kwargs))
+        result = super().execute_sync(
+            query,
+            variable_values,
+            context_value,
+            root_value,
+            operation_name,
+            allowed_operation_types,
+            operation_extensions,
+        )
+        return self._masked_return(result)
 
     @override
-    async def execute(self, *args: object, **kwargs: object) -> StrawberryExecutionResult:
+    async def execute(
+        self,
+        query: str | None,
+        variable_values: dict[str, object] | None = None,
+        context_value: object = None,
+        root_value: object = None,
+        operation_name: str | None = None,
+        allowed_operation_types: Iterable[OperationType] | None = None,
+        operation_extensions: dict[str, object] | None = None,
+    ) -> StrawberryExecutionResult:
         """Run the operation asynchronously and mask what is RETURNED.
 
         The async twin of :meth:`execute_sync`, for the same reason and with the
@@ -1182,7 +1217,16 @@ class DjangoSchema(strawberry.Schema):
         here - each frame is masked at the transport's result source - and
         nothing about this override touches them.
         """
-        return self._masked_return(await call_forwarded(super().execute, args, kwargs))
+        result = await super().execute(
+            query,
+            variable_values,
+            context_value,
+            root_value,
+            operation_name,
+            allowed_operation_types,
+            operation_extensions,
+        )
+        return self._masked_return(result)
 
     def _masked_return(self, result: StrawberryExecutionResult) -> StrawberryExecutionResult:
         """Apply this schema's error policy to one returned execution result.

@@ -60,6 +60,12 @@ from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 from tests._idioms import ClaimsClassBase, ClassReadRaisesBase
 
 
+def _unchecked_entries(*entries: object) -> list[SchemaExtension]:
+    """Hand ``DjangoSchema(extensions=...)`` entries its annotation refuses, for the refusal under test."""
+    # basedpyright: trust boundary: hostile entries the schema's construction-time check refuses
+    return list(entries)  # pyright: ignore[reportReturnType]
+
+
 def _error_code(error: GraphQLError) -> object:
     """Return the ``code`` extension a refused operation's error carries."""
     assert error.extensions is not None
@@ -266,7 +272,7 @@ def test_a_subclass_of_an_enforcement_extension_is_refused_at_construction(entry
     the real thing by anything but exact type, so neither is admitted as one.
     """
     with pytest.raises(ConfigurationError, match="subclasses the package"):
-        DjangoSchema(query=DummyQuery, extensions=[entry])
+        DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
 
 
 def _field_node(name: str) -> FieldNode:
@@ -732,7 +738,7 @@ def test_an_accepted_extension_entry_still_runs_after_a_replacement_attempt(entr
     """
     schema = DjangoSchema(
         query=_BoundedRowQuery,
-        extensions=[entry],
+        extensions=_unchecked_entries(entry),
         resource_policy=ResourcePolicy(max_list_rows=1),
     )
     _assert_entry_survives_a_replacement_attempt(schema)
@@ -1397,7 +1403,7 @@ def test_an_extension_entry_strawberry_could_not_resolve_is_refused(entry: objec
     ``test_a_slotted_callable_factory_is_accepted_and_enforces``.
     """
     with pytest.raises(ConfigurationError, match="is none of those"):
-        DjangoSchema(query=DummyQuery, extensions=[entry])
+        DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
 
 
 @pytest.mark.parametrize(
@@ -1670,7 +1676,7 @@ def test_a_factory_producing_an_enforcement_authority_refuses_the_operation(entr
     and a singleton selector are the same fact spelled three ways, and none of
     them can be an enforcement authority.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[entry])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
 
     _assert_configuration_refusal(schema.execute_sync("{ hello }"))
 
@@ -1766,7 +1772,7 @@ def test_every_supported_entry_spelling_still_resolves_into_one_chain(entry: obj
     Each resolves between exactly one masking authority and exactly one resource
     authority, both of which are the schema's.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[entry])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
     resolved = schema.get_extensions(sync=True)
 
     assert schema.execute_sync("{ hello }").data == {"hello": "world"}
@@ -1802,7 +1808,11 @@ def test_a_refused_schema_answers_every_document_with_the_configuration_code(
     refusal is published first and the parse stage is handed a document of the
     package's own, so the client is told the same thing whatever it sent.
     """
-    schema = DjangoSchema(query=DummyQuery, mutation=DummyMutation, extensions=[lambda: 7])
+    schema = DjangoSchema(
+        query=DummyQuery,
+        mutation=DummyMutation,
+        extensions=_unchecked_entries(lambda: 7),
+    )
 
     result = schema.execute_sync(document)
 
@@ -1822,7 +1832,7 @@ def test_a_refused_schema_still_bounds_the_document_it_is_refusing() -> None:
     """
     schema = DjangoSchema(
         query=DummyQuery,
-        extensions=[lambda: 7],
+        extensions=_unchecked_entries(lambda: 7),
         resource_policy=ResourcePolicy(max_document_tokens=1),
     )
 
@@ -1864,7 +1874,7 @@ def test_a_refused_request_runs_no_parser_at_all(document: str, code: str) -> No
     """
     schema = DjangoSchema(
         query=DummyQuery,
-        extensions=[lambda: 7],
+        extensions=_unchecked_entries(lambda: 7),
         resource_policy=ResourcePolicy(max_document_tokens=3),
     )
     parsed: list[str] = []
@@ -1923,9 +1933,10 @@ def test_a_refused_schema_answers_every_operation_name_the_same_way(
     that cannot succeed - and upstream raises that failure out of the API,
     over a refusal already published. The name is normalized with the document.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
-    result = schema.execute_sync("{ hello }", operation_name=operation_name)
+    # basedpyright: trust boundary: a non-``str`` name a raw transport can still hand over
+    result = schema.execute_sync("{ hello }", operation_name=operation_name)  # pyright: ignore[reportArgumentType]
 
     assert result.data is None
     assert result.errors is not None
@@ -1944,9 +1955,10 @@ async def test_a_refused_schema_answers_an_awaited_operation_name_the_same_way(
     operation_name: object,
 ) -> None:
     """The asynchronous API refuses the same names, and raises out of none of them."""
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
-    result = await schema.execute("{ hello }", operation_name=operation_name)
+    # basedpyright: trust boundary: a non-``str`` name a raw transport can still hand over
+    result = await schema.execute("{ hello }", operation_name=operation_name)  # pyright: ignore[reportArgumentType]
 
     assert result.data is None
     assert result.errors is not None
@@ -1971,7 +1983,7 @@ async def test_a_refused_schema_streams_one_refusal_for_every_operation_name(
     saw a well-formed error frame carrying a different story than the sync API
     told about the same request.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
     # basedpyright: the non-str name among the refused names is the hostile input under test;
     # DjangoSchema.stream types the parameter as str | None
@@ -2037,7 +2049,7 @@ def test_a_refused_schema_answers_a_one_shot_transport_policy_synchronously() ->
     forbidden" - an error about the request, raised out of the API, in place of
     the published statement about the schema.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
     result = schema.execute_sync(
         "{ hello }",
@@ -2054,7 +2066,7 @@ def test_a_refused_schema_answers_a_one_shot_transport_policy_synchronously() ->
 @pytest.mark.asyncio
 async def test_a_refused_schema_answers_a_one_shot_transport_policy_when_awaited() -> None:
     """The asynchronous API reads the same snapshot, and raises out of nothing."""
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
     result = await schema.execute(
         "{ hello }",
@@ -2076,7 +2088,7 @@ async def test_a_refused_schema_streams_a_refusal_under_a_one_shot_transport_pol
     with no extensions at all, so a transport saw a well-formed error frame
     carrying a different story than the schema was telling.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
     stream = await schema.stream(
         "{ hello }",
@@ -2112,7 +2124,7 @@ def test_the_substitute_document_is_selected_from_a_one_shot_policy_too(
     gets the substitute of its own type, and the fallback that would have hidden
     a broken selection behind a query document never runs.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
     context = StrawberryExecutionContext(
         query="{ hello }",
         schema=schema,
@@ -2134,7 +2146,7 @@ def test_a_refused_request_snapshots_the_transport_policy_exactly_once() -> None
     ``tuple`` is asserted rather than an equal sequence, because a consumer type
     that merely compares equal is the input this replaces.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
     policy = _OneShotPolicy(OperationType.QUERY)
     context = StrawberryExecutionContext(
         query="{ hello }",
@@ -2156,7 +2168,7 @@ def test_a_refused_request_never_asks_a_transport_policy_whether_it_is_empty() -
     container supplied by a consumer is normalized by being read, never by being
     truth-tested.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
     result = schema.execute_sync(
         "{ hello }",
@@ -2174,7 +2186,7 @@ def test_a_refused_request_never_asks_a_transport_policy_whether_it_is_empty() -
     "schema_factory",
     [
         lambda: DjangoSchema(query=DummyQuery),
-        lambda: DjangoSchema(query=DummyQuery, extensions=[lambda: 7]),
+        lambda: DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7)),
     ],
     ids=["healthy", "refused"],
 )
@@ -2202,7 +2214,7 @@ def test_a_refused_request_keeps_the_text_it_arrived_with_and_selects_by_nothing
     neither the request's text nor the name it asked for can reach the parser,
     the selector, validation, or execution again.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
     context = StrawberryExecutionContext(
         query="{ hello }",
         schema=schema,
@@ -2244,7 +2256,7 @@ def test_the_substitute_document_is_of_a_type_the_transport_allows(
     nothing about the configuration. The documents are the package's own
     constants, so the substitution costs no parse.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
     context = StrawberryExecutionContext(
         query="{ hello }",
         schema=schema,
@@ -2266,7 +2278,7 @@ async def test_a_refused_schema_answers_a_streamed_operation_with_one_frame() ->
     own resume wrapper has to carry it the same way every other frame is
     carried.
     """
-    schema = DjangoSchema(query=DummyQuery, extensions=[lambda: 7])
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
     stream = await schema.stream("{ hello }")
     frames = [frame async for frame in stream]
@@ -2381,7 +2393,7 @@ def test_a_refused_chain_runs_no_consumer_hook_and_no_resolver() -> None:
             seen.append("resolver")
             return "world"
 
-    schema = DjangoSchema(query=ResolverQuery, extensions=[_Loud, lambda: 7])
+    schema = DjangoSchema(query=ResolverQuery, extensions=_unchecked_entries(_Loud, lambda: 7))
 
     _assert_configuration_refusal(schema.execute_sync("{ hello }"))
     assert seen == []

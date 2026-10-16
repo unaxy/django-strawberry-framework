@@ -83,7 +83,6 @@ from django_strawberry_framework.mutations.sets import (
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils._narrowing import is_class, read_attr, require
 from django_strawberry_framework.utils.inputs import make_shape_build_cache
-from django_strawberry_framework.utils.typing import call_forwarded
 
 from .inputs import (
     FORM,
@@ -490,13 +489,10 @@ def _default_get_form(
     the common "inject a kwarg" case. Single-sourced so the construction path is
     identical for both flavors.
     """
-    # Both flavors' ``_validate_meta`` store a ``require_subclass``-checked form class.
-    form_class = cast("FormClass", type(self)._mutation_meta.form_class)
-    return call_forwarded(
-        form_class,
-        (),
-        self.get_form_kwargs(info, data=data, files=files, instance=instance),
-    )
+    # Both flavors' ``_validate_meta`` store a ``require_subclass``-checked form class. It is
+    # called with the hook's kwargs mapping, which no static signature can check.
+    form_class = cast("Callable[..., forms.BaseForm]", type(self)._mutation_meta.form_class)
+    return form_class(**self.get_form_kwargs(info, data=data, files=files, instance=instance))
 
 
 def _build_and_stash_form_input(

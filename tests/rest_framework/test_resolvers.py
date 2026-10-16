@@ -132,7 +132,7 @@ from django_strawberry_framework.utils.inputs import (
     RELATION_SINGLE,
     InputFieldSpec,
 )
-from django_strawberry_framework.utils.querysets import SyncMisuseError, is_queryset
+from django_strawberry_framework.utils.querysets import SyncMisuseError
 from django_strawberry_framework.utils.write_transaction import (
     authorization_phase,
     managed_write_transaction,
@@ -153,6 +153,8 @@ from tests._info import make_info, unread_info
 
 if TYPE_CHECKING:
     from typing import TypeAlias, TypeVar
+
+    from typing_extensions import TypeIs
 
     from django_strawberry_framework.mutations.inputs import FieldError
     from django_strawberry_framework.rest_framework.resolvers import _WrittenRow
@@ -284,10 +286,15 @@ def _child_relation(field: object) -> DRFRelatedField:
     return child_relation_of(field)
 
 
+def _is_queryset(value: object) -> TypeIs[QuerySet[Model, object]]:
+    """Return whether ``value`` is a ``QuerySet`` (subclasses included)."""
+    return isinstance(value, QuerySet)
+
+
 def _validator_queryset_db(validator: UniqueValidator | UniqueTogetherValidator) -> str | None:
     """The alias a DRF uniqueness validator's queryset is pinned to (``None``: router decides)."""
     # drf-stubs types both validators' ``queryset`` as the bare generic ``QuerySet``.
-    return queryset_db(require(read_attr(validator, "queryset"), is_queryset))
+    return queryset_db(require(read_attr(validator, "queryset"), _is_queryset))
 
 
 @pytest.fixture(autouse=True)
