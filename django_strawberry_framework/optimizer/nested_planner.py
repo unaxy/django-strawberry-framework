@@ -49,6 +49,7 @@ from django_strawberry_framework.utils.connections import (
     relay_max_results_from_info as _relay_max_results_from_info,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
+from django_strawberry_framework.utils.querysets import expand_relation_order
 from django_strawberry_framework.utils.relations import instance_accessor
 
 from . import logger
@@ -1566,6 +1567,13 @@ def plan_connection_relation(
         if not keyed_windows:
             return NestedConnectionPlanResult(plan=plan)
 
+    # The window numbers its rows by ``Query.resolve_ref``, which reads a relation
+    # name as its key column, while the statement's ``ORDER BY`` (and the
+    # per-parent pipeline) compile it into the related model's ``Meta.ordering``:
+    # every reader below takes the order as the compiler runs it
+    # (``utils/querysets.py::expand_relation_order``). The keyset vocabulary
+    # above keeps the terms as written, as the root slicer does.
+    order_by = expand_relation_order(order_by, child_queryset.query)
     # A random order (``"?"`` or ``Random()``, ``plans.py::has_random_term``) is
     # a fresh draw each time the database evaluates it, and the window evaluates
     # its order more than once per statement, so no window can serve one page of

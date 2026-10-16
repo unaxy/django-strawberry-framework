@@ -56,7 +56,7 @@ from django_strawberry_framework.utils.connections import (
     assert_window_fetch_mode,
     window_range_plan,
 )
-from django_strawberry_framework.utils.querysets import applied_order
+from django_strawberry_framework.utils.querysets import applied_order, related_order_substitute
 from django_strawberry_framework.utils.relations import instance_accessor, relation_kind
 
 from .field_meta import FieldMeta
@@ -1133,7 +1133,10 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
     Handles both string order refs (``"name"``, ``"-name"``, ``"shelf__code"``,
     ``"pk"``) and ``OrderBy`` / ``F`` expressions (the NULLS-positioning and the
     to-many-aggregate paths). A relation path, an aggregate-annotation alias, or
-    any non-``F`` expression is treated as non-unique (so the pk is appended).
+    any non-``F`` expression is treated as non-unique (so the pk is appended), and
+    so is a relation NAME the compiler orders by the related model's
+    ``Meta.ordering`` (``utils/querysets.py::related_order_substitute``), a
+    one-to-one primary key's included: that ordering, not the key, decides ties.
     """
     if not effective:
         return False
@@ -1145,7 +1148,7 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
     if meta is None:
         return False
     pk = getattr(meta, "pk", None)
-    if pk is not None and ref in ("pk", getattr(pk, "name", None), getattr(pk, "attname", None)):
+    if pk is not None and ref in ("pk", getattr(pk, "attname", None)):
         return True
     if "__" in ref:
         # A relation traversal (e.g. ``shelf__code``) is not the model's own
@@ -1157,6 +1160,13 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
     except FieldDoesNotExist:
         # Annotation alias (e.g. a to-many aggregate) or a transform - not a
         # model column we can call unique.
+        return False
+    related = field_obj.related_model if field_obj.is_relation else None
+    related_opts = related._meta if isinstance(related, type) else None
+    if isinstance(effective[-1], str) and related_order_substitute(field_obj, related_opts, ref):
+        # The compiler orders a relation NAME - a one-to-one primary key's too - by the
+        # related model's ``Meta.ordering`` (``utils/querysets.py::expand_relation_order``),
+        # not by this unique key; an expression over it reads the key column.
         return False
     # A NULLABLE unique column is not a total order: SQL UNIQUE permits multiple
     # NULLs, so terminal ties among NULL rows are nondeterministic and the pk must
@@ -1194,6 +1204,12 @@ def effective_connection_order(
       empty ``query.order_by`` does NOT mean unordered - reading it in isolation
       would drop ``Meta.ordering`` and rewrite ``ORDER BY name`` into
       ``ORDER BY pk``.
+
+    The terms are as written. The pipeline hands them to ``QuerySet.order_by``,
+    whose compiler orders a relation name by the related model's
+    ``Meta.ordering``; the window, whose ``RowNumber`` would read that name as
+    the key column, expands it the same way first
+    (``utils/querysets.py::expand_relation_order``).
 
     Every read here ignores ``query.standard_ordering``: both callers run
     ``normalize_order_direction`` on the queryset first, so a hook / manager
@@ -1283,7 +1299,11 @@ def has_random_term(order_by: Sequence[object], query: Query) -> bool:
     ``Q`` / ``WhereNode``) through each of its children - a lookup's left side
     read as a name, its value as an expression, a string value staying the
     literal it is - so ``Random()`` under a composition, behind an alias or in
-    a ``When`` condition reading one is found as surely as ``"?"`` is.
+    a ``When`` condition reading one is found as surely as ``"?"`` is. The planner
+    asks after expanding each relation name into the related ``Meta.ordering``
+    the compiler orders it by (``utils/querysets.py::expand_relation_order``),
+    so a ``Random()`` reached through a relation is found too; a related ``"?"``
+    stays the relation name, which Django refuses with ``FieldError``.
 
     The nested window evaluates its order more than once per statement: the
     ``RowNumber`` window, the reversed window a ``last:`` page adds, and the
@@ -1556,6 +1576,13 @@ def apply_window_pagination(
     default ``True`` preserves every direct caller; the fast path treats a missing
     annotation as "not planned" and degrades safely
     (``connection.py::_resolve_from_window`` #"defensive per-parent").
+
+    ``order_by`` is the order as the compiler runs it
+    (``utils/querysets.py::expand_relation_order``): ``RowNumber`` resolves each
+    string as an ``F``, a relation name as its key column, while the outer
+    ``ORDER BY`` compiles that name into the related model's ``Meta.ordering``,
+    so an unexpanded name would number the rows in one order and return them
+    in another.
 
     The same ``order_by`` tuple is also applied to the queryset itself via
     ``.order_by(*order_by)``: the SQL window only determines the ROW-NUMBER

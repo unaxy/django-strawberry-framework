@@ -31,7 +31,19 @@ One shape per planner rule, each read off the wire and off the SQL the request e
   to one, in a ``When`` condition reading one) or from ``Meta.ordering`` - leaves
   ``GenreType.booksConnection`` unplanned, so each genre's page is one per-parent
   statement holding one random draw, structured exactly like the same window
-  under a column order.
+  under a column order. A ``shelf`` name under a random ``Shelf.Meta.ordering``
+  is such an order too: Django orders a relation name by its model's ordering.
+- An order naming a relation, which Django compiles into the related model's
+  ``Meta.ordering``: the window orders by that expansion, so a ``Book`` order by
+  ``shelf`` (hook or ``Meta.ordering``, either direction, reversed) under every
+  shape of ``Shelf.Meta.ordering``, a ``Book`` order by ``genres`` or ``loans``
+  (rows multiplied by the join), a ``Printing`` order by ``edition`` reaching the
+  nullable ``Edition.publisher_2``, a ``ShelfLabel`` order by its multi-column
+  ``shelf`` (its carrier columns, which Django never expands) and a
+  ``PatronProfile`` order by its one-to-one key (made total by that key) each
+  page from one ``ROW_NUMBER`` statement exactly as the library schema pages
+  them with no optimizer. A related ``"?"``, an ordering loop and a
+  condition item raise Django's own error with and without the optimizer.
 - Mixed-case Django names, whose published spelling reverses to a name the model
   lacks: ``Distributor.displayName`` projects its own column, the forward key
   ``Consignment.distributorRef`` plans one ``JOIN``, and its reverse
@@ -51,14 +63,30 @@ import pytest
 import strawberry
 from apps.library import models
 from apps.library import schema as library_schema
+from django.conf import settings
 from django.db import connection
-from django.db.models import Case, F, FloatField, Q, QuerySet, Value, When
-from django.db.models.functions import Abs, Random
+from django.db.models import Case, F, FloatField, Model, Q, QuerySet, Value, When
+from django.db.models.functions import Abs, Lower, Random
+from django.http import HttpRequest
+from django.http.response import HttpResponseBase
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext, register_lookup
-from graphql_client import JSONObject, assert_graphql_success
+from django.urls import clear_url_caches, path
+from graphql_client import JSONObject, assert_graphql_success, graphql_payload
+from strategy_schemas import make_django_type
 from strawberry.relay.utils import to_base64
 
+from django_strawberry_framework import (
+    DjangoConnectionField,
+    DjangoOptimizerExtension,
+    DjangoSchema,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+)
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import decode_global_id, global_id_for
+from django_strawberry_framework.views import DjangoGraphQLView
 
 
 def _sql_from_table(captured: CaptureQueriesContext, table: str) -> list[str]:
@@ -722,6 +750,20 @@ _RANDOM_BOOK_META_ORDERS: dict[str, tuple[object, ...]] = {
     "meta-composition": (Random().desc(),),
 }
 
+#: A book order naming the ``shelf`` relation under a random ``Shelf.Meta.ordering``,
+#: which the compiler orders it by: from the hook, and from ``Book.Meta.ordering``.
+_RANDOM_SHELF_BOOK_ORDERS: dict[str, _BookShuffle | tuple[object, ...]] = {
+    "related-hook": lambda books: books.order_by("shelf"),
+    "related-meta": ("shelf",),
+}
+
+#: Every random order row above, by its id.
+_RANDOM_BOOK_ORDERS: dict[str, _BookShuffle | tuple[object, ...]] = {
+    **_RANDOM_BOOK_HOOK_ORDERS,
+    **_RANDOM_BOOK_META_ORDERS,
+    **_RANDOM_SHELF_BOOK_ORDERS,
+}
+
 
 def _seed_shuffled_genres() -> dict[str, set[str]]:
     """Three genres holding five, one and no books; returns each genre's titles."""
@@ -753,8 +795,28 @@ def _page_structure(page: JSONObject) -> tuple[list[str], JSONObject]:
     return [edge["cursor"] for edge in page["edges"]], page["pageInfo"]
 
 
+def _order_books_by(
+    monkeypatch: pytest.MonkeyPatch,
+    order: _BookShuffle | tuple[object, ...],
+) -> None:
+    """Order ``BookType``'s queryset through its hook, or set ``Book.Meta.ordering`` to a tuple."""
+    if isinstance(order, tuple):
+        monkeypatch.setattr(models.Book._meta, "ordering", order)
+        return
+    shipped_hook = library_schema.BookType.get_queryset
+
+    def ordered_hook(
+        _cls: type[library_schema.BookType],
+        queryset: QuerySet[models.Book],
+        info: strawberry.Info[object, object],
+    ) -> QuerySet[models.Book]:
+        return order(shipped_hook(queryset, info))
+
+    monkeypatch.setattr(library_schema.BookType, "get_queryset", classmethod(ordered_hook))
+
+
 @pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
-@pytest.mark.parametrize("source", [*_RANDOM_BOOK_HOOK_ORDERS, *_RANDOM_BOOK_META_ORDERS])
+@pytest.mark.parametrize("source", list(_RANDOM_BOOK_ORDERS))
 @pytest.mark.django_db
 def test_random_book_order_leaves_genre_books_connection_to_the_per_parent_pipeline(
     source: str,
@@ -771,26 +833,17 @@ def test_random_book_order_leaves_genre_books_connection_to_the_per_parent_pipel
     window, each ordering by the database's random function. Every page is then a
     slice of ONE permutation, so its edge cursors and ``pageInfo`` are exactly the
     ones the shipped primary-key order serves through its window first (one
-    windowed statement), and its titles are distinct books of that genre.
+    windowed statement), and its titles are distinct books of that genre. A
+    ``shelf`` name under a random ``Shelf.Meta.ordering`` is the same order:
+    Django orders the name by that ordering.
     """
     titles = _seed_shuffled_genres()
     planned, planned_sql = _shuffled_books_pages(window)
     assert [len(planned_sql), "OVER (" in planned_sql[0]] == [1, True], planned_sql
 
-    if source in _RANDOM_BOOK_HOOK_ORDERS:
-        shuffle = _RANDOM_BOOK_HOOK_ORDERS[source]
-        shipped_hook = library_schema.BookType.get_queryset
-
-        def shuffled_hook(
-            _cls: type[library_schema.BookType],
-            queryset: QuerySet[models.Book],
-            info: strawberry.Info[object, object],
-        ) -> QuerySet[models.Book]:
-            return shuffle(shipped_hook(queryset, info))
-
-        monkeypatch.setattr(library_schema.BookType, "get_queryset", classmethod(shuffled_hook))
-    else:
-        monkeypatch.setattr(models.Book._meta, "ordering", _RANDOM_BOOK_META_ORDERS[source])
+    if source in _RANDOM_SHELF_BOOK_ORDERS:
+        monkeypatch.setattr(models.Shelf._meta, "ordering", (Random(),))
+    _order_books_by(monkeypatch, _RANDOM_BOOK_ORDERS[source])
     # The transform rows order through ``abs``, which Django registers on no field by default.
     with register_lookup(FloatField, Abs):
         shuffled, shuffled_sql = _shuffled_books_pages(window)
@@ -852,3 +905,597 @@ def test_string_literal_in_a_book_order_condition_keeps_genre_books_connection_w
 
     assert [len(served_sql), "OVER (" in served_sql[0]] == [1, True], served_sql
     assert served == planned
+
+
+#: Opens the error policy's pass-through gate so a refused order's ``FieldError`` reaches
+#: the wire; the toolbar middleware is dropped because ``config.urls`` computed its
+#: ``djdt`` routes under the ambient ``DEBUG=False``.
+_ERROR_POLICY_PASS_THROUGH = {
+    "DEBUG": True,
+    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
+}
+
+_MOUNTED: dict[str, strawberry.Schema | None] = {"schema": None}
+
+
+def _mounted_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _MOUNTED["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [path("graphql-test/", _mounted_view)]
+
+
+def _post(query: str, *, schema: strawberry.Schema | None = None) -> JSONObject:
+    """Post ``query`` and return the envelope, optimized or not.
+
+    With no ``schema`` it posts to the shipped ``/graphql/``, whose schema carries the
+    project's ``DjangoOptimizerExtension``; otherwise ``schema`` is mounted at
+    ``/graphql-test/`` for the one request.
+    """
+    if schema is None:
+        with override_settings(**_ERROR_POLICY_PASS_THROUGH):
+            return graphql_payload(query)
+    _MOUNTED["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__, **_ERROR_POLICY_PASS_THROUGH):
+            clear_url_caches()
+            return graphql_payload(query, url="/graphql-test/")
+    finally:
+        _MOUNTED["schema"] = None
+        clear_url_caches()
+
+
+def _unoptimized_library_schema() -> DjangoSchema:
+    """The library app's own ``Query`` with no extension: every relation resolves per parent."""
+    return DjangoSchema(query=library_schema.Query, config=strawberry_config())
+
+
+def _hold(
+    child_model: type[Model],
+    child_fields: tuple[str, ...],
+    parent_model: type[Model],
+    relation: str,
+    order: tuple[str, ...],
+) -> tuple[strawberry.Schema, strawberry.Schema]:
+    """A ``parents`` list over ``parent_model`` whose ``relation`` is a connection, optimized and not.
+
+    The child type's ``get_queryset`` orders by ``order``; ``parents`` lists every parent
+    by name, and ``children`` is the root connection over the child type.
+    """
+
+    def hook(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        _info: strawberry.Info[object, object],
+    ) -> QuerySet[Model]:
+        return queryset.order_by(*order)
+
+    registry.clear()
+    child_type = make_django_type(
+        "HeldChildType",
+        child_model,
+        child_fields,
+        namespace_extra={"get_queryset": classmethod(hook)},
+    )
+    parent_type = make_django_type(
+        "HeldParentType",
+        parent_model,
+        ("id", "name", relation),
+        meta_extra={"relation_shapes": {relation: "connection"}},
+    )
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        children = DjangoConnectionField(child_type)
+
+        @strawberry.field(graphql_type=list[parent_type])
+        def parents(self) -> QuerySet[Model]:
+            return parent_model._default_manager.order_by("name")
+
+    optimizer = DjangoOptimizerExtension()
+    optimized = strawberry.Schema(
+        query=Query,
+        config=strawberry_config(),
+        extensions=[lambda: optimizer],
+    )
+    return optimized, strawberry.Schema(query=Query, config=strawberry_config())
+
+
+def _seed_shelved_genres() -> None:
+    """Two genres of five books each over four shelves whose codes run against their ids.
+
+    By id the shelves are ``B`` (South), ``D`` (North), ``A`` (North), ``C`` (South), so
+    ``-code``, ``Lower("code")``, ``-pk`` and ``branch`` (South first) then ``-code``
+    each order them differently from their ids and from each other. Books are
+    shelved out of id order, the two genres' books interleave, two books sit on one
+    shelf in each genre (the primary key breaks that tie) and one book is in both.
+    """
+    north = models.Branch.objects.create(name="North")
+    south = models.Branch.objects.create(name="South")
+    shelves = [
+        models.Shelf.objects.create(code=code, branch=branch)
+        for code, branch in (
+            ("B", south),
+            ("D", north),
+            ("A", north),
+            ("C", south),
+        )
+    ]
+    fiction = models.Genre.objects.create(name="Fiction")
+    history = models.Genre.objects.create(name="History")
+    for index, shelf_index in enumerate(
+        (
+            2,
+            0,
+            3,
+            1,
+            0,
+            2,
+            1,
+            3,
+            3,
+        ),
+    ):
+        book = models.Book.objects.create(title=f"Book {index}", shelf=shelves[shelf_index])
+        book.genres.add(history if index % 2 else fiction)
+    history.books.add(models.Book.objects.get(title="Book 0"))
+
+
+def _genre_books_pages(
+    window: str,
+    *,
+    schema: strawberry.Schema | None = None,
+) -> tuple[dict[str, JSONObject], list[str]]:
+    """Each genre's ``booksConnection`` page under ``window``, and every SQL statement run."""
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(_SHUFFLED_BOOKS_QUERY % _SHUFFLED_BOOKS_WINDOWS[window], schema=schema)
+    assert "errors" not in payload, payload
+    pages = {
+        edge["node"]["name"]: edge["node"]["booksConnection"]
+        for edge in payload["data"]["allLibraryGenresConnection"]["edges"]
+    }
+    return pages, [entry["sql"] for entry in captured.captured_queries]
+
+
+#: A book order naming the ``shelf`` relation: from the hook ascending, descending and
+#: reversed, and from ``Book.Meta.ordering``.
+_SHELF_NAME_BOOK_ORDERS: dict[str, _BookShuffle | tuple[object, ...]] = {
+    "hook": lambda books: books.order_by("shelf"),
+    "hook-descending": lambda books: books.order_by("-shelf"),
+    "hook-reversed": lambda books: books.order_by("shelf").reverse(),
+    "meta": ("shelf",),
+}
+
+#: The ``Shelf.Meta.ordering`` a ``shelf`` name compiles into, and the ``Branch`` one a
+#: nested ``branch`` name compiles into: a descending name, an ``OrderBy`` with its own
+#: direction and nulls placement, a bare expression, the primary key, and a relation
+#: name expanding again.
+_SHELF_ORDERINGS: dict[str, tuple[tuple[object, ...], tuple[object, ...] | None]] = {
+    "name": (("-code",), None),
+    "order-by": ((F("code").desc(nulls_last=True),), None),
+    "expression": ((Lower("code"),), None),
+    "pk": (("-pk",), None),
+    "relation": (("branch", "-code"), ("-name",)),
+}
+
+
+@pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
+@pytest.mark.parametrize("shelf_ordering", list(_SHELF_ORDERINGS))
+@pytest.mark.parametrize("source", list(_SHELF_NAME_BOOK_ORDERS))
+@pytest.mark.django_db
+def test_relation_name_book_order_pages_genre_books_connection_like_the_pipeline(
+    source: str,
+    shelf_ordering: str,
+    window: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A book order naming ``shelf`` pages through the window as the per-parent pipeline pages it.
+
+    Django orders a relation NAME by the related model's ``Meta.ordering`` (the
+    compiler's ``find_ordering_name``), which a window cannot read off the name
+    itself. Under every spelling of the name, every shelf ordering and every page
+    window, the optimized request still plans ``booksConnection`` as one
+    ``ROW_NUMBER`` statement beside the genre page (two statements in all) and
+    serves each genre exactly the titles, edge cursors and ``pageInfo`` the
+    library schema serves with no optimizer.
+    """
+    _seed_shelved_genres()
+    shelves, branches = _SHELF_ORDERINGS[shelf_ordering]
+    monkeypatch.setattr(models.Shelf._meta, "ordering", shelves)
+    if branches is not None:
+        monkeypatch.setattr(models.Branch._meta, "ordering", branches)
+    _order_books_by(monkeypatch, _SHELF_NAME_BOOK_ORDERS[source])
+
+    optimized, optimized_sql = _genre_books_pages(window)
+    unoptimized, _ = _genre_books_pages(window, schema=_unoptimized_library_schema())
+
+    assert len(optimized_sql) == 2, optimized_sql
+    assert ["ROW_NUMBER" in sql.upper() for sql in optimized_sql] == [False, True], optimized_sql
+    assert optimized == unoptimized
+
+
+#: A ``Shelf.Meta.ordering`` (and the ``Branch.Meta.ordering`` it reaches) that Django
+#: cannot expand a ``shelf`` name into, with the start of the error it raises: a related
+#: ``"?"``, an ordering loop between the two models, and a condition, which is no order
+#: expression.
+_UNEXPANDABLE_SHELF_ORDERINGS: dict[
+    str,
+    tuple[tuple[object, ...], tuple[str, ...] | None, str],
+] = {
+    "random-name": (("?",), None, "Cannot resolve keyword '?' into field."),
+    "loop": (("branch",), ("shelves",), "Infinite loop caused by ordering."),
+    "condition": ((Q(code="A"),), None, "'Q' object has no attribute"),
+}
+
+
+@pytest.mark.parametrize("shelf_ordering", list(_UNEXPANDABLE_SHELF_ORDERINGS))
+@pytest.mark.parametrize("source", list(_SHELF_NAME_BOOK_ORDERS))
+@pytest.mark.django_db
+def test_unexpandable_relation_name_book_order_raises_djangos_error_with_and_without_optimizer(
+    source: str,
+    shelf_ordering: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``shelf`` name Django cannot expand raises Django's own error whether the window plans it or not.
+
+    The window keeps such a term as written, so the statement compiling it raises
+    the ``FieldError`` the per-parent pipeline raises: the optimized request fails
+    where its window statement runs (the genre page that fetches it) and the
+    unoptimized one at each genre's ``booksConnection``, both with Django's message
+    (an unresolvable name lists the field choices of the statement it compiled in,
+    and a condition fails on the direction method the order asked for).
+    """
+    _seed_shelved_genres()
+    shelves, branches, message = _UNEXPANDABLE_SHELF_ORDERINGS[shelf_ordering]
+    monkeypatch.setattr(models.Shelf._meta, "ordering", shelves)
+    if branches is not None:
+        monkeypatch.setattr(models.Branch._meta, "ordering", branches)
+    _order_books_by(monkeypatch, _SHELF_NAME_BOOK_ORDERS[source])
+    query = _SHUFFLED_BOOKS_QUERY % _SHUFFLED_BOOKS_WINDOWS["first"]
+
+    optimized = _post(query)
+    unoptimized = _post(query, schema=_unoptimized_library_schema())
+
+    raised = [
+        {error["message"].split(" Choices are:")[0] for error in payload["errors"]}
+        for payload in (optimized, unoptimized)
+    ]
+    assert raised[0] == raised[1], raised
+    assert [head.startswith(message) for head in raised[0]] == [True], raised
+
+
+#: Each held parent's nested connection under one window shape, with every edge cursor
+#: and the full ``pageInfo``; ``%s`` is the relation's field name, then the window.
+_HELD_QUERY = """
+query {
+  parents {
+    name
+    %s(%s) {
+      edges { cursor node { %s } }
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+    }
+  }
+}
+"""
+
+
+def _held_pages(
+    schema: strawberry.Schema,
+    relation: str,
+    window: str,
+    label: str,
+) -> tuple[dict[str, JSONObject], list[str]]:
+    """Each held parent's ``relation`` page under ``window``, and every SQL statement run."""
+    query = _HELD_QUERY % (relation, _SHUFFLED_BOOKS_WINDOWS[window], label)
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(query, schema=schema)
+    assert "errors" not in payload, payload
+    pages = {parent["name"]: parent[relation] for parent in payload["data"]["parents"]}
+    return pages, [entry["sql"] for entry in captured.captured_queries]
+
+
+def _seed_profiles_sharing_emails() -> None:
+    """Two genres favored by three patrons each, two of each genre's three sharing an email.
+
+    By id the emails run ``b``, ``a``, ``b`` under ``Fiction`` and ``a``, ``c``, ``a``
+    under ``History``, so an email order ties twice and only the primary key decides.
+    """
+    fiction = models.Genre.objects.create(name="Fiction")
+    history = models.Genre.objects.create(name="History")
+    seeded = (
+        (fiction, "b@example.com"),
+        (history, "a@example.com"),
+        (fiction, "a@example.com"),
+        (history, "c@example.com"),
+        (fiction, "b@example.com"),
+        (history, "a@example.com"),
+    )
+    for index, (genre, email) in enumerate(seeded):
+        patron = models.Patron.objects.create(name=f"Patron {index}", email=email)
+        models.PatronProfile.objects.create(
+            patron=patron,
+            postal_code=f"0000{index}",
+            favorite_genre=genre,
+        )
+
+
+#: The order a patron profile's one-to-one primary key compiles into under
+#: ``Patron.Meta.ordering = ["email"]``, made total by that key.
+_PROFILE_EMAIL_ORDER = '"library_patron"."email" ASC, "library_patronprofile"."patron_id" ASC'
+
+
+@pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
+@pytest.mark.django_db
+def test_one_to_one_key_name_order_is_made_total_and_pages_like_the_pipeline(
+    window: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile order naming its one-to-one primary key gets the key as its tiebreaker.
+
+    ``PatronProfile.patron`` is the profile's unique primary key, but Django orders
+    the NAME ``patron`` by ``Patron.Meta.ordering`` (here the shared ``email``), so
+    the key is appended as the tiebreaker on every path: the root ``children``
+    connection, the window planning a genre's ``favoringProfilesConnection`` (two
+    statements, one ``ROW_NUMBER``) and each per-parent statement without the
+    optimizer, which serves exactly the optimized pages.
+    """
+    _seed_profiles_sharing_emails()
+    monkeypatch.setattr(models.Patron._meta, "ordering", ["email"])
+    optimized, unoptimized = _hold(
+        models.PatronProfile,
+        ("postal_code",),
+        models.Genre,
+        "favoring_profiles",
+        ("patron",),
+    )
+
+    with CaptureQueriesContext(connection) as captured:
+        root = _post("{ children(first: 4) { edges { node { postalCode } } } }", schema=optimized)
+    planned, planned_sql = _held_pages(
+        optimized,
+        "favoringProfilesConnection",
+        window,
+        "postalCode",
+    )
+    served, served_sql = _held_pages(
+        unoptimized,
+        "favoringProfilesConnection",
+        window,
+        "postalCode",
+    )
+
+    assert [edge["node"]["postalCode"] for edge in root["data"]["children"]["edges"]] == [
+        "00001",
+        "00002",
+        "00005",
+        "00000",
+    ]
+    assert [_PROFILE_EMAIL_ORDER in entry["sql"] for entry in captured.captured_queries] == [True]
+    assert len(planned_sql) == 2, planned_sql
+    assert ["ROW_NUMBER" in sql.upper() for sql in planned_sql] == [False, True], planned_sql
+    assert _PROFILE_EMAIL_ORDER in planned_sql[1], planned_sql
+    assert [_PROFILE_EMAIL_ORDER in sql for sql in served_sql[1:]] == [True, True], served_sql
+    assert planned == served
+
+
+#: Each publisher's ``printings2Connection`` page under one window shape, with every edge
+#: cursor and the full ``pageInfo``.
+_PRINTINGS_QUERY = """
+query {
+  allLibraryPublishersConnection {
+    edges {
+      node {
+        name
+        printings2Connection(%s) {
+          edges { cursor node { runSize } }
+          pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _seed_jointly_issued_printings() -> None:
+    """Two publishers' press runs over four editions, two of them with no second house.
+
+    Each publisher's runs (``publisher_2``) cover every edition out of id order, one
+    edition twice, so an order by the edition's second house ties on ``NULL`` and on
+    the repeated edition, and only the primary key decides.
+    """
+    gollancz = models.Publisher.objects.create(name="Gollancz", house_code="HOUSE-G")
+    orbit = models.Publisher.objects.create(name="Orbit", house_code="HOUSE-O")
+    tor = models.Publisher.objects.create(name="Tor", house_code="HOUSE-T")
+    editions = [
+        models.Edition.objects.create(
+            isbn_13=f"978000000000{index}",
+            publisher=house,
+            publisher_2=second,
+        )
+        for index, (house, second) in enumerate(
+            (
+                (gollancz, tor),
+                (orbit, None),
+                (gollancz, orbit),
+                (tor, None),
+            ),
+        )
+    ]
+    for run_size, (publisher, edition) in enumerate(
+        (
+            (gollancz, 2),
+            (orbit, 3),
+            (gollancz, 0),
+            (orbit, 1),
+            (gollancz, 3),
+            (orbit, 1),
+            (gollancz, 1),
+            (orbit, 0),
+            (gollancz, 2),
+            (orbit, 2),
+        ),
+    ):
+        models.Printing.objects.create(
+            edition=editions[edition],
+            publisher_2=publisher,
+            run_size=run_size,
+        )
+
+
+def _printings_pages(
+    window: str,
+    *,
+    schema: strawberry.Schema | None = None,
+) -> tuple[dict[str, JSONObject], list[str]]:
+    """Each publisher's ``printings2Connection`` page under ``window``, and every SQL statement run."""
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(_PRINTINGS_QUERY % _SHUFFLED_BOOKS_WINDOWS[window], schema=schema)
+    assert "errors" not in payload, payload
+    pages = {
+        edge["node"]["name"]: edge["node"]["printings2Connection"]
+        for edge in payload["data"]["allLibraryPublishersConnection"]["edges"]
+    }
+    return pages, [entry["sql"] for entry in captured.captured_queries]
+
+
+@pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
+@pytest.mark.django_db
+def test_nullable_relation_name_reached_through_a_relation_order_pages_like_the_pipeline(
+    window: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A printing order by ``edition`` reaching the nullable ``publisher_2`` pages as the pipeline does.
+
+    ``Printing.Meta.ordering = ["edition"]`` compiles into ``Edition.Meta.ordering``
+    (``publisher_2``, a nullable key) and on into ``Publisher.Meta.ordering``
+    (``-name``), joined with a ``LEFT OUTER JOIN`` so an edition with no second house
+    keeps its runs. Each publisher's ``printings2Connection`` is still one
+    ``ROW_NUMBER`` statement beside the publisher page, serving exactly the pages,
+    cursors and ``pageInfo`` the library schema serves with no optimizer.
+    """
+    _seed_jointly_issued_printings()
+    monkeypatch.setattr(models.Printing._meta, "ordering", ["edition"])
+    monkeypatch.setattr(models.Edition._meta, "ordering", ["publisher_2"])
+    monkeypatch.setattr(models.Publisher._meta, "ordering", ["-name"])
+
+    planned, planned_sql = _printings_pages(window)
+    served, _ = _printings_pages(window, schema=_unoptimized_library_schema())
+
+    assert len(planned_sql) == 2, planned_sql
+    assert ["ROW_NUMBER" in sql.upper() for sql in planned_sql] == [False, True], planned_sql
+    assert "LEFT OUTER JOIN" in planned_sql[1], planned_sql
+    assert planned == served
+
+
+#: A book order naming a to-many relation, with the ``Meta.ordering`` of each model the
+#: name compiles into: the ``genres`` many-to-many, and the ``loans`` reverse key on into
+#: each loan's patron. Every book repeats once per row the relation joins.
+_TO_MANY_BOOK_ORDERS: dict[str, tuple[str, tuple[tuple[type[Model], tuple[str, ...]], ...]]] = {
+    "many-to-many": ("genres", ((models.Genre, ("-name",)),)),
+    "reverse-key": ("loans", ((models.Loan, ("patron",)), (models.Patron, ("-name",)))),
+}
+
+
+@pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
+@pytest.mark.parametrize("source", list(_TO_MANY_BOOK_ORDERS))
+@pytest.mark.django_db
+def test_to_many_relation_name_book_order_pages_genre_books_connection_like_the_pipeline(
+    source: str,
+    window: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A book order naming a to-many relation multiplies rows the same way through the window.
+
+    The compiler joins the relation to order by its model's ``Meta.ordering``, so a
+    book appears once per joined row; the window numbers exactly those rows, and each
+    genre's page, cursors and ``pageInfo`` equal the unoptimized library schema's,
+    served from one ``ROW_NUMBER`` statement beside the genre page.
+    """
+    _seed_shelved_genres()
+    patrons = [models.Patron.objects.create(name=name) for name in ("Ada", "Grace", "Linus")]
+    for index, book in enumerate(models.Book.objects.order_by("pk")):
+        for patron in patrons[index % 3 : index % 3 + 2]:
+            models.Loan.objects.create(book=book, patron=patron)
+    name, orderings = _TO_MANY_BOOK_ORDERS[source]
+    for model, ordering in orderings:
+        monkeypatch.setattr(model._meta, "ordering", ordering)
+    _order_books_by(monkeypatch, lambda books: books.order_by(name))
+
+    planned, planned_sql = _genre_books_pages(window)
+    served, _ = _genre_books_pages(window, schema=_unoptimized_library_schema())
+
+    assert len(planned_sql) == 2, planned_sql
+    assert ["ROW_NUMBER" in sql.upper() for sql in planned_sql] == [False, True], planned_sql
+    assert planned == served
+
+
+def _seed_labelled_shelves() -> None:
+    """Two branches with three shelves each, labelled out of code order, one shelf twice."""
+    for branch_name in ("North", "South"):
+        branch = models.Branch.objects.create(name=branch_name)
+        for code in ("s2", "s1", "s3"):
+            models.Shelf.objects.create(branch=branch, code=code)
+        for index, code in enumerate(
+            (
+                "s2",
+                "s1",
+                "s3",
+                "s1",
+            ),
+        ):
+            models.ShelfLabel.objects.create(
+                branch=branch,
+                shelf_code=code,
+                text=f"{branch_name} {index}",
+            )
+
+
+#: The ``Shelf.Meta.ordering`` declared beside a label's ``shelf`` order, or none: the
+#: multi-column relation orders by its two carrier columns either way.
+_LABEL_SHELF_ORDERINGS: dict[str, tuple[str, ...] | None] = {
+    "no-ordering": None,
+    "ordering-ignored": ("-code",),
+}
+
+
+@pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
+@pytest.mark.parametrize("shelf_ordering", list(_LABEL_SHELF_ORDERINGS))
+@pytest.mark.parametrize("order", ["shelf", "-shelf"])
+@pytest.mark.django_db
+def test_multi_column_relation_name_label_order_pages_like_the_pipeline(
+    order: str,
+    shelf_ordering: str,
+    window: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A label order naming the multi-column ``shelf`` relation pages through the window.
+
+    ``ShelfLabel.shelf`` lives in two carrier columns and its ``attname`` is its
+    name, so Django orders the name by both carriers and never by
+    ``Shelf.Meta.ordering``, declared or not; neither carrier is one key column the
+    window could read off the name. Each branch's ``shelfLabelsConnection`` is
+    one ``ROW_NUMBER`` statement beside the branch list, serving exactly the pages,
+    cursors and ``pageInfo`` the per-parent pipeline serves.
+    """
+    _seed_labelled_shelves()
+    shelves = _LABEL_SHELF_ORDERINGS[shelf_ordering]
+    if shelves is not None:
+        monkeypatch.setattr(models.Shelf._meta, "ordering", shelves)
+    optimized, unoptimized = _hold(
+        models.ShelfLabel,
+        ("text",),
+        models.Branch,
+        "shelf_labels",
+        (order,),
+    )
+
+    planned, planned_sql = _held_pages(optimized, "shelfLabelsConnection", window, "text")
+    served, _ = _held_pages(unoptimized, "shelfLabelsConnection", window, "text")
+
+    assert len(planned_sql) == 2, planned_sql
+    assert ["ROW_NUMBER" in sql.upper() for sql in planned_sql] == [False, True], planned_sql
+    assert planned == served

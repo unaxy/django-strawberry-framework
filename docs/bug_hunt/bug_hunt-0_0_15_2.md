@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 142 done, 112 to do.
+Progress: 143 done, 113 to do.
 
 ## Done
 
@@ -439,6 +439,13 @@ Progress: 142 done, 112 to do.
   a nested proxy) as the object it stands for, so `FilterSet` and `OrderSet` accept every lazy declaration their
   evaluated twin accepts and django-filter's list/tuple declared-filter allowance answers as for the target; 250 is its
   duplicate
+- [x] 252. A nested connection ordered by a relation name windowed on the key column while the pipeline compiled the
+  related model's `Meta.ordering`: fixed, `utils/querysets.py::expand_relation_order` gives the window, the reversed
+  window, the lateral column map, the random-order arm, the scalar-only projection and the index advisory the order as
+  Django's compiler runs it (forward, one-to-one, nullable, reverse, many-to-many, multi-hop and recursive names); a
+  related `Random()` goes per parent; an expanding one-to-one key name gets the pk tiebreak on every path; a multi-column
+  `ForeignObject` name windows on its carrier columns instead of raising; the keyset vocabulary still refuses a relation
+  name on both paths
 
 ## Outside review of the fixes
 
@@ -585,11 +592,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   gave four `base_filters` orders under `PYTHONHASHSEED` 1-4 (an `OrderSet` gives one), because `FilterSet.get_fields`
   never calls `utils/inputs.py::canonicalize_set_meta_fields`, whose docstring promises one order under every seed;
   check the generated filter input SDL order too
-- [ ] 252. A hook `order_by("<relation>")` on a nested connection's target windows on the `<relation>_id` column
-  while the pipeline's compiler expands the name into the related model's `Meta.ordering`: Entry
-  `order_by("property")` with `Property.Meta.ordering = ["-name"]` pages `entriesConnection(first: 2)` as {pm, pd}
-  optimized and {px, pm} without the optimizer; a random related `Meta.ordering` reached this way also escapes
-  `has_random_term`
 - [ ] 254. `rest_framework/inputs.py::serializer_schema_fingerprint`'s docstring says "This captures EVERY axis the
   generated input / SDL / reverse map depends on", but `_fingerprint_converter_extra` records only a `ListField`'s direct
   child; retract the sentence to what the fingerprint covers (no code change)
@@ -598,6 +600,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
+- [ ] 257. `list_field.py::_is_deterministic_order_field_path` reads a relation's model-field `attname`, which for a
+  many-to-many equals its name, so it never sees a many-to-many order name expand into the related `Meta.ordering`:
+  `Book.Meta.ordering = ["genres"]` with `Genre.Meta.ordering = [Random()]` certifies a positive `offset` while the
+  compiled order is random; read the expansion through `utils/querysets.py::related_order_substitute`
 ## To do: holes found re-checking the fixes
 
 
@@ -810,6 +816,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 253. CHANGELOG entry for item 100: a nested connection whose target orders at random (`"?"`, `Random()`) is served
   per parent with the optimizer on, as it is without it (0.0.14 raised "Cannot resolve keyword '?'" for `"?"` and
   minted wrong cursors and pageInfo for `Random()`); under `strictness="raise"` it is an unplanned N+1
+- [ ] 258. CHANGELOG entry for item 252: a nested connection whose target orders by a relation name pages and mints
+  cursors as it does without the optimizer (0.0.14 windowed on the key column while the page was sorted by the related
+  model's `Meta.ordering`, and raised for a multi-column `ForeignObject` name); a related `Random()` ordering is served
+  per parent; an order naming a one-to-one key whose model declares `Meta.ordering` gains the pk tiebreak
 - [ ] 108. A serializer-only source over the default `create()` / `update()` (`gs = PrimaryKeyRelatedField(many=True,
   source="genres_id")`) builds; create raises a masked TypeError and update is a silent no-op. Refuse a column-less
   writable source at class creation, as item 103 does for an `attname` source, or leave it to DRF's default `create()` /
