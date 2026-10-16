@@ -1,13 +1,24 @@
 """Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
 
 ``require_instance`` and ``require`` are the checked narrowings the package applies to a
-value whose source guarantees its class but types it loosely. They inspect a Python value,
-not a GraphQL request, so there is no live sibling in ``examples/fakeshop/test_query/``.
+value whose source guarantees its class but types it loosely; the ``is_exact_*`` container
+predicates prove a builtin type without consulting the value's class. They inspect a Python
+value, not a GraphQL request, so there is no live sibling in
+``examples/fakeshop/test_query/``.
 """
 
-import pytest
+from collections.abc import Callable
 
-from django_strawberry_framework.utils._narrowing import is_str, require, require_instance
+import pytest
+from typing_extensions import override
+
+from django_strawberry_framework.utils._narrowing import (
+    is_exact_list_or_tuple,
+    is_exact_set_or_frozenset,
+    is_str,
+    require,
+    require_instance,
+)
 
 
 def test_require_instance_returns_an_instance_of_the_class_unchanged() -> None:
@@ -34,3 +45,35 @@ def test_require_refuses_a_value_the_predicate_rejects() -> None:
     """A value the predicate rejects raises ``TypeError`` naming the value's type."""
     with pytest.raises(TypeError, match=r"^expected the type the source guarantees, got int$"):
         _ = require(1, is_str)
+
+
+class _ClaimsEveryClassMeta(type):
+    """A metaclass whose ``__eq__`` claims equality with every class and records each call."""
+
+    eq_calls: list[object] = []
+
+    @override
+    def __eq__(cls, other: object) -> bool:
+        _ClaimsEveryClassMeta.eq_calls.append(other)
+        return True
+
+    __hash__ = type.__hash__
+
+
+class _ClaimsEveryClass(metaclass=_ClaimsEveryClassMeta):
+    """A class that compares equal to ``list``, ``tuple``, ``set`` and ``frozenset``."""
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [is_exact_list_or_tuple, is_exact_set_or_frozenset],
+    ids=["list_or_tuple", "set_or_frozenset"],
+)
+def test_exact_container_predicate_refuses_a_class_whose_metaclass_eq_claims_a_builtin(
+    predicate: Callable[[object], bool],
+) -> None:
+    """The type is compared by identity, so the metaclass ``__eq__`` neither runs nor decides."""
+    _ClaimsEveryClassMeta.eq_calls.clear()
+
+    assert predicate(_ClaimsEveryClass()) is False
+    assert _ClaimsEveryClassMeta.eq_calls == []

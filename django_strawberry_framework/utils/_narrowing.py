@@ -242,7 +242,6 @@ __all__ = (
     "is_exact_pair",
     "is_exact_set_or_frozenset",
     "is_exact_tuple",
-    "is_exact_tuple_or_list",
     "is_frozenset",
     "is_iterable",
     "is_list",
@@ -366,19 +365,19 @@ def is_exact_pair(value: object) -> TypeGuard[tuple[object, object]]:
 
 
 def is_exact_list_or_tuple(value: object) -> TypeGuard[list[object] | tuple[object, ...]]:
-    """Return whether ``value`` is EXACTLY a builtin ``list`` or ``tuple``."""
-    return type(value) in (list, tuple)
+    """Return whether ``value`` is EXACTLY a builtin ``list`` or ``tuple``.
 
-
-def is_exact_tuple_or_list(value: object) -> TypeGuard[list[object] | tuple[object, ...]]:
-    """``is_exact_list_or_tuple`` comparing ``tuple`` first, for the sites that test in that order.
-
-    ``in`` compares by equality, so the order decides which class a metaclass ``__eq__``
-    is asked about first; each site keeps its own.
+    The type is compared by identity: ``in`` over a tuple of classes would compare by
+    equality and run a consumer metaclass ``__eq__``, which can claim a builtin.
     """
-    return type(value) in (tuple, list)
+    value_type = type(value)
+    return value_type is list or value_type is tuple
 
 
 def is_exact_set_or_frozenset(value: object) -> TypeGuard[set[object] | frozenset[object]]:
-    """Return whether ``value`` is EXACTLY a builtin ``set`` or ``frozenset``."""
-    return type(value) in (set, frozenset)
+    """Return whether ``value`` is EXACTLY a builtin ``set`` or ``frozenset``.
+
+    The type is compared by identity, as in ``is_exact_list_or_tuple``.
+    """
+    value_type = type(value)
+    return value_type is set or value_type is frozenset
