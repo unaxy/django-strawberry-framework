@@ -133,7 +133,6 @@ from ._narrowing import (
     is_exact_pair,
     is_exact_set_or_frozenset,
     is_exact_tuple,
-    is_exact_tuple_or_list,
     read_attr,
     type_attr,
     type_mro,
@@ -1694,7 +1693,7 @@ def _raw_sql_sequence_defect(holder: object, label: str) -> tuple[str, str] | No
     """
     if holder is None:
         return None
-    if not is_exact_tuple_or_list(holder):
+    if not is_exact_list_or_tuple(holder):
         return ("untrusted", f"query {label} is a {_safe_type_name(holder)}")
     for item in holder:
         if type(item) is not str:
@@ -2896,7 +2895,7 @@ def _sealed_prefetch_related_lookups(
     # loop below (spec-045 Decision 1).
     if lookups is None:
         return (), None
-    if not is_exact_tuple_or_list(lookups):
+    if not is_exact_list_or_tuple(lookups):
         return None, ("untrusted", f"{cls_name} prefetch lookups is a {_safe_type_name(lookups)}")
     sealed_entries: list[str | _SealedPrefetch] = []
     for entry in lookups:
@@ -3113,7 +3112,7 @@ def _bake_deferred_filter_or_defect(
         return ("untrusted", f"{cls_name} deferred filter negate is a {_safe_type_name(negate)}")
     if not is_exact_dict(kwargs):
         return ("untrusted", f"{cls_name} deferred filter kwargs is a {_safe_type_name(kwargs)}")
-    if not is_exact_tuple_or_list(args):
+    if not is_exact_list_or_tuple(args):
         return ("untrusted", f"{cls_name} deferred filter args is a {_safe_type_name(args)}")
     if PROHIBITED_FILTER_KWARGS.intersection(kwargs):
         return ("untrusted", f"{cls_name} deferred filter carries prohibited kwargs")
