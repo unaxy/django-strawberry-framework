@@ -845,12 +845,10 @@ def test_a_schema_with_no_enforcement_record_is_bounded_by_the_package_defaults(
     """
 
     class _Unregistered(DjangoSchema):
-        # basedpyright: the stand-in skips DjangoSchema's constructor on purpose: the test
-        # proves a schema with no enforcement record falls back to the package defaults
-        def __init__(self) -> None:  # pyright: ignore[reportMissingSuperCall]
-            pass
+        """A schema subclass built without its constructor, so no enforcement record exists."""
 
-    schema = _Unregistered()
+    # Built without ``__init__``, as a subclass that never completes ``DjangoSchema.__init__``.
+    schema = _Unregistered.__new__(_Unregistered)
     assert _SCHEMA_ENFORCEMENT.recall(schema) is None
     assert schema.resource_policy == ResourcePolicy()
     assert schema.error_policy == ErrorPolicy()

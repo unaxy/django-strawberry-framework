@@ -595,6 +595,22 @@ class _AcceptedDisclosure(NamedTuple):
 _ACKNOWLEDGEMENT: PrivateAuthority[_AcceptedDisclosure] = PrivateAuthority()
 
 
+def _required_acknowledgement(value: object) -> bool:
+    """Return ``allow_unsafe_production`` as the real ``bool`` it must be, else raise.
+
+    The ``bool`` annotation is the contract; this is the boundary for a caller with no
+    type checker (an env-var string read straight through), per GOAL.md "Trust
+    boundary" (configuration is validated at construction).
+    """
+    if not isinstance(value, bool):
+        raise ConfigurationError(
+            "DjangoDebugExtension(allow_unsafe_production=...) must be a bool; got "
+            f"{describe_value(value)}. A truthy non-bool would arm "
+            "the production disclosure, so it is refused rather than interpreted.",
+        )
+    return value
+
+
 class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
     """Attach Django query-log SQL and execution exceptions to ``extensions["debug"]``.
 
@@ -701,17 +717,10 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
         ``enabled`` flag.
         """
         super().__init__()
-        # basedpyright: the ``bool`` annotation is the contract; this check rejects a caller
-        # without a type checker (an env-var string read straight through), per GOAL.md
-        # "Trust boundary" (configuration is validated at construction)
-        if not isinstance(allow_unsafe_production, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
-            # basedpyright: unreachable under the annotation, for the trust boundary above
-            raise ConfigurationError(  # pyright: ignore[reportUnreachable]
-                "DjangoDebugExtension(allow_unsafe_production=...) must be a bool; got "
-                f"{describe_value(allow_unsafe_production)}. A truthy non-bool would arm "
-                "the production disclosure, so it is refused rather than interpreted.",
-            )
-        _ACKNOWLEDGEMENT.settle(self, _AcceptedDisclosure(allow_unsafe_production))
+        _ACKNOWLEDGEMENT.settle(
+            self,
+            _AcceptedDisclosure(_required_acknowledgement(allow_unsafe_production)),
+        )
 
     @override
     def _new_operation_state(self, execution_context: "ExecutionContext") -> _DebugOperationState:

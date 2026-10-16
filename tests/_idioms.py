@@ -69,6 +69,11 @@ instances (``ClaimsClass(claimed)`` takes the claim per instance); both render a
 ``<ClassReadRaises>`` / ``<ClaimsClass>`` so a rejection message that quotes the value is
 deterministic.
 
+``UnreadableStateQuerySet`` is a ``QuerySet`` whose instance ``__dict__`` read raises, the
+hostile shape a reader of queryset state through ``object.__getattribute__`` must refuse; the
+two redeclarations the checker rejects (the ``Final`` ``__dict__``, and a property over an
+attribute) are suppressed here once rather than at each row.
+
 ``comparing_metaclass`` derives a metaclass from ``base`` whose ``__eq__`` answers every
 comparison of its classes with ``verdict`` (equal, unequal, or a raised ``RuntimeError``) and
 records each call, so a row declares a consumer class under it and asserts both the honest
@@ -295,6 +300,19 @@ class ClassReadRaises(ClassReadRaisesBase):
     @override
     def __repr__(self) -> str:
         return "<ClassReadRaises>"
+
+
+class UnreadableStateQuerySet(QuerySet[_ModelT]):
+    """A queryset whose instance ``__dict__`` read raises, so its state cannot be read or rebuilt."""
+
+    # basedpyright: the hostile shape under test; a raising __dict__ descriptor is what a state
+    # reader must refuse, and the checker forbids redeclaring the Final __dict__
+    @property  # pyright: ignore[reportGeneralTypeIssues]
+    @override
+    # basedpyright: a ``__dict__`` property whose read raises; the checker rejects any property
+    # overriding a base class attribute
+    def __dict__(self) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
+        raise RuntimeError("unreadable instance state")
 
 
 class ClaimsClass(ClaimsClassBase):

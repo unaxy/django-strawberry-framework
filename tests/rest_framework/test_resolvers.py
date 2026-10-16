@@ -6185,11 +6185,6 @@ def test_upload_metadata_tolerates_raising_name_and_content_type() -> None:
     """A file object whose ``name`` or ``content_type`` properties raise yields ``None``."""
 
     class BrokenFile(File[bytes]):
-        # basedpyright: File.__init__ assigns ``self.name``, which this read-only raising
-        # property refuses; skipping it leaves the hostile descriptors as the only state
-        def __init__(self) -> None:  # pyright: ignore[reportMissingSuperCall]
-            pass
-
         @property
         @override
         # basedpyright: the hostile shape under test, a ``name`` property whose read raises; the
@@ -6208,7 +6203,9 @@ def test_upload_metadata_tolerates_raising_name_and_content_type() -> None:
         def content_type(self) -> NoReturn:
             raise ValueError("invalid content-type header")
 
-    metadata = serializer_resolvers._upload_metadata(BrokenFile())
+    # Built without ``__init__``: ``File.__init__`` assigns ``self.name``, which the read-only
+    # raising property refuses, so the hostile descriptors are the only state.
+    metadata = serializer_resolvers._upload_metadata(BrokenFile.__new__(BrokenFile))
     assert isinstance(metadata, UploadMetadata)
     assert metadata.name is None
     assert metadata.size is None

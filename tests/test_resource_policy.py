@@ -134,7 +134,12 @@ from django_strawberry_framework.utils.operation_lease import OperationLease
 from django_strawberry_framework.utils.querysets import materialized_rows, normalized_row_source
 from tests._django_private import has_apply_rel_filters
 from tests._execution import make_execution_context
-from tests._idioms import ClaimsClassBase, ClassReadRaises, pickle_roundtrip
+from tests._idioms import (
+    ClaimsClassBase,
+    ClassReadRaises,
+    UnreadableStateQuerySet,
+    pickle_roundtrip,
+)
 
 _M = TypeVar("_M", bound=Model)
 _QuerySetT = TypeVar("_QuerySetT", bound="QuerySet[Model, object]")
@@ -2397,19 +2402,8 @@ def test_a_queryset_subclass_whose_state_is_unreadable_is_refused(
     info = SimpleNamespace(context={})
     arm_resource_budget(info.context, ResourcePolicy(max_list_rows=2))
 
-    class _UnreadableQuerySet(QuerySet[Category]):
-        # basedpyright: the hostile shape under test; a raising __dict__ descriptor is what the
-        # bound must refuse, and the checker forbids redeclaring the Final __dict__
-        @property  # pyright: ignore[reportGeneralTypeIssues]
-        @override
-        # basedpyright: the hostile shape under test, a ``__dict__`` property whose read raises;
-        # the checker rejects any property overriding a base class attribute
-        def __dict__(self) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-            """Refuse to hand over the instance state the rebuild reads."""
-            raise RuntimeError("no state")
-
     with pytest.raises(ConfigurationError) as excinfo:
-        bounded_rows(_UnreadableQuerySet(model=Category), info)
+        bounded_rows(UnreadableStateQuerySet[Category](model=Category), info)
     assert "instance state is unreadable" in str(excinfo.value)
 
 
