@@ -4080,6 +4080,65 @@ def test_update_item_via_form_partial_update_preserves_category_and_description(
     assert item.description == "preserve this description"
 
 
+@pytest.mark.django_db
+def test_update_item_via_form_refuses_an_omitted_dangling_category() -> None:
+    """An omitted `category` whose stored pk names no row is the form's own choice error.
+
+    The generated `category` field resolves its choice by the pk the column stores, so the
+    stored pk is rebound as is and the bound form's own lookup refuses it: the update fails
+    with the `categoryId`-keyed `invalid_choice` error and nothing is written. The
+    `Category` row is removed through a raw cursor with constraint checks disabled.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    item = models.Item.objects.create(
+        name="DanglingBefore",
+        description="keep me",
+        category=category,
+    )
+    client = _login_with_perm("staff_1", "change_item")
+
+    with connection.constraint_checks_disabled():
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM products_category WHERE id = %s", [category.pk])
+        try:
+            response = _post_graphql(
+                _UPDATE_ITEM_VIA_FORM,
+                client=client,
+                variables={
+                    "id": _global_id("products.item", item.pk),
+                    "d": {"name": "DanglingAfter"},
+                },
+            )
+            stored = list(
+                models.Item.objects.filter(pk=item.pk).values_list("name", "category_id"),
+            )
+        finally:
+            # Remove every row whose FK now dangles off the deleted category BEFORE
+            # constraint checks come back on, so the fixture teardown's
+            # ``PRAGMA foreign_key_check`` sees a consistent database.
+            models.Entry.objects.filter(property__category_id=category.pk).delete()
+            models.Entry.objects.filter(item__category_id=category.pk).delete()
+            models.Property.objects.filter(category_id=category.pk).delete()
+            models.Item.objects.filter(category_id=category.pk).delete()
+    assert response.status_code == 200
+    payload = response.json()
+    assert "errors" not in payload, payload
+    assert payload["data"]["updateItemViaForm"] == {
+        "node": None,
+        "errors": [
+            {
+                "field": "categoryId",
+                "messages": [
+                    "Select a valid choice. That choice is not one of the available choices.",
+                ],
+            },
+        ],
+    }
+    assert stored == [("DanglingBefore", category.pk)]
+
+
 @pytest.mark.django_db(transaction=True)
 def test_update_item_via_form_revalidates_an_untouched_stale_name() -> None:
     """A stored `name` the current form rejects blocks a partial update that never sends it.

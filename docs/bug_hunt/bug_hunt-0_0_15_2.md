@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 143 done, 113 to do.
+Progress: 146 done, 116 to do.
 
 ## Done
 
@@ -446,6 +446,21 @@ Progress: 143 done, 113 to do.
   related `Random()` goes per parent; an expanding one-to-one key name gets the pk tiebreak on every path; a multi-column
   `ForeignObject` name windows on its carrier columns instead of raising; the keyset vocabulary still refuses a relation
   name on both paths
+- [x] 259. A `RelatedFilter` flat copy was deferred when its form field cleaned an absent key to a value that filters (a
+  consumer field class whose `clean` / `to_python` returns a default, a `TypedChoiceFilter` or `CharFilter` with a nonempty
+  `empty_value`), so the parent connection dropped the constraint a full copy applies: fixed,
+  `filters/sets.py::_absence_filters_nothing` defers only after `_absent_cleaned_value` proves the cleaned absent value
+  from Django's, django-filter's or the package's own field classes (whole MRO) and `_filter_skips` proves the filter
+  skips it; a two-state `BooleanField`, a multi-widget on a single-value field and an empty string reaching a package
+  filter stay eager too; the shipped schema's deferred set is unchanged
+- [x] 260. A partial `ModelForm` update omitting a FK whose stored key names no row (a `db_constraint=False` key left
+  dangling) read the stored key under the form's lookup field and could link an unrelated row: fixed,
+  `forms/resolvers.py::_reconstruct_partial_data` reports it as the form field's own `invalid_choice` error before the form
+  is bound, so nothing is written; a NULL FK still binds the empty value
+- [x] 261. `scripts/check_trailing_commas.py --fix` exited 0 when a later round's reflow stranded an explode behind a
+  suppression comment: fixed, `_classify_round` classifies every round (round 1, the on-disk rounds and the `--diff`
+  rounds) and reports each stranded explode once from the file's final pass, at its line in the settled text; `--diff`
+  raises the same errors as `--fix`
 
 ## Outside review of the fixes
 
@@ -820,6 +835,15 @@ tracker number are recorded there; open remainders and new defects are filed as 
   cursors as it does without the optimizer (0.0.14 windowed on the key column while the page was sorted by the related
   model's `Meta.ordering`, and raised for a multi-column `ForeignObject` name); a related `Random()` ordering is served
   per parent; an order naming a one-to-one key whose model declares `Meta.ordering` gains the pk tiebreak
+- [ ] 262. Decide whether a partial `ModelForm` update promises to keep an omitted NULL text column NULL: Django's
+  `TextField.formfield` sets no `empty_value=None` (`CharField.formfield` does), so a `title`-only `updateBookViaForm` on a
+  book whose `subtitle` (`TextField(blank=True, null=True)`) is NULL writes `''`; spec-038 Decision 8 step 4 says omitted
+  scalars are preserved, while the reconstruction binds the stored value and lets the form clean it as a provided one
+- [ ] 263. CHANGELOG entry for item 259: a flat `RelatedFilter` copy whose form field cleans an absent key to a value that
+  filters (a consumer field class, a nonempty `empty_value`) constrains the parent connection as a full copy does (0.0.14
+  dropped the constraint when the request did not name the copy)
+- [ ] 264. CHANGELOG entry for item 260: a partial `ModelForm` update omitting a FK whose stored key names no row is that
+  field's `invalid_choice` error with nothing written (0.0.14 could link the row whose form key equals the stored key)
 - [ ] 108. A serializer-only source over the default `create()` / `update()` (`gs = PrimaryKeyRelatedField(many=True,
   source="genres_id")`) builds; create raises a masked TypeError and update is a silent no-op. Refuse a column-less
   writable source at class creation, as item 103 does for an `attname` source, or leave it to DRF's default `create()` /

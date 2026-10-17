@@ -51,6 +51,7 @@ from django_filters import (
 )
 from django_filters.conf import settings as _df_settings
 from django_filters.exceptions import FieldLookupError
+from django_filters.fields import BaseCSVField
 from django_filters.utils import get_model_field, resolve_field, try_dbfield
 from graphql import GraphQLError
 from typing_extensions import override
@@ -84,7 +85,6 @@ from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils._narrowing import (
     class_dict,
     dict_items,
-    dict_of,
     is_dict,
     is_list_or_tuple,
     is_str,
@@ -135,6 +135,7 @@ from django_strawberry_framework.utils.relations import (
     path_traverses_to_many,
     relation_kind,
 )
+from django_strawberry_framework.utils.typing import object_result
 
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
@@ -147,12 +148,15 @@ from .base import (
     IntegerRangeFilter,
     ListFilter,
     MembershipInFilter,
+    RangeField,
     RangeFilter,
     RelatedFilter,
     RelationPkFilter,
     RelationPkMultipleFilter,
     _bound_field_name,
+    _EnumMemberFilterMixin,
     _relation_uses_non_pk_to_field,
+    _RelationIdentityListField,
     membership_in_filter_class,
 )
 from .inputs import (
@@ -174,10 +178,18 @@ from .inputs import (
 _LOGIC_PYTHON_ATTRS: frozenset[str] = frozenset(op.python_attr for op in LOGIC_OPERATORS)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, ItemsView, Iterator, Mapping, Sequence
+    from collections.abc import (
+        Callable,
+        Generator,
+        ItemsView,
+        Iterator,
+        Mapping,
+        Sequence,
+    )
     from types import MethodType
     from typing import TypeAlias
 
+    from django.core.files.uploadedfile import UploadedFile
     from django.forms import Field as FormField
     from django.http import HttpRequest
     from django_filters.filterset import FilterSetOptions
@@ -1064,8 +1076,9 @@ class ExpansionSnapshot:
       when it reads them (``FilterSet.__init__``): every ``RelatedFilter``-expanded
       copy whose absence from the request filters nothing
       (``_absence_filters_nothing``, decided once here). Any other copy (a
-      ``required`` one, a checkbox, a consumer ``filter``) would still act on a
-      request that does not name it, so every instance copies it up front, as it
+      ``required`` one, a checkbox, a consumer ``filter``, a form field cleaning
+      an absent key to a value that filters) would still act on a request that
+      does not name it, so every instance copies it up front, as it
       does the set's own filters; a set that reads its form its own way
       (``FilterSet._reads_its_form_its_own_way``) defers none. Only an instance
       the package's request pipeline builds defers (``_pipeline_built``).
@@ -1129,7 +1142,7 @@ _EMPTY_SKIPPING_FILTER_MODULES: tuple[str, ...] = (
 def _absence_filters_nothing(
     name: str,
     filter_instance: Filter,
-    omitted_by_widget: dict[type[forms.Widget], bool],
+    absent_by_widget: dict[type[forms.Widget], object],
 ) -> bool:
     """Whether a request that does not name this flat copy would get nothing from copying it.
 
@@ -1139,19 +1152,25 @@ def _absence_filters_nothing(
 
     - the filter is not ``required`` (the form would refuse the absent key) and
       not ``disabled`` (a disabled field cleans to its ``initial``);
-    - its ``filter`` is django-filter's or the package's, which skip an empty
-      value (a ``method=`` filter runs through django-filter's ``FilterMethod``);
-      a projected copy is judged by the child filter it runs, and runs inside a
+    - its ``filter`` and its ``field`` are django-filter's or the package's (a
+      ``method=`` filter runs through django-filter's ``FilterMethod``); a
+      projected copy is judged by the child filter it runs, and runs inside a
       child instance, so a child set that edits its instances' filters
       (``FilterSet._customizes_instances``) keeps the copy up front;
-    - a ``ChoiceFilter`` whose ``null_value`` is the value its form field cleans
-      an absent key to would run its ``IS NULL`` branch before any empty skip;
     - its widget is Django's, django-filter's or the package's, reports the key
       omitted from empty data (``Widget.value_omitted_from_data``: a
       ``CheckboxInput`` reads an absent key as ``False``, a ``SelectMultiple``
       cannot tell absent from empty) and names no sub-key with a ``__`` suffix,
       which ``_named_flat_copies`` reads as a relation path; a widget that
-      cannot be built or asked counts as not omitted.
+      cannot be built or asked counts as not omitted;
+    - its form field cleans the value that widget reads for an absent key to a
+      value proven from Django's, django-filter's or the package's own field
+      classes (``_absent_cleaned_value``): a consumer field class, or an
+      ``empty_value`` the field returns for absence, may clean it to a value
+      that constrains;
+    - a ``ChoiceFilter`` whose ``null_value`` is that cleaned value would run its
+      ``IS NULL`` branch before any empty skip;
+    - its ``filter`` skips that cleaned value (``_filter_skips``).
     """
     extra = filter_instance.extra
     if extra.get("required") or extra.get("disabled"):
@@ -1165,69 +1184,66 @@ def _absence_filters_nothing(
     ):
         return False
     filter_class: type[object] = getattr(filter_instance, "_projected_from", type(filter_instance))
-    if not _defined_in(getattr(filter_class, "filter", None), _EMPTY_SKIPPING_FILTER_MODULES):
+    if not (
+        _defined_in(getattr(filter_class, "filter", None), _EMPTY_SKIPPING_FILTER_MODULES)
+        and _defined_in(_defining_class(filter_class, "field"), _EMPTY_SKIPPING_FILTER_MODULES)
+    ):
         return False
-    if isinstance(filter_instance, ChoiceFilter) and _null_value_is_absent(filter_instance):
-        return False
+    field_class: type[forms.Field] = filter_instance.field_class
     # The widget the copy's form field builds: the declared one, else its field class's.
-    widget = cast(
-        "forms.Widget | type[forms.Widget]",
-        extra.get("widget") or getattr(filter_instance, "field_class", forms.Field).widget,
-    )
+    widget = cast("forms.Widget | type[forms.Widget]", extra.get("widget") or field_class.widget)
     if isinstance(widget, type):
-        cached = omitted_by_widget.get(widget)
-        if cached is None:
-            cached = omitted_by_widget[widget] = _widget_reports_omitted(widget, name)
-        return cached
-    return _widget_reports_omitted(widget, name)
+        if widget not in absent_by_widget:
+            absent_by_widget[widget] = _absent_widget_value(widget, name)
+        raw = absent_by_widget[widget]
+    else:
+        raw = _absent_widget_value(widget, name)
+    if raw is _UNPROVEN:
+        return False
+    absent = _absent_cleaned_value(field_class, extra, raw)
+    if absent is _UNPROVEN:
+        return False
+    if isinstance(filter_instance, ChoiceFilter) and _null_value_is_absent(
+        cast("object", filter_instance.null_value),
+        absent,
+    ):
+        return False
+    return _filter_skips(filter_class, absent)
 
 
-# The modules whose widgets read form data the way ``_named_flat_copies`` names it.
-_DATA_READING_WIDGET_MODULES: tuple[str, ...] = ("django.forms.", *_EMPTY_SKIPPING_FILTER_MODULES)
+# The modules whose widgets read form data the way ``_named_flat_copies`` names it, and
+# whose form field classes clean an absent key as ``_absent_cleaned_value`` states.
+_FORM_DATA_MODULES: tuple[str, ...] = ("django.forms.", *_EMPTY_SKIPPING_FILTER_MODULES)
+
+# What a proof helper returns when it cannot establish a value statically.
+_UNPROVEN: object = object()
 
 
 def _defined_in(member: object, modules: tuple[str, ...]) -> bool:
-    """Whether ``member`` is a function defined in one of ``modules`` (a module name prefix)."""
+    """Whether ``member`` (a function or class) is defined in one of ``modules`` (name prefixes)."""
     module = getattr(member, "__module__", None)
     return isinstance(module, str) and module.startswith(modules)
 
 
-def _null_value_is_absent(filter_instance: ChoiceFilter) -> bool:
-    """Whether ``filter_instance``'s ``null_value`` is what its form field cleans an absent key to.
-
-    ``ChoiceFilter.filter`` compares the value with ``null_value`` before any
-    empty skip. A model-choice field cleans an absent key to ``None``, a typed
-    choice field to its ``empty_value``, any other choice field to ``""``. A
-    ``null_value`` or absent value that is neither ``None`` nor a plain ``str``
-    counts as matching: comparing it would run its own ``__eq__``.
-    """
-    null_value = cast("object", filter_instance.null_value)
-    field_class = cast("type[forms.Field]", filter_instance.field_class)
-    absent: object = ""
-    if issubclass(field_class, forms.ModelChoiceField):
-        absent = None
-    elif issubclass(field_class, forms.TypedChoiceField):
-        absent = dict_of(filter_instance.extra).get("empty_value", "")
-    if null_value is None or absent is None:
-        return null_value is absent
-    if type(null_value) is not str or type(absent) is not str:
-        return True
-    return null_value == absent
+def _defining_class(klass: type[object], attribute: str) -> type[object] | None:
+    """Return the first class in ``klass``'s MRO whose own namespace defines ``attribute``."""
+    return next((base for base in klass.__mro__ if attribute in vars(base)), None)
 
 
-def _widget_reports_omitted(widget: forms.Widget | type[forms.Widget], name: str) -> bool:
-    """Whether ``widget`` (built when a class) reads form data as ``_named_flat_copies`` names it.
+def _absent_widget_value(widget: forms.Widget | type[forms.Widget], name: str) -> object:
+    """Return what ``widget`` (built when a class) reads for an absent key; ``_UNPROVEN`` when unread.
 
-    Its data-reading methods are Django's, django-filter's or the package's,
-    ``value_omitted_from_data({}, {}, name)`` is ``True``, and a multi-widget
-    names no sub-key with a ``__`` suffix; ``False`` on a raise.
+    Its data-reading methods must be Django's, django-filter's or the package's,
+    ``value_omitted_from_data({}, {}, name)`` must be ``True``, and a multi-widget
+    must name no sub-key with a ``__`` suffix (``_named_flat_copies`` reads one as a
+    relation path); ``_UNPROVEN`` otherwise, and on a raise.
     """
     widget_class = widget if isinstance(widget, type) else type(widget)
     if not (
-        _defined_in(widget_class.value_from_datadict, _DATA_READING_WIDGET_MODULES)
-        and _defined_in(widget_class.value_omitted_from_data, _DATA_READING_WIDGET_MODULES)
+        _defined_in(widget_class.value_from_datadict, _FORM_DATA_MODULES)
+        and _defined_in(widget_class.value_omitted_from_data, _FORM_DATA_MODULES)
     ):
-        return False
+        return _UNPROVEN
     try:
         built = widget() if isinstance(widget, type) else widget
         # django-stubs declare no ``widgets_names``; ``MultiWidget.__init__`` sets it.
@@ -1235,10 +1251,143 @@ def _widget_reports_omitted(widget: forms.Widget | type[forms.Widget], name: str
         if isinstance(built, forms.MultiWidget) and any(
             suffix.startswith("__") for suffix in suffixes
         ):
-            return False
-        return built.value_omitted_from_data({}, MultiValueDict(), name) is True
+            return _UNPROVEN
+        no_files: MultiValueDict[str, UploadedFile[bytes] | UploadedFile[str]] = MultiValueDict()
+        if built.value_omitted_from_data({}, no_files, name) is not True:
+            return _UNPROVEN
+        return object_result(built.value_from_datadict, {}, no_files, name)
     except Exception:  # noqa: BLE001 - consumer widget code may raise anything; fails closed
+        return _UNPROVEN
+
+
+# Form field families, each a subclass of Django's / django-filter's / the package's own,
+# whose ``clean`` returns ``None`` for an absent key's ``None``: each ``to_python`` maps an
+# empty value to ``None`` (``BaseCSVField.clean`` returns it before its element cleaning).
+_NONE_CLEANING_FIELDS: tuple[type[forms.Field], ...] = (
+    BaseCSVField,
+    forms.IntegerField,
+    forms.DateField,
+    forms.TimeField,
+    forms.DateTimeField,
+    forms.DurationField,
+    forms.NullBooleanField,
+    forms.ModelChoiceField,
+    RangeField,
+    _RelationIdentityListField,
+)
+
+
+def _absent_cleaned_value(
+    field_class: type[forms.Field],
+    extra: Mapping[str, object],
+    raw: object,
+) -> object:
+    """Return what ``field_class`` built from ``extra`` cleans ``raw`` to, else ``_UNPROVEN``.
+
+    ``raw`` is the value the copy's widget reads for an absent key: ``None``, or one
+    ``None`` per sub-widget of a multi-widget. Proven statically, running no field
+    code: every class in ``field_class``'s MRO is Django's, django-filter's or the
+    package's (a consumer subclass may override ``clean`` / ``to_python`` /
+    ``validate``, its ``__init__``, or ``empty_values``), and the value then follows
+    from the family the class belongs to:
+
+    - a ``MultiValueField`` folds a value of only ``None`` into ``compress([])``
+      before any sub-field cleans, and every ``compress`` of those modules but the
+      abstract base's returns ``None`` for it;
+    - a ``CharField`` / ``TypedChoiceField`` returns its ``empty_value`` (``""``
+      unless ``extra`` sets one), a ``TypedMultipleChoiceField`` its ``empty_value``
+      (``[]``), a ``BooleanField`` that is not a ``NullBooleanField`` ``False``, a
+      ``MultipleChoiceField`` ``[]``, any other ``ChoiceField`` ``""``, and each of
+      ``_NONE_CLEANING_FIELDS`` (and ``Field`` itself) ``None``;
+    - any other class (a ``FileField`` cleans absence to its ``initial``, a
+      ``ComboField`` through its sub-fields, a ``ModelMultipleChoiceField`` to a
+      queryset) is unproven, as is a multi-widget value reaching a single-value
+      field (only the package's ``RangeField`` folds its pair to ``None``).
+    """
+    if not all(
+        _defined_in(klass, _FORM_DATA_MODULES)
+        for klass in field_class.__mro__
+        if klass is not object
+    ):
+        return _UNPROVEN
+    if issubclass(field_class, forms.MultiValueField):
+        if not (raw is None or (is_list_or_tuple(raw) and all(item is None for item in raw))):
+            return _UNPROVEN
+        if _defining_class(field_class, "compress") is forms.MultiValueField:
+            return _UNPROVEN
+        return None
+    if raw is not None:
+        if issubclass(field_class, RangeField) and raw in RangeField.empty_values:
+            return None
+        return _UNPROVEN
+    # A ``ModelChoiceField`` subclass, but it cleans absence to an empty queryset.
+    if issubclass(field_class, forms.ModelMultipleChoiceField):
+        return _UNPROVEN
+    if issubclass(field_class, _NONE_CLEANING_FIELDS) or field_class is forms.Field:
+        return None
+    if issubclass(field_class, forms.TypedMultipleChoiceField):
+        return extra.get("empty_value", [])
+    if issubclass(field_class, (forms.CharField, forms.TypedChoiceField)):
+        return extra.get("empty_value", "")
+    if issubclass(field_class, forms.BooleanField) and not issubclass(
+        field_class,
+        forms.NullBooleanField,
+    ):
         return False
+    if issubclass(field_class, forms.MultipleChoiceField):
+        return []
+    if issubclass(field_class, forms.ChoiceField):
+        return ""
+    return _UNPROVEN
+
+
+def _null_value_is_absent(null_value: object, absent: object) -> bool:
+    """Whether a ``ChoiceFilter``'s ``null_value`` is ``absent``, the value an absent key cleans to.
+
+    ``ChoiceFilter.filter`` compares the value with ``null_value`` before any
+    empty skip. A ``null_value`` or absent value that is neither ``None`` nor a
+    plain ``str`` counts as matching: comparing it would run its own ``__eq__``.
+    """
+    if null_value is None or absent is None:
+        return null_value is absent
+    if type(null_value) is not str or type(absent) is not str:
+        return True
+    return null_value == absent
+
+
+# The built-in types whose empty instances django-filter's filters skip (``EMPTY_VALUES``).
+_BUILTIN_EMPTY_TYPES: frozenset[type[object]] = frozenset(
+    {
+        str,
+        list,
+        tuple,
+        dict,
+    },
+)
+
+
+def _filter_skips(filter_class: type[object], absent: object) -> bool:
+    """Whether ``filter_class``'s ``filter`` applies no constraint for ``absent``.
+
+    Every ``filter`` of django-filter's and of the package's skips ``None``.
+    django-filter's also skip any other empty value (``EMPTY_VALUES``, or a falsy
+    one); the package's need not (an explicit ``[]`` matches nothing on a
+    membership filter), so only ``None`` counts there. An enum-member filter
+    hands every value but its marker to the django-filter ``filter`` after it.
+    Only a built-in empty value counts (``""``, ``[]``, ``()``, ``{}``), so no
+    comparison runs a value's own ``__eq__``.
+    """
+    if absent is None:
+        return True
+    if type(absent) not in _BUILTIN_EMPTY_TYPES or absent:
+        return False
+    filters = (
+        method
+        for base in filter_class.__mro__
+        if (method := vars(base).get("filter")) is not None
+        and method is not vars(_EnumMemberFilterMixin)["filter"]
+    )
+    return _defined_in(next(filters, None), ("django_filters.",))
 
 
 def _candidate_metadata_for(
@@ -2467,7 +2616,7 @@ class FilterSet(
             ):
                 cls._expanded_filters = all_filters
                 own = cls._unexpanded_filters()
-                omitted_by_widget: dict[type[forms.Widget], bool] = {}
+                absent_by_widget: dict[type[forms.Widget], object] = {}
                 cls._expanded_snapshot = ExpansionSnapshot(
                     # The snapshot exposes a READ-ONLY view of the filter map;
                     # the mutable ``all_filters`` is what django-filter needs on
@@ -2480,7 +2629,7 @@ class FilterSet(
                         name
                         for name, filter_instance in all_filters.items()
                         if name not in own
-                        and _absence_filters_nothing(name, filter_instance, omitted_by_widget)
+                        and _absence_filters_nothing(name, filter_instance, absent_by_widget)
                     )
                     if not cls._reads_its_form_its_own_way()
                     else frozenset(),

@@ -82,8 +82,12 @@ file and line. ``--fix`` edits the commas and then runs ``ruff format`` on the
 touched files so the layout actually reflows -- and repeats: one comma edit can
 enable the next only after the reflow (an outer construct collapses once its
 nested children have), so each round re-checks the files the last one edited,
-in one ``ruff format`` spawn per round, until nothing changes. A file still
-changing after ``MAX_FIX_ROUNDS`` rounds is an ``unfixable`` error, never a pass.
+in one ``ruff format`` spawn per round, until nothing changes. Every round's
+result is classified the same way (``_classify_round``): a rejected edit, a
+stranded explode (see below) and a file still changing after ``MAX_FIX_ROUNDS``
+rounds are each an ``unfixable`` error, never a pass. Stranded explodes come
+from each file's final pass, so each is reported once, at its line in the text
+the file is left in.
 
 Every run ends with one summary line -- files checked, files excluded, files
 ignored (unsupported suffix), violations, errors -- so a clean pass and a pass
@@ -105,10 +109,12 @@ of ``file`` / ``line`` / ``rule`` / ``message`` / ``fixable``, and, with
 ``collapse``, ``md-scaffold``, ``brace-explode``, ``non-ascii`` for violations;
 ``read-error``, ``parse-error``, ``unfixable``, ``unmatched-path`` for errors.
 A violation the fixer will not repair carries ``fixable: false``; under
-``--fix`` (and ``--diff`` for a missing fixpoint) it is also an ``unfixable``
-error naming the file and line: a footer rebuild that would drop content, a
-comma edit that would not parse, an explode that would strand a suppression
-comment, and a file with no fixpoint.
+``--fix`` it is also an ``unfixable`` error naming the file and line: a footer
+rebuild that would drop content, a comma edit that would not parse, an explode
+that would strand a suppression comment, and a file with no fixpoint. For
+``.py`` files ``--diff`` raises exactly the ``unfixable`` errors ``--fix`` would,
+at the lines of the text ``--fix`` would leave; its violations describe the file
+as it stands, as ``--check``'s do.
 
 Exclusions are anchored to repo-relative paths (``EXCLUDE_PATTERNS``, built from
 ``EXCLUDE_SCRATCH_DIRS`` and ``EXCLUDE_SCRATCH_SUBTREES``): the per-cycle
@@ -130,7 +136,11 @@ What the fixer refuses to touch:
   silenced -- move onto lines of their own, so ruff's RUF100 would delete the
   noqa as unused and basedpyright would report the ignore as unnecessary. The
   violation stays (``fixable: false``) and ``--fix`` reports it as an
-  ``unfixable`` error: move the suppression onto the element it is for.
+  ``unfixable`` error: move the suppression onto the element it is for. This
+  holds in every round: a construct ``ruff format`` collapses onto a line that
+  ends in a suppression is stranded only after the reflow, and fails the run the
+  same way. The error (and its ``explode`` violation) comes from the file's final
+  pass, once per construct, at its line in the text the file is left in.
 * ``**kwargs`` signatures, by project convention (AGENTS.md). A trailing comma
   after ``*args`` OR ``**kwargs`` parses fine on every supported Python, and
   ``COM812`` adds both once a signature is multi-line; the bare ``*`` and ``/``
@@ -1681,21 +1691,71 @@ def _python_pass(text: str, threshold: int) -> _PythonPass:
     return _PythonPass(new, found, analysis.stranded, broken)
 
 
+def _broken_message(broken: str) -> str:
+    """Return the ``unfixable`` message for a comma edit ``_python_pass`` rejected."""
+    return f"comma fix would break syntax ({broken}) -- NOT fixed"
+
+
+@dataclass
+class _Round:
+    """The verdict on one ``_python_pass``, the same for every round and mode.
+
+    ``write`` says the edited text is kept (on disk, or as the next in-memory round's
+    input); a pass that keeps nothing is the file's FINAL pass, whose text is the one
+    the file is left in. ``errors`` holds ``(line, message)`` per ``unfixable`` error:
+    a rejected edit, the missing fixpoint and, on the final pass only, each stranded
+    explode; ``stranded`` those final-pass stranded lines, each also a not-fixable
+    ``explode`` violation; ``fixes`` the ``(line, rule)`` of every violation the kept
+    edit repairs.
+    """
+
+    errors: list[tuple[int | None, str]]
+    stranded: list[int]
+    fixes: list[tuple[int, str]]
+    write: bool
+
+
+def _classify_round(result: _PythonPass, text: str, *, last: bool) -> _Round:
+    """Classify ``result``, the pass over ``text``, the same way in every round and mode.
+
+    Round 1 (``main``), every later ``--fix`` round (``_settle_on_disk``) and the
+    ``--diff`` rounds (``_settle_in_memory``) all go through here. Stranded explodes
+    are reported from the final pass alone (no edit kept, or the round past
+    ``MAX_FIX_ROUNDS``, whose edit is withheld and reported as no fixpoint), so each
+    is reported once, at its line in the text the file is left in, and a pass whose
+    only finding is a withheld explode fails the run instead of passing as a fixpoint.
+    """
+    errors: list[tuple[int | None, str]] = []
+    if result.broken is not None:
+        errors.append((None, _broken_message(result.broken)))
+    fixes = [(line, kind) for line, kind, fixable in result.found if fixable]
+    write = result.new != text and not last
+    if result.new != text and last:
+        errors.append((fixes[0][0] if fixes else None, NO_FIXPOINT_MESSAGE))
+    if write:
+        return _Round(errors, [], fixes, write=True)
+    errors.extend((line, STRANDED_MESSAGE) for line in result.stranded)
+    return _Round(errors, list(result.stranded), [], write=False)
+
+
 def _settle_on_disk(
     files: list[Path],
     *,
     quiet: bool,
-) -> tuple[list[tuple[Path, int, str]], list[tuple[Path, int | None, str]]]:
+) -> tuple[list[tuple[Path, int, str, bool]], list[tuple[Path, int | None, str]]]:
     """Reformat the comma-edited ``files`` and repeat the comma round until they settle.
 
     Round 1 is the caller's. Each further round reformats every file the previous
-    round edited in ONE ``ruff format`` spawn, then re-reads and re-edits them; a file
-    that still needs an edit after ``MAX_FIX_ROUNDS`` is reported, not written.
+    round edited in ONE ``ruff format`` spawn, then re-reads and re-edits them. Every
+    round is classified by ``_classify_round``, and a file's final round reports its
+    stranded explodes: one a reflow exposes fails the run exactly as a round-1 one
+    does, at its line in the file left on disk. A file that still needs an edit after
+    ``MAX_FIX_ROUNDS`` is reported, not written.
 
-    Returns ``(fixes made after round 1 as (path, line, rule), errors as (path, line,
-    message))``.
+    Returns ``(violations found after round 1 as (path, line, rule, fixable), errors
+    as (path, line, message))``.
     """
-    fixed: list[tuple[Path, int, str]] = []
+    found: list[tuple[Path, int, str, bool]] = []
     errors: list[tuple[Path, int | None, str]] = []
     pending = files
     for round_number in range(2, MAX_FIX_ROUNDS + 2):
@@ -1710,40 +1770,58 @@ def _settle_on_disk(
             except _RECHECK_ERRORS as exc:
                 errors.append((path, None, f"re-check after ruff format failed ({exc})"))
                 continue
-            if result.broken is not None:
-                message = f"comma fix would break syntax ({result.broken}) -- NOT fixed"
-                errors.append((path, None, message))
-            if result.new == text:
-                continue
-            first = next((line for line, _, fixable in result.found if fixable), None)
-            if round_number > MAX_FIX_ROUNDS:
-                errors.append((path, first, NO_FIXPOINT_MESSAGE))
+            outcome = _classify_round(result, text, last=round_number > MAX_FIX_ROUNDS)
+            errors.extend((path, line, message) for line, message in outcome.errors)
+            found.extend(
+                (
+                    path,
+                    line,
+                    "explode",
+                    False,
+                )
+                for line in outcome.stranded
+            )
+            if not outcome.write:
                 continue
             write_source(path, result.new, newline)
-            fixed.extend((path, line, kind) for line, kind, fixable in result.found if fixable)
+            found.extend(
+                (
+                    path,
+                    line,
+                    kind,
+                    True,
+                )
+                for line, kind in outcome.fixes
+            )
             edited.append(path)
         pending = edited
-    return fixed, errors
+    return found, errors
 
 
-def _settle_in_memory(text: str, path: Path) -> tuple[str, bool] | None:
-    """``_settle_on_disk`` for one text: ``(settled text, converged)``, ``None`` if ruff failed.
+def _settle_in_memory(text: str, path: Path) -> tuple[str, list[tuple[int | None, str]], bool]:
+    """``_settle_on_disk`` for one text: ``(settled text, errors, reflowed)``.
 
     ``--diff`` writes nothing, so it runs the same rounds through ``ruff format``'s
-    stdin and shows the text ``--fix`` would leave.
+    stdin, classified by the same ``_classify_round``, and shows the text ``--fix``
+    would leave; ``errors`` are the ``(line, message)`` of every ``unfixable`` error
+    ``--fix`` would raise after round 1, the final text's stranded explodes included.
+    A round ``ruff format`` fails on goes on with the unreflowed text, as ``--fix``
+    does on disk, and ``reflowed`` is then ``False``.
     """
     after = text
+    errors: list[tuple[int | None, str]] = []
+    reflowed_every_round = True
     for round_number in range(2, MAX_FIX_ROUNDS + 2):
         reflowed = _ruff_format_text(after, path)
         if reflowed is None:
-            return None
+            reflowed, reflowed_every_round = after, False
         result = _python_pass(reflowed, threshold_for(path))
-        if result.new == reflowed:
-            return reflowed, True
-        if round_number > MAX_FIX_ROUNDS:
-            return reflowed, False
+        outcome = _classify_round(result, reflowed, last=round_number > MAX_FIX_ROUNDS)
+        errors.extend(outcome.errors)
+        if not outcome.write:
+            return reflowed, errors, reflowed_every_round
         after = result.new
-    return after, False  # unreachable: the last round returns
+    return after, errors, reflowed_every_round  # unreachable: the last round never writes
 
 
 @dataclass
@@ -1798,18 +1876,17 @@ class _Report:
 def _diff_target(path: Path, new: str, report: _Report) -> str:
     """Return the text ``--fix`` would leave at ``path`` given its first-round text ``new``.
 
-    A ``.py`` file runs the remaining ``--fix`` rounds in memory (``_settle_in_memory``);
-    without ruff the diff shows the comma edits only.
+    A ``.py`` file runs the remaining ``--fix`` rounds in memory (``_settle_in_memory``)
+    and reports every ``unfixable`` error those rounds would raise. Without ruff the
+    diff shows the text without its reflow.
     """
     if path.suffix != ".py":
         return new
-    settled = _settle_in_memory(new, path)
-    if settled is None:
-        report.say(f"{path}: ruff format failed; diff shows the comma edits only", err=True)
-        return new
-    after, converged = settled
-    if not converged:
-        report.error(path, None, "unfixable", NO_FIXPOINT_MESSAGE)
+    after, errors, reflowed = _settle_in_memory(new, path)
+    if not reflowed:
+        report.say(f"{path}: ruff format failed; diff shows the text without its reflow", err=True)
+    for line, message in errors:
+        report.error(path, line, "unfixable", message)
     return after
 
 
@@ -1908,14 +1985,22 @@ def main(argv: list[str] | None = None) -> int:
                     f"parse error ({exc}) -- NOT checked",
                 )
                 continue
-            if do_fix:
-                if result.broken is not None:
-                    message = f"comma fix would break syntax ({result.broken}) -- NOT fixed"
-                    report.error(path, None, "unfixable", message)
-                for line in result.stranded:
-                    report.error(path, line, "unfixable", STRANDED_MESSAGE)
+            # A file round 1 edits reports its stranded explodes from the pass that
+            # settles it (``_settle_on_disk`` / ``_settle_in_memory``), at their lines
+            # in the text it is left in; ``--check`` reports the text as it stands.
+            outcome = _classify_round(result, text, last=False)
+            if check and not args.diff:
+                found.extend(result.found)
+            else:
+                for line, message in outcome.errors:
+                    report.error(path, line, "unfixable", message)
+                deferred = set(result.stranded) - set(outcome.stranded) if do_fix else set[int]()
+                found.extend(
+                    (line, kind, fixable)
+                    for line, kind, fixable in result.found
+                    if not (kind == "explode" and line in deferred)
+                )
             new = result.new
-            found.extend(result.found)
 
         elif path.suffix == ".md":
             scaffold_missing = (
@@ -1957,14 +2042,15 @@ def main(argv: list[str] | None = None) -> int:
             if path.suffix == ".py":
                 py_changed.append(path)
         elif args.diff:
-            diffs[str(path)] = _unified_diff(path, text, _diff_target(path, new, report))
+            target = _diff_target(path, new, report)
+            diffs[str(path)] = _unified_diff(path, text, target)
 
     if do_fix:
         # Later rounds: each one reformats what the previous round edited, so a
         # comma edit that only becomes visible after the reflow is made in this run.
-        later_fixes, settle_errors = _settle_on_disk(py_changed, quiet=args.json)
-        for fixed_path, lineno, kind in later_fixes:
-            report.violation(fixed_path, lineno, kind, MESSAGES[kind], fixable=True)
+        later, settle_errors = _settle_on_disk(py_changed, quiet=args.json)
+        for later_path, lineno, kind, fixable in later:
+            report.violation(later_path, lineno, kind, MESSAGES[kind], fixable=fixable)
         for error_path, lineno, message in settle_errors:
             report.error(error_path, lineno, "unfixable", message)
 

@@ -1365,6 +1365,17 @@ write flavor rides.
        by pk while the column stores the `to_field` value. Getting any of the three
        wrong makes an omitted unchanged field fail, or bind the row whose key equals
        the stored value, where a provided unchanged field passes.
+     - **A stored key that names no row is not projected.** For the third shape a NULL
+       column still comes from `model_to_dict` (the form's empty value), but a non-null
+       stored key whose related row is missing (a `db_constraint=False` key left
+       dangling) has no form-key value: the stored key and the form key are different
+       namespaces, so binding the stored key could resolve an unrelated row whose form
+       key equals it, and binding the empty value would clear the relation. The
+       reconstruction reports that field instead, with the form field's own
+       `invalid_choice` error mapped through `_form_errors_to_field_errors`, and the
+       mutation fails before the form is bound, so nothing is written. When the form
+       key is the stored column (`model_to_dict`), the bound form's own lookup already
+       refuses a dangling key with the same error.
      - **A file field contributes no key at all.** `model_to_dict` yields the stored
        relative path, which is not a re-bindable `data=` value for a field fed from
        `files=`, so file fields are excluded from the reconstruction entirely.
@@ -1790,6 +1801,8 @@ Rationale companion: [Decision 14][rationale-d14].
   way whenever the form's key is not the column the relation stores, including a
   `to_field_name`-less field over a `ForeignKey(to_field=…)`
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
+  An omitted field whose stored key names no row is that field's `invalid_choice` error
+  with nothing written, never a rebind by the stored key or a clear.
 - **A form whose `__init__` requires constructor kwargs.** Schema-time discovery
   reads `form_class.base_fields` (no instantiation), and runtime construction goes
   through `get_form_kwargs(info, *, data, files, instance=None)` — the consumer
@@ -1885,7 +1898,12 @@ behavior reachable through `/graphql/`, package tests own internals.
   `invalid_choice` error with no `UPDATE`, and on a stored `available` book it saves. **Omitted
   relation over a `to_field` key** — an `updatePatronProfileViaForm` that omits
   `favoriteGenreId` keeps the stored genre name, including when that name is another
-  genre's id; an unset genre stays unset, a genre replaces it and `null` clears it.
+  genre's id; an unset genre stays unset, a genre replaces it and `null` clears it. A
+  stored name no genre carries (the genre row deleted under disabled constraint checks)
+  is the `favoriteGenreId`-keyed `invalid_choice` error with nothing written, including
+  when that name is another genre's id, while a supplied genre or `null` still writes;
+  over the pk-keyed `updateItemViaForm` a dangling `category` is the form's own
+  `categoryId`-keyed `invalid_choice` error.
   **Write-time `IntegrityError`** — a valid
   `ModelForm.save()` that hits a constraint the form's validation excluded
   (`createDefaultCategoryItemViaForm`) surfaces the **`FieldError` envelope**, not a

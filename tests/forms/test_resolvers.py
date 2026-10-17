@@ -974,7 +974,8 @@ def test_partial_reconstruction_excludes_every_file_field_flavor(file_field_name
         image="scalar_media/images/stored.png",
     )
 
-    reconstructed = form_resolvers._reconstruct_partial_data(UpdateMedia, specimen, {})
+    reconstructed, unresolved = form_resolvers._reconstruct_partial_data(UpdateMedia, specimen, {})
+    assert unresolved == {}
     assert file_field_name not in reconstructed
     assert reconstructed["label"] == specimen.label
 
@@ -1814,7 +1815,12 @@ def test_partial_update_reconstruct_with_extra_model_choice_field() -> None:
             form_class = CustomItemForm
             operation = "update"
 
-    data = form_resolvers._reconstruct_partial_data(CustomItemMutation, item, {"name": "updated"})
+    data, unresolved = form_resolvers._reconstruct_partial_data(
+        CustomItemMutation,
+        item,
+        {"name": "updated"},
+    )
+    assert unresolved == {}
     assert "extra_choice" not in data
     assert data["name"] == "updated"
     assert data["category"] == cat.pk
@@ -1842,7 +1848,12 @@ def test_partial_update_reconstruct_with_reverse_relation_field() -> None:
             form_class = CustomItemForm
             operation = "update"
 
-    data = form_resolvers._reconstruct_partial_data(CustomItemMutation, item, {"name": "updated"})
+    data, unresolved = form_resolvers._reconstruct_partial_data(
+        CustomItemMutation,
+        item,
+        {"name": "updated"},
+    )
+    assert unresolved == {}
     assert "entries" not in data
     assert data["name"] == "updated"
     assert data["category"] == cat.pk
@@ -1887,38 +1898,95 @@ def test_partial_update_reconstruct_reads_the_related_row_only_off_the_stored_ke
 
     located = library_models.Book.objects.get(pk=book.pk)
     with CaptureQueriesContext(connection) as captured:
-        data = form_resolvers._reconstruct_partial_data(UpdateBook, located, {})
+        data, unresolved = form_resolvers._reconstruct_partial_data(UpdateBook, located, {})
     assert len(captured.captured_queries) == reads
+    assert unresolved == {}
     assert data["shelf"] == (shelf.code if to_field_name == "code" else shelf.pk)
 
 
 @pytest.mark.django_db
-def test_partial_update_reconstruct_with_dangling_fk_target() -> None:
-    """A ModelForm with a dangling FK does not crash reconstruction with DoesNotExist."""
-    cat = product_models.Category.objects.create(name=_uniq("cat"))
-    item = product_models.Item.objects.create(name=_uniq("item"), category=cat)
-    item.category_id = 999999
-    if hasattr(item, "_state"):
-        item._state.fields_cache.pop("category", None)
+@pytest.mark.parametrize(
+    ("stored", "reads"),
+    [
+        ("null", 0),
+        ("genre", 1),
+        ("dangling", 1),
+        ("dangling_select_related", 0),
+    ],
+)
+def test_partial_update_reconstruct_reports_an_unresolvable_stored_key(
+    stored: str,
+    reads: int,
+) -> None:
+    """An omitted FK whose stored key names no row is reported, never bound by that key.
 
-    class ItemForm(forms.ModelForm[product_models.Item]):
-        category = forms.ModelChoiceField(
-            queryset=product_models.Category.objects.all(),
-            to_field_name="name",
+    ``PatronProfile.favorite_genre`` stores the genre name; the declared field resolves a
+    genre by id, so the omitted field is projected from the related row. A NULL column is
+    the form's empty value with no read and a stored genre binds by its id. A stored name
+    no genre carries (read through the descriptor, or a ``select_related`` join that
+    cached no row) has no id to bind: the field is reported with the form field's own
+    ``invalid_choice`` error and left out of the data, so neither the stored name, read
+    as an id, nor the empty value, which would clear the relation, is ever bound.
+    """
+    other = library_models.Genre.objects.create(name=_uniq("Other"))
+    genre = library_models.Genre.objects.create(name=str(other.pk))
+    patron = library_models.Patron.objects.create(name=_uniq("Patron"))
+    library_models.PatronProfile.objects.create(
+        patron=patron,
+        favorite_genre=None if stored == "null" else genre,
+    )
+
+    class ProfileForm(forms.ModelForm[library_models.PatronProfile]):
+        favorite_genre = forms.ModelChoiceField(
+            queryset=library_models.Genre.objects.all(),
+            required=False,
         )
 
         class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
+            model = library_models.PatronProfile
+            fields = ("address_2", "favorite_genre")
 
-    class ItemMutation(DjangoModelFormMutation):
+    class UpdateProfile(DjangoModelFormMutation):
         class Meta:
-            form_class = ItemForm
+            form_class = ProfileForm
             operation = "update"
 
-    data = form_resolvers._reconstruct_partial_data(ItemMutation, item, {"name": "updated"})
-    assert data["name"] == "updated"
-    assert data["category"] == 999999
+    profiles = library_models.PatronProfile.objects.all()
+    if stored == "dangling_select_related":
+        profiles = profiles.select_related("favorite_genre")
+    with connection.constraint_checks_disabled():
+        if stored.startswith("dangling"):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM library_genre WHERE id = %s",
+                    [genre.pk],
+                )
+        try:
+            located = profiles.get(pk=patron.pk)
+            with CaptureQueriesContext(connection) as captured:
+                data, unresolved = form_resolvers._reconstruct_partial_data(
+                    UpdateProfile,
+                    located,
+                    {"address_2": "Suite 9"},
+                )
+        finally:
+            library_models.PatronProfile.objects.filter(pk=patron.pk).update(favorite_genre=None)
+    assert len(captured.captured_queries) == reads
+    assert data["address_2"] == "Suite 9"
+    if stored == "null":
+        assert (data["favorite_genre"], unresolved) == (None, {})
+    elif stored == "genre":
+        assert (data["favorite_genre"], unresolved) == (genre.pk, {})
+    else:
+        assert "favorite_genre" not in data
+        assert list(unresolved) == ["favorite_genre"]
+        [error] = unresolved["favorite_genre"]
+        assert error.code == "invalid_choice"
+        assert (
+            error.message
+            == ProfileForm.base_fields["favorite_genre"].error_messages["invalid_choice"]
+        )
+        assert error.params == {"value": genre.name}
 
 
 def test_to_form_key_value_handles_serializable_value_exceptions(
@@ -2085,7 +2153,8 @@ def test_reconstruct_partial_data_m2m_does_not_exist(monkeypatch: pytest.MonkeyP
             form_class = BookForm
             operation = "update"
 
-    data = _reconstruct_partial_data(BookMutation, library_models.Book(pk=1), {})
+    data, unresolved = _reconstruct_partial_data(BookMutation, library_models.Book(pk=1), {})
+    assert unresolved == {}
     assert "genres" not in data
 
 

@@ -234,7 +234,13 @@ Suppressions go on the element. The script refuses to explode a line that ends i
 `# pyright: ignore` or `# type: ignore`: after the explode the comment would sit after the closing bracket while
 the diagnostic moves to an element line, so `RUF100` would delete the noqa and basedpyright would report the
 ignore as unnecessary. `--check` reports it as not fixable and `--fix` as an `unfixable` error; move the comment
-onto the element it silences.
+onto the element it silences. The refusal holds in every `--fix` round, not only the first: a construct that
+`ruff format` collapses onto a line ending in a suppression (a multi-line literal whose closing bracket carries the
+comment) is stranded only after the reflow, and that later round fails the run with the same `unfixable` error, so
+`--fix` never exits 0 on a file `--check` then rejects. Stranded errors are taken from each file's final pass: one
+per construct, at its line in the file as `--fix` leaves it, which is the line `--check` then names. `--diff`
+raises exactly the errors `--fix` would, initially stranded lines included; only its violations describe the file
+as it stands.
 
 Ruff-side notes:
 

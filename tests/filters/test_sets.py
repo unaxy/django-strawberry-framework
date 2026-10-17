@@ -1843,7 +1843,205 @@ def test_a_choice_filter_whose_null_value_is_the_absent_value_runs_its_null_bran
     ``str`` is never compared and counts as matching.
     """
     choice_filter = make()
-    assert sets_module._null_value_is_absent(choice_filter) is runs_null_branch
+    field_class: type[forms.Field] = choice_filter.field_class
+    absent = sets_module._absent_cleaned_value(field_class, choice_filter.extra, None)
+    assert (
+        sets_module._null_value_is_absent(cast("object", choice_filter.null_value), absent)
+        is runs_null_branch
+    )
+
+
+class _DefaultingCharField(forms.CharField):
+    """A consumer form field whose ``clean`` reads an absent value as ``"B"``."""
+
+    @override
+    def clean(self, value: object) -> object:
+        cleaned: object = super().clean(value)
+        return cleaned or "B"
+
+
+class _DefaultingCharFilter(CharFilter):
+    """A consumer ``CharFilter`` over ``_DefaultingCharField``, keeping django-filter's ``filter``."""
+
+    field_class = _DefaultingCharField
+
+
+class _OwnFieldCharFilter(CharFilter):
+    """A consumer ``CharFilter`` that builds its own form field, whose absence cleans to ``"B"``."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        return forms.CharField(empty_value="B", required=False)
+
+
+class _PlainBooleanFieldFilter(Filter):
+    """A consumer filter over Django's two-state ``BooleanField``."""
+
+    field_class = forms.BooleanField
+
+
+class _FileFieldFilter(Filter):
+    """A filter over Django's ``FileField``, which cleans an absent key to its ``initial``."""
+
+    field_class = forms.FileField
+
+
+class _ComboFieldFilter(Filter):
+    """A filter over Django's ``ComboField``, which cleans through its sub-fields."""
+
+    field_class = forms.ComboField
+
+
+class _BareMultiValueFieldFilter(Filter):
+    """A filter over Django's abstract ``MultiValueField``, whose ``compress`` raises."""
+
+    field_class = forms.MultiValueField
+
+
+class _TitleInFilter(BaseInFilter, CharFilter):
+    """A consumer ``in`` filter over titles: django-filter's CSV field over ``CharField``."""
+
+
+class _TextListFilter(ListFilter):
+    """A consumer list filter over ``CharField``, which cleans an absent key to ``""``."""
+
+    field_class = forms.CharField
+
+
+_TITLE_CHOICES = [("A", "A"), ("B", "B")]
+
+
+@pytest.mark.parametrize(
+    ("make", "deferred"),
+    [
+        (lambda: Filter(field_name="title"), True),
+        (lambda: CharFilter(field_name="title"), True),
+        (lambda: CharFilter(field_name="title", empty_value=None), True),
+        (lambda: NumberFilter(field_name="number"), True),
+        (lambda: BooleanFilter(field_name="embargoed"), True),
+        (lambda: ChoiceFilter(field_name="title", choices=_TITLE_CHOICES), True),
+        (
+            lambda: django_filters.TypedChoiceFilter(field_name="title", choices=_TITLE_CHOICES),
+            True,
+        ),
+        (
+            lambda: MultipleChoiceFilter(
+                field_name="title",
+                choices=_TITLE_CHOICES,
+                widget=forms.TextInput,
+            ),
+            True,
+        ),
+        (
+            lambda: django_filters.TypedMultipleChoiceFilter(
+                field_name="title",
+                choices=_TITLE_CHOICES,
+                widget=forms.TextInput,
+            ),
+            True,
+        ),
+        (lambda: EnumLookupFilter(field_name="title"), True),
+        (lambda: _TitleInFilter(field_name="title", lookup_expr="in"), True),
+        (lambda: RangeFilter(field_name="number"), True),
+        (lambda: django_filters.DateFromToRangeFilter(field_name="number"), True),
+        (lambda: _DefaultingCharFilter(field_name="title"), False),
+        (lambda: _OwnFieldCharFilter(field_name="title"), False),
+        (lambda: CharFilter(field_name="title", empty_value="B"), False),
+        (
+            lambda: django_filters.TypedChoiceFilter(
+                field_name="title",
+                choices=_TITLE_CHOICES,
+                empty_value="B",
+            ),
+            False,
+        ),
+        (
+            lambda: django_filters.TypedChoiceFilter(
+                field_name="number",
+                choices=[(1, "1")],
+                coerce=int,
+                empty_value=0,
+            ),
+            False,
+        ),
+        (lambda: _PlainBooleanFieldFilter(field_name="embargoed", widget=forms.TextInput), False),
+        (
+            lambda: ModelMultipleChoiceFilter(
+                field_name="periodical",
+                queryset=library_models.Periodical.objects.all(),
+                widget=forms.TextInput,
+            ),
+            False,
+        ),
+        (lambda: _FileFieldFilter(field_name="title"), False),
+        (lambda: _ComboFieldFilter(field_name="title", fields=[forms.CharField()]), False),
+        (
+            lambda: _BareMultiValueFieldFilter(field_name="title", fields=[forms.CharField()]),
+            False,
+        ),
+        (
+            lambda: CharFilter(
+                field_name="title",
+                widget=forms.MultiWidget(widgets=(forms.TextInput, forms.TextInput)),
+            ),
+            False,
+        ),
+        (
+            lambda: django_filters.DateFromToRangeFilter(
+                field_name="number",
+                widget=forms.MultiWidget(widgets=(forms.SplitDateTimeWidget, forms.TextInput)),
+            ),
+            False,
+        ),
+        (lambda: _TextListFilter(field_name="title"), False),
+    ],
+    ids=[
+        "field",
+        "char",
+        "char-none-empty-value",
+        "number",
+        "null-boolean",
+        "choice",
+        "typed-choice",
+        "multiple-choice-text-widget",
+        "typed-multiple-choice-text-widget",
+        "enum-lookup",
+        "csv-in",
+        "package-range-pair",
+        "multi-value-range",
+        "consumer-field-clean",
+        "consumer-field-property",
+        "char-empty-value",
+        "typed-choice-empty-value",
+        "typed-choice-int-empty-value",
+        "boolean-field-text-widget",
+        "model-multiple-choice-text-widget",
+        "file-field",
+        "combo-field",
+        "abstract-multi-value-field",
+        "multi-widget-on-char-field",
+        "nested-multi-widget-on-multi-value-field",
+        "package-list-filter-empty-string",
+    ],
+)
+def test_a_flat_copy_is_deferred_only_when_its_field_provably_cleans_absence_to_a_skipped_value(
+    make: Callable[[], Filter],
+    deferred: bool,  # noqa: FBT001
+) -> None:
+    """A copy is deferred only when its form field cleans an absent key to a value its filter skips.
+
+    The value is proven from the field class's family, never by running field code:
+    Django's, django-filter's and the package's own fields with an empty
+    ``empty_value`` defer, as do multi-value fields that fold one ``None`` per
+    sub-widget. A consumer field class or ``field`` property, a nonempty
+    ``empty_value``, a two-state ``BooleanField`` (absent is ``False``), a
+    ``ModelMultipleChoiceField`` (absent is a queryset), a ``FileField`` (absent is
+    its ``initial``), a ``ComboField``, the abstract ``MultiValueField``, a
+    multi-widget value reaching a single-value field, and an empty string reaching
+    a package filter (which skips only ``None``) keep the copy up front.
+    """
+    assert sets_module._absence_filters_nothing("issues__x", make(), {}) is deferred
 
 
 class _NeedsArgumentWidget(forms.TextInput):
