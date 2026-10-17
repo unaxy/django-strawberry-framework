@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 146 done, 116 to do.
+Progress: 150 done, 117 to do.
 
 ## Done
 
@@ -461,6 +461,20 @@ Progress: 146 done, 116 to do.
   suppression comment: fixed, `_classify_round` classifies every round (round 1, the on-disk rounds and the `--diff`
   rounds) and reports each stranded explode once from the file's final pass, at its line in the settled text; `--diff`
   raises the same errors as `--fix`
+- [x] 265. Residual of 259: the deferral proof read the field class and `extra`, never the form field the filter had
+  already built (`Filter.field` caches it in `_field`), so a filter whose `__init__` edited `self.field` (an `empty_value`,
+  `required`, `disabled`, widget or method) was still deferred: fixed, `filters/sets.py::_absence_filters_nothing` proves
+  from the cached field when there is one, and `_runs_as` walks a projected copy to the filter it runs at every hop, so a
+  copy run inside a child set with its own `__init__` two or more hops down stays eager too (fakeshop defers 4706 copies,
+  was 4885)
+- [x] 266. Residual of 260: a single form relation whose form-key value the field cleans to empty (a stored or supplied
+  key `""`, row present or not) bound as a clear: fixed, `forms/resolvers.py::_unrepresentable_choice` is the one check
+  every stored and provided single form key passes, refusing it as the field's `invalid_choice` error with nothing written
+- [x] 267. An M2M form list element in the field's `empty_values` (a raw pk `""`) was skipped as a clear and bound
+  undecoded, linking a row its type hides or reading a pk as a `to_field_name` value: fixed,
+  `forms/resolvers.py::_decode_form_relation_multi` decodes every element; only the whole value can be a clear
+- [x] 268. A filter whose instance carries its own `filter` was judged by the class `filter` and deferred: fixed,
+  `filters/sets.py::_own_filter_skips` accepts only the bound `FilterMethod` `method=` installs
 
 ## Outside review of the fixes
 
@@ -619,6 +633,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   many-to-many equals its name, so it never sees a many-to-many order name expand into the related `Meta.ordering`:
   `Book.Meta.ordering = ["genres"]` with `Genre.Meta.ordering = [Random()]` certifies a positive `offset` while the
   compiled order is random; read the expansion through `utils/querysets.py::related_order_substitute`
+- [ ] 269. A flat copy whose instance `filter` is a bound method reading `self.field_name` breaks even when the request
+  names it: `_bound_terminal` copies the filter and rebinds `field_name`, but the bound method still points at the
+  pre-copy object (`books__title`), so the query raises `FieldError: Cannot resolve keyword 'books'`; `_owner_bound_child`
+  should treat any filter holding its own `filter` as owner-bound, as it does a `method=` filter
 ## To do: holes found re-checking the fixes
 
 
@@ -841,9 +859,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   scalars are preserved, while the reconstruction binds the stored value and lets the form clean it as a provided one
 - [ ] 263. CHANGELOG entry for item 259: a flat `RelatedFilter` copy whose form field cleans an absent key to a value that
   filters (a consumer field class, a nonempty `empty_value`) constrains the parent connection as a full copy does (0.0.14
-  dropped the constraint when the request did not name the copy)
+  dropped the constraint when the request did not name the copy); also covers 265 and 268 (a field or `filter` the
+  filter's `__init__` set, a child set's own `__init__` at any depth)
 - [ ] 264. CHANGELOG entry for item 260: a partial `ModelForm` update omitting a FK whose stored key names no row is that
-  field's `invalid_choice` error with nothing written (0.0.14 could link the row whose form key equals the stored key)
+  field's `invalid_choice` error with nothing written (0.0.14 could link the row whose form key equals the stored key); also covers
+  266 and 267 (a stored or supplied single key `""` is that error instead of a clear; an M2M element `""` is decoded
+  and visibility-checked)
 - [ ] 108. A serializer-only source over the default `create()` / `update()` (`gs = PrimaryKeyRelatedField(many=True,
   source="genres_id")`) builds; create raises a masked TypeError and update is a silent no-op. Refuse a column-less
   writable source at class creation, as item 103 does for an `attname` source, or leave it to DRF's default `create()` /

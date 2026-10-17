@@ -16,7 +16,8 @@ required ``genres`` M2M is reconstructed from the located row rather than cleare
 the column, so its generated input publishes only the values the form admits.
 ``PatronProfileGenreForm`` declares a genre-id-keyed ``favorite_genre`` over the ``to_field``
 key ``PatronProfile.favorite_genre``, so a partial update omitting it rebinds the stored
-genre by its id.
+genre by its id. ``PatronProfileGenreNameForm`` keeps the generated name-keyed field over the
+same key, so the stored name is the form key.
 ``PrintingForm`` relates to the text-keyed ``Edition`` (FK + M2M), so its raw-pk
 inputs carry ISBN text; ``EditionImprintForm`` updates an ``Edition`` located by that text.
 ``BranchWithShelfForm`` and ``BranchPairForm`` add model-less plain-form
@@ -134,6 +135,21 @@ class PatronProfileGenreForm(forms.ModelForm[models.PatronProfile]):
         queryset=models.Genre.objects.order_by("name"),
         required=False,
     )
+
+    class Meta:
+        model = models.PatronProfile
+        fields = ("address_2", "favorite_genre")
+
+
+class PatronProfileGenreNameForm(forms.ModelForm[models.PatronProfile]):
+    """A ``PatronProfile`` ``ModelForm`` whose generated ``favorite_genre`` is keyed by genre name.
+
+    ``favorite_genre`` is a ``ForeignKey(Genre, to_field="name")`` and the form keeps the
+    generated field, which resolves a choice by ``to_field_name="name"``: the key the column
+    stores, so an omitted genre rebinds the stored name as is. The field is optional
+    (``blank=True``), so a name the field cleans to empty (``""``) would clear the relation
+    instead of naming the genre that carries it.
+    """
 
     class Meta:
         model = models.PatronProfile

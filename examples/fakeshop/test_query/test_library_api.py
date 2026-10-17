@@ -7361,6 +7361,94 @@ class _DefaultBToPythonFilter(CharFilter):
     field_class = _DefaultBToPythonField
 
 
+class _InitEmptyValueFilter(CharFilter):
+    """A consumer ``CharFilter`` whose ``__init__`` sets the form field it builds to clean to ``"B"``."""
+
+    def __init__(self, field_name: str, method: str | None = None) -> None:
+        super().__init__(field_name=field_name, method=method)
+        field = self.field
+        assert isinstance(field, forms.CharField)
+        field.empty_value = "B"
+
+
+class _InitDisabledFilter(CharFilter):
+    """A consumer ``CharFilter`` whose ``__init__`` disables its form field with an ``initial``."""
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.field.disabled = True
+        self.field.initial = "B"
+
+
+class _InitRequiredFilter(CharFilter):
+    """A consumer ``CharFilter`` whose ``__init__`` makes its form field required."""
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.field.required = True
+
+
+class _InitCheckboxFilter(CharFilter):
+    """A consumer ``CharFilter`` whose ``__init__`` gives its form field a checkbox widget.
+
+    A ``CheckboxInput`` reads an absent key as ``False``, which the ``CharField``
+    cleans to the title ``"False"``.
+    """
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.field.widget = forms.CheckboxInput()
+
+
+def _clean_to_b(_value: object) -> str:
+    """A form field ``clean`` an instance carries of its own: every value cleans to ``"B"``."""
+    return "B"
+
+
+class _InitOwnCleanFilter(CharFilter):
+    """A consumer ``CharFilter`` whose ``__init__`` gives its form field a ``clean`` of its own."""
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        vars(self.field)["clean"] = _clean_to_b
+
+
+def _read_b_from_bound_data(data: Mapping[str, object], _files: object, _name: str) -> object:
+    """A widget ``value_from_datadict`` an instance carries of its own: ``"B"`` from any data."""
+    return "B" if data else None
+
+
+class _InitOwnReaderFilter(CharFilter):
+    """A consumer ``CharFilter`` whose ``__init__`` gives its widget a reader of its own.
+
+    The reader answers ``None`` for empty data, as Django's does, but ``"B"`` for
+    any request carrying form data.
+    """
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        vars(self.field.widget)["value_from_datadict"] = _read_b_from_bound_data
+
+
+def _title_or_b(queryset: QuerySet[Model], value: object) -> QuerySet[Model]:
+    """A ``filter`` a filter instance carries of its own: the title ``value``, or ``"B"`` if empty."""
+    return queryset.filter(title=value or "B")
+
+
+class _InitOwnFilterFilter(CharFilter):
+    """A consumer ``CharFilter`` whose ``__init__`` gives it a ``filter`` of its own."""
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        vars(self)["filter"] = _title_or_b
+
+
+def _with_built_field(declared: Filter) -> Filter:
+    """Return ``declared`` after reading its form field, which django-filter builds and caches."""
+    assert isinstance(declared.field, forms.Field)
+    return declared
+
+
 def _filter_title(
     _filterset: FilterSet,
     queryset: QuerySet[models.Book],
@@ -7375,9 +7463,12 @@ class _AbsentChildFilterCase(NamedTuple):
     """One child filter the parent request omits (or names), and the shelves it answers."""
 
     declared: Callable[[], Filter]
-    expected: tuple[str, ...]
+    # ``None`` when the form refuses the request (the copy's field is required).
+    expected: tuple[str, ...] | None
     # The flat copy's form value and its ``booksStatus`` operator bag when the request names it.
     named: tuple[str, str] | None = None
+    # Whether the parent copies the flat copy only when a request names it.
+    deferred: bool = False
 
 
 _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
@@ -7417,9 +7508,68 @@ _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
         ("S-A",),
         named=("A", '{ exact: "A" }'),
     ),
+    "init-empty-value": _AbsentChildFilterCase(
+        lambda: _InitEmptyValueFilter(field_name="title"),
+        ("S-B",),
+    ),
+    "projected-init-empty-value": _AbsentChildFilterCase(
+        lambda: _InitEmptyValueFilter(field_name="title", method="filter_title"),
+        ("S-B",),
+    ),
+    "named-init-empty-value": _AbsentChildFilterCase(
+        lambda: _InitEmptyValueFilter(field_name="title"),
+        ("S-A",),
+        named=("A", '{ exact: "A" }'),
+    ),
+    "init-disabled-initial": _AbsentChildFilterCase(
+        lambda: _InitDisabledFilter(field_name="title"),
+        ("S-B",),
+    ),
+    "init-own-clean": _AbsentChildFilterCase(
+        lambda: _InitOwnCleanFilter(field_name="title"),
+        ("S-B",),
+    ),
+    "init-widget-own-reader": _AbsentChildFilterCase(
+        lambda: _InitOwnReaderFilter(field_name="title"),
+        ("S-B",),
+    ),
+    "init-own-filter": _AbsentChildFilterCase(
+        lambda: _InitOwnFilterFilter(field_name="title"),
+        ("S-B",),
+    ),
+    "named-init-own-filter": _AbsentChildFilterCase(
+        lambda: _InitOwnFilterFilter(field_name="title"),
+        ("S-A",),
+        named=("A", '{ exact: "A" }'),
+    ),
+    "projected-method-default": _AbsentChildFilterCase(
+        lambda: CharFilter(field_name="title", method="filter_title"),
+        ("S-A", "S-B"),
+        deferred=True,
+    ),
+    "init-required": _AbsentChildFilterCase(
+        lambda: _InitRequiredFilter(field_name="title"),
+        None,
+    ),
+    "init-checkbox-widget": _AbsentChildFilterCase(
+        lambda: _InitCheckboxFilter(field_name="title"),
+        (),
+    ),
     "char-default": _AbsentChildFilterCase(
         lambda: CharFilter(field_name="title"),
         ("S-A", "S-B"),
+        deferred=True,
+    ),
+    "char-built-field-default": _AbsentChildFilterCase(
+        lambda: _with_built_field(CharFilter(field_name="title")),
+        ("S-A", "S-B"),
+        deferred=True,
+    ),
+    "named-char-built-field-default": _AbsentChildFilterCase(
+        lambda: _with_built_field(CharFilter(field_name="title")),
+        ("S-A",),
+        named=("A", '{ exact: "A" }'),
+        deferred=True,
     ),
     "typed-choice-default": _AbsentChildFilterCase(
         lambda: TypedChoiceFilter(
@@ -7427,6 +7577,7 @@ _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
             choices=models.Book.CirculationStatus.choices,
         ),
         ("S-A", "S-B"),
+        deferred=True,
     ),
 }
 
@@ -7494,8 +7645,17 @@ def test_library_parent_connection_answers_an_omitted_child_filter_as_a_full_cop
     ``clean`` / ``to_python`` default, a nonempty ``empty_value`` on
     ``CharFilter`` / ``TypedChoiceFilter`` over the ``circulation_status``
     choices, a multi-widget reading two keys into a single-value field) still
-    constrains, while a built-in empty default constrains nothing. A request
-    that names the copy (``booksStatus``) filters by the value it sends.
+    constrains, as does a field the filter's ``__init__`` built and edited (an
+    ``empty_value``, ``disabled`` with an ``initial``, a checkbox widget, a
+    ``clean`` of its own or a widget reading form data its own way), whose
+    cached instance every copy runs; one it made ``required`` refuses the request
+    as the full copy's form does. A ``filter`` the filter's ``__init__`` sets on
+    the instance replaces the class's and acts on the absent key too, while the
+    ``FilterMethod`` a ``method=`` installs keeps a built-in default deferred. A
+    built-in empty default constrains nothing
+    and is copied only when named, a field already built but left as built
+    included. A request that names the copy (``booksStatus``) filters by the
+    value it sends.
     """
     case = _ABSENT_CHILD_FILTER_CASES[case_id]
     branch = models.Branch.objects.create(name="Absent", city="Boston")
@@ -7532,15 +7692,167 @@ def test_library_parent_connection_answers_an_omitted_child_filter_as_a_full_cop
             queryset=models.Shelf.objects.order_by("code"),
             request=HttpRequest(),
         )
+        refused = not copying_every_filter.form.is_valid()
+        form_errors = copying_every_filter.form.errors.get_json_data()
         expected = list(copying_every_filter.qs.values_list("code", flat=True))
+        snapshot = shelf_filter._expansion_snapshot()
     finally:
         registry.clear()
 
     assert response.status_code == 200
     payload = response.json()
+    if case.expected is None:
+        assert refused
+        assert form_errors == {
+            "books__status": [{"message": "This field is required.", "code": "required"}],
+        }
+        assert payload["data"] is None
+        assert [error["extensions"]["errors"] for error in payload["errors"]] == [form_errors]
+    else:
+        assert not refused
+        assert "errors" not in payload, payload
+        codes = [edge["node"]["code"] for edge in payload["data"]["shelves"]["edges"]]
+        assert codes == expected == list(case.expected)
+    assert snapshot is not None
+    assert ("books__status" in snapshot.deferred_copies) is case.deferred
+
+
+def _absent_grandchild_filter_holder() -> tuple[strawberry.Schema, type[FilterSet]]:
+    """A ``Branch`` connection expanding ``shelves``, whose filter expands ``books`` over a child.
+
+    The child set's ``__init__`` edits its ``status`` filter's form field to clean
+    an absent key to ``"B"``, so the shelf set's ``books__status`` and the branch
+    set's ``shelves__books__status`` are both copies projected through it: the
+    branch's runs inside a shelf instance, which runs it inside a book instance.
+    """
+
+    class EditingBookFilter(FilterSet):
+        status = CharFilter(field_name="title")
+
+        class Meta:
+            model = models.Book
+            fields = {"title": ["exact"]}
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            field = self.filters["status"].field
+            assert isinstance(field, forms.CharField)
+            field.empty_value = "B"
+
+    class GrandchildShelfFilter(FilterSet):
+        books = RelatedFilter(EditingBookFilter, field_name="books")
+
+        class Meta:
+            model = models.Shelf
+            fields = {"topic": ["exact"]}
+
+    class GrandchildBranchFilter(FilterSet):
+        shelves = RelatedFilter(GrandchildShelfFilter, field_name="shelves")
+
+        class Meta:
+            model = models.Branch
+            fields = {"city": ["exact"]}
+
+    # ``RelatedFilter`` needs each target model's type registered.
+    class HolderGrandchildBookType(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            name = "HolderGrandchildBookType"
+
+    class HolderGrandchildShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "code")
+            interfaces = (relay.Node,)
+            name = "HolderGrandchildShelfType"
+
+    assert registry.get(models.Book) is HolderGrandchildBookType
+    assert registry.get(models.Shelf) is HolderGrandchildShelfType
+
+    class HolderGrandchildBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            filterset_class = GrandchildBranchFilter
+            name = "HolderGrandchildBranchType"
+
+    @strawberry.type
+    class Query:
+        branches: DjangoConnection[HolderGrandchildBranchType] = DjangoConnectionField(
+            HolderGrandchildBranchType,
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config()), GrandchildBranchFilter
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("named", [False, True], ids=["omitted", "named"])
+def test_library_grandparent_connection_answers_an_omitted_grandchild_filter_as_a_full_copy_over_http(
+    named: bool,  # noqa: FBT001
+) -> None:
+    """A copy projected through two child sets runs the field the deeper set's ``__init__`` edits.
+
+    The branch set's ``shelves__books__status`` runs inside a shelf instance, whose
+    ``books__status`` runs inside a book instance whose ``__init__`` makes the
+    field clean an absent key to ``"B"``. The shelf set edits nothing, yet a
+    request that omits the copy still gets the branches a full copy gets (those
+    reaching a book titled ``"B"``), so the copy is never deferred; one that names
+    it (``shelvesBooksStatus``) filters by the value it sends.
+    """
+    boston_a = models.Branch.objects.create(name="Absent A", city="Boston")
+    boston_b = models.Branch.objects.create(name="Absent B", city="Boston")
+    salem = models.Branch.objects.create(name="Absent C", city="Salem")
+    for branch, title in ((boston_a, "A"), (boston_b, "B"), (salem, "B")):
+        shelf = models.Shelf.objects.create(code=f"S-{branch.pk}", topic="general", branch=branch)
+        models.Book.objects.create(title=title, shelf=shelf)
+    data = {"city": "Boston"}
+    status = ""
+    if named:
+        data["shelves__books__status"] = "A"
+        status = ', shelvesBooksStatus: { exact: "A" }'
+
+    registry.clear()
+    try:
+        schema, branch_filter = _absent_grandchild_filter_holder()
+        response = _post_holder(
+            schema,
+            f"""
+            {{
+              branches(first: 10, filter: {{ city: {{ exact: "Boston" }}{status} }}) {{
+                edges {{ node {{ name }} }}
+              }}
+            }}
+            """,
+        )
+        copying_every_filter = branch_filter(
+            data=data,
+            queryset=models.Branch.objects.order_by("name"),
+            request=HttpRequest(),
+        )
+        expected = list(copying_every_filter.qs.values_list("name", flat=True))
+        snapshot = branch_filter._expansion_snapshot()
+    finally:
+        registry.clear()
+
+    assert snapshot is not None
+    assert "shelves__books__status" in snapshot.filters
+    assert "shelves__books__status" not in snapshot.deferred_copies
+    assert response.status_code == 200
+    payload = response.json()
     assert "errors" not in payload, payload
-    codes = [edge["node"]["code"] for edge in payload["data"]["shelves"]["edges"]]
-    assert codes == expected == list(case.expected)
+    names = [edge["node"]["name"] for edge in payload["data"]["branches"]["edges"]]
+    assert names == expected == (["Absent A"] if named else ["Absent B"])
 
 
 @pytest.mark.django_db
@@ -14248,6 +14560,350 @@ def test_form_to_field_relation_update_refuses_an_omitted_dangling_genre_over_ht
         }
         assert (column, address) == ([gone_name], ["Suite 1"])
         assert updates == []
+
+
+_FORM_PROFILE_NAME_UPDATE = (
+    "mutation($id: ID!, $d: PatronProfileGenreNameFormPartialInput!) { "
+    f"updatePatronProfileByGenreNameViaForm(id: $id, data: $d) {{ {_PROFILE_SELECTION} }} }}"
+)
+
+#: The ``invalid_choice`` error a ``ModelChoiceField`` gives a choice it cannot resolve.
+_INVALID_CHOICE = "Select a valid choice. That choice is not one of the available choices."
+
+
+def _genre_reads(sql: list[str]) -> int:
+    """Count the captured statements that read the ``Genre`` table."""
+    return sum('FROM "library_genre"' in statement for statement in sql)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "genre_reads"),
+    [("omitted_dangling", 0), ("omitted_existing", 0), ("supplied_existing", 1)],
+)
+def test_form_name_keyed_genre_update_refuses_a_genre_named_empty_over_http(
+    value: str,
+    genre_reads: int,
+) -> None:
+    """A form update naming a genre whose name is ``""`` is refused with nothing written.
+
+    ``PatronProfileGenreNameForm.favorite_genre`` is the generated field over
+    ``ForeignKey(Genre, to_field="name")``, so it resolves a genre by the name the column
+    stores. ``ModelChoiceField.to_python`` answers ``None`` for ``""`` before it looks a
+    genre up, and the field is optional, so binding ``""`` would clear the relation. That
+    holds whether no genre carries the name (the genre row is removed under disabled
+    constraint checks), a genre named ``""`` exists, or the client supplies that genre by
+    its ``GlobalID``: the field cannot name such a genre at all. Each is the field's own
+    ``invalid_choice`` error keyed to ``favoriteGenreId``, the form is never bound and no
+    ``UPDATE`` runs, so neither ``address_2`` nor the column changes. The stored name is
+    refused by its value alone, without reading the genre table; the supplied genre is
+    read once, by its id, to resolve it.
+    """
+    empty = models.Genre.objects.create(name="")
+    kept = models.Genre.objects.create(name="EmptyNameKept")
+    patron = models.Patron.objects.create(name="EmptyNameFormUpdatePatron")
+    stored = kept if value == "supplied_existing" else empty
+    models.PatronProfile.objects.create(patron=patron, address_2="Suite 1", favorite_genre=stored)
+    data: dict[str, object] = {"address_2": "Suite 4"}
+    if value == "supplied_existing":
+        data["favoriteGenreId"] = global_id_for(library_schema.GenreType, empty.pk)
+
+    with connection.constraint_checks_disabled():
+        if value == "omitted_dangling":
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM library_genre WHERE id = %s",
+                    [empty.pk],
+                )
+        try:
+            with CaptureQueriesContext(connection) as captured:
+                response = _post_graphql(
+                    _FORM_PROFILE_NAME_UPDATE,
+                    variables={
+                        "id": global_id_for(library_schema.PatronProfileType, patron.pk),
+                        "d": data,
+                    },
+                )
+            column = _profile_genre_column(patron)
+            address = list(
+                models.PatronProfile.objects.filter(patron=patron).values_list(
+                    "address_2",
+                    flat=True,
+                ),
+            )
+        finally:
+            models.PatronProfile.objects.filter(patron=patron).update(favorite_genre=None)
+    assert response.status_code == 200
+    payload = response.json()
+    assert "errors" not in payload, payload
+    assert payload["data"]["updatePatronProfileByGenreNameViaForm"] == {
+        "node": None,
+        "errors": [{"field": "favoriteGenreId", "messages": [_INVALID_CHOICE]}],
+    }
+    assert (column, address) == ([stored.name], ["Suite 1"])
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert [s for s in sql if s.lstrip().upper().startswith("UPDATE")] == []
+    assert _genre_reads(sql) == genre_reads
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "value",
+    [
+        "omitted_unset",
+        "omitted_genre",
+        "genre_over_empty",
+        "null_over_empty",
+    ],
+)
+def test_form_name_keyed_genre_update_keeps_or_replaces_the_genre_over_http(value: str) -> None:
+    """The name-keyed form keeps an omitted genre and lets a supplied value replace ``""``.
+
+    An omitted genre rebinds the stored name as is, and an unset genre stays unset. Over a
+    stored ``""`` no genre carries (the genre row is removed under disabled constraint
+    checks), a supplied genre still replaces the name and an explicit ``null`` still clears
+    it: only the omitted ``""`` is refused.
+    """
+    empty = models.Genre.objects.create(name="")
+    old = models.Genre.objects.create(name="EmptyNameOld")
+    new = models.Genre.objects.create(name="EmptyNameNew")
+    patron = models.Patron.objects.create(name="EmptyNameFormKeepPatron")
+    stored = {"omitted_unset": None, "omitted_genre": old}.get(value, empty)
+    models.PatronProfile.objects.create(patron=patron, favorite_genre=stored)
+    data: dict[str, object] = {"address_2": "Suite 4"}
+    if value == "genre_over_empty":
+        data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
+    elif value == "null_over_empty":
+        data["favoriteGenreId"] = None
+    expected = {"omitted_genre": old.name, "genre_over_empty": new.name}.get(value)
+
+    with connection.constraint_checks_disabled():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM library_genre WHERE id = %s",
+                [empty.pk],
+            )
+        try:
+            response = _post_graphql(
+                _FORM_PROFILE_NAME_UPDATE,
+                variables={
+                    "id": global_id_for(library_schema.PatronProfileType, patron.pk),
+                    "d": data,
+                },
+            )
+            column = _profile_genre_column(patron)
+        finally:
+            models.PatronProfile.objects.filter(patron=patron, favorite_genre="").update(
+                favorite_genre=None,
+            )
+    assert response.status_code == 200
+    payload = response.json()
+    assert "errors" not in payload, payload
+    assert payload["data"]["updatePatronProfileByGenreNameViaForm"] == {
+        "node": {
+            "secondaryAddress": "Suite 4",
+            "favoriteGenre": None if expected is None else {"name": expected},
+        },
+        "errors": [],
+    }
+    assert column == [expected]
+
+
+_UPDATE_SHELF_VIA_FORM = (
+    "mutation($id: ID!, $d: ShelfRelationsFormPartialInput!){ updateShelfViaForm(id:$id, data:$d){ "
+    "result{ code branch{ name } } errors{ field messages } } }"
+)
+
+
+def _branch_reads(sql: list[str]) -> int:
+    """Count the captured statements that read the ``Branch`` table."""
+    return sum('FROM "library_branch"' in statement for statement in sql)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "branch_reads"),
+    [("omitted", 2), ("supplied", 1)],
+)
+def test_form_shelf_update_refuses_a_branch_named_empty_over_http(
+    value: str,
+    branch_reads: int,
+) -> None:
+    """A form update naming a branch whose name is ``""`` is refused with nothing written.
+
+    ``ShelfRelationsForm.branch`` resolves a branch by ``to_field_name="name"`` while the
+    column stores the branch pk, so an omitted branch is projected from the stored row to
+    its name and a supplied one is resolved by pk, then projected. A branch named ``""``
+    projects to a key the field cleans to empty before its lookup, so binding it would
+    report the required branch as missing. Either way it is the field's own
+    ``invalid_choice`` error keyed to ``branchId`` and no ``UPDATE`` runs. The supplied
+    branch is refused at the decode, after its one read by pk; the omitted one after the
+    reconstruction read the stored branch once and the ``alt_branches`` members once.
+    """
+    empty = models.Branch.objects.create(name="", city="open")
+    kept = models.Branch.objects.create(name="EmptyNameShelfKept", city="open")
+    shelf = models.Shelf.objects.create(code="EN-1", branch=empty if value == "omitted" else kept)
+    data: dict[str, object] = {"code": "EN-2"}
+    if value == "supplied":
+        data["branchId"] = empty.pk
+
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_graphql(_UPDATE_SHELF_VIA_FORM, variables={"id": shelf.pk, "d": data})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "errors" not in payload, payload
+    assert payload["data"]["updateShelfViaForm"] == {
+        "result": None,
+        "errors": [{"field": "branchId", "messages": [_INVALID_CHOICE]}],
+    }
+    assert list(models.Shelf.objects.filter(pk=shelf.pk).values_list("code", "branch_id")) == [
+        ("EN-1", shelf.branch_id),
+    ]
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert [s for s in sql if s.lstrip().upper().startswith("UPDATE")] == []
+    assert _branch_reads(sql) == branch_reads
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", ["omitted", "replaced"])
+def test_form_shelf_update_keeps_or_replaces_the_branch_over_http(value: str) -> None:
+    """An omitted branch rebinds by its name; a supplied branch replaces one named ``""``."""
+    empty = models.Branch.objects.create(name="", city="open")
+    old = models.Branch.objects.create(name="EmptyNameShelfOld", city="open")
+    new = models.Branch.objects.create(name="EmptyNameShelfNew", city="open")
+    shelf = models.Shelf.objects.create(code="EN-3", branch=old if value == "omitted" else empty)
+    data: dict[str, object] = {"code": "EN-4"}
+    if value == "replaced":
+        data["branchId"] = new.pk
+    expected = old if value == "omitted" else new
+
+    response = _post_graphql(_UPDATE_SHELF_VIA_FORM, variables={"id": shelf.pk, "d": data})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "errors" not in payload, payload
+    assert payload["data"]["updateShelfViaForm"] == {
+        "result": {"code": "EN-4", "branch": {"name": expected.name}},
+        "errors": [],
+    }
+    assert list(models.Shelf.objects.filter(pk=shelf.pk).values_list("branch_id", flat=True)) == [
+        expected.pk,
+    ]
+
+
+@pytest.mark.django_db
+def test_form_shelf_create_refuses_a_branch_named_empty_over_http() -> None:
+    """A form create naming a branch whose name is ``""`` is the ``invalid_choice`` error."""
+    empty = models.Branch.objects.create(name="", city="open")
+    response = _post_graphql(
+        "mutation($d: ShelfRelationsFormInput!){ createShelfViaForm(data:$d){ "
+        "result{ code } errors{ field messages } } }",
+        variables={"d": {"code": "EN-5", "branchId": empty.pk}},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert "errors" not in payload, payload
+    assert payload["data"]["createShelfViaForm"] == {
+        "result": None,
+        "errors": [{"field": "branchId", "messages": [_INVALID_CHOICE]}],
+    }
+    assert not models.Shelf.objects.filter(code="EN-5").exists()
+
+
+@pytest.mark.django_db
+def test_form_printing_update_refuses_a_stored_edition_keyed_empty_over_http() -> None:
+    """An omitted edition whose stored ISBN is ``""`` is refused by value, with nothing written.
+
+    ``PrintingForm.edition`` is the generated field keyed by the ISBN the column stores, so
+    the omitted edition rebinds its stored key with no read. An edition whose ISBN is ``""``
+    exists, but the field cleans ``""`` to empty before its lookup, so binding it would
+    report the required edition as missing: it is the field's ``invalid_choice`` error
+    keyed to ``editionId``, decided without reading the edition by its key: the one edition
+    read is the omitted ``boundWith`` members' reconstruction.
+    """
+    publisher = models.Publisher.objects.create(name="EmptyIsbnPublisher")
+    edition = models.Edition.objects.create(isbn_13="", publisher=publisher)
+    printing = models.Printing.objects.create(edition=edition, run_size=1)
+    result, sql = _post_printing_write("form", "update", {"runSize": 2}, printing)
+    assert result == {
+        "node": None,
+        "errors": [
+            {
+                "field": "editionId",
+                "messages": [_INVALID_CHOICE],
+                "codes": ["invalid_choice"],
+                "path": ["editionId"],
+            },
+        ],
+    }
+    printing.refresh_from_db()
+    assert printing.run_size == 1
+    edition_reads = [s for s in sql if 'FROM "library_edition"' in s]
+    assert len(edition_reads) == 1, edition_reads
+    assert "library_printing_bound_with" in edition_reads[0]
+    assert [s for s in sql if s.lstrip().upper().startswith("UPDATE")] == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", ["omitted", "supplied"])
+def test_form_printing_update_links_a_bound_edition_keyed_empty_over_http(value: str) -> None:
+    """A ``boundWith`` member whose ISBN is ``""`` stays linked, omitted or supplied.
+
+    ``ModelMultipleChoiceField`` looks every member key up, ``""`` included, so a member
+    edition whose ISBN is ``""`` is not refused: an omitted ``boundWith`` keeps it and a
+    supplied one links it beside another edition.
+    """
+    publisher = models.Publisher.objects.create(name="EmptyIsbnBoundPublisher")
+    empty = models.Edition.objects.create(isbn_13="", publisher=publisher)
+    other = models.Edition.objects.create(isbn_13="9780000000266", publisher=publisher)
+    printing = models.Printing.objects.create(edition=other, run_size=1)
+    if value == "omitted":
+        printing.bound_with.set([empty, other])
+    data: dict[str, object] = {"runSize": 2}
+    if value == "supplied":
+        data["boundWith"] = ["", other.pk]
+    result, _sql = _post_printing_write("form", "update", data, printing)
+    assert result["errors"] == []
+    assert sorted(printing.bound_with.values_list("isbn_13", flat=True)) == ["", other.pk]
+    printing.refresh_from_db()
+    assert printing.run_size == 2
+
+
+@pytest.mark.django_db
+def test_form_printing_update_decodes_a_bound_element_keyed_empty_over_http() -> None:
+    """A ``boundWith`` element ``""`` naming no edition is the relation error, nothing written.
+
+    A list element is never a clear: the raw ISBN ``""`` is decoded like any member, read
+    once through ``EditionType``'s queryset, and since no edition carries it the element is
+    the uniform relation error keyed to ``boundWith``, short-circuiting before the second
+    element and before any form is bound. Bound undecoded it would reach the form's own
+    lookup instead.
+    """
+    publisher = models.Publisher.objects.create(name="EmptyIsbnUnknownPublisher")
+    other = models.Edition.objects.create(isbn_13="9780000000269", publisher=publisher)
+    printing = models.Printing.objects.create(edition=other, run_size=1)
+    printing.bound_with.set([other])
+    result, sql = _post_printing_write(
+        "form",
+        "update",
+        {"runSize": 2, "boundWith": ["", other.pk]},
+        printing,
+    )
+    assert result == {
+        "node": None,
+        "errors": [
+            {
+                "field": "boundWith",
+                "messages": ["Invalid id for relation 'boundWith'."],
+                "codes": ["invalid"],
+                "path": ["boundWith"],
+            },
+        ],
+    }
+    printing.refresh_from_db()
+    assert printing.run_size == 1
+    assert list(printing.bound_with.values_list("isbn_13", flat=True)) == [other.pk]
+    assert _edition_lookups(sql) == 1
+    assert [s for s in sql if s.lstrip().upper().startswith("UPDATE")] == []
 
 
 @pytest.mark.django_db

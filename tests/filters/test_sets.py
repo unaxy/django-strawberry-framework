@@ -73,6 +73,7 @@ from django_filters import (
     MultipleChoiceFilter,
     NumberFilter,
 )
+from django_filters.filters import FilterMethod
 from django_filters.filterset import FILTER_FOR_DBFIELD_DEFAULTS as UPSTREAM
 from django_filters.filterset import BaseFilterSet, UnknownFieldBehavior
 from django_filters.filterset import FilterSetMetaclass as DjangoFilterMetaclass
@@ -94,6 +95,7 @@ from django_strawberry_framework.filters import (
     GlobalIDFilter,
     GlobalIDMultipleChoiceFilter,
     ListFilter,
+    ListFilterMethod,
     RangeFilter,
     RelatedFilter,
 )
@@ -2025,12 +2027,17 @@ _TITLE_CHOICES = [("A", "A"), ("B", "B")]
         "package-list-filter-empty-string",
     ],
 )
+@pytest.mark.parametrize("built", [False, True], ids=["unbuilt", "built"])
 def test_a_flat_copy_is_deferred_only_when_its_field_provably_cleans_absence_to_a_skipped_value(
     make: Callable[[], Filter],
     deferred: bool,  # noqa: FBT001
+    built: bool,  # noqa: FBT001
 ) -> None:
     """A copy is deferred only when its form field cleans an absent key to a value its filter skips.
 
+    A filter whose form field is already built (django-filter caches it on the
+    filter, and every copy keeps it) is judged by that field and answers as the
+    field its class and ``extra`` would build.
     The value is proven from the field class's family, never by running field code:
     Django's, django-filter's and the package's own fields with an empty
     ``empty_value`` defer, as do multi-value fields that fold one ``None`` per
@@ -2041,7 +2048,259 @@ def test_a_flat_copy_is_deferred_only_when_its_field_provably_cleans_absence_to_
     multi-widget value reaching a single-value field, and an empty string reaching
     a package filter (which skips only ``None``) keep the copy up front.
     """
-    assert sets_module._absence_filters_nothing("issues__x", make(), {}) is deferred
+    declared = make()
+    if built:
+        assert isinstance(declared.field, forms.Field)
+    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is deferred
+
+
+def _clean_to_b(*_args: object) -> str:
+    """A form field or widget method an instance carries of its own: it answers ``"B"``."""
+    return "B"
+
+
+@pytest.mark.parametrize(
+    ("make", "attribute"),
+    [
+        (lambda: CharFilter(field_name="title"), "clean"),
+        (lambda: CharFilter(field_name="title"), "to_python"),
+        (lambda: CharFilter(field_name="title"), "validate"),
+        (lambda: CharFilter(field_name="title"), "run_validators"),
+        (lambda: CharFilter(field_name="title"), "_clean_bound_field"),
+        (lambda: CharFilter(field_name="title"), "bound_data"),
+        (lambda: django_filters.DateFromToRangeFilter(field_name="number"), "compress"),
+    ],
+    ids=[
+        "clean",
+        "to-python",
+        "validate",
+        "run-validators",
+        "clean-bound-field",
+        "bound-data",
+        "multi-value-compress",
+    ],
+)
+def test_a_built_field_carrying_its_own_cleaning_method_keeps_its_copy_up_front(
+    make: Callable[[], Filter],
+    attribute: str,
+) -> None:
+    """A built field holding a method of its own no longer cleans as its class says.
+
+    The same filter with its field built and left alone stays deferred.
+    """
+    declared = make()
+    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is True
+    vars(declared.field)[attribute] = _clean_to_b
+    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is False
+
+
+def _char_with(method: str | None) -> Filter:
+    """A ``CharFilter`` over titles, with ``method`` when one is given."""
+    return CharFilter(field_name="title", method=method)
+
+
+def _number_with(method: str | None) -> Filter:
+    """A ``NumberFilter`` over numbers, with ``method`` when one is given."""
+    return NumberFilter(field_name="number", method=method)
+
+
+def _package_list_with(method: str | None) -> Filter:
+    """The package's ``ListFilter`` over titles, with ``method`` when one is given."""
+    return ListFilter(field_name="title", method=method)
+
+
+def _char_empty_value_with(method: str | None) -> Filter:
+    """A ``CharFilter`` whose field cleans absence to ``"B"``, with ``method`` when one is given."""
+    return CharFilter(field_name="title", empty_value="B", method=method)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        _char_with,
+        _number_with,
+        _package_list_with,
+        _char_empty_value_with,
+    ],
+    ids=[
+        "char",
+        "number",
+        "package-list",
+        "char-empty-value",
+    ],
+)
+def test_a_method_filter_is_judged_as_the_same_filter_without_its_method(
+    make: Callable[[str | None], Filter],
+) -> None:
+    """The ``FilterMethod`` a ``method=`` installs on the instance keeps the copy's verdict.
+
+    django-filter's skips every empty value and the package's list one skips only
+    ``None``, each no less than the class's own ``filter`` skips.
+    """
+    plain = sets_module._absence_filters_nothing("issues__x", make(None), {})
+    with_method = make("filter_title")
+    assert isinstance(vars(with_method)["filter"], FilterMethod)
+    assert sets_module._absence_filters_nothing("issues__x", with_method, {}) is plain
+
+
+class _OwnFilterMethod(FilterMethod):
+    """A consumer ``FilterMethod`` subclass."""
+
+
+def _own_callable(_declared: Filter) -> object:
+    """A ``filter`` of the instance's own that is no ``FilterMethod``."""
+    return _clean_to_b
+
+
+def _method_of_another_filter(_declared: Filter) -> object:
+    """django-filter's ``FilterMethod``, bound to a different filter."""
+    return FilterMethod(CharFilter(field_name="title"))
+
+
+def _consumer_filter_method(declared: Filter) -> object:
+    """A consumer ``FilterMethod`` subclass bound to the filter."""
+    return _OwnFilterMethod(declared)
+
+
+def _list_filter_method(declared: Filter) -> object:
+    """The package's list ``FilterMethod``, which passes an empty string to its method."""
+    return ListFilterMethod(declared)
+
+
+def _django_filter_method(declared: Filter) -> object:
+    """django-filter's ``FilterMethod`` bound to the filter, as ``method=`` installs it."""
+    return FilterMethod(declared)
+
+
+@pytest.mark.parametrize(
+    ("install", "deferred"),
+    [
+        (_own_callable, False),
+        (_method_of_another_filter, False),
+        (_consumer_filter_method, False),
+        (_list_filter_method, False),
+        (_django_filter_method, True),
+    ],
+    ids=[
+        "own-callable",
+        "method-of-another-filter",
+        "consumer-filter-method",
+        "list-filter-method-on-char",
+        "django-filter-method",
+    ],
+)
+def test_a_filter_holding_its_own_filter_is_deferred_only_for_a_proven_filter_method(
+    install: Callable[[Filter], object],
+    deferred: bool,  # noqa: FBT001
+) -> None:
+    """An instance ``filter`` replaces the class's, so only a proven ``FilterMethod`` defers.
+
+    The absent key cleans to ``""``: django-filter's ``FilterMethod`` skips it, the
+    package's list one hands it to the method.
+    """
+    declared = CharFilter(field_name="title", method="filter_title")
+    vars(declared)["filter"] = install(declared)
+    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is deferred
+
+
+def _own_field_class(declared: Filter) -> None:
+    """Give the filter a form field class of its own."""
+    declared.field_class = _DefaultingCharField
+
+
+def _own_null_value(declared: Filter) -> None:
+    """Make the filter's ``null_value`` the value an absent key cleans to."""
+    vars(declared)["null_value"] = ""
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [_own_field_class, _own_null_value],
+    ids=["field-class", "null-value"],
+)
+def test_a_filter_attribute_set_on_the_instance_is_the_one_judged(
+    edit: Callable[[Filter], None],
+) -> None:
+    """The proof reads ``field_class`` and ``null_value`` through the instance, as the request does."""
+    declared = ChoiceFilter(field_name="title", choices=_TITLE_CHOICES)
+    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is True
+    edit(declared)
+    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is False
+
+
+def _own_empty_values(declared: Filter) -> None:
+    """Give the built field ``empty_values`` of its own."""
+    vars(declared.field)["empty_values"] = []
+
+
+def _not_a_form_field(declared: Filter) -> None:
+    """Cache an object that is no form field as the filter's built field."""
+    vars(declared)["_field"] = object()
+
+
+def _widget_class(declared: Filter) -> None:
+    """Hand the built field a widget class where ``Field.__init__`` builds an instance."""
+    declared.field.widget = forms.TextInput
+
+
+def _required_field(declared: Filter) -> None:
+    """Make the built field required."""
+    declared.field.required = True
+
+
+def _disabled_field(declared: Filter) -> None:
+    """Disable the built field."""
+    declared.field.disabled = True
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        _own_empty_values,
+        _not_a_form_field,
+        _widget_class,
+        _required_field,
+        _disabled_field,
+    ],
+    ids=[
+        "own-empty-values",
+        "not-a-form-field",
+        "widget-class",
+        "required",
+        "disabled",
+    ],
+)
+def test_a_built_field_whose_own_state_may_act_on_absence_keeps_its_copy_up_front(
+    edit: Callable[[Filter], None],
+) -> None:
+    """A built field's own state that may act on an absent key keeps the copy up front.
+
+    Its own ``empty_values`` (an empty one makes ``CharField`` clean an absent
+    ``None`` to ``"None"``), ``required`` or ``disabled``, a widget that is no widget
+    instance, or a cached object that is no form field, is not proven to clean
+    absence to nothing.
+    """
+    declared = CharFilter(field_name="title")
+    assert isinstance(declared.field, forms.Field)
+    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is True
+    edit(declared)
+    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is False
+
+
+def test_a_projected_copy_its_child_set_does_not_publish_is_copied_up_front() -> None:
+    """A projected copy runs the filter its child set publishes by name; with none it is unproven."""
+
+    class PlainIssueFilter(FilterSet):
+        class Meta:
+            model = library_models.Issue
+            fields = {"title": ["exact"]}
+
+    projected = sets_module._new_projected(CharFilter)
+    vars(projected).update(vars(CharFilter(field_name="issues__title")))
+    projected._projection = ChildProjection(PlainIssueFilter, "title", "issues")
+    assert sets_module._absence_filters_nothing("issues__title", projected, {}) is True
+    projected._projection = ChildProjection(PlainIssueFilter, "missing", "issues")
+    assert sets_module._absence_filters_nothing("issues__missing", projected, {}) is False
 
 
 class _NeedsArgumentWidget(forms.TextInput):
@@ -2075,11 +2334,24 @@ class _DunderSuffixWidget(forms.MultiWidget):
         return [value, None]
 
 
+def _read_b_from_bound_data(data: Mapping[str, object], _files: object, _name: str) -> object:
+    """A widget ``value_from_datadict`` an instance carries of its own: ``"B"`` from any data."""
+    return "B" if data else None
+
+
+def _own_reader_widget() -> forms.TextInput:
+    """A Django ``TextInput`` instance whose own reader answers ``None`` only for empty data."""
+    widget = forms.TextInput()
+    vars(widget)["value_from_datadict"] = _read_b_from_bound_data
+    return widget
+
+
 @pytest.mark.parametrize(
     ("widget", "omitted"),
     [
         (forms.TextInput, True),
         (forms.TextInput(), True),
+        (_own_reader_widget(), False),
         (_NeedsArgumentWidget, False),
         (_ReadingWidget, False),
         (_ReadingWidget(), False),
@@ -2091,6 +2363,7 @@ class _DunderSuffixWidget(forms.MultiWidget):
     ids=[
         "django-class",
         "django-instance",
+        "django-instance-own-reader",
         "unbuildable",
         "consumer-reader-class",
         "consumer-reader-instance",
@@ -2107,8 +2380,9 @@ def test_a_widget_that_reads_data_its_own_way_keeps_its_copy_up_front(
     """Only a widget of Django's, django-filter's or the package's that can be asked defers its copy.
 
     A widget class that cannot be built, a consumer widget reading the data its own
-    way, and a multi-widget with a ``__`` sub-key suffix (which the named-key scan
-    reads as a relation path) keep their copies up front.
+    way (by its class, or a Django widget instance carrying its own reader), and a
+    multi-widget with a ``__`` sub-key suffix (which the named-key scan reads as a
+    relation path) keep their copies up front.
     """
     deferred = sets_module._absence_filters_nothing(
         "issues__title",

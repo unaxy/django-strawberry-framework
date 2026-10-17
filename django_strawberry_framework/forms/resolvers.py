@@ -37,7 +37,11 @@ and the form-specific invariants this module owns:
   indistinguishable, no existence leak). The visible object is converted to the
   form-key value by
   ``to_field_name`` (``obj.serializable_value(field.to_field_name)`` else
-  ``obj.pk``) so the bound form validates by the same key it was built on.
+  ``obj.pk``) so the bound form validates by the same key it was built on. A single
+  relation whose form-key value the field cleans to empty is refused as that field's
+  ``invalid_choice`` error rather than bound as a clear. Only a whole single or list
+  value in the field's ``empty_values`` is a clear; an M2M list element never is, so
+  every element, ``""`` included, is decoded.
 
 - **``update`` reconstructs the full bound payload** (Decision 8 step 4): for
   every non-file declared form field the input did not provide, supply the located
@@ -48,10 +52,13 @@ and the form-specific invariants this module owns:
   is the form key. M2M and every other ``ModelChoiceField`` FK, including a
   ``to_field_name``-less field over a ``ForeignKey(to_field=...)``, are reconstructed
   from the related object(s) through ``_to_form_key_value`` so an omitted relation binds
-  in the SAME shape a provided one decodes to (Decision 8). A non-null stored key of
-  such a FK that resolves to no related row is the form field's own ``invalid_choice``
-  error, keyed like every form error, before the form is bound: the stored key is never
-  read under the form's lookup field and never replaced by an empty value. An
+  in the SAME shape a provided one decodes to (Decision 8). A single FK's form key, stored
+  or provided, must be a value the ``ModelChoiceField`` looks up: one in the field's
+  ``empty_values`` (a ``to_field`` or text key holding ``""``) cleans to empty, never to
+  the row, so it is the form field's own ``invalid_choice`` error, keyed like every form
+  error, before the form is bound. A non-null stored key of a FK reconstructed from its
+  related object that resolves to no row is the same error: the stored key is never read
+  under the form's lookup field and never replaced by an empty value. An
   omitted file is preserved via the bound ``form_class(instance=...)``'s ``initial``
   (never re-supplied, never cleared). A required non-model extra field stays
   required in the partial input, so it is always present in
@@ -267,6 +274,39 @@ def _is_empty_form_value(candidate: object, form_field: forms.Field | None) -> b
         return False
 
 
+def _unrepresentable_choice(
+    form_field: forms.Field | None,
+    form_key: object,
+    *,
+    value: object,
+) -> ValidationError | None:
+    """Return the field's ``invalid_choice`` error when ``form_key`` names no row through it.
+
+    The one representability check every single-relation form key passes before a form is
+    bound with it. ``ModelChoiceField.to_python`` answers ``None`` for any value in the
+    field's ``empty_values`` before it looks a choice up, so a related row whose form-key
+    value is one of them (a ``to_field_name`` column holding ``""``, a text key ``""``, a
+    nullable key column holding ``NULL``) cannot be named through the field: binding the
+    key clears an optional relation or reports a required one as missing. ``form_key`` is
+    ``None`` when no related row resolves (a dangling stored key), which is refused the same
+    way. Either is the field's own ``invalid_choice`` error with ``value`` as its parameter,
+    never a clear and never a reinterpreted key. Only single relations reach it: a
+    ``ModelMultipleChoiceField`` looks every member key up, an empty-valued key included,
+    so ``_decode_form_relation_multi`` binds a member keyed ``""`` as is.
+    """
+    if (
+        form_field is None
+        or not _is_model_choice_field(form_field)
+        or not _is_empty_form_value(form_key, form_field)
+    ):
+        return None
+    return ValidationError(
+        form_field.error_messages["invalid_choice"],
+        code="invalid_choice",
+        params={"value": value},
+    )
+
+
 def _decode_form_relation_single(
     value: object,
     *,
@@ -295,24 +335,49 @@ def _decode_form_relation_single(
     ``form_field`` is still consulted for ``empty_values`` (the skip) and
     ``to_field_name`` (the projection), both class-level and queryset-independent.
 
-    An explicit ``null`` (or any of the form field's ``empty_values``) is NOT an
-    id to decode: it is a clear / no-value, skipped through UNCHANGED so the
+    An explicit ``null`` (or any of the form field's ``empty_values``) as the WHOLE
+    single-relation value is NOT an id to decode: it is a clear / no-value, skipped
+    through UNCHANGED so the
     bound form's OWN validation decides - a required ``ModelChoiceField`` raises
     its field-keyed required error via ``form.is_valid()``, an optional one clears
     to the empty value (spec-038 Decision 8 step 1). Treating it as a raw pk
     instead would mis-report a decode-level "Invalid id for relation" error and
     block a legitimate nullable-FK clear.
+
+    A visible row whose form-key value the field cleans to empty (a ``to_field_name``
+    column holding ``""``) cannot be linked through a single ``ModelChoiceField``: binding
+    that key would clear the relation the client named. It is the field's own
+    ``invalid_choice`` error keyed to ``graphql_name`` (``_unrepresentable_choice``, the
+    check an omitted relation's stored key passes in ``_reconstruct_partial_data``), and no
+    form is bound.
     """
-    return decode_visible_relation(
+
+    def skip(candidate: object) -> bool:
+        return _is_empty_form_value(candidate, form_field)
+
+    form_key, error = decode_visible_relation(
         value,
         graphql_name=graphql_name,
         related_model=related_model,
         info=info,
         async_recourse=_FORM_ASYNC_RECOURSE,
-        skip=lambda candidate: _is_empty_form_value(candidate, form_field),
+        skip=skip,
         project=lambda obj: _to_form_key_value(obj, form_field),
         index=index,
     )
+    if error is not None or skip(value):
+        return form_key, error
+    choice_error = _unrepresentable_choice(form_field, form_key, value=value)
+    if choice_error is not None:
+        return None, validation_error_to_field_errors(
+            ValidationError({graphql_name: [choice_error]}),
+        )[0]
+    return form_key, None
+
+
+def _never_a_clear(_candidate: object) -> bool:
+    """Skip nothing: a relation-id list element is always an id to decode."""
+    return False
 
 
 def _decode_form_relation_multi(
@@ -325,11 +390,20 @@ def _decode_form_relation_multi(
 ) -> tuple[list[object] | None, FieldError | None]:
     """Decode an M2M ``list[<id>]`` to a list of form-key values, visibility-checked (NET-NEW).
 
-    Maps ``_decode_form_relation_single`` over each element (so every member is
-    type-checked, visibility-checked on its own branch, and ``to_field_name``
+    Runs the shared ``decode_visible_relation`` spine over each element (so every member
+    is type-checked, visibility-checked on its own branch, and ``to_field_name``
     converted) and returns the list under the form field name. Each member is passed
     its index, so a text error keys to the element (``boundWith.1``). The first member
     error short-circuits. An empty list is a valid clear.
+
+    **A list element is never a clear.** The ``empty_values`` skip applies to the whole
+    value only (below); an element in ``empty_values`` (a raw text pk ``""``) is an id like
+    any other and gets the full decode, so a hidden or missing row is the uniform
+    relation error. Skipped undecoded, it would be bound as is and the
+    ``ModelMultipleChoiceField`` would look it up as a real key: linking a row its
+    related type's ``get_queryset`` hides, or reading a pk as the ``to_field_name``
+    value of another row. A visible member keyed ``""`` decodes to ``""`` and is
+    linked, since the field looks every member key up.
 
     An explicit ``null`` (or any of the form field's ``empty_values``, including
     the empty list) clears the M2M: return ``[]`` so the bound form decides
@@ -354,12 +428,14 @@ def _decode_form_relation_multi(
     keys: list[object] = []
     # The shared materializer answers the values exactly when it reports no error.
     for index, value in enumerate(cast("list[object]", provided_values)):
-        key, error = _decode_form_relation_single(
+        key, error = decode_visible_relation(
             value,
             graphql_name=graphql_name,
             related_model=related_model,
-            form_field=form_field,
             info=info,
+            async_recourse=_FORM_ASYNC_RECOURSE,
+            skip=_never_a_clear,
+            project=lambda obj: _to_form_key_value(obj, form_field),
             index=index,
         )
         if error is not None:
@@ -448,7 +524,8 @@ def _reconstruct_partial_data(
       (``_stored_key_is_form_key``; every generated field does, since
       ``ForeignKey.formfield`` passes the target's name as ``to_field_name``), the
       stored value is exactly what ``_to_form_key_value`` produces for a provided FK,
-      with no related-object fetch.
+      with no related-object fetch. A non-empty stored key that resolves to no row needs
+      no fetch either: the bound form's own lookup refuses it as ``invalid_choice``.
     - **Every other single ``ModelChoiceField`` FK / OneToOne** is reconstructed from
       the related object via ``_to_form_key_value``, NOT ``model_to_dict``. The bound
       form validates it with ``queryset.get(<to_field_name or "pk">=value)``, so the
@@ -462,9 +539,8 @@ def _reconstruct_partial_data(
       no row (a dangling key, which a ``db_constraint=False`` FK admits) cannot be
       projected: the stored key and the form key are different namespaces, so binding
       the stored key would let the form resolve an unrelated row whose form key equals
-      it, and binding the empty value would clear the relation. It is reported instead,
-      as the form field's own ``invalid_choice`` error (the error the form gives a
-      choice it cannot resolve), and nothing is bound.
+      it, and binding the empty value would clear the relation.
+
     - **M2M** is reconstructed as a list of ``_to_form_key_value(obj, form_field)``
       (the ``to_field_name`` value, default ``obj.pk``) - NOT ``model_to_dict``'s
       list of related INSTANCES. For a ``ModelMultipleChoiceField`` with
@@ -474,6 +550,18 @@ def _reconstruct_partial_data(
       omitted-vs-provided inconsistency (spec-038 Decision 8 step 4). Only a
       form field that is a real forward M2M on the model is reconstructed this way;
       a non-model extra is left to ``model_to_dict`` (which ignores non-columns).
+
+    Every non-null stored single FK then passes one representability check
+    (``_unrepresentable_choice``) before anything is bound: its form key (the stored value
+    of a FK stored by its form key, else the projection of the related row) must be a value
+    the field looks up. ``ModelChoiceField.to_python`` answers ``None`` for anything in the
+    field's ``empty_values`` before its lookup, so a form key of ``""`` (a ``to_field`` or
+    text key holding ``""``) would bind as empty and clear the relation, whether a row
+    carries that key or not. Such a form key, and a projected FK's dangling stored key, are
+    reported as the form field's own ``invalid_choice`` error (the error the form gives a
+    choice it cannot resolve), and nothing is bound. A FK stored by its form key is decided
+    by the stored value alone, with no query. A provided relation passes the same check in
+    ``_decode_form_relation_single``.
 
     Reconstruction reads the form's FULL declared field set (``get_form_fields``),
     NOT the (possibly narrowed) generated input: a ``Meta.fields`` / ``Meta.exclude``
@@ -487,7 +575,7 @@ def _reconstruct_partial_data(
     ``setattr`` on the located instance, not a bound-data reconstruction.
 
     Returns ``(data, unresolved)``: ``unresolved`` maps each form field whose stored key
-    resolves to no row to its errors, in the ``form.errors.as_data()`` shape
+    the field cannot bind to its errors, in the ``form.errors.as_data()`` shape
     ``_form_errors_to_field_errors`` maps; the caller binds ``data`` only when ``unresolved``
     is empty.
     """
@@ -520,26 +608,27 @@ def _reconstruct_partial_data(
             name in links
             and _is_model_choice_field(form_field)
             and not _is_model_multiple_choice_field(form_field)
-            and not _stored_key_is_form_key(links[name], form_field)
         ):
             stored_key = read_attr(instance, links[name].attname, None)
             if stored_key is None:
                 scalar_names.append(name)
                 continue
-            try:
-                related = read_attr(instance, name, None)
-            except ObjectDoesNotExist:
-                related = None
-            if related is None:
-                unresolved[name] = [
-                    ValidationError(
-                        form_field.error_messages["invalid_choice"],
-                        code="invalid_choice",
-                        params={"value": stored_key},
-                    ),
-                ]
+            same_key = _stored_key_is_form_key(links[name], form_field)
+            if same_key:
+                form_key = stored_key
             else:
-                relation_data[name] = _to_form_key_value(related, form_field)
+                try:
+                    related = read_attr(instance, name, None)
+                except ObjectDoesNotExist:
+                    related = None
+                form_key = None if related is None else _to_form_key_value(related, form_field)
+            choice_error = _unrepresentable_choice(form_field, form_key, value=stored_key)
+            if choice_error is not None:
+                unresolved[name] = [choice_error]
+            elif same_key:
+                scalar_names.append(name)
+            else:
+                relation_data[name] = form_key
         else:
             scalar_names.append(name)
 

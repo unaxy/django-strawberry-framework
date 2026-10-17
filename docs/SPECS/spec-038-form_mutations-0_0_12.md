@@ -1089,7 +1089,13 @@ decoder that visibility-checks only the Relay branch lets a writer attach a hidd
 related object. The gate is therefore owned by one shared spine,
 [`utils/write_values.py`][utils-write-values]`::decode_visible_relation`, which every
 write flavor rides and which the form flavor only *colors*: the spine (i) skips a
-clear / no-value unchanged, so the bound form's own validation decides required-ness,
+clear / no-value unchanged, so the bound form's own validation decides required-ness
+(the form's clear is the WHOLE relation value in the field's `empty_values`: a single
+`null` or `""`, or an M2M `null` or empty list; a list element is never a clear, so an
+M2M element such as a raw text pk `""` gets steps (ii)-(iv) like any id, and a hidden or
+missing row is the same per-element relation error rather than an undecoded key the
+`ModelMultipleChoiceField` would look up, linking a hidden row or reading a pk as
+another row's `to_field_name` value),
 (ii) type-checks and coerces the id (a bad `GlobalID` or an uncoercible raw pk is the
 uniform field-keyed `FieldError`; a coerced pk holding unencodable text, such as a lone
 surrogate in the id of a text-keyed target, is the text preflight's field-keyed `invalid`
@@ -1116,7 +1122,14 @@ GraphQL id fail form validation. So after the visibility query yields the visibl
 `ModelMultipleChoiceField`). A hidden-`Category` id (Relay or raw pk) therefore returns
 the **identical** field-keyed `FieldError` the model-driven mutation returns — proven
 by live + package tests over a Relay primary AND a non-Relay (raw-pk) primary, for both
-single and multi relations.
+single and multi relations. A single `ModelChoiceField` cannot name a visible row whose
+form-key value is in the field's `empty_values` (a `to_field_name` column holding `""`):
+`ModelChoiceField.to_python` answers `None` for such a value before its lookup, so
+binding it would clear the relation the client named. The decoder reports it as the
+form field's own `invalid_choice` error keyed to the input field, before any form is
+bound (`django_strawberry_framework/forms/resolvers.py::_unrepresentable_choice`, the same check an omitted
+relation passes in Decision 8 step 4). A `ModelMultipleChoiceField` looks every member
+key up, `""` included, so a member keyed `""` is linked, not refused.
 
 **Two generated inputs: create (`field.required`) + partial.** Like the `036`
 `Input` / `PartialInput` split, the form flavor generates `<FormClass>Input` (create;
@@ -1365,17 +1378,25 @@ write flavor rides.
        by pk while the column stores the `to_field` value. Getting any of the three
        wrong makes an omitted unchanged field fail, or bind the row whose key equals
        the stored value, where a provided unchanged field passes.
-     - **A stored key that names no row is not projected.** For the third shape a NULL
-       column still comes from `model_to_dict` (the form's empty value), but a non-null
-       stored key whose related row is missing (a `db_constraint=False` key left
-       dangling) has no form-key value: the stored key and the form key are different
-       namespaces, so binding the stored key could resolve an unrelated row whose form
-       key equals it, and binding the empty value would clear the relation. The
-       reconstruction reports that field instead, with the form field's own
-       `invalid_choice` error mapped through `_form_errors_to_field_errors`, and the
-       mutation fails before the form is bound, so nothing is written. When the form
-       key is the stored column (`model_to_dict`), the bound form's own lookup already
-       refuses a dangling key with the same error.
+     - **A single FK's form key must be one the form field looks up.** A NULL column
+       still comes from `model_to_dict` (the form's empty value). Every non-null stored
+       key passes one representability check
+       (`django_strawberry_framework/forms/resolvers.py::_unrepresentable_choice`) before the form is bound, and a
+       failure is the form field's own `invalid_choice` error mapped through
+       `_form_errors_to_field_errors`: the mutation fails before the form is bound, so
+       nothing is written, and the stored key is never reinterpreted or replaced by an
+       empty value. Two keys fail it. A form key in the field's `empty_values` (a
+       `to_field` or text key holding `""`, stored when the form key is the stored
+       column, projected from the related row for the third shape) cleans to empty in
+       `ModelChoiceField.to_python` before any lookup, so it would bind as a clear
+       whether or not a row carries it; the stored-column case is decided by the stored
+       value alone, with no query. And for the third shape a stored key whose related
+       row is missing (a `db_constraint=False` key left dangling) has no form-key value:
+       the stored key and the form key are different namespaces, so binding the stored
+       key could resolve an unrelated row whose form key equals it. When the form key is
+       the stored column and is not empty, the bound form's own lookup already refuses a
+       dangling key with the same error. A provided relation passes the same check at
+       its decode (Decision 7).
      - **A file field contributes no key at all.** `model_to_dict` yields the stored
        relative path, which is not a re-bindable `data=` value for a field fed from
        `files=`, so file fields are excluded from the reconstruction entirely.
@@ -1627,16 +1648,19 @@ plain `ContactForm`, and `products/schema.py` exposes them via
   `DefaultCategoryItemModelForm` (the write-time `IntegrityError` case),
   `StampedItemModelForm` (kwarg-requiring, the `get_form_kwargs` case), `ContactForm`
   and `PingForm` (the `DenyAll` default).
-- **`library`** — `CreateShelfViaForm`, `UpdateBookViaForm`, `UpdateBookAtRepairDeskViaForm`,
-  `UpdatePatronProfileViaForm`, `CreateBranchWithShelf` and `CreateBranchPair` over
+- **`library`** — `CreateShelfViaForm`, `UpdateShelfViaForm`, `UpdateBookViaForm`,
+  `UpdateBookAtRepairDeskViaForm`, `UpdatePatronProfileViaForm`,
+  `UpdatePatronProfileByGenreNameViaForm`, `CreateBranchWithShelf` and `CreateBranchPair` over
   `ShelfRelationsForm` / `BookGenresModelForm` / `BookRepairDeskForm` /
-  `PatronProfileGenreForm` / `BranchWithShelfForm` / `BranchPairForm`. Library carries the cases products cannot:
+  `PatronProfileGenreForm` / `PatronProfileGenreNameForm` / `BranchWithShelfForm` /
+  `BranchPairForm`. Library carries the cases products cannot:
   the **non-Relay raw-pk** relation decode, the `to_field_name` conversion, the
   request-scoped-`queryset` idiom, the plain-form `perform_mutate` rollback, and the
   write-time blank integer choice column (`Shelf.tier`), and the narrowed form choice field
   (`UpdateBookAtRepairDeskViaForm` over `BookRepairDeskForm`, whose `circulation_status`
   admits two of the column's three values), and a declared pk-keyed `ModelChoiceField`
-  over the `to_field` key `PatronProfile.favorite_genre` (`UpdatePatronProfileViaForm`).
+  over the `to_field` key `PatronProfile.favorite_genre` (`UpdatePatronProfileViaForm`) beside
+  the generated name-keyed one (`UpdatePatronProfileByGenreNameViaForm`).
 - **`scalars`** — `CreateMediaSpecimenImageViaForm`, the image-column flavor of the
   `Upload` routing.
 
@@ -1802,7 +1826,12 @@ Rationale companion: [Decision 14][rationale-d14].
   `to_field_name`-less field over a `ForeignKey(to_field=…)`
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
   An omitted field whose stored key names no row is that field's `invalid_choice` error
-  with nothing written, never a rebind by the stored key or a clear.
+  with nothing written, never a rebind by the stored key or a clear. So is a single
+  relation, omitted or provided, whose form-key value the field cleans to empty (a
+  `to_field_name` or text key holding `""`), whether or not a row carries it; an M2M
+  member keyed `""` is looked up like any member and linked. An M2M list element is never
+  a clear: a raw-pk element `""` is decoded through the related type's visibility like
+  any id, so a hidden or missing row it names is the relation error, never bound.
 - **A form whose `__init__` requires constructor kwargs.** Schema-time discovery
   reads `form_class.base_fields` (no instantiation), and runtime construction goes
   through `get_form_kwargs(info, *, data, files, instance=None)` — the consumer
@@ -1903,7 +1932,19 @@ behavior reachable through `/graphql/`, package tests own internals.
   is the `favoriteGenreId`-keyed `invalid_choice` error with nothing written, including
   when that name is another genre's id, while a supplied genre or `null` still writes;
   over the pk-keyed `updateItemViaForm` a dangling `category` is the form's own
-  `categoryId`-keyed `invalid_choice` error.
+  `categoryId`-keyed `invalid_choice` error. **A relation keyed `""`** — over the
+  name-keyed `updatePatronProfileByGenreNameViaForm`, an omitted stored name `""` (no
+  genre carrying it, or a genre named `""`) and a supplied genre named `""` are each the
+  `favoriteGenreId`-keyed `invalid_choice` error with nothing written, never a clear,
+  the stored name refused without reading the genre table, while an omitted genre keeps
+  its name, an unset genre stays unset, and a supplied genre or `null` over a stored
+  `""` still writes; over `updateShelfViaForm` / `createShelfViaForm`, whose `branch`
+  resolves by name over the pk-stored column, an omitted or supplied branch named `""`
+  is the `branchId`-keyed `invalid_choice` error; over `updatePrintingViaForm` a stored
+  edition ISBN `""` is the `editionId`-keyed `invalid_choice` error decided without
+  reading the edition by its key, while a `boundWith` member keyed `""` stays linked,
+  omitted or supplied, and a `boundWith` element `""` naming no edition is the
+  `boundWith`-keyed relation error with nothing written.
   **Write-time `IntegrityError`** — a valid
   `ModelForm.save()` that hits a constraint the form's validation excluded
   (`createDefaultCategoryItemViaForm`) surfaces the **`FieldError` envelope**, not a
