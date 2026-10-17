@@ -35,8 +35,8 @@ import contextlib
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 
-from django.core.exceptions import FieldDoesNotExist
-from django.db.models import Count, F, OrderBy, Prefetch, Q, Value, Window
+from django.core.exceptions import FieldDoesNotExist, FieldError
+from django.db.models import Count, F, OrderBy, Prefetch, Q, Value, Window, sql
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
 from django.db.models.functions import Random, RowNumber
@@ -62,7 +62,7 @@ from django_strawberry_framework.utils.connections import (
     assert_window_fetch_mode,
     window_range_plan,
 )
-from django_strawberry_framework.utils.querysets import applied_order, related_order_substitute
+from django_strawberry_framework.utils.querysets import applied_order, resolve_order_name
 from django_strawberry_framework.utils.relations import instance_accessor, relation_kind
 
 from .field_meta import FieldMeta
@@ -1141,7 +1141,7 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
     to-many-aggregate paths). A relation path, an aggregate-annotation alias, or
     any non-``F`` expression is treated as non-unique (so the pk is appended), and
     so is a relation NAME the compiler orders by the related model's
-    ``Meta.ordering`` (``utils/querysets.py::related_order_substitute``), a
+    ``Meta.ordering`` (``utils/querysets.py::resolve_order_name``), a
     one-to-one primary key's included: that ordering, not the key, decides ties.
     """
     if not effective:
@@ -1162,18 +1162,19 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
         # parent ordering a total order.
         return False
     try:
-        field_obj = meta.get_field(ref)
-    except FieldDoesNotExist:
-        # Annotation alias (e.g. a to-many aggregate) or a transform - not a
-        # model column we can call unique.
+        resolved = resolve_order_name(sql.Query(model), ref, meta)
+    except FieldError:
+        # Annotation alias (e.g. a to-many aggregate), a transform or a generic
+        # foreign key - not a model column we can call unique.
         return False
-    related = field_obj.related_model if field_obj.is_relation else None
-    related_opts = related._meta if isinstance(related, type) else None
-    if isinstance(effective[-1], str) and related_order_substitute(field_obj, related_opts, ref):
+    if isinstance(effective[-1], str) and resolved.substitute is not None:
         # The compiler orders a relation NAME - a one-to-one primary key's too - by the
         # related model's ``Meta.ordering`` (``utils/querysets.py::expand_relation_order``),
         # not by this unique key; an expression over it reads the key column.
         return False
+    # Uniqueness is the model field's own: a many-to-many's join field is the through
+    # table's key, unique per through row at most, never per row of this query.
+    field_obj = meta.get_field(ref)
     # A NULLABLE unique column is not a total order: SQL UNIQUE permits multiple
     # NULLs, so terminal ties among NULL rows are nondeterministic and the pk must
     # be appended as a tiebreaker.

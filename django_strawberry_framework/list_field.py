@@ -14,8 +14,9 @@ from types import GenericAlias
 from typing import TYPE_CHECKING, Literal, TypeVar, cast, get_args
 
 import strawberry
-from django.core.exceptions import FieldDoesNotExist
+from django.core.exceptions import FieldError
 from django.db import models
+from django.db.models import sql
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import (
     BaseExpression,
@@ -114,6 +115,7 @@ from .utils.querysets import (
     reject_async_iterable_in_sync_context,
     reject_awaitable_sync_source,
     reject_residual_async_source,
+    resolve_order_name,
     wrap_async_queryset_adapter,
 )
 from .utils.typing import graphql_fields, is_async_callable
@@ -128,6 +130,7 @@ if TYPE_CHECKING:
 
     from .orders.sets import OrderSet
     from .types.definition import DjangoTypeDefinition
+    from .utils.querysets import ResolvedOrderName
     from .utils.typing import ModelField
 
 __all__ = ("DjangoListField", "ListArgumentError")
@@ -746,33 +749,23 @@ _APPROVED_ORDER_NODES = (
 )
 
 
-def _resolve_order_field_path(
-    opts: Options[models.Model] | None,
-    path: str,
-) -> tuple[ModelField, Options[models.Model] | None] | None:
-    """Walk a field path against ``opts``, returning ``(field, related opts)`` or None.
+def _resolve_order_field_path(opts: Options[models.Model], path: str) -> ResolvedOrderName | None:
+    """Resolve a field path against ``opts`` as the compiler does, or return None.
 
-    ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name`` hands
-    the ``LOOKUP_SEP``-joined pieces to ``_setup_joins``, which resolves each one
-    as a field on the model reached so far - ``pk`` naming the primary key and a
-    reverse relation naming its own model the same way a forward one does. A
-    piece that is not a field of the model in hand is a transform or a lookup,
-    which this package does not read: None says the path could not be resolved
-    to a field, and an unresolved path is never certified.
+    ``utils/querysets.py::resolve_order_name`` is the ``Query.names_to_path``
+    walk ``setup_joins`` runs for an order name, an ``F`` and a lookup alike, so
+    the field it ends on is the one Django compiles against: for a many-to-many,
+    the through table's key to the target rather than the ``ManyToManyField``.
+    The walk runs against the model alone. The annotation and ``extra`` steps
+    that read the query's own state come first, by name, where the compiler
+    takes them; a piece only the query's annotations or filtered relations could
+    resolve further along a path is not a column this package can name. A path
+    that does not resolve is None, and is never certified.
     """
-    field = None
-    for piece in path.split(LOOKUP_SEP):
-        if opts is None:
-            return None
-        name = opts.pk.name if piece == "pk" else piece
-        try:
-            field = opts.get_field(name)
-        except FieldDoesNotExist:
-            return None
-        related = field.related_model if field.is_relation else None
-        opts = related._meta if related is not None else None
-    # ``split`` yields at least one piece, and every piece that does not return sets it.
-    return cast("ModelField", field), opts
+    try:
+        return resolve_order_name(sql.Query(opts.model), path, opts)
+    except FieldError:
+        return None
 
 
 def _is_deterministic_order_field_path(
@@ -786,15 +779,21 @@ def _is_deterministic_order_field_path(
 
     ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name`` does not
     order by a relation: when the path ends on a relation whose target model has
-    its own ``Meta.ordering``, and the last piece is neither the field's
-    ``attname`` nor ``pk``, the compiler REPLACES the term with that model's
-    ordering and keeps recursing. So the order the rows come back in is the
+    its own ``Meta.ordering``, and the last piece is neither the ``attname`` of
+    the last hop's join field nor ``pk``, the compiler REPLACES the term with
+    that model's ordering and keeps recursing
+    (``utils/querysets.py::resolve_order_name``). For a many-to-many that
+    join field is the through table's key to the target, and for a generic
+    relation its reverse relation, which has no ``attname``, so either relation
+    name always expands. So the order the rows come back in is the
     related model's, and it is that ordering - not the relation name standing in
     front of it - that decides whether the request is repeatable.
 
     A path Django would reject with ``FieldError("Infinite loop caused by
     ordering.")`` is refused rather than followed: a term whose compilation
-    raises is not one this package can certify.
+    raises is not one this package can certify. So is a path with a piece left
+    over once a piece names no field: that is a transform or a lookup, which
+    this package does not read.
 
     ``prefix`` is the name the expanded terms hang under. The compiler rewrites
     an expression it lifts out of a related ordering through
@@ -803,16 +802,10 @@ def _is_deterministic_order_field_path(
     classifier reading references must name them the same way.
     """
     resolved = _resolve_order_field_path(opts, path)
-    if resolved is None:
+    if resolved is None or resolved.lookups:
         return False
-    field, related_opts = resolved
-    if (
-        not field.is_relation
-        or related_opts is None
-        or not related_opts.ordering
-        or getattr(field, "attname", None) == path.rsplit(LOOKUP_SEP, maxsplit=1)[-1]
-        or path == "pk"
-    ):
+    related_opts = resolved.related_opts
+    if resolved.substitute is None or related_opts is None:
         return True
     step = (opts.model, path)
     if step in seen:
@@ -821,7 +814,7 @@ def _is_deterministic_order_field_path(
     nested_prefix = f"{prefix}{path}{LOOKUP_SEP}"
     return all(
         _is_deterministic_order_term(query, item, related_opts, nested, nested_prefix)
-        for item in related_opts.ordering
+        for item in resolved.substitute
     )
 
 
@@ -854,7 +847,8 @@ def _is_deterministic_order_reference(query: Query, name: str, prefix: str) -> b
         return _is_deterministic_order_term(query, annotation)
     if referenced in query.extra:
         return False
-    return _resolve_order_field_path(query.get_meta(), referenced) is not None
+    resolved = _resolve_order_field_path(query.get_meta(), referenced)
+    return resolved is not None and not resolved.lookups
 
 
 # The relation edges an order-determinism probe starts from: none traversed yet.
@@ -1132,11 +1126,10 @@ def _is_deterministic_order_predicate_reference(
         if referenced in query.extra:
             return False
     target = opts if opts is not None else query.get_meta()
-    for count in range(len(pieces), 0, -1):
-        resolved = _resolve_order_field_path(target, LOOKUP_SEP.join(pieces[:count]))
-        if resolved is not None:
-            return _is_deterministic_order_lookup_chain(resolved[0], pieces[count:])
-    return False
+    resolved = _resolve_order_field_path(target, lookup)
+    if resolved is None:
+        return False
+    return _is_deterministic_order_lookup_chain(resolved.final_field, resolved.lookups)
 
 
 def _is_deterministic_order_condition(

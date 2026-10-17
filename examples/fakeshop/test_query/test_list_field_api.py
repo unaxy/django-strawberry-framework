@@ -589,8 +589,25 @@ def _shelf_offset_page(
     ``resolver`` supplies the source queryset when a case needs one carrying query
     state of its own, such as the alias a conditional ordering compares against.
     """
+    return _shelf_offset_page_over(
+        monkeypatch,
+        shelf_ordering,
+        library_models.Branch,
+        branch_ordering,
+        resolver,
+    )
+
+
+def _shelf_offset_page_over(
+    monkeypatch: pytest.MonkeyPatch,
+    shelf_ordering: _ModelOrdering,
+    target: type[models.Model],
+    target_ordering: _ModelOrdering,
+    resolver: _ListResolver | None = None,
+) -> tuple[JSONObject, list[str]]:
+    """Post the shelf page under ``Meta.ordering`` on the shelf and on ``target``, with its SQL."""
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", shelf_ordering)
-    monkeypatch.setattr(library_models.Branch._meta, "ordering", branch_ordering)
+    monkeypatch.setattr(target._meta, "ordering", target_ordering)
 
     @strawberry.type
     class _ShelfQuery:
@@ -698,6 +715,114 @@ def test_holder_offset_accepts_an_expression_reference_to_a_relation(
 
     payload, shelf_sql = _shelf_offset_page(monkeypatch, shelf_ordering, (Random(),))
 
+    assert "errors" not in payload, payload
+    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert len(shelf_sql) == 1
+    statement = shelf_sql[0].upper()
+    assert "OFFSET 1" in statement, statement
+    assert _RANDOM_ORDER_SQL not in statement, statement
+
+
+def _seed_three_shelves_with_genres_and_tags() -> None:
+    """Three shelves, each with one book in one genre, and each branch with one tag."""
+    for name in ("Alpha", "Bravo", "Charlie"):
+        branch = library_models.Branch.objects.create(name=name, city="Boston")
+        shelf = library_models.Shelf.objects.create(code=f"{name}-1", branch=branch)
+        book = library_models.Book.objects.create(title=f"{name} book", shelf=shelf)
+        book.genres.add(library_models.Genre.objects.create(name=f"{name} genre"))
+        library_models.TaggedItem.objects.create(tag=f"{name.lower()}-tag", content_object=branch)
+
+
+def _assert_orderings_pass_checks(*checked: type[models.Model]) -> None:
+    """Every patched ``Meta.ordering`` is one Django's system check accepts (no ``models.E015``)."""
+    for model in checked:
+        assert [error.id for error in model.check() if error.id == "models.E015"] == [], model
+
+
+# A string ending on a many-to-many or a generic relation, through a path the system check
+# accepts: the compiler's join walk ends on the through table's key to the target (the
+# many-to-many) or on the reverse relation (the generic relation), neither of which the
+# name spells, so the name always expands into the target's ``Meta.ordering``.
+_TO_MANY_RELATION_DEFAULTS_REFUSED = [
+    pytest.param(("books__genres",), library_models.Genre, (Random(),), id="m2m-random"),
+    pytest.param(("branch__tags",), library_models.TaggedItem, (Random(),), id="generic-random"),
+    pytest.param(("books__genres",), library_models.Genre, ("books__shelf",), id="m2m-loop"),
+    pytest.param(
+        ("branch__alt_shelves__alt_branches",),
+        library_models.Branch,
+        ("alt_shelves__alt_branches",),
+        id="m2m-repeated-loop",
+    ),
+]
+_TO_MANY_RELATION_DEFAULTS_SERVED = [
+    pytest.param(("books__genres",), library_models.Genre, ("name",), id="m2m-column"),
+    pytest.param(("books__genres__pk",), library_models.Genre, (Random(),), id="m2m-pk-random"),
+    pytest.param(("branch__tags",), library_models.TaggedItem, ("tag",), id="generic-column"),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("shelf_ordering", "target", "target_ordering"),
+    _TO_MANY_RELATION_DEFAULTS_REFUSED,
+)
+def test_holder_offset_rejects_a_to_many_relation_default_that_expands_to_an_unstable_order(
+    monkeypatch: pytest.MonkeyPatch,
+    shelf_ordering: _ModelOrdering,
+    target: type[models.Model],
+    target_ordering: _ModelOrdering,
+) -> None:
+    """A to-many relation name orders by its target's default, as a foreign key's does.
+
+    ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name`` keeps a
+    relation name as a column only when it is the ``attname`` of the field its
+    join walk ends on, and neither relation's walk ends on a field the name
+    spells. So a random target default re-shuffles the shelves, and a target
+    ordering leading back to the shelf is a loop Django raises on: both refused.
+    """
+    _seed_three_shelves_with_genres_and_tags()
+
+    payload, shelf_sql = _shelf_offset_page_over(
+        monkeypatch,
+        shelf_ordering,
+        target,
+        target_ordering,
+    )
+
+    _assert_orderings_pass_checks(library_models.Shelf, target)
+    err = payload["errors"][0]
+    assert err["extensions"]["reason"] == "order_required"
+    assert err["extensions"]["argument"] == "offset"
+    assert shelf_sql == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("shelf_ordering", "target", "target_ordering"),
+    _TO_MANY_RELATION_DEFAULTS_SERVED,
+)
+def test_holder_offset_accepts_a_to_many_relation_default_that_expands_to_a_stable_order(
+    monkeypatch: pytest.MonkeyPatch,
+    shelf_ordering: _ModelOrdering,
+    target: type[models.Model],
+    target_ordering: _ModelOrdering,
+) -> None:
+    """The controls for the row above: the expansion is read, and a key column is a column.
+
+    The same names under a target ordering by a column page like any column
+    order, and naming the target's ``pk`` under a random target default orders
+    by the key and never reaches that default.
+    """
+    _seed_three_shelves_with_genres_and_tags()
+
+    payload, shelf_sql = _shelf_offset_page_over(
+        monkeypatch,
+        shelf_ordering,
+        target,
+        target_ordering,
+    )
+
+    _assert_orderings_pass_checks(library_models.Shelf, target)
     assert "errors" not in payload, payload
     assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1

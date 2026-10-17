@@ -1461,6 +1461,90 @@ async def test_async_offset_accepts_an_expression_reference_to_a_relation(
     assert _RANDOM_ORDER_SQL not in statement, statement
 
 
+def _seed_three_shelves_with_genres_and_tags() -> None:
+    """Three shelves, each with one book in one genre, and each branch with one tag."""
+    for name in ("Alpha", "Bravo", "Charlie"):
+        branch = library_models.Branch.objects.create(name=name, city="Boston")
+        shelf = library_models.Shelf.objects.create(code=f"{name}-1", branch=branch)
+        book = library_models.Book.objects.create(title=f"{name} book", shelf=shelf)
+        book.genres.add(library_models.Genre.objects.create(name=f"{name} genre"))
+        library_models.TaggedItem.objects.create(tag=f"{name.lower()}-tag", content_object=branch)
+
+
+def _patch_orderings_passing_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    shelf_ordering: _ModelOrdering,
+    target: type[models.Model],
+    target_ordering: _ModelOrdering,
+) -> None:
+    """Patch both ``Meta.ordering`` values, each one Django's system check accepts."""
+    monkeypatch.setattr(library_models.Shelf._meta, "ordering", shelf_ordering)
+    monkeypatch.setattr(target._meta, "ordering", target_ordering)
+    for model in (library_models.Shelf, target):
+        assert [error.id for error in model.check() if error.id == "models.E015"] == [], model
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("shelf_ordering", "target", "target_ordering"),
+    [
+        pytest.param(("books__genres",), library_models.Genre, (Random(),), id="m2m-random"),
+        pytest.param(
+            ("branch__tags",),
+            library_models.TaggedItem,
+            (Random(),),
+            id="generic-random",
+        ),
+    ],
+)
+async def test_async_offset_rejects_a_to_many_relation_default_that_expands_to_a_random_order(
+    monkeypatch: pytest.MonkeyPatch,
+    shelf_ordering: _ModelOrdering,
+    target: type[models.Model],
+    target_ordering: _ModelOrdering,
+) -> None:
+    """The async coloring expands a many-to-many or generic relation name the same way."""
+    await sync_to_async(_seed_three_shelves_with_genres_and_tags)()
+    _patch_orderings_passing_checks(monkeypatch, shelf_ordering, target, target_ordering)
+    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+
+    payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
+
+    err = payload["errors"][0]
+    assert err["extensions"]["reason"] == "order_required"
+    assert err["extensions"]["argument"] == "offset"
+    assert shelf_sql == [], shelf_sql
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("shelf_ordering", "target", "target_ordering"),
+    [
+        pytest.param(("books__genres",), library_models.Genre, ("name",), id="m2m-column"),
+        pytest.param(("branch__tags",), library_models.TaggedItem, ("tag",), id="generic-column"),
+    ],
+)
+async def test_async_offset_accepts_a_to_many_relation_default_that_expands_to_a_stable_order(
+    monkeypatch: pytest.MonkeyPatch,
+    shelf_ordering: _ModelOrdering,
+    target: type[models.Model],
+    target_ordering: _ModelOrdering,
+) -> None:
+    """The controls for the row above: the expansion is read, not assumed random."""
+    await sync_to_async(_seed_three_shelves_with_genres_and_tags)()
+    _patch_orderings_passing_checks(monkeypatch, shelf_ordering, target, target_ordering)
+    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+
+    payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
+
+    assert "errors" not in payload, payload
+    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert len(shelf_sql) == 1, shelf_sql
+    statement = shelf_sql[0].upper()
+    assert "OFFSET 1" in statement, statement
+    assert _RANDOM_ORDER_SQL not in statement, statement
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_rejects_a_conditional_order_over_a_random_predicate(
     monkeypatch: pytest.MonkeyPatch,
