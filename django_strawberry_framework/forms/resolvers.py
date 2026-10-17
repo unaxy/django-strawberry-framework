@@ -48,7 +48,10 @@ and the form-specific invariants this module owns:
   is the form key. M2M and every other ``ModelChoiceField`` FK, including a
   ``to_field_name``-less field over a ``ForeignKey(to_field=...)``, are reconstructed
   from the related object(s) through ``_to_form_key_value`` so an omitted relation binds
-  in the SAME shape a provided one decodes to (Decision 8). An
+  in the SAME shape a provided one decodes to (Decision 8). A non-null stored key of
+  such a FK that resolves to no related row is the form field's own ``invalid_choice``
+  error, keyed like every form error, before the form is bound: the stored key is never
+  read under the form's lookup field and never replaced by an empty value. An
   omitted file is preserved via the bound ``form_class(instance=...)``'s ``initial``
   (never re-supplied, never cleared). A required non-model extra field stays
   required in the partial input, so it is always present in
@@ -420,7 +423,7 @@ def _reconstruct_partial_data(
     mutation_cls: _FormMutationClass,
     instance: models.Model,
     provided_data: dict[str, object],
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, list[ValidationError]]]:
     """Reconstruct the full bound ``data=`` for a partial ``ModelForm`` update (NET-NEW).
 
     For every non-file declared form field NOT overridden by ``provided_data``,
@@ -454,9 +457,14 @@ def _reconstruct_partial_data(
       a PROVIDED unchanged FK passes: a ``to_field_name`` naming another column, or a
       ``to_field_name``-less field (keyed by pk) over a ``ForeignKey(to_field=...)``.
       The fetch reads the related row through the FK descriptor, unscoped by
-      visibility like ``model_to_dict``; a FK whose row value is ``None``, or whose
-      target row is gone, falls through to ``model_to_dict`` (the form's empty value
-      / the stored key), never ``_to_form_key_value(None, ...)``.
+      visibility like ``model_to_dict``. A FK whose column is NULL falls through to
+      ``model_to_dict`` (the form's empty value). A non-null stored key that resolves to
+      no row (a dangling key, which a ``db_constraint=False`` FK admits) cannot be
+      projected: the stored key and the form key are different namespaces, so binding
+      the stored key would let the form resolve an unrelated row whose form key equals
+      it, and binding the empty value would clear the relation. It is reported instead,
+      as the form field's own ``invalid_choice`` error (the error the form gives a
+      choice it cannot resolve), and nothing is bound.
     - **M2M** is reconstructed as a list of ``_to_form_key_value(obj, form_field)``
       (the ``to_field_name`` value, default ``obj.pk``) - NOT ``model_to_dict``'s
       list of related INSTANCES. For a ``ModelMultipleChoiceField`` with
@@ -477,6 +485,11 @@ def _reconstruct_partial_data(
     are excluded (``forms.ImageField`` subclasses ``forms.FileField``, so the one
     ``isinstance`` catches both). Net-new vs. ``036``: the model update does
     ``setattr`` on the located instance, not a bound-data reconstruction.
+
+    Returns ``(data, unresolved)``: ``unresolved`` maps each form field whose stored key
+    resolves to no row to its errors, in the ``form.errors.as_data()`` shape
+    ``_form_errors_to_field_errors`` maps; the caller binds ``data`` only when ``unresolved``
+    is empty.
     """
     # Only a ``ModelForm`` update locates a row to reconstruct from.
     model = backing_model_of(mutation_cls._mutation_meta)
@@ -490,6 +503,7 @@ def _reconstruct_partial_data(
 
     m2m_data: dict[str, object] = {}
     relation_data: dict[str, object] = {}
+    unresolved: dict[str, list[ValidationError]] = {}
     scalar_names: list[str] = []
     for name, form_field in form_fields.items():
         if name in provided_data or isinstance(form_field, forms.FileField):
@@ -508,35 +522,47 @@ def _reconstruct_partial_data(
             and not _is_model_multiple_choice_field(form_field)
             and not _stored_key_is_form_key(links[name], form_field)
         ):
+            stored_key = read_attr(instance, links[name].attname, None)
+            if stored_key is None:
+                scalar_names.append(name)
+                continue
             try:
                 related = read_attr(instance, name, None)
-            except (AttributeError, ObjectDoesNotExist):
+            except ObjectDoesNotExist:
                 related = None
-            if related is not None:
-                relation_data[name] = _to_form_key_value(related, form_field)
+            if related is None:
+                unresolved[name] = [
+                    ValidationError(
+                        form_field.error_messages["invalid_choice"],
+                        code="invalid_choice",
+                        params={"value": stored_key},
+                    ),
+                ]
             else:
-                scalar_names.append(name)
+                relation_data[name] = _to_form_key_value(related, form_field)
         else:
             scalar_names.append(name)
 
     base = model_to_dict(instance, fields=scalar_names)
-    return {
+    data = {
         **base,
         **m2m_data,
         **relation_data,
         **provided_data,
     }
+    return data, unresolved
 
 
 def _form_errors_to_field_errors(
-    form: forms.BaseForm,
+    errors: dict[str, list[ValidationError]],
     mutation_cls: _FormMutationClass,
 ) -> list[FieldError]:
-    """Map a failed form's ``form.errors`` onto the ``FieldError`` envelope.
+    """Map form-field-keyed errors onto the ``FieldError`` envelope.
 
-    Reuses the ``036`` ``validation_error_to_field_errors`` over a
-    ``ValidationError(form.errors.as_data())``: ``as_data()`` yields the
-    ``{field: [ValidationError, ...]}`` shape the mapper's ``error_dict`` branch
+    ``errors`` is a failed form's ``form.errors.as_data()``, or the omitted relations
+    ``_reconstruct_partial_data`` could not resolve, in the same shape. Reuses the
+    ``036`` ``validation_error_to_field_errors`` over a ``ValidationError(errors)``: the
+    ``{field: [ValidationError, ...]}`` shape is what the mapper's ``error_dict`` branch
     consumes, so the form's ``NON_FIELD_ERRORS`` bucket keys to the ``"__all__"``
     sentinel exactly as a model ``full_clean()`` failure does (Decision 8 step 4).
     Each form field name is re-keyed to the GraphQL input field the client sent
@@ -545,7 +571,7 @@ def _form_errors_to_field_errors(
     does not expose keeps its form field name. No parallel mapper.
     """
     return validation_error_to_field_errors(
-        ValidationError(form.errors.as_data()),
+        ValidationError(errors),
         build_error_key_map(mutation_cls._input_field_specs),
     )
 
@@ -565,15 +591,17 @@ def _modelform_decode_step(
     ``data=`` so a one-field change validates against the row's unchanged values.
     A plain form has no located instance, so reconstruction is skipped. Returns
     ``(form_data, provided_files)`` for the write step, or a ``StepFailure``
-    on a decode failure (the shared skeleton maps it to the error envelope).
+    on a decode failure or an omitted relation whose stored key resolves to no row
+    (the shared skeleton maps it to the error envelope; no form is bound).
     """
     provided_data, provided_files, decode_error = _decode_form_data(mutation_cls, data, info)
     if decode_error is not None:
         return StepFailure([decode_error])
-    if instance is not None:
-        form_data = _reconstruct_partial_data(mutation_cls, instance, provided_data)
-    else:
-        form_data = provided_data
+    if instance is None:
+        return provided_data, provided_files
+    form_data, unresolved = _reconstruct_partial_data(mutation_cls, instance, provided_data)
+    if unresolved:
+        return StepFailure(_form_errors_to_field_errors(unresolved, mutation_cls))
     return form_data, provided_files
 
 
@@ -597,7 +625,7 @@ def _bound_form_or_field_errors(
     form_data, provided_files = decoded
     form = holder.get_form(info, data=form_data, files=provided_files, instance=instance)
     if not form.is_valid():
-        return None, _form_errors_to_field_errors(form, mutation_cls)
+        return None, _form_errors_to_field_errors(form.errors.as_data(), mutation_cls)
     return form, None
 
 

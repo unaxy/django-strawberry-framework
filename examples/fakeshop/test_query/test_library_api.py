@@ -25,6 +25,7 @@ from apps.library.filters_genre import GenreFilter
 from apps.products.services import create_users
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
+from django import forms
 from django.conf import settings
 from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
@@ -35,6 +36,7 @@ from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
+from django_filters import CharFilter, Filter, TypedChoiceFilter
 from graphql_client import JSONObject
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import post_graphql as _post_graphql
@@ -54,7 +56,12 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.filters import FilterInput, FilterSet, GlobalIDFilter
+from django_strawberry_framework.filters import (
+    FilterInput,
+    FilterSet,
+    GlobalIDFilter,
+    RelatedFilter,
+)
 from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
@@ -7325,6 +7332,217 @@ def _relation_pk_global_id_holder_schema() -> strawberry.Schema:
     return strawberry.Schema(query=Query, config=strawberry_config())
 
 
+class _DefaultBCleanField(forms.CharField):
+    """A consumer form field whose ``clean`` reads an absent or empty value as ``"B"``."""
+
+    @override
+    def clean(self, value: object) -> object:
+        cleaned: object = super().clean(value)
+        return cleaned or "B"
+
+
+class _DefaultBToPythonField(forms.CharField):
+    """A consumer form field whose ``to_python`` reads an absent or empty value as ``"B"``."""
+
+    @override
+    def to_python(self, value: object) -> str | None:
+        return super().to_python(value) or "B"
+
+
+class _DefaultBCleanFilter(CharFilter):
+    """A consumer ``CharFilter`` that keeps django-filter's ``filter`` over a defaulting field."""
+
+    field_class = _DefaultBCleanField
+
+
+class _DefaultBToPythonFilter(CharFilter):
+    """A consumer ``CharFilter`` over a field whose ``to_python`` defaults."""
+
+    field_class = _DefaultBToPythonField
+
+
+def _filter_title(
+    _filterset: FilterSet,
+    queryset: QuerySet[models.Book],
+    name: str,
+    value: object,
+) -> QuerySet[models.Book]:
+    """A child ``method=`` filter: ``title`` equals the cleaned value."""
+    return queryset.filter(**{name: value})
+
+
+class _AbsentChildFilterCase(NamedTuple):
+    """One child filter the parent request omits (or names), and the shelves it answers."""
+
+    declared: Callable[[], Filter]
+    expected: tuple[str, ...]
+    # The flat copy's form value and its ``booksStatus`` operator bag when the request names it.
+    named: tuple[str, str] | None = None
+
+
+_ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
+    "clean-default": _AbsentChildFilterCase(
+        lambda: _DefaultBCleanFilter(field_name="title"),
+        ("S-B",),
+    ),
+    "projected-clean-default": _AbsentChildFilterCase(
+        lambda: _DefaultBCleanFilter(field_name="title", method="filter_title"),
+        ("S-B",),
+    ),
+    "to-python-default": _AbsentChildFilterCase(
+        lambda: _DefaultBToPythonFilter(field_name="title"),
+        ("S-B",),
+    ),
+    "typed-choice-empty-value": _AbsentChildFilterCase(
+        lambda: TypedChoiceFilter(
+            field_name="circulation_status",
+            choices=models.Book.CirculationStatus.choices,
+            empty_value=models.Book.CirculationStatus.REPAIR,
+        ),
+        ("S-B",),
+    ),
+    "char-empty-value": _AbsentChildFilterCase(
+        lambda: CharFilter(field_name="title", empty_value="B"),
+        ("S-B",),
+    ),
+    "multi-widget-on-char-field": _AbsentChildFilterCase(
+        lambda: CharFilter(
+            field_name="title",
+            widget=forms.MultiWidget(widgets=(forms.TextInput, forms.TextInput)),
+        ),
+        (),
+    ),
+    "named-clean-default": _AbsentChildFilterCase(
+        lambda: _DefaultBCleanFilter(field_name="title"),
+        ("S-A",),
+        named=("A", '{ exact: "A" }'),
+    ),
+    "char-default": _AbsentChildFilterCase(
+        lambda: CharFilter(field_name="title"),
+        ("S-A", "S-B"),
+    ),
+    "typed-choice-default": _AbsentChildFilterCase(
+        lambda: TypedChoiceFilter(
+            field_name="circulation_status",
+            choices=models.Book.CirculationStatus.choices,
+        ),
+        ("S-A", "S-B"),
+    ),
+}
+
+
+def _absent_child_filter_holder(
+    declared: Filter,
+) -> tuple[strawberry.Schema, type[FilterSet]]:
+    """A ``Shelf`` connection whose filter expands ``books`` over a child declaring ``declared``.
+
+    The child ``status`` filter appears on the parent as the flat copy ``books__status``.
+    """
+    child_meta = type("Meta", (), {"model": models.Book, "fields": {"title": ["exact"]}})
+    child = type(
+        "AbsentChildBookFilter",
+        (FilterSet,),
+        {"status": declared, "filter_title": _filter_title, "Meta": child_meta},
+    )
+
+    class AbsentChildShelfFilter(FilterSet):
+        books = RelatedFilter(child, field_name="books")
+
+        class Meta:
+            model = models.Shelf
+            fields = {"topic": ["exact"]}
+
+    # ``RelatedFilter`` needs the child model's type registered.
+    class HolderAbsentChildBookType(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            name = "HolderAbsentChildBookType"
+
+    assert registry.get(models.Book) is HolderAbsentChildBookType
+
+    class HolderAbsentChildShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "code")
+            interfaces = (relay.Node,)
+            filterset_class = AbsentChildShelfFilter
+            name = "HolderAbsentChildShelfType"
+
+    @strawberry.type
+    class Query:
+        shelves: DjangoConnection[HolderAbsentChildShelfType] = DjangoConnectionField(
+            HolderAbsentChildShelfType,
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config()), AbsentChildShelfFilter
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("case_id", list(_ABSENT_CHILD_FILTER_CASES))
+def test_library_parent_connection_answers_an_omitted_child_filter_as_a_full_copy_over_http(
+    case_id: str,
+) -> None:
+    """A parent connection answers a child filter it omits exactly as copying every filter does.
+
+    The child filter reaches the parent as the flat copy ``books__status``. A
+    request that does not name it gets the rows a filter set copying every
+    filter (django-filter's own constructor) gets: a copy whose form field
+    cleans an absent key to a value that constrains (a consumer field's
+    ``clean`` / ``to_python`` default, a nonempty ``empty_value`` on
+    ``CharFilter`` / ``TypedChoiceFilter`` over the ``circulation_status``
+    choices, a multi-widget reading two keys into a single-value field) still
+    constrains, while a built-in empty default constrains nothing. A request
+    that names the copy (``booksStatus``) filters by the value it sends.
+    """
+    case = _ABSENT_CHILD_FILTER_CASES[case_id]
+    branch = models.Branch.objects.create(name="Absent", city="Boston")
+    shelf_a = models.Shelf.objects.create(code="S-A", topic="general", branch=branch)
+    shelf_b = models.Shelf.objects.create(code="S-B", topic="general", branch=branch)
+    models.Shelf.objects.create(code="S-C", topic="maps", branch=branch)
+    models.Book.objects.create(title="A", shelf=shelf_a)
+    models.Book.objects.create(
+        title="B",
+        shelf=shelf_b,
+        circulation_status=models.Book.CirculationStatus.REPAIR,
+    )
+    data = {"topic": "general"}
+    books = ""
+    if case.named is not None:
+        data["books__status"] = case.named[0]
+        books = f", booksStatus: {case.named[1]}"
+
+    registry.clear()
+    try:
+        schema, shelf_filter = _absent_child_filter_holder(case.declared())
+        response = _post_holder(
+            schema,
+            f"""
+            {{
+              shelves(first: 10, filter: {{ topic: {{ exact: "general" }}{books} }}) {{
+                edges {{ node {{ code }} }}
+              }}
+            }}
+            """,
+        )
+        copying_every_filter = shelf_filter(
+            data=data,
+            queryset=models.Shelf.objects.order_by("code"),
+            request=HttpRequest(),
+        )
+        expected = list(copying_every_filter.qs.values_list("code", flat=True))
+    finally:
+        registry.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "errors" not in payload, payload
+    codes = [edge["node"]["code"] for edge in payload["data"]["shelves"]["edges"]]
+    assert codes == expected == list(case.expected)
+
+
 @pytest.mark.django_db
 def test_generic_relation_tags_resolve_over_http_with_optimizer() -> None:
     """Holder GenericRelation ``tags`` resolves under the optimizer (rung 3).
@@ -13940,6 +14158,96 @@ def test_form_to_field_relation_update_keeps_an_omitted_genre_over_http(value: s
         "favoriteGenre": None if expected is None else {"name": expected},
     }
     assert _profile_genre_column(patron) == [expected]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "value",
+    [
+        "omitted",
+        "omitted_named_like_another_genres_id",
+        "genre",
+        "null",
+    ],
+)
+def test_form_to_field_relation_update_refuses_an_omitted_dangling_genre_over_http(
+    value: str,
+) -> None:
+    """A form update omitting a genre whose stored name no genre carries writes nothing.
+
+    The genre row is removed under disabled constraint checks, so the column keeps a name
+    that resolves to no genre. ``PatronProfileGenreForm.favorite_genre`` resolves a genre
+    by id, so that name has no id to rebind: the omitted field is its own
+    ``invalid_choice`` error keyed to ``favoriteGenreId``, the form is never bound and no
+    ``UPDATE`` runs, so neither ``address_2`` nor the column changes. Reading the stored
+    name as an id would link the genre whose id it equals, and binding the empty value
+    would clear the relation. A supplied genre still replaces the name and an explicit
+    ``null`` still clears it.
+    """
+    other = models.Genre.objects.create(name="DanglingOther")
+    gone_name = str(other.pk) if value == "omitted_named_like_another_genres_id" else "Gone"
+    gone = models.Genre.objects.create(name=gone_name)
+    new = models.Genre.objects.create(name="DanglingNew")
+    patron = models.Patron.objects.create(name="DanglingFormUpdatePatron")
+    models.PatronProfile.objects.create(patron=patron, address_2="Suite 1", favorite_genre=gone)
+    data: dict[str, object] = {"address_2": "Suite 4"}
+    if value == "genre":
+        data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
+    elif value == "null":
+        data["favoriteGenreId"] = None
+
+    with connection.constraint_checks_disabled():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM library_genre WHERE id = %s",
+                [gone.pk],
+            )
+        try:
+            with CaptureQueriesContext(connection) as captured:
+                response = _post_graphql(
+                    _FORM_PROFILE_UPDATE,
+                    variables={
+                        "id": global_id_for(library_schema.PatronProfileType, patron.pk),
+                        "d": data,
+                    },
+                )
+            column = _profile_genre_column(patron)
+            address = list(
+                models.PatronProfile.objects.filter(patron=patron).values_list(
+                    "address_2",
+                    flat=True,
+                ),
+            )
+        finally:
+            models.PatronProfile.objects.filter(patron=patron).update(favorite_genre=None)
+    assert response.status_code == 200
+    payload = response.json()
+    assert "errors" not in payload, payload
+    result = payload["data"]["updatePatronProfileViaForm"]
+    updates = [q["sql"] for q in captured if q["sql"].lstrip().upper().startswith("UPDATE")]
+    if value in {"genre", "null"}:
+        expected = new.name if value == "genre" else None
+        assert result["errors"] == []
+        assert result["node"] == {
+            "secondaryAddress": "Suite 4",
+            "favoriteGenre": None if expected is None else {"name": expected},
+        }
+        assert (column, address) == ([expected], ["Suite 4"])
+        assert len(updates) == 1, updates
+    else:
+        assert result == {
+            "node": None,
+            "errors": [
+                {
+                    "field": "favoriteGenreId",
+                    "messages": [
+                        "Select a valid choice. That choice is not one of the available choices.",
+                    ],
+                },
+            ],
+        }
+        assert (column, address) == ([gone_name], ["Suite 1"])
+        assert updates == []
 
 
 @pytest.mark.django_db

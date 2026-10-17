@@ -380,15 +380,15 @@ def test_explode_comma_lands_inside_the_tuples_own_parentheses(
     assert ctc._apply(source, analysis.inserts, analysis.deletes) == (fixed or source)
 
 
-@pytest.mark.parametrize(
-    "comment",
-    [
-        "# noqa: T201",
-        "# NOQA",
-        "# pyright: ignore[reportUnusedCallResult]",
-        "# type: ignore",
-    ],
+SUPPRESSIONS = (
+    "# noqa: T201",
+    "# NOQA",
+    "# pyright: ignore[reportUnusedCallResult]",
+    "# type: ignore",
 )
+
+
+@pytest.mark.parametrize("comment", SUPPRESSIONS)
 def test_explode_refuses_to_strand_a_trailing_suppression(
     repo: Path,
     capsys: pytest.CaptureFixture[str],
@@ -413,6 +413,13 @@ def test_explode_refuses_to_strand_a_trailing_suppression(
     document = json.loads(capsys.readouterr().out)
     assert [(v["rule"], v["fixable"]) for v in document["violations"]] == [("explode", False)]
     assert document["errors"] == []
+    # --diff raises the error --fix does.
+    assert ctc.main(["--diff", "--json", "pkg/mod.py"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert [(e["rule"], e["line"], e["message"]) for e in document["errors"]] == [
+        ("unfixable", 1, ctc.STRANDED_MESSAGE),
+    ]
+    assert path.read_text(encoding="utf-8") == source
 
 
 @pytest.mark.parametrize(
@@ -463,16 +470,213 @@ def test_diff_shows_the_fixpoint(repo: Path, capsys: pytest.CaptureFixture[str])
     assert path.read_text(encoding="utf-8") == NESTED
 
 
+@pytest.mark.parametrize("mode", ["--fix", "--diff"])
 def test_fix_without_a_fixpoint_is_an_error(
     repo: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    mode: str,
 ) -> None:
     """A file still changing after the round bound fails the run instead of passing."""
     monkeypatch.setattr(ctc, "MAX_FIX_ROUNDS", 1)
     _write(repo, "pkg/mod.py", NESTED)
+    assert ctc.main([mode, "--json", "pkg/mod.py"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert [
+        (
+            e["file"],
+            e["rule"],
+            e["line"],
+            e["message"],
+        )
+        for e in document["errors"]
+    ] == [
+        (
+            "pkg/mod.py",
+            "unfixable",
+            1,
+            ctc.NO_FIXPOINT_MESSAGE,
+        ),
+    ]
+
+
+def _stranded_after_reflow(comment: str) -> tuple[str, str]:
+    """A source whose explode is stranded only once ``ruff format`` collapses it, and the text it settles to.
+
+    Line 1 is a multi-line list with the suppression after its closing bracket, so
+    round 1 sees no violation there; line 4's collapse makes round 1 write the file,
+    the reflow joins the list onto line 1, and round 2 finds the explode withheld.
+    """
+    source = f"X = [\n    print(1), print(2), print(3), print(4)\n]  {comment}\nY = [1, 2,]\n"
+    settled = f"X = [print(1), print(2), print(3), print(4)]  {comment}\nY = [1, 2]\n"
+    return source, settled
+
+
+@pytest.mark.parametrize("comment", SUPPRESSIONS)
+def test_fix_fails_on_an_explode_a_later_round_strands(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    comment: str,
+) -> None:
+    """A suppression stranded by the reflow fails --fix with the round-1 error, and --check agrees."""
+    source, settled = _stranded_after_reflow(comment)
+    path = _write(repo, "pkg/mod.py", source)
     assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 1
     document = json.loads(capsys.readouterr().out)
-    assert [(e["file"], e["rule"], e["line"]) for e in document["errors"]] == [
-        ("pkg/mod.py", "unfixable", 1),
+    assert path.read_text(encoding="utf-8") == settled
+    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+        ("collapse", 4, True),
+        ("explode", 1, False),
     ]
+    assert [
+        (
+            e["file"],
+            e["rule"],
+            e["line"],
+            e["message"],
+        )
+        for e in document["errors"]
+    ] == [
+        (
+            "pkg/mod.py",
+            "unfixable",
+            1,
+            ctc.STRANDED_MESSAGE,
+        ),
+    ]
+    assert document["summary"]["exit"] == 1
+    # The settled file is exactly what --check rejects: the same line, not fixable.
+    assert ctc.main(["--check", "--json", "pkg/mod.py"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+        ("explode", 1, False),
+    ]
+    assert document["errors"] == []
+
+
+def test_fix_reports_a_later_round_stranded_explode_in_human_output(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without --json the later-round refusal is the round-1 line on stderr, and the run fails."""
+    source, _ = _stranded_after_reflow(SUPPRESSIONS[0])
+    _ = _write(repo, "pkg/mod.py", source)
+    assert ctc.main(["--fix", "pkg/mod.py"]) == 1
+    captured = capsys.readouterr()
+    assert f"pkg/mod.py:1: {ctc.STRANDED_MESSAGE}" in captured.err.splitlines()
+    assert "1 error(s): file(s) not checked or not fully fixed" in captured.out
+    assert "errors 1" in _summary(captured.out)
+
+
+def test_diff_fails_on_an_explode_a_later_round_strands(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--diff runs the same rounds in memory, so it raises the error --fix would and writes nothing."""
+    source, settled = _stranded_after_reflow(SUPPRESSIONS[0])
+    path = _write(repo, "pkg/mod.py", source)
+    assert ctc.main(["--diff", "--json", "pkg/mod.py"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert path.read_text(encoding="utf-8") == source
+    assert [
+        (
+            e["file"],
+            e["rule"],
+            e["line"],
+            e["message"],
+        )
+        for e in document["errors"]
+    ] == [
+        (
+            "pkg/mod.py",
+            "unfixable",
+            1,
+            ctc.STRANDED_MESSAGE,
+        ),
+    ]
+    assert f"+{settled.splitlines()[0]}\n" in document["diffs"]["pkg/mod.py"]
+
+
+def test_stranded_explode_below_a_reflowed_construct_is_reported_once_at_its_settled_line(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A round-1 stranded line that the reflow moves up is one error, at its line in the settled file.
+
+    Round 1 strands line 5 and collapses the list above it; the reflow joins that list
+    onto line 1, so the construct settles on line 2. --diff raises the same errors as
+    --fix, and --check on the settled file names the same line.
+    """
+    stranded = "X = [print(1), print(2), print(3), print(4)]  # noqa: T201\n"
+    source = "Y = [\n    1,\n    2,\n]\n" + stranded
+    path = _write(repo, "pkg/mod.py", source)
+    expected = [
+        (
+            "pkg/mod.py",
+            "unfixable",
+            2,
+            ctc.STRANDED_MESSAGE,
+        ),
+    ]
+    assert ctc.main(["--diff", "--json", "pkg/mod.py"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert [
+        (
+            e["file"],
+            e["rule"],
+            e["line"],
+            e["message"],
+        )
+        for e in document["errors"]
+    ] == expected
+    # --diff's violations describe the file as it stands.
+    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+        ("collapse", 1, True),
+        ("explode", 5, False),
+    ]
+    assert path.read_text(encoding="utf-8") == source
+    assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert path.read_text(encoding="utf-8") == "Y = [1, 2]\n" + stranded
+    assert [
+        (
+            e["file"],
+            e["rule"],
+            e["line"],
+            e["message"],
+        )
+        for e in document["errors"]
+    ] == expected
+    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+        ("collapse", 1, True),
+        ("explode", 2, False),
+    ]
+    assert ctc.main(["--check", "--json", "pkg/mod.py"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+        ("explode", 2, False),
+    ]
+
+
+def test_fix_reports_an_edit_that_would_break_syntax(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A comma edit that would not parse is an error and is not written.
+
+    ``_python_pass`` re-parses every edit as a safety net no real layout reaches, so
+    ``_apply`` is made to return unparseable text.
+    """
+
+    def unparseable(text: str, _inserts: list[int], _deletes: list[int]) -> str:
+        return text + "(\n"
+
+    monkeypatch.setattr(ctc, "_apply", unparseable)
+    path = _write(repo, "pkg/mod.py", "Y = [1, 2,]\n")
+    assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert path.read_text(encoding="utf-8") == "Y = [1, 2,]\n"
+    assert [(e["rule"], e["line"]) for e in document["errors"]] == [("unfixable", None)]
+    assert str(document["errors"][0]["message"]).startswith("comma fix would break syntax (")
+    assert [(v["rule"], v["fixable"]) for v in document["violations"]] == [("collapse", False)]
