@@ -4357,6 +4357,10 @@ def test_pipeline_alias_guard_auth_alias_access_is_scoped_to_the_authorization_p
         del connections.databases["auth_mirror"]
 
 
+@pytest.mark.skipif(
+    connections["default"].vendor != "sqlite",
+    reason="builds a SQLite :memory: auth alias and reads SQLite's PRAGMA query_only refusal",
+)
 def test_authorization_phase_enforces_db_read_only_on_non_pinned_auth_aliases(
     django_db_blocker: pytest_django.DjangoDbBlocker,
 ) -> None:
