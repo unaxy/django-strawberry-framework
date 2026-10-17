@@ -21,7 +21,9 @@ generated-input identity, NullBoolean UNSET omit (shipped
 ``setCardItemComplete.complete`` is ``required=False``, a weaker claim; the
 Django-default-required omit needs a throwaway form, and a live holder cannot
 declare ``DjangoFormMutation`` after the acceptance finalize), required extra
-field on a partial input, ``to_field_name`` reconstruction, ImageField
+field on a partial input, ``to_field_name`` reconstruction (including an M2M member
+whose ``to_field_name`` value is ``""``), a raw-pk M2M element ``""`` decoded through a
+hiding text-keyed type (no fakeshop text-keyed type hides a row), ImageField
 reconstruction key absence, decode-helper envelopes, optimizer
 ``dst_optimizer_plan`` G2, and the save-time blank non-text choice column shapes
 fakeshop has no column for (omitted with no default, decimal / date, update
@@ -855,6 +857,90 @@ def test_partial_update_preserves_unprovided_m2m_with_to_field_name() -> None:
     assert payload["node"]["title"] == "Renamed"
     book.refresh_from_db()
     assert list(book.genres.values_list("pk", flat=True)) == [genre.pk]  # preserved
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "genre_reads"),
+    [("omitted", 4), ("supplied", 4)],
+)
+def test_m2m_member_whose_to_field_name_value_is_empty_stays_linked(
+    value: str,
+    genre_reads: int,
+) -> None:
+    """An M2M member whose ``to_field_name`` value is ``""`` is linked, never refused or dropped.
+
+    A single ``ModelChoiceField`` cleans ``""`` to empty before its lookup, so a relation
+    keyed ``""`` is refused there; a ``ModelMultipleChoiceField`` looks every member key
+    up, ``""`` included, so the same genre named ``""`` binds as a member. An omitted
+    ``genres`` is reconstructed to ``[""]`` and kept; a supplied one decodes the genre's
+    ``GlobalID`` to ``""`` and links it. Both shapes read the genre table four times (the
+    omitted members' reconstruction or the supplied member's decode, then the bound form's
+    initial members, the field's lookup and the save's member set), so the empty key costs
+    no extra lookup. No fakeshop form keys an M2M by a text column a member can hold ``""``
+    in.
+    """
+
+    class BookForm(forms.ModelForm[library_models.Book]):
+        genres = forms.ModelMultipleChoiceField(
+            queryset=library_models.Genre.objects.all(),
+            to_field_name="name",
+            required=False,
+        )
+
+        class Meta:
+            model = library_models.Book
+            fields = ("title", "genres")
+
+    class GenreT(DjangoType, relay.Node):
+        class Meta:
+            model = library_models.Genre
+            fields = ("id", "name")
+            primary = True
+
+    class BookT(DjangoType, relay.Node):
+        class Meta:
+            model = library_models.Book
+            fields = ("id", "title")
+            primary = True
+
+    class UpdateBook(DjangoModelFormMutation):
+        class Meta:
+            form_class = BookForm
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        update_book = DjangoMutationField(UpdateBook)
+
+    finalize_django_types()
+    schema = _schema(Mutation)
+    branch = library_models.Branch.objects.create(name=_uniq("Br"))
+    shelf = library_models.Shelf.objects.create(code=_uniq("Sh"), branch=branch)
+    empty = library_models.Genre.objects.create(name="")
+    book = library_models.Book.objects.create(title="Orig", shelf=shelf)
+    data: dict[str, object] = {"title": "Renamed"}
+    if value == "omitted":
+        book.genres.add(empty)
+    else:
+        data["genres"] = [global_id_for(GenreT, empty.pk)]
+    with CaptureQueriesContext(connection) as captured:
+        res = schema.execute_sync(
+            "mutation($id: ID!, $d: BookFormPartialInput!){ updateBook(id:$id, data:$d){ "
+            "node{ title } errors{ field messages } } }",
+            variable_values={"id": global_id_for(BookT, book.pk), "d": data},
+        )
+    assert res.errors is None, res.errors
+    assert res.data is not None
+    assert res.data["updateBook"] == {"node": {"title": "Renamed"}, "errors": []}
+    assert list(book.genres.values_list("pk", flat=True)) == [empty.pk]
+    reads = [
+        query["sql"]
+        for query in captured.captured_queries
+        if query["sql"].startswith("SELECT") and 'FROM "library_genre"' in query["sql"]
+    ]
+    assert len(reads) == genre_reads, reads
 
 
 @pytest.mark.django_db
@@ -1772,6 +1858,173 @@ def test_plain_form_relation_decode_error_yields_not_ok_envelope() -> None:
     payload = res.data["pick"]
     assert payload["ok"] is False
     assert [e["field"] for e in payload["errors"]] == ["genreId"]
+
+
+@pytest.mark.django_db
+def test_decode_form_relation_multi_keeps_a_member_whose_to_field_name_value_is_empty() -> None:
+    """A raw-pk M2M member whose ``to_field_name`` value is ``""`` decodes to ``""``, unrefused.
+
+    The member is read once by pk and projected to its name; a ``ModelMultipleChoiceField``
+    looks ``""`` up like any member key, so the decode keeps it instead of reporting the
+    ``invalid_choice`` a single ``ModelChoiceField`` gives that key.
+    """
+    empty = library_models.Genre.objects.create(name="")
+    field = forms.ModelMultipleChoiceField(
+        queryset=library_models.Genre.objects.all(),
+        to_field_name="name",
+    )
+    with CaptureQueriesContext(connection) as captured:
+        keys, error = _decode_form_relation_multi(
+            [empty.pk],
+            graphql_name="genres",
+            related_model=library_models.Genre,
+            form_field=field,
+            info=unread_info(),
+        )
+    assert (keys, error) == ([""], None)
+    assert len(captured.captured_queries) == 1
+
+
+def _build_printing_bound_with_schema(
+    *,
+    to_field_name: str | None,
+) -> strawberry.Schema:
+    """A ModelForm create over ``Printing`` whose ``bound_with`` names text-keyed editions.
+
+    ``EditionT`` is a non-Relay primary, so ``boundWith`` takes raw ISBN text, and its
+    ``get_queryset`` hides every edition whose ISBN is ``""`` or starts with ``hidden``.
+    ``to_field_name`` keys the ``bound_with`` member lookup (``None`` keeps the generated
+    field, keyed by the ISBN pk).
+    """
+
+    class PrintingForm(forms.ModelForm[library_models.Printing]):
+        class Meta:
+            model = library_models.Printing
+            fields = ("edition", "run_size", "bound_with")
+
+    if to_field_name is not None:
+        PrintingForm.base_fields["bound_with"] = forms.ModelMultipleChoiceField(
+            queryset=library_models.Edition.objects.all(),
+            to_field_name=to_field_name,
+            required=False,
+        )
+
+    class EditionT(DjangoType):
+        class Meta:
+            model = library_models.Edition
+            fields = ("isbn_13",)
+            primary = True
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: models.QuerySet[library_models.Edition],
+            info: object,
+        ) -> models.QuerySet[library_models.Edition]:
+            return queryset.exclude(isbn_13="").exclude(isbn_13__startswith="hidden")
+
+    class PrintingT(DjangoType, relay.Node):
+        class Meta:
+            model = library_models.Printing
+            fields = ("id", "run_size")
+            primary = True
+
+    class CreatePrinting(DjangoModelFormMutation):
+        class Meta:
+            form_class = PrintingForm
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        create_printing = DjangoMutationField(CreatePrinting)
+
+    finalize_django_types()
+    assert registry.get(library_models.Edition) is EditionT
+    assert registry.get(library_models.Printing) is PrintingT
+    return _schema(Mutation)
+
+
+_CREATE_PRINTING = (
+    "mutation($d: PrintingFormInput!){ createPrinting(data:$d){ "
+    "node{ runSize } errors{ field messages } } }"
+)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("to_field_name", "isbn_10", "edition_reads"),
+    [(None, "0000000000", 2), ("isbn_10", "", 2)],
+    ids=["keyed_by_isbn", "keyed_by_isbn_10"],
+)
+def test_m2m_raw_pk_element_empty_is_decoded_never_a_clear(
+    to_field_name: str | None,
+    isbn_10: str,
+    edition_reads: int,
+) -> None:
+    """A raw-pk ``boundWith`` element ``""`` names the edition whose ISBN is ``""``, decoded.
+
+    A list element is never a clear: ``""`` is the pk of an edition, so it is type-checked
+    and resolved through ``EditionT.get_queryset`` like any member. That edition is hidden,
+    so the element is the uniform relation error with nothing written. Bound undecoded, the
+    generated (ISBN-keyed) field would link the hidden edition, and a field keyed by
+    ``isbn_10`` would read the pk ``""`` as an ``isbn_10`` value and link the visible edition
+    whose ``isbn_10`` is ``""``. The edition table is read twice: ``editionId`` and the
+    element, each through ``EditionT.get_queryset``; the refusal precedes any form. ``EditionT``
+    is test-local: no fakeshop text-keyed type hides a row.
+    """
+    schema = _build_printing_bound_with_schema(to_field_name=to_field_name)
+    publisher = library_models.Publisher.objects.create(name=_uniq("Pub"))
+    library_models.Edition.objects.create(isbn_13="", isbn_10=isbn_10, publisher=publisher)
+    shown = library_models.Edition.objects.create(
+        isbn_13="9780000000267",
+        isbn_10="",
+        publisher=publisher,
+    )
+    with CaptureQueriesContext(connection) as captured:
+        res = schema.execute_sync(
+            _CREATE_PRINTING,
+            variable_values={"d": {"editionId": shown.pk, "runSize": 1, "boundWith": [""]}},
+        )
+    assert res.errors is None, res.errors
+    assert res.data is not None
+    assert res.data["createPrinting"] == {
+        "node": None,
+        "errors": [{"field": "boundWith", "messages": ["Invalid id for relation 'boundWith'."]}],
+    }
+    assert not library_models.Printing.objects.exists()
+    reads = [q["sql"] for q in captured.captured_queries if 'FROM "library_edition"' in q["sql"]]
+    assert len(reads) == edition_reads, reads
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("to_field_name", "isbn_10"),
+    [(None, "0000000000"), ("isbn_10", "0000000267")],
+    ids=["keyed_by_isbn", "keyed_by_isbn_10"],
+)
+def test_m2m_raw_pk_element_naming_a_visible_edition_links_it(
+    to_field_name: str | None,
+    isbn_10: str,
+) -> None:
+    """A visible edition named by its raw ISBN links through either key (the control)."""
+    schema = _build_printing_bound_with_schema(to_field_name=to_field_name)
+    publisher = library_models.Publisher.objects.create(name=_uniq("Pub"))
+    shown = library_models.Edition.objects.create(
+        isbn_13="9780000000268",
+        isbn_10=isbn_10,
+        publisher=publisher,
+    )
+    res = schema.execute_sync(
+        _CREATE_PRINTING,
+        variable_values={"d": {"editionId": shown.pk, "runSize": 1, "boundWith": [shown.pk]}},
+    )
+    assert res.errors is None, res.errors
+    assert res.data is not None
+    assert res.data["createPrinting"] == {"node": {"runSize": 1}, "errors": []}
+    printing = library_models.Printing.objects.get()
+    assert list(printing.bound_with.values_list("isbn_13", flat=True)) == [shown.pk]
 
 
 def test_decode_form_relation_multi_non_iterable_returns_field_error() -> None:

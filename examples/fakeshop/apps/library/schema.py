@@ -1398,6 +1398,21 @@ class CreateShelfViaForm(DjangoModelFormMutation):
         permission_classes = []
 
 
+class UpdateShelfViaForm(DjangoModelFormMutation):
+    """Update a ``Shelf`` via ``ShelfRelationsForm``; the update ``id`` is the raw pk.
+
+    The column stores the branch pk while the form's ``branch`` resolves a branch by
+    ``to_field_name="name"``, so an update that omits ``branchId`` binds the stored branch
+    by its name. A branch named ``""`` cannot be named through that field (it cleans to
+    empty), so omitting or supplying it is the field's ``invalid_choice`` error.
+    """
+
+    class Meta:
+        form_class = forms.ShelfRelationsForm
+        operation = "update"
+        permission_classes = []
+
+
 class CreateShelf(DjangoMutation):
     """Create a ``Shelf`` via the model pipeline - the MODEL raw-pk relation path.
 
@@ -1477,6 +1492,22 @@ class UpdatePatronProfileViaForm(DjangoModelFormMutation):
 
     class Meta:
         form_class = forms.PatronProfileGenreForm
+        operation = "update"
+        permission_classes = []
+
+
+class UpdatePatronProfileByGenreNameViaForm(DjangoModelFormMutation):
+    """Update a ``PatronProfile`` via ``PatronProfileGenreNameForm`` - a name-keyed ``to_field`` FK.
+
+    The form's generated ``favorite_genre`` resolves a genre by the name the column stores, so
+    an update that omits ``favoriteGenreId`` rebinds the stored name as is. A genre whose name
+    the optional field cleans to empty cannot be named through it: a stored or supplied genre
+    named ``""`` is the field's ``invalid_choice`` error, never a clear. ``PatronProfileType``
+    is Relay-Node, so the update ``id`` is a ``GlobalID``.
+    """
+
+    class Meta:
+        form_class = forms.PatronProfileGenreNameForm
         operation = "update"
         permission_classes = []
 
@@ -2472,6 +2503,10 @@ class Mutation:
     sent is resolved to the genre name the column stores.
     ``updatePatronProfileViaForm`` is the ``ModelForm`` write of the same key through a
     genre-id-keyed form field: an omitted genre is rebound by its id, never by the stored name.
+    ``updatePatronProfileByGenreNameViaForm`` writes it through the generated name-keyed field,
+    which refuses a genre named ``""`` (stored or supplied) instead of clearing it.
+    ``updateShelfViaForm`` updates a shelf through the name-keyed ``branch`` over the
+    pk-stored column, refusing a branch named ``""`` the same way.
     ``createPrinting`` / ``updatePrinting`` and their ``ViaForm`` / ``ViaSerializer`` siblings
     write relations into the text-keyed ``Edition`` in each flavor; ``updateEdition`` /
     ``deleteEdition`` and the ``ViaForm`` / ``ViaSerializer`` updates locate an ``Edition`` by
@@ -2479,12 +2514,16 @@ class Mutation:
     """
 
     create_shelf_via_form = DjangoMutationField(CreateShelfViaForm)
+    update_shelf_via_form = DjangoMutationField(UpdateShelfViaForm)
     create_shelf = DjangoMutationField(CreateShelf)
     update_shelf_condition = DjangoMutationField(UpdateShelfCondition)
     update_patron_profile = DjangoMutationField(UpdatePatronProfile)
     update_book_via_form = DjangoMutationField(UpdateBookViaForm)
     update_book_at_repair_desk_via_form = DjangoMutationField(UpdateBookAtRepairDeskViaForm)
     update_patron_profile_via_form = DjangoMutationField(UpdatePatronProfileViaForm)
+    update_patron_profile_by_genre_name_via_form = DjangoMutationField(
+        UpdatePatronProfileByGenreNameViaForm,
+    )
     create_book_via_custom_input = DjangoMutationField(CreateBookViaCustomInput)
     update_book_via_custom_input = DjangoMutationField(UpdateBookViaCustomInput)
     create_publisher = DjangoMutationField(CreatePublisher)

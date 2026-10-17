@@ -16,6 +16,7 @@ resolved filter instances, not from a parallel map).
 from __future__ import annotations
 
 import copy
+import inspect
 from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -52,6 +53,7 @@ from django_filters import (
 from django_filters.conf import settings as _df_settings
 from django_filters.exceptions import FieldLookupError
 from django_filters.fields import BaseCSVField
+from django_filters.filters import FilterMethod
 from django_filters.utils import get_model_field, resolve_field, try_dbfield
 from graphql import GraphQLError
 from typing_extensions import override
@@ -1148,16 +1150,23 @@ def _absence_filters_nothing(
 
     Decided once per copy when the expansion is published; a copy for which this
     is ``False`` is copied by every request, as django-filter copies every filter.
-    Absence is a no-op only when every link holds:
+    The proof describes the filter the request runs (``_runs_as``: the copy
+    itself, or for a projected copy the child filter it runs inside a child
+    instance) and the form field that filter hands the form: the field the
+    filter already built and cached (django-filter's ``Filter.field`` keeps it
+    in ``_field``, and every copy keeps it), else the one its ``field_class``
+    builds from its ``extra``. Absence is a no-op only when every link holds:
 
     - the filter is not ``required`` (the form would refuse the absent key) and
-      not ``disabled`` (a disabled field cleans to its ``initial``);
+      not ``disabled`` (a disabled field cleans to its ``initial``), in its
+      ``extra`` and on a cached field;
     - its ``filter`` and its ``field`` are django-filter's or the package's (a
-      ``method=`` filter runs through django-filter's ``FilterMethod``); a
-      projected copy is judged by the child filter it runs, and runs inside a
-      child instance, so a child set that edits its instances' filters
-      (``FilterSet._customizes_instances``) keeps the copy up front;
-    - its widget is Django's, django-filter's or the package's, reports the key
+      ``method=`` filter runs through django-filter's ``FilterMethod``);
+    - a cached field is a form field that sets no ``empty_values`` of its own and
+      holds no attribute of its own where its class defines a method (an
+      instance ``clean``, ``to_python`` or ``compress``; ``_shadows_a_method``);
+    - its widget (the cached field's, else the declared one, else its field
+      class's) is Django's, django-filter's or the package's, reports the key
       omitted from empty data (``Widget.value_omitted_from_data``: a
       ``CheckboxInput`` reads an absent key as ``False``, a ``SelectMultiple``
       cannot tell absent from empty) and names no sub-key with a ``__`` suffix,
@@ -1166,32 +1175,54 @@ def _absence_filters_nothing(
     - its form field cleans the value that widget reads for an absent key to a
       value proven from Django's, django-filter's or the package's own field
       classes (``_absent_cleaned_value``): a consumer field class, or an
-      ``empty_value`` the field returns for absence, may clean it to a value
-      that constrains;
+      ``empty_value`` the field returns for absence (the cached field's own,
+      else the one in ``extra``), may clean it to a value that constrains;
     - a ``ChoiceFilter`` whose ``null_value`` is that cleaned value would run its
       ``IS NULL`` branch before any empty skip;
-    - its ``filter`` skips that cleaned value (``_filter_skips``).
+    - its ``filter`` skips that cleaned value (``_filter_skips``), and so does a
+      ``filter`` the filter holds of its own (``_own_filter_skips``: only the
+      ``FilterMethod`` a ``method=`` installs is proven).
+
+    Every other member the proof reads from the filter is read through the
+    instance (``extra``, ``field_class``, ``null_value``, the cached ``_field``);
+    ``field`` is a property, which no instance attribute can replace.
     """
-    extra = filter_instance.extra
+    source = _runs_as(filter_instance)
+    if source is None:
+        return False
+    extra = source.extra
     if extra.get("required") or extra.get("disabled"):
         return False
-    if (
-        isinstance(
-            filter_instance,
-            ProjectedChildFilter,
-        )
-        and filter_instance._projection.filterset._customizes_instances()
-    ):
-        return False
-    filter_class: type[object] = getattr(filter_instance, "_projected_from", type(filter_instance))
+    filter_class = type(source)
     if not (
         _defined_in(getattr(filter_class, "filter", None), _EMPTY_SKIPPING_FILTER_MODULES)
         and _defined_in(_defining_class(filter_class, "field"), _EMPTY_SKIPPING_FILTER_MODULES)
     ):
         return False
-    field_class: type[forms.Field] = filter_instance.field_class
-    # The widget the copy's form field builds: the declared one, else its field class's.
-    widget = cast("forms.Widget | type[forms.Widget]", extra.get("widget") or field_class.widget)
+    # django-filter's ``Filter.field`` builds the form field once and caches it in ``_field``.
+    cached = object_result(vars(source).get, "_field", _UNPROVEN)
+    if cached is _UNPROVEN:
+        field_class: type[forms.Field] = source.field_class
+        # The widget the copy's form field builds: the declared one, else its field class's.
+        widget = cast(
+            "forms.Widget | type[forms.Widget]",
+            extra.get("widget") or field_class.widget,
+        )
+        built_from: Mapping[str, object] = extra
+    elif (
+        not isinstance(cached, forms.Field)
+        or cached.required
+        or cached.disabled
+        or "empty_values" in vars(cached)
+        or _shadows_a_method(cached)
+        # django-stubs type a field's ``widget`` as ``Any``; ``Field.__init__`` builds an instance.
+        or not isinstance(cached_widget := object_result(getattr, cached, "widget"), forms.Widget)
+    ):
+        return False
+    else:
+        field_class = type(cached)
+        widget = cached_widget
+        built_from = vars(cached)
     if isinstance(widget, type):
         if widget not in absent_by_widget:
             absent_by_widget[widget] = _absent_widget_value(widget, name)
@@ -1200,15 +1231,77 @@ def _absence_filters_nothing(
         raw = _absent_widget_value(widget, name)
     if raw is _UNPROVEN:
         return False
-    absent = _absent_cleaned_value(field_class, extra, raw)
+    absent = _absent_cleaned_value(field_class, built_from, raw)
     if absent is _UNPROVEN:
         return False
-    if isinstance(filter_instance, ChoiceFilter) and _null_value_is_absent(
-        cast("object", filter_instance.null_value),
+    if isinstance(source, ChoiceFilter) and _null_value_is_absent(
+        cast("object", source.null_value),
         absent,
     ):
         return False
-    return _filter_skips(filter_class, absent)
+    return _filter_skips(filter_class, absent) and _own_filter_skips(source, absent)
+
+
+def _own_filter_skips(source: Filter, absent: object) -> bool:
+    """Whether the ``filter`` ``source`` holds of its own, if any, applies no constraint for ``absent``.
+
+    ``absent`` is a value the class's ``filter`` skips (``_filter_skips``). An
+    instance ``filter`` replaces the class's for that filter and every copy of it.
+    The one proven is the ``FilterMethod`` a ``method=`` installs: django-filter's,
+    which skips every empty value, or the package's empty-list-aware one, which
+    skips only ``None``; it must be bound to ``source`` itself and every class in
+    its MRO must be django-filter's or the package's. Any other instance
+    ``filter`` is unproven. Nothing is called.
+    """
+    own = object_result(vars(source).get, "filter", None)
+    if own is None:
+        return True
+    if not (
+        isinstance(own, FilterMethod)
+        and own.f is source
+        and all(
+            _defined_in(klass, _EMPTY_SKIPPING_FILTER_MODULES)
+            for klass in type(own).__mro__
+            if klass is not object
+        )
+    ):
+        return False
+    return absent is None or _defining_class(type(own), "__call__") is FilterMethod
+
+
+def _runs_as(filter_instance: Filter) -> Filter | None:
+    """Return the class-level filter a request runs for this flat copy, else ``None``.
+
+    A plain copy runs a deep copy of itself. A projected copy runs, inside a
+    child instance, a copy of the filter its child set publishes under the
+    projection's name (``ProjectedChildFilter.field``), which may be projected in
+    turn, one hop deeper (each hop's name is shorter, so the walk ends). ``None``
+    when a child set on the way edits its instances' filters
+    (``FilterSet._customizes_instances``), so what it publishes does not describe
+    what runs, or when it publishes no filter under that name.
+    """
+    source: Filter | None = filter_instance
+    while isinstance(source, ProjectedChildFilter):
+        projection = source._projection
+        if projection.filterset._customizes_instances():
+            return None
+        source = projection.filterset.base_filters.get(projection.name)
+    return source
+
+
+def _shadows_a_method(instance: object) -> bool:
+    """Whether ``instance`` holds an attribute of its own where its class defines a method.
+
+    Such an attribute replaces the method for that instance (an instance
+    ``clean``, ``to_python``, ``compress`` or ``value_from_datadict``), so the
+    class no longer says what the instance runs. Read from the instance's own
+    namespace and the class's raw attributes; nothing is called.
+    """
+    klass = type(instance)
+    return any(
+        inspect.isroutine(object_result(inspect.getattr_static, klass, key, None))
+        for key in vars(instance)
+    )
 
 
 # The modules whose widgets read form data the way ``_named_flat_copies`` names it, and
@@ -1234,9 +1327,11 @@ def _absent_widget_value(widget: forms.Widget | type[forms.Widget], name: str) -
     """Return what ``widget`` (built when a class) reads for an absent key; ``_UNPROVEN`` when unread.
 
     Its data-reading methods must be Django's, django-filter's or the package's,
-    ``value_omitted_from_data({}, {}, name)`` must be ``True``, and a multi-widget
-    must name no sub-key with a ``__`` suffix (``_named_flat_copies`` reads one as a
-    relation path); ``_UNPROVEN`` otherwise, and on a raise.
+    the built widget must hold no attribute of its own in place of a method
+    (``_shadows_a_method``), ``value_omitted_from_data({}, {}, name)`` must be
+    ``True``, and a multi-widget must name no sub-key with a ``__`` suffix
+    (``_named_flat_copies`` reads one as a relation path); ``_UNPROVEN``
+    otherwise, and on a raise.
     """
     widget_class = widget if isinstance(widget, type) else type(widget)
     if not (
@@ -1246,6 +1341,8 @@ def _absent_widget_value(widget: forms.Widget | type[forms.Widget], name: str) -
         return _UNPROVEN
     try:
         built = widget() if isinstance(widget, type) else widget
+        if _shadows_a_method(built):
+            return _UNPROVEN
         # django-stubs declare no ``widgets_names``; ``MultiWidget.__init__`` sets it.
         suffixes = cast("list[str]", getattr(built, "widgets_names", []))
         if isinstance(built, forms.MultiWidget) and any(
@@ -1279,13 +1376,15 @@ _NONE_CLEANING_FIELDS: tuple[type[forms.Field], ...] = (
 
 def _absent_cleaned_value(
     field_class: type[forms.Field],
-    extra: Mapping[str, object],
+    built_from: Mapping[str, object],
     raw: object,
 ) -> object:
-    """Return what ``field_class`` built from ``extra`` cleans ``raw`` to, else ``_UNPROVEN``.
+    """Return what a ``field_class`` form field cleans ``raw`` to, else ``_UNPROVEN``.
 
     ``raw`` is the value the copy's widget reads for an absent key: ``None``, or one
-    ``None`` per sub-widget of a multi-widget. Proven statically, running no field
+    ``None`` per sub-widget of a multi-widget. ``built_from`` is where the field's
+    ``empty_value`` is read: the filter's ``extra`` the field is built from, or a
+    built field's own attributes. Proven statically, running no field
     code: every class in ``field_class``'s MRO is Django's, django-filter's or the
     package's (a consumer subclass may override ``clean`` / ``to_python`` /
     ``validate``, its ``__init__``, or ``empty_values``), and the value then follows
@@ -1295,7 +1394,7 @@ def _absent_cleaned_value(
       before any sub-field cleans, and every ``compress`` of those modules but the
       abstract base's returns ``None`` for it;
     - a ``CharField`` / ``TypedChoiceField`` returns its ``empty_value`` (``""``
-      unless ``extra`` sets one), a ``TypedMultipleChoiceField`` its ``empty_value``
+      unless ``built_from`` sets one), a ``TypedMultipleChoiceField`` its ``empty_value``
       (``[]``), a ``BooleanField`` that is not a ``NullBooleanField`` ``False``, a
       ``MultipleChoiceField`` ``[]``, any other ``ChoiceField`` ``""``, and each of
       ``_NONE_CLEANING_FIELDS`` (and ``Field`` itself) ``None``;
@@ -1326,9 +1425,9 @@ def _absent_cleaned_value(
     if issubclass(field_class, _NONE_CLEANING_FIELDS) or field_class is forms.Field:
         return None
     if issubclass(field_class, forms.TypedMultipleChoiceField):
-        return extra.get("empty_value", [])
+        return built_from.get("empty_value", [])
     if issubclass(field_class, (forms.CharField, forms.TypedChoiceField)):
-        return extra.get("empty_value", "")
+        return built_from.get("empty_value", "")
     if issubclass(field_class, forms.BooleanField) and not issubclass(
         field_class,
         forms.NullBooleanField,
