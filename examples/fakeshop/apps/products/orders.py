@@ -27,6 +27,7 @@ input names the gated field.
 
 from __future__ import annotations
 
+from django.contrib.auth.models import AbstractUser
 from graphql import GraphQLError
 
 from django_strawberry_framework.orders import OrderSet, RelatedOrder
@@ -44,7 +45,7 @@ class CategoryOrder(OrderSet):
     def check_name_permission(self, request: object) -> None:
         """Only staff users may order by ``Category.name``."""
         user = getattr(request, "user", None)
-        if not user or not user.is_staff:
+        if not (isinstance(user, AbstractUser) and user.is_staff):
             raise GraphQLError("You must be a staff user to order by Category name.")
 
 

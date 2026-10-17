@@ -244,22 +244,26 @@ class MediaSpecimenWithPathType(DjangoType):
 class Query:
     """Scalars coverage root fields."""
 
-    @strawberry.field(graphql_type=list[MediaSpecimenWithPathType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[MediaSpecimenWithPathType])  # pyright: ignore[reportAny]
     def all_media_specimens_with_path(self) -> list[models.MediaSpecimen]:
         """Root field for the filesystem-path opt-in demonstration type (spec-048)."""
         return list(models.MediaSpecimen.objects.order_by("id"))
 
-    @strawberry.field(graphql_type=list[OverriddenScalarSpecimenType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[OverriddenScalarSpecimenType])  # pyright: ignore[reportAny]
     def all_override_specimens(self) -> list[models.OverrideSpecimen]:
         """Root field for the consumer-authored field-override demonstration type."""
         return list(models.OverrideSpecimen.objects.order_by("id"))
 
-    @strawberry.field(graphql_type=list[MediaSpecimenType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[MediaSpecimenType])  # pyright: ignore[reportAny]
     def all_media_specimens(self) -> list[models.MediaSpecimen]:
         """Root field for the file/image read-output demonstration type (spec-037)."""
         return list(models.MediaSpecimen.objects.order_by("id"))
 
-    @strawberry.field(graphql_type=list[ScalarSpecimenType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[ScalarSpecimenType])  # pyright: ignore[reportAny]
     def all_scalar_specimens(
         self,
         info: Info,
@@ -274,7 +278,8 @@ class Query:
             queryset = orders.ScalarSpecimenOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[ScalarSpecimenType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[ScalarSpecimenType])  # pyright: ignore[reportAny]
     def all_scalar_specimens_via_manager(self) -> Manager[models.ScalarSpecimen]:
         """Resolver returning a bare ``Manager`` instead of ``Manager.all()``.
 
@@ -289,7 +294,8 @@ class Query:
         """
         return models.ScalarSpecimen.objects
 
-    @strawberry.field(graphql_type=list[NullableScalarSpecimenType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[NullableScalarSpecimenType])  # pyright: ignore[reportAny]
     def all_nullable_scalar_specimens(
         self,
         info: Info,
@@ -304,7 +310,8 @@ class Query:
             queryset = orders.NullableScalarSpecimenOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[ScalarSpecimenTagType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[ScalarSpecimenTagType])  # pyright: ignore[reportAny]
     def all_scalar_specimen_tags(
         self,
         info: Info,
@@ -319,7 +326,8 @@ class Query:
             queryset = orders.ScalarSpecimenTagOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=ScalarSpecimenType | None)
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=ScalarSpecimenType | None)  # pyright: ignore[reportAny]
     def scalar_specimen_by_signed_big(self, signed_big: BigInt) -> models.ScalarSpecimen | None:
         """Lookup-by-``BigInt`` query field exercising input-position parsing.
 

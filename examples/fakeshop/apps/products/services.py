@@ -39,6 +39,7 @@ Examples:
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import pkgutil
 import random
@@ -59,14 +60,23 @@ if TYPE_CHECKING:
     from django.db.models import Model, QuerySet
 
 
+def _generator(fake: Faker, method_name: str) -> Callable[[], object] | None:
+    """Return the Faker method ``method_name`` names, or ``None`` when it names no callable."""
+    method = getattr(fake, method_name, None)
+    return method if callable(method) else None
+
+
 def _is_safe_generator(fake: Faker, method_name: str) -> bool:
     """Probe a Faker method by calling it once to check it returns a usable string value.
 
     Rejects methods that return non-scalar types (bytes, dicts, lists, tuples, etc.)
     or raise exceptions when called with no arguments.
     """
+    method = _generator(fake, method_name)
+    if method is None:
+        return False
     try:
-        result = getattr(fake, method_name)()
+        result = method()
     except Exception:  # noqa: BLE001 - probing an arbitrary Faker provider call
         return False
 
@@ -105,14 +115,14 @@ def discover_providers(fake: Faker) -> dict[str, list[str]]:
             continue
 
         try:
-            mod = __import__(modname, fromlist=["Provider"])
+            mod = importlib.import_module(modname)
         except ImportError:
             continue
 
-        if not hasattr(mod, "Provider"):
+        provider_cls = getattr(mod, "Provider", None)
+        if not isinstance(provider_cls, type):
             continue
 
-        provider_cls = mod.Provider
         methods: list[str] = []
 
         for name in sorted(dir(provider_cls)):
@@ -120,7 +130,7 @@ def discover_providers(fake: Faker) -> dict[str, list[str]]:
                 continue
 
             attr = getattr(provider_cls, name, None)
-            if attr is None or not callable(attr) or isinstance(attr, property):
+            if not callable(attr) or isinstance(attr, property):
                 continue
 
             # Only include methods with no required args beyond self
@@ -130,7 +140,9 @@ def discover_providers(fake: Faker) -> dict[str, list[str]]:
                 required = [
                     p
                     for p in params[1:]  # skip self
-                    if p.default is inspect.Parameter.empty
+                    # basedpyright: typeshed types ``Parameter.default`` as ``Any`` (any value can
+                    # be a default); only its identity with ``Parameter.empty`` is read
+                    if p.default is inspect.Parameter.empty  # pyright: ignore[reportAny]
                     and p.kind
                     not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
                 ]
@@ -151,9 +163,11 @@ def discover_providers(fake: Faker) -> dict[str, list[str]]:
 
 def _fake_value(fake: Faker, method_name: str) -> str:
     """Call a Faker method and return its result as a string."""
-    fn: Callable[[], object] = getattr(fake, method_name)
-    result = fn()
-    return str(result)
+    method = _generator(fake, method_name)
+    if method is None:
+        msg = f"Faker has no generator method {method_name!r}."
+        raise AttributeError(msg)
+    return str(method())
 
 
 # Item/Entry privacy is drawn from this fixed-seed stream rather than the process

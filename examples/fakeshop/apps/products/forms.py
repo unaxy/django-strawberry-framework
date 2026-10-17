@@ -33,10 +33,8 @@ end. These forms cover the spec's Decision-12 live matrix:
   case Django's own validation cannot see).
 """
 
-from typing import Any
-
 from django import forms
-from django.contrib.auth.models import AnonymousUser, User
+from django.contrib.auth.models import AbstractUser, AnonymousUser
 from typing_extensions import override
 
 from .models import Category, Item
@@ -65,7 +63,10 @@ class ItemModelForm(forms.ModelForm[Item]):
 
     def clean_name(self) -> str:
         """Reject ``REJECTED_ITEM_NAME`` as a field-level error on ``name``."""
-        name = self.cleaned_data["name"]
+        name = self.cleaned_data.get("name")
+        if not isinstance(name, str):
+            # Django runs ``clean_name`` only once the ``name`` field cleaned to a str.
+            raise TypeError(f"expected the cleaned name, got {type(name).__name__}")
         if name == REJECTED_ITEM_NAME:
             raise forms.ValidationError("This name is not allowed.")
         return name
@@ -86,7 +87,11 @@ class ContactForm(forms.Form):
 
     def clean_subject(self) -> str:
         """Strip the subject and reject it when blank."""
-        subject = self.cleaned_data["subject"].strip()
+        subject = self.cleaned_data.get("subject")
+        if not isinstance(subject, str):
+            # Django runs ``clean_subject`` only once the ``subject`` field cleaned to a str.
+            raise TypeError(f"expected the cleaned subject, got {type(subject).__name__}")
+        subject = subject.strip()
         if not subject:
             raise forms.ValidationError("Subject must not be blank.")
         return subject
@@ -110,8 +115,8 @@ class StampedItemModelForm(forms.ModelForm[Item]):
     Models the construction-hook migration case: the form cannot be instantiated without
     a ``user``, and its ``clean()`` requires ``user.is_authenticated``. Schema-time
     discovery reads ``base_fields`` (no instantiation), so the required-kwarg ``__init__``
-    is fine at bind; the mutation's ``get_form_kwargs`` override injects
-    ``user=info.context.request.user`` at runtime. The injected user stamps the created
+    is fine at bind; the mutation's ``get_form_kwargs`` override injects the request's
+    ``user`` at runtime. The injected user stamps the created
     row's ``description`` so the test can pin that the user actually reached the form.
     """
 
@@ -119,11 +124,16 @@ class StampedItemModelForm(forms.ModelForm[Item]):
         model = Item
         fields = ("name", "category")
 
-    # basedpyright: verbatim forward to ModelForm.__init__; object fails its typed params
-    def __init__(self, *args: Any, user: User | AnonymousUser, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
+    def __init__(
+        self,
+        *args: object,
+        user: AbstractUser | AnonymousUser,
+        **kwargs: object,
+    ) -> None:
         """Keep the injected ``user`` for ``clean`` and ``save``."""
         self._user = user
-        super().__init__(*args, **kwargs)
+        # basedpyright: verbatim forward; ModelForm.__init__ checks each argument when it runs
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
     @override
     def clean(self) -> dict[str, object] | None:
@@ -176,13 +186,12 @@ class DefaultCategoryItemModelForm(forms.ModelForm[Item]):
 
     def __init__(
         self,
-        # basedpyright: verbatim forward to ModelForm.__init__; object fails its typed params
-        *args: Any,  # pyright: ignore[reportExplicitAny]
+        *args: object,
         category: Category | None = None,
-        # basedpyright: verbatim forward to ModelForm.__init__; object fails its typed params
-        **kwargs: Any,  # pyright: ignore[reportExplicitAny]
+        **kwargs: object,
     ) -> None:
         """Attach the kwarg ``category`` to the unsaved instance when given."""
-        super().__init__(*args, **kwargs)
+        # basedpyright: verbatim forward; ModelForm.__init__ checks each argument when it runs
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         if category is not None:
             self.instance.category = category

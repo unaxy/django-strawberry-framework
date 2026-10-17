@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from django.core.exceptions import ValidationError
@@ -49,6 +50,9 @@ from apps.kanban import models, services
 
 if TYPE_CHECKING:
     from typing_extensions import TypeIs
+
+#: ``json.loads`` typed as the ``object`` a decode returns; the ``_is_json_*`` guards narrow it.
+_loads: Callable[[str], object] = json.loads
 
 
 def _is_dict(value: object) -> TypeIs[dict[object, object]]:
@@ -109,7 +113,7 @@ class Command(BaseCommand):
         if not file_path.is_file():
             raise CommandError(f"File not found: {path}")
         try:
-            payload: object = json.loads(file_path.read_text(encoding="utf-8"))
+            payload = _loads(file_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as error:
             raise CommandError(f"Invalid JSON in {path}: {error}") from error
         cards = payload.get("cards") if _is_json_object(payload) else None

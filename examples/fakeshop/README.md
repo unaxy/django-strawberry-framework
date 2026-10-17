@@ -454,7 +454,7 @@ class BranchOrder(OrderSet):
     @classmethod
     def check_name_permission(cls, request):
         user = getattr(request, "user", None)
-        if user is None or not getattr(user, "is_staff", False):
+        if not (isinstance(user, AbstractUser) and user.is_staff):
             raise GraphQLError("staff only", extensions={"code": "ORDER_PERMISSION_DENIED"})
 ```
 
@@ -518,7 +518,7 @@ FK selection never surfaces a row the parent rule hid
 @classmethod
 def get_queryset(cls, queryset, info):
     user = getattr(getattr(info.context, "request", None), "user", None)
-    if user and user.is_staff:
+    if isinstance(user, AbstractUser) and user.is_staff:
         return queryset
     return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
 ```

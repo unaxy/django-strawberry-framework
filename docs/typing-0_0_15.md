@@ -7,10 +7,10 @@ A split suite run on a tree other sessions are editing can drop modules from eve
 Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit and the CI lint job) refuses a
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any count off `[tool.type-suppressions]`: the ignore
-comments per unlocked rule and the `typing.cast` calls (440) may only fall, and the budget falls with them. A rule
+comments per unlocked rule and the `typing.cast` calls (441) may only fall, and the budget falls with them. A rule
 whose last ignore is cleared leaves the budget and gains the marker.
 
-Progress: 25 done, 9 to do. Ignore comments: 838 lines (1897 at the start of 0.0.15's ignore sweep).
+Progress: 25 done, 9 to do. Ignore comments: 913 lines (1897 at the start of 0.0.15's ignore sweep).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -117,8 +117,22 @@ of them.
   `reportExplicitAny` line: the module `__getattr__` (the dormant `apps/products/fields.py` subclasses a planned
   `AdvancedFieldSet` through it), `DjangoType.get_queryset`'s `info` (item 24), the async view's `run` (Strawberry
   overloads `run(HttpRequest)` to two response types) and the runner's `operation` / `on_stream_result` (they wrap
-  upstream's scopes rather than subclass them). Still off for tests (2977) and examples (5542, about 2000 of them
-  from `testing/client.py`'s public `Response.response: Any`)
+  upstream's scopes rather than subclass them). On for the example project outside its test folders too (650 sites,
+  380 of them in migrations, to 80 suppressions): a data migration binds each `apps.get_model(...)` (`type[Any]`) to
+  a declared `type[...]`, `models.Model` when only the manager is used and otherwise a `TYPE_CHECKING`-only shape
+  class naming the historical columns that migration reads (ruff `DJ008` off for migrations); an `aggregate()` or
+  `values_list()` result is bound to a declared `dict[str, int | None]` / `QuerySet[M, <row>]`; a `cleaned_data` read
+  is `.get(...)` narrowed by `isinstance` (`apps/kanban/schema.py::_cleaned`); the request user is the documented
+  `getattr` chain on an `Info[object, object]`, narrowed by `isinstance(user, AbstractUser)`; JSON goes through a
+  `Callable[..., object]` alias, with one counted `cast` into `graphql_client.py`'s open `JSONObject`; `pk` is declared
+  `int | None` on the kanban and glossary bases and `NullableScalarSpecimen` (not on the products and library models,
+  whose saved-row `pk` the live tests pass as `int`); the ModelForm / ModelSerializer forwards take `*args: object,
+  **kwargs: object` with a `reportArgumentType` ignore on the forward (11 `reportExplicitAny` ignores gone). The 80:
+  63 `@strawberry.field(graphql_type=...)` decorators and 6 resolver-less `strawberry.field(...)` attributes
+  (Strawberry's no-resolver overload returns `Any`), the dormant `apps/products/fields.py`'s 4 `AdvancedFieldSet`
+  bases and 4 `root.pk` reads, `graphql_client.py`'s read of `Response.response` (item 32), `seed_shards`' read
+  of `settings.DATABASES` (django-stubs types every setting `Any`) and typeshed's `inspect.Parameter.default`. Still
+  off for tests (2977) and the example project's test folders
 - [ ] 8. `reportUnannotatedClassAttribute`: 8365 (package 0, tests 6684, examples 1681, scripts 0, root 0); on for
   scripts/, the package and the root files (their execution environments in `pyproject.toml`)
 
@@ -196,7 +210,7 @@ strawberry_django does?
 
 ## Ignore breakdown
 
-Lines carrying `# pyright: ignore[...]`: 838 (915 rule hits): tests 626, package 142, examples 69,
+Lines carrying `# pyright: ignore[...]`: 913 (990 rule hits): tests 626, package 142, examples 144,
 scripts 1. The tables below were measured at 881 lines.
 
 ### By cause

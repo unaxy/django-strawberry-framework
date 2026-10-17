@@ -41,6 +41,7 @@ present `filters.py` / `orders.py` modules; `aggregate_class` /
 # ruff: enable[ERA001]
 
 import strawberry
+from django.contrib.auth.models import AbstractUser
 from django.db.models import Model, QuerySet
 from strawberry import relay
 from typing_extensions import override
@@ -102,7 +103,7 @@ class CategoryType(DjangoType):
     def get_queryset(
         cls,
         queryset: QuerySet[models.Category],
-        info: strawberry.Info,
+        info: strawberry.Info[object, object],
     ) -> QuerySet[models.Category]:
         """Staff see everything; everyone else (incl. view_category holders) sees public rows.
 
@@ -111,9 +112,9 @@ class CategoryType(DjangoType):
         non-null FK selection can never reach a target the viewer cannot see).
         """
         user = getattr(getattr(info.context, "request", None), "user", None)
-        if user and user.is_staff:
+        if isinstance(user, AbstractUser) and user.is_staff:
             return queryset
-        if user and user.has_perm("products.view_category"):
+        if isinstance(user, AbstractUser) and user.has_perm("products.view_category"):
             return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
         return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
 
@@ -152,7 +153,7 @@ class ItemType(DjangoType):
     def get_queryset(
         cls,
         queryset: QuerySet[models.Item],
-        info: strawberry.Info,
+        info: strawberry.Info[object, object],
     ) -> QuerySet[models.Item]:
         """Staff see everything; everyone else sees public Items under a visible Category.
 
@@ -164,9 +165,9 @@ class ItemType(DjangoType):
         raise ``RelatedObjectDoesNotExist``. Only staff bypass the cascade.
         """
         user = getattr(getattr(info.context, "request", None), "user", None)
-        if user and user.is_staff:
+        if isinstance(user, AbstractUser) and user.is_staff:
             return queryset
-        if user and user.has_perm("products.view_item"):
+        if isinstance(user, AbstractUser) and user.has_perm("products.view_item"):
             return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
         return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
 
@@ -202,7 +203,7 @@ class PropertyType(DjangoType):
     def get_queryset(
         cls,
         queryset: QuerySet[models.Property],
-        info: strawberry.Info,
+        info: strawberry.Info[object, object],
     ) -> QuerySet[models.Property]:
         """Staff see everything; everyone else sees public Properties under a visible Category.
 
@@ -213,9 +214,9 @@ class PropertyType(DjangoType):
         hidden target. Only staff bypass the cascade.
         """
         user = getattr(getattr(info.context, "request", None), "user", None)
-        if user and user.is_staff:
+        if isinstance(user, AbstractUser) and user.is_staff:
             return queryset
-        if user and user.has_perm("products.view_property"):
+        if isinstance(user, AbstractUser) and user.has_perm("products.view_property"):
             return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
         return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
 
@@ -253,7 +254,7 @@ class EntryType(DjangoType):
     def get_queryset(
         cls,
         queryset: QuerySet[models.Entry],
-        info: strawberry.Info,
+        info: strawberry.Info[object, object],
     ) -> QuerySet[models.Entry]:
         """Staff see everything; everyone else sees public Entries whose targets are visible.
 
@@ -265,9 +266,9 @@ class EntryType(DjangoType):
         target and raise ``RelatedObjectDoesNotExist``. Only staff bypass.
         """
         user = getattr(getattr(info.context, "request", None), "user", None)
-        if user and user.is_staff:
+        if isinstance(user, AbstractUser) and user.is_staff:
             return queryset
-        if user and user.has_perm("products.view_entry"):
+        if isinstance(user, AbstractUser) and user.has_perm("products.view_entry"):
             return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
         return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)
 
@@ -434,7 +435,7 @@ class CreateStampedItemViaForm(DjangoModelFormMutation):
     """Create an ``Item`` through ``StampedItemModelForm``, injecting ``user``.
 
     ``StampedItemModelForm.__init__`` REQUIRES a ``user`` kwarg, so this mutation
-    overrides ``get_form_kwargs`` to inject ``user=info.context.request.user`` at
+    overrides ``get_form_kwargs`` to inject the request's ``user`` at
     runtime. The override also waives the create-required-narrowing guard at bind. The
     injected user stamps the created row's ``description``, so the live test can pin that
     the user actually reached the form (and that schema-time ``base_fields`` discovery
@@ -448,14 +449,14 @@ class CreateStampedItemViaForm(DjangoModelFormMutation):
     @override
     def get_form_kwargs(
         self,
-        info: strawberry.Info,
+        info: strawberry.Info[object, object],
         *,
         data: dict[str, object],
         files: dict[str, object],
         instance: Model | None = None,
     ) -> dict[str, object]:
         kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
-        kwargs["user"] = info.context.request.user
+        kwargs["user"] = getattr(getattr(info.context, "request", None), "user", None)
         return kwargs
 
 

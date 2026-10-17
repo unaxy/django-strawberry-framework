@@ -11,6 +11,8 @@ via a state/database split (the through model's table already exists, so the
 default M2M-alter path -- which would recreate it -- is bypassed).
 """
 
+from typing import TYPE_CHECKING
+
 import django.db.models.deletion
 import django.db.models.lookups
 from django.db import migrations, models
@@ -18,6 +20,20 @@ from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
 
 import apps.kanban.constraints
+
+if TYPE_CHECKING:
+
+    class _CardChangedFiles(models.Model):
+        """A row of the historical auto-created ``Card.changed_files`` through table."""
+
+        card_id: int
+        trackedpath_id: int
+
+    class _Card(models.Model):
+        """The historical ``kanban.Card`` relation this migration reads."""
+
+        changed_files: models.ManyToManyField[models.Model, _CardChangedFiles]
+
 
 _ONE_HOT_LINK_NAMES = (
     "milestone",
@@ -56,15 +72,16 @@ CREATE UNIQUE INDEX "kanban_card_changed_files_card_id_trackedpath_id_uniq"
 
 def _copy_links_and_uuid_rows(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """Copy old auto-M2M rows into CardPathLink and create their UUID side-rows."""
-    Card = apps.get_model("kanban", "Card")
-    CardPathLink = apps.get_model("kanban", "CardPathLink")
-    UUIDModel = apps.get_model("kanban", "UUIDModel")
+    Card: type[_Card] = apps.get_model("kanban", "Card")
+    CardPathLink: type[models.Model] = apps.get_model("kanban", "CardPathLink")
+    UUIDModel: type[models.Model] = apps.get_model("kanban", "UUIDModel")
     alias = schema_editor.connection.alias
 
     through = Card.changed_files.through
-    done_card_ids = set(
-        Card.objects.using(alias).filter(status__key="done").values_list("id", flat=True),
+    done_cards: models.QuerySet[_Card, int] = (
+        Card.objects.using(alias).filter(status__key="done").values_list("id", flat=True)
     )
+    done_card_ids = set(done_cards)
     for row in through.objects.using(alias).all():
         kind = "changed" if row.card_id in done_card_ids else "predicted"
         link = CardPathLink.objects.using(alias).create(
@@ -72,7 +89,7 @@ def _copy_links_and_uuid_rows(apps: StateApps, schema_editor: BaseDatabaseSchema
             path_id=row.trackedpath_id,
             kind=kind,
         )
-        UUIDModel.objects.using(alias).create(cardpathlink=link)
+        _ = UUIDModel.objects.using(alias).create(cardpathlink=link)
 
 
 def _drop_copied_links(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
@@ -84,14 +101,14 @@ def _drop_copied_links(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor)
     0011 preserves the links -- a bare delete would lose them all -- then clear the
     ``CardPathLink`` rows (their ``UUIDModel`` side-rows cascade on delete).
     """
-    CardPathLink = apps.get_model("kanban", "CardPathLink")
+    CardPathLink: type[models.Model] = apps.get_model("kanban", "CardPathLink")
     alias = schema_editor.connection.alias
     with schema_editor.connection.cursor() as cursor:
         cursor.execute(
             'INSERT INTO "kanban_card_changed_files" ("card_id", "trackedpath_id") '
             'SELECT "card_id", "path_id" FROM "kanban_cardpathlink";',
         )
-    CardPathLink.objects.using(alias).all().delete()
+    _ = CardPathLink.objects.using(alias).all().delete()
 
 
 class Migration(migrations.Migration):

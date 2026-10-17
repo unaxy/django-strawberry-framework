@@ -35,6 +35,7 @@ separate, currently-unscheduled extension (no owning card) and stays commented.
 
 from __future__ import annotations
 
+from django.contrib.auth.models import AbstractUser
 from graphql import GraphQLError
 
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
@@ -57,7 +58,7 @@ class CategoryFilter(FilterSet):
     def check_name_permission(self, request: object) -> None:
         """Only staff users may filter by ``Category.name``."""
         user = getattr(request, "user", None)
-        if not user or not user.is_staff:
+        if not (isinstance(user, AbstractUser) and user.is_staff):
             raise GraphQLError("You must be a staff user to filter by Category name.")
 
 

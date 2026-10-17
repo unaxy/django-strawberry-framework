@@ -383,7 +383,9 @@ classmethod-decorators = ["django.utils.decorators.classonlymethod"]
 "tests/**/test_*.py" = ["D102", "D103"]
 "examples/**/test_*.py" = ["D102", "D103"]
 # makemigrations writes these files; a hand-added docstring is lost on the next regeneration.
-"examples/**/migrations/*.py" = ["D"]
+# DJ008: a data migration's historical row shapes are `TYPE_CHECKING`-only classes, never
+# built or printed.
+"examples/**/migrations/*.py" = ["D", "DJ008"]
 # PERF: one-shot build/maintenance scripts are not a performance surface.
 # T201: print is the CLI output of scripts and the root tools.
 # S603/S607: dev tooling runs the maintainer's own git/uv/ruff/docker/sys.executable by name, with no
@@ -524,8 +526,9 @@ reportUnusedFunction = "none"
 reportImportCycles = "none"
 reportUninitializedInstanceVariable = "none"
 # The ratchet, off until their sites are fixed (turn one on to list them): `reportAny` is
-# on in the scripts/, root-file and package environments below, the last two in those, and
-# `reportUnusedCallResult` in the example project outside its tests.
+# on in the scripts/, root-file and package environments below and in the example project
+# outside its tests, `reportUnannotatedClassAttribute` in the scripts/, root-file and package
+# environments, and `reportUnusedCallResult` in all of those.
 reportAny = "none"
 reportUnannotatedClassAttribute = "none"
 reportUnusedCallResult = "none"
@@ -607,6 +610,7 @@ root = "examples/fakeshop/apps/scalars/tests"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop"
+reportAny = "error"
 reportUnusedCallResult = "error"
 
 # The suppression budget scripts/check_type_suppressions.py holds the tree to: `cast` counts
@@ -615,16 +619,16 @@ reportUnusedCallResult = "error"
 # diagnostic instead); one below it fails until the budget is lowered to match, and a rule at
 # zero leaves `ignores` (marked `# Locked` above once it is on in every environment).
 [tool.type-suppressions]
-cast = 440
+cast = 441
 
 [tool.type-suppressions.ignores]
-reportArgumentType = 309
+reportArgumentType = 315
 reportAssignmentType = 32
 reportAttributeAccessIssue = 142
 reportCallIssue = 15
 reportDeprecated = 2
-reportAny = 10
-reportExplicitAny = 66
+reportAny = 90
+reportExplicitAny = 55
 reportFunctionMemberAccess = 5
 reportGeneralTypeIssues = 5
 reportIncompatibleMethodOverride = 59

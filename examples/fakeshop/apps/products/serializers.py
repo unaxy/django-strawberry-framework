@@ -24,6 +24,7 @@ Decision-13 live matrix:
   unique-together fire).
 """
 
+from django.contrib.auth.models import AbstractUser
 from rest_framework import serializers
 from typing_extensions import override
 
@@ -82,7 +83,7 @@ class ItemSerializer(serializers.ModelSerializer[Item]):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         name = attrs.get("name")
-        if name is not None and user is not None and getattr(user, "username", None) == name:
+        if name is not None and isinstance(user, AbstractUser) and user.username == name:
             raise serializers.ValidationError("Item name must not equal the requesting username.")
         return attrs
 

@@ -28,10 +28,32 @@ deliberate no-op -- the realigned placeholders are the correct state.
 """
 
 import re
+from typing import TYPE_CHECKING
 
-from django.db import migrations
+from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
+
+if TYPE_CHECKING:
+
+    class _Card(models.Model):
+        """The historical ``kanban.Card`` columns this migration reads."""
+
+        pk: int
+        planning_note: str
+
+    class _CardItem(models.Model):
+        """The historical ``kanban.CardItem`` columns this migration reads."""
+
+        pk: int
+        text: str
+
+    class _CardReference(models.Model):
+        """The historical ``kanban.CardReference`` columns this migration reads."""
+
+        pk: int
+        raw_text: str
+
 
 CARD_REF_RE = re.compile(r"\{\{card_ref:(\d+)\}\}")
 
@@ -44,7 +66,7 @@ _REMAPS = {
 
 
 def _placeholder_orders(text: str) -> set[int]:
-    return {int(order) for order in CARD_REF_RE.findall(text or "")}
+    return {int(match.group(1)) for match in CARD_REF_RE.finditer(text or "")}
 
 
 def _remap(text: str, old_to_new: dict[int, int]) -> str:
@@ -56,9 +78,9 @@ def _remap(text: str, old_to_new: dict[int, int]) -> str:
 
 
 def _realign_placeholders(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
-    Card = apps.get_model("kanban", "Card")
-    CardItem = apps.get_model("kanban", "CardItem")
-    CardReference = apps.get_model("kanban", "CardReference")
+    Card: type[_Card] = apps.get_model("kanban", "Card")
+    CardItem: type[_CardItem] = apps.get_model("kanban", "CardItem")
+    CardReference: type[_CardReference] = apps.get_model("kanban", "CardReference")
     alias = schema_editor.connection.alias
 
     for title, old_to_new in _REMAPS.items():
@@ -78,11 +100,11 @@ def _realign_placeholders(apps: StateApps, schema_editor: BaseDatabaseSchemaEdit
 
         new_note = _remap(card.planning_note, old_to_new)
         if new_note != (card.planning_note or ""):
-            Card.objects.using(alias).filter(pk=card.pk).update(planning_note=new_note)
+            _ = Card.objects.using(alias).filter(pk=card.pk).update(planning_note=new_note)
         for item in items:
             new_text = _remap(item.text, old_to_new)
             if new_text != (item.text or ""):
-                CardItem.objects.using(alias).filter(pk=item.pk).update(text=new_text)
+                _ = CardItem.objects.using(alias).filter(pk=item.pk).update(text=new_text)
 
 
 class Migration(migrations.Migration):

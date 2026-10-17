@@ -7,10 +7,22 @@ from the path so the migration round-trips.
 """
 
 import warnings
+from typing import TYPE_CHECKING
 
 from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
+
+if TYPE_CHECKING:
+
+    class _SpecDoc(models.Model):
+        """The historical ``kanban.SpecDoc`` columns this migration reads."""
+
+        pk: int
+        name: str
+        url: str
+        path: str
+
 
 SPEC_URL_PREFIX = "https://github.com/unaxy/django-strawberry-framework/blob/main"
 
@@ -24,17 +36,17 @@ def _backfill_path_from_url(apps: StateApps, schema_editor: BaseDatabaseSchemaEd
     migrate. The reverse rebuild is a pure function of ``path``, so a raw-URL
     fallback still round-trips faithfully.
     """
-    SpecDoc = apps.get_model("kanban", "SpecDoc")
+    SpecDoc: type[_SpecDoc] = apps.get_model("kanban", "SpecDoc")
     manager = SpecDoc.objects.using(schema_editor.connection.alias)
     prefix = f"{SPEC_URL_PREFIX}/"
     unmatched: list[str] = []
     for row in manager.all():
         url = row.url or ""
         if url.startswith(prefix):
-            manager.filter(pk=row.pk).update(path=url[len(prefix) :])
+            _ = manager.filter(pk=row.pk).update(path=url[len(prefix) :])
         else:
             unmatched.append(str(row.name))
-            manager.filter(pk=row.pk).update(path=url)
+            _ = manager.filter(pk=row.pk).update(path=url)
     if unmatched:
         warnings.warn(
             f"SpecDoc backfill: {len(unmatched)} url(s) did not start with "
@@ -45,10 +57,10 @@ def _backfill_path_from_url(apps: StateApps, schema_editor: BaseDatabaseSchemaEd
 
 def _rebuild_url_from_path(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """Reverse: reconstruct the full GitHub URL from the repo-relative path."""
-    SpecDoc = apps.get_model("kanban", "SpecDoc")
+    SpecDoc: type[_SpecDoc] = apps.get_model("kanban", "SpecDoc")
     manager = SpecDoc.objects.using(schema_editor.connection.alias)
     for row in manager.all():
-        manager.filter(pk=row.pk).update(url=f"{SPEC_URL_PREFIX}/{row.path}")
+        _ = manager.filter(pk=row.pk).update(url=f"{SPEC_URL_PREFIX}/{row.path}")
 
 
 class Migration(migrations.Migration):
