@@ -16,6 +16,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import pytest
 from django.db import models
@@ -25,6 +26,10 @@ import django_strawberry_framework.optimizer.extension as extension_module
 from django_strawberry_framework import DjangoOptimizerExtension
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from scripts import _bench_common
+from tests._idioms import json_at, json_loads, json_object
+
+if TYPE_CHECKING:
+    from scripts.importtime_report import ImportRow, _ImportSummary
 
 SCRIPTS = Path(_bench_common.__file__).resolve().parent
 
@@ -54,10 +59,27 @@ def package_tree(tmp_path: Path) -> Path:
     return root
 
 
+@runtime_checkable
+class _ImporttimeReport(Protocol):
+    """The part of ``scripts/importtime_report.py`` these tests call."""
+
+    def parse_importtime(self, stderr: str, /) -> "list[ImportRow]": ...
+
+    def min_across_rounds(
+        self,
+        rounds: "list[list[ImportRow]]",
+        /,
+    ) -> dict[str, dict[str, int]]: ...
+
+    def summarize(self, merged: dict[str, dict[str, int]], top: int) -> "_ImportSummary": ...
+
+
 @pytest.fixture
-def importtime_report(scripts_module: Callable[[str], ModuleType]) -> ModuleType:
+def importtime_report(scripts_module: Callable[[str], ModuleType]) -> _ImporttimeReport:
     """Import ``scripts/importtime_report.py`` the way it runs: scripts dir on ``sys.path``."""
-    return scripts_module("importtime_report")
+    module = scripts_module("importtime_report")
+    assert isinstance(module, _ImporttimeReport)
+    return module
 
 
 def test_summarize_rounds_reports_fastest_sample_median_of_medians_and_spread() -> None:
@@ -93,17 +115,17 @@ def test_report_json_carries_header_rows_and_status_with_sorted_keys(tmp_path: P
     _bench_common.write_report(path, report)
 
     text = path.read_text(encoding="utf-8")
-    loaded = json.loads(text)
+    loaded = json_object(json_loads(text))
     assert list(loaded) == [
         "failures",
         "header",
         "rows",
         "status",
     ]
-    assert list(loaded["header"]) == ["params", "provenance", "tool"]
-    assert list(loaded["header"]["params"]) == ["iterations", "rounds"]
+    assert list(json_object(loaded, "header")) == ["params", "provenance", "tool"]
+    assert list(json_object(loaded, "header", "params")) == ["iterations", "rounds"]
     assert loaded["status"] == "failed"
-    assert loaded["header"]["tool"] == "bench_x"
+    assert json_at(loaded, "header", "tool") == "bench_x"
     assert text == json.dumps(loaded, indent=2, sort_keys=True) + "\n"
 
 
@@ -328,7 +350,9 @@ def test_parse_variables_accepts_an_object_and_refuses_other_json() -> None:
         _bench_common.parse_variables("[1, 2]")
 
 
-def test_importtime_parser_reads_times_names_and_depth(importtime_report: ModuleType) -> None:
+def test_importtime_parser_reads_times_names_and_depth(
+    importtime_report: _ImporttimeReport,
+) -> None:
     """Each ``import time`` line becomes a row; the header and other output are skipped."""
     rows = importtime_report.parse_importtime(IMPORTTIME_FIXTURE)
 
@@ -349,7 +373,7 @@ def test_importtime_parser_reads_times_names_and_depth(importtime_report: Module
 
 
 def test_importtime_summary_takes_per_module_minimum_and_groups_by_top_level(
-    importtime_report: ModuleType,
+    importtime_report: _ImporttimeReport,
 ) -> None:
     """Figures are per-module minima; non-package imports are summed per top-level name."""
     rounds = [

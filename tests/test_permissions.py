@@ -113,11 +113,13 @@ from django_strawberry_framework.permissions import (
     apply_cascade_permissions,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils._narrowing import call_method, is_tuple, read_attr
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_query,
 )
+from django_strawberry_framework.utils.typing import object_result
 from tests._django_private import has_values_method
-from tests._idioms import comparing_metaclass, is_object_dict
+from tests._idioms import comparing_metaclass, is_object_dict, saved_pk
 from tests.optimizer import _link_models
 
 #: A ``get_queryset`` hook as ``_make_type`` installs it (``classmethod``-wrapped).
@@ -636,7 +638,9 @@ def test_forward_foreign_object_of_any_width_is_an_unsupported_edge(child_name: 
     project as a one-column ``__in`` subquery, so the cascade classifies it
     fail-closed rather than cascadable, and naming it in ``fields=`` raises.
     """
-    model = getattr(_link_models, child_name)
+    model = read_attr(_link_models, child_name)
+    assert isinstance(model, type)
+    assert issubclass(model, models.Model)
     plan = _edge_plan(model)
     assert plan.cascadable == ()
     assert plan.unsupported == ("parent",)
@@ -846,7 +850,11 @@ def test_multi_db_subquery_pinned_to_caller_alias() -> None:
     # a non-default alias ("Subqueries aren't allowed across different databases"), so
     # compile against the caller's own alias (carried by both the outer query and the
     # pinned RHS) to render the inlined ``IN (SELECT ...)``.
-    compiled_sql = result.query.get_compiler(using=result.db).as_sql()[0]
+    compiler = object_result(result.query.get_compiler, using=result.db)
+    sql_and_params = call_method(compiler, "as_sql")
+    assert is_tuple(sql_and_params)
+    compiled_sql = sql_and_params[0]
+    assert isinstance(compiled_sql, str)
     assert "IN (SELECT" in compiled_sql
     # ...and the queryset it ran the target hook against was pinned to the caller's
     # resolved alias - the genuine RHS the walk built, observed inside the hook itself.
@@ -1192,7 +1200,7 @@ def test_to_field_edge_compares_target_column() -> None:
     _make_type(
         "TfGenreType",
         Genre,
-        get_queryset=lambda _cls, qs, _info: qs.exclude(pk=hidden.pk).values("id"),
+        get_queryset=lambda _cls, qs, _info: qs.exclude(pk=saved_pk(hidden)).values("id"),
     )
     profile_type = _make_type(
         "TfPatronProfileType",
@@ -1572,7 +1580,11 @@ def test_annotation_alias_shadow_cannot_bypass_visibility() -> None:
             qs: models.QuerySet[models.Model],
             _info: object,
         ) -> models.QuerySet[models.Model, dict[str, object]]:
-            return qs.filter(name="visible").values("name").annotate(id=models.Value(hidden.pk))
+            return (
+                qs.filter(name="visible")
+                .values("name")
+                .annotate(id=models.Value(saved_pk(hidden)))
+            )
 
         parent_type = _register_ct_pair(_shadow_hook)
         with pytest.raises(ConfigurationError, match="shadows"):
@@ -2199,7 +2211,7 @@ def test_two_overlapping_threads_isolate_traversal_state() -> None:
     ) -> models.QuerySet[models.Model]:
         barrier.wait()  # both walks are provably in-flight together
         assert isinstance(info, SimpleNamespace)
-        if getattr(info.context, "fail", False):
+        if read_attr(read_attr(info, "context"), "fail", False):
             raise RuntimeError("thread boom")
         return qs.exclude(name="hidden")
 
@@ -2306,8 +2318,8 @@ class _StaffOnlyCategoryFilter(FilterSet):
         fields = {"name": ["exact"]}
 
     def check_name_permission(self, request: object) -> None:
-        user = getattr(request, "user", None)
-        if not user or not user.is_staff:
+        user = read_attr(request, "user", None)
+        if not user or not read_attr(user, "is_staff"):
             raise GraphQLError("You must be a staff user to filter by Category name.")
 
 
@@ -2328,8 +2340,8 @@ class _StaffOnlyCategoryOrder(OrderSet):
         fields = ["name"]
 
     def check_name_permission(self, request: object) -> None:
-        user = getattr(request, "user", None)
-        if not user or not user.is_staff:
+        user = read_attr(request, "user", None)
+        if not user or not read_attr(user, "is_staff"):
             raise GraphQLError("You must be a staff user to order by Category name.")
 
     @classmethod
@@ -2358,8 +2370,8 @@ class _StaffOnlyItemFilter(FilterSet):
         fields = {"name": ["exact"]}
 
     def check_name_permission(self, request: object) -> None:
-        user = getattr(request, "user", None)
-        if not user or not user.is_staff:
+        user = read_attr(request, "user", None)
+        if not user or not read_attr(user, "is_staff"):
             raise GraphQLError("You must be a staff user to filter by Item name.")
 
 

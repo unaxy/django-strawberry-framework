@@ -51,7 +51,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Coroutine, Generator
 from io import BytesIO
-from typing import Any, NoReturn, TypeAlias
+from typing import NoReturn, TypeAlias
 from unittest import mock
 
 import pytest
@@ -112,7 +112,12 @@ from django_strawberry_framework.middleware.request_body import (
     GraphQLRequestBodyBoundaryMiddleware,
     _package_view_instance,
 )
-from django_strawberry_framework.utils.typing import is_marked_coroutine_function
+from django_strawberry_framework.utils._narrowing import instance_dict, is_awaitable, read_attr
+from django_strawberry_framework.utils.typing import (
+    call_forwarded,
+    is_marked_coroutine_function,
+    object_result,
+)
 from django_strawberry_framework.views import (
     _BODY_LIMIT_REASON,
     _JSON_PARSE_REASON,
@@ -163,14 +168,14 @@ SCHEMA = strawberry.Schema(query=Query)
 
 def _view_class_of(view: Callable[..., object]) -> type[object]:
     """Django's ``view_class`` bookkeeping, read out of the ``as_view`` callback's namespace."""
-    view_class: object = vars(view)["view_class"]
+    view_class = instance_dict(view)["view_class"]
     assert isinstance(view_class, type)
     return view_class
 
 
 def _view_initkwargs_of(view: Callable[..., object]) -> dict[str, object]:
     """Django's ``view_initkwargs`` bookkeeping, read out of the ``as_view`` callback's namespace."""
-    initkwargs: object = vars(view)["view_initkwargs"]
+    initkwargs = instance_dict(view)["view_initkwargs"]
     assert is_object_dict(initkwargs)
     named = {key: value for key, value in initkwargs.items() if isinstance(key, str)}
     assert len(named) == len(initkwargs)
@@ -231,17 +236,22 @@ def test_views_module_imports_with_channels_absent() -> None:
 
         module = importlib.import_module("django_strawberry_framework.views")
 
-        assert isinstance(module.DjangoGraphQLView, type)
-        assert isinstance(module.AsyncDjangoGraphQLView, type)
+        fresh_sync_view = read_attr(module, "DjangoGraphQLView")
+        fresh_async_view = read_attr(module, "AsyncDjangoGraphQLView")
+        assert isinstance(fresh_sync_view, type)
+        assert isinstance(fresh_async_view, type)
         assert "strawberry.channels" not in sys.modules
         # Fresh class objects on both sides of the boundary: the package's body
         # ran, and so did upstream's.
-        assert module.DjangoGraphQLView is not DjangoGraphQLView
-        assert module.AsyncDjangoGraphQLView is not AsyncDjangoGraphQLView
+        assert fresh_sync_view is not DjangoGraphQLView
+        assert fresh_async_view is not AsyncDjangoGraphQLView
 
         upstream = importlib.import_module("strawberry.django.views")
-        fresh_upstream = (upstream.GraphQLView, upstream.AsyncGraphQLView)
-        fresh_package = (module.DjangoGraphQLView, module.AsyncDjangoGraphQLView)
+        fresh_upstream = (
+            read_attr(upstream, "GraphQLView"),
+            read_attr(upstream, "AsyncGraphQLView"),
+        )
+        fresh_package = (fresh_sync_view, fresh_async_view)
         for captured, fresh, package_view in zip(
             _UPSTREAM_VIEWS,
             fresh_upstream,
@@ -2779,7 +2789,7 @@ def test_the_view_callback_of_both_views_carries_the_csrf_exempt_mark(
 
     boundary_view.assert_called_once()
     assert vars(view)["csrf_exempt"] is _CSRF_ORDERING_EXEMPTION
-    assert bool(vars(view)["csrf_exempt"]) is True
+    assert bool(instance_dict(view)["csrf_exempt"]) is True
     assert getattr(view, _BOUNDARY_MARKER) is True
     assert _view_class_of(view) is view_class
     assert _view_initkwargs_of(view) == {"schema": SCHEMA}
@@ -2944,7 +2954,11 @@ def _wrapper_copying_only_csrf_exempt(
             *args: object,
             **kwargs: object,
         ) -> HttpResponseBase:
-            return await view(request, *args, **kwargs)
+            pending = object_result(view, request, *args, **kwargs)
+            assert is_awaitable(pending), pending
+            response = await pending
+            assert isinstance(response, HttpResponseBase)
+            return response
 
         wrapped = async_wrapped
 
@@ -3317,13 +3331,12 @@ def _chain(middleware: list[str]) -> Generator[None, None, None]:
         yield
 
 
-# basedpyright: verbatim forward to Client.post / AsyncClient.post; object fails its typed params
 async def _post(
     path: str,
     *,
     is_async: bool,
     client: Client | AsyncClient | None = None,
-    **kwargs: Any,  # pyright: ignore[reportExplicitAny]
+    **kwargs: object,
 ) -> HttpResponseBase:
     """POST through the real handler, on whichever client matches the transport.
 
@@ -3335,9 +3348,9 @@ async def _post(
         client = AsyncClient() if is_async else Client()
     if is_async:
         assert isinstance(client, AsyncClient)
-        return await client.post(path, **kwargs)
+        return await call_forwarded(client.post, (path,), kwargs)
     assert isinstance(client, Client)
-    return client.post(path, **kwargs)
+    return call_forwarded(client.post, (path,), kwargs)
 
 
 def _csrf_enforcing_client(*, is_async: bool) -> AsyncClient | Client:
@@ -3355,7 +3368,9 @@ def _csrf_enforcing_client(*, is_async: bool) -> AsyncClient | Client:
     client = (
         AsyncClient(enforce_csrf_checks=True) if is_async else Client(enforce_csrf_checks=True)
     )
-    client.cookies[settings.CSRF_COOKIE_NAME] = "a" * CSRF_SECRET_LENGTH * 2
+    cookie_name = read_attr(settings, "CSRF_COOKIE_NAME")
+    assert isinstance(cookie_name, str), cookie_name
+    client.cookies[cookie_name] = "a" * CSRF_SECRET_LENGTH * 2
     return client
 
 
@@ -3479,10 +3494,9 @@ async def test_the_view_does_not_measure_a_body_the_chain_already_measured() -> 
 
     class _Recording(DjangoGraphQLView):
         @override
-        # basedpyright: verbatim forward to SyncBaseHTTPView.run; object fails its typed params
-        def run(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponseBase:  # pyright: ignore[reportExplicitAny]
+        def run(self, request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
             seen.append((getattr(request, _BOUNDARY_ENFORCED, False), request.body))
-            return super().run(request, *args, **kwargs)
+            return call_forwarded(super().run, (request, *args), kwargs)
 
     with _chain(_ORDERED_CHAIN):
         request = RequestFactory().generic(
@@ -3524,7 +3538,7 @@ def test_middleware_ignores_an_unreadable_optional_mount_handoff() -> None:
         def __getattribute__(self, name: str) -> object:
             if name == _BOUNDARY_MOUNT:
                 raise RuntimeError("mount unavailable")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
         def __call__(self, _request: HttpRequest) -> HttpResponse:
             return HttpResponse()

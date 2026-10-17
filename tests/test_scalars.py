@@ -44,6 +44,7 @@ from django_strawberry_framework.scalars import (
     _serialize_bigint,
 )
 from django_strawberry_framework.scalars import Upload as UploadFromScalars
+from django_strawberry_framework.utils.typing import object_result
 
 # ---------------------------------------------------------------------------
 # Strict serializer - hostile subclasses and non-int Python objects
@@ -164,7 +165,7 @@ def test_bigint_rejection_messages_survive_hostile_values() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 raise RuntimeError("type name exploded")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _HostileObject(metaclass=_HostileTypeMeta):
         pass
@@ -332,7 +333,7 @@ def test_scalar_collision_label_falls_back_when_class_name_metadata_is_unreadabl
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 raise RuntimeError("name unavailable")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _HostileName(metaclass=_HostileNameMeta):
         pass

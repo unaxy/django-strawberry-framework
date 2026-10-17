@@ -8,13 +8,13 @@ shape for generated plans or git listings, so none of these rows can move.
 There is no live sibling in ``examples/fakeshop/test_query/``.
 """
 
-import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from scripts import review_plan
+from tests._idioms import json_at, json_list, json_loads
 
 PACKAGE = review_plan.PACKAGE_DIR
 
@@ -707,10 +707,16 @@ def test_scope_groups_committed_dirty_and_renamed(
         )
         == 0
     )
-    data = json.loads(capsys.readouterr().out)
-    assert (len(data["committed"]), len(data["dirty"]), len(data["renames"])) == (4, 2, 1)
-    assert data["renames"][0]["item"] == "sub/beta_renamed.py"
-    assert {entry["path"]: entry["item"] for entry in data["dirty"]} == {
+    data = json_loads(capsys.readouterr().out)
+    assert (
+        len(json_list(data, "committed")),
+        len(json_list(data, "dirty")),
+        len(json_list(data, "renames")),
+    ) == (4, 2, 1)
+    assert json_at(data, "renames", 0, "item") == "sub/beta_renamed.py"
+    assert {
+        json_at(entry, "path"): json_at(entry, "item") for entry in json_list(data, "dirty")
+    } == {
         f"{PACKAGE}/sub/deep/gamma.py": "sub/deep/gamma.py",
         f"{PACKAGE}/sub/untracked.py": "sub/untracked.py",
     }
@@ -725,7 +731,7 @@ def test_scope_groups_committed_dirty_and_renamed(
     )
     assert root_init_line.endswith("  (Project integration)")
     assert "(project)" not in text
-    assert data["folders"] == ["(package root)", "sub/", "sub/deep/"]
+    assert json_at(data, "folders") == ["(package root)", "sub/", "sub/deep/"]
 
     assert (
         review_plan.main(

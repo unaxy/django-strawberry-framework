@@ -31,9 +31,15 @@ from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import _field_specs
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.relay import apply_interfaces
+from django_strawberry_framework.utils._narrowing import is_tuple, read_attr, require
 from django_strawberry_framework.utils.inputs import GeneratedInputArgumentsFactory
 from tests._idioms import comparing_metaclass, definition_raises
 from tests.filters.fixtures.filtersets import SelfReferentialBranchFilter
+
+
+def _args(annotation: object) -> tuple[object, ...]:
+    """``typing.get_args`` with each member typed ``object`` (typeshed declares them ``Any``)."""
+    return get_args(annotation)
 
 
 @pytest.fixture(autouse=True)
@@ -301,16 +307,16 @@ def test_filter_arguments_factory_input_shape_matches_runtime_filter_for_relay_t
     # accepted here so the test is robust to Strawberry version changes.
     assert genres_field.type_annotation is not None
     type_annotation = genres_field.type_annotation.annotation
-    non_none = [arg for arg in get_args(type_annotation) if arg is not type(None)]
+    non_none = [arg for arg in _args(type_annotation) if arg is not type(None)]
     assert non_none, type_annotation
     inner = non_none[0]
     if hasattr(inner, "__metadata__"):
-        forward = inner.__args__[0]
-        forward_name = getattr(forward, "__forward_arg__", forward)
+        forward = require(read_attr(inner, "__args__"), is_tuple)[0]
+        forward_name = read_attr(forward, "__forward_arg__", forward)
     else:
         # `LazyType` carries `.type_name` after Strawberry has resolved
         # the Annotated wrapper.
-        forward_name = inner.type_name
+        forward_name = read_attr(inner, "type_name")
     assert forward_name == "GenreFilterInputType"
 
 
@@ -348,10 +354,14 @@ def test_filter_arguments_factory_input_shape_matches_runtime_filter_for_non_rel
     fields = {f.python_name: f for f in get_object_definition(input_cls, strict=True).fields}
     assert fields["shelf"].type_annotation is not None
     bag_annotation = fields["shelf"].type_annotation.annotation
-    (bag_cls,) = [arg for arg in get_args(bag_annotation) if arg is not type(None)]
-    bag = {f.python_name: f for f in bag_cls.__strawberry_definition__.fields}
-    assert bag["exact"].type_annotation.annotation == (int | None)
-    assert bag["in_"].type_annotation.annotation == (list[int] | None)
+    (bag_cls,) = [arg for arg in _args(bag_annotation) if arg is not type(None)]
+    bag = {f.python_name: f for f in get_object_definition(bag_cls, strict=True).fields}
+    exact_annotation = bag["exact"].type_annotation
+    in_annotation = bag["in_"].type_annotation
+    assert exact_annotation is not None
+    assert in_annotation is not None
+    assert exact_annotation.annotation == (int | None)
+    assert in_annotation.annotation == (list[int] | None)
 
 
 @pytest.mark.django_db

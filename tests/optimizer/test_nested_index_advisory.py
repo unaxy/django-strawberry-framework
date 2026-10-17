@@ -114,7 +114,9 @@ from django_strawberry_framework.optimizer.nested_planner import (
 )
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils._narrowing import list_of, require_instance
 from django_strawberry_framework.utils.imports import import_attr_if_importable
+from tests._idioms import is_object_dict, is_object_list
 from tests._relation_fixtures import RpCompositeParent
 
 from ._link_models import LnkParent, LnkTag
@@ -648,7 +650,10 @@ class TestIndexLeadingTerms:
 
     def test_maps_field_names_to_terms(self) -> None:
         """A composite index resolves each field name to ``(attname, direction)``."""
-        index = next(iter(_IdxChildComposite._meta.indexes))
+        index = require_instance(
+            next(iter(list_of(_IdxChildComposite._meta.indexes))),
+            models.Index,
+        )
         assert _index_leading_terms(_meta(_IdxChildComposite), index) == [
             ("parent_id", False),
             ("title", False),
@@ -665,7 +670,7 @@ class TestIndexLeadingTerms:
 
     def test_expression_index_returns_none(self) -> None:
         """An expression index (no ``.fields``) is uninspectable -> ``None``."""
-        index = next(iter(_IdxChildExpr._meta.indexes))
+        index = require_instance(next(iter(list_of(_IdxChildExpr._meta.indexes))), models.Index)
         assert _index_leading_terms(_meta(_IdxChildExpr), index) is None
 
     def test_unresolvable_field_returns_none(self) -> None:
@@ -1894,7 +1899,8 @@ class TestAdvisoryDeferredUntilWindowAccepted:
 
         @strawberry.type
         class Query:
-            @strawberry.field(graphql_type=list[ShelfNode])
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            @strawberry.field(graphql_type=list[ShelfNode])  # pyright: ignore[reportAny]
             def shelves(self) -> QuerySet[Shelf]:
                 return Shelf.objects.order_by("id")
 
@@ -1923,10 +1929,21 @@ class TestAdvisoryDeferredUntilWindowAccepted:
         refused = self._shelf_books_schema(self._RefuseEveryWindow()).execute_sync(self._QUERY)
         assert refused.errors is None, refused.errors
         assert refused.data is not None
-        titles = [
-            edge["node"]["title"]
-            for edge in refused.data["shelves"][0]["booksConnection"]["edges"]
-        ]
+        data: dict[str, object] = refused.data
+        shelves = data["shelves"]
+        assert is_object_list(shelves)
+        shelf = shelves[0]
+        assert is_object_dict(shelf)
+        connection = shelf["booksConnection"]
+        assert is_object_dict(connection)
+        edges = connection["edges"]
+        assert is_object_list(edges)
+        titles: list[object] = []
+        for edge in edges:
+            assert is_object_dict(edge)
+            node = edge["node"]
+            assert is_object_dict(node)
+            titles.append(node["title"])
         assert titles == ["t0", "t1"]
         assert not self._warnings(caplog)
 

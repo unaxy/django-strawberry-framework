@@ -12,6 +12,7 @@ import pytest
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.types.converters import build_enum_from_choices
+from django_strawberry_framework.utils._narrowing import enum_value
 
 
 def test_non_iterable_choice_entry_is_a_malformed_choice() -> None:
@@ -24,4 +25,4 @@ def test_pair_choice_entry_builds_its_member() -> None:
     """A ``(value, label)`` pair still builds the enum member it declares."""
     enum_cls = build_enum_from_choices([("a", "A")], "ChoiceEntryShapeEnum", source_label="probe")
 
-    assert [member.value for member in enum_cls] == ["a"]
+    assert [enum_value(member) for member in enum_cls] == ["a"]

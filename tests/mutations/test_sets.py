@@ -114,8 +114,9 @@ from django_strawberry_framework.types.base import (
     ALLOWED_META_KEYS,
     DEFERRED_META_KEYS,
 )
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR
-from tests._idioms import definition_raises, pickle_roundtrip
+from tests._idioms import definition_raises, module_binding, pickle_roundtrip
 from tests.optimizer import _link_models
 
 
@@ -767,7 +768,7 @@ def test_bind_materializes_input_and_payload_globals() -> None:
     assert "UpdateItemPayload" in _materialized_names
     assert "DeleteItemPayload" in _materialized_names
     # The materialized class is also a real module global (the lazy-ref contract).
-    assert inputs_module.ItemInput is _materialized_names["ItemInput"]
+    assert module_binding(inputs_module, "ItemInput") is _materialized_names["ItemInput"]
 
     # The bind stashes forward-compat refs for the resolver pipeline.
     assert CreateItem._input_class is _materialized_names["ItemInput"]
@@ -878,7 +879,7 @@ def test_bind_merges_consumer_partial_input_class_for_update() -> None:
 
     @strawberry.input
     class CustomItemPartial:
-        name: str | None = strawberry.field(default=strawberry.UNSET, description="custom partial")
+        name: str | None = strawberry.field(default=UNSET, description="custom partial")
 
     class UpdateItem(DjangoMutation):
         class Meta:
@@ -936,7 +937,7 @@ def test_bind_rejects_raw_pk_relation_override_on_partial_input() -> None:
 
     @strawberry.input
     class RawPkItemPartial:
-        category_id: int | None = strawberry.field(default=strawberry.UNSET)
+        category_id: int | None = strawberry.field(default=UNSET)
 
     class UpdateItem(DjangoMutation):
         class Meta:
@@ -1137,7 +1138,7 @@ def test_bind_dedupes_identical_full_shapes() -> None:
     finalize_django_types()
     # Both bind to the same materialized ``ItemInput`` (identical shapes dedupe).
     assert CreateItemA._input_class is CreateItemB._input_class
-    assert CreateItemA._input_class is sys.modules[INPUTS_MODULE_PATH].ItemInput
+    assert CreateItemA._input_class is module_binding(sys.modules[INPUTS_MODULE_PATH], "ItemInput")
 
 
 def test_bind_dedupes_full_set_fields_with_bare_create() -> None:
@@ -1173,7 +1174,7 @@ def test_bind_dedupes_full_set_fields_with_bare_create() -> None:
     # Reaches finalize without raising; both share the one canonical ``ItemInput``.
     finalize_django_types()
     assert CreateBare._input_class is CreateFull._input_class
-    assert CreateBare._input_class is sys.modules[INPUTS_MODULE_PATH].ItemInput
+    assert CreateBare._input_class is module_binding(sys.modules[INPUTS_MODULE_PATH], "ItemInput")
 
 
 def test_bind_dedupes_fields_with_complementary_exclude() -> None:

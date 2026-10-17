@@ -131,7 +131,7 @@ from io import BytesIO
 from logging import LogRecord
 from pathlib import Path
 from types import CoroutineType, ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeAlias, TypeGuard
+from typing import TYPE_CHECKING, NoReturn, Protocol, TypeAlias, TypeGuard
 from urllib.parse import urlparse
 
 import channels.auth
@@ -169,7 +169,6 @@ from django.test import AsyncClient, RequestFactory, override_settings
 from django.urls import URLPattern, path
 from django.utils.functional import SimpleLazyObject
 from graphql import GraphQLError
-from graphql_client import JSONObject
 from strawberry.channels import GraphQLWSConsumer
 from strawberry.channels.handlers.ws_handler import ChannelsWebSocketAdapter
 from strawberry.extensions import SchemaExtension
@@ -192,12 +191,24 @@ from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import sessions as session_store_module
+from django_strawberry_framework.utils._narrowing import (
+    class_dict,
+    list_of,
+    read_attr,
+)
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter, request_from_info
+from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._idioms import (
     ClassReadRaisesBase,
     is_object_dict,
     is_object_list,
+    json_at,
+    json_list,
+    json_loads,
+    json_object,
+    receive_json,
     run_capturing,
+    saved_pk,
     websocket_scope,
 )
 from tests._soft_dependency import blocked_modules, evicted_modules, simulated_absence
@@ -687,11 +698,9 @@ class _UnreadRevocationOwner:
         raise AssertionError("the wrapper must not read the consumer's revocation")
 
 
-# basedpyright: verbatim forward to DjangoGraphQLProtocolRouter.__init__ (rows pass deliberately
-# unusable values); object fails its typed params
 def _router(
     schema: strawberry.Schema = SCHEMA,
-    **kwargs: Any,  # pyright: ignore[reportExplicitAny]
+    **kwargs: object,
 ) -> routers_module.DjangoGraphQLProtocolRouter:
     """Build the router, supplying the required ``django_application`` once.
 
@@ -699,7 +708,8 @@ def _router(
     testing the failure matrix passes the unusable value explicitly.
     """
     kwargs.setdefault("django_application", _RecordingDjangoApplication())
-    return _router_class()(schema, **kwargs)
+    # Rows pass deliberately unusable values, so the forward is verbatim.
+    return call_forwarded(_router_class(), (schema,), kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -817,6 +827,11 @@ def _ws_communicator(
     return WebsocketCommunicator(application, path, headers=headers, subprotocols=[subprotocol])
 
 
+async def _receive_json(communicator: WebsocketCommunicator) -> dict[object, object]:
+    """The next ``websocket.send`` frame, decoded; every GraphQL WS server message is an object."""
+    return json_object(await receive_json(communicator))
+
+
 @contextlib.asynccontextmanager
 async def _open_ws(
     application: ProtocolTypeRouter,
@@ -838,7 +853,7 @@ async def _open_ws(
         assert connected, "websocket handshake failed"
         assert protocol == subprotocol
         await communicator.send_json_to({"type": "connection_init"})
-        ack = await communicator.receive_json_from(timeout=10)
+        ack = await _receive_json(communicator)
         assert ack["type"] == "connection_ack", ack
         yield communicator
     finally:
@@ -876,7 +891,7 @@ async def _ws_operation(
     query: str,
     *,
     op_id: str = "1",
-) -> JSONObject:
+) -> dict[object, object]:
     """Run ONE operation round trip on an open socket; return its first frame.
 
     The protocol is read back off the communicator's own scope, so a caller
@@ -892,9 +907,9 @@ async def _ws_operation(
     await communicator.send_json_to(
         {"type": operation_frame, "id": op_id, "payload": {"query": query}},
     )
-    message = await communicator.receive_json_from(timeout=10)
+    message = await _receive_json(communicator)
     if message["type"] == success_frame:
-        completion = await communicator.receive_json_from(timeout=10)
+        completion = await _receive_json(communicator)
         assert completion == {"type": "complete", "id": op_id}, completion
     return message
 
@@ -903,7 +918,7 @@ async def _ws_graphql_data(
     application: ProtocolTypeRouter,
     query: str,
     cookie: str | None = None,
-) -> JSONObject:
+) -> object:
     """Run one graphql-transport-ws operation on its own socket; return ``data``.
 
     The single-operation shape (open, one operation, close) three tests still
@@ -913,12 +928,12 @@ async def _ws_graphql_data(
     async with _open_ws(application, cookie=cookie) as communicator:
         message = await _ws_operation(communicator, query)
     assert message["type"] == "next", message
-    payload = message["payload"]
+    payload = json_object(message, "payload")
     assert payload.get("errors") is None, payload
     return payload["data"]
 
 
-_JSONFrame: TypeAlias = JSONObject
+_JSONFrame: TypeAlias = dict[object, object]
 
 
 async def _drain_until_close(
@@ -946,7 +961,7 @@ async def _drain_until_close(
         if message["type"] == "websocket.close":
             return message, frames
         assert message["type"] == "websocket.send", message
-        frames.append(json.loads(message["text"]))
+        frames.append(json_object(json_loads(_sent_text(message))))
 
 
 def _assert_revoked_close(closed: dict[str, object]) -> None:
@@ -975,6 +990,22 @@ def _assert_revoked_close(closed: dict[str, object]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _str_setting(name: str) -> str:
+    """One string-valued Django setting, read by name."""
+    value = read_attr(settings, name)
+    assert isinstance(value, str), (name, value)
+    return value
+
+
+def _session_store_class() -> type[SessionBase]:
+    """The ``SessionStore`` class of the configured ``SESSION_ENGINE``."""
+    engine = importlib.import_module(_str_setting("SESSION_ENGINE"))
+    store = read_attr(engine, "SessionStore")
+    assert isinstance(store, type), store
+    assert issubclass(store, SessionBase), store
+    return store
+
+
 @database_sync_to_async
 def _make_user_and_session(
     username: str,
@@ -991,13 +1022,14 @@ def _make_user_and_session(
     users = get_user_model().objects
     assert isinstance(users, UserManager)
     user = users.create_user(username=username, password=password)
-    engine = importlib.import_module(settings.SESSION_ENGINE)
-    session = engine.SessionStore()
-    session[SESSION_KEY] = str(user.pk)
+    session = _session_store_class()()
+    session[SESSION_KEY] = str(saved_pk(user))
     session[BACKEND_SESSION_KEY] = "django.contrib.auth.backends.ModelBackend"
     session[HASH_SESSION_KEY] = user.get_session_auth_hash()
     session.save()
-    return user, f"{settings.SESSION_COOKIE_NAME}={session.session_key}", session.session_key
+    session_key = session.session_key
+    assert session_key is not None
+    return user, f"{_str_setting('SESSION_COOKIE_NAME')}={session_key}", session_key
 
 
 @database_sync_to_async
@@ -1008,7 +1040,7 @@ def _flush_the_session(_user: AbstractBaseUser, session_key: str) -> None:
     both of the spec's "revoke" and "flush" shapes - the stored record is gone,
     and ``channels.auth.get_user`` then finds no ``_auth_user_id``.
     """
-    importlib.import_module(settings.SESSION_ENGINE).SessionStore(session_key).flush()
+    _session_store_class()(session_key).flush()
 
 
 @database_sync_to_async
@@ -1020,7 +1052,7 @@ def _session_row_still_exists(session_key: str) -> bool:
     itself completed. Asked through the engine's own ``exists`` rather than the
     ``Session`` model, so the question stays true for any server-side engine.
     """
-    return importlib.import_module(settings.SESSION_ENGINE).SessionStore().exists(session_key)
+    return _session_store_class()().exists(session_key)
 
 
 @database_sync_to_async
@@ -1509,14 +1541,14 @@ async def _logout_through_a_real_second_request(session_key: str, username: str)
     request rather than a second fixture. Lifted out of the real-second-request
     logout row when the running-subscription rows needed the same revocation.
     """
-    cookie_name = settings.SESSION_COOKIE_NAME
+    cookie_name = _str_setting("SESSION_COOKIE_NAME")
     with override_settings(ROOT_URLCONF=__name__):
         client = AsyncClient()
         client.cookies[cookie_name] = session_key
         response = await client.post(f"/{_LOGOUT_PROBE_PATH}")
 
     assert response.status_code == 200, response.content
-    body = response.json()
+    body = json_object(object_result(response.json))
     assert body["session_key_before"] == session_key
     assert body["username_before"] == username
     assert body["authenticated_before"] is True
@@ -1962,7 +1994,8 @@ def test_the_default_websocket_consumer_is_the_packages_revalidating_subclass() 
     assert callback.consumer_initkwargs["schema"] is SCHEMA
     # Both protocol pre-hooks are in place, each one level below upstream's.
     for attribute in ("graphql_transport_ws_handler_class", "graphql_ws_handler_class"):
-        installed = getattr(callback.consumer_class, attribute)
+        installed = read_attr(callback.consumer_class, attribute)
+        assert isinstance(installed, type), installed
         assert installed is not getattr(_graphql_ws_consumer(), attribute)
         assert installed.__mro__[1].__name__.startswith("BaseGraphQL")
 
@@ -2562,7 +2595,7 @@ def test_the_two_new_websocket_keywords_are_keyword_only() -> None:
     }
     for name, default in keyword_only.items():
         assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY, name
-        assert parameters[name].default == default, name
+        assert read_attr(parameters[name], "default") == default, name
     # The two required transport arguments stay positional-or-keyword, in order.
     positional = [
         name
@@ -2867,7 +2900,10 @@ def _django_asgi_host_meta(
     which participates in the Host decision, and none of which this boundary has any
     business carrying.
     """
-    meta = ASGIRequest(_http_scope_of(_handshake_scope(headers, server)), BytesIO()).META
+    meta: dict[str, object] = ASGIRequest(
+        _http_scope_of(_handshake_scope(headers, server)),
+        BytesIO(),
+    ).META
     return {key: value for key, value in meta.items() if key in _HOST_META_KEYS}
 
 
@@ -3139,8 +3175,13 @@ async def test_duplicate_host_headers_fail_closed_in_djangos_comma_joined_form()
     (``test_a_hostile_host_header_is_rejected_before_the_schema_runs``).
     """
     duplicated = [(b"host", b"testserver"), (b"host", b"testserver")]
-    joined = ASGIRequest(_http_scope_of(_handshake_scope(duplicated)), BytesIO()).META["HTTP_HOST"]
+    meta: dict[str, object] = ASGIRequest(
+        _http_scope_of(_handshake_scope(duplicated)),
+        BytesIO(),
+    ).META
+    joined = meta["HTTP_HOST"]
     assert joined == "testserver,testserver"
+    assert isinstance(joined, str)
     assert _django_http_host_verdict(host=joined) is None
     assert _django_http_host_verdict(host="testserver") is not None
 
@@ -3707,10 +3748,9 @@ def test_restore_is_two_sided_and_the_present_path_works_again() -> None:
         with pytest.raises(ImportError, match=_HINT_SUBSTRING):
             exec("from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter", {})  # noqa: S102 - the import statement is under test; literal source
 
-    assert (
-        django_strawberry_framework.routers is sys.modules["django_strawberry_framework.routers"]
-    )
-    assert django_strawberry_framework.routers is routers_module
+    routers_binding = read_attr(django_strawberry_framework, "routers")
+    assert routers_binding is sys.modules["django_strawberry_framework.routers"]
+    assert routers_binding is routers_module
     # No stale negative caching (spec-041 Helper-reuse D3): the present path works again
     # in the same process, through both access paths, yielding one class.
     assert _router_class() is routers_module.DjangoGraphQLProtocolRouter
@@ -3752,8 +3792,8 @@ def test_consumers_module_imports_with_channels_absent() -> None:
         module = importlib.import_module("django_strawberry_framework.consumers")
 
         assert module is not consumers_module
-        assert callable(module.build_revalidating_consumer_class)
-        assert module._DEFAULT_REVALIDATION_WINDOW == 0.0
+        assert callable(read_attr(module, "build_revalidating_consumer_class"))
+        assert read_attr(module, "_DEFAULT_REVALIDATION_WINDOW") == 0.0
         assert "strawberry.channels" not in sys.modules
 
 
@@ -3766,7 +3806,7 @@ def test_unrelated_attribute_miss_stays_a_plain_attribute_error() -> None:
     """
     mod = importlib.import_module("django_strawberry_framework.routers")
     with pytest.raises(AttributeError, match="DefinitelyNotARouter"):
-        _ = mod.DefinitelyNotARouter
+        _ = read_attr(mod, "DefinitelyNotARouter")
 
 
 @pytest.mark.parametrize(
@@ -3928,7 +3968,7 @@ async def test_a_revoked_session_closes_the_socket_on_the_next_operation_without
     async with _open_ws(router, cookie=cookie) as communicator:
         first = await _ws_operation(communicator, "{ username }", op_id="1")
         assert first["type"] == "next", first
-        assert first["payload"]["data"] == {"username": "revalidation_probe"}
+        assert json_at(first, "payload", "data") == {"username": "revalidation_probe"}
         assert probe.reads == 2
 
         await revoke(user, session_key)
@@ -3973,13 +4013,14 @@ async def test_a_valid_session_keeps_executing_and_the_next_operation_sees_the_r
     async with _open_ws(router, cookie=cookie) as communicator:
         first = await _ws_operation(communicator, "{ actorIdentity }", op_id="1")
         assert first["type"] == "next", first
-        assert first["payload"]["data"] == {"actorIdentity": "freshness_probe|False"}
+        assert json_at(first, "payload", "data") == {"actorIdentity": "freshness_probe|False"}
 
         await _rename_and_promote_the_user(user, "freshness_probe_renamed")
 
         second = await _ws_operation(communicator, "{ actorIdentity }", op_id="2")
         assert second["type"] == "next", second
-        assert second["payload"]["data"] == {"actorIdentity": "freshness_probe_renamed|True"}
+        second_data = json_at(second, "payload", "data")
+        assert second_data == {"actorIdentity": "freshness_probe_renamed|True"}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4014,13 +4055,13 @@ async def test_the_revalidation_window_defers_the_denial_until_it_expires(
     async with _open_ws(router, cookie=cookie) as communicator:
         first = await _ws_operation(communicator, "{ username }", op_id="1")
         assert first["type"] == "next", first
-        assert first["payload"]["data"] == {"username": "window_probe"}
+        assert json_at(first, "payload", "data") == {"username": "window_probe"}
 
         await _flush_the_session(user, session_key)
 
         inside = await _ws_operation(communicator, "{ username }", op_id="2")
         assert inside["type"] == "next", inside
-        assert inside["payload"]["data"] == {"username": "window_probe"}
+        assert json_at(inside, "payload", "data") == {"username": "window_probe"}
         assert probe.reads == 1
 
         advanced = time.monotonic() + 7200.0
@@ -4057,7 +4098,7 @@ async def test_the_legacy_graphql_ws_protocol_is_revalidated_at_handle_start() -
     async with _open_ws(router, cookie=cookie, subprotocol=_LEGACY_WS) as communicator:
         first = await _ws_operation(communicator, _TICK_SUBSCRIPTION, op_id="1")
         assert first["type"] == "data", first
-        assert first["payload"]["data"] == {"tick": "tock"}
+        assert json_at(first, "payload", "data") == {"tick": "tock"}
 
         await _flush_the_session(user, session_key)
 
@@ -4269,7 +4310,7 @@ async def test_revalidation_resolves_its_session_store_outside_the_opt_in_auth_p
             message = await _ws_operation(communicator, "{ username }", op_id="1")
 
         assert message["type"] == "next", message
-        assert message["payload"]["data"] == {"username": "import_boundary_probe"}
+        assert json_at(message, "payload", "data") == {"username": "import_boundary_probe"}
 
         assert session_store_module.__name__ in sys.modules
         imported_auth = sorted(
@@ -4309,7 +4350,7 @@ async def test_a_real_second_request_logout_denies_the_next_operation_on_the_ope
     async with _open_ws(router, cookie=cookie) as communicator:
         first = await _ws_operation(communicator, "{ username }", op_id="1")
         assert first["type"] == "next", first
-        assert first["payload"]["data"] == {"username": "logout_probe"}
+        assert json_at(first, "payload", "data") == {"username": "logout_probe"}
 
         await _logout_through_a_real_second_request(session_key, "logout_probe")
 
@@ -4378,9 +4419,9 @@ async def test_a_running_subscription_cannot_emit_a_result_after_revocation(
         await _reached(controller.started, "the operation was never admitted")
 
         controller.release(0)
-        first = await communicator.receive_json_from(timeout=10)
+        first = await _receive_json(communicator)
         assert first["type"] == success_frame, first
-        assert first["payload"]["data"] == {"controlled": "running-1"}
+        assert json_at(first, "payload", "data") == {"controlled": "running-1"}
         # One read per checkpoint: this operation's admission, then its result.
         assert probe.reads == 2
 
@@ -4436,9 +4477,9 @@ async def test_a_valid_session_keeps_a_running_subscription_emitting_every_resul
         received: list[object] = []
         for index in range(2):
             controller.release(index)
-            message = await communicator.receive_json_from(timeout=10)
+            message = await _receive_json(communicator)
             assert message["type"] == success_frame, message
-            received.append(message["payload"]["data"]["controlled"])
+            received.append(json_at(message, "payload", "data", "controlled"))
 
         assert received == ["control-1", "control-2"]
         # Still open: nothing closed the socket, and nothing else is queued.
@@ -4470,8 +4511,7 @@ _LEAKY_SUBSCRIPTION = "subscription { leaky { label boom } }"
 _CORRELATION_ID_PATTERN = re.compile(r"\A[0-9a-f]{32}\Z")
 
 
-# basedpyright: verbatim forward to DjangoSchema.__init__; object fails its typed params
-def _masking_schema(**schema_kwargs: Any) -> "DjangoSchema":  # pyright: ignore[reportExplicitAny]
+def _masking_schema(**schema_kwargs: object) -> "DjangoSchema":
     """Build a ``DjangoSchema`` over this module's ORM-free operations.
 
     ``DjangoSchema`` rather than the module's plain ``SCHEMA`` because the policy
@@ -4479,7 +4519,11 @@ def _masking_schema(**schema_kwargs: Any) -> "DjangoSchema":  # pyright: ignore[
     at construction, which is what both rows configure. Declares no
     ``DjangoType``, so the package registry is untouched.
     """
-    return DjangoSchema(query=Query, subscription=Subscription, **schema_kwargs)
+    return call_forwarded(
+        DjangoSchema,
+        (),
+        {"query": Query, "subscription": Subscription, **schema_kwargs},
+    )
 
 
 @pytest.mark.parametrize("subprotocol", [_TRANSPORT_WS, _LEGACY_WS])
@@ -4513,17 +4557,21 @@ async def test_every_subscription_event_is_masked_before_it_reaches_the_wire(
     async with _open_ws(router, subprotocol=subprotocol) as communicator:
         await _send_operation(communicator, _LEAKY_SUBSCRIPTION, op_id="1")
         for _ in range(2):
-            message = await communicator.receive_json_from(timeout=10)
+            message = await _receive_json(communicator)
             assert message["type"] == success_frame, message
             assert _EVENT_SENSITIVE not in json.dumps(message), message
-            payload = message["payload"]
+            payload = json_object(message, "payload")
             assert payload["data"] == {"leaky": {"label": "ok", "boom": None}}, payload
-            assert len(payload["errors"]) == 1, payload
-            error = payload["errors"][0]
+            assert len(json_list(payload, "errors")) == 1, payload
+            error = json_object(payload, "errors", 0)
             assert error["message"] == DEFAULT_ERROR_POLICY.message, error
             # The failing field is still named: the client wrote the query.
             assert error["path"] == ["leaky", "boom"], error
-            correlation_id = error["extensions"][DEFAULT_ERROR_POLICY.correlation_extension_key]
+            correlation_id = json_at(
+                error,
+                "extensions",
+                DEFAULT_ERROR_POLICY.correlation_extension_key,
+            )
             assert isinstance(correlation_id, str), error
             correlation_ids.append(correlation_id)
 
@@ -4555,11 +4603,13 @@ async def test_the_subscription_seam_masks_only_what_the_policy_asks_it_to() -> 
 
     async with _open_ws(router) as communicator:
         await _send_operation(communicator, _LEAKY_SUBSCRIPTION, op_id="1")
-        message = await communicator.receive_json_from(timeout=10)
+        message = await _receive_json(communicator)
 
     assert message["type"] == "next", message
-    error = message["payload"]["errors"][0]
-    assert _EVENT_SENSITIVE in error["message"], error
+    error = json_object(message, "payload", "errors", 0)
+    error_message = error["message"]
+    assert isinstance(error_message, str), error
+    assert _EVENT_SENSITIVE in error_message, error
     assert "extensions" not in error or error["extensions"] is None, error
 
 
@@ -4824,7 +4874,7 @@ async def test_the_connection_lock_never_serializes_a_second_connection(
         async with _open_ws(router, cookie=second_cookie) as second_socket:
             message = await _ws_operation(second_socket, "{ username }", op_id="1")
             assert message["type"] == "next", message
-            assert message["payload"]["data"] == {"username": "blast_radius_two"}
+            assert json_at(message, "payload", "data") == {"username": "blast_radius_two"}
             second_consumer = gate.consumers[-1]
             assert second_consumer is not first_consumer
             assert _actor_lease(second_consumer) is not _actor_lease(first_consumer)
@@ -4834,9 +4884,9 @@ async def test_the_connection_lock_never_serializes_a_second_connection(
 
         # Socket 1 then finishes normally - it was never revoked, only slow.
         probe.hold.set()
-        first = await first_socket.receive_json_from(timeout=10)
+        first = await _receive_json(first_socket)
         assert first["type"] == "next", first
-        assert first["payload"]["data"] == {"controlled": "blast-radius-1"}
+        assert json_at(first, "payload", "data") == {"controlled": "blast-radius-1"}
 
     assert gate.sends_under_lease == [True, True]
 
@@ -4871,16 +4921,16 @@ async def test_a_positive_window_defers_the_close_on_a_running_subscription(
         await _reached(controller.started, "the operation was never admitted")
 
         controller.release(0)
-        first = await communicator.receive_json_from(timeout=10)
-        assert first["payload"]["data"] == {"controlled": "window-frame-1"}
+        first = await _receive_json(communicator)
+        assert json_at(first, "payload", "data") == {"controlled": "window-frame-1"}
         assert probe.reads == 1
 
         await _flush_the_session(user, session_key)
 
         # Inside the accepted delay: the revoked session still emits.
         controller.release(1)
-        inside = await communicator.receive_json_from(timeout=10)
-        assert inside["payload"]["data"] == {"controlled": "window-frame-2"}
+        inside = await _receive_json(communicator)
+        assert json_at(inside, "payload", "data") == {"controlled": "window-frame-2"}
         assert probe.reads == 1
 
         advanced = time.monotonic() + 7200.0
@@ -5002,18 +5052,17 @@ async def test_control_frame_send_serializes_with_a_concurrent_revocation() -> N
     # basedpyright: a plain stand-in class carrying only the hooks the code under test reads;
     # build_revalidating_consumer_class types the parameter as type[GraphQLWSConsumer]
     consumer_class = consumers_module.build_revalidating_consumer_class(BaseConsumer)  # pyright: ignore[reportArgumentType]
-    consumer = SimpleNamespace(
-        _revocation=consumers_module._ConnectionRevocation(),
-        scope={},
-    )
+    revocation = consumers_module._ConnectionRevocation()
+    scope: dict[str, object] = {}
+    consumer = SimpleNamespace(_revocation=revocation, scope=scope)
     adapter = consumer_class.websocket_adapter_class(consumer)
 
     send_task = asyncio.create_task(adapter.send_json({"type": "pong"}))
     await _reached(entered, "the delegated control frame never reached upstream send")
 
     async def revoke() -> None:
-        async with session_store_module.actor_lease(consumer.scope):
-            consumer._revocation.decide()
+        async with session_store_module.actor_lease(scope):
+            revocation.decide()
 
     revoke_task = asyncio.create_task(revoke())
     await asyncio.sleep(0)
@@ -5023,7 +5072,7 @@ async def test_control_frame_send_serializes_with_a_concurrent_revocation() -> N
     await send_task
     await revoke_task
     assert sent == [{"type": "pong"}]
-    assert consumer._revocation.revoked
+    assert revocation.revoked
 
 
 #: Upstream's OWN default for ``max_subscriptions_per_connection``
@@ -5828,7 +5877,7 @@ async def test_nothing_is_written_to_the_socket_after_the_revocation_close(
         await _reached(controller.started, "the operation was never admitted")
 
         controller.release(0)
-        first = await communicator.receive_json_from(timeout=10)
+        first = await _receive_json(communicator)
         assert first["type"] == success_frame, first
 
         await _flush_the_session(user, session_key)
@@ -5907,7 +5956,7 @@ async def test_a_delegated_control_frame_is_suppressed_once_the_revocation_is_de
         # Before any revocation: the client provokes the delegated frame and it is
         # committed, upstream's own reply, untouched.
         await communicator.send_json_to({"type": provoke_type, "id": "warm"})
-        reply = await communicator.receive_json_from(timeout=10)
+        reply = await _receive_json(communicator)
         assert reply["type"] == reply_type, reply
         permitted = log.frame_types
         assert permitted[-1] == reply_type, permitted
@@ -5966,7 +6015,7 @@ def _wrapped_schema_reads() -> frozenset[str]:
     """
     return frozenset(
         name
-        for name, value in vars(consumers_module._StopAwareSchema).items()
+        for name, value in class_dict(consumers_module._StopAwareSchema).items()
         if not name.startswith("_") and callable(value)
     )
 
@@ -6008,7 +6057,7 @@ def test_the_stop_aware_schema_covers_every_upstream_schema_read() -> None:
     sources = _upstream_handler_sources()
     reads: set[str] = set()
     for source in sources:
-        for attribute in re.findall(r"self\.schema\.(\w+)", source):
+        for attribute in list_of(re.findall(r"self\.schema\.(\w+)", source)):
             assert isinstance(attribute, str), attribute
             reads.add(attribute)
         assert not re.search(r"(isinstance|type)\(\s*(self\.)?schema\b", source), (
@@ -6207,9 +6256,9 @@ async def test_a_same_socket_logout_stops_a_running_subscription_on_both_protoco
         await _reached(controller.started, "the operation was never admitted")
 
         controller.release(0)
-        first = await communicator.receive_json_from(timeout=10)
+        first = await _receive_json(communicator)
         assert first["type"] == success_frame, first
-        assert first["payload"]["data"] == {"controlled": "same-socket-1"}
+        assert json_at(first, "payload", "data") == {"controlled": "same-socket-1"}
         assert probe.reads == 2
 
         consumer = gate.consumers[0]
@@ -6258,7 +6307,7 @@ async def test_the_logout_mutations_own_reply_is_suppressed_by_the_connection_cl
     async with _open_ws(router, cookie=cookie) as communicator:
         first = await _ws_operation(communicator, "{ username }", op_id="1")
         assert first["type"] == "next", first
-        assert first["payload"]["data"] == {"username": "logout_frame_probe"}
+        assert json_at(first, "payload", "data") == {"username": "logout_frame_probe"}
 
         await _send_operation(communicator, _LOGOUT_MUTATION, op_id="2")
         closed, frames = await _drain_until_close(communicator)
@@ -6297,11 +6346,11 @@ async def test_an_anonymous_socket_that_logs_out_keeps_the_read_free_carve_out(
     async with _open_ws(router) as communicator:
         logged_out = await _ws_operation(communicator, _LOGOUT_MUTATION, op_id="1")
         assert logged_out["type"] == "next", logged_out
-        assert logged_out["payload"]["data"] == {"logout": {"ok": False}}
+        assert json_at(logged_out, "payload", "data") == {"logout": {"ok": False}}
 
         after = await _ws_operation(communicator, "{ actor }", op_id="2")
         assert after["type"] == "next", after
-        assert after["payload"]["data"] == {"actor": "ChannelsRequestAdapter|True"}
+        assert json_at(after, "payload", "data") == {"actor": "ChannelsRequestAdapter|True"}
         assert await communicator.receive_nothing(timeout=0.2)
 
     assert probe.reads == 0
@@ -6378,8 +6427,8 @@ async def test_a_same_socket_logout_cannot_complete_across_a_parked_protected_se
 
         # Released, the authorized frame goes out and the logout linearizes behind it.
         gate.hold_before_send.set()
-        first = await communicator.receive_json_from(timeout=10)
-        assert first["payload"]["data"] == {"controlled": "parked-send-1"}
+        first = await _receive_json(communicator)
+        assert json_at(first, "payload", "data") == {"controlled": "parked-send-1"}
         await logout_task
         assert not await _session_row_still_exists(session_key)
         assert _connection_actor(consumer).is_anonymous
@@ -6457,8 +6506,8 @@ async def test_a_transition_in_flight_denies_both_checkpoints_inside_a_positive_
 
         # Result 1 rides the admission's read from the window cache.
         running.release(0)
-        first = await communicator.receive_json_from(timeout=10)
-        assert first["payload"]["data"] == {"controlled": "transition-running-1"}
+        first = await _receive_json(communicator)
+        assert json_at(first, "payload", "data") == {"controlled": "transition-running-1"}
         assert probe.reads == 1
 
         consumer = gate.consumers[0]
@@ -6538,7 +6587,7 @@ async def test_router_delegates_legacy_invalid_json_continuation() -> None:
     await communicator.send_input({"type": "websocket.receive", "text": "{"})
     assert await communicator.receive_nothing(timeout=0.2)
     await communicator.send_json_to({"type": "connection_init"})
-    output = await communicator.receive_json_from(timeout=10)
+    output = await _receive_json(communicator)
     assert output["type"] == "connection_ack"
 
 
@@ -6630,7 +6679,7 @@ def _handler_class(consumer_class: type, name: str) -> type:
     ``Context`` / ``RootValue`` type variables, which a read through the class
     leaves unbound.
     """
-    handler_class = getattr(consumer_class, name)
+    handler_class = read_attr(consumer_class, name)
     assert isinstance(handler_class, type)
     return handler_class
 
@@ -6698,7 +6747,7 @@ async def test_a_non_dispatchable_frame_is_refused_and_the_connection_ends(
     assert connected
     try:
         await communicator.send_json_to({"type": "connection_init"})
-        ack = await communicator.receive_json_from(timeout=10)
+        ack = await _receive_json(communicator)
         assert ack["type"] == "connection_ack"
         await communicator.send_to(text_data=frame_text)
         output = await communicator.receive_output(timeout=10)
@@ -6863,7 +6912,7 @@ async def test_a_non_string_query_delivered_over_a_socket_does_not_break_the_loo
             message = await communicator.receive_output(timeout=10)
             if message["type"] == "websocket.close":
                 raise AssertionError("the message loop died on the non-string query")
-            payload: object = json.loads(message["text"])
+            payload = json_loads(_sent_text(message))
             assert is_object_dict(payload), payload
             if payload.get("id") == "1":
                 rejected.append(payload)

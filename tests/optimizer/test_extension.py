@@ -23,7 +23,7 @@ import uuid
 import warnings
 import weakref
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Coroutine, Iterable, Iterator, Mapping
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, TypeGuard
 
@@ -125,6 +125,12 @@ from django_strawberry_framework.types.resolvers import (
     _will_lazy_load_many,
     _will_lazy_load_single,
 )
+from django_strawberry_framework.utils._narrowing import (
+    is_set_or_frozenset,
+    read_attr,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils._queryset_private import (
     queryset_prefetch_lookups,
 )
@@ -139,6 +145,9 @@ from tests._idioms import (
     ClaimsClassBase,
     ClassReadRaisesBase,
     definition_raises,
+    is_object_dict,
+    is_object_list,
+    saved_pk,
     str_subclass_name,
 )
 from tests._info import make_info, response_path
@@ -175,6 +184,34 @@ def _fragments_by_name(definitions: Iterable[DefinitionNode]) -> dict[str, Fragm
         assert isinstance(definition, FragmentDefinitionNode)
         fragments[definition.name.value] = definition
     return fragments
+
+
+def _stashed_plan(ctx: object) -> OptimizationPlan:
+    """The optimizer plan the extension stashed on the attribute-style context ``ctx``."""
+    return require_instance(read_attr(ctx, DST_OPTIMIZER_PLAN), OptimizationPlan)
+
+
+def _stashed_keys(ctx: object, key: str) -> set[object] | frozenset[object]:
+    """The resolver-key set the extension stashed on ``ctx`` under ``key``."""
+    return require(read_attr(ctx, key), is_set_or_frozenset)
+
+
+def _run_coroutine(coroutine: Coroutine[object, object, object]) -> object:
+    """Run ``coroutine`` to completion on a fresh event loop and return its result."""
+    return asyncio.run(coroutine)
+
+
+def _at(value: object, *keys: str) -> object:
+    """The member of a JSON payload ``value`` at the object-key path ``keys``."""
+    for key in keys:
+        assert is_object_dict(value), value
+        value = value[key]
+    return value
+
+
+def _list_at(value: object, *keys: str) -> list[object]:
+    """The JSON list member of ``value`` at the object-key path ``keys``."""
+    return require(_at(value, *keys), is_object_list)
 
 
 @pytest.fixture(autouse=True)
@@ -246,7 +283,8 @@ def test_optimize_coerces_manager_through_all_records_cache_miss() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> Manager[Item]:
             # Return the Manager itself, not ``Manager.all()``.
             return Item.objects
@@ -287,7 +325,8 @@ def test_optimizer_plans_merged_duplicate_root_field_nodes_plan_shape() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -301,8 +340,8 @@ def test_optimizer_plans_merged_duplicate_root_field_nodes_plan_shape() -> None:
     )
 
     assert result.errors is None
-    assert ctx.dst_optimizer_plan.select_related == ("category",)
-    assert "ItemType.category@allItems.category" in ctx.dst_optimizer_planned
+    assert _stashed_plan(ctx).select_related == ("category",)
+    assert "ItemType.category@allItems.category" in _stashed_keys(ctx, DST_OPTIMIZER_PLANNED)
 
 
 @pytest.mark.django_db
@@ -334,7 +373,8 @@ def test_optimizer_elides_forward_fk_id_only_selection_plan_shape() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -348,12 +388,14 @@ def test_optimizer_elides_forward_fk_id_only_selection_plan_shape() -> None:
         context_value=ctx,
     )
     assert result.errors is None
-    plan = ctx.dst_optimizer_plan
+    plan = _stashed_plan(ctx)
     assert plan.select_related == ()
     assert plan.prefetch_related == ()
     assert plan.only_fields == ("name", "category_id")
     assert plan.fk_id_elisions == ("ItemType.category@allItems.category",)
-    assert ctx.dst_optimizer_fk_id_elisions == {"ItemType.category@allItems.category"}
+    assert _stashed_keys(ctx, DST_OPTIMIZER_FK_ID_ELISIONS) == {
+        "ItemType.category@allItems.category",
+    }
 
 
 @pytest.mark.django_db
@@ -384,7 +426,8 @@ def test_optimizer_elides_forward_fk_id_only_selection_for_each_alias_plan_shape
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -398,7 +441,7 @@ def test_optimizer_elides_forward_fk_id_only_selection_for_each_alias_plan_shape
         context_value=ctx,
     )
     assert result.errors is None
-    plan = ctx.dst_optimizer_plan
+    plan = _stashed_plan(ctx)
     assert plan.select_related == ()
     assert plan.prefetch_related == ()
     assert plan.only_fields == ("category_id",)
@@ -406,7 +449,7 @@ def test_optimizer_elides_forward_fk_id_only_selection_for_each_alias_plan_shape
         "ItemType.category@allItems.first",
         "ItemType.category@allItems.second",
     )
-    assert ctx.dst_optimizer_fk_id_elisions == {
+    assert _stashed_keys(ctx, DST_OPTIMIZER_FK_ID_ELISIONS) == {
         "ItemType.category@allItems.first",
         "ItemType.category@allItems.second",
     }
@@ -439,7 +482,8 @@ def test_optimizer_does_not_elide_forward_fk_when_extra_scalar_selected_plan_sha
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -453,7 +497,7 @@ def test_optimizer_does_not_elide_forward_fk_when_extra_scalar_selected_plan_sha
         context_value=ctx,
     )
     assert result.errors is None
-    plan = ctx.dst_optimizer_plan
+    plan = _stashed_plan(ctx)
     assert plan.select_related == ("category",)
     assert plan.fk_id_elisions == ()
     assert plan.only_fields == (
@@ -507,7 +551,8 @@ def test_optimizer_does_not_elide_forward_fk_when_target_has_custom_get_queryset
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -521,7 +566,7 @@ def test_optimizer_does_not_elide_forward_fk_when_target_has_custom_get_queryset
         context_value=ctx,
     )
     assert result.errors is None
-    plan = ctx.dst_optimizer_plan
+    plan = _stashed_plan(ctx)
     assert plan.select_related == ()
     assert plan.fk_id_elisions == ()
     assert plan.only_fields == ("name", "category_id")
@@ -542,7 +587,8 @@ def test_optimizer_passes_through_unregistered_return_type(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -600,7 +646,8 @@ def test_evaluated_root_queryset_does_not_record_a_plan_cache_miss() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             qs = Item.objects.select_related("category").all()
             len(qs)
@@ -685,7 +732,7 @@ def test_resolve_async_passes_through_evaluated_queryset(monkeypatch: pytest.Mon
     info = make_info(field_name="allCategories")._raw_info
     result = ext.resolve(fake_next, None, info)
     assert asyncio.iscoroutine(result)
-    resolved = asyncio.run(result)
+    resolved = _run_coroutine(result)
     assert resolved is qs  # same instance, no clone
     assert ext.cache_info().misses == 0  # guard fired before plan build
 
@@ -866,7 +913,7 @@ def test_resolve_handles_async_root_resolver() -> None:
     # result should be a coroutine (async wrapper)
     assert asyncio.iscoroutine(result)
     # Await it - _optimize will pass through because no model backs the return type.
-    resolved = asyncio.run(result)
+    resolved = _run_coroutine(result)
     assert resolved is qs
 
 
@@ -888,7 +935,8 @@ def test_optimize_handles_empty_field_nodes() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -925,7 +973,8 @@ def test_optimize_returns_original_queryset_for_empty_plan(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -940,7 +989,7 @@ def test_optimize_returns_original_queryset_for_empty_plan(
     ctx = SimpleNamespace()
     result = schema.execute_sync("{ allCategories { name } }", context_value=ctx)
     assert result.errors is None
-    assert ctx.dst_optimizer_plan.is_empty
+    assert _stashed_plan(ctx).is_empty
 
 
 # ---------------------------------------------------------------------------
@@ -987,7 +1036,8 @@ def test_cache_differentiates_queries() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -1021,7 +1071,8 @@ def test_cache_differentiates_reachable_named_fragment_bodies() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -1042,8 +1093,8 @@ def test_cache_differentiates_reachable_named_fragment_bodies() -> None:
 
     assert result_scalar.errors is None
     assert result_relation.errors is None
-    assert ctx_scalar.dst_optimizer_plan.select_related == ()
-    assert ctx_relation.dst_optimizer_plan.select_related == ("category",)
+    assert _stashed_plan(ctx_scalar).select_related == ()
+    assert _stashed_plan(ctx_relation).select_related == ("category",)
     assert ext.cache_info().hits == 0
     assert ext.cache_info().misses == 2
     assert ext.cache_info().size == 2
@@ -1072,11 +1123,13 @@ def test_cache_differentiates_same_model_root_fields(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def featured_categories(self) -> QuerySet[Category]:
             return Category.objects.filter(is_private=False)
 
@@ -1092,7 +1145,7 @@ def test_cache_differentiates_same_model_root_fields(
     assert ext.cache_info().hits == 0
     assert ext.cache_info().misses == 2
     assert ext.cache_info().size == 2
-    assert ctx.dst_optimizer_plan.prefetch_related == ()
+    assert _stashed_plan(ctx).prefetch_related == ()
 
 
 def test_cache_key_includes_root_runtime_path_for_same_model_fields() -> None:
@@ -1180,13 +1233,15 @@ def test_mutation_real_execution_suppresses_only_keeps_select_related() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
     @strawberry.type
     class Mutation:
-        @strawberry.mutation(graphql_type=list[ItemType])
+        # basedpyright: strawberry.mutation's no-resolver overload (the decorator factory) returns Any
+        @strawberry.mutation(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def touch_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -1200,7 +1255,7 @@ def test_mutation_real_execution_suppresses_only_keeps_select_related() -> None:
         context_value=mutation_ctx,
     )
     assert mutation_result.errors is None
-    mutation_plan = mutation_ctx.dst_optimizer_plan
+    mutation_plan = _stashed_plan(mutation_ctx)
     assert mutation_plan.only_fields == ()
     assert mutation_plan.select_related == ("category",)
 
@@ -1210,7 +1265,7 @@ def test_mutation_real_execution_suppresses_only_keeps_select_related() -> None:
         context_value=query_ctx,
     )
     assert query_result.errors is None
-    query_plan = query_ctx.dst_optimizer_plan
+    query_plan = _stashed_plan(query_ctx)
     assert query_plan.select_related == ("category",)
     assert query_plan.only_fields != ()
 
@@ -1295,7 +1350,8 @@ def test_cache_clear_makes_the_next_request_build_its_plan_again() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -1336,13 +1392,13 @@ def test_stash_union_skips_restash_when_subset() -> None:
     """
     context = SimpleNamespace()
     DjangoOptimizerExtension._stash_union(context, "sentinels", frozenset({"a", "b"}))
-    first = context.sentinels
+    first = read_attr(context, "sentinels")
 
     DjangoOptimizerExtension._stash_union(context, "sentinels", frozenset({"a"}))
-    assert context.sentinels is first  # subset: no re-stash, same object
+    assert read_attr(context, "sentinels") is first  # subset: no re-stash, same object
 
     DjangoOptimizerExtension._stash_union(context, "sentinels", frozenset({"c"}))
-    assert context.sentinels == frozenset({"a", "b", "c"})
+    assert read_attr(context, "sentinels") == frozenset({"a", "b", "c"})
 
 
 def test_get_or_build_plan_reuses_uncacheable_plan_within_execution(
@@ -1409,7 +1465,8 @@ def test_filter_vars_do_not_affect_cache() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self, limit: int = 10) -> QuerySet[Item]:
             return Item.objects.all()[:limit]
 
@@ -1445,7 +1502,8 @@ def test_cache_separates_operation_names_in_same_document() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -2078,7 +2136,8 @@ def test_root_pagination_variable_one_plan_through_schema() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self, first: int = 10) -> QuerySet[Category]:
             return Category.objects.all()[:first]
 
@@ -2355,7 +2414,8 @@ def test_str_subclass_strictness_arms_the_guard_as_its_text(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def projected_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id").only("name")
 
@@ -2421,11 +2481,11 @@ def test_plan_cache_eviction_survives_concurrent_drain(
     # requests' evictions drain the cache just before the ``drain_at_pop``-th
     # pop of OUR sweep, so that pop hits an empty dict.
     real_popitem = extension._plan_cache.popitem
-    calls = SimpleNamespace(value=0)
+    pops: list[None] = []
 
     def racing_popitem(*, last: bool) -> "tuple[PlanCacheKey, OptimizationPlan]":
-        calls.value += 1
-        if calls.value == drain_at_pop:
+        pops.append(None)
+        if len(pops) == drain_at_pop:
             extension._plan_cache.clear()
         return real_popitem(last=last)
 
@@ -2440,7 +2500,7 @@ def test_plan_cache_eviction_survives_concurrent_drain(
 
     plan = extension._get_or_build_plan([], Category, _info_for("rootnew"), None)
     assert plan is new_plan
-    assert calls.value == 4
+    assert len(pops) == 4
 
 
 @pytest.mark.django_db
@@ -2462,7 +2522,8 @@ def test_strictness_warn_logs_unplanned_relation(caplog: pytest.LogCaptureFixtur
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> list[Item]:
             return list(Item.objects.all()[:1])
 
@@ -2494,7 +2555,8 @@ def test_strictness_off_does_not_stash_sentinel() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -2527,7 +2589,8 @@ def test_strictness_warn_stashes_sentinel() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -2543,7 +2606,7 @@ def test_strictness_warn_stashes_sentinel() -> None:
     planned = getattr(ctx, "dst_optimizer_planned", None)
     assert planned is not None
     assert "ItemType.category@allItems.category" in planned
-    assert ctx.dst_optimizer_strictness == "warn"
+    assert read_attr(ctx, DST_OPTIMIZER_STRICTNESS) == "warn"
 
 
 @pytest.mark.django_db
@@ -2572,7 +2635,8 @@ def test_strictness_with_empty_plan_does_not_raise_or_warn(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -2591,8 +2655,8 @@ def test_strictness_with_empty_plan_does_not_raise_or_warn(
     )
     # Strictness sentinels are still stashed (the plan is published before the
     # is_empty short-circuit); the planned set is just empty.
-    assert ctx.dst_optimizer_strictness == mode
-    assert ctx.dst_optimizer_planned == set()
+    assert read_attr(ctx, DST_OPTIMIZER_STRICTNESS) == mode
+    assert _stashed_keys(ctx, DST_OPTIMIZER_PLANNED) == set()
 
 
 @pytest.mark.django_db
@@ -2616,7 +2680,8 @@ def test_strictness_includes_fk_id_elision_in_planned_paths(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -2631,8 +2696,10 @@ def test_strictness_includes_fk_id_elision_in_planned_paths(
         context_value=ctx,
     )
     assert result.errors is None
-    assert "ItemType.category@allItems.category" in ctx.dst_optimizer_planned
-    assert ctx.dst_optimizer_fk_id_elisions == {"ItemType.category@allItems.category"}
+    assert "ItemType.category@allItems.category" in _stashed_keys(ctx, DST_OPTIMIZER_PLANNED)
+    assert _stashed_keys(ctx, DST_OPTIMIZER_FK_ID_ELISIONS) == {
+        "ItemType.category@allItems.category",
+    }
     assert not any("Potential N+1" in r.message for r in caplog.records)
 
 
@@ -2665,7 +2732,7 @@ def test_will_lazy_load_false_for_real_reverse_one_to_one_in_fields_cache() -> N
     """B3: real reverse OneToOne relations also cache in _state.fields_cache."""
     patron = Patron.objects.create(name="Ada")
     MembershipCard.objects.create(patron=patron, barcode="1234")
-    cached_patron = Patron.objects.select_related("card").get(pk=patron.pk)
+    cached_patron = Patron.objects.select_related("card").get(pk=saved_pk(patron))
 
     assert "card" not in cached_patron.__dict__
     assert "card" in cached_patron._state.fields_cache
@@ -2706,7 +2773,8 @@ def test_strictness_raise_accepts_unplanned_cached_forward_fk() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> list[Item]:
             return list(Item.objects.select_related("category").all()[:1])
 
@@ -2746,7 +2814,8 @@ def test_strictness_raise_accepts_unplanned_cached_reverse_one_to_one() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[PatronType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[PatronType])  # pyright: ignore[reportAny]
         def all_patrons(self) -> list[Patron]:
             return list(Patron.objects.select_related("card").all())
 
@@ -2788,7 +2857,8 @@ def test_strictness_warn_planned_alias_no_warning(caplog: pytest.LogCaptureFixtu
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -2835,7 +2905,8 @@ def test_optimizer_strictness_accepts_nested_planned_relation() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -2848,7 +2919,10 @@ def test_optimizer_strictness_accepts_nested_planned_relation() -> None:
         context_value=ctx,
     )
     assert result.errors is None
-    assert "ItemType.entries@allCategories.items.entries" in ctx.dst_optimizer_planned
+    assert "ItemType.entries@allCategories.items.entries" in _stashed_keys(
+        ctx,
+        DST_OPTIMIZER_PLANNED,
+    )
 
 
 @pytest.mark.django_db
@@ -2891,7 +2965,8 @@ def test_optimizer_nested_prefetch_with_custom_get_queryset_marks_uncacheable() 
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -3247,7 +3322,8 @@ def test_plan_stashed_with_select_related() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -3260,8 +3336,7 @@ def test_plan_stashed_with_select_related() -> None:
         context_value=ctx,
     )
     assert result.errors is None
-    plan = getattr(ctx, "dst_optimizer_plan", None)
-    assert plan is not None
+    plan = _stashed_plan(ctx)
     assert "category" in plan.select_related
 
 
@@ -3292,7 +3367,8 @@ def test_plan_stashed_with_prefetch_related() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -3305,9 +3381,10 @@ def test_plan_stashed_with_prefetch_related() -> None:
         context_value=ctx,
     )
     assert result.errors is None
-    plan = getattr(ctx, "dst_optimizer_plan", None)
-    assert plan is not None
-    assert [lookup.prefetch_to for lookup in plan.prefetch_related] == ["items"]
+    plan = _stashed_plan(ctx)
+    assert [
+        require_instance(lookup, Prefetch).prefetch_to for lookup in plan.prefetch_related
+    ] == ["items"]
 
 
 def test_publish_plan_to_context_reuses_finalized_metadata() -> None:
@@ -3322,10 +3399,10 @@ def test_publish_plan_to_context_reuses_finalized_metadata() -> None:
 
     ext._publish_plan_to_context(plan, make_info(context=ctx)._raw_info)
 
-    assert ctx.dst_optimizer_plan is plan
-    assert ctx.dst_optimizer_fk_id_elisions is plan.finalized_fk_id_elisions
-    assert ctx.dst_optimizer_planned is plan.finalized_planned_resolver_keys
-    assert ctx.dst_optimizer_lookup_paths is plan.finalized_lookup_paths
+    assert _stashed_plan(ctx) is plan
+    assert _stashed_keys(ctx, DST_OPTIMIZER_FK_ID_ELISIONS) is plan.finalized_fk_id_elisions
+    assert _stashed_keys(ctx, DST_OPTIMIZER_PLANNED) is plan.finalized_planned_resolver_keys
+    assert _stashed_keys(ctx, DST_OPTIMIZER_LOOKUP_PATHS) is plan.finalized_lookup_paths
 
 
 def test_publish_plan_to_context_rebuilds_metadata_for_unfinalized_plan() -> None:
@@ -3347,9 +3424,13 @@ def test_publish_plan_to_context_rebuilds_metadata_for_unfinalized_plan() -> Non
 
     ext._publish_plan_to_context(plan, make_info(context=ctx)._raw_info)
 
-    assert ctx.dst_optimizer_fk_id_elisions == frozenset({"ItemType.category@allItems.category"})
-    assert ctx.dst_optimizer_planned == frozenset({"ItemType.category@allItems.category"})
-    assert ctx.dst_optimizer_lookup_paths == frozenset({"category"})
+    assert _stashed_keys(ctx, DST_OPTIMIZER_FK_ID_ELISIONS) == frozenset(
+        {"ItemType.category@allItems.category"},
+    )
+    assert _stashed_keys(ctx, DST_OPTIMIZER_PLANNED) == frozenset(
+        {"ItemType.category@allItems.category"},
+    )
+    assert _stashed_keys(ctx, DST_OPTIMIZER_LOOKUP_PATHS) == frozenset({"category"})
 
 
 def test_named_children_skips_excluded_and_recurses_through_fragments() -> None:
@@ -3383,8 +3464,8 @@ def test_node_children_with_runtime_prefix_skips_excluded_and_clones_fragments()
     # ``skipped`` excluded; fragment cloned (carries its type condition); plain
     # cloned carrying the connection-aware runtime prefix for the walker.
     assert len(result) == 2
-    assert result[0].type_condition == "ItemNode"
-    assert result[1]._optimizer_runtime_prefixes == [("items", "edges", "node")]
+    assert read_attr(result[0], "type_condition") == "ItemNode"
+    assert read_attr(result[1], "_optimizer_runtime_prefixes") == [("items", "edges", "node")]
 
 
 def test_plan_stashed_on_dict_context() -> None:
@@ -3480,7 +3561,7 @@ def test_plan_stashed_on_object_context_unit() -> None:
 
     plan = OptimizationPlan(prefetch_related=["items"])
     _stash_on_context(ctx, "dst_optimizer_plan", plan)
-    assert ctx.dst_optimizer_plan is plan
+    assert _stashed_plan(ctx) is plan
 
 
 def test_stash_on_read_only_mapping_is_silent() -> None:
@@ -3786,16 +3867,19 @@ async def test_shared_singleton_answers_each_operation_with_its_own_context() ->
     @strawberry.type
     class Query:
         @strawberry.field
-        async def probe(self, info: strawberry.Info) -> str:
+        async def probe(self, info: strawberry.Info[object, object]) -> str:
             nonlocal started
             started += 1
             if started == 2:
                 overlapping.set()
             await asyncio.wait_for(overlapping.wait(), timeout=5)
-            name = info.context["name"]
+            context = info.context
+            assert is_object_dict(context)
+            name = context["name"]
+            assert isinstance(name, str)
             execution_context = extension.execution_context
             assert execution_context is not None
-            seen[name] = execution_context.context
+            seen[name] = read_attr(execution_context, "context")
             return name
 
     schema = DjangoSchema(query=Query, extensions=[lambda: extension])
@@ -3900,12 +3984,13 @@ def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state()
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
         @strawberry.field
-        def nest(self, info: strawberry.Info) -> str:
+        def nest(self, info: strawberry.Info[object, object]) -> str:
             """Run a whole inner operation on this request's own context object."""
             before = extension.execution_context
             published_before = _published_optimizer_keys(info.context)
@@ -3935,7 +4020,7 @@ def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state()
     assert after.query is not None
     assert after.query.startswith("{ nest")
     assert outer.data is not None
-    assert all(item["category"]["name"] for item in outer.data["allItems"])
+    assert all(_at(item, "category", "name") for item in _list_at(outer.data, "allItems"))
 
     # The request context object is the OUTER operation's introspection medium:
     # the inner execution neither erased what was on it nor published its own
@@ -3952,7 +4037,7 @@ def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state()
     )
     assert fresh.errors is None
     assert fresh.data is not None
-    assert all(item["category"]["name"] for item in fresh.data["allItems"])
+    assert all(_at(item, "category", "name") for item in _list_at(fresh.data, "allItems"))
 
 
 @pytest.mark.django_db
@@ -3992,7 +4077,8 @@ def test_an_operation_started_from_a_consumer_teardown_leaves_the_request_its_pl
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -4006,7 +4092,7 @@ def test_an_operation_started_from_a_consumer_teardown_leaves_the_request_its_pl
             yield
             if seen:
                 return
-            context = self.execution_context.context
+            context = read_attr(self.execution_context, "context")
             state = extension._operation_state()
             seen["published"] = [_published_optimizer_keys(context)]
             assert state is not None
@@ -4032,7 +4118,7 @@ def test_an_operation_started_from_a_consumer_teardown_leaves_the_request_its_pl
 
     assert outer.errors is None, outer.errors
     assert outer.data is not None
-    assert all(item["category"]["name"] for item in outer.data["allItems"])
+    assert all(_at(item, "category", "name") for item in _list_at(outer.data, "allItems"))
     published_before, published_after = seen["published"]
     stashes_before, stashes_after = seen["stashes"]
     assert published_after == published_before
@@ -4064,7 +4150,8 @@ def test_on_execute_clears_reused_context_fk_elisions_before_full_selection() ->
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -4078,16 +4165,22 @@ def test_on_execute_clears_reused_context_fk_elisions_before_full_selection() ->
         context_value=shared,
     )
     assert r1.errors is None
-    assert "ItemType.category@allItems.category" in shared.dst_optimizer_fk_id_elisions
+    assert "ItemType.category@allItems.category" in _stashed_keys(
+        shared,
+        DST_OPTIMIZER_FK_ID_ELISIONS,
+    )
 
     r2 = schema.execute_sync(
         "{ allItems { name category { id name } } }",
         context_value=shared,
     )
     assert r2.errors is None
-    assert "ItemType.category@allItems.category" not in shared.dst_optimizer_fk_id_elisions
+    assert "ItemType.category@allItems.category" not in _stashed_keys(
+        shared,
+        DST_OPTIMIZER_FK_ID_ELISIONS,
+    )
     assert r2.data is not None
-    names = [it["category"]["name"] for it in r2.data["allItems"]]
+    names = [_at(it, "category", "name") for it in _list_at(r2.data, "allItems")]
     assert all(n for n in names)
 
 
@@ -4110,7 +4203,8 @@ def test_on_execute_clears_reused_context_planned_keys_across_executions() -> No
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -4124,7 +4218,7 @@ def test_on_execute_clears_reused_context_planned_keys_across_executions() -> No
         context_value=shared,
     )
     assert r1.errors is None
-    assert "ItemType.category@allItems.category" in shared.dst_optimizer_planned
+    assert "ItemType.category@allItems.category" in _stashed_keys(shared, DST_OPTIMIZER_PLANNED)
 
     r2 = schema.execute_sync(
         "{ allItems { name } }",
@@ -4147,7 +4241,8 @@ def test_empty_plan_still_stashed() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -4157,8 +4252,7 @@ def test_empty_plan_still_stashed() -> None:
     ctx = SimpleNamespace()
     result = schema.execute_sync("{ allCategories { name } }", context_value=ctx)
     assert result.errors is None
-    plan = getattr(ctx, "dst_optimizer_plan", None)
-    assert plan is not None
+    plan = _stashed_plan(ctx)
     assert plan.only_fields == ("name",)
     assert plan.select_related == ()
     assert plan.prefetch_related == ()
@@ -4186,7 +4280,8 @@ def test_optimizer_applies_only_for_selected_scalars() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -4199,7 +4294,7 @@ def test_optimizer_applies_only_for_selected_scalars() -> None:
         context_value=ctx,
     )
     assert result.errors is None
-    plan = ctx.dst_optimizer_plan
+    plan = _stashed_plan(ctx)
     assert plan.only_fields == ("name",)
     assert plan.select_related == ()
     assert plan.prefetch_related == ()
@@ -4249,7 +4344,8 @@ def test_optimizer_downgrades_select_related_for_custom_get_queryset() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -4263,7 +4359,7 @@ def test_optimizer_downgrades_select_related_for_custom_get_queryset() -> None:
     )
     assert result.errors is None
     assert calls
-    plan = ctx.dst_optimizer_plan
+    plan = _stashed_plan(ctx)
     assert plan.select_related == ()
     assert "category_id" in plan.only_fields
     assert "category__name" not in plan.only_fields
@@ -4307,7 +4403,8 @@ def test_optimizer_does_not_cache_custom_get_queryset_prefetch_plans() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -4374,7 +4471,8 @@ def test_b8_consumer_select_related_does_not_mutate_cached_plan() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.select_related("category")
 
@@ -4391,7 +4489,7 @@ def test_b8_consumer_select_related_does_not_mutate_cached_plan() -> None:
         context_value=ctx1,
     )
     assert result1.errors is None
-    assert ctx1.dst_optimizer_plan.select_related == ()
+    assert _stashed_plan(ctx1).select_related == ()
     assert len(ext._plan_cache) == 1
     cached_plan = next(iter(ext._plan_cache.values()))
     assert cached_plan.select_related == ("category",)
@@ -4406,7 +4504,7 @@ def test_b8_consumer_select_related_does_not_mutate_cached_plan() -> None:
         context_value=ctx2,
     )
     assert result2.errors is None
-    assert ctx2.dst_optimizer_plan.select_related == ()
+    assert _stashed_plan(ctx2).select_related == ()
     assert next(iter(ext._plan_cache.values())) is cached_plan
     assert cached_plan.select_related == ("category",)
     assert ext.cache_info().hits == 1
@@ -4441,7 +4539,8 @@ def test_b8_consumer_prefetch_object_suppresses_optimizer_entry() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.prefetch_related(consumer_pf)
 
@@ -4457,7 +4556,7 @@ def test_b8_consumer_prefetch_object_suppresses_optimizer_entry() -> None:
     # B5 stashes the POST-diff plan (publish runs after B8 reconciliation) so
     # introspection matches what was actually applied: consumer won, optimizer
     # ``items`` Prefetch is gone from the stashed directives.
-    plan = ctx.dst_optimizer_plan
+    plan = _stashed_plan(ctx)
     assert [getattr(entry, "prefetch_to", entry) for entry in plan.prefetch_related] == []
     # The queryset that came out of ``_optimize`` carries exactly the
     # consumer's ``Prefetch`` - the optimizer entry was diffed away.
@@ -4513,7 +4612,8 @@ def test_b8_consumer_plain_string_upgraded_to_optimizer_prefetch() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def all_categories(self) -> QuerySet[Category]:
             return Category.objects.prefetch_related("items")
 
@@ -4641,11 +4741,13 @@ def test_plan_cache_keys_distinguish_primary_and_secondary_returns_for_same_mode
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
-        @strawberry.field(graphql_type=list[AdminItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[AdminItemType])  # pyright: ignore[reportAny]
         def all_admin_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -4891,7 +4993,8 @@ def test_optimizer_helper_extraction_no_regression() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -4903,7 +5006,7 @@ def test_optimizer_helper_extraction_no_regression() -> None:
     assert result.errors is None
     # The plan was built and applied (the forward FK is select_related-ed) - the
     # middleware behavior is unchanged by the extraction.
-    assert ctx.dst_optimizer_plan.select_related == ("category",)
+    assert _stashed_plan(ctx).select_related == ("category",)
     # ``_optimize`` delegated to ``apply_to`` with the resolved (origin, model),
     # NOT inferred inside the helper.
     assert delegations == [(ItemType, Item)]
@@ -4937,7 +5040,8 @@ def test_apply_connection_optimization_uses_active_optimizer_cache() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self, info: strawberry.Info[object, object]) -> QuerySet[Item]:
             # Inside a resolver the ``on_execute`` lifecycle has published the
             # active extension; the helper must discover it (not build a
@@ -4984,16 +5088,16 @@ def test_publish_plan_to_context_unions_parent_and_nested_sentinel_sets() -> Non
     ext._publish_plan_to_context(nested_plan, make_info(context=ctx)._raw_info)
 
     # The parent's resolver key + FK-id elision survive the nested publish.
-    assert ctx.dst_optimizer_planned == frozenset(
+    assert _stashed_keys(ctx, DST_OPTIMIZER_PLANNED) == frozenset(
         {"ItemType.category@allItems.category", "EntryType.property@allItems.entries.property"},
     )
-    assert ctx.dst_optimizer_fk_id_elisions == frozenset(
+    assert _stashed_keys(ctx, DST_OPTIMIZER_FK_ID_ELISIONS) == frozenset(
         {"ItemType.category@allItems.category", "EntryType.property@allItems.entries.property"},
     )
     # Lookup paths union too (parent "category" + nested "entries").
-    assert {"category", "entries"} <= ctx.dst_optimizer_lookup_paths
+    assert {"category", "entries"} <= _stashed_keys(ctx, DST_OPTIMIZER_LOOKUP_PATHS)
     # DST_OPTIMIZER_PLAN stays last-wins introspection data (not unioned).
-    assert ctx.dst_optimizer_plan is nested_plan
+    assert _stashed_plan(ctx) is nested_plan
 
 
 def test_publish_plan_to_context_union_tolerates_non_set_existing_stash() -> None:
@@ -5131,15 +5235,15 @@ def test_cascading_target_downgrades_join_to_prefetch() -> None:
         def get_queryset(
             cls,
             queryset: QuerySet[Category],
-            info: strawberry.Info,
+            info: strawberry.Info[object, object],
             **kwargs: object,
         ) -> QuerySet[Category]:
-            user = getattr(info.context, "user", None)
+            user = read_attr(info.context, "user", None)
             seen_users.append(user)
             # Cascade AND narrow by a user-derived predicate so the live request
             # user reaches the prefetch child queryset's compiled SQL.
             assert user is not None
-            queryset = queryset.filter(name=user.name)
+            queryset = queryset.filter(name=read_attr(user, "name"))
             return apply_cascade_permissions(cls, queryset, info)
 
     assert registry.get(Category) is CategoryType
@@ -5153,7 +5257,8 @@ def test_cascading_target_downgrades_join_to_prefetch() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -5172,7 +5277,7 @@ def test_cascading_target_downgrades_join_to_prefetch() -> None:
     )
     assert result.errors is None
 
-    plan = ctx.dst_optimizer_plan
+    plan = _stashed_plan(ctx)
     assert plan.select_related == ()
     assert plan.cacheable is False
     assert ext.cache_info().size == 0
@@ -5185,7 +5290,9 @@ def test_cascading_target_downgrades_join_to_prefetch() -> None:
     assert seen_users[0] is request_user
     # ...and that user's narrowing is baked into the prefetch child queryset's SQL
     # (proving ``_build_child_queryset`` threaded the live ``info``, not a default).
-    child_sql = str(plan.prefetch_related[0].queryset.query)
+    child_queryset = plan.prefetch_related[0].queryset
+    assert child_queryset is not None
+    child_sql = str(child_queryset.query)
     assert "request_user" in child_sql
 
 
@@ -5236,7 +5343,8 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 
     @strawberry.type
     class CascadingQuery:
-        @strawberry.field(graphql_type=list[CascadingItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CascadingItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -5251,7 +5359,7 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
     assert cascading_schema.execute_sync(query, context_value=ctx_a).errors is None
     assert cascading_schema.execute_sync(query, context_value=ctx_b).errors is None
 
-    assert ctx_a.dst_optimizer_plan.cacheable is False
+    assert _stashed_plan(ctx_a).cacheable is False
     assert cascading_ext.cache_info().hits == 0
     assert cascading_ext.cache_info().misses == 2
     assert cascading_ext.cache_info().size == 0
@@ -5275,7 +5383,8 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 
     @strawberry.type
     class PlainQuery:
-        @strawberry.field(graphql_type=list[PlainItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[PlainItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -5328,11 +5437,13 @@ def test_consumer_projection_widens_to_the_selection_and_keeps_the_join() -> Non
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def projected_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id").only("name")
 
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def planned_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id")
 
@@ -5392,7 +5503,8 @@ def test_mutation_over_a_consumer_projection_prunes_the_join_it_cannot_traverse(
 
     @strawberry.type
     class Mutation:
-        @strawberry.mutation(graphql_type=list[ItemType])
+        # basedpyright: strawberry.mutation's no-resolver overload (the decorator factory) returns Any
+        @strawberry.mutation(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def touch_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id").only("name")
 
@@ -5412,7 +5524,7 @@ def test_mutation_over_a_consumer_projection_prunes_the_join_it_cannot_traverse(
         for item in Item.objects.select_related("category").order_by("id")
     ]
     assert result.data == {"touchItems": expected}
-    plan = context.dst_optimizer_plan
+    plan = _stashed_plan(context)
     assert plan.only_fields == ()
     assert plan.select_related == ()
     assert plan.planned_resolver_keys == ()
@@ -5451,13 +5563,15 @@ def test_b8_consumer_wins_prefetch_nested_keys_stay_strictness_visible() -> None
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def objs(self) -> QuerySet[Category]:
             return Category.objects.all().prefetch_related(
                 Prefetch("items", queryset=Item.objects.filter(is_private=False)),
             )
 
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def planned_objs(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -5510,7 +5624,8 @@ def test_b8_consumer_wins_prefetch_preserves_nested_fk_id_elision() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def objs(self) -> QuerySet[Category]:
             return Category.objects.all().prefetch_related(
                 Prefetch("items", queryset=Item.objects.filter(is_private=False)),
@@ -5528,7 +5643,11 @@ def test_b8_consumer_wins_prefetch_preserves_nested_fk_id_elision() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    ids = [item["category"]["id"] for obj in result.data["objs"] for item in obj["items"]]
+    ids = [
+        _at(item, "category", "id")
+        for obj in _list_at(result.data, "objs")
+        for item in _list_at(obj, "items")
+    ]
     assert all(cid for cid in ids)
 
 
@@ -5565,7 +5684,8 @@ def test_strictness_reaches_an_execution_with_no_stashable_context() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def projected_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id").only("name")
 
@@ -5616,7 +5736,8 @@ def test_strictness_flags_a_relation_under_an_unplannable_root() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         def categories(self) -> list[Category]:
             return list(Category.objects.order_by("id"))
 
@@ -5669,7 +5790,8 @@ async def test_strictness_flags_an_unplanned_relation_before_the_async_sync_gate
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
         async def categories(self) -> list[Category]:
             return [obj async for obj in Category.objects.order_by("id")]
 
@@ -5890,7 +6012,8 @@ def test_an_operation_in_a_context_that_outlived_a_request_publishes_as_its_own(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             """Copy this operation's context, as a resolver starting a task does."""
             seen.setdefault("copied", contextvars.copy_context())
@@ -5931,7 +6054,7 @@ def test_an_operation_in_a_context_that_outlived_a_request_publishes_as_its_own(
 # =============================================================================
 
 
-class _ConsumerInfo(strawberry.Info):
+class _ConsumerInfo(strawberry.Info[object, object]):
     """A schema ``info_class``: Strawberry hands every resolver this subclass."""
 
 

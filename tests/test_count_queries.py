@@ -10,18 +10,55 @@ script in a workspace copy. There is no live sibling in
 reached by a query.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from types import ModuleType
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import pytest
 
 from scripts import _bench_common
 
+if TYPE_CHECKING:
+    from scripts.count_queries import Operation
+
+
+@runtime_checkable
+class _CountQueries(Protocol):
+    """The part of ``scripts/count_queries.py`` these tests read.
+
+    ``compare_reports`` takes the decoded JSON reports, which these tests build as plain
+    report dicts.
+    """
+
+    BUILTIN_OPERATIONS: "dict[str, Operation]"
+
+    def classify_counts(self, counts: list[int], /) -> str: ...
+
+    def rows_grew(self, root_rows: list[int | None], /) -> bool: ...
+
+    def parse_cardinalities(self, raw: str, /) -> list[int]: ...
+
+    def compare_reports(
+        self,
+        baseline: Mapping[str, object],
+        current: Mapping[str, object],
+        /,
+    ) -> list[str]: ...
+
+    def effective_operation_name(
+        self,
+        document: str,
+        operation_name: str | None,
+        /,
+    ) -> str | None: ...
+
 
 @pytest.fixture
-def count_queries(scripts_module: Callable[[str], ModuleType]) -> ModuleType:
+def count_queries(scripts_module: Callable[[str], ModuleType]) -> _CountQueries:
     """Import ``scripts/count_queries.py`` the way it runs: scripts dir on ``sys.path``."""
-    return scripts_module("count_queries")
+    module = scripts_module("count_queries")
+    assert isinstance(module, _CountQueries)
+    return module
 
 
 @pytest.mark.parametrize(
@@ -37,7 +74,7 @@ def count_queries(scripts_module: Callable[[str], ModuleType]) -> ModuleType:
     ],
 )
 def test_counts_classify_by_shape_across_cardinalities(
-    count_queries: ModuleType,
+    count_queries: _CountQueries,
     counts: list[int],
     verdict: str,
 ) -> None:
@@ -45,7 +82,7 @@ def test_counts_classify_by_shape_across_cardinalities(
     assert count_queries.classify_counts(counts) == verdict
 
 
-def test_one_count_has_no_verdict(count_queries: ModuleType) -> None:
+def test_one_count_has_no_verdict(count_queries: _CountQueries) -> None:
     """A single cardinality cannot show a shape, so classification refuses."""
     with pytest.raises(ValueError, match="two or more"):
         count_queries.classify_counts([4])
@@ -61,7 +98,7 @@ def test_one_count_has_no_verdict(count_queries: ModuleType) -> None:
     ],
 )
 def test_verdict_is_evidence_only_when_root_rows_grew(
-    count_queries: ModuleType,
+    count_queries: _CountQueries,
     root_rows: list[int | None],
     *,
     grew: bool,
@@ -70,7 +107,9 @@ def test_verdict_is_evidence_only_when_root_rows_grew(
     assert count_queries.rows_grew(root_rows) is grew
 
 
-def test_cardinalities_parse_sorted_and_refuse_zero_or_repeats(count_queries: ModuleType) -> None:
+def test_cardinalities_parse_sorted_and_refuse_zero_or_repeats(
+    count_queries: _CountQueries,
+) -> None:
     """Cells run ascending; 0 fakes a slope and a repeat measures nothing new."""
     assert count_queries.parse_cardinalities("30,2,10") == [2, 10, 30]
     with pytest.raises(ValueError, match="positive"):
@@ -106,7 +145,7 @@ def _report(
 
 
 def test_compare_prints_per_cardinality_deltas_and_both_verdicts(
-    count_queries: ModuleType,
+    count_queries: _CountQueries,
 ) -> None:
     """Each cardinality shows before, after and signed delta, then the verdict change."""
     before = _report([4, 4, 4])
@@ -132,7 +171,7 @@ def test_compare_prints_per_cardinality_deltas_and_both_verdicts(
     ],
 )
 def test_compare_refuses_a_different_operation(
-    count_queries: ModuleType,
+    count_queries: _CountQueries,
     before: tuple[str, str | None],
     after: tuple[str, str | None],
     key: str,
@@ -162,7 +201,7 @@ def test_compare_refuses_a_different_operation(
     ],
 )
 def test_effective_operation_name_is_the_one_executed(
-    count_queries: ModuleType,
+    count_queries: _CountQueries,
     document: str,
     operation_name: str | None,
     effective: str | None,
@@ -171,7 +210,7 @@ def test_effective_operation_name_is_the_one_executed(
     assert count_queries.effective_operation_name(document, operation_name) == effective
 
 
-def test_builtin_operations_name_a_known_seeder(count_queries: ModuleType) -> None:
+def test_builtin_operations_name_a_known_seeder(count_queries: _CountQueries) -> None:
     """Every built-in operation seeds rows its root field reads."""
     assert {op.seeder for op in count_queries.BUILTIN_OPERATIONS.values()} <= {
         "products",

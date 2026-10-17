@@ -74,7 +74,20 @@ from django_strawberry_framework.optimizer.lateral_fetch import (
 )
 from django_strawberry_framework.optimizer.nested_fetch import NestedConnectionRequest
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
-from tests._idioms import is_object_dict, is_object_list, run_capturing
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    instance_dict,
+    is_list_or_tuple,
+    read_attr,
+)
+from tests._idioms import (
+    is_object_dict,
+    is_object_list,
+    json_at,
+    json_list,
+    run_capturing,
+    saved_pk,
+)
 
 pytestmark = [
     pytest.mark.pg,
@@ -91,11 +104,43 @@ def _prefetched_rows(instance: Model, to_attr: str, model: type[_RowT]) -> list[
 
     The model class declares no such attribute; Django's prefetch writes it onto the instance.
     """
-    rows: object = vars(instance)[to_attr]
+    rows = instance_dict(instance)[to_attr]
     assert is_object_list(rows)
     typed = [row for row in rows if isinstance(row, model)]
     assert len(typed) == len(rows)
     return typed
+
+
+def _connections_by_code(data: object) -> dict[object, object]:
+    """Each root shelf's ``booksConnection`` payload, keyed by the shelf's ``code``."""
+    return {
+        json_at(shelf, "code"): json_at(shelf, "booksConnection")
+        for shelf in json_list(data, "shelves")
+    }
+
+
+def _count(value: object, *path: str) -> int:
+    """The integer count ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    assert type(found) is int, found
+    return found
+
+
+def _first_column_texts(cursor: object) -> list[str]:
+    """The first column of every row the cursor's last statement returned, each a ``str``.
+
+    Django's ``CursorWrapper`` delegates ``fetchall`` to the driver cursor through
+    ``__getattr__``, so the stub types the read ``Any``; each row is checked here instead.
+    """
+    rows = call_method(cursor, "fetchall")
+    assert is_object_list(rows), rows
+    texts: list[str] = []
+    for row in rows:
+        assert is_list_or_tuple(row), row
+        first = row[0]
+        assert isinstance(first, str), first
+        texts.append(first)
+    return texts
 
 
 @runtime_checkable
@@ -291,7 +336,7 @@ def test_reverse_fk_parity_across_pagination_shapes(
         count_free=count_free,
     )
     assert data is not None
-    assert len(data["shelves"]) == 3  # including the childless shelf C.
+    assert len(json_list(data, "shelves")) == 3  # including the childless shelf C.
 
 
 @pytest.mark.parametrize(
@@ -340,13 +385,16 @@ def test_next_page_probe_parity_is_count_free() -> None:
     data, captured = _assert_parity(query, count_free=True)
     assert "COUNT(" not in captured[1]["sql"].upper()
     assert data is not None
-    assert len(data["shelves"]) == 3  # including the childless shelf C.
-    by_code = {shelf["code"]: shelf["booksConnection"] for shelf in data["shelves"]}
+    assert len(json_list(data, "shelves")) == 3  # including the childless shelf C.
+    by_code = {
+        json_at(shelf, "code"): json_at(shelf, "booksConnection")
+        for shelf in json_list(data, "shelves")
+    }
     # Shelf C (no books) resolves as an EMPTY page - empty edges + no next page -
     # not a missing sentinel; shelf A (5 books) reports a next page from the probe.
-    assert by_code["C"]["edges"] == []
-    assert by_code["C"]["pageInfo"]["hasNextPage"] is False
-    assert by_code["A"]["pageInfo"]["hasNextPage"] is True
+    assert json_at(by_code, "C", "edges") == []
+    assert json_at(by_code, "C", "pageInfo", "hasNextPage") is False
+    assert json_at(by_code, "A", "pageInfo", "hasNextPage") is True
 
 
 def test_next_page_probe_parity_childless_no_edges_shape() -> None:
@@ -368,8 +416,8 @@ def test_next_page_probe_parity_childless_no_edges_shape() -> None:
     data, _ = _assert_parity(query, count_free=True)
     assert data is not None
     flags = {
-        shelf["code"]: shelf["booksConnection"]["pageInfo"]["hasNextPage"]
-        for shelf in data["shelves"]
+        json_at(shelf, "code"): json_at(shelf, "booksConnection", "pageInfo", "hasNextPage")
+        for shelf in json_list(data, "shelves")
     }
     assert flags["C"] is False
     assert flags["A"] is True
@@ -397,8 +445,8 @@ def test_reverse_m2m_parity_joins_the_through_table_once() -> None:
     # Overlap sanity: every genre relates to four books (5 two-genre shelf-A
     # books + the two-genre loner distribute evenly); each page shows 2 of 4.
     assert data is not None
-    by_name = {genre["id"]: genre for genre in data["genres"]}
-    counts = sorted(genre["booksConnection"]["totalCount"] for genre in by_name.values())
+    by_name = {json_at(genre, "id"): genre for genre in json_list(data, "genres")}
+    counts = sorted(_count(genre, "booksConnection", "totalCount") for genre in by_name.values())
     assert counts == [4, 4, 4]
 
 
@@ -445,15 +493,15 @@ def test_divergent_alias_parity_one_lateral_per_response_key() -> None:
     executed_sql = " ".join(entry["sql"] for entry in captured)
     assert "COUNT(" not in executed_sql.upper()
     assert data is not None
-    by_code = {shelf["code"]: shelf for shelf in data["shelves"]}
+    by_code = {json_at(shelf, "code"): shelf for shelf in json_list(data, "shelves")}
     # Shelf A (5 books): each alias serves ITS OWN page bound and probe flag.
-    assert len(by_code["A"]["a"]["edges"]) == 2
-    assert by_code["A"]["a"]["pageInfo"]["hasNextPage"] is True
-    assert len(by_code["A"]["b"]["edges"]) == 5
-    assert by_code["A"]["b"]["pageInfo"]["hasNextPage"] is False
+    assert len(json_list(by_code, "A", "a", "edges")) == 2
+    assert json_at(by_code, "A", "a", "pageInfo", "hasNextPage") is True
+    assert len(json_list(by_code, "A", "b", "edges")) == 5
+    assert json_at(by_code, "A", "b", "pageInfo", "hasNextPage") is False
     # Childless shelf C: an empty page for BOTH per-key windows.
-    assert by_code["C"]["a"]["edges"] == []
-    assert by_code["C"]["b"]["pageInfo"]["hasNextPage"] is False
+    assert json_at(by_code, "C", "a", "edges") == []
+    assert json_at(by_code, "C", "b", "pageInfo", "hasNextPage") is False
 
 
 def test_divergent_alias_total_count_sibling_keeps_count_on_both_laterals() -> None:
@@ -481,9 +529,9 @@ def test_divergent_alias_total_count_sibling_keeps_count_on_both_laterals() -> N
     for window_sql in window_sqls:
         assert "_dst_total_count" in window_sql
     assert data is not None
-    by_code = {shelf["code"]: shelf for shelf in data["shelves"]}
-    assert by_code["A"]["a"]["pageInfo"]["hasNextPage"] is True
-    assert by_code["A"]["b"]["totalCount"] == 5
+    by_code = {json_at(shelf, "code"): shelf for shelf in json_list(data, "shelves")}
+    assert json_at(by_code, "A", "a", "pageInfo", "hasNextPage") is True
+    assert json_at(by_code, "A", "b", "totalCount") == 5
 
 
 def test_last_zero_serves_the_first_zero_page_under_both_strategies() -> None:
@@ -515,7 +563,7 @@ def test_stray_executor_thread_connections_are_tracked_for_session_close() -> No
 
     # The root conftest's Postgres wrapper plants the registry on the backend module at run
     # time; the module declares no such attribute, so it is read out of the module namespace.
-    registry_list: object = vars(postgres_base)["_dst_stray_connection_registry"]
+    registry_list = instance_dict(postgres_base)["_dst_stray_connection_registry"]
     assert is_object_list(registry_list)
     before = len(registry_list)
     failures: list[BaseException] = []
@@ -629,10 +677,10 @@ def test_visibility_scope_takes_the_lateral_path_with_parity() -> None:
     assert "CROSS JOIN LATERAL" in executed_sql
     assert "circulation_status" in executed_sql  # the scope rode into the branch.
     assert lateral.data is not None
-    by_code = {shelf["code"]: shelf["booksConnection"] for shelf in lateral.data["shelves"]}
+    by_code = _connections_by_code(lateral.data)
     # Anonymous sees only the four available books on shelf A (two repair hidden).
-    assert by_code["A"]["totalCount"] == 4
-    assert by_code["A"]["pageInfo"]["hasNextPage"] is True
+    assert json_at(by_code, "A", "totalCount") == 4
+    assert json_at(by_code, "A", "pageInfo", "hasNextPage") is True
 
 
 def test_visibility_scope_lateral_applies_the_filter_exactly_once() -> None:
@@ -651,15 +699,15 @@ def test_visibility_scope_lateral_applies_the_filter_exactly_once() -> None:
     lateral_sql = next(entry["sql"] for entry in captured if "CROSS JOIN LATERAL" in entry["sql"])
     assert lateral_sql.count("circulation_status") == 1
     assert result.data is not None
-    by_code = {shelf["code"]: shelf["booksConnection"] for shelf in result.data["shelves"]}
-    titles = [edge["node"]["title"] for edge in by_code["A"]["edges"]]
+    by_code = _connections_by_code(result.data)
+    titles = [json_at(edge, "node", "title") for edge in json_list(by_code, "A", "edges")]
     assert titles == [
         "a0",
         "a1",
         "a2",
         "a3",
     ]  # repair books excluded, in order.
-    assert by_code["A"]["totalCount"] == 4
+    assert json_at(by_code, "A", "totalCount") == 4
 
 
 def test_multi_table_visibility_scope_downgrades_off_the_lateral_path() -> None:
@@ -709,8 +757,8 @@ def test_multi_table_visibility_scope_downgrades_off_the_lateral_path() -> None:
     executed_sql = " ".join(entry["sql"] for entry in captured)
     assert "CROSS JOIN LATERAL" not in executed_sql  # multi-table scope refused.
     assert result.data is not None
-    by_code = {shelf["code"]: shelf["booksConnection"] for shelf in result.data["shelves"]}
-    assert by_code["A"]["totalCount"] == 6  # no city is restricted, so all six show.
+    by_code = _connections_by_code(result.data)
+    assert json_at(by_code, "A", "totalCount") == 6  # no city is restricted, so all six show.
 
 
 def _request_varying_visibility_schema() -> tuple[
@@ -735,10 +783,10 @@ def _request_varying_visibility_schema() -> tuple[
         info: object,
     ) -> QuerySet[Book]:
         # The real idiom: unwrap info.context -> request -> user -> is_staff.
-        context = getattr(info, "context", None)
-        request = getattr(context, "request", None) or context
-        user = getattr(request, "user", None)
-        if user is not None and getattr(user, "is_staff", False):
+        context = read_attr(info, "context", None)
+        request = read_attr(context, "request", None) or context
+        user = read_attr(request, "user", None)
+        if user is not None and read_attr(user, "is_staff", False):
             return queryset
         return queryset.exclude(circulation_status="repair")
 
@@ -800,15 +848,17 @@ def test_request_varying_visibility_is_not_cached_across_callers() -> None:
     assert staff.errors is None, staff.errors
 
     assert anon.data is not None
-    anon_books = {s["code"]: s["booksConnection"] for s in anon.data["shelves"]}
+    anon_books = _connections_by_code(anon.data)
     assert staff.data is not None
-    staff_books = {s["code"]: s["booksConnection"] for s in staff.data["shelves"]}
+    staff_books = _connections_by_code(staff.data)
     # The two callers see DIFFERENT rows - each request's scope was applied, not
     # replayed from a cached first-caller plan.
-    assert anon_books["A"]["totalCount"] == 4  # repair hidden from anonymous.
-    assert staff_books["A"]["totalCount"] == 6  # staff sees all six.
-    staff_titles = {edge["node"]["title"] for edge in staff_books["A"]["edges"]}
-    anon_titles = {edge["node"]["title"] for edge in anon_books["A"]["edges"]}
+    assert json_at(anon_books, "A", "totalCount") == 4  # repair hidden from anonymous.
+    assert json_at(staff_books, "A", "totalCount") == 6  # staff sees all six.
+    staff_titles = {
+        json_at(edge, "node", "title") for edge in json_list(staff_books, "A", "edges")
+    }
+    anon_titles = {json_at(edge, "node", "title") for edge in json_list(anon_books, "A", "edges")}
     assert staff_titles - anon_titles == {"r0", "r1"}  # the two repair books.
 
     anon_sql = " ".join(entry["sql"] for entry in anon_captured)
@@ -933,9 +983,12 @@ def test_keyset_count_free_seek_runs_in_branch_on_postgres() -> None:
     assert "_dst_total_count" not in lateral_sql
     assert "LIMIT" in lateral_sql
     assert data is not None
-    by_name = {parent["id"]: parent["issuesConnection"] for parent in data["periodicals"]}
+    by_name = {
+        json_at(parent, "id"): json_at(parent, "issuesConnection")
+        for parent in json_list(data, "periodicals")
+    }
     pages = {
-        tuple(edge["node"]["title"] for edge in connection_data["edges"])
+        tuple(json_at(edge, "node", "title") for edge in json_list(connection_data, "edges"))
         for connection_data in by_name.values()
     }
     # populated continues past p4; sparse re-positions by VALUE (numbers < 4).
@@ -969,7 +1022,10 @@ def test_keyset_counted_seek_downgrades_to_windowed_with_pre_seek_totals() -> No
     executed_sql = " ".join(entry["sql"] for entry in captured)
     assert "FILTER (WHERE" in executed_sql  # the page-relative filtered count
     assert data is not None
-    totals = {parent["issuesConnection"]["totalCount"] for parent in data["periodicals"]}
+    totals = {
+        json_at(parent, "issuesConnection", "totalCount")
+        for parent in json_list(data, "periodicals")
+    }
     assert totals == {5, 3, 0}  # PRE-seek partition counts
 
 
@@ -980,13 +1036,13 @@ def test_keyset_first_page_full_shape_parity() -> None:
         f"{{ periodicals {{ id issuesConnection(first: 2) {{ {_KEYSET_FULL_PAGE} }} }} }}",
     )
     assert data is not None
-    for parent in data["periodicals"]:
-        connection_data = parent["issuesConnection"]
-        for edge in connection_data["edges"]:
+    for parent in json_list(data, "periodicals"):
+        for edge in json_list(parent, "issuesConnection", "edges"):
             # Keyset first pages mint VALUE cursors (the dstcursor prefix),
             # never positional offsets.
-
-            decoded = base64.b64decode(edge["cursor"]).decode()
+            cursor = json_at(edge, "cursor")
+            assert isinstance(cursor, str)
+            decoded = base64.b64decode(cursor).decode()
             assert decoded.startswith("dstcursor:")
 
 
@@ -1051,7 +1107,7 @@ def test_keyset_json_seek_uses_field_adapter_on_postgres(
     seek = KeysetSeek(
         columns=columns,
         cursor=KeysetCursor(
-            values=(children[cursor_rank].payload, children[cursor_rank].pk),
+            values=(children[cursor_rank].payload, saved_pk(children[cursor_rank])),
         ),
     )
     field = ScalarSpecimen._meta.get_field("children")
@@ -1076,7 +1132,7 @@ def test_keyset_json_seek_uses_field_adapter_on_postgres(
     (planned_prefetch,) = plan.prefetch_related
     assert isinstance(planned_prefetch, Prefetch)
     with CaptureQueriesContext(db_connection) as captured:
-        loaded = ScalarSpecimen.objects.prefetch_related(planned_prefetch).get(pk=parent.pk)
+        loaded = ScalarSpecimen.objects.prefetch_related(planned_prefetch).get(pk=saved_pk(parent))
     lateral_sql = next(entry["sql"] for entry in captured if "CROSS JOIN LATERAL" in entry["sql"])
     assert sql_fragment in lateral_sql
     window = _prefetched_rows(loaded, "_dst_children_connection", ScalarSpecimen)
@@ -1170,7 +1226,9 @@ def test_lateral_custom_through_joins_the_foreign_key_target_column() -> None:
         assert LATERAL_STRATEGY.plan(request, plan)
         (planned_prefetch,) = plan.prefetch_related
         with CaptureQueriesContext(db_connection) as captured:
-            loaded = NaturalParent.objects.prefetch_related(planned_prefetch).get(pk=parent.pk)
+            loaded = NaturalParent.objects.prefetch_related(planned_prefetch).get(
+                pk=saved_pk(parent),
+            )
         lateral_sql = next(
             entry["sql"] for entry in captured if "CROSS JOIN LATERAL" in entry["sql"]
         )
@@ -1198,7 +1256,7 @@ def test_keyset_lateral_seek_is_an_index_seek() -> None:
     issues = _seed_periodicals()
     seek = KeysetSeek(
         columns=cursor_columns_for(Issue, ("number", "id")),
-        cursor=KeysetCursor(values=(2, issues[1].pk)),
+        cursor=KeysetCursor(values=(2, saved_pk(issues[1]))),
     )
 
     field = Periodical._meta.get_field("issues")
@@ -1245,7 +1303,7 @@ def test_keyset_lateral_seek_is_an_index_seek() -> None:
             # params; build_lateral_sql returns the backend-prepared values as ``list[object]``,
             # which the driver binds
             cursor.execute(f"EXPLAIN {sql}", params)  # pyright: ignore[reportArgumentType]
-            explain_plan = " ".join(row[0] for row in cursor.fetchall())
+            explain_plan = " ".join(_first_column_texts(cursor))
         finally:
             cursor.execute("SET enable_seqscan = on")
             cursor.execute("DROP INDEX keyset_seek_pin_idx")
@@ -1284,4 +1342,4 @@ def test_single_parent_fast_path_pages_identically_to_lateral() -> None:
     # The single seeded parent is what drives the len==1 IN list the fast path
     # keys on; shelf A carries five books so ``first: 2`` is a real bounded page.
     assert data is not None
-    assert len(data["shelves"]) == 1
+    assert len(json_list(data, "shelves")) == 1

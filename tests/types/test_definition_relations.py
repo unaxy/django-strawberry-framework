@@ -42,6 +42,7 @@ from django_strawberry_framework.types.definition import (
     _is_framework_relay_id_resolver,
     origin_has_custom_id_resolver,
 )
+from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import ClaimsClass, ClassReadRaises
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
@@ -202,7 +203,7 @@ def test_graphql_type_name_wraps_unreadable_origin_and_rejects_empty_name() -> N
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 raise RuntimeError("name exploded")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _HostileOrigin(metaclass=_HostileMeta):
         pass
@@ -284,7 +285,7 @@ def test_custom_id_detection_fails_closed_for_hostile_class_metadata() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__mro__":
                 raise RuntimeError("mro exploded")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _HostileMro(metaclass=_HostileMroMeta):
         pass
@@ -294,7 +295,7 @@ def test_custom_id_detection_fails_closed_for_hostile_class_metadata() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__dict__":
                 raise RuntimeError("dict exploded")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _HostileDict(metaclass=_HostileDictMeta):
         pass
@@ -308,7 +309,7 @@ def test_custom_id_detection_fails_closed_for_hostile_class_metadata() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__mro__":
                 return _UnreadableMro()
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _UnreadableMroOrigin(metaclass=_UnreadableMroMeta):
         pass

@@ -71,6 +71,7 @@ from strawberry.channels import GraphQLHTTPConsumer, GraphQLWSConsumer
 from strawberry.types import ExecutionResult
 from strawberry.types.base import has_object_definition
 from strawberry.types.field import StrawberryField
+from strawberry.types.unset import UnsetType
 from typing_extensions import NotRequired, TypedDict, override
 
 from django_strawberry_framework import (
@@ -111,6 +112,8 @@ from django_strawberry_framework.registry import (
     iter_subsystem_clears,
     registry,
 )
+from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from django_strawberry_framework.utils.querysets import SyncMisuseError
 from django_strawberry_framework.utils.sessions import connection_actor_state
@@ -118,6 +121,11 @@ from tests._idioms import (
     ClaimsClassBase,
     ClassReadRaisesBase,
     comparing_metaclass,
+    json_at,
+    json_list,
+    json_loads,
+    json_object,
+    receive_json,
     resolver_function,
 )
 from tests._info import make_info, unread_info
@@ -1856,9 +1864,9 @@ def test_register_decode_step_with_unset_password_returns_none_password() -> Non
     class _RegisterInput:
         username: str
         email: str
-        password: str = strawberry.UNSET
+        password: str | UnsetType = UNSET
 
-    data = _RegisterInput(username="testuser", email="u@example.com", password=strawberry.UNSET)
+    data = _RegisterInput(username="testuser", email="u@example.com", password=UNSET)
     decoded = _register_decode_step(
         rider,
         data,
@@ -1964,7 +1972,9 @@ def test_register_full_clean_errors_key_to_the_input_fields_sent(
     )
     assert weak.errors is None, weak.errors
     assert weak.data is not None
-    assert [error["field"] for error in weak.data["register"]["errors"]] == ["password"]
+    assert [json_at(error, "field") for error in json_list(weak.data, "register", "errors")] == [
+        "password",
+    ]
     assert not User.objects.filter(username__startswith="keyed_").exists()
 
 
@@ -2370,8 +2380,21 @@ def _cookie_key(cookie: str | None) -> str:
     return cookie.split("=", 1)[1]
 
 
+def _setting_str(name: str) -> str:
+    """Return the Django setting ``name``, asserting it is a ``str`` (django-stubs types it ``Any``)."""
+    value = read_attr(settings, name)
+    assert isinstance(value, str), value
+    return value
+
+
 def _open_store(key: str | None = None) -> SessionBase:
-    return importlib.import_module(settings.SESSION_ENGINE).SessionStore(key)
+    store_class = read_attr(
+        importlib.import_module(_setting_str("SESSION_ENGINE")),
+        "SessionStore",
+    )
+    assert isinstance(store_class, type)
+    assert issubclass(store_class, SessionBase)
+    return store_class(key)
 
 
 def _seed_session(**data: object) -> str | None:
@@ -2406,12 +2429,12 @@ async def test_channels_http_login_round_trip_sets_cookie_keys_and_authenticates
     router = _channels_router(_auth_router_schema())
     resp = await _ch_post(router, _CH_LOGIN, {"u": "staff_1", "p": TEST_USER_PASSWORD})
     assert resp["status"] == 200
-    body = json.loads(resp["body"])
+    body = json_object(json_loads(resp["body"]))
     assert body.get("errors") is None, body
-    assert body["data"]["login"]["node"] == {"username": "staff_1"}
+    assert json_at(body, "data", "login", "node") == {"username": "staff_1"}
     cookie = _set_cookie(resp)
     assert cookie is not None
-    assert cookie.startswith(f"{settings.SESSION_COOKIE_NAME}=")
+    assert cookie.startswith(f"{_setting_str('SESSION_COOKIE_NAME')}=")
     key = _cookie_key(cookie)
     stored_pk = await database_sync_to_async(_read_session)(key, SESSION_KEY)
     stored_backend = await database_sync_to_async(_read_session)(key, BACKEND_SESSION_KEY)
@@ -2427,7 +2450,7 @@ async def test_channels_http_login_anon_to_auth_cycles_key_and_preserves_data() 
     await _acreate_users(1)
     router = _channels_router(_auth_router_schema())
     anon_key = await database_sync_to_async(_seed_session)(cart=["item-1"])
-    cookie = f"{settings.SESSION_COOKIE_NAME}={anon_key}"
+    cookie = f"{_setting_str('SESSION_COOKIE_NAME')}={anon_key}"
     resp = await _ch_post(
         router,
         _CH_LOGIN,
@@ -3015,9 +3038,9 @@ async def test_channels_http_logout_invalidates_cookie_and_durable_session() -> 
 
     resp = await _ch_post(router, _LOGOUT_Q, cookie=cookie)
     assert resp["status"] == 200
-    body = json.loads(resp["body"])
+    body = json_object(json_loads(resp["body"]))
     assert body.get("errors") is None, body
-    assert body["data"]["logout"] == {"ok": True, "errors": []}
+    assert json_at(body, "data", "logout") == {"ok": True, "errors": []}
     # The durable server-side row is gone and the browser cookie is emptied.
     assert not await database_sync_to_async(_session_row_exists)(key)
     set_cookie = _set_cookie(resp)
@@ -3034,11 +3057,11 @@ async def test_channels_http_anonymous_logout_is_false_but_flushes_residue() -> 
     await _acreate_users(1)
     router = _channels_router(_auth_router_schema())
     anon_key = await database_sync_to_async(_seed_session)(cart=["item-1"])
-    cookie = f"{settings.SESSION_COOKIE_NAME}={anon_key}"
+    cookie = f"{_setting_str('SESSION_COOKIE_NAME')}={anon_key}"
     resp = await _ch_post(router, _LOGOUT_Q, cookie=cookie)
-    body = json.loads(resp["body"])
+    body = json_object(json_loads(resp["body"]))
     assert body.get("errors") is None, body
-    assert body["data"]["logout"] == {"ok": False, "errors": []}
+    assert json_at(body, "data", "logout") == {"ok": False, "errors": []}
     # Residual anonymous data is flushed durably even though ok is false.
     assert not await database_sync_to_async(_session_row_exists)(anon_key)
     assert await database_sync_to_async(_read_session)(anon_key, "cart") is None
@@ -3062,8 +3085,8 @@ async def _ws_open(router: ProtocolTypeRouter, cookie: str | None = None) -> Web
     assert connected, "websocket handshake failed"
     assert protocol == "graphql-transport-ws"
     await communicator.send_json_to({"type": "connection_init"})
-    ack = await communicator.receive_json_from(timeout=10)
-    assert ack["type"] == "connection_ack", ack
+    ack = await receive_json(communicator)
+    assert json_at(ack, "type") == "connection_ack", ack
     return communicator
 
 
@@ -3071,18 +3094,18 @@ async def _ws_run(
     communicator: WebsocketCommunicator,
     query: str,
     op_id: str,
-) -> dict[str, object]:
+) -> dict[object, object]:
     """Run one single-result operation, draining the ``next`` and ``complete`` frames."""
     await communicator.send_json_to(
         {"type": "subscribe", "id": op_id, "payload": {"query": query}},
     )
-    msg = await communicator.receive_json_from(timeout=10)
-    assert msg["type"] == "next", msg
-    complete = await communicator.receive_json_from(timeout=10)
-    assert complete["type"] == "complete", complete
-    payload = msg["payload"]
+    msg = await receive_json(communicator)
+    assert json_at(msg, "type") == "next", msg
+    complete = await receive_json(communicator)
+    assert json_at(complete, "type") == "complete", complete
+    payload = json_object(msg, "payload")
     assert payload.get("errors") is None, payload
-    return payload["data"]
+    return json_object(payload, "data")
 
 
 @pytest.mark.django_db(transaction=True)

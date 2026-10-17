@@ -89,6 +89,7 @@ from django_strawberry_framework import (
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import CREATE, NON_FIELD_ERROR_KEY, PARTIAL
 from django_strawberry_framework.mutations.resolvers import StepFailure
+from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import resolvers as serializer_resolvers
 from django_strawberry_framework.rest_framework.accessors import (
@@ -115,17 +116,20 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types import relay as relay_module
 from django_strawberry_framework.utils._narrowing import (
+    call_method,
     is_class,
     is_list,
     is_mapping,
     is_tuple,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
 from django_strawberry_framework.utils.errors import build_error_key_map
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     FILE,
     RELATION_MULTI,
@@ -148,12 +152,14 @@ from tests._idioms import (
     ModelSerializerBase,
     is_object_dict,
     run_capturing,
+    saved_pk,
 )
 from tests._info import make_info, unread_info
 
 if TYPE_CHECKING:
     from typing import TypeAlias, TypeVar
 
+    from django.db.backends.utils import CursorWrapper
     from typing_extensions import TypeIs
 
     from django_strawberry_framework.mutations.inputs import FieldError
@@ -172,6 +178,12 @@ if TYPE_CHECKING:
     _PkRelation: TypeAlias = (
         serializers.RelatedField[_ModelT, _ModelT, object] | serializers.ManyRelatedField
     )
+
+
+def _first_column(cursor: CursorWrapper) -> object:
+    """The first column of ``cursor``'s next row (the stubs type ``fetchone`` as ``Any``)."""
+    row = require(call_method(cursor, "fetchone"), is_tuple)
+    return row[0]
 
 
 def _serializer_context(kwargs: dict[str, object]) -> dict[object, object]:
@@ -456,7 +468,7 @@ def test_decode_relation_single_raw_pk_hidden_target_is_field_error() -> None:
     del GenreT
     genre = library_models.Genre.objects.create(name="HiddenGenre")
     pk, error = serializer_resolvers._decode_relation_single(
-        genre.pk,
+        saved_pk(genre),
         graphql_name="genreId",
         related_model=library_models.Genre,
         info=unread_info(),
@@ -472,13 +484,13 @@ def test_decode_relation_single_raw_pk_visible_reduces_to_pk() -> None:
     _declare_nonrelay_genre_primary()
     genre = library_models.Genre.objects.create(name="VisibleGenre")
     pk, error = serializer_resolvers._decode_relation_single(
-        genre.pk,
+        saved_pk(genre),
         graphql_name="genreId",
         related_model=library_models.Genre,
         info=unread_info(),
     )
     assert error is None
-    assert pk == genre.pk
+    assert pk == saved_pk(genre)
 
 
 @pytest.mark.django_db
@@ -513,7 +525,7 @@ def test_decode_relation_single_wrong_model_global_id_is_field_error() -> None:
     # A GlobalID whose type slot names a DIFFERENT model (`library.shelf`) than the
     # Genre-typed relation: `decode_model_global_id` rejects the model mismatch ->
     # field error, never a cross-model pk lookup.
-    wrong_gid = relay.GlobalID(type_name="library.shelf", node_id=str(genre.pk))
+    wrong_gid = relay.GlobalID(type_name="library.shelf", node_id=str(saved_pk(genre)))
     pk, error = serializer_resolvers._decode_relation_single(
         wrong_gid,
         graphql_name="genreId",
@@ -538,17 +550,17 @@ def test_decode_relation_multi_collects_visible_then_short_circuits() -> None:
     g1 = library_models.Genre.objects.create(name="MG1")
     g2 = library_models.Genre.objects.create(name="MG2")
     pks, error = serializer_resolvers._decode_relation_multi(
-        [g1.pk, g2.pk],
+        [saved_pk(g1), saved_pk(g2)],
         graphql_name="genreIds",
         related_model=library_models.Genre,
         info=unread_info(),
     )
     assert error is None
-    assert pks == [g1.pk, g2.pk]
+    assert pks == [saved_pk(g1), saved_pk(g2)]
 
     # A bad (uncoercible) element short-circuits to the field-keyed error.
     pks, error = serializer_resolvers._decode_relation_multi(
-        [g1.pk, "bad"],
+        [saved_pk(g1), "bad"],
         graphql_name="genreIds",
         related_model=library_models.Genre,
         info=unread_info(),
@@ -688,13 +700,13 @@ def test_serializer_save_is_called_exactly_once_and_refetch_uses_returned_object
     request.user = User(username="spy")
     info = make_info(context=SimpleNamespace(request=request))
 
-    provided: dict[str, object] = {"name": "SpyItem", "category": category.pk}
+    provided: dict[str, object] = {"name": "SpyItem", "category": saved_pk(category)}
     # The write-pipeline context stands in for the shared skeleton the direct call bypasses.
     with write_pipeline("default", lock=False):
         saved = write_step(mutation_cls, info, None, provided)
     assert calls == [1]  # save() called exactly once
     assert isinstance(saved, product_models.Item)
-    assert saved.pk is not None
+    assert saved_pk(saved) is not None
     assert saved.name == "SpyItem"
 
 
@@ -722,7 +734,7 @@ def test_save_time_drf_validation_error_uses_recursive_flattener_not_flat_mapper
             mutation_cls,
             info,
             None,
-            {"name": "OK", "category": category.pk},
+            {"name": "OK", "category": saved_pk(category)},
         )
     assert isinstance(result, StepFailure)
     assert [(fe.field, fe.messages) for fe in result.errors] == [("name", ["drf save-time"])]
@@ -752,7 +764,7 @@ def test_save_time_django_validation_error_uses_flat_mapper_not_detail() -> None
             mutation_cls,
             info,
             None,
-            {"name": "OK", "category": category.pk},
+            {"name": "OK", "category": saved_pk(category)},
         )
     assert isinstance(result, StepFailure)
     # The flat Django mapper reads `error_dict` (NOT a DRF `.detail`); the model name `name`
@@ -793,7 +805,7 @@ def test_save_time_django_validation_error_keys_a_source_rename_to_its_input_nam
             mutation_cls,
             info,
             None,
-            {"full_name": "OK", "category": category.pk},
+            {"full_name": "OK", "category": saved_pk(category)},
         )
     assert isinstance(result, StepFailure)
     assert [(fe.field, fe.path, fe.messages) for fe in result.errors] == [
@@ -835,7 +847,7 @@ def test_save_time_django_validation_error_keys_a_serializer_only_field_to_its_i
             mutation_cls,
             info,
             None,
-            {"name": "OK", "category": category.pk, "review_note": "n"},
+            {"name": "OK", "category": saved_pk(category), "review_note": "n"},
         )
     assert isinstance(result, StepFailure)
     assert [(fe.field, fe.path, fe.messages) for fe in result.errors] == [
@@ -880,7 +892,7 @@ def test_save_time_django_validation_error_keys_a_renamed_relation_by_both_colum
             mutation_cls,
             info,
             None,
-            {"name": "OK", "category_ref": category.pk},
+            {"name": "OK", "category_ref": saved_pk(category)},
         )
     assert isinstance(result, StepFailure)
     assert [(fe.field, fe.messages) for fe in result.errors] == [
@@ -970,7 +982,7 @@ def test_save_time_integrity_error_maps_to_all_sentinel_envelope() -> None:
             mutation_cls,
             info,
             None,
-            {"name": "OK", "category": category.pk},
+            {"name": "OK", "category": saved_pk(category)},
         )
     assert isinstance(result, StepFailure)
     assert [fe.field for fe in result.errors] == [NON_FIELD_ERROR_KEY]
@@ -1019,7 +1031,7 @@ def test_save_time_validation_after_partial_write_is_rolled_back() -> None:
             mutation_cls,
             info,
             data=data,
-            id=strawberry.UNSET,
+            id=UNSET,
         )
 
     # The mutation returns the error envelope (null object + the field error)...
@@ -1294,14 +1306,14 @@ def test_merged_kwargs_override_echoing_the_same_request_object_is_tolerated() -
         @override
         def get_serializer_kwargs(
             self,
-            info: strawberry.Info,
+            info: strawberry.Info[object, object],
             *,
             data: Mapping[str, object],
             hook_context: SerializerHookContext,
         ) -> dict[str, object]:
             kwargs = super().get_serializer_kwargs(info, data=data, hook_context=hook_context)
             # The SAME object the framework resolved, echoed back.
-            kwargs["context"] = {"request": info.context.request}
+            kwargs["context"] = {"request": read_attr(info.context, "request")}
             return kwargs
 
     class CategoryT(DjangoType, relay.Node):
@@ -1404,7 +1416,7 @@ def test_relation_decode_consumes_recorded_strategy_after_strategy_resolver_fail
 
     finalize_django_types()
     category = product_models.Category.objects.create(name="StrategyCat")
-    gid = relay.GlobalID.from_id(global_id_for(CategoryT, category.pk))
+    gid = relay.GlobalID.from_id(global_id_for(CategoryT, saved_pk(category)))
 
     def _boom(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("_resolve_globalid_strategy must not run on the query path")
@@ -1419,7 +1431,7 @@ def test_relation_decode_consumes_recorded_strategy_after_strategy_resolver_fail
         info=make_info(),
     )
     assert error is None
-    assert pk == category.pk
+    assert pk == saved_pk(category)
 
 
 # ===========================================================================
@@ -1451,7 +1463,7 @@ def test_relation_decode_async_get_queryset_from_sync_raises_sync_misuse() -> No
     genre = library_models.Genre.objects.create(name="AsyncGenre")
     with pytest.raises(SyncMisuseError):
         serializer_resolvers._decode_relation_single(
-            genre.pk,
+            saved_pk(genre),
             graphql_name="genreId",
             related_model=library_models.Genre,
             info=unread_info(),
@@ -1526,7 +1538,7 @@ async def test_async_entry_rejects_data_rewriting_hook_too() -> None:
     del CategoryT, ItemT
 
     category = await sync_to_async(product_models.Category.objects.create)(name="AsyncRewriteCat")
-    gid = relay.GlobalID(type_name="products.category", node_id=str(category.pk))
+    gid = relay.GlobalID(type_name="products.category", node_id=str(saved_pk(category)))
 
     @strawberry.input
     class _Data:
@@ -2064,7 +2076,7 @@ def test_serializer_refetch_keeps_select_related_suppresses_only() -> None:
         "mutation($d: BasicItemSerializerInput!){ writeItem(data:$d){ "
         "node{ name category{ name } } errors{ field } } }",
         variable_values={
-            "d": {"name": "G2Widget", "categoryId": global_id_for(CategoryT, category.pk)},
+            "d": {"name": "G2Widget", "categoryId": global_id_for(CategoryT, saved_pk(category))},
         },
         context_value=ctx,
     )
@@ -2072,7 +2084,7 @@ def test_serializer_refetch_keeps_select_related_suppresses_only() -> None:
     assert result.data is not None
     assert result.data["writeItem"]["errors"] == []
 
-    plan = ctx.dst_optimizer_plan
+    plan = require_instance(read_attr(ctx, "dst_optimizer_plan"), OptimizationPlan)
     # The relation selection (`category { name }`) is planned via select_related.
     assert plan.select_related == ("category",)
     # No `.only(...)` projection under a MUTATION (the G2 gate suppresses it).
@@ -2714,10 +2726,11 @@ def test_relation_queryset_scope_is_isolated_between_concurrent_serializer_insta
         def get_queryset(
             cls,
             queryset: QuerySet[library_models.Branch],
-            info: strawberry.Info,
+            info: strawberry.Info[object, object],
         ) -> QuerySet[library_models.Branch]:
             scopes_met.wait(timeout=5)
-            return queryset.filter(city=info.context.request.visibility_city)
+            request = read_attr(info.context, "request")
+            return queryset.filter(city=read_attr(request, "visibility_city"))
 
     class BranchSer(serializers.Serializer[object]):
         branch: _PkRelation[library_models.Branch] = serializers.PrimaryKeyRelatedField(
@@ -2975,7 +2988,7 @@ def test_save_kwargs_hook_cannot_mutate_validated_data_by_identity() -> None:
 
     provided: dict[str, object] = {
         "name": "BlobItem",
-        "category": category.pk,
+        "category": saved_pk(category),
         "meta_blob": {"mode": "ok", "tags": ["a"]},
     }
     with write_pipeline("default", lock=False):
@@ -3015,7 +3028,7 @@ def test_save_kwargs_hook_validation_error_maps_to_field_error_envelope() -> Non
             mutation_cls,
             info,
             None,
-            {"name": "OK", "category": category.pk},
+            {"name": "OK", "category": saved_pk(category)},
         )
     assert isinstance(result, StepFailure)
     assert [(fe.field, fe.messages) for fe in result.errors] == [
@@ -3048,7 +3061,7 @@ def test_save_kwargs_hook_non_mapping_return_is_configuration_error() -> None:
             mutation_cls,
             _info_with_request(),
             None,
-            {"name": "MalformedSaveKwargsItem", "category": category.pk},
+            {"name": "MalformedSaveKwargsItem", "category": saved_pk(category)},
         )
 
 
@@ -3553,7 +3566,7 @@ def test_serializer_kwargs_hook_non_string_keys_fail_before_serializer_construct
             mutation_cls,
             _info_with_request(),
             None,
-            {"name": "KeyGate", "category": category.pk},
+            {"name": "KeyGate", "category": saved_pk(category)},
         )
 
 
@@ -3591,7 +3604,7 @@ def test_save_kwargs_hook_non_string_keys_fail_before_save() -> None:
             mutation_cls,
             _info_with_request(),
             None,
-            {"name": "KeyGateSave", "category": category.pk},
+            {"name": "KeyGateSave", "category": saved_pk(category)},
         )
 
 
@@ -3956,7 +3969,7 @@ def test_saved_result_spoofed_pk_on_never_persisted_instance_is_configuration_er
     fake, serializer = _saved_result_fixture()
     category = product_models.Category.objects.create(name="SpoofCat")
     real = product_models.Item.objects.create(name="Real", category=category)
-    spoofed = product_models.Item(pk=real.pk, name="Spoof")  # adding=True, _state.db=None
+    spoofed = product_models.Item(pk=saved_pk(real), name="Spoof")  # adding=True, _state.db=None
     serializer.instance = spoofed  # DRF bookkeeping followed; the object is defective anyway
     with pytest.raises(ConfigurationError, match="returned an unsaved"):
         serializer_resolvers._checked_saved_result(
@@ -3981,7 +3994,7 @@ def test_saved_result_detached_saved_looking_instance_is_configuration_error() -
     fake, serializer = _saved_result_fixture()
     category = product_models.Category.objects.create(name="DetachedCat")
     real = product_models.Item.objects.create(name="RealRow", category=category)
-    forged = product_models.Item(pk=real.pk, name="Forged")
+    forged = product_models.Item(pk=saved_pk(real), name="Forged")
     forged._state.adding = False
     forged._state.db = "default"
     # serializer.instance was never assigned (the save bookkeeping was bypassed).
@@ -4029,7 +4042,7 @@ def test_saved_result_create_without_witnessed_insert_is_configuration_error() -
             [
                 (
                     existing,
-                    existing.pk,
+                    saved_pk(existing),
                     False,
                     "default",
                 ),
@@ -4047,7 +4060,7 @@ def test_saved_result_create_with_witnessed_insert_passes() -> None:
     written: list[_WrittenRow] = [
         (
             item,
-            item.pk,
+            saved_pk(item),
             True,
             "default",
         ),
@@ -4077,8 +4090,8 @@ def test_saved_result_update_pk_mutation_is_configuration_error() -> None:
     category = product_models.Category.objects.create(name="SnapCat")
     authorized = product_models.Item.objects.create(name="AuthorizedRow", category=category)
     hidden = product_models.Item.objects.create(name="HiddenRow", category=category)
-    authorized_pk = authorized.pk  # the immutable snapshot the pipeline captures pre-hooks
-    authorized.pk = hidden.pk  # the in-place forgery: instance IS the returned object
+    authorized_pk = saved_pk(authorized)  # the immutable snapshot the pipeline captures pre-hooks
+    authorized.pk = saved_pk(hidden)  # the in-place forgery: instance IS the returned object
     serializer.instance = authorized
     with pytest.raises(ConfigurationError, match="must write the row that was authorized"):
         serializer_resolvers._checked_saved_result(
@@ -4113,7 +4126,7 @@ def test_write_step_update_repointing_instance_pk_is_configuration_error() -> No
     category = product_models.Category.objects.create(name="RepointCat")
     target = product_models.Item.objects.create(name="Target", category=category)
     hidden = product_models.Item.objects.create(name="Hidden", category=category)
-    hidden_holder["pk"] = hidden.pk
+    hidden_holder["pk"] = saved_pk(hidden)
     mutation_cls = _bind_item_serializer_mutation(RepointingSerializer, operation="update")
     request = HttpRequest()
     request.user = User(username="u")
@@ -4153,7 +4166,7 @@ def test_write_step_create_pk_mutated_after_insert_is_configuration_error() -> N
 
     category = product_models.Category.objects.create(name="SwapCat")
     hidden = product_models.Item.objects.create(name="HiddenSwap", category=category)
-    hidden_holder["pk"] = hidden.pk
+    hidden_holder["pk"] = saved_pk(hidden)
     mutation_cls = _bind_item_serializer_mutation(PkSwapSerializer)
     request = HttpRequest()
     request.user = User(username="u")
@@ -4167,7 +4180,7 @@ def test_write_step_create_pk_mutated_after_insert_is_configuration_error() -> N
             mutation_cls,
             info,
             None,
-            {"name": "Fresh", "category": category.pk},
+            {"name": "Fresh", "category": saved_pk(category)},
         )
 
 
@@ -4206,7 +4219,7 @@ def test_write_step_create_returning_existing_row_is_configuration_error() -> No
             mutation_cls,
             info,
             None,
-            {"name": "Fresh", "category": category.pk},
+            {"name": "Fresh", "category": saved_pk(category)},
         )
 
 
@@ -4392,17 +4405,17 @@ def test_authorization_phase_enforces_db_read_only_on_non_pinned_auth_aliases(
             ):
                 # Reads are permitted inside the read-only barrier.
                 cursor.execute("SELECT COUNT(*) FROM probe")
-                assert cursor.fetchone()[0] == 1
+                assert _first_column(cursor) == 1
                 # A write is refused by the database itself (read-only transaction).
                 with pytest.raises(OperationalError, match="readonly"):
                     cursor.execute("INSERT INTO probe (id) VALUES (2)")
             # The write never happened, and the connection is writable again post-phase.
             with conn.cursor() as cursor:
                 cursor.execute("SELECT COUNT(*) FROM probe")
-                assert cursor.fetchone()[0] == 1
+                assert _first_column(cursor) == 1
                 cursor.execute("INSERT INTO probe (id) VALUES (3)")
                 cursor.execute("SELECT COUNT(*) FROM probe")
-                assert cursor.fetchone()[0] == 2
+                assert _first_column(cursor) == 2
         finally:
             connections["auth_barrier"].close()
             del connections.databases["auth_barrier"]
@@ -4490,7 +4503,7 @@ def test_saved_result_update_pk_drift_is_configuration_error() -> None:
             _as_serializer_mutation(fake),
             serializer,
             other,
-            authorized.pk,
+            saved_pk(authorized),
             "default",
             [],
         )
@@ -4506,7 +4519,7 @@ def test_saved_result_happy_path_returns_saved() -> None:
     written: list[_WrittenRow] = [
         (
             item,
-            item.pk,
+            saved_pk(item),
             False,
             "default",
         ),
@@ -4516,7 +4529,7 @@ def test_saved_result_happy_path_returns_saved() -> None:
             _as_serializer_mutation(fake),
             serializer,
             item,
-            item.pk,
+            saved_pk(item),
             "default",
             written,
         )
@@ -4536,7 +4549,7 @@ def test_saved_result_update_without_witness_is_configuration_error() -> None:
             _as_serializer_mutation(fake),
             serializer,
             item,
-            item.pk,
+            saved_pk(item),
             "default",
             [],
         )
@@ -4621,7 +4634,7 @@ def test_validator_pinning_leaves_a_read_only_base_serializer_field_alone() -> N
             mutation_cls,
             info,
             None,
-            {"name": "Summarized", "category": category.pk},
+            {"name": "Summarized", "category": saved_pk(category)},
         )
     assert isinstance(saved, product_models.Item)
     assert saved.name == "Summarized"
@@ -4912,7 +4925,7 @@ def test_runtime_context_attname_alias_of_a_relation_is_rejected_before_any_writ
             mutation_cls,
             info,
             None,
-            data_factory(category.pk),
+            data_factory(saved_pk(category)),
         )
     assert (product_models.Category.objects.count(), product_models.Item.objects.count()) == counts
 
@@ -5309,7 +5322,7 @@ def test_field_validator_substituting_a_relation_object_is_rejected() -> None:
             fields = ("name", "category")
 
         def validate_category(self, _value: product_models.Category) -> product_models.Category:
-            return product_models.Category.objects.get(pk=hidden.pk)  # the swap
+            return product_models.Category.objects.get(pk=saved_pk(hidden))  # the swap
 
     visible = product_models.Category.objects.create(name="LedgerVisible")
     mutation_cls = _bind_item_serializer_mutation(SwappingSerializer)
@@ -5321,7 +5334,7 @@ def test_field_validator_substituting_a_relation_object_is_rejected() -> None:
             mutation_cls,
             _info(),
             None,
-            {"name": "LedgerItem", "category": visible.pk},
+            {"name": "LedgerItem", "category": saved_pk(visible)},
         )
 
 
@@ -5344,7 +5357,7 @@ def test_object_validator_injecting_a_relation_value_is_rejected() -> None:
 
         @override
         def validate(self, attrs: dict[str, object]) -> dict[str, object]:
-            attrs["genres"] = [library_models.Genre.objects.get(pk=hidden.pk)]
+            attrs["genres"] = [library_models.Genre.objects.get(pk=saved_pk(hidden))]
             return attrs
 
     book = _seed_book()
@@ -5393,10 +5406,10 @@ def test_object_validator_popping_a_supplied_relation_is_rejected() -> None:
             mutation_cls,
             _info(),
             book,
-            {"title": "PoppedTitle", "genres": [other.pk]},
+            {"title": "PoppedTitle", "genres": [saved_pk(other)]},
         )
     # The write was rejected before save: the stored set is unchanged.
-    assert set(book.genres.values_list("pk", flat=True)) == {kept.pk}
+    assert set(book.genres.values_list("pk", flat=True)) == {saved_pk(kept)}
 
 
 @pytest.mark.django_db
@@ -5415,7 +5428,7 @@ def test_field_validator_substituting_a_renamed_source_relation_is_rejected() ->
             fields = ("name", "group")
 
         def validate_group(self, _value: product_models.Category) -> product_models.Category:
-            return product_models.Category.objects.get(pk=hidden.pk)
+            return product_models.Category.objects.get(pk=saved_pk(hidden))
 
     visible = product_models.Category.objects.create(name="RenamedVisible")
     mutation_cls = _bind_item_serializer_mutation(RenamedSwapSerializer)
@@ -5427,7 +5440,7 @@ def test_field_validator_substituting_a_renamed_source_relation_is_rejected() ->
             mutation_cls,
             _info(),
             None,
-            {"name": "RenamedItem", "group": visible.pk},
+            {"name": "RenamedItem", "group": saved_pk(visible)},
         )
 
 
@@ -5452,10 +5465,10 @@ def test_custom_pk_field_relation_stays_supported_by_the_ledger() -> None:
             mutation_cls,
             _info(),
             None,
-            {"name": "PkFieldItem", "category": str(category.pk)},
+            {"name": "PkFieldItem", "category": str(saved_pk(category))},
         )
     assert isinstance(saved, product_models.Item)
-    assert saved.category_id == category.pk
+    assert saved.category_id == saved_pk(category)
 
 
 @pytest.mark.django_db
@@ -5477,7 +5490,7 @@ def test_object_validator_mutating_a_resolved_relation_pk_in_place_is_rejected()
             # Mutate the SAME resolved object's pk to a hidden row: a bare
             # identity check would miss it; the captured-pk snapshot catches it.
             assert isinstance(attrs["category"], product_models.Category)
-            attrs["category"].pk = hidden.pk
+            attrs["category"].pk = saved_pk(hidden)
             return attrs
 
     visible = product_models.Category.objects.create(name="InPlaceVisible")
@@ -5490,7 +5503,7 @@ def test_object_validator_mutating_a_resolved_relation_pk_in_place_is_rejected()
             mutation_cls,
             _info(),
             None,
-            {"name": "InPlaceItem", "category": visible.pk},
+            {"name": "InPlaceItem", "category": saved_pk(visible)},
         )
 
 
@@ -5546,7 +5559,7 @@ def test_custom_update_ignoring_a_validated_fk_fails_attestation() -> None:
             mutation_cls,
             _info(),
             item,
-            {"category": new.pk},
+            {"category": saved_pk(new)},
         )
 
 
@@ -5578,7 +5591,7 @@ def test_custom_update_mutating_a_validated_relation_pk_at_save_fails_attestatio
             # pk to a hidden row and persist THAT - a forge the live-object read
             # would miss, but the captured-pk attestation catches.
             assert isinstance(validated_data["category"], product_models.Category)
-            validated_data["category"].pk = hidden.pk
+            validated_data["category"].pk = saved_pk(hidden)
             return super().update(instance, validated_data)
 
     mutation_cls = _bind_item_serializer_mutation(MutatingUpdateSerializer, operation="update")
@@ -5590,7 +5603,7 @@ def test_custom_update_mutating_a_validated_relation_pk_at_save_fails_attestatio
             mutation_cls,
             _info(),
             item,
-            {"category": visible.pk},
+            {"category": saved_pk(visible)},
         )
 
 
@@ -5632,7 +5645,7 @@ def test_custom_update_replacing_the_validated_m2m_set_fails_attestation() -> No
             mutation_cls,
             _info(),
             book,
-            {"genres": [wanted.pk]},
+            {"genres": [saved_pk(wanted)]},
         )
 
 
@@ -5689,10 +5702,10 @@ def test_supplied_m2m_duplicates_and_explicit_empty_list_pass_attestation() -> N
             mutation_cls,
             _info(),
             book,
-            {"genres": [genre.pk, genre.pk]},  # duplicates collapse to the one row
+            {"genres": [saved_pk(genre), saved_pk(genre)]},  # duplicates collapse to the one row
         )
     assert isinstance(saved, library_models.Book)
-    assert list(book.genres.values_list("pk", flat=True)) == [genre.pk]
+    assert list(book.genres.values_list("pk", flat=True)) == [saved_pk(genre)]
 
     with write_pipeline("default", lock=False):
         saved = serializer_resolvers._serializer_write_step(
@@ -5731,7 +5744,7 @@ def test_save_failure_after_partial_writes_rolls_back_to_the_savepoint() -> None
             mutation_cls,
             _info(),
             None,
-            {"name": "SavepointItem", "category": category.pk},
+            {"name": "SavepointItem", "category": saved_pk(category)},
         )
     assert isinstance(result, StepFailure)
     assert [(fe.field, fe.messages) for fe in result.errors] == [("name", ["post-write failure"])]
@@ -5809,7 +5822,7 @@ def test_save_kwargs_naming_a_model_field_is_rejected() -> None:
             mutation_cls,
             _info(),
             None,
-            {"name": "SaveKwargItem", "category": category.pk},
+            {"name": "SaveKwargItem", "category": saved_pk(category)},
         )
     assert not product_models.Item.objects.filter(name="SaveKwargItem").exists()
 
@@ -5864,8 +5877,8 @@ def test_nested_relation_substitution_is_rejected_per_item() -> None:
         )
 
         def validate_genre(self, value: library_models.Genre) -> library_models.Genre:
-            if value.pk == genres[1].pk:
-                return library_models.Genre.objects.get(pk=hidden.pk)  # swap item 2 only
+            if saved_pk(value) == saved_pk(genres[1]):
+                return library_models.Genre.objects.get(pk=saved_pk(hidden))  # swap item 2 only
             return value
 
     class ParentSerializer(serializers.Serializer[object]):
@@ -5890,7 +5903,7 @@ def test_nested_relation_substitution_is_rejected_per_item() -> None:
     )
 
     serializer = ParentSerializer(
-        data={"items": [{"genre": genres[0].pk}, {"genre": genres[1].pk}]},
+        data={"items": [{"genre": saved_pk(genres[0])}, {"genre": saved_pk(genres[1])}]},
     )
     ledger = serializer_resolvers._instrument_relation_intent(
         _as_serializer_mutation(fake_mut),
@@ -5906,7 +5919,7 @@ def test_nested_relation_substitution_is_rejected_per_item() -> None:
 
     # The intact twin: no swap, two items, records consumed in order, no raise.
     serializer = ParentSerializer(
-        data={"items": [{"genre": genres[0].pk}, {"genre": genres[2].pk}]},
+        data={"items": [{"genre": saved_pk(genres[0])}, {"genre": saved_pk(genres[2])}]},
     )
     ledger = serializer_resolvers._instrument_relation_intent(
         _as_serializer_mutation(fake_mut),
@@ -5993,7 +6006,7 @@ def test_nested_to_field_relation_key_changed_in_place_is_rejected(
         ),
     )
 
-    item = {"favorite_genre": chosen.pk}
+    item = {"favorite_genre": saved_pk(chosen)}
     serializer = ParentSerializer(data={"profile": [item] if many else item})
     ledger = serializer_resolvers._instrument_relation_intent(fake_mut, serializer)
     assert serializer.is_valid(), serializer_errors(serializer)
@@ -6049,7 +6062,7 @@ def test_nested_relation_nulled_after_validation_is_rejected() -> None:
         _injected_field_specs=None,
     )
 
-    serializer = NullingParentSerializer(data={"items": [{"genre": genre.pk}]})
+    serializer = NullingParentSerializer(data={"items": [{"genre": saved_pk(genre)}]})
     ledger = serializer_resolvers._instrument_relation_intent(
         _as_serializer_mutation(fake_mut),
         serializer,
@@ -6486,7 +6499,7 @@ def test_decode_nested_multi_tolerates_none_item_in_list() -> None:
                 CreateBook,
                 info,
                 data=input_data,
-                id=strawberry.UNSET,
+                id=UNSET,
             )
 
         assert isinstance(result, _ErrorEnvelope)

@@ -66,7 +66,8 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.finalizer import _bind_orderset_owner
 from django_strawberry_framework.types.relay import apply_interfaces
-from tests._idioms import definition_raises
+from django_strawberry_framework.utils._narrowing import class_dict, read_attr
+from tests._idioms import definition_raises, json_at, json_list
 
 
 @pytest.fixture(autouse=True)
@@ -164,12 +165,12 @@ def test_phase_2_5_binds_all_owners_before_expansion() -> None:
             fields = ["title"]
 
     observations: list[bool] = []
-    original_get_fields = ShelfOrder.get_fields.__func__
 
     @classmethod
-    def instrumented_get_fields(cls: type[OrderSet]) -> OrderedDict[str, RelatedOrder | None]:
+    def instrumented_get_fields(cls: type[ShelfOrder]) -> OrderedDict[str, RelatedOrder | None]:
         observations.append(cls._owner_definition is not None)
-        return original_get_fields(cls)
+        # The inherited ``OrderSet.get_fields`` the spy shadows on ``ShelfOrder``.
+        return super(ShelfOrder, cls).get_fields()
 
     # basedpyright: the classmethod spy installed on the class is the probe under test; the
     # checker compares the descriptor against the bound hook signature
@@ -1094,10 +1095,10 @@ def test_an_orderset_subclass_binds_its_own_owner_apart_from_its_base(
             orderset_class = ViaPlainBookOrder
 
     finalize_django_types()
-    assert ShelfOrder.__dict__["_owner_definition"].origin is (
+    assert read_attr(class_dict(ShelfOrder)["_owner_definition"], "origin") is (
         hiding_type if base_on_hiding else plain_type
     )
-    assert SubShelfOrder.__dict__["_owner_definition"].origin is (
+    assert read_attr(class_dict(SubShelfOrder)["_owner_definition"], "origin") is (
         plain_type if base_on_hiding else hiding_type
     )
 
@@ -1130,8 +1131,14 @@ def test_an_orderset_subclass_binds_its_own_owner_apart_from_its_base(
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    assert [row["title"] for row in result.data["viaHiding"]] == ["on-seen", "on-hidden"]
-    assert [row["title"] for row in result.data["viaPlain"]] == ["on-hidden", "on-seen"]
+    assert [json_at(row, "title") for row in json_list(result.data, "viaHiding")] == [
+        "on-seen",
+        "on-hidden",
+    ]
+    assert [json_at(row, "title") for row in json_list(result.data, "viaPlain")] == [
+        "on-hidden",
+        "on-seen",
+    ]
 
 
 def test_bind_orderset_owner_rejects_orderset_model_unrelated_to_owner() -> None:

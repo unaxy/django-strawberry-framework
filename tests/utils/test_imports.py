@@ -23,7 +23,7 @@ from django_strawberry_framework.utils.imports import (
     loaded_attr,
     require_optional_module,
 )
-from tests._idioms import stub_module
+from tests._idioms import module_binding, stub_module
 
 _HINT = "TestFeature requires somepackage. Install it with `pip install somepackage`."
 
@@ -164,9 +164,10 @@ def test_import_helpers_normalize_hostile_string_subclass_names(
     hostile_path = _HostileString(module_path)
     hostile_attr = _HostileString("Marker")
 
-    assert loaded_attr(hostile_path, hostile_attr) is fake.Marker
-    assert import_attr_if_importable(hostile_path, hostile_attr) is fake.Marker
-    assert import_attr(hostile_path, hostile_attr) is fake.Marker
+    marker = module_binding(fake, "Marker")
+    assert loaded_attr(hostile_path, hostile_attr) is marker
+    assert import_attr_if_importable(hostile_path, hostile_attr) is marker
+    assert import_attr(hostile_path, hostile_attr) is marker
 
 
 def test_require_optional_module_normalizes_a_hostile_install_hint() -> None:

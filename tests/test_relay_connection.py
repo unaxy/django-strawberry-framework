@@ -75,7 +75,7 @@ from django_strawberry_framework.utils.connections import (
     UnwindowableConnection,
 )
 from tests._definition import make_definition
-from tests._idioms import declare_django_type
+from tests._idioms import declare_django_type, json_at, json_list
 from tests._info import make_info
 
 
@@ -888,8 +888,10 @@ def test_fast_path_single_query(
             "{ objs { name booksConnection(first: 2) { edges { node { title } } } } }",
         )
     assert result.data is not None
-    assert len(result.data["objs"]) == 4
-    assert all(len(g["booksConnection"]["edges"]) == 2 for g in result.data["objs"])
+    assert len(json_list(result.data, "objs")) == 4
+    assert all(
+        len(json_list(g, "booksConnection", "edges")) == 2 for g in json_list(result.data, "objs")
+    )
 
 
 @pytest.mark.django_db
@@ -913,7 +915,10 @@ def test_fast_path_through_schema_connection_extension(
             "{ objs { booksConnection(first: 2) { edges { node { title } } } } }",
         )
     assert result.data is not None
-    titles = [e["node"]["title"] for e in result.data["objs"][0]["booksConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(result.data, "objs", 0, "booksConnection", "edges")
+    ]
     assert titles == ["a", "b"]
 
 
@@ -953,10 +958,10 @@ def test_divergent_aliases_one_window_query_per_alias(
             "} }",
         )
     assert result.data is not None
-    assert len(result.data["objs"]) == 4
-    for obj in result.data["objs"]:
-        assert len(obj["a"]["edges"]) == 2  # a's window bound
-        assert len(obj["b"]["edges"]) == 3  # b's window bound (3 of 5 available)
+    assert len(json_list(result.data, "objs")) == 4
+    for obj in json_list(result.data, "objs"):
+        assert len(json_list(obj, "a", "edges")) == 2  # a's window bound
+        assert len(json_list(obj, "b", "edges")) == 3  # b's window bound (3 of 5 available)
 
 
 @pytest.mark.django_db
@@ -990,16 +995,16 @@ def test_divergent_aliases_wire_parity() -> None:
     assert fast.data == slow.data
     # And the fast payload is substantively right, not vacuously equal.
     assert fast.data is not None
-    fast_obj = fast.data["objs"][0]
-    assert [e["node"]["title"] for e in fast_obj["a"]["edges"]] == ["a", "b"]
-    assert fast_obj["a"]["pageInfo"]["hasNextPage"] is True
-    assert [e["node"]["title"] for e in fast_obj["b"]["edges"]] == [
+    fast_obj = json_at(fast.data, "objs", 0)
+    assert [json_at(e, "node", "title") for e in json_list(fast_obj, "a", "edges")] == ["a", "b"]
+    assert json_at(fast_obj, "a", "pageInfo", "hasNextPage") is True
+    assert [json_at(e, "node", "title") for e in json_list(fast_obj, "b", "edges")] == [
         "a",
         "b",
         "c",
         "d",
     ]
-    assert fast_obj["b"]["pageInfo"]["hasNextPage"] is False
+    assert json_at(fast_obj, "b", "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -1049,7 +1054,7 @@ def test_divergent_alias_per_key_window_preferred_over_shared() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    titles = [e["node"]["title"] for e in result.data["objs"][0]["x"]["edges"]]
+    titles = [json_at(e, "node", "title") for e in json_list(result.data, "objs", 0, "x", "edges")]
     assert titles == ["b"]  # the per-key window, not the shared ["a", "c"]
 
 
@@ -1073,9 +1078,13 @@ def test_divergent_mixed_sidecar_serves_each_alias_correctly() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    obj = result.data["objs"][0]
-    assert [e["node"]["title"] for e in obj["a"]["edges"]] == ["banana"]
-    assert [e["node"]["title"] for e in obj["b"]["edges"]] == ["apple", "banana", "avocado"]
+    obj = json_at(result.data, "objs", 0)
+    assert [json_at(e, "node", "title") for e in json_list(obj, "a", "edges")] == ["banana"]
+    assert [json_at(e, "node", "title") for e in json_list(obj, "b", "edges")] == [
+        "apple",
+        "banana",
+        "avocado",
+    ]
 
 
 @pytest.mark.django_db
@@ -1091,9 +1100,9 @@ def test_divergent_aliases_strictness_raise_planned_keys_silent() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    obj = result.data["objs"][0]
-    assert len(obj["a"]["edges"]) == 2
-    assert len(obj["b"]["edges"]) == 3
+    obj = json_at(result.data, "objs", 0)
+    assert len(json_list(obj, "a", "edges")) == 2
+    assert len(json_list(obj, "b", "edges")) == 3
 
 
 @pytest.mark.django_db
@@ -1149,7 +1158,10 @@ def test_distinct_target_fallback_reports_correct_total_count() -> None:
     schema = _genres_distinct_book_schema(optimizer=True)
     result = _exec(schema, "{ objs { name booksConnection { totalCount } } }")
     assert result.data is not None
-    by_name = {g["name"]: g["booksConnection"]["totalCount"] for g in result.data["objs"]}
+    by_name = {
+        json_at(g, "name"): json_at(g, "booksConnection", "totalCount")
+        for g in json_list(result.data, "objs")
+    }
     # True distinct count (3), NOT the inflated 5 a pre-DISTINCT Count(1) OVER reports.
     assert by_name["fiction"] == 3
 
@@ -1216,10 +1228,10 @@ def test_fast_path_wire_parity_last_only() -> None:
 
     fast = _exec(_genres_list_schema(optimizer=True), query)
     assert fast.data is not None
-    fast_conn = fast.data["objs"][0]["booksConnection"]
-    assert [e["node"]["title"] for e in fast_conn["edges"]] == ["d", "e"]
-    assert fast_conn["pageInfo"]["hasPreviousPage"] is True
-    assert fast_conn["pageInfo"]["hasNextPage"] is False
+    fast_conn = json_at(fast.data, "objs", 0, "booksConnection")
+    assert [json_at(e, "node", "title") for e in json_list(fast_conn, "edges")] == ["d", "e"]
+    assert json_at(fast_conn, "pageInfo", "hasPreviousPage") is True
+    assert json_at(fast_conn, "pageInfo", "hasNextPage") is False
 
     registry.clear()
     _connection_type_cache.clear()
@@ -1314,10 +1326,10 @@ def test_windowed_last_page_reverses_a_bare_expression_ordering(
     with django_assert_num_queries(2):  # parents + ONE windowed prefetch.
         fast = _exec(_genres_expression_ordered_schema(optimizer=True), query)
     assert fast.data is not None
-    fast_conn = fast.data["objs"][0]["booksConnection"]
-    assert [e["node"]["title"] for e in fast_conn["edges"]] == ["d", "e"]
-    assert fast_conn["pageInfo"]["hasPreviousPage"] is True
-    assert fast_conn["pageInfo"]["hasNextPage"] is False
+    fast_conn = json_at(fast.data, "objs", 0, "booksConnection")
+    assert [json_at(e, "node", "title") for e in json_list(fast_conn, "edges")] == ["d", "e"]
+    assert json_at(fast_conn, "pageInfo", "hasPreviousPage") is True
+    assert json_at(fast_conn, "pageInfo", "hasNextPage") is False
 
     registry.clear()
     _connection_type_cache.clear()
@@ -1362,11 +1374,11 @@ def test_nested_window_count_observers_follow_a_non_camel_case_schema(
             f"{{ objs {{ {snake} }} }}",
         )
     assert result.data is not None
-    conn = result.data["objs"][0]["books_connection"]
-    assert conn["total_count"] == 5
-    assert conn["page_info"]["has_next_page"] is True
-    assert conn["page_info"]["has_previous_page"] is False
-    assert [e["node"]["title"] for e in conn["edges"]] == ["a", "b"]
+    conn = json_at(result.data, "objs", 0, "books_connection")
+    assert json_at(conn, "total_count") == 5
+    assert json_at(conn, "page_info", "has_next_page") is True
+    assert json_at(conn, "page_info", "has_previous_page") is False
+    assert [json_at(e, "node", "title") for e in json_list(conn, "edges")] == ["a", "b"]
 
     registry.clear()
     _connection_type_cache.clear()
@@ -1379,10 +1391,14 @@ def test_nested_window_count_observers_follow_a_non_camel_case_schema(
         f"{{ objs {{ {camel} }} }}",
     )
     assert default.data is not None
-    default_conn = default.data["objs"][0]["booksConnection"]
-    assert default_conn["totalCount"] == conn["total_count"]
-    assert default_conn["pageInfo"]["hasNextPage"] == conn["page_info"]["has_next_page"]
-    assert [e["node"]["title"] for e in default_conn["edges"]] == ["a", "b"]
+    default_conn = json_at(default.data, "objs", 0, "booksConnection")
+    assert json_at(default_conn, "totalCount") == json_at(conn, "total_count")
+    assert json_at(default_conn, "pageInfo", "hasNextPage") == json_at(
+        conn,
+        "page_info",
+        "has_next_page",
+    )
+    assert [json_at(e, "node", "title") for e in json_list(default_conn, "edges")] == ["a", "b"]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1518,7 +1534,10 @@ def test_fast_path_non_pk_ordering_applies_explicit_deterministic_order_by() -> 
         slow = _exec(_build(optimizer=False), query)
         assert fast.data == slow.data
         assert fast.data is not None
-        titles = [e["node"]["title"] for e in fast.data["objs"][0]["postsConnection"]["edges"]]
+        titles = [
+            json_at(e, "node", "title")
+            for e in json_list(fast.data, "objs", 0, "postsConnection", "edges")
+        ]
         assert titles == ["a", "b"]
     finally:
         with db_connection.schema_editor() as schema_editor:
@@ -1548,7 +1567,7 @@ def test_fast_path_cursor_round_trips_to_fallback_after() -> None:
         "{ objs { booksConnection(first: 2) { pageInfo { endCursor } } } }",
     )
     assert fast.data is not None
-    end_cursor = fast.data["objs"][0]["booksConnection"]["pageInfo"]["endCursor"]
+    end_cursor = json_at(fast.data, "objs", 0, "booksConnection", "pageInfo", "endCursor")
 
     registry.clear()
     _connection_type_cache.clear()
@@ -1558,7 +1577,10 @@ def test_fast_path_cursor_round_trips_to_fallback_after() -> None:
         f"{{ edges {{ node {{ title }} }} }} }} }}",
     )
     assert page_two.data is not None
-    titles = [e["node"]["title"] for e in page_two.data["objs"][0]["booksConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(page_two.data, "objs", 0, "booksConnection", "edges")
+    ]
     assert titles == ["c", "d"]
 
 
@@ -1620,8 +1642,11 @@ def test_fast_path_fires_for_reverse_fk_without_related_name(
             "{ objs { name repairticketConnection(first: 2) { edges { node { code } } } } }",
         )
     assert result.data is not None
-    assert len(result.data["objs"]) == 3
-    assert all(len(v["repairticketConnection"]["edges"]) == 2 for v in result.data["objs"])
+    assert len(json_list(result.data, "objs")) == 3
+    assert all(
+        len(json_list(v, "repairticketConnection", "edges")) == 2
+        for v in json_list(result.data, "objs")
+    )
 
 
 @pytest.mark.django_db
@@ -1884,10 +1909,10 @@ def test_fast_path_genuinely_empty_parent_serves_zero(
             "pageInfo { hasNextPage hasPreviousPage } } } }",
         )
     assert result.data is not None
-    conn = result.data["objs"][0]["booksConnection"]
-    assert conn["edges"] == []
-    assert conn["totalCount"] == 0
-    assert conn["pageInfo"] == {"hasNextPage": False, "hasPreviousPage": False}
+    conn = json_at(result.data, "objs", 0, "booksConnection")
+    assert json_at(conn, "edges") == []
+    assert json_at(conn, "totalCount") == 0
+    assert json_at(conn, "pageInfo") == {"hasNextPage": False, "hasPreviousPage": False}
 
 
 @pytest.mark.django_db
@@ -1922,9 +1947,9 @@ def test_fast_path_zero_children_parent_serves_under_ambiguous_shapes(
     slow = _exec(_genres_list_schema(optimizer=False, book_total_count=True), query)
     assert fast.data == slow.data
     assert fast.data is not None
-    conn = fast.data["objs"][0]["booksConnection"]
-    assert conn["edges"] == []
-    assert conn["totalCount"] == 0
+    conn = json_at(fast.data, "objs", 0, "booksConnection")
+    assert json_at(conn, "edges") == []
+    assert json_at(conn, "totalCount") == 0
 
 
 @pytest.mark.django_db
@@ -1971,7 +1996,10 @@ def test_fast_path_ignores_window_when_sidecar_kwargs_present() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    titles = [e["node"]["title"] for e in result.data["objs"][0]["booksConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(result.data, "objs", 0, "booksConnection", "edges")
+    ]
     assert titles == ["banana"]  # the filter narrowed; the unfiltered window was refused
 
 
@@ -2016,7 +2044,10 @@ def test_fallback_when_annotations_missing() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    titles = [e["node"]["title"] for e in result.data["objs"][0]["booksConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(result.data, "objs", 0, "booksConnection", "edges")
+    ]
     assert titles == ["a", "b"]
 
 
@@ -2071,8 +2102,8 @@ def test_outer_total_count_predicate_ignores_nested_total_count() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    genre_node = result.data["objs"]["edges"][0]["node"]
-    assert genre_node["booksConnection"]["totalCount"] == 3
+    genre_node = json_at(result.data, "objs", "edges", 0, "node")
+    assert json_at(genre_node, "booksConnection", "totalCount") == 3
 
 
 # =============================================================================
@@ -2177,7 +2208,10 @@ def test_strictness_warn_logs_once_per_occurrence(caplog: pytest.LogCaptureFixtu
     assert result.errors is None, result.errors
     # Warn continues: the filtered page is still served correctly.
     assert result.data is not None
-    titles = [e["node"]["title"] for e in result.data["objs"][0]["booksConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(result.data, "objs", 0, "booksConnection", "edges")
+    ]
     assert titles == ["banana"]
     assert any("Potential N+1 on books" in r.getMessage() for r in caplog.records), [
         r.getMessage() for r in caplog.records
@@ -2321,7 +2355,10 @@ def test_strictness_silent_when_window_served() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    titles = [e["node"]["title"] for e in result.data["objs"][0]["booksConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(result.data, "objs", 0, "booksConnection", "edges")
+    ]
     assert titles == ["apple", "banana"]
 
 
@@ -2344,7 +2381,10 @@ def test_strictness_silent_when_off() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    titles = [e["node"]["title"] for e in result.data["objs"][0]["booksConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(result.data, "objs", 0, "booksConnection", "edges")
+    ]
     assert titles == ["banana"]
 
 
@@ -2367,7 +2407,10 @@ def test_strictness_silent_no_optimizer() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    titles = [e["node"]["title"] for e in result.data["objs"][0]["booksConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(result.data, "objs", 0, "booksConnection", "edges")
+    ]
     assert titles == ["apple", "banana"]
 
 
@@ -2459,10 +2502,10 @@ def test_fast_path_count_less_window_serves_cheap_page(
     with django_assert_num_queries(2), CaptureQueriesContext(db_connection) as captured:
         result = _exec(schema, query)
     assert result.data is not None
-    conn = result.data["objs"][0]["booksConnection"]
-    assert [e["node"]["title"] for e in conn["edges"]] == ["a", "b"]
-    assert conn["pageInfo"]["hasPreviousPage"] is False
-    assert conn["pageInfo"]["startCursor"] == conn["edges"][0]["cursor"]
+    conn = json_at(result.data, "objs", 0, "booksConnection")
+    assert [json_at(e, "node", "title") for e in json_list(conn, "edges")] == ["a", "b"]
+    assert json_at(conn, "pageInfo", "hasPreviousPage") is False
+    assert json_at(conn, "pageInfo", "startCursor") == json_at(conn, "edges", 0, "cursor")
     # The SQL-negative pin: the count window never compiled.
     window_sql = captured[1]["sql"]
     assert "_dst_row_number" in window_sql
@@ -2640,7 +2683,7 @@ def test_consumer_assigned_relation_with_hint_is_planned_and_silent() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data is not None
-    titles = [b["title"] for b in result.data["objs"][0]["books"]]
+    titles = [json_at(b, "title") for b in json_list(result.data, "objs", 0, "books")]
     assert titles == ["a", "b"]
 
 

@@ -49,6 +49,7 @@ from django_strawberry_framework.auth.sessions import (
     uses_signed_cookie_sessions,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils._narrowing import instance_dict
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from tests._idioms import ClassReadRaises, stub_module
 from tests._soft_dependency import simulated_absence
@@ -463,7 +464,7 @@ def test_no_process_global_lock_registry_in_the_sessions_module() -> None:
     )
     offenders = [
         name
-        for name, value in vars(sessions_mod).items()
+        for name, value in instance_dict(sessions_mod).items()
         if not name.startswith("__") and isinstance(value, forbidden)
     ]
     assert offenders == [], f"unexpected process-global lock storage: {offenders}"

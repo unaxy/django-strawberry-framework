@@ -10,13 +10,13 @@ or generated diff files, so none of these rows can move; there is no live
 sibling in ``examples/fakeshop/test_query/``.
 """
 
-import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from scripts import review_changed_python_diffs_against_head as diffs
+from tests._idioms import json_at, json_list, json_loads, json_object
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -199,7 +199,7 @@ def test_list_json_reports_changes_head_blobs_and_dirty_group(
     _write(repo, "pkg/new.py", "NEW = 1\n")
 
     assert diffs.main(["--list", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
+    payload = json_object(json_loads(capsys.readouterr().out))
 
     assert payload["base"] == "v1"
     assert payload["head"] == head
@@ -223,12 +223,16 @@ def test_list_json_reports_changes_head_blobs_and_dirty_group(
             "head_blob": _git(repo, "rev-parse", "HEAD:pkg/mod.py"),
         },
     ]
-    dirty = {row["path"]: row for row in payload["dirty"]}
+    dirty = {json_at(row, "path"): row for row in json_list(payload, "dirty")}
     assert set(dirty) == {"pkg/added.py", "pkg/new.py"}
-    assert dirty["pkg/added.py"]["status"] == " M"
-    assert dirty["pkg/added.py"]["worktree_blob"] == _git(repo, "hash-object", "pkg/added.py")
-    assert dirty["pkg/new.py"]["status"] == "??"
-    assert dirty["pkg/new.py"]["head_blob"] is None
+    assert json_at(dirty, "pkg/added.py", "status") == " M"
+    assert json_at(dirty, "pkg/added.py", "worktree_blob") == _git(
+        repo,
+        "hash-object",
+        "pkg/added.py",
+    )
+    assert json_at(dirty, "pkg/new.py", "status") == "??"
+    assert json_at(dirty, "pkg/new.py", "head_blob") is None
     assert not (repo / "docs").exists()
 
 

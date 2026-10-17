@@ -526,10 +526,10 @@ reportUnusedFunction = "none"
 reportImportCycles = "none"
 reportUninitializedInstanceVariable = "none"
 # The ratchet, off until their sites are fixed (turn one on to list them): `reportAny` is
-# on in the scripts/, root-file and package environments below and in the example project
-# outside its tests, `reportUnannotatedClassAttribute` in the scripts/, root-file and package
-# environments, and `reportUnusedCallResult` in all of those.
-reportAny = "none"
+# on everywhere but the example project's test folders (off in their environments below),
+# `reportUnannotatedClassAttribute` in the scripts/, root-file and package environments, and
+# `reportUnusedCallResult` in those and the example project outside its tests.
+reportAny = "error"
 reportUnannotatedClassAttribute = "none"
 reportUnusedCallResult = "none"
 
@@ -586,27 +586,34 @@ reportUnusedCallResult = "error"
 
 # The example project's test folders, listed before the project root: tests keep the root
 # environment's rules (a test calls for side effects: fixture rows, `delete()`, a call inside
-# `pytest.raises`).
+# `pytest.raises`), except `reportAny`, whose sites in these folders are not cleared yet.
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/tests"
+reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/test_query"
+reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/glossary/tests"
+reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/kanban/tests"
+reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/library/tests"
+reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/products/tests"
+reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/scalars/tests"
+reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop"
@@ -619,24 +626,24 @@ reportUnusedCallResult = "error"
 # diagnostic instead); one below it fails until the budget is lowered to match, and a rule at
 # zero leaves `ignores` (marked `# Locked` above once it is on in every environment).
 [tool.type-suppressions]
-cast = 440
+cast = 433
 
 [tool.type-suppressions.ignores]
 reportArgumentType = 315
-reportAssignmentType = 32
+reportAssignmentType = 33
 reportAttributeAccessIssue = 142
 reportCallIssue = 15
 reportDeprecated = 2
-reportAny = 90
-reportExplicitAny = 55
-reportFunctionMemberAccess = 5
+reportAny = 191
+reportExplicitAny = 40
+reportFunctionMemberAccess = 4
 reportGeneralTypeIssues = 5
 reportIncompatibleMethodOverride = 59
 reportIncompatibleUnannotatedOverride = 1
 reportIncompatibleVariableOverride = 93
 reportIndexIssue = 10
 reportInvalidTypeArguments = 5
-reportMissingSuperCall = 2
+reportMissingSuperCall = 3
 reportOptionalMemberAccess = 3
 reportPropertyTypeMismatch = 5
 reportReturnType = 27

@@ -12,7 +12,6 @@ so none of these rows can move. There is no live sibling in
 ``examples/fakeshop/test_query/``.
 """
 
-import json
 import re
 import subprocess
 from collections.abc import Iterator
@@ -53,6 +52,7 @@ from scripts.build_tree_md import (
     stale_report,
     tree_row_paths,
 )
+from tests._idioms import json_at, json_list, json_loads, json_object
 
 _FAKESHOP_PROJECT = REPO_ROOT / "examples" / "fakeshop"
 _FAKESHOP_APP_NAMES = fakeshop_app_names(_FAKESHOP_PROJECT / "apps")
@@ -459,19 +459,19 @@ def test_list_docstrings_json_carries_the_same_rows(
             "--json",
         ],
     )
-    payload = json.loads(capsys.readouterr().out)
+    payload = json_object(json_loads(capsys.readouterr().out))
 
     assert status == 1
     assert payload["total"] == 2
     assert payload["failing"] == 1
     assert [
         (
-            row["path"],
-            row["row"],
-            row["line"],
-            row["ok"],
+            json_at(row, "path"),
+            json_at(row, "row"),
+            json_at(row, "line"),
+            json_at(row, "ok"),
         )
-        for row in payload["modules"]
+        for row in json_list(payload, "modules")
     ] == [
         (
             str(fake_package / "good.py"),
@@ -486,7 +486,9 @@ def test_list_docstrings_json_carries_the_same_rows(
             False,
         ),
     ]
-    assert [violation["rule"] for violation in payload["modules"][1]["violations"]] == [
+    assert [
+        json_at(violation, "rule") for violation in json_list(payload, "modules", 1, "violations")
+    ] == [
         RULE_NO_EG_IE,
     ]
 

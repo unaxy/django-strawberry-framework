@@ -53,7 +53,6 @@ from django.db.models import Model, QuerySet
 from django.db.models.signals import post_save
 from django.utils.functional import SimpleLazyObject
 from graphql.execution.execute import ExecutionContext as CoreExecutionContext
-from graphql_client import JSONObject
 from strawberry import relay
 from typing_extensions import Self, override
 
@@ -73,9 +72,17 @@ from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.mutations.permissions import DjangoModelPermission
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.schema import DjangoMutationExecutionContext
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    dict_of,
+    is_awaitable,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.write_transaction import (
     _SNAPSHOT_NODE_BUDGET,
     _enforce_read_only_barrier,
@@ -101,14 +108,48 @@ from django_strawberry_framework.utils.write_transaction import (
     snapshot_target_state,
     write_pipeline,
 )
-from tests._idioms import ClaimsClass, ClassReadRaises, definition_raises, is_object_dict
+from tests._idioms import (
+    ClaimsClass,
+    ClassReadRaises,
+    definition_raises,
+    is_object_dict,
+    is_object_list,
+    saved_pk,
+)
 from tests._info import make_info
 
 if TYPE_CHECKING:
     from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter
 
 
-_JSONFrame: TypeAlias = JSONObject
+_JSONFrame: TypeAlias = dict[object, object]
+
+
+def _json_at(value: object, *path: str | int) -> object:
+    """``value`` followed down ``path``: a ``str`` key into an object, an ``int`` index into a list."""
+    found = value
+    for key in path:
+        if isinstance(key, str):
+            assert is_object_dict(found), found
+            found = found[key]
+        else:
+            assert is_object_list(found), found
+            found = found[key]
+    return found
+
+
+def _json_object(value: object, *path: str | int) -> dict[object, object]:
+    """The JSON object at ``path`` under ``value`` (see ``_json_at``)."""
+    found = _json_at(value, *path)
+    assert is_object_dict(found), found
+    return found
+
+
+def _json_list(value: object, *path: str | int) -> list[object]:
+    """The JSON list at ``path`` under ``value`` (see ``_json_at``)."""
+    found = _json_at(value, *path)
+    assert is_object_list(found), found
+    return found
 
 
 @pytest.fixture(autouse=True)
@@ -272,7 +313,7 @@ def test_plain_strawberry_schema_refuses_generated_mutations_before_writing() ->
 
     result = schema.execute_sync(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "Written"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "Written"}},
     )
 
     assert result.errors is not None
@@ -398,7 +439,7 @@ async def test_async_execution_context_exits_transaction_on_raised_base_exceptio
     # transaction was exited (its connection left the atomic block).
     result = await schema.execute(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "AsyncRaised"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "AsyncRaised"}},
     )
     assert result.errors is not None
     assert "execution exploded" in str(result.errors[0])
@@ -431,7 +472,7 @@ def test_sync_execution_context_exits_transaction_on_raised_base_exception(
     # that the transaction was exited (the connection left the atomic block).
     result = schema.execute_sync(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "SyncRaised"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "SyncRaised"}},
     )
     assert result.errors is not None
     assert "execution exploded" in str(result.errors[0])
@@ -562,8 +603,9 @@ def _committed_window_names() -> set[str]:
     finally:
         connection = connections["default"]
         connection.close()
-        if connection.connection is not None:
-            connection.connection.close()
+        raw_connection = read_attr(connection, "connection")
+        if raw_connection is not None:
+            call_method(raw_connection, "close")
             connection.connection = None
 
 
@@ -602,7 +644,10 @@ def _connections_really_close() -> Generator[None, None, None]:
     def _declines_close_unless_default(self: sqlite_base.DatabaseWrapper) -> bool:
         return self.alias != default.alias and declines_close(self)
 
-    keeper = sqlite3.connect(default.settings_dict["NAME"], uri=True)
+    keeper = sqlite3.connect(
+        require_instance(dict_of(default.settings_dict)["NAME"], str),
+        uri=True,
+    )
     try:
         with patch.object(
             sqlite_base.DatabaseWrapper,
@@ -679,7 +724,7 @@ async def _socket(
     assert connected, "websocket handshake failed"
     try:
         await communicator.send_json_to({"type": "connection_init"})
-        ack = await communicator.receive_json_from(timeout=10)
+        ack = await _receive_frame(communicator)
         assert ack["type"] == "connection_ack", ack
         yield communicator
     finally:
@@ -701,9 +746,18 @@ async def _send_create(
     )
 
 
+async def _receive_frame(communicator: WebsocketCommunicator) -> _JSONFrame:
+    """The next JSON object frame ``communicator`` receives (channels leaves it ``Any``)."""
+    pending = object_result(communicator.receive_json_from, timeout=10)
+    assert is_awaitable(pending)
+    frame = await pending
+    assert is_object_dict(frame), frame
+    return frame
+
+
 async def _receive_result(communicator: WebsocketCommunicator, *, op_id: str = "1") -> _JSONFrame:
     """The operation's single result frame, with its ``complete`` drained."""
-    frame = await communicator.receive_json_from(timeout=10)
+    frame = await _receive_frame(communicator)
     if frame["type"] == "next":
         assert await communicator.receive_json_from(timeout=10) == {
             "type": "complete",
@@ -1149,7 +1203,7 @@ class _DeleteTargetOutFromUnder:
             # seam - the race being made deterministic is the point, not the
             # phase discipline of this fixture.
             with pipeline_write_phase():
-                product_models.Item._base_manager.filter(pk=instance.pk).delete()
+                product_models.Item._base_manager.filter(pk=saved_pk(instance)).delete()
         return True
 
 
@@ -1163,15 +1217,15 @@ def test_update_of_concurrently_deleted_row_returns_conflict_envelope() -> None:
 
     result = schema.execute_sync(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "NeverLands"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "NeverLands"}},
     )
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    payload = result.data["write0"]
+    payload = _json_object(result.data, "write0")
     assert payload["node"] is None
-    assert [e["field"] for e in payload["errors"]] == ["id"]
-    assert "concurrent" in payload["errors"][0]["messages"][0]
+    assert [_json_at(error, "field") for error in _json_list(payload, "errors")] == ["id"]
+    assert "concurrent" in require_instance(_json_at(payload, "errors", 0, "messages", 0), str)
     # The conflict envelope rolled the WHOLE transaction back - including the
     # in-transaction out-of-band delete - and the update was never silently
     # converted into an insert: the row survives with its original name.
@@ -1187,14 +1241,14 @@ def test_delete_of_concurrently_deleted_row_returns_conflict_envelope() -> None:
     schema = _mutation_schema(DeleteItem)
     item = _seed_item("VanishingDelete")
 
-    result = schema.execute_sync(_DELETE, variable_values={"id": _item_gid(item.pk)})
+    result = schema.execute_sync(_DELETE, variable_values={"id": _item_gid(saved_pk(item))})
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    payload = result.data["write0"]
+    payload = _json_object(result.data, "write0")
     assert payload["node"] is None
-    assert [e["field"] for e in payload["errors"]] == ["id"]
-    assert "concurrent" in payload["errors"][0]["messages"][0]
+    assert [_json_at(error, "field") for error in _json_list(payload, "errors")] == ["id"]
+    assert "concurrent" in require_instance(_json_at(payload, "errors", 0, "messages", 0), str)
 
 
 @pytest.mark.django_db
@@ -1213,14 +1267,14 @@ def test_missing_post_write_refetch_returns_conflict_envelope(
     monkeypatch.setattr(mutation_resolvers, "refetch_optimized", _refetch_nothing)
     result = schema.execute_sync(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "RefetchWritten"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "RefetchWritten"}},
     )
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    payload = result.data["write0"]
+    payload = _json_object(result.data, "write0")
     assert payload["node"] is None
-    assert [e["field"] for e in payload["errors"]] == ["id"]
+    assert [_json_at(error, "field") for error in _json_list(payload, "errors")] == ["id"]
     item.refresh_from_db()
     assert item.name == "RefetchGone"  # the conflict envelope rolled the write back
 
@@ -1258,7 +1312,7 @@ def test_forced_update_conflict_requires_a_demonstrably_absent_row() -> None:
 def test_forced_update_conflict_maps_absent_row_to_conflict() -> None:
     """A zero-row signal with the row demonstrably gone is the ``conflict`` envelope."""
     item = _seed_item("Gone")
-    product_models.Item._base_manager.filter(pk=item.pk).delete()
+    product_models.Item._base_manager.filter(pk=saved_pk(item)).delete()
     signal = DatabaseError("Forced update did not affect any rows.")
     errors = forced_update_conflict_errors(item, "default", signal)
     assert [error.field for error in errors] == ["id"]
@@ -1325,7 +1379,7 @@ def test_visibility_hook_switching_aliases_fails_closed() -> None:
 
     result = schema.execute_sync(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "CrossAlias"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "CrossAlias"}},
     )
 
     assert result.errors is not None
@@ -1578,7 +1632,7 @@ def test_select_for_update_false_update_still_succeeds_unlocked() -> None:
 
     result = schema.execute_sync(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "UnlockedUpdated"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "UnlockedUpdated"}},
     )
     assert result.errors is None, result.errors
     assert result.data is not None
@@ -1652,7 +1706,7 @@ def test_permission_class_returning_non_bool_is_a_configuration_error() -> None:
 
     result = schema.execute_sync(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "Allowed?"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "Allowed?"}},
     )
 
     assert result.errors is not None
@@ -1687,7 +1741,7 @@ def test_check_permission_override_returning_non_bool_is_a_configuration_error()
 
     result = schema.execute_sync(
         _UPDATE,
-        variable_values={"id": _item_gid(item.pk), "d": {"name": "Allowed?"}},
+        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "Allowed?"}},
     )
 
     assert result.errors is not None
@@ -1735,15 +1789,15 @@ def test_forced_update_integrity_error_race_maps_to_the_constraint_envelope() ->
     ):
         result = schema.execute_sync(
             _UPDATE,
-            variable_values={"id": _item_gid(item.pk), "d": {"name": "Raced"}},
+            variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "Raced"}},
         )
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    payload = result.data["write0"]
+    payload = _json_object(result.data, "write0")
     assert payload["node"] is None
-    assert payload["errors"][0]["field"] == NON_FIELD_ERROR_KEY
-    assert payload["errors"][0]["messages"] == ["A database constraint was violated."]
+    assert _json_at(payload, "errors", 0, "field") == NON_FIELD_ERROR_KEY
+    assert _json_at(payload, "errors", 0, "messages") == ["A database constraint was violated."]
     item.refresh_from_db()
     assert item.name == "RaceTarget"
 
@@ -1902,7 +1956,7 @@ def test_target_state_snapshot_and_drift_rejection() -> None:
             assert_no_target_drift("DriftMut", item)
 
     # A DEFERRED field is absent from the snapshot and skipped by the check.
-    deferred_item = product_models.Item.objects.defer("description").get(pk=item.pk)
+    deferred_item = product_models.Item.objects.defer("description").get(pk=saved_pk(item))
     with write_pipeline("default", lock=False):
         pipeline = require_write_pipeline()
         pipeline.target_state = snapshot_target_state(deferred_item)

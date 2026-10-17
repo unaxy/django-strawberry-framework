@@ -25,6 +25,7 @@ from django.utils.functional import SimpleLazyObject
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.sessions import (
     _ACTOR_STATE_SCOPE_KEY,
     ConnectionActorState,
@@ -93,7 +94,7 @@ def test_session_store_class_reports_an_unreadable_setting_as_configuration_erro
     # The module attribute is restored by monkeypatch; prove the resolver is
     # not left wedged on the stand-in.
     monkeypatch.undo()
-    assert django_settings.SESSION_ENGINE
+    assert read_attr(django_settings, "SESSION_ENGINE")
     assert session_store_class() is DBSessionStore
 
 

@@ -99,11 +99,14 @@ from django_strawberry_framework.rest_framework.sets import (
     _validate_serializer_nested_fields,
 )
 from django_strawberry_framework.types import base as types_base
+from django_strawberry_framework.utils._narrowing import class_dict, dict_of, read_attr
+from django_strawberry_framework.utils.input_values import UNSET
 from tests._idioms import (
     ClassReadRaises,
     ModelSerializerBase,
     comparing_metaclass,
     definition_raises,
+    module_binding,
 )
 from tests._info import unread_info
 
@@ -487,7 +490,7 @@ def test_bind_materializes_serializer_input_into_rest_framework_namespace() -> N
     assert "ItemSerializerInput" not in mutation_materialized_names
     assert CreateItem._input_class is serializer_materialized_names["ItemSerializerInput"]
     assert (
-        serializer_module.ItemSerializerInput
+        module_binding(serializer_module, "ItemSerializerInput")
         is serializer_materialized_names["ItemSerializerInput"]
     )
 
@@ -804,7 +807,7 @@ def test_declared_flat_choice_over_grouped_column_binds(*, exposes_status: bool)
     enum_definition = status.type
     assert isinstance(enum_definition, StrawberryEnumDefinition)
     assert enum_definition.name == "GroupedSerInputStatusEnum"
-    assert [value.value for value in enum_definition.values] == ["a", "b"]
+    assert [read_attr(value, "value") for value in enum_definition.values] == ["a", "b"]
     assert registry.get_enum(model, "status") is None
 
 
@@ -1437,7 +1440,7 @@ def test_serializer_meta_optional_fields_is_not_the_public_api() -> None:
     assert input_cls is not None
     fields = _input_fields(input_cls)
     # ``name`` stays REQUIRED: the serializer-level optional_fields has no effect.
-    assert fields["name"].default_value is not strawberry.UNSET
+    assert fields["name"].default_value is not UNSET
 
 
 def test_mutation_optional_fields_unknown_name_raises_at_class_creation() -> None:
@@ -1476,7 +1479,7 @@ def test_get_serializer_for_schema_classmethod_override_drives_bind() -> None:
 
         @override
         def get_fields(self) -> dict[str, DRFField]:
-            _ = self.context["tenant"]  # KeyError under no-arg default discovery
+            _ = dict_of(self.context)["tenant"]  # KeyError under no-arg default discovery
             return base_fields(super())
 
     class CreateCtxItem(SerializerMutation):
@@ -2273,7 +2276,7 @@ def test_input_type_name_reads_bound_name_after_finalize() -> None:
 
     finalize_django_types()
 
-    bound_name = CreateItemViaSerializer.__dict__["_input_type_name"]
+    bound_name = class_dict(CreateItemViaSerializer)["_input_type_name"]
     assert CreateItemViaSerializer._input_class is not None
     assert bound_name == CreateItemViaSerializer._input_class.__name__
     assert (

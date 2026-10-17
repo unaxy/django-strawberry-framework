@@ -49,6 +49,7 @@ from django_strawberry_framework.relay import (
     decode_model_global_id,
 )
 from django_strawberry_framework.types.relay import SyncMisuseError, implements_relay_node
+from tests._idioms import json_at, json_list, saved_pk
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +145,7 @@ def test_bare_node_field_resolves_type_name_id() -> None:
     assert row is not None
     result = schema.execute_sync(
         _NODE_QUERY,
-        variable_values={"id": _gid("CategoryNode", row.pk)},
+        variable_values={"id": _gid("CategoryNode", saved_pk(row))},
     )
     assert result.errors is None
     assert result.data is not None
@@ -201,7 +202,7 @@ def test_bare_node_field_multi_type_model_typename_follows_gid() -> None:
         assert row is not None
         result = schema.execute_sync(
             "query ($id: ID!) { node(id: $id) { __typename } }",
-            variable_values={"id": _gid(type_name, row.pk)},
+            variable_values={"id": _gid(type_name, saved_pk(row))},
         )
         assert result.errors is None
         assert result.data is not None
@@ -224,12 +225,12 @@ def test_bare_nodes_field_multi_type_model_typenames_follow_gids() -> None:
     result = schema.execute_sync(
         "query ($ids: [ID!]!) { nodes(ids: $ids) { __typename } }",
         variable_values={
-            "ids": [_gid("CategoryAdminNode", row.pk), _gid("CategoryNode", row.pk)],
+            "ids": [_gid("CategoryAdminNode", saved_pk(row)), _gid("CategoryNode", saved_pk(row))],
         },
     )
     assert result.errors is None
     assert result.data is not None
-    assert [node["__typename"] for node in result.data["nodes"]] == [
+    assert [json_at(node, "__typename") for node in json_list(result.data, "nodes")] == [
         "CategoryAdminNode",
         "CategoryNode",
     ]
@@ -288,7 +289,7 @@ def test_node_type_hint_does_not_poison_reused_model_instance() -> None:
         types=[PrimaryNode, SecondaryNode],
     )
     assert row is not None
-    gid = _gid("SecondaryNode", row.pk)
+    gid = _gid("SecondaryNode", saved_pk(row))
     result = schema.execute_sync(
         "query($id: ID!) { node(id: $id) { __typename } primary { name } }",
         variable_values={"id": gid},
@@ -453,7 +454,7 @@ def test_decode_model_global_id_resolves_custom_node_id_to_real_pk() -> None:
     result = decode_model_global_id(_gid("products.category", row.name), Category)
     assert result.status is GlobalIDDecode.OK
     # The REAL integer pk, NOT the ``name`` string the GlobalID carried.
-    assert result.pk == row.pk
+    assert result.pk == saved_pk(row)
     assert result.pk != row.name
 
 
@@ -594,14 +595,14 @@ def test_consumer_overrides_receive_the_decoded_node_id_string() -> None:
     finalize_django_types()
     schema = strawberry.Schema(query=Query, config=strawberry_config(), types=[CategoryNode])
     assert row is not None
-    gid = _gid("products.category", row.pk)
+    gid = _gid("products.category", saved_pk(row))
     result = schema.execute_sync(
         "query ($id: ID!) { node(id: $id) { __typename } nodes(ids: [$id, $id]) { __typename } }",
         variable_values={"id": gid},
     )
 
     assert result.errors is None
-    assert received == [str(row.pk), [str(row.pk), str(row.pk)]]
+    assert received == [str(saved_pk(row)), [str(saved_pk(row)), str(saved_pk(row))]]
 
 
 @pytest.mark.django_db
@@ -629,7 +630,7 @@ def test_default_resolvers_find_a_row_whose_id_literal_spells_its_pk_differently
     schema = strawberry.Schema(query=Query, config=strawberry_config(), types=[CategoryNode])
     row = Category.objects.order_by("pk").first()
     assert row is not None
-    padded = _gid("products.category", f"0{row.pk}")
+    padded = _gid("products.category", f"0{saved_pk(row)}")
     result = schema.execute_sync(
         "query ($id: ID!) { node(id: $id) { ... on CategoryNode { name } }"
         " nodes(ids: [$id]) { ... on CategoryNode { name } } }",
@@ -681,7 +682,7 @@ def test_default_resolvers_read_an_uncoercible_id_as_no_row_under_strawberrys_no
     schema = _strawberry_node_schema()
     row = Category.objects.order_by("pk").first()
     assert row is not None
-    bad, good = _gid("CategoryNode", "abc"), _gid("CategoryNode", row.pk)
+    bad, good = _gid("CategoryNode", "abc"), _gid("CategoryNode", saved_pk(row))
 
     result = schema.execute_sync(
         _STRAWBERRY_NODE_QUERY,
@@ -706,7 +707,7 @@ async def test_async_default_resolvers_read_an_uncoercible_id_as_no_row() -> Non
     schema = _strawberry_node_schema()
     row = await Category.objects.order_by("pk").afirst()
     assert row is not None
-    bad, good = _gid("CategoryNode", "abc"), _gid("CategoryNode", row.pk)
+    bad, good = _gid("CategoryNode", "abc"), _gid("CategoryNode", saved_pk(row))
 
     result = await schema.execute(
         _STRAWBERRY_NODE_QUERY,
@@ -864,7 +865,7 @@ async def test_nodes_async_with_sync_consumer_resolve_nodes_override() -> None:
     raised ``TypeError: 'list' object can't be awaited``.
     """
     await sync_to_async(services.seed_data)(1)
-    rows = {str(obj.pk): obj async for obj in Category.objects.order_by("pk")}
+    rows = {str(saved_pk(obj)): obj async for obj in Category.objects.order_by("pk")}
 
     class SyncCategoryNode(DjangoType):
         class Meta:
@@ -896,7 +897,7 @@ async def test_nodes_async_with_sync_consumer_resolve_nodes_override() -> None:
     query = "query ($ids: [ID!]!) { nodes(ids: $ids) { __typename ... on CategoryNode { name } } }"
     result = await schema.execute(
         query,
-        variable_values={"ids": [_gid("products.category", target.pk)]},
+        variable_values={"ids": [_gid("products.category", saved_pk(target))]},
     )
     assert result.errors is None
     assert result.data is not None
@@ -934,7 +935,7 @@ def test_node_sync_with_async_consumer_resolve_node_raises_sync_misuse() -> None
     assert row is not None
     result = schema.execute_sync(
         _CATEGORY_QUERY,
-        variable_values={"id": _gid("products.category", row.pk)},
+        variable_values={"id": _gid("products.category", saved_pk(row))},
     )
     assert result.errors is not None
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
@@ -984,7 +985,7 @@ async def test_node_sync_operation_inside_an_event_loop_never_calls_async_resolv
 
     result = schema.execute_sync(
         _CATEGORY_QUERY,
-        variable_values={"id": _gid("products.category", row.pk)},
+        variable_values={"id": _gid("products.category", saved_pk(row))},
     )
 
     assert result.errors is not None
@@ -1026,7 +1027,7 @@ def test_nodes_sync_with_async_consumer_resolve_nodes_raises_sync_misuse() -> No
     assert row is not None
     result = schema.execute_sync(
         _CATEGORIES_QUERY,
-        variable_values={"ids": [_gid("products.category", row.pk)]},
+        variable_values={"ids": [_gid("products.category", saved_pk(row))]},
     )
     assert result.errors is not None
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
@@ -1072,7 +1073,10 @@ def test_nodes_consumer_resolve_nodes_wrong_length_raises() -> None:
     result = schema.execute_sync(
         _CATEGORIES_QUERY,
         variable_values={
-            "ids": [_gid("products.category", first.pk), _gid("products.category", second.pk)],
+            "ids": [
+                _gid("products.category", saved_pk(first)),
+                _gid("products.category", saved_pk(second)),
+            ],
         },
     )
     assert result.errors is not None
@@ -1108,7 +1112,7 @@ def test_nodes_consumer_resolve_nodes_generator_return_accepted() -> None:
             required: bool = False,
         ) -> Iterator[Category | None]:
             del info, required  # Strawberry's relay passes these by keyword
-            rows = {str(obj.pk): obj for obj in Category.objects.filter(pk__in=node_ids)}
+            rows = {str(saved_pk(obj)): obj for obj in Category.objects.filter(pk__in=node_ids)}
             return (rows.get(str(node_id)) for node_id in node_ids)
 
     schema = _schema_with(
@@ -1120,7 +1124,10 @@ def test_nodes_consumer_resolve_nodes_generator_return_accepted() -> None:
     result = schema.execute_sync(
         _CATEGORIES_QUERY,
         variable_values={
-            "ids": [_gid("products.category", second.pk), _gid("products.category", first.pk)],
+            "ids": [
+                _gid("products.category", saved_pk(second)),
+                _gid("products.category", saved_pk(first)),
+            ],
         },
     )
     assert result.errors is None
@@ -1166,7 +1173,7 @@ def test_node_sync_async_get_queryset_raises_sync_misuse() -> None:
     assert row is not None
     result = schema.execute_sync(
         _CATEGORY_QUERY,
-        variable_values={"id": _gid("products.category", row.pk)},
+        variable_values={"id": _gid("products.category", saved_pk(row))},
     )
     assert result.errors is not None
     assert isinstance(result.errors[0].original_error, SyncMisuseError)

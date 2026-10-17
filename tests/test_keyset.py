@@ -86,6 +86,7 @@ from django_strawberry_framework.optimizer.plans import (
     OptimizationPlan,
     apply_window_pagination,
 )
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.connections import (
     FetchMode,
     PaginationArgumentError,
@@ -94,6 +95,7 @@ from django_strawberry_framework.utils.connections import (
     resolve_relay_max_results,
     window_range_plan,
 )
+from tests._idioms import saved_pk
 from tests._info import make_info
 from tests._soft_dependency import simulated_absence
 
@@ -225,7 +227,7 @@ def test_cursor_round_trip_preserves_values() -> None:
         fingerprint=_fingerprint(),
         argument="after",
     )
-    assert decoded.values == (7, issue.pk)
+    assert decoded.values == (7, saved_pk(issue))
 
 
 def test_decrypt_cursor_payload_rejects_non_ascii_token() -> None:
@@ -235,7 +237,7 @@ def test_decrypt_cursor_payload_rejects_non_ascii_token() -> None:
 
 def test_decrypt_cursor_payload_rejects_non_json_plaintext() -> None:
     invalid_json = base64.urlsafe_b64encode(
-        _cursor_aessiv(django_settings.SECRET_KEY).encrypt(
+        _cursor_aessiv(read_attr(django_settings, "SECRET_KEY")).encrypt(
             b"not-json",
             [_CURSOR_ENCRYPTION_CONTEXT],
         ),
@@ -477,7 +479,7 @@ def test_keyset_seek_q_mixed_directions_both_ways() -> None:
         for number in (1, 2, 3)
     ]
     columns = _issue_columns()
-    cursor = KeysetCursor(values=(2, issues[1].pk))
+    cursor = KeysetCursor(values=(2, saved_pk(issues[1])))
     after = list(Issue.objects.filter(keyset_seek_q(columns, cursor)).order_by("-number", "id"))
     before = list(
         Issue.objects.filter(keyset_seek_q(columns, cursor, flip=True)).order_by("-number", "id"),
@@ -647,7 +649,7 @@ def test_apply_window_pagination_counted_keyset_serves_pre_seek_counts() -> None
     ]
     Issue.objects.create(periodical=drained, number=9, title="d9")
     # Cursor at p3 under (-number, id): "after" means numbers below 3.
-    cursor = KeysetCursor(values=(3, issues[2].pk))
+    cursor = KeysetCursor(values=(3, saved_pk(issues[2])))
     seek = KeysetSeek(columns=_issue_columns(), cursor=cursor)
     windowed = apply_window_pagination(
         Issue.objects.all(),
@@ -658,11 +660,11 @@ def test_apply_window_pagination_counted_keyset_serves_pre_seek_counts() -> None
         with_total_count=True,
         keyset_seek=seek,
     )
-    rows = list(windowed.filter(periodical_id__in=[populated.pk, drained.pk]))
+    rows = list(windowed.filter(periodical_id__in=[saved_pk(populated), saved_pk(drained)]))
     by_partition: dict[int, list[Issue]] = {}
     for row in rows:
         by_partition.setdefault(row.periodical_id, []).append(row)
-    populated_rows = by_partition[populated.pk]
+    populated_rows = by_partition[saved_pk(populated)]
     # Page row: p2 with PAGE-RELATIVE rn 1; the qualify-wrapped filter kept the
     # partition count PRE-seek (4, not the 2 post-seek rows).
     page_row = next(r for r in populated_rows if getattr(r, WINDOW_ROW_NUMBER) == 1)
@@ -676,7 +678,7 @@ def test_apply_window_pagination_counted_keyset_serves_pre_seek_counts() -> None
     # The drained partition (its only row precedes the cursor... number 9 sorts
     # FIRST under -number, so it is pre-seek) keeps ONLY its marker, carrying
     # the true pre-seek count.
-    drained_rows = by_partition[drained.pk]
+    drained_rows = by_partition[saved_pk(drained)]
     assert [getattr(r, WINDOW_ROW_NUMBER) for r in drained_rows] == [0]
     assert getattr(drained_rows[0], WINDOW_TOTAL_COUNT) == 1
     assert getattr(drained_rows[0], WINDOW_KEYSET_SEEK_COUNT) == 0
@@ -928,7 +930,7 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
     targetless_lead = SimpleNamespace(
         lookup_name=lead.lookup_name,
         lhs=SimpleNamespace(target=None),
-        rhs=lead.rhs,
+        rhs=read_attr(lead, "rhs"),
     )
     assert not _keyset_seek_quals_match(_as_seek_nodes(targetless_lead, expansion), spec)
     foreign_target = SimpleNamespace(
@@ -938,7 +940,7 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
     foreign_lead = SimpleNamespace(
         lookup_name=lead.lookup_name,
         lhs=SimpleNamespace(target=foreign_target),
-        rhs=lead.rhs,
+        rhs=read_attr(lead, "rhs"),
     )
     assert not _keyset_seek_quals_match(_as_seek_nodes(foreign_lead, expansion), spec)
 

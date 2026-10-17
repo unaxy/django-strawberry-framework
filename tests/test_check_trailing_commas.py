@@ -11,17 +11,27 @@ it. The script inspects source files, not a GraphQL request, so there is no live
 sibling in ``examples/fakeshop/test_query/``.
 """
 
-import json
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from scripts import check_trailing_commas as ctc
+from tests._idioms import json_at, json_list, json_loads, json_object
 
 SCAFFOLD = "\n".join([ctc.LINK_DEF_HEADER, "", *ctc.LINK_DEF_CATEGORIES]) + "\n"
 CLEAN_MD = "# Title\n\nBody.\n\n" + SCAFFOLD
 CLEAN_PY = "VALUE = [1, 2]\n"
+
+
+def _document(capsys: pytest.CaptureFixture[str]) -> dict[object, object]:
+    """The one ``--json`` document the last ``main`` call printed."""
+    return json_object(json_loads(capsys.readouterr().out))
+
+
+def _records(document: dict[object, object], key: str) -> list[dict[object, object]]:
+    """The per-violation records under ``document[key]``, each checked to be a JSON object."""
+    return [json_object(record) for record in json_list(document, key)]
 
 
 @pytest.fixture
@@ -189,7 +199,7 @@ def test_json_document_shape(repo: Path, capsys: pytest.CaptureFixture[str]) -> 
         "missing.md",
     ]
     assert ctc.main(argv) == 1
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert set(document) == {
         "mode",
         "paths",
@@ -219,14 +229,19 @@ def test_json_document_shape(repo: Path, capsys: pytest.CaptureFixture[str]) -> 
         "message",
         "fixable",
     }
-    assert all(set(record) == keys for record in document["violations"] + document["errors"])
-    by_rule = {(v["file"], v["rule"]): (v["line"], v["fixable"]) for v in document["violations"]}
+    assert all(
+        set(record) == keys
+        for record in _records(document, "violations") + _records(document, "errors")
+    )
+    by_rule = {
+        (v["file"], v["rule"]): (v["line"], v["fixable"]) for v in _records(document, "violations")
+    }
     assert by_rule == {
         ("docs/guide.md", "md-scaffold"): (2, True),
         ("pkg/wide.py", "explode"): (1, True),
         ("pkg/wide.py", "non-ascii"): (2, False),
     }
-    assert [(e["file"], e["rule"]) for e in document["errors"]] == [
+    assert [(e["file"], e["rule"]) for e in _records(document, "errors")] == [
         ("missing.md", "unmatched-path"),
     ]
 
@@ -398,25 +413,27 @@ def test_explode_refuses_to_strand_a_trailing_suppression(
     source = f"X = [print(1), print(2), print(3), print(4)]  {comment}\n"
     path = _write(repo, "pkg/mod.py", source)
     assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert path.read_text(encoding="utf-8") == source
-    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+    assert [(v["rule"], v["line"], v["fixable"]) for v in _records(document, "violations")] == [
         ("explode", 1, False),
     ]
-    assert [(e["file"], e["rule"], e["line"]) for e in document["errors"]] == [
+    assert [(e["file"], e["rule"], e["line"]) for e in _records(document, "errors")] == [
         ("pkg/mod.py", "unfixable", 1),
     ]
-    assert document["errors"][0]["message"] == ctc.STRANDED_MESSAGE
-    assert document["summary"]["fixed"] == 0
+    assert json_at(document, "errors", 0, "message") == ctc.STRANDED_MESSAGE
+    assert json_at(document, "summary", "fixed") == 0
     # --check reports the same explode as not fixable, and no error.
     assert ctc.main(["--check", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
-    assert [(v["rule"], v["fixable"]) for v in document["violations"]] == [("explode", False)]
+    document = _document(capsys)
+    assert [(v["rule"], v["fixable"]) for v in _records(document, "violations")] == [
+        ("explode", False),
+    ]
     assert document["errors"] == []
     # --diff raises the error --fix does.
     assert ctc.main(["--diff", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
-    assert [(e["rule"], e["line"], e["message"]) for e in document["errors"]] == [
+    document = _document(capsys)
+    assert [(e["rule"], e["line"], e["message"]) for e in _records(document, "errors")] == [
         ("unfixable", 1, ctc.STRANDED_MESSAGE),
     ]
     assert path.read_text(encoding="utf-8") == source
@@ -434,9 +451,9 @@ def test_explode_with_a_trailing_non_suppression_is_fixed(
     """Negative control: a plain comment or a ``# noqa`` inside a string does not block it."""
     path = _write(repo, "pkg/mod.py", f"X = [print(1), print(2), print(3), print(4)]{tail}\n")
     assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 0
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert document["errors"] == []
-    assert document["summary"]["fixed"] == 1
+    assert json_at(document, "summary", "fixed") == 1
     assert "    print(1),\n" in path.read_text(encoding="utf-8")
 
 
@@ -450,10 +467,10 @@ def test_fix_reaches_the_fixpoint_in_one_run(
     """An outer construct that collapses only after its children have is fixed in one --fix."""
     path = _write(repo, "pkg/mod.py", NESTED)
     assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 0
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert path.read_text(encoding="utf-8") == "X = [[1, 2], [3, 4]]\n"
     # Two inner collapses in round 1, the outer one in round 2.
-    assert [(v["rule"], v["line"]) for v in document["violations"]] == [
+    assert [(v["rule"], v["line"]) for v in _records(document, "violations")] == [
         ("collapse", 2),
         ("collapse", 6),
         ("collapse", 1),
@@ -481,7 +498,7 @@ def test_fix_without_a_fixpoint_is_an_error(
     monkeypatch.setattr(ctc, "MAX_FIX_ROUNDS", 1)
     _write(repo, "pkg/mod.py", NESTED)
     assert ctc.main([mode, "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert [
         (
             e["file"],
@@ -489,7 +506,7 @@ def test_fix_without_a_fixpoint_is_an_error(
             e["line"],
             e["message"],
         )
-        for e in document["errors"]
+        for e in _records(document, "errors")
     ] == [
         (
             "pkg/mod.py",
@@ -522,9 +539,9 @@ def test_fix_fails_on_an_explode_a_later_round_strands(
     source, settled = _stranded_after_reflow(comment)
     path = _write(repo, "pkg/mod.py", source)
     assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert path.read_text(encoding="utf-8") == settled
-    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+    assert [(v["rule"], v["line"], v["fixable"]) for v in _records(document, "violations")] == [
         ("collapse", 4, True),
         ("explode", 1, False),
     ]
@@ -535,7 +552,7 @@ def test_fix_fails_on_an_explode_a_later_round_strands(
             e["line"],
             e["message"],
         )
-        for e in document["errors"]
+        for e in _records(document, "errors")
     ] == [
         (
             "pkg/mod.py",
@@ -544,11 +561,11 @@ def test_fix_fails_on_an_explode_a_later_round_strands(
             ctc.STRANDED_MESSAGE,
         ),
     ]
-    assert document["summary"]["exit"] == 1
+    assert json_at(document, "summary", "exit") == 1
     # The settled file is exactly what --check rejects: the same line, not fixable.
     assert ctc.main(["--check", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
-    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+    document = _document(capsys)
+    assert [(v["rule"], v["line"], v["fixable"]) for v in _records(document, "violations")] == [
         ("explode", 1, False),
     ]
     assert document["errors"] == []
@@ -576,7 +593,7 @@ def test_diff_fails_on_an_explode_a_later_round_strands(
     source, settled = _stranded_after_reflow(SUPPRESSIONS[0])
     path = _write(repo, "pkg/mod.py", source)
     assert ctc.main(["--diff", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert path.read_text(encoding="utf-8") == source
     assert [
         (
@@ -585,7 +602,7 @@ def test_diff_fails_on_an_explode_a_later_round_strands(
             e["line"],
             e["message"],
         )
-        for e in document["errors"]
+        for e in _records(document, "errors")
     ] == [
         (
             "pkg/mod.py",
@@ -594,7 +611,9 @@ def test_diff_fails_on_an_explode_a_later_round_strands(
             ctc.STRANDED_MESSAGE,
         ),
     ]
-    assert f"+{settled.splitlines()[0]}\n" in document["diffs"]["pkg/mod.py"]
+    diff = json_at(document, "diffs", "pkg/mod.py")
+    assert isinstance(diff, str)
+    assert f"+{settled.splitlines()[0]}\n" in diff
 
 
 def test_stranded_explode_below_a_reflowed_construct_is_reported_once_at_its_settled_line(
@@ -619,7 +638,7 @@ def test_stranded_explode_below_a_reflowed_construct_is_reported_once_at_its_set
         ),
     ]
     assert ctc.main(["--diff", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert [
         (
             e["file"],
@@ -627,16 +646,16 @@ def test_stranded_explode_below_a_reflowed_construct_is_reported_once_at_its_set
             e["line"],
             e["message"],
         )
-        for e in document["errors"]
+        for e in _records(document, "errors")
     ] == expected
     # --diff's violations describe the file as it stands.
-    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+    assert [(v["rule"], v["line"], v["fixable"]) for v in _records(document, "violations")] == [
         ("collapse", 1, True),
         ("explode", 5, False),
     ]
     assert path.read_text(encoding="utf-8") == source
     assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert path.read_text(encoding="utf-8") == "Y = [1, 2]\n" + stranded
     assert [
         (
@@ -645,15 +664,15 @@ def test_stranded_explode_below_a_reflowed_construct_is_reported_once_at_its_set
             e["line"],
             e["message"],
         )
-        for e in document["errors"]
+        for e in _records(document, "errors")
     ] == expected
-    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+    assert [(v["rule"], v["line"], v["fixable"]) for v in _records(document, "violations")] == [
         ("collapse", 1, True),
         ("explode", 2, False),
     ]
     assert ctc.main(["--check", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
-    assert [(v["rule"], v["line"], v["fixable"]) for v in document["violations"]] == [
+    document = _document(capsys)
+    assert [(v["rule"], v["line"], v["fixable"]) for v in _records(document, "violations")] == [
         ("explode", 2, False),
     ]
 
@@ -675,8 +694,12 @@ def test_fix_reports_an_edit_that_would_break_syntax(
     monkeypatch.setattr(ctc, "_apply", unparseable)
     path = _write(repo, "pkg/mod.py", "Y = [1, 2,]\n")
     assert ctc.main(["--fix", "--json", "pkg/mod.py"]) == 1
-    document = json.loads(capsys.readouterr().out)
+    document = _document(capsys)
     assert path.read_text(encoding="utf-8") == "Y = [1, 2,]\n"
-    assert [(e["rule"], e["line"]) for e in document["errors"]] == [("unfixable", None)]
-    assert str(document["errors"][0]["message"]).startswith("comma fix would break syntax (")
-    assert [(v["rule"], v["fixable"]) for v in document["violations"]] == [("collapse", False)]
+    assert [(e["rule"], e["line"]) for e in _records(document, "errors")] == [("unfixable", None)]
+    assert str(json_at(document, "errors", 0, "message")).startswith(
+        "comma fix would break syntax (",
+    )
+    assert [(v["rule"], v["fixable"]) for v in _records(document, "violations")] == [
+        ("collapse", False),
+    ]

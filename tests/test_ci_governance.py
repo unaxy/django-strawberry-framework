@@ -28,6 +28,7 @@ import pytest
 import yaml
 
 from django_strawberry_framework.utils.imports import CHANNELS_FLOOR, STRAWBERRY_FLOOR
+from django_strawberry_framework.utils.typing import object_result
 
 # The repo-wide Python sweep below borrows this repo's existing definition of the
 # first-party source trees rather than re-listing them, so the two cannot drift
@@ -40,6 +41,7 @@ from django_strawberry_framework.utils.imports import CHANNELS_FLOOR, STRAWBERRY
 # construction, so the gate cannot pass in a clean CI checkout and fail on a
 # developer machine.
 from scripts.check_citations import SOURCE_TREES, iter_python_sources
+from tests._idioms import json_at, json_list
 
 if TYPE_CHECKING:
     from typing_extensions import TypeIs
@@ -81,8 +83,7 @@ def _is_sequence(node: object) -> "TypeIs[list[object]]":
 
 def _load(path: Path) -> object:
     """Parse one YAML file into its untyped node tree."""
-    document: object = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return document
+    return object_result(yaml.safe_load, path.read_text(encoding="utf-8"))
 
 
 def _workflow(path: Path) -> _YAMLMapping:
@@ -310,10 +311,8 @@ def test_dependabot_covers_python_and_github_actions() -> None:
     The ``github-actions`` entry is what stops full-SHA pins from going stale:
     an immutable pin never picks up an upstream fix on its own.
     """
-    config = yaml.safe_load(
-        (REPO_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"),
-    )
-    ecosystems = {entry["package-ecosystem"] for entry in config["updates"]}
+    config = _load(REPO_ROOT / ".github" / "dependabot.yml")
+    ecosystems = {json_at(entry, "package-ecosystem") for entry in json_list(config, "updates")}
     assert {"uv", "github-actions"} <= ecosystems, (
         f"dependabot.yml must cover the 'uv' and 'github-actions' ecosystems, got {ecosystems}"
     )

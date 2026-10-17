@@ -29,8 +29,6 @@ from apps.library.filters import BookFilter
 from apps.library.models import Book
 from django.db.models import Model
 from django.utils.functional import SimpleLazyObject
-from strawberry import UNSET
-from strawberry import UNSET as _UNSET
 from typing_extensions import override
 
 import django_strawberry_framework.filters.sets as filter_sets
@@ -54,7 +52,8 @@ from django_strawberry_framework.sets_mixins import (
     require_re_readable_field_declaration,
     should_cache_expansion,
 )
-from django_strawberry_framework.utils.input_values import SetInputTraversal
+from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
 from django_strawberry_framework.utils.inputs import GeneratedInputFieldSpec
 from tests._idioms import ClassReadRaises, definition_raises
 
@@ -69,8 +68,8 @@ _SHARED_PERMISSION_METHODS = (
 
 
 def _unbound(owner: type, name: str) -> object:
-    attr = getattr(owner, name)
-    return getattr(attr, "__func__", attr)
+    attr = read_attr(owner, name)
+    return read_attr(attr, "__func__", attr)
 
 
 def test_filterset_and_orderset_share_active_input_permission_mixin() -> None:
@@ -726,14 +725,14 @@ def test_family_input_traversal_is_derived_from_the_permission_config() -> None:
     assert isinstance(filter_traversal, SetInputTraversal)
     assert filter_traversal.related_attr == "related_filters"
     assert filter_traversal.logic_keys == frozenset({"and_", "or_", "not_"})
-    assert filter_traversal.unset_sentinel is _UNSET
+    assert filter_traversal.unset_sentinel is UNSET
     assert filter_traversal.handle_top_level_list is False
     assert filter_traversal.field_specs is _filter_specs
 
     order_traversal = OrderSet._input_traversal()
     assert order_traversal.related_attr == "related_orders"
     assert order_traversal.logic_keys == frozenset()
-    assert order_traversal.unset_sentinel is _UNSET
+    assert order_traversal.unset_sentinel is UNSET
     assert order_traversal.handle_top_level_list is True
     assert order_traversal.field_specs is _order_specs
 

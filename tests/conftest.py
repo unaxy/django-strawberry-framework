@@ -53,6 +53,8 @@ from django_strawberry_framework.resource_policy import (
     begin_resource_budget,
     end_resource_budget,
 )
+from django_strawberry_framework.utils._narrowing import require_instance
+from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
     from django_strawberry_framework import ResourcePolicy
@@ -75,7 +77,12 @@ def _tracking_get_new_connection(
     conn_params: object,
 ) -> sqlite3.Connection:
     """Register connections opened under a running loop, then delegate."""
-    connection = _original_get_new_connection(self, conn_params)
+    # django-stubs types ``get_new_connection`` as returning ``Any``; the SQLite backend
+    # returns the ``sqlite3.Connection`` the teardown closes.
+    connection = require_instance(
+        object_result(_original_get_new_connection, self, conn_params),
+        sqlite3.Connection,
+    )
     try:
         asyncio.get_running_loop()
     except RuntimeError:

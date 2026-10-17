@@ -40,6 +40,8 @@ from django_strawberry_framework.middleware.debug_toolbar import (
     _IS_GRAPHIQL,
     _is_graphiql_request,
 )
+from django_strawberry_framework.utils._narrowing import call_method, read_attr, require_instance
+from tests._idioms import json_at, json_object
 from tests._soft_dependency import blocked_modules, evicted_modules, simulated_absence
 
 urlpatterns = [path("__debug__/", include("debug_toolbar.urls"))]
@@ -91,11 +93,18 @@ def middleware(toolbar_leaf: ModuleType) -> DebugToolbarMiddleware:
     for the unit's lifetime; ``get_response`` returning ``None`` is the sync
     ``get_response`` the stock ``__init__`` inspects (sync -> not async mode).
     """
+    # The leaf imports only once ``toolbar_leaf`` has installed the toolbar app.
+    from django_strawberry_framework.middleware.debug_toolbar import (  # noqa: PLC0415
+        DebugToolbarMiddleware,
+    )
 
     def get_response(_request: HttpRequest) -> None:
         return None
 
-    return toolbar_leaf.DebugToolbarMiddleware(get_response)
+    return require_instance(
+        call_method(toolbar_leaf, "DebugToolbarMiddleware", get_response),
+        DebugToolbarMiddleware,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +173,7 @@ def test_leaf_reimports_after_restore(toolbar_leaf: ModuleType) -> None:
     # The two-sided-restore invariant: the parent attribute path and the
     # import path resolve to the same module object.
     parent = importlib.import_module(_PARENT)
-    assert parent.debug_toolbar is leaf
+    assert read_attr(parent, "debug_toolbar") is leaf
 
 
 def test_broken_toolbar_install_propagates_raw_import_error(toolbar_leaf: ModuleType) -> None:
@@ -218,10 +227,10 @@ def test_leaf_import_requires_debug_toolbar_in_installed_apps() -> None:
 
 def test_require_debug_toolbar_guard_unit(toolbar_leaf: ModuleType) -> None:
     """The thin-wrapper contract - module identity when present, hint when absent."""
-    assert toolbar_leaf.require_debug_toolbar() is sys.modules["debug_toolbar"]
+    assert call_method(toolbar_leaf, "require_debug_toolbar") is sys.modules["debug_toolbar"]
     with _simulated_toolbar_absence():
         with pytest.raises(ImportError, match=_HINT_SUBSTRING) as excinfo:
-            toolbar_leaf.require_debug_toolbar()
+            call_method(toolbar_leaf, "require_debug_toolbar")
         assert isinstance(excinfo.value.__cause__, ImportError)
 
 
@@ -247,7 +256,9 @@ def test_install_hint_floor_matches_the_pyproject_dev_group_row(toolbar_leaf: Mo
     text = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(encoding="utf-8")
     rows = re.findall(r'"(django-debug-toolbar>=[0-9][^"]*)"', text)
     assert rows == [_HINT_SUBSTRING], (rows, _HINT_SUBSTRING)
-    assert _HINT_SUBSTRING in toolbar_leaf._DEBUG_TOOLBAR_INSTALL_HINT
+    hint = read_attr(toolbar_leaf, "_DEBUG_TOOLBAR_INSTALL_HINT")
+    assert isinstance(hint, str), hint
+    assert _HINT_SUBSTRING in hint
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +341,8 @@ def test_get_payload_bails_without_request_id(toolbar_leaf: ModuleType) -> None:
     """
     request = RequestFactory().post("/graphql/")
     response = HttpResponse(b"{}", content_type="application/json")
-    assert toolbar_leaf._get_payload(request, response, _FakeToolbar(request_id=None)) is None
+    toolbar = _FakeToolbar(request_id=None)
+    assert call_method(toolbar_leaf, "_get_payload", request, response, toolbar) is None
 
 
 def test_get_payload_panel_title_only_when_has_content(toolbar_leaf: ModuleType) -> None:
@@ -354,9 +366,9 @@ def test_get_payload_panel_title_only_when_has_content(toolbar_leaf: ModuleType)
             _FakePanel("TemplatesPanel", has_content=True, title="Templates", nav_subtitle="t"),
         ],
     )
-    payload = toolbar_leaf._get_payload(request, response, toolbar)
-    assert payload["debugToolbar"]["requestId"] == "riid"
-    panels = payload["debugToolbar"]["panels"]
+    payload = call_method(toolbar_leaf, "_get_payload", request, response, toolbar)
+    assert json_at(payload, "debugToolbar", "requestId") == "riid"
+    panels = json_object(payload, "debugToolbar", "panels")
     assert panels["QuietPanel"] == {"title": None, "subtitle": "quiet sub"}
     assert panels["LoudPanel"] == {"title": "Loud", "subtitle": "loud sub"}
     assert "TemplatesPanel" not in panels
@@ -371,7 +383,8 @@ def test_get_payload_bails_on_non_object_json_body(toolbar_leaf: ModuleType) -> 
     """
     request = RequestFactory().post("/graphql/")
     response = HttpResponse(b"[1, 2]", content_type="application/json")
-    assert toolbar_leaf._get_payload(request, response, _FakeToolbar(request_id="riid")) is None
+    toolbar = _FakeToolbar(request_id="riid")
+    assert call_method(toolbar_leaf, "_get_payload", request, response, toolbar) is None
 
 
 @pytest.mark.parametrize("content", [b"not json", b"\xff"])

@@ -88,7 +88,8 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.mutations.permissions import DenyAll
 from django_strawberry_framework.mutations.sets import iter_mutations
 from django_strawberry_framework.registry import registry
-from tests._idioms import ClassReadRaises, definition_raises
+from django_strawberry_framework.utils.typing import call_forwarded
+from tests._idioms import ClassReadRaises, definition_raises, module_binding
 from tests._info import unread_info
 
 
@@ -662,8 +663,10 @@ def test_get_form_only_override_trips_the_construction_hook_waiver(
         files: dict[str, object],
         instance: models.Model | None = None,
     ) -> forms.BaseForm:
-        return form_cls(
-            **self.get_form_kwargs(info, data=data, files=files, instance=instance),
+        return call_forwarded(
+            form_cls,
+            (),
+            self.get_form_kwargs(info, data=data, files=files, instance=instance),
         )
 
     Overriding = type(
@@ -838,7 +841,10 @@ def test_modelform_bind_materializes_form_input_into_forms_namespace() -> None:
     assert "ItemModelFormInput" in form_materialized_names
     assert "ItemModelFormInput" not in mutation_materialized_names
     assert CreateItem._input_class is form_materialized_names["ItemModelFormInput"]
-    assert forms_module.ItemModelFormInput is form_materialized_names["ItemModelFormInput"]
+    assert (
+        module_binding(forms_module, "ItemModelFormInput")
+        is form_materialized_names["ItemModelFormInput"]
+    )
 
     # The payload is model-backed (rides the DjangoMutation payload path).
     assert "CreateItemPayload" in mutation_materialized_names

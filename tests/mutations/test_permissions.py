@@ -55,6 +55,8 @@ from django_strawberry_framework.mutations.permissions import (
 from django_strawberry_framework.mutations.sets import _ValidatedMutationMeta
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils._narrowing import read_attr
+from tests._idioms import saved_pk
 from tests._info import make_info
 
 if TYPE_CHECKING:
@@ -102,7 +104,7 @@ def _user_with_perms(*codenames: str) -> AbstractBaseUser:
         perm = Permission.objects.get(codename=codename, content_type__app_label="products")
         user.user_permissions.add(perm)
     # Re-fetch so the permission cache reflects the freshly added rows.
-    return get_user_model().objects.get(pk=user.pk)
+    return get_user_model().objects.get(pk=saved_pk(user))
 
 
 def test_operation_action_map_is_pinned() -> None:
@@ -271,7 +273,7 @@ def test_empty_permission_classes_never_resolves_request_auth() -> None:
         schema,
         _CREATE_Q,
         ExplodingUser(),
-        {"d": {"name": "Open", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        {"d": {"name": "Open", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
     assert res.errors is None, res.errors
     assert res.data is not None
@@ -300,7 +302,7 @@ def test_permission_classes_override_deny_blocks_permitted_caller() -> None:
         schema,
         _CREATE_Q,
         user,
-        {"d": {"name": "Nope", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        {"d": {"name": "Nope", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
     assert res.errors is not None
     assert not product_models.Item.objects.filter(name="Nope").exists()
@@ -334,7 +336,7 @@ def test_async_has_permission_is_rejected_not_bypassed() -> None:
         schema,
         _CREATE_Q,
         AnonymousUser(),
-        {"d": {"name": "AsyncBlocked", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        {"d": {"name": "AsyncBlocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
     assert res.errors is not None
     assert "coroutine" in res.errors[0].message.lower()
@@ -369,7 +371,7 @@ def test_awaitable_has_permission_is_rejected_not_bypassed() -> None:
         schema,
         _CREATE_Q,
         AnonymousUser(),
-        {"d": {"name": "AwaitableBlocked", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        {"d": {"name": "AwaitableBlocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
 
     assert res.errors is not None
@@ -406,7 +408,7 @@ def test_hostile_non_bool_permission_result_keeps_configuration_error() -> None:
         schema,
         _CREATE_Q,
         AnonymousUser(),
-        {"d": {"name": "HostileBlocked", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        {"d": {"name": "HostileBlocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
 
     assert res.errors is not None
@@ -466,7 +468,12 @@ def test_async_check_permission_override_is_rejected_not_bypassed() -> None:
         schema,
         _CREATE_Q,
         AnonymousUser(),
-        {"d": {"name": "AsyncCheckBlocked", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        {
+            "d": {
+                "name": "AsyncCheckBlocked",
+                "categoryId": global_id_for(CategoryT, saved_pk(cat)),
+            },
+        },
     )
     assert res.errors is not None
     assert "coroutine" in res.errors[0].message.lower()
@@ -677,7 +684,7 @@ def test_walk_ignores_mid_request_pollution_of_the_class_permission_list() -> No
     )
     # The hook really emptied the live list - the in-flight walk ran the denier
     # anyway (it iterates the captured snapshot, not the live list).
-    assert ListSubstrateMutation._mutation_meta.permission_classes == []
+    assert read_attr(ListSubstrateMutation._mutation_meta, "permission_classes") == []
     assert events == ["cleared", "Denier"]
 
     # The SHIPPED tuple substrate refuses the in-place pollution outright, and
@@ -778,7 +785,7 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
         schema,
         _CREATE_Q,
         AnonymousUser(),
-        {"d": {"name": "Blocked", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        {"d": {"name": "Blocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
     # The seal raises OUT of the walk: loud top-level failure, no write.
     assert res.errors is not None
@@ -794,7 +801,7 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
         schema,
         _CREATE_Q,
         AnonymousUser(),
-        {"d": {"name": "StillBlocked", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        {"d": {"name": "StillBlocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
     assert res2.errors is not None
     assert not product_models.Item.objects.filter(name="StillBlocked").exists()

@@ -95,6 +95,7 @@ from django_strawberry_framework.optimizer.plans import (
 from django_strawberry_framework.orders import Ordering, OrderSet, RelatedOrder
 from django_strawberry_framework.utils.connections import UnwindowableConnection
 from tests._definition import make_definition
+from tests._idioms import json_at, json_list, json_object, saved_pk
 from tests._info import make_info
 from tests.optimizer._link_models import LnkPairChild, link_fixture_tables
 
@@ -496,14 +497,21 @@ def test_keyset_pages_a_foreign_object_term_by_seeking_over_its_carriers() -> No
         first, _sql = page("parent")
         assert first.errors is None, first.errors
         assert first.data is not None
-        first_page = first.data["children"]
-        assert [edge["node"]["name"] for edge in first_page["edges"]] == ["z9", "a1"]
-        second, second_sql = page("parent", first_page["pageInfo"]["endCursor"])
-        replayed, _sql = page("name", first_page["pageInfo"]["endCursor"])
+        first_page = json_object(first.data, "children")
+        assert [json_at(edge, "node", "name") for edge in json_list(first_page, "edges")] == [
+            "z9",
+            "a1",
+        ]
+        end_cursor = json_at(first_page, "pageInfo", "endCursor")
+        assert isinstance(end_cursor, str)
+        second, second_sql = page("parent", end_cursor)
+        replayed, _sql = page("name", end_cursor)
 
     assert second.errors is None, second.errors
     assert second.data is not None
-    assert [edge["node"]["name"] for edge in second.data["children"]["edges"]] == ["a2", "a3"]
+    assert [
+        json_at(edge, "node", "name") for edge in json_list(second.data, "children", "edges")
+    ] == ["a2", "a3"]
     assert second.data["children"]["pageInfo"]["hasNextPage"] is True
     (seek,) = [sql for sql in second_sql if "ORDER BY" in sql]
     where = seek.split(" WHERE ", 1)[1].split(" ORDER BY ", 1)[0]
@@ -617,7 +625,7 @@ def test_keyset_window_slice_from_arguments_arms() -> None:
     window, seek = sliced
     assert (window.offset, window.limit, window.reverse) == (0, 2, False)
     assert seek is not None
-    assert seek.cursor.values == (1, issue.pk)
+    assert seek.cursor.values == (1, saved_pk(issue))
 
     # Malformed pagination and malformed cursors both map to ``None``,
     # including backward shapes that would otherwise be unwindowable.

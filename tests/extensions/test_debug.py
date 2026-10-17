@@ -93,7 +93,9 @@ from django_strawberry_framework.extensions.debug import (
     _serialize_sql_row,
     _terminal_original_error,
 )
+from django_strawberry_framework.utils._narrowing import call_method, require_instance
 from tests._execution import execution_result, make_execution_context
+from tests._idioms import json_at, json_list, json_object
 
 # The payload caps re-spelled as INDEPENDENT literals (the module's spec-044
 # D4 rule extended to spec-048 Decision 6's constants): a cap that silently
@@ -663,12 +665,12 @@ def test_mask_errors_ordering_controls_exception_visibility(*, debug_after_maski
     assert result.errors is not None
     assert [error.message for error in result.errors] == ["Unexpected error."]
     assert result.extensions is not None
-    exceptions = result.extensions["debug"]["exceptions"]
+    exceptions = json_list(result.extensions, "debug", "exceptions")
     if debug_after_masking:
         # Debug tears down FIRST (LIFO), reading the originals.
         assert len(exceptions) == 1
-        assert exceptions[0]["excType"] == "<class 'ValueError'>"
-        assert exceptions[0]["message"] == "sensitive boom detail"
+        assert json_at(exceptions, 0, "excType") == "<class 'ValueError'>"
+        assert json_at(exceptions, 0, "message") == "sensitive boom detail"
     else:
         # Masking already stripped original_error before debug's teardown.
         assert exceptions == []
@@ -831,9 +833,11 @@ async def test_async_overlapping_operations_share_the_wrapper_and_restore(
         assert observed_wrappers[marker] is parent_wrapper  # inherited, not re-materialized
         extensions = results[marker].extensions
         assert extensions is not None
-        payload = extensions["debug"]
+        payload = json_object(extensions, "debug")
         assert isinstance(payload["sql"], list)  # type only - async SQL fidelity not claimed
-        assert [row["message"] for row in payload["exceptions"]] == [f"boom-{marker}"]
+        assert [json_at(row, "message") for row in json_list(payload, "exceptions")] == [
+            f"boom-{marker}",
+        ]
 
     assert debug_module._coordinator._active == {}
     assert parent_wrapper.force_debug_cursor is original_flag
@@ -877,9 +881,15 @@ def test_nested_sync_operations_share_the_log_and_cross_attribute(
     assert outer_result.errors is None
     inner_result = inner_holder["result"]
     assert inner_result.extensions is not None
-    inner_sql = [row["sql"] for row in inner_result.extensions["debug"]["sql"]]
+    inner_sql = [
+        require_instance(json_at(row, "sql"), str)
+        for row in json_list(inner_result.extensions, "debug", "sql")
+    ]
     assert outer_result.extensions is not None
-    outer_sql = [row["sql"] for row in outer_result.extensions["debug"]["sql"]]
+    outer_sql = [
+        require_instance(json_at(row, "sql"), str)
+        for row in json_list(outer_result.extensions, "debug", "sql")
+    ]
 
     # The inner payload owns its interval only.
     assert any("SELECT 2" in statement for statement in inner_sql)
@@ -945,9 +955,13 @@ def test_concurrent_sync_operations_use_isolated_instances() -> None:
 
     assert thread_wrappers["a"] is not thread_wrappers["b"]  # distinct thread-local wrappers
     assert result_a.extensions is not None
-    messages_a = [row["message"] for row in result_a.extensions["debug"]["exceptions"]]
+    messages_a = [
+        json_at(row, "message") for row in json_list(result_a.extensions, "debug", "exceptions")
+    ]
     assert result_b.extensions is not None
-    messages_b = [row["message"] for row in result_b.extensions["debug"]["exceptions"]]
+    messages_b = [
+        json_at(row, "message") for row in json_list(result_b.extensions, "debug", "exceptions")
+    ]
     assert messages_a == ["marker-a"]  # only its OWN marker - fresh instances
     assert messages_b == ["marker-b"]
     assert restored_flags == {"a": False, "b": False}
@@ -989,8 +1003,9 @@ def test_sql_diagnostic_failure_degrades_payload_and_preserves_the_result(
         assert result.errors is None
         assert result.data == {"ok": "ok"}
         assert result.extensions is not None
-        payload = result.extensions["debug"]
-        assert [row["sql"] for row in payload["sql"]] == ["SELECT 90"]  # the bad row alone is lost
+        payload = json_object(result.extensions, "debug")
+        # the bad row alone is lost
+        assert [json_at(row, "sql") for row in json_list(payload, "sql")] == ["SELECT 90"]
         assert payload["exceptions"] == []
         assert any("could not be serialized" in record.message for record in caplog.records)
         # Restoration is separately protected from the diagnostic failure.
@@ -1021,12 +1036,13 @@ def test_a_failing_query_log_drain_degrades_to_the_rows_serialized_so_far(
         def __iter__(self) -> NoReturn:
             raise RuntimeError("query log read failed")
 
-    good = SimpleNamespace(vendor="sqlite", alias="default", queries_log=[])
+    good_log: list[dict[str, str]] = []
+    good = SimpleNamespace(vendor="sqlite", alias="default", queries_log=good_log)
     good_snapshot = _ConnectionSnapshot(
         database_connection=_as_connection(good),
         query_log_start=0,
     )
-    good.queries_log.append({"sql": "SELECT 1", "time": "0.001"})
+    good_log.append({"sql": "SELECT 1", "time": "0.001"})
     exploding_snapshot = _ConnectionSnapshot(
         database_connection=_as_connection(
             SimpleNamespace(
@@ -1095,8 +1111,8 @@ def test_cursor_construction_defines_the_capture_interval(
     inside_cursor.execute("SELECT 12")
     assert len(default_wrapper.queries_log) == start + 2
     assert "SELECT 12" in default_wrapper.queries_log[-1]["sql"]
-    pre_opened_cursor.close()
-    inside_cursor.close()
+    call_method(pre_opened_cursor, "close")
+    call_method(inside_cursor, "close")
 
 
 # ---------------------------------------------------------------------------
@@ -1134,7 +1150,10 @@ def test_sibling_hook_sql_capture_is_list_order_dependent(*, debug_listed_first:
 
     assert result.errors is None
     assert result.extensions is not None
-    statements = [row["sql"] for row in result.extensions["debug"]["sql"]]
+    statements = [
+        require_instance(json_at(row, "sql"), str)
+        for row in json_list(result.extensions, "debug", "sql")
+    ]
     if debug_listed_first:
         # Debug enters first and tears down last: both sibling markers fall
         # inside its active interval.
@@ -1367,10 +1386,13 @@ async def test_streaming_seam_publishes_the_payload_the_engine_reads() -> None:
     # A bare schema has no masking extension: the raw message stays on the wire.
     assert frame.errors is not None
     assert [error.message for error in frame.errors] == ["sensitive boom detail"]
-    payload = (frame.extensions or {}).get("debug")
-    assert payload is not None, "the streaming seam must publish debug like execute does"
+    frame_extensions = frame.extensions or {}
+    assert frame_extensions.get("debug") is not None, (
+        "the streaming seam must publish debug like execute does"
+    )
+    payload = json_object(frame_extensions, "debug")
     assert set(payload) == {"sql", "exceptions"}
-    messages = [row["message"] for row in payload["exceptions"]]
+    messages = [json_at(row, "message") for row in json_list(payload, "exceptions")]
     assert messages == ["sensitive boom detail"]
     assert isinstance(payload["sql"], list)
 
@@ -1378,7 +1400,9 @@ async def test_streaming_seam_publishes_the_payload_the_engine_reads() -> None:
     direct = await schema.execute("{ boom }")
     assert "debug" in (direct.extensions or {})
     assert direct.extensions is not None
-    assert [row["message"] for row in direct.extensions["debug"]["exceptions"]] == [
+    assert [
+        json_at(row, "message") for row in json_list(direct.extensions, "debug", "exceptions")
+    ] == [
         "sensitive boom detail",
     ]
 
@@ -1395,8 +1419,7 @@ async def test_streaming_clean_operation_carries_both_lists() -> None:
     assert isinstance(frames[0], ExecutionResult)
     assert frames[0].errors is None
     assert frames[0].extensions is not None
-    payload = frames[0].extensions["debug"]
-    assert payload == {"sql": [], "exceptions": []}
+    assert frames[0].extensions["debug"] == {"sql": [], "exceptions": []}
 
 
 async def test_streaming_parse_failure_publishes_no_debug_key() -> None:
@@ -1646,12 +1669,18 @@ def test_a_nan_duration_costs_only_its_own_row_and_the_rest_keep_their_order(
         assert result.errors is None
         assert result.data == {"ok": "ok"}
         assert result.extensions is not None
-        payload = result.extensions["debug"]
+        payload = json_object(result.extensions, "debug")
         # Both good rows survived, in the order they were logged: the refusal
         # cost its own row and nothing else.
-        assert [row["sql"] for row in payload["sql"]] == ["SELECT 92", "SELECT 94"]
+        assert [json_at(row, "sql") for row in json_list(payload, "sql")] == [
+            "SELECT 92",
+            "SELECT 94",
+        ]
         # No NaN row exists anywhere - a NaN is the one value unequal to itself.
-        assert not any(row["duration"] != row["duration"] for row in payload["sql"])
+        assert not any(
+            json_at(row, "duration") != json_at(row, "duration")
+            for row in json_list(payload, "sql")
+        )
         assert any("could not be serialized" in record.message for record in caplog.records)
         assert default_wrapper.force_debug_cursor is False
         assert debug_module._coordinator._active == {}

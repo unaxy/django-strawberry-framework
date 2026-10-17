@@ -23,6 +23,7 @@ from django_strawberry_framework.management.commands._imports import (
     import_or_command_error,
     import_string_or_command_error,
 )
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import stub_module
 
 
@@ -105,7 +106,7 @@ def test_import_module_symbol_or_command_error_resolves_valid_selector(
         "imports_probe_module:schema",
         default_symbol_name="schema",
     )
-    assert resolved is module.schema
+    assert resolved is read_attr(module, "schema")
 
 
 def test_import_module_symbol_or_command_error_applies_default_symbol_name(
@@ -116,7 +117,7 @@ def test_import_module_symbol_or_command_error_applies_default_symbol_name(
         "imports_probe_module",
         default_symbol_name="schema",
     )
-    assert resolved is module.schema
+    assert resolved is read_attr(module, "schema")
 
 
 def test_import_module_symbol_or_command_error_wraps_import_error() -> None:
@@ -155,7 +156,8 @@ def test_import_string_or_command_error_resolves_valid_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _make_module(monkeypatch)
-    assert import_string_or_command_error("imports_probe_module.schema") is module.schema
+    resolved = import_string_or_command_error("imports_probe_module.schema")
+    assert resolved is read_attr(module, "schema")
 
 
 def test_import_string_or_command_error_requires_module_path() -> None:

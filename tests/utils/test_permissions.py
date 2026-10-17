@@ -20,6 +20,7 @@ from typing_extensions import override
 import django_strawberry_framework.utils.permissions as perm
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.sets_mixins import ActiveInputPermissionMixin
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.permissions import (
     ChannelsRequestAdapter,
     _channels_request_adapter,
@@ -40,6 +41,7 @@ from django_strawberry_framework.utils.permissions import (
     walk_declared_relation_path,
 )
 from django_strawberry_framework.utils.querysets import SyncMisuseError
+from django_strawberry_framework.utils.typing import object_result
 
 # ---------------------------------------------------------------------------
 # request_from_info -- family-labelled, shape-tolerant
@@ -345,12 +347,12 @@ def test_iter_input_items_handles_dict_dataclass_and_non_walkable() -> None:
 
 def test_extract_branch_value_collapses_only_the_configured_sentinel() -> None:
     """The order side (default ``unset_sentinel=None``) leaves UNSET intact; filter collapses it."""
-    holder = {"branch": strawberry.UNSET, "real": 5}
+    holder = {"branch": UNSET, "real": 5}
     # No sentinel configured (order semantics): UNSET passes through unchanged.
-    assert extract_branch_value(holder, "branch") is strawberry.UNSET
+    assert extract_branch_value(holder, "branch") is UNSET
     # Filter semantics: UNSET collapses to None ("branch not supplied").
-    assert extract_branch_value(holder, "branch", unset_sentinel=strawberry.UNSET) is None
-    assert extract_branch_value(holder, "real", unset_sentinel=strawberry.UNSET) == 5
+    assert extract_branch_value(holder, "branch", unset_sentinel=UNSET) is None
+    assert extract_branch_value(holder, "real", unset_sentinel=UNSET) == 5
     assert extract_branch_value(None, "branch") is None
 
 
@@ -960,7 +962,7 @@ def test_related_permission_declarations_fail_closed_for_malformed_metadata() ->
         def __getattribute__(cls, name: str) -> object:
             if name == "related_filters":
                 raise RuntimeError("related descriptor exploded")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _UnreadableSet(ActiveInputPermissionMixin, metaclass=_HostileMeta):
         pass
@@ -1235,7 +1237,7 @@ def test_related_depth_error_survives_hostile_child_qualname() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__qualname__":
                 raise RuntimeError("qualname exploded")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _Child(metaclass=_HostileMeta):
         _MAX_LOGIC_DEPTH = 0

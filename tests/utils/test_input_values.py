@@ -21,6 +21,7 @@ from django_strawberry_framework.utils.input_values import (
     LEAF,
     LOGIC,
     RELATED,
+    UNSET,
     RelatedDeclarationError,
     SetInputTraversal,
     assert_set_traversal_depth,
@@ -32,6 +33,7 @@ from django_strawberry_framework.utils.input_values import (
     set_traversal_depth_cap,
 )
 from django_strawberry_framework.utils.inputs import GeneratedInputFieldSpec
+from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import ClaimsClass, ClassReadRaises
 
 # ---------------------------------------------------------------------------
@@ -59,15 +61,15 @@ def test_iter_input_items_handles_dict_dataclass_and_non_walkable() -> None:
 def test_is_inactive_value_is_identity_based_not_truthiness() -> None:
     # ``None`` is always inactive; a configured sentinel collapses too.
     assert is_inactive_value(None) is True
-    assert is_inactive_value(None, unset_sentinel=strawberry.UNSET) is True
-    assert is_inactive_value(strawberry.UNSET, unset_sentinel=strawberry.UNSET) is True
+    assert is_inactive_value(None, unset_sentinel=UNSET) is True
+    assert is_inactive_value(UNSET, unset_sentinel=UNSET) is True
     # Falsy-but-supplied values stay ACTIVE (identity, not truthiness).
     assert is_inactive_value(0) is False
     assert is_inactive_value("") is False
     assert is_inactive_value(False) is False  # noqa: FBT003 - the bool is the value under test
     # Order semantics (no sentinel configured): UNSET is a normal active value,
     # so the order normalizer never needs to reference ``strawberry.UNSET``.
-    assert is_inactive_value(strawberry.UNSET) is False
+    assert is_inactive_value(UNSET) is False
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +91,7 @@ def test_iter_active_fields_classifies_and_skips_inactive() -> None:
         field_specs=specs,
         related_attr="related_filters",
         logic_keys=frozenset({"and_"}),
-        unset_sentinel=strawberry.UNSET,
+        unset_sentinel=UNSET,
     )
     fields = list(
         iter_active_fields(
@@ -99,7 +101,7 @@ def test_iter_active_fields_classifies_and_skips_inactive() -> None:
                 "shelf": {"code": "y"},
                 "and_": [{"title": "z"}],
                 "skip_none": None,
-                "skip_unset": strawberry.UNSET,
+                "skip_unset": UNSET,
             },
             config,
         ),
@@ -137,7 +139,7 @@ def test_iter_active_fields_dict_and_dataclass_classify_identically() -> None:
     config = SetInputTraversal(
         field_specs={},
         related_attr="related_filters",
-        unset_sentinel=strawberry.UNSET,
+        unset_sentinel=UNSET,
     )
     dataclass_view = [
         (f.python_attr, f.kind)
@@ -180,10 +182,10 @@ def test_iter_active_fields_inactive_or_non_walkable_top_level_yields_nothing() 
     config = SetInputTraversal(
         field_specs={},
         related_attr="related_orders",
-        unset_sentinel=strawberry.UNSET,
+        unset_sentinel=UNSET,
     )
     assert list(iter_active_fields(_Set, None, config)) == []
-    assert list(iter_active_fields(_Set, strawberry.UNSET, config)) == []
+    assert list(iter_active_fields(_Set, UNSET, config)) == []
     assert list(iter_active_fields(_Set, 42, config)) == []
 
 
@@ -321,7 +323,7 @@ def test_dataclass_and_object_field_read_failures_are_typed() -> None:
         def __getattribute__(self, name: str) -> object:
             if name == "name":
                 raise RuntimeError("hostile object field")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     with pytest.raises(ConfigurationError, match="dataclass field value could not be read"):
         iter_input_items(_UnreadableDataclass())
@@ -351,7 +353,7 @@ def test_active_field_configuration_and_related_metadata_fail_closed() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "related_orders":
                 raise RuntimeError("hostile related declarations")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _UnreadableSet(metaclass=_HostileSetMeta):
         pass
@@ -575,7 +577,7 @@ def test_related_declaration_mapping_wraps_an_unreadable_class_attribute() -> No
         def __getattribute__(cls, name: str) -> object:
             if name == "related_orders":
                 raise RuntimeError("hostile class read")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _Set(metaclass=_HostileMeta):
         pass
@@ -596,7 +598,7 @@ def test_iter_active_fields_contains_a_hostile_config_related_attr_read() -> Non
     """
 
     class _HostileConfig:
-        unset_sentinel = strawberry.UNSET
+        unset_sentinel = UNSET
         handle_top_level_list = False
 
         @property
@@ -714,7 +716,7 @@ def test_depth_cap_error_label_survives_a_qualname_whose_class_read_raises(
         def __getattribute__(cls, name: str) -> object:
             if name == "__qualname__":
                 return ClassReadRaises(raised)
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _Set(metaclass=_HostileMeta):
         _MAX_LOGIC_DEPTH = 1
@@ -735,7 +737,7 @@ def test_depth_cap_error_label_reads_qualname_defensively() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__qualname__":
                 raise RuntimeError("hostile qualname")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _Set(metaclass=_HostileMeta):
         _MAX_LOGIC_DEPTH = 1

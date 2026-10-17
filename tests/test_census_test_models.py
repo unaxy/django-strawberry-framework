@@ -9,17 +9,10 @@ script measures the test tree, it is not reached by a query.
 """
 
 import ast
-from collections.abc import Callable
-from types import ModuleType
 
 import pytest
 
-
-@pytest.fixture
-def census(scripts_module: Callable[[str], ModuleType]) -> ModuleType:
-    """Import ``scripts/census_test_models.py`` the way it runs: scripts dir on ``sys.path``."""
-    return scripts_module("census_test_models")
-
+from scripts import census_test_models as census
 
 SIBLING_SAME_NAME = """
 def a():
@@ -418,7 +411,6 @@ class Base:
     ],
 )
 def test_bare_base_names_resolve_by_enclosing_scope(
-    census: ModuleType,
     source: str,
     models: list[str],
     top_level: set[str],

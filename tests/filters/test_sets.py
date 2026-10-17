@@ -147,7 +147,17 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import collect_related_declarations
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.relay import SyncMisuseError, apply_interfaces
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    class_dict,
+    is_dict,
+    is_exact_pair,
+    read_attr,
+    require,
+)
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
+from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import (
     STR_ENUM,
     STR_SUBCLASS_KINDS,
@@ -155,7 +165,9 @@ from tests._idioms import (
     comparing_metaclass,
     definition_raises,
     is_object_dict,
+    is_object_list,
     pickle_roundtrip,
+    saved_pk,
     str_subclass_name,
 )
 from tests.optimizer import _link_models
@@ -435,10 +447,10 @@ def _seed_medtrics_loan_graph() -> _MedtricsLoanGraph:
     )
 
     return _MedtricsLoanGraph(
-        relation_and_direct=relation_and_direct.pk,
-        relation_only=relation_only.pk,
-        direct_only=direct_only.pk,
-        unrelated=unrelated.pk,
+        relation_and_direct=saved_pk(relation_and_direct),
+        relation_only=saved_pk(relation_only),
+        direct_only=saved_pk(direct_only),
+        unrelated=saved_pk(unrelated),
     )
 
 
@@ -1262,8 +1274,10 @@ def _path_walk(filterset: type[FilterSet], path: tuple[type[FilterSet], ...] = (
     """
     path = (*path, filterset)
     names = dict.fromkeys(filterset._unexpanded_filters())
-    declarations: Mapping[str, RelatedFilter] = filterset.__dict__["related_filters"]
+    declarations = class_dict(filterset)["related_filters"]
+    assert is_dict(declarations)
     for declaration_name, declaration in declarations.items():
+        assert isinstance(declaration, RelatedFilter)
         target = declaration.filterset
         assert target is not None
         child = (
@@ -1349,7 +1363,7 @@ def _seed_desk_ring_rows() -> dict[str, int]:
     for model in (library_models.Branch, library_models.CirculationDesk, library_models.Shelf):
         meta = {"model": model, "fields": ("id",)}
         type(f"Ring{model.__name__}Type", (DjangoType,), {"Meta": type("Meta", (), meta)})
-    return {"North": north.pk, "South": south.pk, "East": east.pk}
+    return {"North": saved_pk(north), "South": saved_pk(south), "East": saved_pk(east)}
 
 
 def test_a_request_copies_the_sets_own_filters_and_the_flat_copies_its_data_names() -> None:
@@ -1858,7 +1872,7 @@ class _DefaultingCharField(forms.CharField):
 
     @override
     def clean(self, value: object) -> object:
-        cleaned: object = super().clean(value)
+        cleaned = object_result(super().clean, value)
         return cleaned or "B"
 
 
@@ -2449,7 +2463,8 @@ def test_a_flat_filter_queryset_reading_an_unsent_cleaned_key_finds_it() -> None
     class ReadingBranchFilter(base_branch):
         @override
         def filter_queryset(self, queryset: QuerySet[_M]) -> QuerySet[_M]:
-            seen.append(self.form.cleaned_data["desks__shelf__code"])
+            cleaned_data: dict[str, object] = self.form.cleaned_data
+            seen.append(cleaned_data["desks__shelf__code"])
             return super().filter_queryset(queryset)
 
     ReadingBranchFilter.get_filters()
@@ -3389,13 +3404,13 @@ def test_generated_forward_fk_in_execution_matches_requested_targets() -> None:
     library_models.Book.objects.create(title="book-c", shelf=shelf_c)
 
     requested = [
-        strawberry.relay.to_base64("ShelfType", str(shelf_a.pk)),
-        strawberry.relay.to_base64("ShelfType", str(shelf_b.pk)),
+        strawberry.relay.to_base64("ShelfType", str(saved_pk(shelf_a))),
+        strawberry.relay.to_base64("ShelfType", str(saved_pk(shelf_b))),
     ]
     result = in_leaf.filter(library_models.Book.objects.all(), requested)
     assert set(result.values_list("title", flat=True)) == {"book-a", "book-b"}
     # Matches the explicit whole-list ``shelf__in`` ORM (never a per-element OR).
-    expected = library_models.Book.objects.filter(shelf__in=[shelf_a.pk, shelf_b.pk])
+    expected = library_models.Book.objects.filter(shelf__in=[saved_pk(shelf_a), saved_pk(shelf_b)])
     assert set(result.values_list("pk", flat=True)) == set(
         expected.values_list("pk", flat=True),
     )
@@ -3407,7 +3422,7 @@ def test_generated_forward_fk_in_execution_matches_requested_targets() -> None:
     with pytest.raises(GraphQLError, match="index 1"):
         in_leaf.filter(
             library_models.Book.objects.all(),
-            [strawberry.relay.to_base64("ShelfType", str(shelf_a.pk)), "not-a-globalid"],
+            [strawberry.relay.to_base64("ShelfType", str(saved_pk(shelf_a))), "not-a-globalid"],
         )
 
 
@@ -3468,7 +3483,9 @@ def test_generated_forward_foreign_object_globalid_filter_matches_by_decoded_pk(
     ``parent=<pk>`` predicate. Either way the leaf returns exactly the encoded
     parent's children.
     """
-    child_model = getattr(_link_models, child_name)
+    child_model = read_attr(_link_models, child_name)
+    assert isinstance(child_model, type)
+    assert issubclass(child_model, django_models.Model)
 
     class LnkParentType(DjangoType):
         class Meta:
@@ -3489,7 +3506,7 @@ def test_generated_forward_foreign_object_globalid_filter_matches_by_decoded_pk(
 
     with _link_models.link_fixture_tables(connection):
         parent = _link_models.LnkParent.objects.get(slug="s-a")
-        node_id = strawberry.relay.to_base64("LnkParentType", str(parent.pk))
+        node_id = strawberry.relay.to_base64("LnkParentType", str(saved_pk(parent)))
         result = leaf.filter(child_model.objects.all(), node_id)
         assert list(result.values_list("name", flat=True)) == ["a1", "a2", "a3"]
 
@@ -3551,7 +3568,7 @@ def test_all_fields_filterset_matches_a_two_column_forward_foreign_object_on_bot
 
     with _link_models.link_fixture_tables(connection):
         parent = _link_models.LnkParent.objects.get(label=label)
-        value = global_id_for(parent_type, parent.pk) if node else parent.pk
+        value = global_id_for(parent_type, saved_pk(parent)) if node else saved_pk(parent)
         result = schema.execute_sync(
             query,
             variable_values={"parent": value},
@@ -3559,9 +3576,11 @@ def test_all_fields_filterset_matches_a_two_column_forward_foreign_object_on_bot
         )
     assert result.errors is None, result.errors
     assert result.data is not None
-    rows = [edge["node"] for edge in result.data["pairs"]["edges"]]
+    data: dict[str, object] = result.data
+    edges = require(require(data["pairs"], is_object_dict)["edges"], is_object_list)
+    rows = [require(require(edge, is_object_dict)["node"], is_object_dict) for edge in edges]
     assert [row["name"] for row in rows] == names
-    assert {row["parent"]["label"] for row in rows} == {label}
+    assert {require(row["parent"], is_object_dict)["label"] for row in rows} == {label}
 
 
 @pytest.mark.django_db
@@ -3596,16 +3615,16 @@ def test_generated_forward_fk_to_field_in_execution_matches_by_decoded_pk() -> N
     _favoring_profile(alpha, "a-child")
     _favoring_profile(beta, "b-child")
     _favoring_profile(gamma, "g-child")
-    assert str(alpha.pk) != alpha.name
+    assert str(saved_pk(alpha)) != alpha.name
 
     requested = [
-        strawberry.relay.to_base64("GenreType", str(alpha.pk)),
-        strawberry.relay.to_base64("GenreType", str(beta.pk)),
+        strawberry.relay.to_base64("GenreType", str(saved_pk(alpha))),
+        strawberry.relay.to_base64("GenreType", str(saved_pk(beta))),
     ]
     result = in_leaf.filter(library_models.PatronProfile.objects.all(), requested)
     assert set(result.values_list("postal_code", flat=True)) == {"a-child", "b-child"}
     expected = library_models.PatronProfile.objects.filter(
-        favorite_genre__pk__in=[alpha.pk, beta.pk],
+        favorite_genre__pk__in=[saved_pk(alpha), saved_pk(beta)],
     )
     assert set(result.values_list("pk", flat=True)) == set(
         expected.values_list("pk", flat=True),
@@ -3614,7 +3633,7 @@ def test_generated_forward_fk_to_field_in_execution_matches_by_decoded_pk() -> N
     # The raw non-pk path compares the pk values against the stored ``name``
     # column and matches nothing -- why the ``__pk`` qualification is required.
     wrong = library_models.PatronProfile.objects.filter(
-        favorite_genre__in=[str(alpha.pk), str(beta.pk)],
+        favorite_genre__in=[str(saved_pk(alpha)), str(saved_pk(beta))],
     )
     assert wrong.count() == 0
 
@@ -3664,32 +3683,32 @@ def test_expanded_related_filter_derives_pk_path_from_live_field_name() -> None:
     library_models.Genre.objects.create(name="C3")  # no profiles
     _favoring_profile(t1, "t1-child")
     _favoring_profile(t2, "t2-child")
-    assert str(t1.pk) != t1.name
+    assert str(saved_pk(t1)) != t1.name
 
-    encoded = strawberry.relay.to_base64("GenreType", str(t1.pk))
+    encoded = strawberry.relay.to_base64("GenreType", str(saved_pk(t1)))
     result = expanded_leaf.filter(library_models.Genre.objects.all(), encoded)
 
     # (b) The derived ``favoring_profiles__favorite_genre__pk`` predicate returns
     # exactly the genre whose profiles point back at ``t1`` -- matching the ORM.
     production = list(result.order_by("id").values_list("pk", flat=True))
     expected = list(
-        library_models.Genre.objects.filter(favoring_profiles__favorite_genre__pk=t1.pk)
+        library_models.Genre.objects.filter(favoring_profiles__favorite_genre__pk=saved_pk(t1))
         .order_by("id")
         .values_list("pk", flat=True),
     )
-    assert production == expected == [t1.pk]
+    assert production == expected == [saved_pk(t1)]
 
     # The rebased-but-NOT-pk-qualified predicate compares against the ``name``
     # column (pk != name) and wrongly matches nothing -- why ``__pk`` matters.
     unqualified = library_models.Genre.objects.filter(
-        favoring_profiles__favorite_genre=str(t1.pk),
+        favoring_profiles__favorite_genre=str(saved_pk(t1)),
     )
     assert list(unqualified) == []
 
     # An absolute-string marker ("favorite_genre__pk") would compile against the
     # PARENT model, which has no ``favorite_genre`` field -> FieldError.
     with pytest.raises(FieldError):
-        list(library_models.Genre.objects.filter(favorite_genre__pk=str(t1.pk)))
+        list(library_models.Genre.objects.filter(favorite_genre__pk=str(saved_pk(t1))))
 
 
 # ---------------------------------------------------------------------------
@@ -3967,8 +3986,8 @@ def test_traversal_to_field_leaf_routes_pk_qualified_through_correlated_exists()
     library_models.Genre.objects.create(name="C3")  # no profiles
     # The auto pk and the FK-stored ``name`` to_field column differ, so ONLY the
     # ``__pk`` qualification returns the right row.
-    assert str(t1.pk) != t1.name
-    encoded = strawberry.relay.to_base64("GenreType", str(t1.pk))
+    assert str(saved_pk(t1)) != t1.name
+    encoded = strawberry.relay.to_base64("GenreType", str(saved_pk(t1)))
     outer = library_models.Genre.objects.order_by("id")
 
     def _build_fs() -> FilterSet:
@@ -3984,7 +4003,7 @@ def test_traversal_to_field_leaf_routes_pk_qualified_through_correlated_exists()
     clean_qs = clean_fs.qs
     assert len(_reserved_aliases(clean_qs)) == 1
     assert str(clean_qs.query).upper().count("EXISTS") == 1
-    assert list(clean_qs.order_by("id").values_list("pk", flat=True)) == [t1.pk]
+    assert list(clean_qs.order_by("id").values_list("pk", flat=True)) == [saved_pk(t1)]
 
 
 @pytest.mark.django_db
@@ -4031,10 +4050,10 @@ def test_traversal_to_field_in_leaf_routes_through_correlated_exists() -> None:
     t2 = library_models.Genre.objects.create(name="C2")
     _favoring_profile(t2, "c2")
     library_models.Genre.objects.create(name="C3")  # no profiles
-    assert str(t1.pk) != t1.name
+    assert str(saved_pk(t1)) != t1.name
     requested = [
-        strawberry.relay.to_base64("GenreType", str(t1.pk)),
-        strawberry.relay.to_base64("GenreType", str(t2.pk)),
+        strawberry.relay.to_base64("GenreType", str(saved_pk(t1))),
+        strawberry.relay.to_base64("GenreType", str(saved_pk(t2))),
     ]
     outer = library_models.Genre.objects.order_by("id")
 
@@ -4056,7 +4075,10 @@ def test_traversal_to_field_in_leaf_routes_through_correlated_exists() -> None:
     outer_tables = sorted({j.table_name for j in clean_qs.query.alias_map.values()})
     assert outer_tables == [library_models.Genre._meta.db_table]
     # Correct rows: t3 has no child, so only the two encoded (by pk) targets match.
-    assert list(clean_qs.order_by("id").values_list("pk", flat=True)) == [t1.pk, t2.pk]
+    assert list(clean_qs.order_by("id").values_list("pk", flat=True)) == [
+        saved_pk(t1),
+        saved_pk(t2),
+    ]
 
     # Restrictive empty list THROUGH the adapter: the leaf is still routed (it is
     # a routable candidate), invoked on the inner root, and yields
@@ -4111,7 +4133,7 @@ def test_expanded_to_field_leaf_answers_pk_qualified_through_its_branch() -> Non
     t2 = library_models.Genre.objects.create(name="C2")
     _favoring_profile(t2, "c2")
     library_models.Genre.objects.create(name="C3")
-    assert str(t1.pk) != t1.name
+    assert str(saved_pk(t1)) != t1.name
 
     def _pks(data: dict[str, object]) -> list[object]:
         qs = ParentFilter(
@@ -4122,9 +4144,9 @@ def test_expanded_to_field_leaf_answers_pk_qualified_through_its_branch() -> Non
         assert _reserved_aliases(qs) == []
         return list(qs.values_list("pk", flat=True))
 
-    encoded = [strawberry.relay.to_base64("GenreType", str(g.pk)) for g in (t1, t2)]
-    assert _pks({"favoring_profiles__favorite_genre": encoded[0]}) == [t1.pk]
-    assert _pks({"favoring_profiles__favorite_genre__in": encoded}) == [t1.pk, t2.pk]
+    encoded = [strawberry.relay.to_base64("GenreType", str(saved_pk(g))) for g in (t1, t2)]
+    assert _pks({"favoring_profiles__favorite_genre": encoded[0]}) == [saved_pk(t1)]
+    assert _pks({"favoring_profiles__favorite_genre__in": encoded}) == [saved_pk(t1), saved_pk(t2)]
     assert _pks({"favoring_profiles__favorite_genre__in": []}) == []
 
 
@@ -4363,7 +4385,7 @@ def test_honored_override_runs_outer_with_no_reserved_alias() -> None:
     # discarded GlobalID primitive would have rejected -- proving the consumer
     # filter runs.
     result = BookFilter(
-        data={"genres": [str(genre_a.pk)]},
+        data={"genres": [str(saved_pk(genre_a))]},
         queryset=library_models.Book.objects.order_by("id"),
         request=HttpRequest(),
     ).qs
@@ -4546,7 +4568,7 @@ def test_generated_deep_to_many_path_correctness_is_row_preserving() -> None:
     assert "library_genre" not in joined_tables
     assert "EXISTS" in str(result.query).upper()
     production_rows = list(result.values_list("pk", flat=True))
-    assert production_rows == [matching_book.pk]
+    assert production_rows == [saved_pk(matching_book)]
 
     # Permanent test-local oracle: the direct-invocation baseline (direct outer
     # invocation of the same filter instance, then its own distinct) yields the
@@ -4595,13 +4617,13 @@ def test_flattened_related_filter_leaf_is_row_preserving() -> None:
     result = bare.qs
 
     # Row-preserving production: the single matching book is returned ONCE.
-    assert list(result.values_list("pk", flat=True)) == [matching_book.pk]
+    assert list(result.values_list("pk", flat=True)) == [saved_pk(matching_book)]
     assert result.count() == 1
 
     # Permanent test-local oracle: the direct-invocation baseline (direct outer
     # invocation of the same distinct=False leaf) duplicates the parent row.
     oracle_rows = list(leaf.filter(outer_qs, "cardio").values_list("pk", flat=True))
-    assert oracle_rows == [matching_book.pk, matching_book.pk]
+    assert oracle_rows == [saved_pk(matching_book), saved_pk(matching_book)]
 
 
 # ---------------------------------------------------------------------------
@@ -4648,7 +4670,7 @@ def test_eligible_m2m_candidate_has_no_outer_or_inner_distinct() -> None:
     # No DISTINCT anywhere: not on the outer query, not inside the EXISTS body.
     assert "DISTINCT" not in sql.upper()
     assert "EXISTS" in sql.upper()
-    assert list(result.values_list("pk", flat=True)) == [matching_book.pk]
+    assert list(result.values_list("pk", flat=True)) == [saved_pk(matching_book)]
 
 
 @pytest.mark.django_db
@@ -4738,7 +4760,7 @@ def test_inactive_candidates_attach_nothing() -> None:
     assert sql.upper().count("EXISTS") == 1
     reserved = [name for name in result.query.annotations if name.startswith("_dst_predicate_")]
     assert reserved == ["_dst_predicate_0"]
-    assert list(result.values_list("pk", flat=True)) == [matching_book.pk]
+    assert list(result.values_list("pk", flat=True)) == [saved_pk(matching_book)]
 
 
 @pytest.mark.django_db
@@ -4880,7 +4902,7 @@ def test_pre_snapshot_filterset_degrades_to_old_behavior(monkeypatch: pytest.Mon
     assert _reserved_aliases(result) == []
     assert result.query.distinct is True
     assert "EXISTS" not in str(result.query).upper()
-    assert list(result.values_list("pk", flat=True)) == [matching_book.pk]
+    assert list(result.values_list("pk", flat=True)) == [saved_pk(matching_book)]
 
 
 @pytest.mark.django_db
@@ -4910,7 +4932,7 @@ def test_not_branch_over_to_many_related_branch_is_row_preserving() -> None:
         _make_info(),
     )
     # Only the non-cardio genre survives, exactly once.
-    assert list(qs.values_list("pk", flat=True)) == [neuro.pk]
+    assert list(qs.values_list("pk", flat=True)) == [saved_pk(neuro)]
 
 
 def _routed_genre_filter() -> type[FilterSet]:
@@ -4966,7 +4988,7 @@ def test_eligible_leaf_in_and_tree_position_is_row_preserving() -> None:
         _make_info(),
     )
     # Only the genre satisfying BOTH arms, returned exactly once despite two books.
-    assert list(qs.values_list("pk", flat=True)) == [both.pk]
+    assert list(qs.values_list("pk", flat=True)) == [saved_pk(both)]
     assert qs.count() == 1
     assert "EXISTS" in str(qs.query).upper()
 
@@ -5009,7 +5031,7 @@ def test_eligible_leaf_in_or_tree_position_is_row_preserving() -> None:
         _make_info(),
     )
     # Eligible-arm match (once, despite two books) unioned with the scalar match.
-    assert list(qs.values_list("pk", flat=True)) == [matched.pk, named_only.pk]
+    assert list(qs.values_list("pk", flat=True)) == [saved_pk(matched), saved_pk(named_only)]
     assert qs.count() == 2
     assert "EXISTS" in str(qs.query).upper()
 
@@ -5042,7 +5064,7 @@ def test_qs_and_apply_sync_and_async_over_eligible_candidate() -> None:
         queryset=library_models.Genre.objects.order_by("id"),
         request=HttpRequest(),
     )
-    assert list(bare.qs.values_list("pk", flat=True)) == [cardio.pk]
+    assert list(bare.qs.values_list("pk", flat=True)) == [saved_pk(cardio)]
 
     # apply_sync path.
     sync_qs = RoutedGenreFilter.apply_sync(
@@ -5050,7 +5072,7 @@ def test_qs_and_apply_sync_and_async_over_eligible_candidate() -> None:
         library_models.Genre.objects.order_by("id"),
         _make_info(),
     )
-    assert list(sync_qs.values_list("pk", flat=True)) == [cardio.pk]
+    assert list(sync_qs.values_list("pk", flat=True)) == [saved_pk(cardio)]
 
     # apply_async path.
     async_qs = asyncio.run(
@@ -5060,7 +5082,7 @@ def test_qs_and_apply_sync_and_async_over_eligible_candidate() -> None:
             _make_info(),
         ),
     )
-    assert list(async_qs.values_list("pk", flat=True)) == [cardio.pk]
+    assert list(async_qs.values_list("pk", flat=True)) == [saved_pk(cardio)]
 
 
 # Row-preserving relational-predicate cut-over cases:
@@ -5171,7 +5193,7 @@ def test_reverse_fk_loans_note_is_row_preserving() -> None:
     ).qs
 
     production = list(result.order_by("id").values_list("pk", flat=True))
-    assert production == [book.pk]
+    assert production == [saved_pk(book)]
     assert result.count() == 1
     assert "EXISTS" in str(result.query).upper()
     oracle = list(leaf.filter(outer, "cardio").order_by("id").values_list("pk", flat=True))
@@ -5211,7 +5233,7 @@ def test_forward_m2m_multiple_parents_is_row_preserving() -> None:
     ).qs
 
     production = list(result.order_by("id").values_list("pk", flat=True))
-    assert production == [single.pk, dupes.pk]
+    assert production == [saved_pk(single), saved_pk(dupes)]
     assert result.count() == 2
     oracle = list(leaf.filter(outer, "cardio").order_by("id").values_list("pk", flat=True))
     assert oracle == production
@@ -5248,7 +5270,7 @@ def test_reverse_m2m_genre_books_title_is_row_preserving() -> None:
     ).qs
 
     production = list(result.order_by("id").values_list("pk", flat=True))
-    assert production == [matched.pk]
+    assert production == [saved_pk(matched)]
     assert result.count() == 1
     oracle = list(leaf.filter(outer, "cardio").order_by("id").values_list("pk", flat=True))
     assert oracle == production
@@ -5265,10 +5287,22 @@ def test_generic_relation_branch_tags_is_row_preserving() -> None:
     """
     branch = library_models.Branch.objects.create(name="Tagged Branch")
     ct = ContentType.objects.get_for_model(library_models.Branch)
-    library_models.TaggedItem.objects.create(tag="cardio-x", content_type=ct, object_id=branch.pk)
-    library_models.TaggedItem.objects.create(tag="cardio-y", content_type=ct, object_id=branch.pk)
+    library_models.TaggedItem.objects.create(
+        tag="cardio-x",
+        content_type=ct,
+        object_id=saved_pk(branch),
+    )
+    library_models.TaggedItem.objects.create(
+        tag="cardio-y",
+        content_type=ct,
+        object_id=saved_pk(branch),
+    )
     other = library_models.Branch.objects.create(name="Other Branch")
-    library_models.TaggedItem.objects.create(tag="neuro-z", content_type=ct, object_id=other.pk)
+    library_models.TaggedItem.objects.create(
+        tag="neuro-z",
+        content_type=ct,
+        object_id=saved_pk(other),
+    )
 
     class BranchTagFilter(FilterSet):
         class Meta:
@@ -5286,7 +5320,7 @@ def test_generic_relation_branch_tags_is_row_preserving() -> None:
     ).qs
 
     production = list(result.order_by("id").values_list("pk", flat=True))
-    assert production == [branch.pk]
+    assert production == [saved_pk(branch)]
     assert result.count() == 1
     oracle = list(leaf.filter(outer, "cardio").order_by("id").values_list("pk", flat=True))
     assert oracle == production
@@ -5318,7 +5352,10 @@ def test_isnull_on_nullable_child_field_is_row_preserving() -> None:
 
     leaf = GenreSubtitleFilter.get_filters()["books__subtitle__isnull"]
     outer = library_models.Genre.objects.order_by("id")
-    for value, expected in ((True, [g_null.pk, g_empty.pk]), (False, [g_has.pk])):
+    for value, expected in (
+        (True, [saved_pk(g_null), saved_pk(g_empty)]),
+        (False, [saved_pk(g_has)]),
+    ):
         result = GenreSubtitleFilter(
             data={"books__subtitle__isnull": value},
             queryset=outer,
@@ -5363,8 +5400,8 @@ def test_nullable_intermediate_to_one_hop_is_row_preserving() -> None:
     production = list(result.order_by("id").values_list("pk", flat=True))
     # child_match and sibling share ``parent`` (whose children include the
     # matching label); root_null has a NULL parent so the EXISTS arm is false.
-    assert production == [child_match.pk, sibling.pk]
-    assert root_null.pk not in production
+    assert production == [saved_pk(child_match), saved_pk(sibling)]
+    assert saved_pk(root_null) not in production
     assert "EXISTS" in str(result.query).upper()
     oracle = list(leaf.filter(outer, "cardio").order_by("id").values_list("pk", flat=True))
     assert oracle == production
@@ -5410,9 +5447,9 @@ def test_to_field_reverse_to_many_children_is_row_preserving() -> None:
         .order_by("id")
         .values_list("pk", flat=True),
     )
-    assert baseline == [matched.pk, matched.pk]
+    assert baseline == [saved_pk(matched), saved_pk(matched)]
     expected = sorted(set(baseline))
-    assert production == expected == [matched.pk]
+    assert production == expected == [saved_pk(matched)]
     assert result.count() == 1
 
     sql = str(result.query)
@@ -5452,7 +5489,7 @@ def test_two_active_leaves_same_relation_cross_row_and() -> None:
     TwoLeafFilter.get_filters()
     outer = library_models.Book.objects.order_by("id")
     result = TwoLeafFilter(
-        data={"genres__name__icontains": "cardio", "genres__id__gt": neuro.pk - 1},
+        data={"genres__name__icontains": "cardio", "genres__id__gt": saved_pk(neuro) - 1},
         queryset=outer,
         request=HttpRequest(),
     ).qs
@@ -5464,12 +5501,12 @@ def test_two_active_leaves_same_relation_cross_row_and() -> None:
     production = list(result.order_by("id").values_list("pk", flat=True))
     # ``book`` has cardiology (name match) AND neurology (id__gt match, cross-row);
     # ``lonely`` has only cardiology (fails id__gt) so it is excluded.
-    assert production == [book.pk]
+    assert production == [saved_pk(book)]
 
     name_leaf = TwoLeafFilter.get_filters()["genres__name__icontains"]
     id_leaf = TwoLeafFilter.get_filters()["genres__id__gt"]
     oracle_qs = name_leaf.filter(outer, "cardio")
-    oracle_qs = id_leaf.filter(oracle_qs, neuro.pk - 1)
+    oracle_qs = id_leaf.filter(oracle_qs, saved_pk(neuro) - 1)
     oracle = list(oracle_qs.order_by("id").values_list("pk", flat=True))
     assert oracle == production
 
@@ -5494,7 +5531,7 @@ def test_range_binds_to_single_child_row() -> None:
     high = library_models.Loan.objects.create(book=split, patron=p2, note="high")
     # id order: low < mid < high. Range == [mid, mid]: match_book's loan is in
     # range; split's loans (low, high) straddle it with none inside.
-    assert low.pk < mid.pk < high.pk
+    assert saved_pk(low) < saved_pk(mid) < saved_pk(high)
 
     class BookLoanRangeFilter(FilterSet):
         class Meta:
@@ -5504,15 +5541,15 @@ def test_range_binds_to_single_child_row() -> None:
     leaf = BookLoanRangeFilter.get_filters()["loans__id__range"]
     outer = library_models.Book.objects.order_by("id")
     result = BookLoanRangeFilter(
-        data={"loans__id__range": [mid.pk, mid.pk]},
+        data={"loans__id__range": [saved_pk(mid), saved_pk(mid)]},
         queryset=outer,
         request=HttpRequest(),
     ).qs
 
     production = list(result.order_by("id").values_list("pk", flat=True))
-    assert production == [match_book.pk]
-    assert split.pk not in production
-    cleaned = leaf.field.clean([mid.pk, mid.pk])
+    assert production == [saved_pk(match_book)]
+    assert saved_pk(split) not in production
+    cleaned = object_result(leaf.field.clean, [saved_pk(mid), saved_pk(mid)])
     oracle = list(leaf.filter(outer, cleaned).order_by("id").values_list("pk", flat=True))
     assert oracle == production
 
@@ -5539,7 +5576,7 @@ def test_negated_split_across_rows_range_counterexample() -> None:
     p3 = library_models.Patron.objects.create(name="p3", email="c")
     mid = library_models.Loan.objects.create(book=match_book, patron=p3, note="mid")
     high = library_models.Loan.objects.create(book=split, patron=p2, note="high")
-    assert low.pk < mid.pk < high.pk
+    assert saved_pk(low) < saved_pk(mid) < saved_pk(high)
 
     class BookLoanRangeFilter(FilterSet):
         class Meta:
@@ -5548,7 +5585,7 @@ def test_negated_split_across_rows_range_counterexample() -> None:
 
     production = list(
         BookLoanRangeFilter.apply_sync(
-            {"not_": {"loans__id": {"range": [mid.pk, mid.pk]}}},
+            {"not_": {"loans__id": {"range": [saved_pk(mid), saved_pk(mid)]}}},
             library_models.Book.objects.order_by("id"),
             _make_info(),
         )
@@ -5556,10 +5593,10 @@ def test_negated_split_across_rows_range_counterexample() -> None:
         .values_list("pk", flat=True),
     )
     # ``match_book`` is excluded (has a loan in range); the split-row book is KEPT.
-    assert production == [split.pk]
+    assert production == [saved_pk(split)]
     oracle = list(
         library_models.Book.objects.order_by("id")
-        .exclude(loans__id__range=(mid.pk, mid.pk))
+        .exclude(loans__id__range=(saved_pk(mid), saved_pk(mid)))
         .values_list("pk", flat=True),
     )
     assert oracle == production
@@ -5620,7 +5657,7 @@ def test_integer_in_over_to_many_path() -> None:
     outer = library_models.Genre.objects.order_by("id")
     cases: dict[str, tuple[list[int], list[int]]] = {
         "empty-set": ([], []),
-        "mixed-valid-invalid": ([b1.pk, 99999999], [g1.pk]),
+        "mixed-valid-invalid": ([saved_pk(b1), 99999999], [saved_pk(g1)]),
         "all-invalid": ([88888888, 99999999], []),
     }
     for value, expected in cases.values():
@@ -5729,13 +5766,18 @@ def test_global_id_list_over_flat_relay_m2m_is_row_preserving() -> None:
     assert snapshot.candidates["genres__in"].eligible is True
 
     result = FlatBookFilter(
-        data={"genres__in": [global_id_for(GenreType, g1.pk), global_id_for(GenreType, g2.pk)]},
+        data={
+            "genres__in": [
+                global_id_for(GenreType, saved_pk(g1)),
+                global_id_for(GenreType, saved_pk(g2)),
+            ],
+        },
         queryset=library_models.Book.objects.order_by("id"),
         request=HttpRequest(),
     ).qs
 
     # ``both`` matches via TWO memberships yet appears once; ``one`` matches once.
-    assert list(result.values_list("pk", flat=True)) == [both.pk, one.pk]
+    assert list(result.values_list("pk", flat=True)) == [saved_pk(both), saved_pk(one)]
     assert result.query.distinct is False
     assert "_dst_predicate_0" in result.query.annotations
     outer_tables = {join.table_name for join in result.query.alias_map.values()}
@@ -5774,7 +5816,7 @@ def test_untouched_surfaces_attach_no_reserved_alias() -> None:
     ).qs
     assert [n for n in declared.query.annotations if n.startswith("_dst_predicate_")] == []
     assert declared.query.distinct is True
-    assert list(declared.order_by("id").values_list("pk", flat=True)) == [book.pk]
+    assert list(declared.order_by("id").values_list("pk", flat=True)) == [saved_pk(book)]
 
     class MethodFilter(FilterSet):
         loan_note = CharFilter(method="filter_note")
@@ -5798,7 +5840,7 @@ def test_untouched_surfaces_attach_no_reserved_alias() -> None:
         request=HttpRequest(),
     ).qs
     assert [n for n in method.query.annotations if n.startswith("_dst_predicate_")] == []
-    assert list(method.order_by("id").values_list("pk", flat=True)) == [book.pk]
+    assert list(method.order_by("id").values_list("pk", flat=True)) == [saved_pk(book)]
 
     class CustomLoanNoteFilter(CharFilter):
         """A declared custom ``CharFilter`` subclass (ineligible: not generated)."""
@@ -5821,7 +5863,7 @@ def test_untouched_surfaces_attach_no_reserved_alias() -> None:
         request=HttpRequest(),
     ).qs
     assert [n for n in custom.query.annotations if n.startswith("_dst_predicate_")] == []
-    assert list(custom.order_by("id").values_list("pk", flat=True)) == [book.pk]
+    assert list(custom.order_by("id").values_list("pk", flat=True)) == [saved_pk(book)]
 
     def _override_extra(_f: object) -> dict[str, object]:
         return {"lookup_expr": "icontains"}
@@ -5846,7 +5888,10 @@ def test_untouched_surfaces_attach_no_reserved_alias() -> None:
     assert [n for n in overridden.query.annotations if n.startswith("_dst_predicate_")] == []
     # The extra-only override owns the filter and does not opt into distinct;
     # both matching loan occurrences remain visible.
-    assert list(overridden.order_by("id").values_list("pk", flat=True)) == [book.pk, book.pk]
+    assert list(overridden.order_by("id").values_list("pk", flat=True)) == [
+        saved_pk(book),
+        saved_pk(book),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -5888,7 +5933,7 @@ def _seed_multiset_book_genre_graph() -> tuple[int, int, int]:
     )
     book_one_genre.genres.add(library_models.Genre.objects.create(name="cardio-vascular"))
     book_no_match.genres.add(library_models.Genre.objects.create(name="neurology"))
-    return book_two_genres.pk, book_one_genre.pk, book_no_match.pk
+    return saved_pk(book_two_genres), saved_pk(book_one_genre), saved_pk(book_no_match)
 
 
 def _apply_book_genre_leaf(
@@ -6223,7 +6268,9 @@ def test_normalize_input_walks_strawberry_dataclass() -> None:
 
     @strawberry.input
     class _Input:
-        name: str | None = strawberry.UNSET
+        # basedpyright: Strawberry types UNSET Any; an input field defaults to it under its
+        # declared GraphQL annotation, which no typed sentinel satisfies
+        name: str | None = strawberry.UNSET  # pyright: ignore[reportAny]
 
     value = _Input(name="hello")
     # `__dataclass_fields__` carries the declared field names.
@@ -6253,12 +6300,18 @@ def test_normalize_input_inner_bag_loop_skips_unset_lookups() -> None:
 
     @strawberry.input
     class _Bag:
-        exact: str | None = strawberry.UNSET
-        i_contains: str | None = strawberry.UNSET
+        # basedpyright: Strawberry types UNSET Any; an input field defaults to it under its
+        # declared GraphQL annotation, which no typed sentinel satisfies
+        exact: str | None = strawberry.UNSET  # pyright: ignore[reportAny]
+        # basedpyright: Strawberry types UNSET Any; an input field defaults to it under its
+        # declared GraphQL annotation, which no typed sentinel satisfies
+        i_contains: str | None = strawberry.UNSET  # pyright: ignore[reportAny]
 
     @strawberry.input
     class _Input:
-        name: _Bag | None = strawberry.UNSET
+        # basedpyright: Strawberry types UNSET Any; an input field defaults to it under its
+        # declared GraphQL annotation, which no typed sentinel satisfies
+        name: _Bag | None = strawberry.UNSET  # pyright: ignore[reportAny]
 
     class CategoryFilter(FilterSet):
         class Meta:
@@ -6285,7 +6338,9 @@ def test_normalize_input_skips_strawberry_unset_attrs() -> None:
 
     @strawberry.input
     class _Input:
-        name: str | None = strawberry.UNSET
+        # basedpyright: Strawberry types UNSET Any; an input field defaults to it under its
+        # declared GraphQL annotation, which no typed sentinel satisfies
+        name: str | None = strawberry.UNSET  # pyright: ignore[reportAny]
 
     class CategoryFilter(FilterSet):
         class Meta:
@@ -6369,8 +6424,12 @@ def test_run_permission_checks_skips_unset_related_branch() -> None:
 
     @strawberry.input
     class BranchInput:
-        name: str | None = strawberry.UNSET
-        shelves: object = strawberry.UNSET
+        # basedpyright: Strawberry types UNSET Any; an input field defaults to it under its
+        # declared GraphQL annotation, which no typed sentinel satisfies
+        name: str | None = strawberry.UNSET  # pyright: ignore[reportAny]
+        # basedpyright: Strawberry types UNSET Any; an input field defaults to it under its
+        # declared GraphQL annotation, which no typed sentinel satisfies
+        shelves: object = strawberry.UNSET  # pyright: ignore[reportAny]
 
     class BranchFilter(FilterSet):
         shelves = RelatedFilter(ShelfFilter, field_name="shelves")
@@ -7483,7 +7542,7 @@ def test_run_permission_checks_short_circuits_on_none_and_unset() -> None:
             fired.append("name")
 
     CategoryFilter._run_permission_checks(None, request=HttpRequest())
-    CategoryFilter._run_permission_checks(strawberry.UNSET, request=HttpRequest())
+    CategoryFilter._run_permission_checks(UNSET, request=HttpRequest())
     assert fired == []
 
 
@@ -7553,7 +7612,7 @@ def test_evaluate_logic_tree_skips_inactive_or_arms() -> None:
     )
     assert sorted(baseline.values_list("name", flat=True)) == ["alpha"]
 
-    for inactive in (None, strawberry.UNSET):
+    for inactive in (None, UNSET):
         mixed = CategoryFilter.apply_sync(
             {"or_": [{"name": {"exact": "alpha"}}, inactive]},
             Category.objects.all(),
@@ -7572,7 +7631,7 @@ def test_evaluate_logic_tree_and_direct_branch_treat_inactive_values_as_identity
 
     queryset = Category.objects.all()
     assert CategoryFilter._evaluate_logic_tree(queryset, {"and": [None]}) == Q()
-    assert CategoryFilter._q_for_branch(queryset, strawberry.UNSET) == Q()
+    assert CategoryFilter._q_for_branch(queryset, UNSET) == Q()
 
 
 def test_collect_nested_visibility_querysets_async_caps_recursion_depth() -> None:
@@ -8124,7 +8183,11 @@ def test_normalize_input_declared_fk_head_keeps_the_generated_in_lookup(lookup: 
 
     value, form_data, oracle = {
         "i_exact": ("alpha", {"branch": "alpha"}, Q(branch__name__iexact="alpha")),
-        "in_": ([beta.pk], {"branch__in": [beta.pk]}, Q(branch__in=[beta.pk])),
+        "in_": (
+            [saved_pk(beta)],
+            {"branch__in": [saved_pk(beta)]},
+            Q(branch__in=[saved_pk(beta)]),
+        ),
     }[lookup]
     assert BranchNameShelfFilter._normalize_input({"branch": {lookup: value}}) == form_data
     _assert_rows_match_oracle(BranchNameShelfFilter, {"branch": {lookup: value}}, oracle)
@@ -8665,7 +8728,7 @@ def test_active_permission_leaf_paths_covers_input_shapes() -> None:
 
     # None / UNSET / non-(dict-or-dataclass) -> empty.
     assert BranchFilter._active_permission_targets(None)[0] == []
-    assert BranchFilter._active_permission_targets(strawberry.UNSET)[0] == []
+    assert BranchFilter._active_permission_targets(UNSET)[0] == []
     assert BranchFilter._active_permission_targets(42)[0] == []
 
     @dataclasses.dataclass
@@ -9249,7 +9312,7 @@ def test_iter_logic_branches_walks_active_branches_and_filters_inactive() -> Non
 
     # None / UNSET input -> empty
     assert list(CategoryFilter._iter_logic_branches(None)) == []
-    assert list(CategoryFilter._iter_logic_branches(strawberry.UNSET)) == []
+    assert list(CategoryFilter._iter_logic_branches(UNSET)) == []
 
     # Wire keys with inactive elements filtered out
     branches = list(
@@ -10088,7 +10151,7 @@ def _seed_two_books_one_cardio_loan() -> tuple[int, int]:
         patron=library_models.Patron.objects.create(name="pb", email="b"),
         note="routine",
     )
-    return matched.pk, other.pk
+    return saved_pk(matched), saved_pk(other)
 
 
 def _reserved_aliases(queryset: QuerySet[django_models.Model]) -> list[str]:
@@ -10427,7 +10490,7 @@ def test_capability_gate_replaces_instance_at_init_fails_closed() -> None:
     result = instance.qs
     assert _reserved_aliases(result) == []
     # The outer path runs the replaced TITLE filter: matches by title only.
-    assert list(result.order_by("id").values_list("pk", flat=True)) == [by_title.pk]
+    assert list(result.order_by("id").values_list("pk", flat=True)) == [saved_pk(by_title)]
 
 
 @pytest.mark.django_db
@@ -10602,7 +10665,7 @@ def test_capability_gate_related_filter_expands_non_capable_child_fails_closed()
     # Not routed through the correlated adapter (no reserved EXISTS alias); the
     # branch restriction keeps the book once although two loans match.
     assert _reserved_aliases(result) == []
-    assert list(result.order_by("id").values_list("pk", flat=True)) == [matched.pk]
+    assert list(result.order_by("id").values_list("pk", flat=True)) == [saved_pk(matched)]
 
 
 @pytest.mark.django_db
@@ -10648,7 +10711,7 @@ def test_capability_gate_related_filter_expands_capable_child_runs_as_branch() -
     # matching loans keep a single row.
     assert _reserved_aliases(result) == []
     assert result.query.distinct is False
-    assert list(result.order_by("id").values_list("pk", flat=True)) == [matched.pk]
+    assert list(result.order_by("id").values_list("pk", flat=True)) == [saved_pk(matched)]
 
 
 # ---------------------------------------------------------------------------
@@ -10822,7 +10885,7 @@ def _seed_r5_prefan_genre_book() -> tuple[library_models.Book, library_models.Ge
     irrelevant.
     """
     genre = library_models.Genre.objects.create(name="temp")
-    genre.name = str(genre.pk)
+    genre.name = str(saved_pk(genre))
     genre.save(update_fields=["name"])
     shelf = _library_shelf()
     book = library_models.Book.objects.create(shelf=shelf, title="book-1")
@@ -10853,7 +10916,7 @@ def _r5_prefan_setup() -> tuple[
     candidate = _r5_prefan_candidate()
     book, genre = _seed_r5_prefan_genre_book()
     fs = _R5PreFanBookFilter(
-        data={"genres": [str(genre.pk)]},
+        data={"genres": [str(saved_pk(genre))]},
         queryset=_r5_prefanned_books(),
         request=HttpRequest(),
     )
@@ -10904,7 +10967,7 @@ def test_routed_leaf_preserves_prefanned_multiplicity() -> None:
     qs = fs.qs
     assert len(_reserved_aliases(qs)) == 1
     assert str(qs.query).upper().count("EXISTS") == 1
-    assert list(qs.values_list("pk", flat=True)) == [book.pk, book.pk]
+    assert list(qs.values_list("pk", flat=True)) == [saved_pk(book), saved_pk(book)]
 
 
 # ======================================================================
@@ -11064,7 +11127,7 @@ def test_extra_only_shadow_runs_outer_with_no_reserved_alias() -> None:
     # The consumer's ModelMultipleChoiceField cleans a raw pk list -- a shape the
     # discarded GlobalID primitive would have rejected -- proving the consumer ran.
     result = BookFilter(
-        data={"genres": [str(genre_a.pk)]},
+        data={"genres": [str(saved_pk(genre_a))]},
         queryset=library_models.Book.objects.order_by("id"),
         request=HttpRequest(),
     ).qs
@@ -11281,7 +11344,11 @@ def test_public_filter_defaults_matches_upstream_django_filter_table() -> None:
         assert sample is not None, f"no live sample field for {field_type.__name__}"
         # basedpyright: types-django-filter types FILTER_FOR_DBFIELD_DEFAULTS keys as type[Field];
         # the runtime table also keys the reverse-relation classes
-        up_extra = UPSTREAM[field_type]["extra"](sample)  # pyright: ignore[reportArgumentType]
+        upstream_entry: dict[str, object] = UPSTREAM[field_type]  # pyright: ignore[reportArgumentType]
+        up_provider = upstream_entry["extra"]
+        assert callable(up_provider), field_type.__name__
+        up_extra = up_provider(sample)
+        assert is_object_dict(up_extra), field_type.__name__
         pkg_provider = package[field_type]["extra"]
         assert callable(pkg_provider), field_type.__name__
         pkg_extra = pkg_provider(sample)
@@ -11291,7 +11358,9 @@ def test_public_filter_defaults_matches_upstream_django_filter_table() -> None:
         assert up_extra.get("null_label") == pkg_extra.get("null_label"), field_type.__name__
         pkg_queryset = pkg_extra["queryset"]
         assert isinstance(pkg_queryset, QuerySet), field_type.__name__
-        assert up_extra["queryset"].model is pkg_queryset.model, field_type.__name__
+        up_queryset = up_extra["queryset"]
+        assert isinstance(up_queryset, QuerySet), field_type.__name__
+        assert up_queryset.model is pkg_queryset.model, field_type.__name__
 
 
 # ======================================================================
@@ -11475,8 +11544,13 @@ def test_reverse_o2o_relation_generation_uses_package_reverse_o2o_provider() -> 
             fields = {"card": ["exact"]}
 
     field = library_models.Patron._meta.get_field("card")
-    _, params = BaseFilterSet.filter_for_lookup.__func__(PatronFilter, field, "exact")
-    assert params["queryset"].model is library_models.MembershipCard
+    lookup = object_result(BaseFilterSet.filter_for_lookup.__func__, PatronFilter, field, "exact")
+    assert is_exact_pair(lookup)
+    _, params = lookup
+    assert is_object_dict(params)
+    queryset = params["queryset"]
+    assert isinstance(queryset, QuerySet)
+    assert queryset.model is library_models.MembershipCard
     leaf = PatronFilter.get_filters()["card"]
     assert isinstance(leaf, RelationPkFilter)
     assert "queryset" not in leaf.extra
@@ -12325,7 +12399,7 @@ def test_dynamic_csv_subclass_with_added_behavior_fails_closed() -> None:
             self,
             name: str,
         ) -> object:  # a DUNDER-named own method -> extra name -> fails.
-            return object.__getattribute__(self, name)
+            return object_result(object.__getattribute__, self, name)
 
     class _EvilInInitSubclass(BaseInFilter, CharFilter):
         def __init_subclass__(
@@ -12551,7 +12625,7 @@ def test_unaudited_release_disables_routing_without_changing_results() -> None:
     assert unaudited_qs.query.distinct is True
 
     # RESULTS are identical -- the degrade declines an optimization, never changes rows.
-    assert list(audited_qs.values_list("pk", flat=True)) == [matched.pk]
+    assert list(audited_qs.values_list("pk", flat=True)) == [saved_pk(matched)]
     assert list(unaudited_qs.values_list("pk", flat=True)) == list(
         audited_qs.values_list("pk", flat=True),
     )
@@ -12747,8 +12821,9 @@ def test_projected_leaf_form_field_is_the_child_instance_field() -> None:
         request=HttpRequest(),
     )
     assert bound.form.is_valid() is False
-    errors = bound.form.errors.get_json_data()
-    assert [entry["code"] for entry in errors["patron__email_must_have_at_sign"]] == [
+    errors: dict[str, object] = bound.form.errors.get_json_data()
+    entries = require(errors["patron__email_must_have_at_sign"], is_object_list)
+    assert [require(entry, is_object_dict)["code"] for entry in entries] == [
         "missing_at_sign",
     ]
     child = bound._projection_child(PatronFilter)
@@ -12793,7 +12868,7 @@ def test_projected_leaf_filters_through_the_child_filterset() -> None:
     oracle = library_models.Loan.objects.filter(
         patron__in=library_models.Patron.objects.filter(email="p1@x"),
     )
-    assert _rows("p1@x") == [alpha.pk] == list(oracle.values_list("pk", flat=True))
+    assert _rows("p1@x") == [saved_pk(alpha)] == list(oracle.values_list("pk", flat=True))
     assert _rows("") == list(
         library_models.Loan.objects.order_by("id").values_list("pk", flat=True),
     )
@@ -13395,7 +13470,7 @@ def test_projected_leaf_walking_a_hop_of_its_child_set_scopes_both_hops(spelling
     seen_loans = sorted(
         library_models.Loan.objects.filter(patron=seen).values_list("pk", flat=True),
     )
-    assert visible_loan.pk in seen_loans
+    assert saved_pk(visible_loan) in seen_loans
     assert _pks("open") == seen_loans
     assert _pks("secret") == []
 
@@ -13594,7 +13669,7 @@ def test_reverse_m2m_relation_key_membership_never_matches_a_hidden_book(
     reads ``BookType``'s visibility through the registry.
     """
     _genres, books = _genre_world()
-    pk = books[book].pk
+    pk = saved_pk(books[book])
     expected = _absent_world(
         library_models.Genre,
         {"books__in": [pk]},
@@ -13622,8 +13697,8 @@ def test_isnull_and_exclude_leaves_differ_from_their_existential_nested_twins() 
     base = library_models.Genre.objects.all()
     nested = _applied(parent, {"visible_books": {"subtitle": {"is_null": True}}}, base)
     flat = _applied(parent, {"books__subtitle": {"is_null": True}}, base)
-    assert nested == {genres["mixed"].pk, genres["plain"].pk}
-    assert flat == nested | {genres["hidden_only"].pk, genres["empty"].pk}
+    assert nested == {saved_pk(genres["mixed"]), saved_pk(genres["plain"])}
+    assert flat == nested | {saved_pk(genres["hidden_only"]), saved_pk(genres["empty"])}
     assert _applied(parent, {"without_title": "x"}, base) == _applied(
         parent,
         {"not_": {"books__title": "x"}},
@@ -13649,9 +13724,9 @@ def test_exclude_leaf_compiles_not_exists_so_a_null_key_cannot_empty_it() -> Non
     assert sql.count("NOT (EXISTS(") == 1
     assert " NOT IN " not in sql
     assert set(qs.values_list("pk", flat=True)) == {
-        genres["hidden_only"].pk,
-        genres["empty"].pk,
-        genres["other"].pk,
+        saved_pk(genres["hidden_only"]),
+        saved_pk(genres["empty"]),
+        saved_pk(genres["other"]),
     }
 
 
@@ -13782,15 +13857,18 @@ def test_inactive_relation_key_leaf_runs_no_get_queryset() -> None:
         {"books": {"is_null": None}},
         library_models.Genre.objects.all(),
     )
-    assert got == {genre.pk}
+    assert got == {saved_pk(genre)}
     assert calls == []
 
 
 _TO_MANY_KEY_VALUE_ROWS: list[tuple[str, Callable[[library_models.Book], object]]] = [
-    ("has_book", lambda book: book.pk),
-    ("has_any_book", lambda book: [book.pk]),
-    ("has_book_in", lambda book: [str(book.pk)]),
-    ("has_book_global", lambda book: [strawberry.relay.to_base64("BookNode", str(book.pk))]),
+    ("has_book", saved_pk),
+    ("has_any_book", lambda book: [saved_pk(book)]),
+    ("has_book_in", lambda book: [str(saved_pk(book))]),
+    (
+        "has_book_global",
+        lambda book: [strawberry.relay.to_base64("BookNode", str(saved_pk(book)))],
+    ),
 ]
 
 
@@ -13880,7 +13958,9 @@ def test_to_many_relation_key_filters_compare_the_visible_target_key(
         {filter_name: value(target)},
         library_models.Genre.objects.all(),
     )
-    expected: set[int] = {genres["mixed"].pk, genres["plain"].pk} if book == "visible_x" else set()
+    expected: set[int] = (
+        {saved_pk(genres["mixed"]), saved_pk(genres["plain"])} if book == "visible_x" else set()
+    )
     assert got == expected
 
 
@@ -13995,7 +14075,7 @@ def test_forward_relation_key_membership_reads_the_visible_target(
 ) -> None:
     """A raw-key, model-choice or excluding key over a ``to_field`` FK treats a hidden genre as no genre."""
     genres, _profiles = _world_of_genre_favorites()
-    pk = genres[genre].pk
+    pk = saved_pk(genres[genre])
     filter_input = (
         {filter_name: {"exact": pk}} if filter_name == "favorite_genre" else {filter_name: pk}
     )
@@ -14036,7 +14116,7 @@ def _relation_kind_case(kind: str, *, declared: bool = True) -> _RelationKindCas
         open_genre = library_models.Genre.objects.create(name="open")
         secret = library_models.Genre.objects.create(name="secret")
         for title, members in (("both", [open_genre, secret]), ("secret", [secret]), ("none", [])):
-            getattr(_book(title), relation).set(members)
+            call_method(read_attr(_book(title), relation), "set", members)
         child_model, child_fields = library_models.Genre, {"name": ["exact"]}
         hidden = [library_models.Genre.objects.filter(name__startswith="secret")]
         parent_model, terminal = library_models.Book, ("name", "secret")
@@ -14075,12 +14155,12 @@ def _relation_kind_case(kind: str, *, declared: bool = True) -> _RelationKindCas
                 library_models.TaggedItem.objects.create(
                     tag=tag,
                     content_type=content_type,
-                    object_id=branch.pk,
+                    object_id=saved_pk(branch),
                 )
             library_models.TaggedItem.objects.create(
                 tag="open",
                 content_type=other_type,
-                object_id=branch.pk,
+                object_id=saved_pk(branch),
             )
         child_model, child_fields = library_models.TaggedItem, {"tag": ["exact"]}
         hidden = [library_models.TaggedItem.objects.filter(tag__startswith="secret")]
@@ -14251,7 +14331,7 @@ def test_undeclared_globalid_relation_key_still_validates_against_the_target_typ
             fields = {"name": ["exact"]}
 
     GenreKeys.get_filters()
-    wrong = strawberry.relay.to_base64("ShelfNode", str(books["visible_x"].pk))
+    wrong = strawberry.relay.to_base64("ShelfNode", str(saved_pk(books["visible_x"])))
     with pytest.raises(GraphQLError, match="GlobalID type mismatch: filter expects BookNode"):
         _applied(GenreKeys, {"has_book_global": wrap(wrong)}, library_models.Genre.objects.all())
 
@@ -14329,7 +14409,7 @@ def test_relation_key_past_two_undeclared_hops_reads_both_targets(book: str, she
     GenreKeys.get_filters()
     expected = _absent_world(
         library_models.Genre,
-        {"books__shelf": target.pk},
+        {"books__shelf": saved_pk(target)},
         hidden=[
             library_models.Book.objects.filter(circulation_status="repair"),
             library_models.Shelf.objects.filter(topic="secret"),
@@ -14337,7 +14417,7 @@ def test_relation_key_past_two_undeclared_hops_reads_both_targets(book: str, she
     )
     got = _applied(
         GenreKeys,
-        {"books__shelf": {"exact": target.pk}},
+        {"books__shelf": {"exact": saved_pk(target)}},
         library_models.Genre.objects.all(),
     )
     assert got == expected
@@ -14631,7 +14711,7 @@ def test_pk_segment_on_a_model_keyed_by_a_relation_is_that_relation(patron: str)
             fields = {"postal_code": ["exact"]}
 
     ProfileKeys.get_filters()
-    pk = profiles[patron].pk
+    pk = saved_pk(profiles[patron])
     expected = _absent_world(
         library_models.PatronProfile,
         {"pk": pk},
@@ -14676,7 +14756,7 @@ def test_undeclared_hop_before_a_transform_reads_its_target_visibility(
 
     TicketPaths.get_filters()
     got = _applied(TicketPaths, {filter_name: value}, library_models.RepairTicket.objects.all())
-    assert got == ({ticket.pk} if venue == "open" else set())
+    assert got == ({saved_pk(ticket)} if venue == "open" else set())
 
 
 def _books_through_shelf_branches(
@@ -14760,7 +14840,7 @@ def test_multi_relation_branch_passes_only_through_visible_intermediate_rows(
         {"shelf__branch__name": "open"},
         hidden=[library_models.Shelf.objects.filter(topic="secret")],
     )
-    assert expected == {books["open"].pk}
+    assert expected == {saved_pk(books["open"])}
     assert _applied(parent, filter_input, library_models.Book.objects.all()) == expected
 
 
@@ -14783,7 +14863,7 @@ def test_apply_async_awaits_the_intermediate_model_get_queryset(
     qs = asyncio.run(
         parent.apply_async(filter_input, library_models.Book.objects.all(), _make_info()),
     )
-    assert set(qs.values_list("pk", flat=True)) == {books["open"].pk}
+    assert set(qs.values_list("pk", flat=True)) == {saved_pk(books["open"])}
     with pytest.raises(RuntimeError, match="use apply_async instead"):
         list(parent.apply(filter_input, library_models.Book.objects.all(), _make_info()))
 
@@ -14834,7 +14914,10 @@ def test_apply_async_awaits_the_undeclared_hop_get_queryset(
     open_shelf.alt_branches.add(alpha)
     secret.alt_branches.add(beta)
     if "alt_shelves" in filter_input:
-        filter_input = {**filter_input, "alt_shelves": {"exact": [open_shelf.pk, secret.pk]}}
+        filter_input = {
+            **filter_input,
+            "alt_shelves": {"exact": [saved_pk(open_shelf), saved_pk(secret)]},
+        }
 
     class BranchKeys(FilterSet):
         class Meta:
@@ -14919,10 +15002,10 @@ def test_undeclared_path_reentering_the_root_model_reads_the_bound_types_hook(
     filter_input = {
         "column": {"books__shelf__code": "x"},
         "column-in-or-arm": {"or_": [{"books__shelf__code": "x"}]},
-        "key-of-secret": {"books__shelf": {"exact": shelves["secret"].pk}},
-        "key-of-private": {"books__shelf": {"exact": shelves["private"].pk}},
+        "key-of-secret": {"books__shelf": {"exact": saved_pk(shelves["secret"])}},
+        "key-of-private": {"books__shelf": {"exact": saved_pk(shelves["private"])}},
     }[spelling]
-    expected: set[int] = set() if spelling == "key-of-private" else {shelves["secret"].pk}
+    expected: set[int] = set() if spelling == "key-of-private" else {saved_pk(shelves["secret"])}
     assert _applied(ShelfKeys, filter_input, library_models.Shelf.objects.all()) == expected
 
 
@@ -15110,7 +15193,7 @@ def test_consumer_qs_override_runs_inside_a_logical_arm() -> None:
         library_models.Shelf.objects.all(),
     )
 
-    assert kept == {good.pk}
+    assert kept == {saved_pk(good)}
 
 
 @pytest.mark.django_db
@@ -15131,11 +15214,11 @@ def test_two_hop_forward_leaves_treat_a_hidden_hop_as_no_related_row() -> None:
             )
         }
 
-    assert titles({"shelf_is": shelves["open"].pk}) == {"open"}
-    assert titles({"shelf_is": shelves["secret"].pk}) == set()
-    assert titles({"branch_is": open_branch.pk}) == {"open", "no_topic"}
-    assert titles({"branch_is": restricted.pk}) == set()
-    assert titles({"not_branch": open_branch.pk}) == {"on_secret", "on_restricted"}
+    assert titles({"shelf_is": saved_pk(shelves["open"])}) == {"open"}
+    assert titles({"shelf_is": saved_pk(shelves["secret"])}) == set()
+    assert titles({"branch_is": saved_pk(open_branch)}) == {"open", "no_topic"}
+    assert titles({"branch_is": saved_pk(restricted)}) == set()
+    assert titles({"not_branch": saved_pk(open_branch)}) == {"on_secret", "on_restricted"}
     assert titles({"branch_missing": True}) == {"on_secret", "on_restricted"}
     assert titles({"branch_missing": False}) == {"open", "no_topic"}
     assert titles({"name_missing": True}) == {"on_secret", "on_restricted"}
@@ -15154,7 +15237,7 @@ def test_forward_key_leaf_of_the_parent_keeps_its_own_filter_invocation() -> Non
     parent, shelves, _open, _restricted, _books = _shelf_branch_world()
     parent.base_filters["shelf_is"].distinct = True
     qs = parent.apply_sync(
-        {"shelf_is": shelves["open"].pk},
+        {"shelf_is": saved_pk(shelves["open"])},
         library_models.Book.objects.all(),
         _make_info(),
     )
@@ -15193,10 +15276,12 @@ def test_mti_target_rows_correlate_by_primary_key() -> None:
 
     TicketParent.get_filters()
     base = library_models.RepairTicket.objects.all()
-    assert _applied(TicketParent, {"desk": {"window_count": 0}}, base) == {tickets["desk"].pk}
+    assert _applied(TicketParent, {"desk": {"window_count": 0}}, base) == {
+        saved_pk(tickets["desk"]),
+    }
     assert _applied(TicketParent, {"no_desk": True}, base) == {
-        tickets["plain"].pk,
-        tickets["secret"].pk,
+        saved_pk(tickets["plain"]),
+        saved_pk(tickets["secret"]),
     }
 
 
@@ -15286,9 +15371,9 @@ def test_explicit_queryset_boundary_counts_as_absent_for_isnull_and_exclude() ->
 
     BookParent.get_filters()
     base = library_models.Book.objects.all()
-    assert _applied(BookParent, {"shelf__topic": "t"}, base) == {books["kept"].pk}
-    assert _applied(BookParent, {"no_shelf": True}, base) == {books["outside"].pk}
-    assert _applied(BookParent, {"not_topic": "t"}, base) == {books["outside"].pk}
+    assert _applied(BookParent, {"shelf__topic": "t"}, base) == {saved_pk(books["kept"])}
+    assert _applied(BookParent, {"no_shelf": True}, base) == {saved_pk(books["outside"])}
+    assert _applied(BookParent, {"not_topic": "t"}, base) == {saved_pk(books["outside"])}
 
 
 @pytest.mark.parametrize("declared", [True, False], ids=["declared", "undeclared"])
@@ -15458,7 +15543,7 @@ def test_projected_method_filter_stays_existential_whatever_its_exclude_flag() -
     _book("in_hidden").genres.set([hidden])
     _book("in_none")
     base = library_models.Book.objects.all()
-    assert _applied(parent, {"genres__named_by_method": "named"}, base) == {in_named.pk}
+    assert _applied(parent, {"genres__named_by_method": "named"}, base) == {saved_pk(in_named)}
     assert _applied(parent, {"genres__named_by_method": "secret"}, base) == set()
 
 
@@ -15561,8 +15646,8 @@ def test_expanded_leaf_under_an_mti_subclass_child_set_runs_where_its_path_resol
         base.values_list("pk", flat=True),
     )
     assert calls == []
-    assert _applied(parent, {"desk__window_count": 2}, base) == {tickets["desk"].pk}
-    assert _applied(parent, {"desk": {"window_count": 2}}, base) == {tickets["desk"].pk}
+    assert _applied(parent, {"desk__window_count": 2}, base) == {saved_pk(tickets["desk"])}
+    assert _applied(parent, {"desk": {"window_count": 2}}, base) == {saved_pk(tickets["desk"])}
     assert _applied(parent, {"desk__window_count": 0}, base) == set()
     assert _applied(parent, {"desk": {"window_count": 0}}, base) == set()
 
@@ -16290,14 +16375,14 @@ def test_null_valued_enum_member_is_a_value_not_is_null(name: str, lookup: str) 
     assert marker == EnumMemberValue("null")
     where = _status_where_lookup({name: marker})
     assert where.lookup_name == lookup
-    assert where.rhs == "null"
+    assert read_attr(where, "rhs") == "null"
 
 
 def test_raw_null_form_value_keeps_choice_filter_is_null() -> None:
     """A raw ``"null"`` in form data keeps ``ChoiceFilter``'s ``IS NULL`` branch."""
     where = _status_where_lookup({"status": "null"})
     assert where.lookup_name == "isnull"
-    assert where.rhs is True
+    assert read_attr(where, "rhs") is True
 
 
 @pytest.mark.parametrize(("name", "lookup"), [("status", "exact"), ("status__iexact", "iexact")])
@@ -16306,7 +16391,7 @@ def test_whitespace_bearing_enum_member_value_is_not_stripped(name: str, lookup:
     leaf = _StatusLookupFilter.get_filters()[name]
     where = _status_where_lookup({name: normalize_input_value(leaf, _StatusMember.PADDED)})
     assert where.lookup_name == lookup
-    assert where.rhs == " padded "
+    assert read_attr(where, "rhs") == " padded "
 
 
 @pytest.mark.parametrize("clone", [copy.deepcopy, pickle_roundtrip])
@@ -16324,4 +16409,4 @@ def test_enum_member_value_survives_copy_and_pickle(clone: Callable[[object], ob
     where = filtered.query.where.children
     assert len(where) == 1
     assert isinstance(where[0], Lookup)
-    assert where[0].rhs == ""
+    assert read_attr(where[0], "rhs") == ""

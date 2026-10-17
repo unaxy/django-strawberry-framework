@@ -22,6 +22,7 @@ import pytest
 from django.db import connection
 from django.db.utils import DatabaseError
 
+from django_strawberry_framework.utils._narrowing import pk_of
 from tests._relation_fixtures import (
     RpCompositeChild,
     RpCompositeParent,
@@ -41,7 +42,7 @@ def test_composite_pk_pair_round_trips() -> None:
         parent = RpCompositeParent.objects.create(tenant_id=1, code="X", label="P")
         # Django renders a CompositePrimaryKey instance's pk as a tuple in
         # declaration order.
-        assert parent.pk == (1, "X")
+        assert pk_of(parent) == (1, "X")
 
         RpCompositeChild.objects.create(parent=parent, name="k1")
         assert parent.children.get().name == "k1"

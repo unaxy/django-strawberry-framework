@@ -7,10 +7,10 @@ and ``first``/``last`` refusals live in
 ``examples/fakeshop/test_query/test_library_api.py``.
 """
 
+import dataclasses
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -46,7 +46,14 @@ from django_strawberry_framework.utils.connections import (
     validate_offset_pagination,
     window_range_plan,
 )
+from django_strawberry_framework.utils.input_values import UNSET
 from tests._info import make_info, unread_info
+
+# basedpyright: Strawberry hands a resolver UNSET for an omitted Int / String argument and types
+# UNSET Any, so it reaches parameters annotated ``int | None`` / ``str | None``; this is that value
+# under the annotation it arrives with, and the window helpers must treat it as absent
+_OMITTED: None = strawberry.UNSET  # pyright: ignore[reportAny]
+
 
 # ``max_results`` is always passed explicitly below, so ``from_arguments`` never
 # dereferences ``info`` (the ``info.schema.config.relay_max_results`` default is
@@ -255,7 +262,7 @@ def test_inverted_after_before_is_unwindowable_not_a_negative_limit_window() -> 
     [
         (None, None),
         ("", None),
-        (strawberry.UNSET, None),
+        (UNSET, None),
         (to_base64("arrayconnection", "0"), 0),
         (to_base64("arrayconnection", "17"), 17),
     ],
@@ -701,7 +708,7 @@ def test_validate_offset_pagination_accepts_what_the_engine_accepts() -> None:
     validate_offset_pagination(
         before="",
         after="",
-        first=strawberry.UNSET,
+        first=_OMITTED,
         last=None,
         cap=10,
         prefix=_PREFIX,
@@ -935,8 +942,15 @@ def test_assert_window_fetch_mode_for_allows_inert_off_shape_probe_with_count() 
         )
 
 
-def _rows(*row_numbers: int) -> list[SimpleNamespace]:
-    return [SimpleNamespace(rn=n) for n in row_numbers]
+@dataclasses.dataclass(frozen=True)
+class _WindowRow:
+    """A window row carrying only its ``rn`` row-number annotation."""
+
+    rn: int
+
+
+def _rows(*row_numbers: int) -> list[_WindowRow]:
+    return [_WindowRow(rn=n) for n in row_numbers]
 
 
 def test_split_window_rows_marker_offset_shape_drops_the_marker() -> None:
@@ -1196,16 +1210,12 @@ def test_fetch_mode_maps_to_the_count_probe_constant_false_triple(
 def test_has_connection_sidecar_input_ignores_strawberry_unset() -> None:
     """`has_connection_sidecar_input` returns False when inputs are `strawberry.UNSET`."""
     assert has_connection_sidecar_input(filter_input=None, order_by_input=None) is False
-    assert (
-        has_connection_sidecar_input(filter_input=strawberry.UNSET, order_by_input=None) is False
-    )
-    assert (
-        has_connection_sidecar_input(filter_input=None, order_by_input=strawberry.UNSET) is False
-    )
+    assert has_connection_sidecar_input(filter_input=UNSET, order_by_input=None) is False
+    assert has_connection_sidecar_input(filter_input=None, order_by_input=UNSET) is False
     assert (
         has_connection_sidecar_input(
-            filter_input=strawberry.UNSET,
-            order_by_input=strawberry.UNSET,
+            filter_input=UNSET,
+            order_by_input=UNSET,
         )
         is False
     )
@@ -1219,10 +1229,10 @@ def test_derive_connection_window_bounds_handles_strawberry_unset() -> None:
     """`derive_connection_window_bounds` correctly ignores `strawberry.UNSET` inputs."""
     bounds = derive_connection_window_bounds(
         None,
-        before=strawberry.UNSET,
-        after=strawberry.UNSET,
-        first=strawberry.UNSET,
-        last=strawberry.UNSET,
+        before=_OMITTED,
+        after=_OMITTED,
+        first=_OMITTED,
+        last=_OMITTED,
         max_results=_MAX,
         prefix=_PREFIX,
     )
@@ -1230,10 +1240,10 @@ def test_derive_connection_window_bounds_handles_strawberry_unset() -> None:
 
     bounds_first = derive_connection_window_bounds(
         None,
-        before=strawberry.UNSET,
-        after=strawberry.UNSET,
+        before=_OMITTED,
+        after=_OMITTED,
         first=5,
-        last=strawberry.UNSET,
+        last=_OMITTED,
         max_results=_MAX,
         prefix=_PREFIX,
     )
@@ -1241,9 +1251,9 @@ def test_derive_connection_window_bounds_handles_strawberry_unset() -> None:
 
     bounds_last = derive_connection_window_bounds(
         None,
-        before=strawberry.UNSET,
-        after=strawberry.UNSET,
-        first=strawberry.UNSET,
+        before=_OMITTED,
+        after=_OMITTED,
+        first=_OMITTED,
         last=5,
         max_results=_MAX,
         prefix=_PREFIX,
@@ -1255,20 +1265,20 @@ def test_derive_keyset_window_bounds_handles_strawberry_unset() -> None:
     """`derive_keyset_window_bounds` correctly ignores `strawberry.UNSET` inputs."""
     bounds = derive_keyset_window_bounds(
         None,
-        before=strawberry.UNSET,
-        after=strawberry.UNSET,
-        first=strawberry.UNSET,
-        last=strawberry.UNSET,
+        before=_OMITTED,
+        after=_OMITTED,
+        first=_OMITTED,
+        last=_OMITTED,
         max_results=_MAX,
     )
     assert bounds == ConnectionWindowBounds(offset=0, limit=_MAX, reverse=False)
 
     bounds_first = derive_keyset_window_bounds(
         None,
-        before=strawberry.UNSET,
-        after=strawberry.UNSET,
+        before=_OMITTED,
+        after=_OMITTED,
         first=7,
-        last=strawberry.UNSET,
+        last=_OMITTED,
         max_results=_MAX,
     )
     assert bounds_first == ConnectionWindowBounds(offset=0, limit=7, reverse=False)
@@ -1314,7 +1324,7 @@ def test_connection_sidecar_kwargs_handles_none_and_empty() -> None:
 
 def test_resolve_relay_max_results_handles_unset() -> None:
     """`resolve_relay_max_results` treats `strawberry.UNSET` as unspecified."""
-    cap = resolve_relay_max_results(None, strawberry.UNSET)
+    cap = resolve_relay_max_results(None, _OMITTED)
     assert cap == 100
 
     bounds = derive_connection_window_bounds(
@@ -1323,7 +1333,7 @@ def test_resolve_relay_max_results_handles_unset() -> None:
         after=None,
         first=5,
         last=None,
-        max_results=strawberry.UNSET,
+        max_results=_OMITTED,
         prefix=_PREFIX,
     )
     assert bounds == ConnectionWindowBounds(offset=0, limit=5, reverse=False)
@@ -1334,6 +1344,6 @@ def test_resolve_relay_max_results_handles_unset() -> None:
         after=None,
         first=5,
         last=None,
-        max_results=strawberry.UNSET,
+        max_results=_OMITTED,
     )
     assert keyset_bounds == ConnectionWindowBounds(offset=0, limit=5, reverse=False)

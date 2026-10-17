@@ -97,23 +97,40 @@ from django_strawberry_framework.connection import (
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, _helper_referenced_filtersets
 from django_strawberry_framework.optimizer.extension import apply_connection_optimization
-from django_strawberry_framework.optimizer.plans import WINDOW_ROW_NUMBER, _keyset_order_ref
+from django_strawberry_framework.optimizer.plans import (
+    WINDOW_ROW_NUMBER,
+    OptimizationPlan,
+    _keyset_order_ref,
+)
 from django_strawberry_framework.orders import OrderSet, _helper_referenced_ordersets
 from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.schema import DjangoSchema
 from django_strawberry_framework.types.relay import SyncMisuseError
+from django_strawberry_framework.utils._narrowing import (
+    is_abstract_set,
+    is_str,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_deferred_filter,
     set_queryset_hints,
 )
 from django_strawberry_framework.utils.connections import PaginationArgumentError
-from tests._idioms import declare_django_type
+from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import declare_django_type, json_at, json_list, json_object
 from tests._info import make_info
 
 _M = TypeVar("_M", bound=models.Model)
 
-_ResponseNode: TypeAlias = JSONObject
+
+def _edge_names(connection: object) -> list[str]:
+    """The ``node.name`` of every edge in a connection payload, each asserted to be a string."""
+    return [
+        require(json_at(edge, "node", "name"), is_str) for edge in json_list(connection, "edges")
+    ]
 
 
 class _DefinitionReads(TypedDict):
@@ -216,9 +233,12 @@ def test_first_and_last_guard_on_generated_subclass() -> None:
 def test_first_and_last_guard_with_unset() -> None:
     """``_guard_first_and_last`` ignores ``strawberry.UNSET`` correctly."""
     # Omitted args arriving as UNSET do not trigger the mutual exclusivity error
-    _guard_first_and_last(strawberry.UNSET, strawberry.UNSET)
-    _guard_first_and_last(5, strawberry.UNSET)
-    _guard_first_and_last(strawberry.UNSET, 5)
+    # basedpyright: the guard is annotated ``int | None``, but Strawberry hands an omitted
+    # argument over as UNSET, the input this row pins
+    omitted: int | None = UNSET  # pyright: ignore[reportAssignmentType]
+    _guard_first_and_last(omitted, omitted)
+    _guard_first_and_last(5, omitted)
+    _guard_first_and_last(omitted, 5)
 
     with pytest.raises(GraphQLError, match="mutually exclusive"):
         _guard_first_and_last(5, 5)
@@ -715,7 +735,7 @@ def test_consumer_resolver_manager_coerced() -> None:
     result = schema.execute_sync("{ items { edges { node { id } } } }")
     assert result.errors is None
     assert result.data is not None
-    assert len(result.data["items"]["edges"]) == Category.objects.count()
+    assert len(json_list(result.data, "items", "edges")) == Category.objects.count()
 
 
 @pytest.mark.django_db
@@ -740,7 +760,7 @@ def test_consumer_resolver_queryset_full_pipeline() -> None:
     )
     assert result.errors is None
     assert result.data is not None
-    names = [edge["node"]["name"] for edge in result.data["items"]["edges"]]
+    names = _edge_names(json_at(result.data, "items"))
     assert names == sorted(names)
 
 
@@ -757,7 +777,7 @@ def test_consumer_resolver_iterable_without_sidecar_input_paginates() -> None:
     result = schema.execute_sync("{ items(first: 1) { edges { node { id } } } }")
     assert result.errors is None
     assert result.data is not None
-    assert len(result.data["items"]["edges"]) == 1
+    assert len(json_list(result.data, "items", "edges")) == 1
 
 
 @pytest.mark.django_db
@@ -830,7 +850,7 @@ def test_consumer_resolver_countless_iterable_paginates_without_total_count(
     result = schema.execute_sync("{ items(first: 1) { edges { node { id } } } }")
     assert result.errors is None
     assert result.data is not None
-    assert len(result.data["items"]["edges"]) == 1
+    assert len(json_list(result.data, "items", "edges")) == 1
 
 
 @pytest.mark.django_db
@@ -860,7 +880,7 @@ def test_consumer_resolver_generator_paginates_without_total_count() -> None:
     )
     assert result.errors is None
     assert result.data is not None
-    assert len(result.data["items"]["edges"]) == 1
+    assert len(json_list(result.data, "items", "edges")) == 1
     assert result.data["items"]["pageInfo"] is not None
 
 
@@ -929,7 +949,7 @@ async def test_async_consumer_resolver_set_source_paginates_without_total_count(
     result = await schema.execute("{ items(first: 1) { edges { node { id } } } }")
     assert result.errors is None
     assert result.data is not None
-    assert len(result.data["items"]["edges"]) == 1
+    assert len(json_list(result.data, "items", "edges")) == 1
 
 
 async def test_attach_count_async_awaits_before_guard_raises() -> None:
@@ -1161,7 +1181,7 @@ def test_connection_resolver_composition_order() -> None:
     assert result.errors is None
     assert calls == ["visibility", "filter", "order"]
     assert result.data is not None
-    assert len(result.data["items"]["edges"]) == 1
+    assert len(json_list(result.data, "items", "edges")) == 1
     # totalCount counts the full post-filter pre-slice set, not the sliced page.
     assert result.data["items"]["totalCount"] == total
 
@@ -1194,7 +1214,7 @@ def test_relay_max_results_cap() -> None:
     at_cap = schema.execute_sync("{ items(first: 2) { edges { node { id } } } }")
     assert at_cap.errors is None
     assert at_cap.data is not None
-    assert len(at_cap.data["items"]["edges"]) == 2
+    assert len(json_list(at_cap.data, "items", "edges")) == 2
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1212,7 +1232,7 @@ async def test_connection_resolver_async_dispatch() -> None:
     result = await schema.execute("{ items(first: 1) { edges { node { id } } totalCount } }")
     assert result.errors is None
     assert result.data is not None
-    assert len(result.data["items"]["edges"]) == 1
+    assert len(json_list(result.data, "items", "edges")) == 1
     assert result.data["items"]["totalCount"] == expected
 
 
@@ -1257,7 +1277,7 @@ async def test_connection_async_generator_resolver_executes_on_async_path() -> N
     result = await schema.execute("{ items(first: 1) { edges { node { id } } } }")
     assert result.errors is None, result.errors
     assert result.data is not None
-    assert len(result.data["items"]["edges"]) == 1
+    assert len(json_list(result.data, "items", "edges")) == 1
 
 
 @pytest.mark.django_db
@@ -1518,8 +1538,8 @@ def test_root_connection_field_queryset_is_planned() -> None:
     # The cooperation point ran: the field's helper published a plan to context.
     # (The middleware never sees the pre-slice queryset behind ConnectionExtension,
     # so this plan can only have come from the field's own helper.)
-    plan = getattr(ctx, "dst_optimizer_plan", None)
-    assert plan is not None
+    plan = read_attr(ctx, "dst_optimizer_plan", None)
+    assert isinstance(plan, OptimizationPlan)
     assert plan.select_related == ("category",)
     assert plan.prefetch_related == ()
     assert plan.only_fields == (
@@ -1529,7 +1549,10 @@ def test_root_connection_field_queryset_is_planned() -> None:
         "category__id",
         "category__name",
     )
-    assert "PlanItemNode.category@items.edges.node.category" in ctx.dst_optimizer_planned
+    assert "PlanItemNode.category@items.edges.node.category" in require(
+        read_attr(ctx, "dst_optimizer_planned"),
+        is_abstract_set,
+    )
 
 
 @pytest.mark.django_db
@@ -1557,12 +1580,15 @@ def test_root_connection_field_queryset_prefetches_node_many_relation() -> None:
     )
 
     assert result.errors is None
-    plan = getattr(ctx, "dst_optimizer_plan", None)
-    assert plan is not None
+    plan = read_attr(ctx, "dst_optimizer_plan", None)
+    assert isinstance(plan, OptimizationPlan)
     assert plan.select_related == ()
-    assert [getattr(entry, "prefetch_to", entry) for entry in plan.prefetch_related] == ["items"]
+    assert [read_attr(entry, "prefetch_to", entry) for entry in plan.prefetch_related] == ["items"]
     assert plan.only_fields == ("id", "name")
-    assert "PlanPrefetchCatNode.items@items.edges.node.items" in ctx.dst_optimizer_planned
+    assert "PlanPrefetchCatNode.items@items.edges.node.items" in require(
+        read_attr(ctx, "dst_optimizer_planned"),
+        is_abstract_set,
+    )
 
 
 @pytest.mark.django_db
@@ -2014,7 +2040,7 @@ def test_connection_healthy_apply_sync_override_still_orders(
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    names = [edge["node"]["name"] for edge in result.data["items"]["edges"]]
+    names = _edge_names(json_at(result.data, "items"))
     assert names == sorted(names)
     assert len(names) == Category.objects.count()
 
@@ -2208,12 +2234,12 @@ def _walk_pages(
     walk: list[tuple[str, tuple[str, str]]] = []
     cursor: str | None = None
     for _ in range(_CONSUMER_WALK_PAGES):
-        items = cast("JSONObject", execute(_page_query(argument, cursor))["items"])
+        items = json_object(execute(_page_query(argument, cursor)), "items")
         walk.extend(
-            (str(cast("JSONObject", edge["node"])["id"]), from_base64(str(edge["cursor"])))
-            for edge in cast("list[JSONObject]", items["edges"])
+            (str(json_at(edge, "node", "id")), from_base64(str(json_at(edge, "cursor"))))
+            for edge in json_list(items, "edges")
         )
-        page_info = cast("JSONObject", items["pageInfo"])
+        page_info = json_object(items, "pageInfo")
         cursor = str(page_info["endCursor" if argument == "after" else "startCursor"])
     return walk
 
@@ -2284,15 +2310,14 @@ async def test_async_consumer_edge_prefix_pages_and_refuses_a_stock_cursor() -> 
     first = await schema.execute(_page_query("after", None))
     assert first.errors is None, first.errors
     assert first.data is not None
-    items = cast("JSONObject", first.data["items"])
-    end_cursor = str(cast("JSONObject", items["pageInfo"])["endCursor"])
+    end_cursor = str(json_at(first.data, "items", "pageInfo", "endCursor"))
     assert from_base64(end_cursor) == (_CONSUMER_CURSOR_PREFIX, "1")
 
     second = await schema.execute(_page_query("after", end_cursor))
     assert second.errors is None, second.errors
     assert second.data is not None
-    edges = cast("list[JSONObject]", cast("JSONObject", second.data["items"])["edges"])
-    assert [from_base64(str(edge["cursor"])) for edge in edges] == [
+    edges = json_list(second.data, "items", "edges")
+    assert [from_base64(str(json_at(edge, "cursor"))) for edge in edges] == [
         (_CONSUMER_CURSOR_PREFIX, "2"),
         (_CONSUMER_CURSOR_PREFIX, "3"),
     ]
@@ -2411,20 +2436,20 @@ def test_connection_over_cascading_type_narrows_edges_and_total_count() -> None:
     )
     assert result.errors is None
     assert result.data is not None
-    conn = result.data["items"]
+    conn = json_object(result.data, "items")
     # edges: only the two items under the visible category; the hidden-target item
     # is dropped by the cascade.
-    edge_names = [edge["node"]["name"] for edge in conn["edges"]]
+    edge_names = _edge_names(conn)
     assert edge_names == [visible_a.name, visible_b.name]
     # totalCount counts the post-visibility set (2), NOT the raw 3 rows.
     assert conn["totalCount"] == 2
     # Cursors are consistent: present, distinct, one per edge.
-    cursors = [edge["cursor"] for edge in conn["edges"]]
+    cursors = [json_at(edge, "cursor") for edge in json_list(conn, "edges")]
     assert all(cursors)
     assert len(set(cursors)) == len(cursors)
     # No further pages over the narrowed set.
-    assert conn["pageInfo"]["hasNextPage"] is False
-    assert conn["pageInfo"]["hasPreviousPage"] is False
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
+    assert json_at(conn, "pageInfo", "hasPreviousPage") is False
 
 
 @pytest.mark.django_db
@@ -2533,8 +2558,8 @@ def test_connection_hostile_hook_narrows_edges_and_total_count_sync() -> None:
     )
     assert result.errors is None
     assert result.data is not None
-    conn = result.data["items"]
-    assert [edge["node"]["name"] for edge in conn["edges"]] == public_names
+    conn = json_object(result.data, "items")
+    assert _edge_names(conn) == public_names
     assert conn["totalCount"] == len(public_names)  # only the visible rows, not the raw 3
 
 
@@ -2553,8 +2578,8 @@ async def test_connection_hostile_hook_narrows_edges_and_total_count_async() -> 
     result = await schema.execute("{ items { edges { node { name } } totalCount } }")
     assert result.errors is None
     assert result.data is not None
-    conn = result.data["items"]
-    assert [edge["node"]["name"] for edge in conn["edges"]] == public_names
+    conn = json_object(result.data, "items")
+    assert _edge_names(conn) == public_names
     assert conn["totalCount"] == len(public_names)
 
 
@@ -2591,7 +2616,7 @@ def test_connection_instance_shadowed_all_hook_is_sealed() -> None:
     )
     assert result.errors is None
     assert result.data is not None
-    assert [edge["node"]["name"] for edge in result.data["items"]["edges"]] == public_names
+    assert _edge_names(json_at(result.data, "items")) == public_names
 
 
 @pytest.mark.django_db
@@ -2855,7 +2880,7 @@ def _counting_node_type(
                 reads["names"].append(attr)
                 if decoy_slot["decoy"] is not None:
                     return decoy_slot["decoy"]
-            return super().__getattribute__(attr)
+            return object_result(super().__getattribute__, attr)
 
     meta_attrs = {
         "model": model,
@@ -2941,7 +2966,7 @@ def test_a_root_connection_reads_the_target_definition_once_on_a_cold_cache() ->
     assert result.errors is None, result.errors
     assert reads["names"] == ["__django_strawberry_definition__"]
     assert result.data is not None
-    returned = {edge["node"]["name"] for edge in result.data["rows"]["edges"]}
+    returned = set(_edge_names(json_at(result.data, "rows")))
     assert returned
     assert returned <= set(Category.objects.values_list("name", flat=True))
 
@@ -3045,9 +3070,9 @@ def test_a_synthesized_relation_connection_is_built_from_the_registrys_definitio
     assert reads["names"] == []
     assert result.data is not None
     nested = {
-        edge["node"]["name"]
-        for parent in result.data["parents"]["edges"]
-        for edge in parent["node"]["itemsConnection"]["edges"]
+        name
+        for parent in json_list(result.data, "parents", "edges")
+        for name in _edge_names(json_at(parent, "node", "itemsConnection"))
     }
     assert nested
     assert nested <= set(Item.objects.values_list("name", flat=True))
@@ -3268,17 +3293,17 @@ def _planned_relation_request(
     assert result.data is not None
     rows = {
         name
-        for parent in result.data["parents"]["edges"]
-        for name in _relation_page(parent["node"], vocabulary)
+        for parent in json_list(result.data, "parents", "edges")
+        for name in _relation_page(json_at(parent, "node"), vocabulary)
     }
     return rows, (info.hits, info.misses, info.size)
 
 
-def _relation_page(node: _ResponseNode, vocabulary: str) -> list[str]:
+def _relation_page(node: object, vocabulary: str) -> list[str]:
     """Read the child names out of whichever relation vocabulary the document selected."""
     if vocabulary == "List":
-        return [row["name"] for row in node["items"]]
-    return [edge["node"]["name"] for edge in node["itemsConnection"]["edges"]]
+        return [require(json_at(row, "name"), is_str) for row in json_list(node, "items")]
+    return _edge_names(json_at(node, "itemsConnection"))
 
 
 @pytest.mark.django_db
@@ -3474,7 +3499,7 @@ def test_connection_healthy_filter_apply_sync_override_still_filters(
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    assert [edge["node"]["name"] for edge in result.data["items"]["edges"]] == ["zz-needle"]
+    assert _edge_names(json_at(result.data, "items")) == ["zz-needle"]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -3585,7 +3610,7 @@ def test_connection_visibility_serves_a_combinator_hook_with_and_without_a_sidec
         result = schema.execute_sync(query, context_value=HttpRequest())
         assert result.errors is None, (query, result.errors)
         assert result.data is not None
-        names = [edge["node"]["name"] for edge in result.data["items"]["edges"]]
+        names = _edge_names(json_at(result.data, "items"))
         assert sorted(names) == expected, query
     assert names == expected[::-1]
 
@@ -3629,5 +3654,5 @@ def test_connection_serves_a_combined_sidecar_result_as_its_primary_key_set(
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    names = [edge["node"]["name"] for edge in result.data["items"]["edges"]]
+    names = _edge_names(json_at(result.data, "items"))
     assert names == _a_or_b_category_names()

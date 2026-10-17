@@ -27,6 +27,7 @@ from strawberry.types.base import StrawberryList
 from typing_extensions import Self, override
 
 import django_strawberry_framework.utils.typing as typing_module
+from django_strawberry_framework.utils._narrowing import class_dict, require
 from django_strawberry_framework.utils.typing import (
     MAX_TYPE_WRAPPER_DEPTH,
     _callable_inspection_target,
@@ -267,9 +268,9 @@ class _MethodHolder:
 # The RAW descriptor objects (as seen when a ``@staticmethod async def`` resolver
 # is referenced by name INSIDE its own class body, e.g. ``resolver=async_static``);
 # attribute access via the class would unwrap these to the underlying function.
-_async_static_obj = _MethodHolder.__dict__["async_static"]
-_sync_static_obj = _MethodHolder.__dict__["sync_static"]
-_async_cls_obj = _MethodHolder.__dict__["async_cls"]
+_async_static_obj = require(class_dict(_MethodHolder)["async_static"], callable)
+_sync_static_obj = class_dict(_MethodHolder)["sync_static"]
+_async_cls_obj = class_dict(_MethodHolder)["async_cls"]
 _async_static_partial_obj = staticmethod(functools.partial(_AsyncCallable()))
 
 

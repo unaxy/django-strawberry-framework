@@ -30,6 +30,7 @@ from django_strawberry_framework.rest_framework import serializer_converter
 from django_strawberry_framework.utils import converters as utils_converters
 from django_strawberry_framework.utils import inputs as utils_inputs
 from django_strawberry_framework.utils import strings as utils_strings
+from tests._idioms import module_binding
 
 # (consumer module, symbol, module that owns the single definition)
 SHARED_BINDINGS = (
@@ -67,12 +68,18 @@ def _row_id(row: tuple[ModuleType, str, ModuleType]) -> str:
     return f"{module.__name__.rsplit('.', 1)[-1]}.{symbol}"
 
 
-def _bound(module: ModuleType, symbol: str) -> FunctionType:
+def _bound(module: ModuleType, symbol: str) -> object:
     """Return `module`'s binding for `symbol`, failing (never erroring) when absent."""
-    namespace = vars(module)
-    if symbol not in namespace:
+    if symbol not in vars(module):
         pytest.fail(f"{module.__name__} binds no {symbol!r}; the shared symbol was dropped.")
-    return namespace[symbol]
+    return module_binding(module, symbol)
+
+
+def _bound_function(module: ModuleType, symbol: str) -> FunctionType:
+    """Return `module`'s binding for `symbol`, failing when it is absent or not a function."""
+    bound = _bound(module, symbol)
+    assert isinstance(bound, FunctionType), f"{module.__name__}.{symbol} is not a function"
+    return bound
 
 
 @pytest.mark.parametrize(
@@ -103,7 +110,7 @@ def test_serializer_flavor_closures_share_one_body(
     twin: ModuleType,
 ) -> None:
     """Factory-produced closures differ as objects, so the BODY is what must be one."""
-    assert _bound(consumer, symbol).__code__ is _bound(twin, symbol).__code__, (
+    assert _bound_function(consumer, symbol).__code__ is _bound_function(twin, symbol).__code__, (
         f"{consumer.__name__}.{symbol} no longer shares a body with "
         f"{twin.__name__}.{symbol}; build both from the one factory."
     )

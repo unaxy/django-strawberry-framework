@@ -7,10 +7,10 @@ A split suite run on a tree other sessions are editing can drop modules from eve
 Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit and the CI lint job) refuses a
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any count off `[tool.type-suppressions]`: the ignore
-comments per unlocked rule and the `typing.cast` calls (441) may only fall, and the budget falls with them. A rule
+comments per unlocked rule and the `typing.cast` calls (433) may only fall, and the budget falls with them. A rule
 whose last ignore is cleared leaves the budget and gains the marker.
 
-Progress: 25 done, 9 to do. Ignore comments: 913 lines (1897 at the start of 0.0.15's ignore sweep).
+Progress: 25 done, 9 to do. Ignore comments: 1000 lines (1897 at the start of 0.0.15's ignore sweep).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -131,8 +131,16 @@ of them.
   63 `@strawberry.field(graphql_type=...)` decorators and 6 resolver-less `strawberry.field(...)` attributes
   (Strawberry's no-resolver overload returns `Any`), the dormant `apps/products/fields.py`'s 4 `AdvancedFieldSet`
   bases and 4 `root.pk` reads, `graphql_client.py`'s read of `Response.response` (item 32), `seed_shards`' read
-  of `settings.DATABASES` (django-stubs types every setting `Any`) and typeshed's `inspect.Parameter.default`. Still
-  off for tests (2977) and the example project's test folders
+  of `settings.DATABASES` (django-stubs types every setting `Any`) and typeshed's `inspect.Parameter.default`. On
+  for tests/ too (2852 sites to 101 suppressions): a saved row's `pk` is `tests/_idioms.py::saved_pk` (`pk_of`
+  narrowed to `int`, failing on an unsaved row); JSON and `result.data` walks go through `json_loads` / `json_at` /
+  `json_object` / `json_list` there (or a file's private copy); `typing.get_args` is `type_args`; a hostile double's
+  `super().__getattribute__` returns through `object_result`; an `Info` whose `context` is read is `Info[object,
+  object]`. The 101: 91 `@strawberry.field` / `@strawberry.mutation(graphql_type=...)` decorators and resolver-less
+  `strawberry.field(...)` attributes, `strawberry.UNSET` as an input default or omitted argument under its
+  declared annotation (7 `@strawberry.input` defaults and two module `_OMITTED` bindings), and the
+  `TestClient` probe through the package root's PEP 562 `__getattr__`. Still off for the example project's test
+  folders (about 3380 sites, most of them JSON payload reads and item 32's `Response.response`)
 - [ ] 8. `reportUnannotatedClassAttribute`: 8365 (package 0, tests 6684, examples 1681, scripts 0, root 0); on for
   scripts/, the package and the root files (their execution environments in `pyproject.toml`)
 
@@ -164,10 +172,10 @@ Survey verdicts recorded so nothing is re-tried blind:
   with their real reasons (typeshed deprecates `asyncio.iscoroutinefunction` from 3.11; asgiref picks its check by
   `hasattr`)
 
-- Item 34, kept budgeted (each at its floor): `reportMissingSuperCall` 2 (the `TYPE_CHECKING` router and consumer
-  declarations; a forwarding `super().__init__` body trades it for four ruff `ARG002` or six `reportArgumentType`);
+- Item 34, kept budgeted (each at its floor): `reportMissingSuperCall` 3 (the `TYPE_CHECKING` router and consumer
+  declarations, and a test form whose `__init__` forwards through `call_forwarded`; a forwarding `super().__init__` body trades it for four ruff `ARG002` or six `reportArgumentType`);
   `reportPropertyTypeMismatch` 5 (setters that take a lazy target or the stop-aware schema wrapper and getters
-  that return the resolved value, the django-filter idiom); `reportFunctionMemberAccess` 5 (the `__test__` pytest
+  that return the resolved value, the django-filter idiom); `reportFunctionMemberAccess` 4 (the `__test__` pytest
   guard spec-043 Decision 7 fixes, and the django-filter `Filter.method` stub); `reportGeneralTypeIssues` 5
   (resolver-only Strawberry fields typed from run-time annotations, a class annotation would win over them; the
   hostile `__dict__`, the refused sync iteration, the string `_meta.model`); `reportInvalidTypeArguments` 5 (`FilterInput[...]` / `OrderInput[...]`
@@ -210,7 +218,7 @@ strawberry_django does?
 
 ## Ignore breakdown
 
-Lines carrying `# pyright: ignore[...]`: 913 (990 rule hits): tests 626, package 142, examples 144,
+Lines carrying `# pyright: ignore[...]`: 1000 (1077 rule hits): tests 713, package 142, examples 144,
 scripts 1. The tables below were measured at 881 lines.
 
 ### By cause

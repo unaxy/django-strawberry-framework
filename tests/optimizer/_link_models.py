@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, TypeAlias, TypeVar
 from django.db import models
 from django.db.backends.base.base import BaseDatabaseWrapper
 
+from tests._idioms import saved_pk
+
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
 
@@ -237,7 +239,7 @@ def link_fixture_tables(connection: BaseDatabaseWrapper) -> Generator[None, None
         for parent, names in zip(parents, (("a1", "a2", "a3"), ("b1",), ()), strict=True):
             for name in names:
                 LnkPairChild.objects.create(p_tenant=parent.tenant, p_code=parent.code, name=name)
-                LnkColumnChild.objects.create(p_id=parent.pk, name=name)
+                LnkColumnChild.objects.create(p_id=saved_pk(parent), name=name)
                 LnkSlugChild.objects.create(parent=parent, name=name)
                 LnkSlugObjectChild.objects.create(p_slug=parent.slug, name=name)
         tags = {

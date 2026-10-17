@@ -29,7 +29,7 @@ import contextlib
 import inspect
 import itertools
 from collections.abc import Callable, Generator, Iterator
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar
 from unittest import mock
 from unittest.mock import MagicMock, patch
@@ -47,7 +47,6 @@ from django.db import IntegrityError, connection, transaction
 from django.db.models import Model, QuerySet
 from django.db.models.signals import m2m_changed, pre_save
 from django.utils import timezone
-from graphql_client import JSONObject
 from strawberry import relay
 from strawberry.types import ExecutionResult
 from strawberry.types.base import has_object_definition
@@ -73,13 +72,17 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework.resolvers import resolve_serializer_sync
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils._narrowing import read_attr, require_instance
 from django_strawberry_framework.utils.errors import validation_error_to_field_errors
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import SyncMisuseError
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.write_transaction import (
     managed_write_transaction,
     open_write_pipeline,
     require_write_pipeline,
 )
+from tests._idioms import is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
 from tests.optimizer import _link_models
 
@@ -210,11 +213,38 @@ def _build_item_schema(
     return _schema(Mutation), (CategoryT, ItemT)
 
 
+def _json_at(value: object, *path: str | int) -> object:
+    """``value`` followed down ``path``: a ``str`` key into an object, an ``int`` index into a list."""
+    found = value
+    for key in path:
+        if isinstance(key, str):
+            assert is_object_dict(found), found
+            found = found[key]
+        else:
+            assert is_object_list(found), found
+            found = found[key]
+    return found
+
+
+def _json_object(value: object, *path: str | int) -> dict[object, object]:
+    """The JSON object at ``path`` under ``value`` (see ``_json_at``)."""
+    found = _json_at(value, *path)
+    assert is_object_dict(found), found
+    return found
+
+
+def _json_list(value: object, *path: str | int) -> list[object]:
+    """The JSON list at ``path`` under ``value`` (see ``_json_at``)."""
+    found = _json_at(value, *path)
+    assert is_object_list(found), found
+    return found
+
+
 def assert_mutation_field_error(
     result: ExecutionResult,
     payload_key: str,
     field: str,
-) -> JSONObject:
+) -> dict[object, object]:
     """Assert the common in-band mutation error envelope.
 
     Pins the shape every in-band failure test shares: no top-level GraphQL errors
@@ -224,9 +254,10 @@ def assert_mutation_field_error(
     """
     assert result.errors is None, result.errors
     assert result.data is not None
-    payload = result.data[payload_key]
+    payload = _json_object(result.data, payload_key)
     assert payload["node"] is None
-    assert [e["field"] for e in payload["errors"]] == [field], payload["errors"]
+    errors = _json_list(payload, "errors")
+    assert [_json_at(error, "field") for error in errors] == [field], errors
     return payload
 
 
@@ -320,9 +351,12 @@ def test_update_custom_node_id_resolves_payload_to_real_pk_not_wrong_row() -> No
     """
     schema, CategoryNode = _build_category_node_schema()
     decoy = product_models.Category.objects.create(name="decoy", description="decoy-untouched")
-    target = product_models.Category.objects.create(name=str(decoy.pk), description="before")
-    assert target.pk != decoy.pk
-    assert target.name == str(decoy.pk)
+    target = product_models.Category.objects.create(
+        name=str(saved_pk(decoy)),
+        description="before",
+    )
+    assert saved_pk(target) != saved_pk(decoy)
+    assert target.name == str(saved_pk(decoy))
 
     gid = global_id_for(CategoryNode, target.name)
     res = schema.execute_sync(
@@ -331,7 +365,7 @@ def test_update_custom_node_id_resolves_payload_to_real_pk_not_wrong_row() -> No
     )
     assert res.errors is None, res.errors
     assert res.data is not None
-    node = res.data["updateCategory"]["node"]
+    node = _json_object(res.data, "updateCategory", "node")
     assert node["description"] == "after"
     # The returned id is rebuilt from the (unchanged) ``name``, so it round-trips to
     # the same GlobalID - the node returned is the target, not the pk-coincident decoy.
@@ -366,7 +400,7 @@ def test_custom_node_id_real_pk_lookup_uses_pinned_alias(monkeypatch: pytest.Mon
     node_id, error = resolvers.coerce_lookup_id(gid, CategoryNode, using="default")
 
     assert error is None
-    assert node_id == target.pk
+    assert node_id == saved_pk(target)
     using.assert_called_once_with("default")
 
 
@@ -380,9 +414,12 @@ def test_delete_custom_node_id_resolves_payload_to_real_pk_not_wrong_row() -> No
     """
     schema, CategoryNode = _build_category_node_schema()
     decoy = product_models.Category.objects.create(name="decoy-del", description="x")
-    target = product_models.Category.objects.create(name=str(decoy.pk), description="doomed")
-    assert target.pk != decoy.pk
-    assert target.name == str(decoy.pk)
+    target = product_models.Category.objects.create(
+        name=str(saved_pk(decoy)),
+        description="doomed",
+    )
+    assert saved_pk(target) != saved_pk(decoy)
+    assert target.name == str(saved_pk(decoy))
 
     gid = global_id_for(CategoryNode, target.name)
     res = schema.execute_sync(_CATEGORY_DELETE, variable_values={"id": gid})
@@ -391,8 +428,8 @@ def test_delete_custom_node_id_resolves_payload_to_real_pk_not_wrong_row() -> No
     assert res.data is not None
     assert res.data["deleteCategory"]["node"]["id"] == gid
     # The NAME-matched target is gone; the row whose pk string equals that name survives.
-    assert not product_models.Category.objects.filter(pk=target.pk).exists()
-    assert product_models.Category.objects.filter(pk=decoy.pk).exists()
+    assert not product_models.Category.objects.filter(pk=saved_pk(target)).exists()
+    assert product_models.Category.objects.filter(pk=saved_pk(decoy)).exists()
 
 
 def test_unprovided_exclude_keeps_constrained_co_member_drops_unrelated() -> None:
@@ -456,17 +493,17 @@ def test_integrity_error_race_fallback_via_mocked_save() -> None:
         res = schema.execute_sync(
             _CREATE,
             variable_values={
-                "d": {"name": "Racer", "categoryId": global_id_for(CategoryT, cat.pk)},
+                "d": {"name": "Racer", "categoryId": global_id_for(CategoryT, saved_pk(cat))},
             },
         )
     assert res.errors is None, res.errors
     assert res.data is not None
-    payload = res.data["createItem"]
+    payload = _json_object(res.data, "createItem")
     assert payload["node"] is None
-    assert payload["errors"][0]["field"] == NON_FIELD_ERROR_KEY
+    assert _json_at(payload, "errors", 0, "field") == NON_FIELD_ERROR_KEY
     # The catch is broad (``except IntegrityError``), so the message is the honest
     # superset, not an over-claimed "uniqueness".
-    assert payload["errors"][0]["messages"] == ["A database constraint was violated."]
+    assert _json_at(payload, "errors", 0, "messages") == ["A database constraint was violated."]
 
 
 @pytest.mark.django_db
@@ -505,7 +542,7 @@ def test_globalid_relation_override_flows_through_visibility_contract() -> None:
     res = schema.execute_sync(
         _CREATE,
         variable_values={
-            "d": {"name": "New", "categoryId": global_id_for(CategoryT, hidden.pk)},
+            "d": {"name": "New", "categoryId": global_id_for(CategoryT, saved_pk(hidden))},
         },
     )
     assert_mutation_field_error(res, "createItem", "categoryId")
@@ -565,8 +602,8 @@ def test_sync_misuse_async_get_queryset_from_sync_path() -> None:
         resolvers.resolve_mutation_sync(
             UpdateItem,
             info=make_info(),
-            data=strawberry.UNSET,
-            id=str(global_id_for(ItemT, item.pk)),
+            data=UNSET,
+            id=str(global_id_for(ItemT, saved_pk(item))),
         )
 
 
@@ -636,13 +673,13 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
         def get_queryset(
             cls,
             queryset: QuerySet[product_models.Category],
-            info: strawberry.Info,
+            info: strawberry.Info[object, object],
             **kwargs: object,
         ) -> QuerySet[product_models.Category]:
             # Narrow the category by a request-user-derived predicate so a leaked
             # row's category (created under a DIFFERENT name) would NOT match,
             # reproducing the read-side ``RelatedObjectDoesNotExist`` FV-1 hit.
-            user_name = getattr(getattr(info.context, "user", None), "name", None)
+            user_name = read_attr(read_attr(info.context, "user", None), "name", None)
             if user_name is not None:
                 queryset = queryset.filter(name=user_name)
             return queryset
@@ -696,7 +733,7 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
     res = await schema.execute(
         create,
         variable_values={
-            "d": {"name": "LeakProbe", "categoryId": global_id_for(CategoryT, cat.pk)},
+            "d": {"name": "LeakProbe", "categoryId": global_id_for(CategoryT, saved_pk(cat))},
         },
     )
     assert res.errors is None, res.errors
@@ -719,7 +756,9 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
     assert read.errors is None, read.errors
     # Exactly the one row this test wrote - no phantom leaked rows.
     assert read.data is not None
-    names = sorted(row["name"] for row in read.data["allItems"])
+    names = sorted(
+        require_instance(_json_at(row, "name"), str) for row in _json_list(read.data, "allItems")
+    )
     assert names == ["LeakProbe"], names
     # The relation round-trips through the optimizer plan (the FV-1 failure mode
     # is a None relation -> RelatedObjectDoesNotExist; here it resolves).
@@ -813,8 +852,11 @@ def test_m2m_hidden_related_id_is_field_error() -> None:
         variable_values={
             "d": {
                 "title": "Dune",
-                "shelfId": global_id_for(ShelfT, shelf.pk),
-                "genres": [global_id_for(GenreT, visible.pk), global_id_for(GenreT, hidden.pk)],
+                "shelfId": global_id_for(ShelfT, saved_pk(shelf)),
+                "genres": [
+                    global_id_for(GenreT, saved_pk(visible)),
+                    global_id_for(GenreT, saved_pk(hidden)),
+                ],
             },
         },
     )
@@ -934,8 +976,8 @@ def test_m2m_assignment_validation_error_is_the_model_keyed_envelope(operation: 
         variables: dict[str, object] = {
             "d": {
                 "title": "Refused",
-                "shelfId": global_id_for(ShelfT, shelf.pk),
-                "genres": [global_id_for(GenreT, frozen.pk)],
+                "shelfId": global_id_for(ShelfT, saved_pk(shelf)),
+                "genres": [global_id_for(GenreT, saved_pk(frozen))],
             },
         }
         book = None
@@ -948,8 +990,8 @@ def test_m2m_assignment_validation_error_is_the_model_keyed_envelope(operation: 
             "updateBook(id:$id, data:$d){ node{ id } errors{ field messages codes path } } }"
         )
         variables = {
-            "id": global_id_for(BookT, book.pk),
-            "d": {"title": "Refused", "genres": [global_id_for(GenreT, frozen.pk)]},
+            "id": global_id_for(BookT, saved_pk(book)),
+            "d": {"title": "Refused", "genres": [global_id_for(GenreT, saved_pk(frozen))]},
         }
     with _genre_assignment_refused():
         res = schema.execute_sync(query, variable_values=variables)
@@ -966,7 +1008,7 @@ def test_m2m_assignment_validation_error_is_the_model_keyed_envelope(operation: 
     else:
         book.refresh_from_db()
         assert book.title == "Kept"
-        assert through_pairs == {(book.pk, stored.pk)}
+        assert through_pairs == {(saved_pk(book), saved_pk(stored))}
 
 
 _ITEM_SAVE_REFUSAL_DISPATCH_UID = "tests.mutations.item_save_time_refusal"
@@ -1041,7 +1083,10 @@ def test_save_time_django_validation_error_reads_its_names_as_model_fields(
             "mutation($d: ItemInput!){ createItem(data:$d){ "
             "node{ id } errors{ field messages codes path } } }",
             variable_values={
-                "d": {"itemName": "Refused", "categoryId": global_id_for(CategoryT, category.pk)},
+                "d": {
+                    "itemName": "Refused",
+                    "categoryId": global_id_for(CategoryT, saved_pk(category)),
+                },
             },
         )
     assert res.errors is None, res.errors
@@ -1139,11 +1184,11 @@ def test_update_raw_pk_m2m_nonexistent_id_is_field_error_no_dangling_row() -> No
     res = schema.execute_sync(
         "mutation($id: ID!, $d: BookPartialInput!){ updateBook(id:$id, data:$d){ "
         "node{ id } errors{ field messages } } }",
-        variable_values={"id": global_id_for(BookT, book.pk), "d": {"genres": [88888]}},
+        variable_values={"id": global_id_for(BookT, saved_pk(book)), "d": {"genres": [88888]}},
     )
     assert_mutation_field_error(res, "updateBook", "genres")
     # The pre-existing M2M set is untouched (the failed write rolled back).
-    assert set(book.genres.values_list("pk", flat=True)) == {existing.pk}
+    assert set(book.genres.values_list("pk", flat=True)) == {saved_pk(existing)}
 
 
 @pytest.mark.django_db
@@ -1245,19 +1290,27 @@ def test_raw_pk_relations_with_no_registered_primary_use_default_manager_existen
     valid = schema.execute_sync(
         query,
         variable_values={
-            "d": {"title": "Valid", "shelfId": shelf.pk, "genres": [genre.pk]},
+            "d": {"title": "Valid", "shelfId": saved_pk(shelf), "genres": [saved_pk(genre)]},
         },
     )
     assert valid.errors is None, valid.errors
     assert valid.data is not None
     assert valid.data["createBook"]["errors"] == []
     book = library_models.Book.objects.get(title="Valid")
-    assert book.shelf_id == shelf.pk
-    assert set(book.genres.values_list("pk", flat=True)) == {genre.pk}
+    assert book.shelf_id == saved_pk(shelf)
+    assert set(book.genres.values_list("pk", flat=True)) == {saved_pk(genre)}
 
     invalid_cases = (
-        ("Missing shelf", {"shelfId": shelf.pk + 9999, "genres": [genre.pk]}, "shelfId"),
-        ("Missing genre", {"shelfId": shelf.pk, "genres": [genre.pk + 9999]}, "genres"),
+        (
+            "Missing shelf",
+            {"shelfId": saved_pk(shelf) + 9999, "genres": [saved_pk(genre)]},
+            "shelfId",
+        ),
+        (
+            "Missing genre",
+            {"shelfId": saved_pk(shelf), "genres": [saved_pk(genre) + 9999]},
+            "genres",
+        ),
     )
     for title, relations, error_field in invalid_cases:
         result = schema.execute_sync(
@@ -1465,7 +1518,7 @@ def test_partial_update_validates_scalar_field_named_id_suffix() -> None:
     tagged = library_models.TaggedItem.objects.create(
         tag="alpha",
         content_type=ct,
-        object_id=branch.pk,
+        object_id=saved_pk(branch),
     )
     update_q = (
         "mutation($id: ID!, $d: TaggedItemPartialInput!){ "
@@ -1474,20 +1527,23 @@ def test_partial_update_validates_scalar_field_named_id_suffix() -> None:
     )
     res = schema.execute_sync(
         update_q,
-        variable_values={"id": global_id_for(TaggedItemT, tagged.pk), "d": {"objectId": -5}},
+        variable_values={
+            "id": global_id_for(TaggedItemT, saved_pk(tagged)),
+            "d": {"objectId": -5},
+        },
     )
     assert res.errors is None, res.errors
     assert res.data is not None
-    payload = res.data["updateTaggedItem"]
+    payload = _json_object(res.data, "updateTaggedItem")
     # The invalid scalar surfaces as a FieldError keyed to the ``objectId`` input -
     # NOT a swallowed write, NOT a mis-labeled ``"__all__"`` uniqueness envelope.
     assert payload["node"] is None
-    fields = [e["field"] for e in payload["errors"]]
+    fields = [_json_at(error, "field") for error in _json_list(payload, "errors")]
     assert "objectId" in fields, payload["errors"]
     assert NON_FIELD_ERROR_KEY not in fields, payload["errors"]
     # The invalid value never reached the DB.
     tagged.refresh_from_db()
-    assert tagged.object_id == branch.pk
+    assert tagged.object_id == saved_pk(branch)
 
 
 def test_provided_attr_names_keeps_scalar_id_suffix_field() -> None:
@@ -1611,19 +1667,19 @@ def test_locate_instance_locks_through_base_manager_subquery_by_default() -> Non
     with transaction.atomic():
         located = mutation_resolvers.locate_instance(
             ItemT,
-            item.pk,
+            saved_pk(item),
             unread_info(),
             alias="default",
         )
     assert located is not None
-    assert located.pk == item.pk
+    assert saved_pk(located) == saved_pk(item)
     # The locked read comes from the BASE manager (a plain Item row), and the
     # visibility subquery still gates it: a missing pk is None, not an error.
     with transaction.atomic():
         assert (
             mutation_resolvers.locate_instance(
                 ItemT,
-                item.pk + 999,
+                saved_pk(item) + 999,
                 unread_info(),
                 alias="default",
             )
@@ -1667,11 +1723,12 @@ def _write_located(instance: Model | None, _decoded: object) -> Model | None:
 def test_locate_instance_opt_out_skips_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     """``select_for_update=False`` locates through the (pinned) visibility queryset, unlocked."""
     sentinel = object()
-    visible_qs = MagicMock(name="visible_qs")
+    get = MagicMock(return_value=sentinel)
+    select_for_update = MagicMock()
+    pinned_qs = MagicMock(name="pinned_qs", get=get, select_for_update=select_for_update)
+    using = MagicMock(return_value=pinned_qs)
+    visible_qs = MagicMock(name="visible_qs", using=using)
     visible_qs._db = None
-    pinned_qs = MagicMock(name="pinned_qs")
-    visible_qs.using.return_value = pinned_qs
-    pinned_qs.get.return_value = sentinel
 
     monkeypatch.setattr(mutation_resolvers, "model_for", _fresh_mock)
     monkeypatch.setattr(mutation_resolvers, "initial_queryset", _noop)
@@ -1685,9 +1742,9 @@ def test_locate_instance_opt_out_skips_the_lock(monkeypatch: pytest.MonkeyPatch)
         select_for_update=False,
     )
     assert result is sentinel
-    visible_qs.using.assert_called_once_with("default")
-    pinned_qs.select_for_update.assert_not_called()
-    pinned_qs.get.assert_called_once_with(pk=7)
+    using.assert_called_once_with("default")
+    select_for_update.assert_not_called()
+    get.assert_called_once_with(pk=7)
 
 
 # ---------------------------------------------------------------------------
@@ -1769,18 +1826,17 @@ def _pipeline_harness(
     *,
     operation: str = "update",
     authorize: Callable[..., object] | None = None,
-) -> tuple[mock.MagicMock, ModuleType]:
+) -> mock.MagicMock:
     """Scaffold ``run_write_pipeline_sync`` with mocked locate/authorize/refetch (snapshot tests)."""
-    mutation_cls = MagicMock()
+    mutation_cls = MagicMock(
+        **{"_mutation_meta.operation": operation, "_mutation_meta.select_for_update": False},
+    )
     mutation_cls.__name__ = "SnapshotMutation"
-    mutation_cls._mutation_meta.operation = operation
-    mutation_cls._mutation_meta.select_for_update = False
     mutation_cls._primary_type = object()
 
-    fake_model = MagicMock(__name__="Row")
     # A REAL identity ``to_python``: the canonical pk comparison must not be fed a
     # MagicMock whose repeated calls return one shared (always-equal) child mock.
-    fake_model._meta.pk.to_python = _identity
+    fake_model = MagicMock(__name__="Row", **{"_meta.pk.to_python": _identity})
     monkeypatch.setattr(mutation_resolvers, "model_for", _returning(fake_model))
     monkeypatch.setattr(mutation_resolvers, "payload_object_slot", _returning("node"))
     monkeypatch.setattr(mutation_resolvers, "payload_cls_for", _fresh_mock)
@@ -1796,7 +1852,7 @@ def _pipeline_harness(
     )
     monkeypatch.setattr(mutation_resolvers, "refetch_optimized", _fresh_mock)
     monkeypatch.setattr(mutation_resolvers, "build_payload", _returning("ok"))
-    return mutation_cls, mutation_resolvers
+    return mutation_cls
 
 
 def test_pipeline_snapshots_authorized_pk_before_permission_hook(
@@ -1817,15 +1873,16 @@ def test_pipeline_snapshots_authorized_pk_before_permission_hook(
     def evil_authorize(*_args: object, **_kwargs: object) -> None:
         located.pk = 999  # re-point at a hidden row AFTER authorization
 
-    mutation_cls, mutation_resolvers = _pipeline_harness(monkeypatch, authorize=evil_authorize)
+    mutation_cls = _pipeline_harness(monkeypatch, authorize=evil_authorize)
     monkeypatch.setattr(mutation_resolvers, "locate_instance", _returning(located))
 
     with (
-        patch.object(mutation_resolvers.transaction, "atomic"),
+        patch.object(transaction, "atomic"),
         managed_write_transaction("default"),
         pytest.raises(ConfigurationError, match="must write the row that was authorized"),
     ):
-        mutation_resolvers.run_write_pipeline_sync(
+        object_result(
+            mutation_resolvers.run_write_pipeline_sync,
             mutation_cls,
             info=None,
             data=None,
@@ -1854,15 +1911,16 @@ def test_pipeline_pk_drift_diagnostic_survives_hostile_repr(
     def evil_authorize(*_args: object, **_kwargs: object) -> None:
         located.pk = _HostilePk()
 
-    mutation_cls, mutation_resolvers = _pipeline_harness(monkeypatch, authorize=evil_authorize)
+    mutation_cls = _pipeline_harness(monkeypatch, authorize=evil_authorize)
     monkeypatch.setattr(mutation_resolvers, "locate_instance", _returning(located))
 
     with (
-        patch.object(mutation_resolvers.transaction, "atomic"),
+        patch.object(transaction, "atomic"),
         managed_write_transaction("default"),
         pytest.raises(ConfigurationError, match="must write the row that was authorized"),
     ):
-        mutation_resolvers.run_write_pipeline_sync(
+        object_result(
+            mutation_resolvers.run_write_pipeline_sync,
             mutation_cls,
             info=None,
             data=None,
@@ -1886,14 +1944,15 @@ def test_pipeline_publishes_authorized_pk_on_write_context(
     def probe_authorize(*_args: object, **_kwargs: object) -> None:
         seen["authorized_pk"] = require_write_pipeline().authorized_pk
 
-    mutation_cls, mutation_resolvers = _pipeline_harness(monkeypatch, authorize=probe_authorize)
+    mutation_cls = _pipeline_harness(monkeypatch, authorize=probe_authorize)
     monkeypatch.setattr(mutation_resolvers, "locate_instance", _returning(located))
 
     with (
-        patch.object(mutation_resolvers.transaction, "atomic"),
+        patch.object(transaction, "atomic"),
         managed_write_transaction("default"),
     ):
-        result = mutation_resolvers.run_write_pipeline_sync(
+        result = object_result(
+            mutation_resolvers.run_write_pipeline_sync,
             mutation_cls,
             info=None,
             data=None,
@@ -1918,20 +1977,20 @@ def test_delete_pipeline_rejects_pk_drift_during_authorization(
     def evil_authorize(*_args: object, **_kwargs: object) -> None:
         located.pk = 999  # re-point at a hidden row AFTER authorization
 
-    mutation_cls, mutation_resolvers = _pipeline_harness(
+    mutation_cls = _pipeline_harness(
         monkeypatch,
         operation="delete",
         authorize=evil_authorize,
     )
-    mutation_cls._mutation_meta.permission_classes = []
+    mutation_cls.configure_mock(**{"_mutation_meta.permission_classes": []})
     monkeypatch.setattr(mutation_resolvers, "locate_instance", _returning(located))
 
     with (
-        patch.object(mutation_resolvers.transaction, "atomic"),
+        patch.object(transaction, "atomic"),
         managed_write_transaction("default"),
         pytest.raises(ConfigurationError, match="pk changed"),
     ):
-        mutation_resolvers._run_delete(mutation_cls, info=None, id_="ignored")
+        object_result(mutation_resolvers._run_delete, mutation_cls, info=None, id_="ignored")
 
 
 def test_delete_pipeline_pk_drift_diagnostic_survives_hostile_repr(
@@ -1953,20 +2012,20 @@ def test_delete_pipeline_pk_drift_diagnostic_survives_hostile_repr(
     def evil_authorize(*_args: object, **_kwargs: object) -> None:
         located.pk = _HostilePk()
 
-    mutation_cls, mutation_resolvers = _pipeline_harness(
+    mutation_cls = _pipeline_harness(
         monkeypatch,
         operation="delete",
         authorize=evil_authorize,
     )
-    mutation_cls._mutation_meta.permission_classes = []
+    mutation_cls.configure_mock(**{"_mutation_meta.permission_classes": []})
     monkeypatch.setattr(mutation_resolvers, "locate_instance", _returning(located))
 
     with (
-        patch.object(mutation_resolvers.transaction, "atomic"),
+        patch.object(transaction, "atomic"),
         managed_write_transaction("default"),
         pytest.raises(ConfigurationError, match="pk changed"),
     ):
-        mutation_resolvers._run_delete(mutation_cls, info=None, id_="ignored")
+        object_result(mutation_resolvers._run_delete, mutation_cls, info=None, id_="ignored")
 
 
 def test_delete_pipeline_rides_shared_write_skeleton(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2079,6 +2138,14 @@ def test_delete_integrity_error_contained_in_envelope() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _link_model(name: str) -> type[Model]:
+    """Return the link fixture model ``tests.optimizer._link_models`` declares as ``name``."""
+    model = read_attr(_link_models, name)
+    assert isinstance(model, type)
+    assert issubclass(model, Model)
+    return model
+
+
 def _build_link_child_schema(
     child_model: type[Model],
 ) -> tuple[strawberry.Schema, type[DjangoType]]:
@@ -2134,7 +2201,7 @@ _LINK_CHILD_CARRIER_ROWS: list[
     tuple[str, Callable[[_link_models.LnkParent], dict[str, object]]]
 ] = [
     ("LnkPairChild", lambda parent: {"pTenant": parent.tenant, "pCode": parent.code}),
-    ("LnkColumnChild", lambda parent: {"pId": parent.pk}),
+    ("LnkColumnChild", lambda parent: {"pId": saved_pk(parent)}),
 ]
 
 
@@ -2154,7 +2221,7 @@ def test_all_fields_mutation_writes_a_foreign_object_through_its_carriers(
     ``pb`` only when both carriers are written; the update moves the row to
     ``pc`` and the payload's generated ``parent`` follows it.
     """
-    child_model = getattr(_link_models, child_name)
+    child_model = _link_model(child_name)
     schema, child_type = _build_link_child_schema(child_model)
     payload = "node { id name parent { label } } errors { field messages }"
     create = f"mutation($d: {child_name}Input!) {{ createChild(data: $d) {{ {payload} }} }}"
@@ -2171,11 +2238,11 @@ def test_all_fields_mutation_writes_a_foreign_object_through_its_carriers(
         )
         assert created.errors is None, created.errors
         assert created.data is not None
-        node = created.data["createChild"]["node"]
+        node = _json_object(created.data, "createChild", "node")
         assert created.data["createChild"]["errors"] == []
         assert (node["name"], node["parent"]) == ("new", {"label": "pb"})
         row = child_model.objects.get(name="new")
-        assert node["id"] == global_id_for(child_type, row.pk)
+        assert node["id"] == global_id_for(child_type, saved_pk(row))
 
         updated = schema.execute_sync(
             update,
@@ -2185,7 +2252,7 @@ def test_all_fields_mutation_writes_a_foreign_object_through_its_carriers(
         assert updated.data is not None
         assert updated.data["updateChild"]["errors"] == []
         assert updated.data["updateChild"]["node"]["parent"] == {"label": "pc"}
-        assert child_model.objects.get(pk=row.pk).parent == parents["pc"]
+        assert read_attr(child_model.objects.get(pk=saved_pk(row)), "parent") == parents["pc"]
 
 
 def _build_link_key_schema(
@@ -2319,11 +2386,11 @@ def test_to_field_relation_input_stores_the_key_of_the_visible_row_it_names(
     """
     with _link_models.link_fixture_tables(connection):
         parents = {p.label: p for p in _link_models.LnkParent.objects.all()}
-        _link_models.LnkParent.objects.filter(pk=parents["pc"].pk).update(
-            slug=str(parents["pa"].pk),
+        _link_models.LnkParent.objects.filter(pk=saved_pk(parents["pc"])).update(
+            slug=str(saved_pk(parents["pa"])),
         )
         schema, parent_type, _tag_type, child_type = _build_link_key_schema(hidden_label="pc")
-        parent_id = global_id_for(parent_type, parents[target].pk)
+        parent_id = global_id_for(parent_type, saved_pk(parents[target]))
         if operation == "create":
             name = "new"
             result = schema.execute_sync(
@@ -2338,13 +2405,13 @@ def test_to_field_relation_input_stores_the_key_of_the_visible_row_it_names(
                 "mutation($id: ID!, $d: LnkSlugChildPartialInput!) "
                 f"{{ updateSlugChild(id: $id, data: $d) {{ {_SLUG_CHILD_PAYLOAD} }} }}",
                 variable_values={
-                    "id": global_id_for(child_type, child.pk),
+                    "id": global_id_for(child_type, saved_pk(child)),
                     "d": {"parentId": parent_id},
                 },
             )
         assert result.errors is None, result.errors
         assert result.data is not None
-        answer = result.data[f"{operation}SlugChild"]
+        answer = _json_object(result.data, f"{operation}SlugChild")
         assert answer["errors"] == expected_errors
         expected_node = (
             {"name": name, "parent": {"label": target}} if not expected_errors else None
@@ -2377,8 +2444,12 @@ def test_to_field_through_m2m_input_sets_the_key_its_through_rows_store() -> Non
         result = schema.execute_sync(
             update,
             variable_values={
-                "id": global_id_for(parent_type, parent.pk),
-                "d": {"tags": [global_id_for(tag_type, tags[name].pk) for name in ("t3", "t2")]},
+                "id": global_id_for(parent_type, saved_pk(parent)),
+                "d": {
+                    "tags": [
+                        global_id_for(tag_type, saved_pk(tags[name])) for name in ("t3", "t2")
+                    ],
+                },
             },
         )
         assert result.errors is None, result.errors

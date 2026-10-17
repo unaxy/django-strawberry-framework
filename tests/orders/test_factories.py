@@ -32,7 +32,8 @@ from django_strawberry_framework.orders.inputs import (
     _field_specs,
     _materialized_names,
 )
-from tests._idioms import definition_raises
+from django_strawberry_framework.utils._narrowing import is_tuple, read_attr
+from tests._idioms import definition_raises, type_args
 
 
 @pytest.fixture(autouse=True)
@@ -156,15 +157,17 @@ def test_factory_builds_relatedorder_fields_with_annotated_strawberry_lazy_forwa
     shelf_field = fields["shelf"]
     assert shelf_field.type_annotation is not None
     annotation = shelf_field.type_annotation.annotation
-    non_none = [arg for arg in get_args(annotation) if arg is not type(None)]
+    non_none = [arg for arg in type_args(annotation) if arg is not type(None)]
     assert non_none, annotation
     inner = non_none[0]
     if hasattr(inner, "__metadata__"):
-        forward = inner.__args__[0]
-        forward_name = getattr(forward, "__forward_arg__", forward)
+        inner_args = read_attr(inner, "__args__")
+        assert is_tuple(inner_args)
+        forward = inner_args[0]
+        forward_name = read_attr(forward, "__forward_arg__", forward)
     else:
         # ``LazyType`` carries ``.type_name`` after Strawberry resolves.
-        forward_name = inner.type_name
+        forward_name = read_attr(inner, "type_name")
     assert forward_name == "ShelfOrderRelInputType"
 
 

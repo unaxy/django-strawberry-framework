@@ -33,6 +33,7 @@ from django_strawberry_framework.exceptions import (
     PathResolutionError,
 )
 from django_strawberry_framework.utils import relations as relations_module
+from django_strawberry_framework.utils._narrowing import call_method, read_attr
 from django_strawberry_framework.utils.relations import (
     ClassifiedPath,
     RelationKind,
@@ -60,6 +61,7 @@ from django_strawberry_framework.utils.relations import (
     relation_link,
     validate_lookup_expr,
 )
+from django_strawberry_framework.utils.typing import object_result
 from tests._relation_fixtures import RpCompositeParent
 from tests.optimizer._link_models import (
     LnkColumnChild,
@@ -116,7 +118,7 @@ class _HostileRelationMetadata:
             "_meta",
         }:
             raise RuntimeError("hostile relation metadata")
-        return super().__getattribute__(name)
+        return object_result(super().__getattribute__, name)
 
 
 class _HostileTerminal:
@@ -900,17 +902,17 @@ def _legacy_traverses_to_many(model: type[Model], field_path: str) -> bool:
     to prove the ``classify_path``-based reimplementation returns byte-identical
     booleans across the hostile-path matrix below.
     """
-    current = model
+    current: object = model
     for segment in field_path.split("__"):
         try:
-            field = current._meta.get_field(segment)
+            field = call_method(read_attr(current, "_meta"), "get_field", segment)
         except FieldDoesNotExist:
             return False
         if not getattr(field, "is_relation", False):
             return False
         if is_many_side_relation_kind(relation_kind(field)):
             return True
-        related = getattr(field, "related_model", None)
+        related = read_attr(field, "related_model", None)
         if related is None:
             return False
         current = related

@@ -60,7 +60,7 @@ from django_strawberry_framework.auth import register_mutation
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
-from tests._idioms import ModelSerializerBase, is_object_list
+from tests._idioms import ModelSerializerBase, is_object_dict, is_object_list, saved_pk
 
 if TYPE_CHECKING:
     from django_strawberry_framework.rest_framework.serializer_converter import DRFSerializer
@@ -175,8 +175,14 @@ def _execute(
     )
     assert result.errors is None, result.errors
     assert result.data is not None
+    data: dict[str, object] = result.data
+    write = data["write"]
+    assert is_object_dict(write)
+    errors = write["errors"]
+    assert is_object_list(errors)
     keys: list[tuple[str, list[str]]] = []
-    for error in result.data["write"]["errors"]:
+    for error in errors:
+        assert is_object_dict(error)
         field, path = error["field"], error["path"]
         assert isinstance(field, str)
         assert is_object_list(path)
@@ -186,7 +192,7 @@ def _execute(
 
 def _category_gid(category_type: type[DjangoType]) -> str:
     category, _created = product_models.Category.objects.get_or_create(name="Keyed category")
-    return global_id_for(category_type, category.pk)
+    return global_id_for(category_type, saved_pk(category))
 
 
 # --------------------------------------------------------------------------- model
@@ -258,7 +264,7 @@ def _run_model_update_save(
     return _execute(
         DjangoMutationField(update_item),
         lambda: f'name: "keyed", categoryId: "{_category_gid(category_type)}"',
-        id_literal=lambda: global_id_for(item_type, item.pk),
+        id_literal=lambda: global_id_for(item_type, saved_pk(item)),
     )
 
 
