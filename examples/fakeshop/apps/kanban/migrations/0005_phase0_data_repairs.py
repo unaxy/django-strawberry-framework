@@ -20,10 +20,42 @@ the pre-repair duplicates / drift are not worth reconstructing.
 """
 
 import re
+from typing import TYPE_CHECKING
 
-from django.db import migrations
+from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
+
+if TYPE_CHECKING:
+
+    class _TargetVersion(models.Model):
+        """The historical ``kanban.TargetVersion`` columns this migration reads."""
+
+        milestone_id: int | None
+
+    class _Card(models.Model):
+        """The historical ``kanban.Card`` columns this migration reads."""
+
+        pk: int
+        planning_note: str
+        milestone_id: int | None
+        target_version: _TargetVersion
+
+    class _CardItem(models.Model):
+        """The historical ``kanban.CardItem`` columns this migration reads."""
+
+        pk: int
+        text: str
+
+    class _CardReference(models.Model):
+        """The historical ``kanban.CardReference`` columns this migration reads."""
+
+        pk: int
+        target_card_id: int
+        kind_id: int
+        order: int
+        raw_text: str
+
 
 CARD_REF_RE = re.compile(r"\{\{card_ref:(\d+)\}\}")
 
@@ -60,13 +92,17 @@ def _dedupe_and_renumber_references(
     order (same target card, so the rendered id is unchanged), and a placeholder
     that pointed at a surviving row follows that row to its new contiguous order.
     """
-    CardReference = apps.get_model("kanban", "CardReference")
-    Card = apps.get_model("kanban", "Card")
-    CardItem = apps.get_model("kanban", "CardItem")
+    CardReference: type[_CardReference] = apps.get_model("kanban", "CardReference")
+    Card: type[_Card] = apps.get_model("kanban", "Card")
+    CardItem: type[_CardItem] = apps.get_model("kanban", "CardItem")
     alias = schema_editor.connection.alias
     manager = CardReference.objects.using(alias)
 
-    source_ids = list(manager.values_list("source_card", flat=True).distinct())
+    sources: models.QuerySet[_CardReference, int] = manager.values_list(
+        "source_card",
+        flat=True,
+    ).distinct()
+    source_ids = list(sources)
     for source_id in source_ids:
         rows = list(manager.filter(source_card=source_id).order_by("order", "id"))
 
@@ -80,7 +116,7 @@ def _dedupe_and_renumber_references(
             key = (row.target_card_id, row.kind_id)
             if key in kept_old_order_by_key:
                 deleted_old_to_kept_old[row.order] = kept_old_order_by_key[key]
-                row.delete()
+                _ = row.delete()
             else:
                 kept_old_order_by_key[key] = row.order
                 survivors.append((row.pk, int(row.order)))
@@ -90,7 +126,7 @@ def _dedupe_and_renumber_references(
         for new_order, (pk, old_order) in enumerate(survivors):
             old_to_new[old_order] = new_order
             if old_order != new_order:
-                manager.filter(pk=pk).update(order=new_order)
+                _ = manager.filter(pk=pk).update(order=new_order)
         # Deleted duplicates inherit the surviving row's new order.
         for deleted_old, kept_old in deleted_old_to_kept_old.items():
             old_to_new[deleted_old] = old_to_new[kept_old]
@@ -102,34 +138,34 @@ def _dedupe_and_renumber_references(
         card = Card.objects.using(alias).get(pk=source_id)
         new_note = _remap_card_ref_placeholders(card.planning_note or "", old_to_new)
         if new_note != (card.planning_note or ""):
-            Card.objects.using(alias).filter(pk=card.pk).update(planning_note=new_note)
+            _ = Card.objects.using(alias).filter(pk=card.pk).update(planning_note=new_note)
         for item in CardItem.objects.using(alias).filter(card_id=source_id):
             new_text = _remap_card_ref_placeholders(item.text or "", old_to_new)
             if new_text != (item.text or ""):
-                CardItem.objects.using(alias).filter(pk=item.pk).update(text=new_text)
+                _ = CardItem.objects.using(alias).filter(pk=item.pk).update(text=new_text)
         # ``CardReference.raw_text`` is the third prose surface carrying
         # ``{{card_ref:N}}`` placeholders (the exporter resolves them at
         # build_kanban_md.py::resolve_card_refs), so it renumbers too.
         for reference in manager.filter(source_card=source_id):
             new_raw = _remap_card_ref_placeholders(reference.raw_text or "", old_to_new)
             if new_raw != (reference.raw_text or ""):
-                manager.filter(pk=reference.pk).update(raw_text=new_raw)
+                _ = manager.filter(pk=reference.pk).update(raw_text=new_raw)
 
 
 def _repair_milestone_drift(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """0.2 -- align each card's milestone with its target version's milestone."""
-    Card = apps.get_model("kanban", "Card")
+    Card: type[_Card] = apps.get_model("kanban", "Card")
     manager = Card.objects.using(schema_editor.connection.alias)
     for card in manager.select_related("target_version").all():
         target_milestone_id = card.target_version.milestone_id
         if card.milestone_id != target_milestone_id:
-            manager.filter(pk=card.pk).update(milestone_id=target_milestone_id)
+            _ = manager.filter(pk=card.pk).update(milestone_id=target_milestone_id)
 
 
 def _retype_done_done_blocked_by(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """0.3 -- retype done->done ``blocked_by`` edges to ``dependency``."""
-    CardReference = apps.get_model("kanban", "CardReference")
-    CardReferenceKind = apps.get_model("kanban", "CardReferenceKind")
+    CardReference: type[_CardReference] = apps.get_model("kanban", "CardReference")
+    CardReferenceKind: type[models.Model] = apps.get_model("kanban", "CardReferenceKind")
     alias = schema_editor.connection.alias
     manager = CardReference.objects.using(alias)
 
@@ -143,7 +179,7 @@ def _retype_done_done_blocked_by(apps: StateApps, schema_editor: BaseDatabaseSch
 
     dependency_kind = CardReferenceKind.objects.using(alias).get(key="dependency")
     for row in stale:
-        manager.filter(pk=row.pk).update(kind=dependency_kind)
+        _ = manager.filter(pk=row.pk).update(kind=dependency_kind)
 
 
 class Migration(migrations.Migration):

@@ -1,5 +1,6 @@
 """Products service tests for Faker discovery, catalog lifecycle, and user lifecycle."""
 
+import importlib
 import inspect
 from collections.abc import Callable, Iterator
 from types import ModuleType
@@ -85,16 +86,16 @@ def test_discover_providers_handles_module_without_provider_class() -> None:
 
 
 def test_discover_providers_handles_import_error() -> None:
-    """If ``__import__`` raises ImportError on a sub-package, discover_providers continues."""
+    """If importing a provider sub-package raises ImportError, discover_providers continues."""
     fake = Faker()
-    real_import: Callable[..., ModuleType] = __import__
+    real_import: Callable[[str, str | None], ModuleType] = importlib.import_module
 
-    def boom_import(name: str, *args: object, **kwargs: object) -> ModuleType:
+    def boom_import(name: str, package: str | None = None) -> ModuleType:
         if name == "faker.providers.bank":
             raise ImportError("synthetic")
-        return real_import(name, *args, **kwargs)
+        return real_import(name, package)
 
-    with patch("builtins.__import__", side_effect=boom_import):
+    with patch.object(importlib, "import_module", side_effect=boom_import):
         result = services.discover_providers(fake)
     assert "bank" not in result
 

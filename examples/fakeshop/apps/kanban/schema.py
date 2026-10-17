@@ -12,8 +12,11 @@ The lookup filtersets are attached to their owning types via
 pattern the scalars app uses.
 """
 
+from typing import TypeVar
+
 import strawberry
 from django import forms
+from django.contrib.auth.models import AbstractUser
 from django.db.models import Exists, OuterRef, QuerySet
 from strawberry import relay
 from strawberry.types import Info
@@ -648,7 +651,8 @@ class BoardDocCardReferenceType(DjangoType):
 class Query:
     """Kanban board root fields."""
 
-    @strawberry.field(graphql_type=list[CardType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[CardType])  # pyright: ignore[reportAny]
     def all_cards(
         self,
         info: Info,
@@ -663,7 +667,8 @@ class Query:
             queryset = orders.CardOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[CardType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[CardType])  # pyright: ignore[reportAny]
     def ready_cards(
         self,
         info: Info,
@@ -692,7 +697,8 @@ class Query:
             queryset = orders.CardOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[CardItemType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[CardItemType])  # pyright: ignore[reportAny]
     def all_kanban_card_items(
         self,
         info: Info,
@@ -707,7 +713,8 @@ class Query:
             queryset = orders.CardItemOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[CardGlossaryTermType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[CardGlossaryTermType])  # pyright: ignore[reportAny]
     def all_kanban_card_glossary_terms(
         self,
         info: Info,
@@ -722,7 +729,8 @@ class Query:
             queryset = orders.CardGlossaryTermOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[StatusType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[StatusType])  # pyright: ignore[reportAny]
     def all_kanban_statuses(
         self,
         info: Info,
@@ -737,7 +745,8 @@ class Query:
             queryset = orders.StatusOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[PriorityType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[PriorityType])  # pyright: ignore[reportAny]
     def all_kanban_priorities(
         self,
         info: Info,
@@ -752,7 +761,8 @@ class Query:
             queryset = orders.PriorityOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[MilestoneType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[MilestoneType])  # pyright: ignore[reportAny]
     def all_kanban_milestones(
         self,
         info: Info,
@@ -767,7 +777,8 @@ class Query:
             queryset = orders.MilestoneOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[UpstreamType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[UpstreamType])  # pyright: ignore[reportAny]
     def all_kanban_upstreams(
         self,
         info: Info,
@@ -782,7 +793,8 @@ class Query:
             queryset = orders.UpstreamOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[ParityLevelType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[ParityLevelType])  # pyright: ignore[reportAny]
     def all_kanban_parity_levels(
         self,
         info: Info,
@@ -797,7 +809,8 @@ class Query:
             queryset = orders.ParityLevelOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[SectionType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[SectionType])  # pyright: ignore[reportAny]
     def all_kanban_sections(
         self,
         info: Info,
@@ -812,7 +825,8 @@ class Query:
             queryset = orders.SectionOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[CardReferenceKindType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[CardReferenceKindType])  # pyright: ignore[reportAny]
     def all_kanban_reference_kinds(
         self,
         info: Info,
@@ -827,7 +841,8 @@ class Query:
             queryset = orders.CardReferenceKindOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[BoardDocKindType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[BoardDocKindType])  # pyright: ignore[reportAny]
     def all_kanban_board_doc_kinds(
         self,
         info: Info,
@@ -843,7 +858,8 @@ class Query:
             queryset = orders.BoardDocKindOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[TargetVersionType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[TargetVersionType])  # pyright: ignore[reportAny]
     def all_kanban_target_versions(
         self,
         info: Info,
@@ -858,7 +874,8 @@ class Query:
             queryset = orders.TargetVersionOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[LabelType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[LabelType])  # pyright: ignore[reportAny]
     def all_kanban_labels(
         self,
         info: Info,
@@ -873,7 +890,8 @@ class Query:
             queryset = orders.LabelOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[TrackedPathType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[TrackedPathType])  # pyright: ignore[reportAny]
     def all_kanban_tracked_paths(
         self,
         info: Info,
@@ -888,7 +906,8 @@ class Query:
             queryset = orders.TrackedPathOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[RelativeSizeType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[RelativeSizeType])  # pyright: ignore[reportAny]
     def all_kanban_relative_sizes(
         self,
         info: Info,
@@ -903,7 +922,8 @@ class Query:
             queryset = orders.RelativeSizeOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[BoardDocType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[BoardDocType])  # pyright: ignore[reportAny]
     def all_kanban_board_docs(
         self,
         info: Info,
@@ -918,7 +938,8 @@ class Query:
             queryset = orders.BoardDocOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[ActorType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[ActorType])  # pyright: ignore[reportAny]
     def all_kanban_actors(
         self,
         info: Info,
@@ -933,7 +954,8 @@ class Query:
             queryset = orders.ActorOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[AttemptOutcomeType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[AttemptOutcomeType])  # pyright: ignore[reportAny]
     def all_kanban_attempt_outcomes(
         self,
         info: Info,
@@ -948,7 +970,8 @@ class Query:
             queryset = orders.AttemptOutcomeOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[VerificationKindType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[VerificationKindType])  # pyright: ignore[reportAny]
     def all_kanban_verification_kinds(
         self,
         info: Info,
@@ -963,7 +986,8 @@ class Query:
             queryset = orders.VerificationKindOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[CardTransitionType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[CardTransitionType])  # pyright: ignore[reportAny]
     def all_kanban_card_transitions(
         self,
         info: Info,
@@ -978,7 +1002,8 @@ class Query:
             queryset = orders.CardTransitionOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[WorkAttemptType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[WorkAttemptType])  # pyright: ignore[reportAny]
     def all_kanban_work_attempts(
         self,
         info: Info,
@@ -993,7 +1018,8 @@ class Query:
             queryset = orders.WorkAttemptOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[DecisionType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[DecisionType])  # pyright: ignore[reportAny]
     def all_kanban_decisions(
         self,
         info: Info,
@@ -1060,7 +1086,7 @@ class IsStaffUser:
         context = getattr(info, "context", None)
         request = getattr(context, "request", None) or context
         user = getattr(request, "user", None)
-        return bool(user is not None and getattr(user, "is_staff", False))
+        return isinstance(user, AbstractUser) and user.is_staff
 
 
 def _service_error_payload(
@@ -1070,6 +1096,27 @@ def _service_error_payload(
     """Map a service failure onto the mutation's ``{ ok: false, errors }`` payload."""
     payload_cls = payload_cls_for(mutation_cls)
     return payload_cls(ok=False, errors=[field_error("", str(exc), codes=exc.code)])
+
+
+_CleanedT = TypeVar("_CleanedT")
+
+
+def _cleaned(form: forms.BaseForm, name: str, kind: type[_CleanedT]) -> _CleanedT:
+    """Return ``form.cleaned_data[name]``, checked against the class its form field cleans to."""
+    value = form.cleaned_data.get(name)
+    if not isinstance(value, kind):
+        msg = (
+            f"{type(form).__name__}.{name} cleaned to {type(value).__name__}, not {kind.__name__}."
+        )
+        raise TypeError(msg)
+    return value
+
+
+def _cleaned_optional(form: forms.BaseForm, name: str, kind: type[_CleanedT]) -> _CleanedT | None:
+    """Return ``form.cleaned_data[name]`` for an optional field: ``None`` or ``kind``."""
+    if form.cleaned_data.get(name) is None:
+        return None
+    return _cleaned(form, name, kind)
 
 
 class _ServiceErrorMixin(DjangoFormMutation):
@@ -1224,12 +1271,11 @@ class SetCardStatus(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
         _ = services.set_card_status(
-            data["card"],
-            data["status_key"],
-            actor=data["actor_key"],
-            note=data.get("note", ""),
+            _cleaned(form, "card", models.Card),
+            _cleaned(form, "status_key", str),
+            actor=_cleaned(form, "actor_key", str),
+            note=_cleaned(form, "note", str),
         )
 
 
@@ -1243,8 +1289,10 @@ class MoveCardNumber(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
-        _ = services.move_card_number(data["card"], data["number"])
+        _ = services.move_card_number(
+            _cleaned(form, "card", models.Card),
+            _cleaned(form, "number", int),
+        )
 
 
 class AddDependency(_ServiceErrorMixin):
@@ -1257,11 +1305,14 @@ class AddDependency(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
-        kwargs = {"raw_text": data.get("raw_text", "")}
-        if data.get("kind"):
-            kwargs["kind"] = data["kind"]
-        _ = services.add_dependency(data["source_card"], data["target_card"], **kwargs)
+        source_card = _cleaned(form, "source_card", models.Card)
+        target_card = _cleaned(form, "target_card", models.Card)
+        raw_text = _cleaned(form, "raw_text", str)
+        kind = _cleaned(form, "kind", str)
+        if kind:
+            _ = services.add_dependency(source_card, target_card, kind=kind, raw_text=raw_text)
+        else:
+            _ = services.add_dependency(source_card, target_card, raw_text=raw_text)
 
 
 class RemoveDependency(_ServiceErrorMixin):
@@ -1274,11 +1325,10 @@ class RemoveDependency(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
         _ = services.remove_dependency(
-            data["source_card"],
-            data["target_card"],
-            kind=data.get("kind") or None,
+            _cleaned(form, "source_card", models.Card),
+            _cleaned(form, "target_card", models.Card),
+            kind=_cleaned(form, "kind", str) or None,
         )
 
 
@@ -1292,10 +1342,9 @@ class SetCardItemComplete(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
-        complete = data.get("complete")
+        complete = _cleaned_optional(form, "complete", bool)
         _ = services.set_item_complete(
-            data["item"],
+            _cleaned(form, "item", models.CardItem),
             complete=True if complete is None else complete,
         )
 
@@ -1310,8 +1359,11 @@ class VerifyCardItem(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
-        _ = services.verify_item(data["item"], actor=data["actor_key"], kind=data["kind_key"])
+        _ = services.verify_item(
+            _cleaned(form, "item", models.CardItem),
+            actor=_cleaned(form, "actor_key", str),
+            kind=_cleaned(form, "kind_key", str),
+        )
 
 
 class RecordWorkAttempt(_ServiceErrorMixin):
@@ -1324,12 +1376,11 @@ class RecordWorkAttempt(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
         _ = services.record_attempt(
-            data["card"],
-            actor=data["actor_key"],
-            summary=data["summary"],
-            evidence=data.get("evidence", ""),
+            _cleaned(form, "card", models.Card),
+            actor=_cleaned(form, "actor_key", str),
+            summary=_cleaned(form, "summary", str),
+            evidence=_cleaned(form, "evidence", str),
         )
 
 
@@ -1343,11 +1394,10 @@ class FinishWorkAttempt(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
         _ = services.finish_attempt(
-            data["attempt"],
-            outcome_key=data["outcome_key"],
-            summary=data.get("summary") or None,
+            _cleaned(form, "attempt", models.WorkAttempt),
+            outcome_key=_cleaned(form, "outcome_key", str),
+            summary=_cleaned(form, "summary", str) or None,
         )
 
 
@@ -1361,13 +1411,12 @@ class RecordDecision(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
         _ = services.record_decision(
-            actor=data["actor_key"],
-            question=data["question"],
-            choice=data["choice"],
-            rationale=data.get("rationale", ""),
-            card=data.get("card"),
+            actor=_cleaned(form, "actor_key", str),
+            question=_cleaned(form, "question", str),
+            choice=_cleaned(form, "choice", str),
+            rationale=_cleaned(form, "rationale", str),
+            card=_cleaned_optional(form, "card", models.Card),
         )
 
 
@@ -1385,14 +1434,14 @@ class SetCardFiles(_ServiceErrorMixin):
     @override
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
         del info
-        data = form.cleaned_data
+        card = _cleaned(form, "card", models.Card)
         # The ``JSON`` scalar admits any value; the service rejects anything but a list
         # (an absent value clears the links), so a falsy non-list never reads as empty.
-        paths: object = data.get("paths")
-        if data["kind"] == models.CARD_PATH_LINK_CHANGED:
-            services.set_card_changed_files(data["card"], paths)
+        paths: object = form.cleaned_data.get("paths")
+        if _cleaned(form, "kind", str) == models.CARD_PATH_LINK_CHANGED:
+            services.set_card_changed_files(card, paths)
         else:
-            services.set_card_predicted_files(data["card"], paths)
+            services.set_card_predicted_files(card, paths)
 
 
 @strawberry.type

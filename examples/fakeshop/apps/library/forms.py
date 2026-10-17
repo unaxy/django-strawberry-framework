@@ -26,8 +26,6 @@ inputs carry ISBN text; ``EditionImprintForm`` updates an ``Edition`` located by
 
 from __future__ import annotations
 
-from typing import Any
-
 from django import forms
 
 from apps.library import models
@@ -66,10 +64,10 @@ class ShelfRelationsForm(forms.ModelForm[models.Shelf]):
             "alt_branches",
         )
 
-    # basedpyright: verbatim forward to ModelForm.__init__; object fails its typed params
-    def __init__(self, *args: Any, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
+    def __init__(self, *args: object, **kwargs: object) -> None:
         """Point the ``branch`` choice field at every branch."""
-        super().__init__(*args, **kwargs)
+        # basedpyright: verbatim forward; ModelForm.__init__ checks each argument when it runs
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         branch = self.fields["branch"]
         if not isinstance(branch, forms.ModelChoiceField):
             raise TypeError("ShelfRelationsForm.branch must be the declared ModelChoiceField.")

@@ -10,7 +10,7 @@ The reverse deletes the seeded rows by key (their UUID side-rows cascade),
 unconditionally -- rows edited after seeding are removed all the same.
 """
 
-from django.db import migrations
+from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
 
@@ -31,10 +31,10 @@ MAINTAINER_ACTOR = ("maintainer", "Maintainer", "human")
 
 def _seed(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     alias = schema_editor.connection.alias
-    AttemptOutcome = apps.get_model("kanban", "AttemptOutcome")
-    VerificationKind = apps.get_model("kanban", "VerificationKind")
-    Actor = apps.get_model("kanban", "Actor")
-    UUIDModel = apps.get_model("kanban", "UUIDModel")
+    AttemptOutcome: type[models.Model] = apps.get_model("kanban", "AttemptOutcome")
+    VerificationKind: type[models.Model] = apps.get_model("kanban", "VerificationKind")
+    Actor: type[models.Model] = apps.get_model("kanban", "Actor")
+    UUIDModel: type[models.Model] = apps.get_model("kanban", "UUIDModel")
 
     for order, (key, label) in enumerate(ATTEMPT_OUTCOMES):
         row, created = AttemptOutcome.objects.using(alias).get_or_create(
@@ -42,7 +42,7 @@ def _seed(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
             defaults={"label": label, "order": order},
         )
         if created:
-            UUIDModel.objects.using(alias).create(attemptoutcome=row)
+            _ = UUIDModel.objects.using(alias).create(attemptoutcome=row)
 
     for order, (key, label) in enumerate(VERIFICATION_KINDS):
         row, created = VerificationKind.objects.using(alias).get_or_create(
@@ -50,7 +50,7 @@ def _seed(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
             defaults={"label": label, "order": order},
         )
         if created:
-            UUIDModel.objects.using(alias).create(verificationkind=row)
+            _ = UUIDModel.objects.using(alias).create(verificationkind=row)
 
     key, label, kind = MAINTAINER_ACTOR
     actor, created = Actor.objects.using(alias).get_or_create(
@@ -58,22 +58,30 @@ def _seed(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
         defaults={"label": label, "kind": kind, "order": 0},
     )
     if created:
-        UUIDModel.objects.using(alias).create(actor=actor)
+        _ = UUIDModel.objects.using(alias).create(actor=actor)
 
 
 def _unseed(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     alias = schema_editor.connection.alias
-    AttemptOutcome = apps.get_model("kanban", "AttemptOutcome")
-    VerificationKind = apps.get_model("kanban", "VerificationKind")
-    Actor = apps.get_model("kanban", "Actor")
+    AttemptOutcome: type[models.Model] = apps.get_model("kanban", "AttemptOutcome")
+    VerificationKind: type[models.Model] = apps.get_model("kanban", "VerificationKind")
+    Actor: type[models.Model] = apps.get_model("kanban", "Actor")
 
-    AttemptOutcome.objects.using(alias).filter(
-        key__in=[key for key, _ in ATTEMPT_OUTCOMES],
-    ).delete()
-    VerificationKind.objects.using(alias).filter(
-        key__in=[key for key, _ in VERIFICATION_KINDS],
-    ).delete()
-    Actor.objects.using(alias).filter(key=MAINTAINER_ACTOR[0]).delete()
+    _ = (
+        AttemptOutcome.objects.using(alias)
+        .filter(
+            key__in=[key for key, _ in ATTEMPT_OUTCOMES],
+        )
+        .delete()
+    )
+    _ = (
+        VerificationKind.objects.using(alias)
+        .filter(
+            key__in=[key for key, _ in VERIFICATION_KINDS],
+        )
+        .delete()
+    )
+    _ = Actor.objects.using(alias).filter(key=MAINTAINER_ACTOR[0]).delete()
 
 
 class Migration(migrations.Migration):

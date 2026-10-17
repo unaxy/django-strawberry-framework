@@ -22,8 +22,8 @@ import apps.kanban.constraints
 
 def _delete_severity_data(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """Delete the ``Severity`` seed rows, cascading their UUID side-rows."""
-    Severity = apps.get_model("kanban", "Severity")
-    Severity.objects.using(schema_editor.connection.alias).all().delete()
+    Severity: type[models.Model] = apps.get_model("kanban", "Severity")
+    _ = Severity.objects.using(schema_editor.connection.alias).all().delete()
 
 
 class Migration(migrations.Migration):

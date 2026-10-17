@@ -6,9 +6,19 @@ Ordering switches to the numeric triple so ``0.0.9`` sorts before ``0.0.16``
 (a lexicographic sort of ``number`` gets this wrong at patch >= 10).
 """
 
+from typing import TYPE_CHECKING
+
 from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
+
+if TYPE_CHECKING:
+
+    class _TargetVersion(models.Model):
+        """The historical ``kanban.TargetVersion`` columns this migration reads."""
+
+        pk: int
+        number: str
 
 
 def _parse_version(number: str) -> tuple[int, int, int]:
@@ -21,11 +31,11 @@ def _parse_version(number: str) -> tuple[int, int, int]:
 
 def _backfill_version_triple(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """Populate ``major``/``minor``/``patch`` from each row's ``number``."""
-    TargetVersion = apps.get_model("kanban", "TargetVersion")
+    TargetVersion: type[_TargetVersion] = apps.get_model("kanban", "TargetVersion")
     manager = TargetVersion.objects.using(schema_editor.connection.alias)
     for row in manager.all():
         major, minor, patch = _parse_version(row.number)
-        manager.filter(pk=row.pk).update(major=major, minor=minor, patch=patch)
+        _ = manager.filter(pk=row.pk).update(major=major, minor=minor, patch=patch)
 
 
 class Migration(migrations.Migration):

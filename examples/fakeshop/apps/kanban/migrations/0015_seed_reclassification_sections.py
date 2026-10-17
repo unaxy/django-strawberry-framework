@@ -25,7 +25,7 @@ the ``PROTECT`` foreign key. The migration therefore declares a no-op reverse
 instead of exposing a reverse function that can only fail.
 """
 
-from django.db import migrations
+from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
 
@@ -39,8 +39,8 @@ NEW_SECTIONS = (
 
 def _seed(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     alias = schema_editor.connection.alias
-    Section = apps.get_model("kanban", "Section")
-    UUIDModel = apps.get_model("kanban", "UUIDModel")
+    Section: type[models.Model] = apps.get_model("kanban", "Section")
+    UUIDModel: type[models.Model] = apps.get_model("kanban", "UUIDModel")
 
     for key, label, order in NEW_SECTIONS:
         row, created = Section.objects.using(alias).get_or_create(
@@ -48,7 +48,7 @@ def _seed(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
             defaults={"label": label, "order": order},
         )
         if created:
-            UUIDModel.objects.using(alias).create(section=row)
+            _ = UUIDModel.objects.using(alias).create(section=row)
 
 
 class Migration(migrations.Migration):

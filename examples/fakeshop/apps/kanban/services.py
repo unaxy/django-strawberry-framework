@@ -442,7 +442,11 @@ def _resolve_by_slug(card_manager: _CardRows, value: object) -> models.Card:
     ``(id, title)`` re-slugifying each title is fine and deterministic.
     """
     target = str(value)
-    for pk, title in card_manager.values_list("id", "title"):
+    rows: django_models.QuerySet[models.Card, tuple[int, str]] = card_manager.values_list(
+        "id",
+        "title",
+    )
+    for pk, title in rows:
         if slugify(title).replace("-", "_") == target:
             return card_manager.get(pk=pk)
     raise KanbanServiceError(
@@ -543,12 +547,12 @@ def _order_or_empty(order: int | None) -> int:
 
 
 def _next_card_item_order(card: models.Card, section: models.Section, using: str | None) -> int:
-    max_order = (
+    totals: dict[str, int | None] = (
         _manager(models.CardItem, using)
         .filter(card=card, section=section)
-        .aggregate(value=Max("order"))["value"]
+        .aggregate(value=Max("order"))
     )
-    return _order_or_empty(max_order) + 1
+    return _order_or_empty(totals["value"]) + 1
 
 
 def append_card_item(
@@ -727,8 +731,11 @@ def move_card_number(card: models.Card, number: int, *, using: str | None = None
         ) from error
     card_manager = _manager(models.Card, using)
     with transaction.atomic(using=using):
-        old_number = card_manager.filter(pk=card.pk).values_list("number", flat=True).first()
-        if old_number is None:
+        stored_numbers: django_models.QuerySet[models.Card, int] = card_manager.filter(
+            pk=card.pk,
+        ).values_list("number", flat=True)
+        old_number = stored_numbers.first()
+        if card.pk is None or old_number is None:
             raise KanbanServiceError(
                 f"Cannot move card pk={card.pk!r}: it has no stored board number.",
                 code="unknown_card",
@@ -760,7 +767,13 @@ def move_card_number(card: models.Card, number: int, *, using: str | None = None
                 .order_by("number")
             )
             delta = -1
-        for neighbor_pk, neighbor_number in list(neighbors.values_list("pk", "number")):
+        neighbor_rows: django_models.QuerySet[models.Card, tuple[int, int]] = (
+            neighbors.values_list(
+                "pk",
+                "number",
+            )
+        )
+        for neighbor_pk, neighbor_number in list(neighbor_rows):
             _ = card_manager.filter(pk=neighbor_pk).update(number=neighbor_number + delta)
         _ = card_manager.filter(pk=card.pk).update(number=requested)
     card.number = requested
@@ -776,9 +789,10 @@ def compact_card_numbers(card: models.Card, *, using: str | None = None) -> None
     """
     using = using if using is not None else _database_alias(card)
     card_manager = _manager(models.Card, using)
-    rows = list(
-        card_manager.filter(number__gt=card.number).order_by("number").values_list("pk", "number"),
+    shifted: django_models.QuerySet[models.Card, tuple[int, int]] = (
+        card_manager.filter(number__gt=card.number).order_by("number").values_list("pk", "number")
     )
+    rows = list(shifted)
     for shifted_pk, shifted_number in rows:
         _ = card_manager.filter(pk=shifted_pk).update(number=shifted_number - 1)
 

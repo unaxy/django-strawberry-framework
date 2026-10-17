@@ -21,6 +21,7 @@ order graph.
 
 from __future__ import annotations
 
+from django.contrib.auth.models import AbstractUser
 from graphql import GraphQLError
 
 from apps.library import models
@@ -71,7 +72,7 @@ class BranchOrder(OrderSet):
         ``test_library_api.py::test_order_check_permission_quiet_for_inactive_field``.
         """
         user = getattr(request, "user", None)
-        if user is None or not getattr(user, "is_staff", False):
+        if not (isinstance(user, AbstractUser) and user.is_staff):
             raise GraphQLError(
                 "staff only",
                 extensions={"code": "ORDER_PERMISSION_DENIED"},
@@ -89,7 +90,7 @@ class BranchOrder(OrderSet):
         ``test_library_api.py::test_order_check_permission_denies_active_related_branch``.
         """
         user = getattr(request, "user", None)
-        if user is None or not getattr(user, "is_staff", False):
+        if not (isinstance(user, AbstractUser) and user.is_staff):
             raise GraphQLError(
                 "hidden shelves",
                 extensions={"code": "ORDER_PERMISSION_DENIED"},

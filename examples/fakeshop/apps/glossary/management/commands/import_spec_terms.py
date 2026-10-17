@@ -269,7 +269,7 @@ class Command(BaseCommand):
 
     def _plan_card(self, repo_root: Path, card: kanban_models.Card) -> CardPlan:
         spec = getattr(card, "spec", None)
-        if spec is None:
+        if not isinstance(spec, kanban_models.SpecDoc):
             raise CommandError(f"Done card {card} has no linked spec doc.")
         spec_path = _spec_path_from_url(spec.url)
         if not spec_path:

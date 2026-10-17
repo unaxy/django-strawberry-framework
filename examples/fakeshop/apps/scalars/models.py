@@ -222,6 +222,10 @@ class NullableScalarSpecimen(models.Model):
     ``test_query/test_scalars_api.py::test_scalars_set_null_ondelete_detaches_partner_in_http_query``.
     """
 
+    # The auto ``id`` primary key, declared for the type checker (django-stubs types
+    # ``Model.pk`` as ``Any``); ``None`` until the row is saved.
+    pk: int | None
+
     label: _NullText = models.TextField(unique=True, null=True, blank=True)
     flag: _NullBool = models.BooleanField(null=True, blank=True)
     score: _NullFloat = models.FloatField(null=True, blank=True)

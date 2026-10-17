@@ -35,6 +35,10 @@ if TYPE_CHECKING:
 class TimeStampedModel(models.Model):
     """Audit timestamps inherited by every glossary model."""
 
+    # The auto ``id`` primary key, declared for the type checker (django-stubs types
+    # ``Model.pk`` as ``Any``); ``None`` until the row is saved.
+    pk: int | None
+
     created_date: _DateTime = models.DateTimeField(auto_now_add=True, editable=False)
     updated_date: _DateTime = models.DateTimeField(auto_now=True, editable=False)
 

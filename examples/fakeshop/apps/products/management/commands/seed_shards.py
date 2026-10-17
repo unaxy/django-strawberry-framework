@@ -105,7 +105,9 @@ class Command(BaseCommand):
     def handle(self, *args: object, count: int, **options: object) -> None:
 
         # Fail fast if the sharded mode isn't active.
-        if "shard_b" not in settings.DATABASES:
+        # basedpyright: django-stubs types every ``django.conf.settings`` attribute ``Any``
+        # (it reads them through ``LazySettings.__getattr__``)
+        if "shard_b" not in settings.DATABASES:  # pyright: ignore[reportAny]
             raise CommandError(
                 "Shard alias `shard_b` not declared in DATABASES. "
                 "Set `FAKESHOP_SHARDED=1` in the environment so config.settings "

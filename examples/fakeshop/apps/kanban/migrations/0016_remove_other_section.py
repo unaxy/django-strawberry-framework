@@ -7,15 +7,24 @@ migration as successful while leaving the retired key in place. The reverse is
 a no-op: a retired lookup is not recreated.
 """
 
-from django.db import migrations
+from typing import TYPE_CHECKING
+
+from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
+
+if TYPE_CHECKING:
+
+    class _Section(models.Model):
+        """The historical ``kanban.Section`` key this migration reads."""
+
+        pk: int
 
 
 def _remove(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     alias = schema_editor.connection.alias
-    Section = apps.get_model("kanban", "Section")
-    CardItem = apps.get_model("kanban", "CardItem")
+    Section: type[_Section] = apps.get_model("kanban", "Section")
+    CardItem: type[models.Model] = apps.get_model("kanban", "CardItem")
 
     other = Section.objects.using(alias).filter(key="other").first()
     if other is None:
@@ -26,7 +35,7 @@ def _remove(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
             "Cannot retire the kanban 'other' section while it still owns "
             f"{remaining} card item(s); reclassify every item before applying migration 0016.",
         )
-    Section.objects.using(alias).filter(pk=other.pk).delete()
+    _ = Section.objects.using(alias).filter(pk=other.pk).delete()
 
 
 class Migration(migrations.Migration):

@@ -39,10 +39,13 @@ def _resolve_date(dt: datetime, info: strawberry.Info[object, object], perm: str
 # ---------------------------------------------------------------------------
 
 
-class CategoryFieldSet(fieldsets.AdvancedFieldSet):
+# basedpyright: ``AdvancedFieldSet`` is the planned surface this dormant module stages; the
+# package's PEP 562 ``__getattr__`` types every name it does not export as ``Any``
+class CategoryFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny]
     """Field-level visibility and computed fields for ``Category``."""
 
-    display_name: str = strawberry.field(description="Computed: {id} - {name}")
+    # basedpyright: strawberry.field's no-resolver overload (the field factory) returns Any
+    display_name: str = strawberry.field(description="Computed: {id} - {name}")  # pyright: ignore[reportAny]
 
     class Meta:
         model = models.Category
@@ -66,7 +69,8 @@ class CategoryFieldSet(fieldsets.AdvancedFieldSet):
         """Computed field: '{id} - {name}'. Visible to all signed-in users."""
         user = _user(info)
         if user and user.is_authenticated:
-            return f"{root.pk} - {root.name}"
+            # basedpyright: django-stubs types ``Model.pk`` as ``Any``
+            return f"{root.pk} - {root.name}"  # pyright: ignore[reportAny]
         return None
 
     def resolve_created_date(
@@ -101,10 +105,13 @@ class CategoryFieldSet(fieldsets.AdvancedFieldSet):
 # ---------------------------------------------------------------------------
 
 
-class ItemFieldSet(fieldsets.AdvancedFieldSet):
+# basedpyright: ``AdvancedFieldSet`` is the planned surface this dormant module stages; the
+# package's PEP 562 ``__getattr__`` types every name it does not export as ``Any``
+class ItemFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny]
     """Field-level visibility and computed fields for ``Item``."""
 
-    display_name: str = strawberry.field(description="Computed: {id} - {name}")
+    # basedpyright: strawberry.field's no-resolver overload (the field factory) returns Any
+    display_name: str = strawberry.field(description="Computed: {id} - {name}")  # pyright: ignore[reportAny]
 
     class Meta:
         model = models.Item
@@ -124,7 +131,8 @@ class ItemFieldSet(fieldsets.AdvancedFieldSet):
         """Computed field: '{id} - {name}'. Visible to all signed-in users."""
         user = _user(info)
         if user and user.is_authenticated:
-            return f"{root.pk} - {root.name}"
+            # basedpyright: django-stubs types ``Model.pk`` as ``Any``
+            return f"{root.pk} - {root.name}"  # pyright: ignore[reportAny]
         return None
 
     def resolve_created_date(
@@ -155,10 +163,13 @@ class ItemFieldSet(fieldsets.AdvancedFieldSet):
 # ---------------------------------------------------------------------------
 
 
-class PropertyFieldSet(fieldsets.AdvancedFieldSet):
+# basedpyright: ``AdvancedFieldSet`` is the planned surface this dormant module stages; the
+# package's PEP 562 ``__getattr__`` types every name it does not export as ``Any``
+class PropertyFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny]
     """Field-level visibility and computed fields for ``Property``."""
 
-    display_name: str = strawberry.field(description="Computed: {id} - {name}")
+    # basedpyright: strawberry.field's no-resolver overload (the field factory) returns Any
+    display_name: str = strawberry.field(description="Computed: {id} - {name}")  # pyright: ignore[reportAny]
 
     class Meta:
         model = models.Property
@@ -171,7 +182,8 @@ class PropertyFieldSet(fieldsets.AdvancedFieldSet):
         """Computed field: '{id} - {name}'. Visible to all signed-in users."""
         user = _user(info)
         if user and user.is_authenticated:
-            return f"{root.pk} - {root.name}"
+            # basedpyright: django-stubs types ``Model.pk`` as ``Any``
+            return f"{root.pk} - {root.name}"  # pyright: ignore[reportAny]
         return None
 
     def resolve_created_date(
@@ -202,10 +214,13 @@ class PropertyFieldSet(fieldsets.AdvancedFieldSet):
 # ---------------------------------------------------------------------------
 
 
-class EntryFieldSet(fieldsets.AdvancedFieldSet):
+# basedpyright: ``AdvancedFieldSet`` is the planned surface this dormant module stages; the
+# package's PEP 562 ``__getattr__`` types every name it does not export as ``Any``
+class EntryFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny]
     """Field-level visibility and computed fields for ``Entry``."""
 
-    display_name: str = strawberry.field(description="Computed: {id} - {value}")
+    # basedpyright: strawberry.field's no-resolver overload (the field factory) returns Any
+    display_name: str = strawberry.field(description="Computed: {id} - {value}")  # pyright: ignore[reportAny]
 
     class Meta:
         model = models.Entry
@@ -218,7 +233,8 @@ class EntryFieldSet(fieldsets.AdvancedFieldSet):
         """Computed field: '{id} - {value}'. Visible to all signed-in users."""
         user = _user(info)
         if user and user.is_authenticated:
-            return f"{root.pk} - {root.value}"
+            # basedpyright: django-stubs types ``Model.pk`` as ``Any``
+            return f"{root.pk} - {root.value}"  # pyright: ignore[reportAny]
         return None
 
     def resolve_created_date(

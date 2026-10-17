@@ -18,8 +18,9 @@ content-type negotiation), which ``TestClient`` exists to abstract away.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, TypeAlias
+import json
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from django.test import Client
 
@@ -38,6 +39,21 @@ JSONObject: TypeAlias = dict[str, Any]  # pyright: ignore[reportExplicitAny]
 JSONValue: TypeAlias = (
     "str | int | float | bool | Sequence[JSONValue] | Mapping[str, JSONValue] | None"
 )
+#: ``json.loads`` typed as the ``object`` a decode returns; ``_json_object`` narrows it.
+_loads: Callable[[bytes], object] = json.loads
+
+
+def _json_object(value: object) -> JSONObject:
+    """Return a decoded JSON value as a ``JSONObject``, failing the test when it is not one."""
+    assert isinstance(value, dict), value
+    # A decoded JSON object has string keys; its values stay the open ``JSONObject`` chain
+    # the live suites subscript, which no check short of a full schema walk can type.
+    return cast("JSONObject", value)
+
+
+def _response_json(response: _MonkeyPatchedWSGIResponse) -> JSONObject:
+    """Decode a live ``/graphql/`` response body as a JSON object."""
+    return _json_object(_loads(response.content))
 
 
 def post_graphql(
@@ -62,7 +78,9 @@ def post_graphql(
         assert_no_errors=False,
         url=url,
     )
-    return result.response
+    # basedpyright: the package's public ``testing.Response.response`` is typed ``Any`` (it
+    # carries whichever ``HttpResponse`` subclass the Django client returned)
+    return result.response  # pyright: ignore[reportAny]
 
 
 def post_graphql_raw(
@@ -95,7 +113,7 @@ def graphql_payload(
     """POST ``query`` to the configured or one-call ``url`` and return parsed JSON."""
     response = post_graphql(query, client=client, variables=variables, url=url)
     assert response.status_code == 200
-    return response.json()
+    return _response_json(response)
 
 
 def assert_graphql_success(
@@ -108,7 +126,7 @@ def assert_graphql_success(
     """POST ``query``, assert HTTP 200 and no GraphQL errors, then return ``data``."""
     payload = graphql_payload(query, client=client, variables=variables, url=url)
     assert "errors" not in payload, payload
-    return payload["data"]
+    return _json_object(payload.get("data"))
 
 
 def assert_graphql_data(
@@ -126,7 +144,7 @@ def assert_graphql_data(
     """
     response = post_graphql(query, client=client, variables=variables, url=url)
     assert response.status_code == 200
-    payload = response.json()
+    payload = _response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"] == expected
+    assert payload.get("data") == expected
     return response

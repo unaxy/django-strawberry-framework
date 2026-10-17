@@ -208,7 +208,8 @@ class GlossaryDocumentType(DjangoType):
 class Query:
     """Glossary root fields."""
 
-    @strawberry.field(graphql_type=list[GlossaryTermType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossaryTermType])  # pyright: ignore[reportAny]
     def all_glossary_terms(
         self,
         info: Info,
@@ -223,7 +224,8 @@ class Query:
             queryset = orders.GlossaryTermOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossaryStatusType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossaryStatusType])  # pyright: ignore[reportAny]
     def all_glossary_statuses(
         self,
         info: Info,
@@ -238,7 +240,8 @@ class Query:
             queryset = orders.GlossaryStatusOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossaryCategoryType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossaryCategoryType])  # pyright: ignore[reportAny]
     def all_glossary_categories(
         self,
         info: Info,
@@ -253,7 +256,8 @@ class Query:
             queryset = orders.GlossaryCategoryOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossaryCategoryMembershipType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossaryCategoryMembershipType])  # pyright: ignore[reportAny]
     def all_glossary_category_memberships(
         self,
         info: Info,
@@ -268,7 +272,8 @@ class Query:
             queryset = orders.GlossaryCategoryMembershipOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossaryAliasType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossaryAliasType])  # pyright: ignore[reportAny]
     def all_glossary_aliases(
         self,
         info: Info,
@@ -283,7 +288,8 @@ class Query:
             queryset = orders.GlossaryAliasOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossaryTermLinkKindType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossaryTermLinkKindType])  # pyright: ignore[reportAny]
     def all_glossary_term_link_kinds(
         self,
         info: Info,
@@ -298,7 +304,8 @@ class Query:
             queryset = orders.GlossaryTermLinkKindOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossaryTermLinkType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossaryTermLinkType])  # pyright: ignore[reportAny]
     def all_glossary_term_links(
         self,
         info: Info,
@@ -313,7 +320,8 @@ class Query:
             queryset = orders.GlossaryTermLinkOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossarySpecMentionType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossarySpecMentionType])  # pyright: ignore[reportAny]
     def all_glossary_spec_mentions(
         self,
         info: Info,
@@ -328,7 +336,8 @@ class Query:
             queryset = orders.GlossarySpecMentionOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossarySourceLinkType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossarySourceLinkType])  # pyright: ignore[reportAny]
     def all_glossary_source_links(
         self,
         info: Info,
@@ -343,7 +352,8 @@ class Query:
             queryset = orders.GlossarySourceLinkOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[GlossaryDocumentType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GlossaryDocumentType])  # pyright: ignore[reportAny]
     def all_glossary_documents(
         self,
         info: Info,

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Count, Max, Model
+from django.db.models import Count, Max, Model, QuerySet
 from django.db.models.signals import (
     m2m_changed,
     post_delete,
@@ -221,12 +221,10 @@ def _validate_card_status_transition(
     old_key = _stored_card_status_key(instance.pk, using)
     if old_key is None:
         return
-    new_key = (
-        _manager(models.Status, using)
-        .filter(pk=instance.status_id)
-        .values_list("key", flat=True)
-        .first()
+    new_keys: QuerySet[models.Status, str] = (
+        _manager(models.Status, using).filter(pk=instance.status_id).values_list("key", flat=True)
     )
+    new_key = new_keys.first()
     if new_key is None or new_key == old_key:
         return
     if (old_key, new_key) not in STATUS_TRANSITIONS:
@@ -351,12 +349,13 @@ def _sync_card_order_after_insert(card: models.Card, using: str | None) -> None:
     card_manager = _manager(models.Card, using)
     try:
         with transaction.atomic(using=using):
-            neighbors = list(
+            neighbor_rows: QuerySet[models.Card, tuple[int, int]] = (
                 card_manager.filter(number__gte=requested_number)
                 .exclude(pk=card.pk)
                 .order_by("-number")
-                .values_list("pk", "number"),
+                .values_list("pk", "number")
             )
+            neighbors = list(neighbor_rows)
             for neighbor_pk, neighbor_number in neighbors:
                 _ = card_manager.filter(pk=neighbor_pk).update(number=neighbor_number + 1)
             _ = card_manager.filter(pk=card.pk).update(number=requested_number)

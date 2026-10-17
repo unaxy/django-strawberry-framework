@@ -8,14 +8,27 @@ does not exist yet). The backfill maps ``is_current=True`` -> ``current`` and
 ``planned``.
 """
 
+from typing import TYPE_CHECKING
+
 from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.migrations.state import StateApps
 
+if TYPE_CHECKING:
+    from django.db.models.fields.related_descriptors import ManyRelatedManager
+
+    class _TrackedPath(models.Model):
+        """The historical ``kanban.TrackedPath`` columns this migration reads."""
+
+        pk: int
+        is_current: bool
+        state: str
+        cards: ManyRelatedManager[models.Model]
+
 
 def _backfill_state(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """Derive ``state`` from the old ``is_current`` boolean and card links."""
-    TrackedPath = apps.get_model("kanban", "TrackedPath")
+    TrackedPath: type[_TrackedPath] = apps.get_model("kanban", "TrackedPath")
     manager = TrackedPath.objects.using(schema_editor.connection.alias)
     for row in manager.all():
         if row.is_current:
@@ -24,15 +37,15 @@ def _backfill_state(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) ->
             state = "historical"
         else:
             state = "planned"
-        manager.filter(pk=row.pk).update(state=state)
+        _ = manager.filter(pk=row.pk).update(state=state)
 
 
 def _restore_is_current(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """Reverse: ``is_current`` = whether ``state`` is ``current``."""
-    TrackedPath = apps.get_model("kanban", "TrackedPath")
+    TrackedPath: type[_TrackedPath] = apps.get_model("kanban", "TrackedPath")
     manager = TrackedPath.objects.using(schema_editor.connection.alias)
     for row in manager.all():
-        manager.filter(pk=row.pk).update(is_current=(row.state == "current"))
+        _ = manager.filter(pk=row.pk).update(is_current=(row.state == "current"))
 
 
 class Migration(migrations.Migration):

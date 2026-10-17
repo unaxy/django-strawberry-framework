@@ -164,6 +164,10 @@ def manager(
 class TimeStampedModel(models.Model):
     """Audit timestamps inherited by every kanban model."""
 
+    # The auto ``id`` primary key, declared for the type checker (django-stubs types
+    # ``Model.pk`` as ``Any``); ``None`` until the row is saved.
+    pk: int | None
+
     created_date: _DateTime = models.DateTimeField(auto_now_add=True, editable=False)
     updated_date: _DateTime = models.DateTimeField(auto_now=True, editable=False)
 
@@ -790,9 +794,10 @@ class CardReference(TimeStampedModel):
             using = kwargs.get("using")
             if using:
                 manager = manager.db_manager(using)
-            last = manager.filter(source_card=self.source_card).aggregate(
-                models.Max("order"),
-            )["order__max"]
+            totals: dict[str, int | None] = manager.filter(
+                source_card=self.source_card,
+            ).aggregate(models.Max("order"))
+            last = totals["order__max"]
             self.order = 0 if last is None else last + 1
         super().save(**kwargs)
 

@@ -55,7 +55,8 @@ def _lookup(model: type[_Lookup], key: str, **defaults: object) -> _Lookup:
 
 
 def _next_order(manager: Manager[Model], **scope: object) -> int:
-    current = manager.filter(**scope).aggregate(top=Max("order"))["top"]
+    totals: dict[str, int | None] = manager.filter(**scope).aggregate(top=Max("order"))
+    current = totals["top"]
     return 0 if current is None else current + 1
 
 
@@ -172,7 +173,8 @@ def make_tracked_path(path: str | None = None, **fields: object) -> models.Track
 
 
 def _next_card_number() -> int:
-    current = models.Card.objects.aggregate(top=Max("number"))["top"]
+    totals: dict[str, int | None] = models.Card.objects.aggregate(top=Max("number"))
+    current = totals["top"]
     return 1 if current is None else current + 1
 
 

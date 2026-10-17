@@ -28,8 +28,8 @@ import apps.kanban.constraints
 
 def _delete_planning_state_data(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """Delete the ``PlanningState`` seed rows, cascading their UUID side-rows."""
-    PlanningState = apps.get_model("kanban", "PlanningState")
-    PlanningState.objects.using(schema_editor.connection.alias).all().delete()
+    PlanningState: type[models.Model] = apps.get_model("kanban", "PlanningState")
+    _ = PlanningState.objects.using(schema_editor.connection.alias).all().delete()
 
 
 class Migration(migrations.Migration):

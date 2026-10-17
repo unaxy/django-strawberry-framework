@@ -73,15 +73,15 @@ class TenantShelfSerializer(serializers.ModelSerializer[Shelf]):
         model = Shelf
         fields = ("code", "branch")
 
-    # basedpyright: verbatim forward to ModelSerializer.__init__; object fails its typed params
-    def __init__(self, *args: Any, tenant: str | None = None, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
+    def __init__(self, *args: object, tenant: str | None = None, **kwargs: object) -> None:
         """Bind the runtime ``tenant``, which every construction must supply."""
         # ``tenant`` is required: a no-arg construction (DRF's default ``.fields``
         # discovery) raises here, forcing the get_serializer_for_schema() override.
         if tenant is None:
             raise TypeError("TenantShelfSerializer requires a 'tenant' keyword argument.")
         self.tenant = tenant
-        super().__init__(*args, **kwargs)
+        # basedpyright: verbatim forward; ModelSerializer.__init__ checks each argument when it runs
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
     @override
     def validate(self, attrs: dict[str, object]) -> dict[str, object]:
@@ -208,15 +208,14 @@ class TargetedShelfSerializer(serializers.ModelSerializer[Shelf]):
 
     def __init__(
         self,
-        # basedpyright: verbatim forward to ModelSerializer.__init__; object fails its typed params
-        *args: Any,  # pyright: ignore[reportExplicitAny]
+        *args: object,
         target_model: type[Model] | None = None,
-        # basedpyright: verbatim forward to ModelSerializer.__init__; object fails its typed params
-        **kwargs: Any,  # pyright: ignore[reportExplicitAny]
+        **kwargs: object,
     ) -> None:
         """Remember the relation target whose decode the generated ``target`` field exercises."""
         self._target_model = target_model
-        super().__init__(*args, **kwargs)
+        # basedpyright: verbatim forward; ModelSerializer.__init__ checks each argument when it runs
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
     # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
     class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -285,15 +284,14 @@ class NoteShelfSerializer(serializers.ModelSerializer[Shelf]):
 
     def __init__(
         self,
-        # basedpyright: verbatim forward to ModelSerializer.__init__; object fails its typed params
-        *args: Any,  # pyright: ignore[reportExplicitAny]
+        *args: object,
         note_allow_null: bool | None = None,
-        # basedpyright: verbatim forward to ModelSerializer.__init__; object fails its typed params
-        **kwargs: Any,  # pyright: ignore[reportExplicitAny]
+        **kwargs: object,
     ) -> None:
         """Remember the nullability the generated write-only ``note`` field carries."""
         self._note_allow_null = note_allow_null
-        super().__init__(*args, **kwargs)
+        # basedpyright: verbatim forward; ModelSerializer.__init__ checks each argument when it runs
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
     # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
     class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -813,9 +811,11 @@ class RenamedPatronProfileSerializer(serializers.ModelSerializer[PatronProfile])
         fields: tuple[str, ...] = ("patron", "address_2", "fav")
 
 
-def _repoint_to_another_genre(genre: Genre) -> None:
+def _repoint_to_another_genre(genre: object) -> None:
     """Rename ``genre`` IN MEMORY to the first other genre's name (the object stays the same)."""
-    other = Genre.objects.exclude(pk=genre.pk).order_by("pk").first()
+    if not isinstance(genre, Genre):
+        raise TypeError(f"expected the validated favorite_genre, got {type(genre).__name__}")
+    other = Genre.objects.exclude(name=genre.name).order_by("pk").first()
     if other is not None:
         genre.name = other.name
 
@@ -831,8 +831,7 @@ class GenreReplacingPatronProfileSerializer(PatronProfileSerializer):
     """
 
     @override
-    # basedpyright: DRF hands create() an untyped validated_data dict; Any matches its stub
-    def create(self, validated_data: dict[str, Any]) -> PatronProfile:  # pyright: ignore[reportExplicitAny]
+    def create(self, validated_data: dict[str, object]) -> PatronProfile:
         _repoint_to_another_genre(validated_data["favorite_genre"])
         return super().create(validated_data)
 
@@ -846,8 +845,7 @@ class GenreReplacingRenamedPatronProfileSerializer(RenamedPatronProfileSerialize
     """
 
     @override
-    # basedpyright: DRF hands create() an untyped validated_data dict; Any matches its stub
-    def create(self, validated_data: dict[str, Any]) -> PatronProfile:  # pyright: ignore[reportExplicitAny]
+    def create(self, validated_data: dict[str, object]) -> PatronProfile:
         _repoint_to_another_genre(validated_data["favorite_genre"])
         return super().create(validated_data)
 

@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 import strawberry
 from django.conf import settings
+from django.contrib.auth.models import AbstractUser
 from django.db.models import Manager, Prefetch, QuerySet
 from django.forms import BaseForm
 from rest_framework.serializers import ModelSerializer as DRFModelSerializer
@@ -119,7 +120,7 @@ def _user_is_staff(info: Info) -> bool:
     context = getattr(info, "context", None)
     request = getattr(context, "request", None) or context
     user = getattr(request, "user", None)
-    return user is not None and getattr(user, "is_staff", False)
+    return isinstance(user, AbstractUser) and user.is_staff
 
 
 @strawberry.interface
@@ -323,7 +324,8 @@ class GenreType(DjangoType):
 class BranchType(DjangoType):
     """Branch parent with reverse FK shelves."""
 
-    @strawberry.field(graphql_type=list[ShelfType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[ShelfType])  # pyright: ignore[reportAny]
     @staticmethod
     def shelves(root: strawberry.Parent[models.Branch]) -> list[models.Shelf]:
         """Consumer-authored relation resolver used by HTTP override tests."""
@@ -590,8 +592,10 @@ class PatronProfileType(DjangoType):
     window, because ``AnnotationManager`` returns a distinct queryset.
     """
 
-    address_2: str = strawberry.field(name="secondaryAddress")
-    postal_code: str = strawberry.field(name="secondary_address")
+    # basedpyright: strawberry.field's no-resolver overload (the field factory) returns Any
+    address_2: str = strawberry.field(name="secondaryAddress")  # pyright: ignore[reportAny]
+    # basedpyright: strawberry.field's no-resolver overload (the field factory) returns Any
+    postal_code: str = strawberry.field(name="secondary_address")  # pyright: ignore[reportAny]
 
     class Meta:
         model = models.PatronProfile
@@ -1074,7 +1078,8 @@ class Query:
         resolver=_branch_notes_over_unrelated_child_resolver,
     )
 
-    @strawberry.field(graphql_type=list[Named])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[Named])  # pyright: ignore[reportAny]
     def named_library_records(
         self,
         info: strawberry.Info,
@@ -1102,7 +1107,8 @@ class Query:
         records.extend(PatronType.get_queryset(models.Patron.objects.order_by("id"), info))
         return records
 
-    @strawberry.field(graphql_type=list[BranchType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[BranchType])  # pyright: ignore[reportAny]
     def all_library_branches(
         self,
         info: strawberry.Info,
@@ -1117,7 +1123,8 @@ class Query:
             queryset = orders.BranchOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[BranchType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[BranchType])  # pyright: ignore[reportAny]
     def all_library_branches_eager_eval(
         self,
         info: strawberry.Info,
@@ -1136,7 +1143,8 @@ class Query:
             return []
         return queryset
 
-    @strawberry.field(graphql_type=list[MembershipCardType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[MembershipCardType])  # pyright: ignore[reportAny]
     def all_library_cards_projected(self) -> QuerySet[models.MembershipCard]:
         """Dogfood: consumer ``.only()`` vs a planned ``select_related``.
 
@@ -1151,7 +1159,8 @@ class Query:
         """
         return models.MembershipCard.objects.order_by("id").only("barcode")
 
-    @strawberry.field(graphql_type=list[MembershipCardType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[MembershipCardType])  # pyright: ignore[reportAny]
     def all_library_cards_deferred(self) -> QuerySet[models.MembershipCard]:
         """Dogfood, defer flavor: ``.defer("patron")`` blocks the same join.
 
@@ -1163,7 +1172,8 @@ class Query:
         """
         return models.MembershipCard.objects.order_by("id").defer("patron")
 
-    @strawberry.field(graphql_type=list[PatronType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[PatronType])  # pyright: ignore[reportAny]
     def all_library_carded_patrons(self) -> QuerySet[models.Patron]:
         """Dogfood: a consumer JOIN across the reverse one-to-one ``card``.
 
@@ -1172,17 +1182,20 @@ class Query:
         """
         return models.Patron.objects.select_related("card").order_by("id")
 
-    @strawberry.field(graphql_type=list[PrintingType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[PrintingType])  # pyright: ignore[reportAny]
     def all_library_published_printings(self) -> QuerySet[models.Printing]:
         """Dogfood: a two-hop consumer JOIN, ``edition`` then its ``publisher``."""
         return models.Printing.objects.select_related("edition__publisher").order_by("id")
 
-    @strawberry.field(graphql_type=list[LoanType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[LoanType])  # pyright: ignore[reportAny]
     def all_library_patron_loans(self) -> QuerySet[models.Loan]:
         """Dogfood: a consumer JOIN on ``patron``, which ``LoanType`` hints to skip."""
         return models.Loan.objects.select_related("patron").order_by("id")
 
-    @strawberry.field(graphql_type=list[ShelfType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[ShelfType])  # pyright: ignore[reportAny]
     def all_library_shelves(
         self,
         info: strawberry.Info,
@@ -1197,7 +1210,8 @@ class Query:
             queryset = orders.ShelfOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[CirculationDeskType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[CirculationDeskType])  # pyright: ignore[reportAny]
     def all_library_circulation_desks_filtered(
         self,
         info: strawberry.Info,
@@ -1218,7 +1232,8 @@ class Query:
             queryset = filters.CirculationDeskFilter.apply_sync(filter, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[ShelfLabelType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[ShelfLabelType])  # pyright: ignore[reportAny]
     def all_library_shelf_labels_filtered(
         self,
         info: strawberry.Info,
@@ -1235,7 +1250,8 @@ class Query:
             queryset = filters.ShelfLabelFilter.apply_sync(filter, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[BookType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[BookType])  # pyright: ignore[reportAny]
     def all_library_books(
         self,
         info: strawberry.Info,
@@ -1250,14 +1266,16 @@ class Query:
             queryset = orders.BookOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[BookType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[BookType])  # pyright: ignore[reportAny]
     def all_library_prefetched_books(self) -> QuerySet[models.Book]:
         """Return books with the shelf and genres relations pre-loaded by the consumer."""
         return (
             models.Book.objects.select_related("shelf").prefetch_related("genres").order_by("id")
         )
 
-    @strawberry.field(graphql_type=list[GenreType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GenreType])  # pyright: ignore[reportAny]
     def all_library_genres_consumer_descendant_prefetch(self) -> QuerySet[models.Genre]:
         """Return genres carrying a consumer descendant ``books__loans`` prefetch."""
         # Collision surface: a consumer descendant prefetch
@@ -1266,7 +1284,8 @@ class Query:
         # raise "'books' lookup was already seen with a different queryset".
         return models.Genre.objects.prefetch_related("books__loans").order_by("id")
 
-    @strawberry.field(graphql_type=list[GenreType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GenreType])  # pyright: ignore[reportAny]
     def all_library_genres_consumer_exact_plus_descendant_prefetch(self) -> QuerySet[models.Genre]:
         """Return genres carrying consumer ``books`` and ``books__loans`` prefetches."""
         # The consumer declares BOTH the exact relation
@@ -1274,7 +1293,8 @@ class Query:
         # with the optimizer plan without colliding.
         return models.Genre.objects.prefetch_related("books", "books__loans").order_by("id")
 
-    @strawberry.field(graphql_type=list[NullabilityOverrideBookType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[NullabilityOverrideBookType])  # pyright: ignore[reportAny]
     def all_library_nullability_override_books(self) -> QuerySet[models.Book]:
         """Return books whose ``subtitle`` is non-null, matching the ``String!`` override."""
         # ``required_overrides = ("subtitle",)`` declares ``subtitle`` as
@@ -1284,7 +1304,8 @@ class Query:
         # deterministic responses (spec-029 / Edge cases).
         return models.Book.objects.exclude(subtitle__isnull=True).order_by("id")
 
-    @strawberry.field(graphql_type=list[GenreType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[GenreType])  # pyright: ignore[reportAny]
     def all_library_genres(
         self,
         info: strawberry.Info,
@@ -1315,7 +1336,8 @@ class Query:
     nodes: list[relay.Node | None] = DjangoNodesField()
     genre: GenreType | None = DjangoNodeField(GenreType)
 
-    @strawberry.field(graphql_type=list[PatronType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[PatronType])  # pyright: ignore[reportAny]
     def all_library_patrons(
         self,
         info: strawberry.Info,
@@ -1330,17 +1352,20 @@ class Query:
             queryset = orders.PatronOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    @strawberry.field(graphql_type=list[PublicPatronType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[PublicPatronType])  # pyright: ignore[reportAny]
     def all_library_public_patrons(self) -> QuerySet[models.Patron]:
         """Root field for the ``Meta.exclude`` deny-list view (see ``PublicPatronType``)."""
         return models.Patron.objects.order_by("id")
 
-    @strawberry.field(graphql_type=list[MembershipCardType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[MembershipCardType])  # pyright: ignore[reportAny]
     def all_library_membership_cards(self) -> QuerySet[models.MembershipCard]:
         """Return every membership card ordered by id."""
         return models.MembershipCard.objects.order_by("id")
 
-    @strawberry.field(graphql_type=list[LoanType])
+    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+    @strawberry.field(graphql_type=list[LoanType])  # pyright: ignore[reportAny]
     def all_library_loans(
         self,
         info: strawberry.Info,
@@ -1707,7 +1732,7 @@ class CreateShelfViaSchemaHookSerializer(SerializerMutation):
     @override
     def get_serializer_kwargs(
         self,
-        info: Info,
+        info: Info[object, object],
         *,
         data: Mapping[str, object],
         hook_context: SerializerHookContext,
