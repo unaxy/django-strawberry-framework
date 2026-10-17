@@ -78,7 +78,18 @@ from django_strawberry_framework.mutations import resolvers as mutation_resolver
 from django_strawberry_framework.orders import Ordering, OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import querysets as querysets_module
-from django_strawberry_framework.utils._narrowing import is_exact_dict
+from django_strawberry_framework.utils._narrowing import (
+    instance_dict,
+    is_dict,
+    is_exact_dict,
+    is_iterable,
+    is_list,
+    is_list_or_tuple,
+    list_of,
+    read_attr,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
     queryset_fields,
@@ -149,6 +160,7 @@ from django_strawberry_framework.utils.querysets import (
     visible_related_object,
     visible_related_objects,
 )
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.write_transaction import write_pipeline
 from tests._django_private import (
     has_constructor_args,
@@ -161,6 +173,7 @@ from tests._idioms import (
     UnreadableStateQuerySet,
     is_object_list,
     module_binding,
+    saved_pk,
 )
 
 if TYPE_CHECKING:
@@ -175,7 +188,7 @@ def test_safe_class_name_falls_back_for_non_string_metaclass_name_metadata() -> 
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 return 42
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _MalformedName(metaclass=_NonStringNameMeta):
         pass
@@ -200,6 +213,17 @@ def _where_leaf(query: SqlQuery) -> "Lookup[object]":
     leaf = query.where.children[0]
     assert isinstance(leaf, Lookup)
     return leaf
+
+
+def _compiled_sql(query: SqlQuery) -> tuple[str, tuple[str | int, ...]]:
+    """``query`` compiled against the default connection: its SQL text and params."""
+    compiler = require_instance(object_result(query.get_compiler, using="default"), SQLCompiler)
+    return compiler.as_sql()
+
+
+def _rhs(query: SqlQuery) -> object:
+    """The right-hand side of ``query``'s first ``WHERE`` lookup (django-stubs types it Any)."""
+    return read_attr(_where_leaf(query), "rhs")
 
 
 def _extra_where_lists(query: SqlQuery) -> tuple[list[str], list[object]]:
@@ -343,8 +367,8 @@ def test_relation_write_visibility_boundary_is_controlled_by_type_registration()
     registry.clear()
     category = Category.objects.create(name="VisibilityBoundary")
     try:
-        assert visible_related_objects(Category, [category.pk], info=None) == {
-            str(category.pk): category.pk,
+        assert visible_related_objects(Category, [saved_pk(category)], info=None) == {
+            str(saved_pk(category)): saved_pk(category),
         }
 
         class CategoryType(DjangoType):
@@ -360,10 +384,10 @@ def test_relation_write_visibility_boundary_is_controlled_by_type_registration()
                 queryset: models.QuerySet[Category],
                 info: object,
             ) -> models.QuerySet[Category]:
-                return queryset.exclude(pk=category.pk)
+                return queryset.exclude(pk=saved_pk(category))
 
         del CategoryType
-        assert visible_related_objects(Category, [category.pk], info=None) == {}
+        assert visible_related_objects(Category, [saved_pk(category)], info=None) == {}
     finally:
         registry.clear()
 
@@ -949,7 +973,7 @@ def test_a_subclass_result_with_a_pending_deferred_filter_seals_with_it_baked() 
     hook = _sync_hook_type(result)
     sealed = apply_type_visibility_sync(hook, Category.objects.all(), info=None)
     assert type(sealed) is models.QuerySet
-    sql_str, params = sealed.query.get_compiler(using="default").as_sql()
+    sql_str, params = _compiled_sql(sealed.query)
     assert "name" in sql_str
     assert "later" in params
 
@@ -973,7 +997,7 @@ def test_exact_queryset_pending_deferred_filter_is_resolved() -> None:
     # The candidate is never mutated -- the pending flag is left exactly as it was.
     assert result.__dict__.get("_deferred_filter") == (False, (), {"name": "later"})
     assert sealed is not None
-    sql_str, params = sealed.query.get_compiler(using="default").as_sql()
+    sql_str, params = _compiled_sql(sealed.query)
     assert "name" in sql_str
     assert "later" in params
 
@@ -1058,7 +1082,7 @@ def test_deferred_filter_never_dispatches_instance_shadowed_inplace() -> None:
     assert dispatched == []
     assert defect is None
     assert sealed is not None
-    sql_str, params = sealed.query.get_compiler(using="default").as_sql()
+    sql_str, params = _compiled_sql(sealed.query)
     assert "name" in sql_str
     assert "later" in params
 
@@ -1233,18 +1257,20 @@ def test_a_pending_exclude_is_baked_negated_exactly_as_django_resolves_it(
     its pending state before the seal ran.
     """
     seed_data(1)
-    name = Category.objects.order_by("pk").values_list("name", flat=True).first()
-    assert name is not None
+    name = require_instance(
+        object_result(Category.objects.order_by("pk").values_list("name", flat=True).first),
+        str,
+    )
     candidate = _pending_exclude(queryset_cls, name)
     oracle = _pending_exclude(queryset_cls, name)
     assert candidate.__dict__["_deferred_filter"] == (True, (), {"name": name})
     rebuilt = rebuild(candidate)
-    rebuilt_sql = rebuilt.query.get_compiler(using="default").as_sql()
-    assert rebuilt_sql == oracle.query.get_compiler(using="default").as_sql()
+    rebuilt_sql = _compiled_sql(rebuilt.query)
+    assert rebuilt_sql == _compiled_sql(oracle.query)
     assert "NOT" in rebuilt_sql[0]
     expected = sorted(Category.objects.exclude(name=name).values_list("pk", flat=True))
     assert expected
-    assert sorted(row.pk for row in _rows_of(Category, rebuilt)) == expected
+    assert sorted(saved_pk(row) for row in _rows_of(Category, rebuilt)) == expected
 
 
 @pytest.mark.django_db
@@ -1433,7 +1459,7 @@ def test_hostile_foreign_query_type_name_cannot_escape_typed_defect() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name in {"__name__", "__qualname__", "__module__"}:
                 raise RuntimeError("hostile type-name read")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _HostileQuery(sql.Query, metaclass=_ExplodingMeta):
         pass
@@ -1453,7 +1479,7 @@ def test_hostile_manager_routing_metadata_cannot_escape_coercion_boundary() -> N
         def __getattribute__(self, name: str) -> object:
             if name == "_db":
                 raise RuntimeError("hostile manager routing read")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     manager = _HostileManager()
     manager.model = Category
@@ -1701,15 +1727,15 @@ def test_hostile_prefetch_synthetic_row_never_materializes() -> None:
     class _HostileItemQS(models.QuerySet[Item]):
         @override
         def _fetch_all(self) -> None:  # never dispatched after sealing
-            self._result_cache = [Item(name="SYNTHETIC-HIDDEN", category_id=category.pk)]
+            self._result_cache = [Item(name="SYNTHETIC-HIDDEN", category_id=saved_pk(category))]
 
     hostile = _HostileItemQS(model=Item)
-    source = Category.objects.filter(pk=category.pk).prefetch_related(
+    source = Category.objects.filter(pk=saved_pk(category)).prefetch_related(
         Prefetch("items", queryset=hostile, to_attr="pf"),
     )
     sealed = apply_type_visibility_sync(_identity_hook_type(), source, info=None)
     (materialized,) = list(sealed)
-    prefetched: object = vars(materialized)["pf"]  # Prefetch(to_attr=...) sets it per row
+    prefetched = instance_dict(materialized)["pf"]  # Prefetch(to_attr=...) sets it per row
     assert is_object_list(prefetched)
     assert [item.name if isinstance(item, Item) else item for item in prefetched] == ["item-real"]
 
@@ -2237,8 +2263,9 @@ def test_shadowed_leaf_as_sql_never_dispatches() -> None:
     source = Category.objects.filter(name="keep")
     str(source.query)
     leaf = _where_leaf(source.query)
-    leaf.rhs = Value("keep")
-    leaf.rhs.__dict__["as_sql"] = _spy_as_sql
+    rhs = Value("keep")
+    leaf.rhs = rhs
+    vars(rhs)["as_sql"] = _spy_as_sql
     sealed, defect = _seal_or_defect(source, Category, None)
     assert sealed is None
     assert defect == ("untrusted", "where clause shadows the 'as_sql' method")
@@ -2368,7 +2395,7 @@ def test_lookup_direct_rhs_sequence_members_are_walked() -> None:
     """
     source = Category.objects.filter(pk__in=[1, 2])
     str(source.query)
-    assert type(_where_leaf(source.query).rhs) is list
+    assert type(_rhs(source.query)) is list
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert type(sealed) is models.QuerySet
@@ -2394,7 +2421,7 @@ def test_lookup_direct_rhs_enum_member_seals() -> None:
 
     source = Category.objects.filter(name=_SealChoices.KEEP)
     str(source.query)
-    assert type(_where_leaf(source.query).rhs) is _SealChoices
+    assert type(_rhs(source.query)) is _SealChoices
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert type(sealed) is models.QuerySet
@@ -2420,11 +2447,11 @@ def test_lookup_direct_rhs_date_subclass_normalizes_to_exact_date() -> None:
             return "1999-12-31"
 
     source = Category.objects.filter(created_date__date=_LoudDate(2020, 1, 2))
-    assert type(_where_leaf(source.query).rhs) is _LoudDate
+    assert type(_rhs(source.query)) is _LoudDate
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert sealed is not None
-    sealed_rhs = _where_leaf(sealed.query).rhs
+    sealed_rhs = _rhs(sealed.query)
     assert type(sealed_rhs) is datetime.date
     assert sealed_rhs == datetime.date(2020, 1, 2)
     assert fired == []
@@ -2433,7 +2460,7 @@ def test_lookup_direct_rhs_date_subclass_normalizes_to_exact_date() -> None:
     assert sealed.query.sql_with_params() == expected.query.sql_with_params()
     assert fired == []
     # The candidate keeps its own value: normalization applies to the sealed query only.
-    assert type(_where_leaf(source.query).rhs) is _LoudDate
+    assert type(_rhs(source.query)) is _LoudDate
 
 
 def test_lookup_direct_rhs_str_subclass_normalizes_to_exact_str() -> None:
@@ -2448,11 +2475,11 @@ def test_lookup_direct_rhs_str_subclass_normalizes_to_exact_str() -> None:
         KEEP = "keep", "Keep"
 
     source = Category.objects.filter(name=_NormChoices.KEEP)
-    assert type(_where_leaf(source.query).rhs) is _NormChoices
+    assert type(_rhs(source.query)) is _NormChoices
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert sealed is not None
-    sealed_rhs = _where_leaf(sealed.query).rhs
+    sealed_rhs = _rhs(sealed.query)
     assert type(sealed_rhs) is str
     assert sealed_rhs == "keep"
 
@@ -2494,7 +2521,7 @@ def test_lookup_direct_rhs_property_shadowed_subclass_normalizes_safely() -> Non
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert sealed is not None
-    sealed_rhs = _where_leaf(sealed.query).rhs
+    sealed_rhs = _rhs(sealed.query)
     assert type(sealed_rhs) is datetime.date
     assert sealed_rhs == datetime.date(2020, 1, 2)
     assert fired == []
@@ -2581,7 +2608,8 @@ def test_lookup_direct_rhs_every_plain_data_base_normalizes_to_its_exact_type() 
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert sealed is not None
-    sealed_rhs = _where_leaf(sealed.query).rhs
+    sealed_rhs = _rhs(sealed.query)
+    assert is_list_or_tuple(sealed_rhs)
     assert [type(item) for item in sealed_rhs] == expected_types
     assert sealed_rhs[:11] == members[:11]
     assert sealed_rhs[11] == "keep"
@@ -2856,9 +2884,9 @@ def test_deferred_filter_bake_leaves_candidate_unmutated_and_is_repeatable() -> 
     assert defect_two is None
     assert result.__dict__.get("_deferred_filter") == (False, (), {"name": "later"})
     assert sealed_one is not None
-    sql_one, params_one = sealed_one.query.get_compiler(using="default").as_sql()
+    sql_one, params_one = _compiled_sql(sealed_one.query)
     assert sealed_two is not None
-    sql_two, params_two = sealed_two.query.get_compiler(using="default").as_sql()
+    sql_two, params_two = _compiled_sql(sealed_two.query)
     assert sql_one == sql_two
     assert list(params_one) == list(params_two)
     # Exactly one "later" parameter -- the predicate was baked once, not accumulated.
@@ -3107,8 +3135,9 @@ def test_dynamic_as_vendor_shadow_never_dispatches() -> None:
     source = Category.objects.filter(name="keep")
     str(source.query)
     leaf = _where_leaf(source.query)
-    leaf.rhs = Value("keep")
-    leaf.rhs.__dict__["as_sqlite"] = _spy_as_sqlite
+    rhs = Value("keep")
+    leaf.rhs = rhs
+    vars(rhs)["as_sqlite"] = _spy_as_sqlite
     sealed, defect = _seal_or_defect(source, Category, None)
     assert sealed is None
     assert defect == ("untrusted", "where clause shadows the 'as_sqlite' compiler method")
@@ -3441,7 +3470,7 @@ def _filtered_relation_join() -> tuple[models.QuerySet[Category], str, BaseTable
     frq = Category.objects.annotate(
         vi=FilteredRelation("items", condition=Q(items__name="keep")),
     ).filter(vi__name="keep")
-    frq.query.get_compiler(using="default").as_sql()  # populate alias_map + resolved_condition
+    _compiled_sql(frq.query)  # populate alias_map + resolved_condition
     for alias, join in frq.query.alias_map.items():
         if getattr(join, "filtered_relation", None) is not None:
             return frq, alias, join
@@ -3451,11 +3480,11 @@ def _filtered_relation_join() -> tuple[models.QuerySet[Category], str, BaseTable
 def test_legit_filtered_relation_seals_byte_identical() -> None:
     """A legitimate ``FilteredRelation`` query seals and compiles to identical SQL."""
     frq, _alias, _join = _filtered_relation_join()
-    expected_sql, expected_params = frq.query.get_compiler(using="default").as_sql()
+    expected_sql, expected_params = _compiled_sql(frq.query)
     sealed, defect = _seal_or_defect(frq, Category, None)
     assert defect is None
     assert sealed is not None
-    got_sql, got_params = sealed.query.get_compiler(using="default").as_sql()
+    got_sql, got_params = _compiled_sql(sealed.query)
     assert got_sql == expected_sql
     assert list(got_params) == list(expected_params)
 
@@ -3541,7 +3570,7 @@ def test_module_spoofing_metaclass_is_not_invoked_and_fails_closed() -> None:
         @override
         def __getattribute__(cls, name: str) -> object:  # must never run for provenance
             fired.append(name)
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _NoisyType(metaclass=_NoisyMeta):
         __module__ = "django.db.models.functions"
@@ -3928,7 +3957,9 @@ def test_slotted_django_str_subclass_in_an_unenumerated_slot_is_normalized() -> 
     assert defect is None
     assert sealed is not None
     assert sealed.query.select_for_update_of == ("self",)
-    assert [type(member) for member in sealed.query.select_for_update_of] == [str]
+    assert [
+        type(member) for member in list_of(read_attr(sealed.query, "select_for_update_of"))
+    ] == [str]
 
 
 def test_reconstruction_never_grows_the_retained_type_set_with_a_planted_type() -> None:
@@ -3984,7 +4015,7 @@ def test_hostile_case_container_fails_closed_before_its_iterator_runs() -> None:
     str(source.query)
     assert isinstance(source.query.annotations["flag"], models.Case)
     source.query.annotations["flag"].cases = _HostileCases(
-        source.query.annotations["flag"].cases,
+        require(read_attr(source.query.annotations["flag"], "cases"), is_list),
     )
     sealed, defect = _seal_or_defect(source, Category, None)
     assert sealed is None
@@ -4232,11 +4263,11 @@ def test_sealed_query_retains_its_schema_objects_by_reference() -> None:
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert sealed is not None
-    sealed_lhs = _where_leaf(sealed.query).lhs
-    source_lhs = _where_leaf(source.query).lhs
+    sealed_lhs = read_attr(_where_leaf(sealed.query), "lhs")
+    source_lhs = read_attr(_where_leaf(source.query), "lhs")
     assert sealed_lhs is not source_lhs
-    assert sealed_lhs.target is source_lhs.target
-    assert sealed_lhs.output_field is source_lhs.output_field
+    assert read_attr(sealed_lhs, "target") is read_attr(source_lhs, "target")
+    assert read_attr(sealed_lhs, "output_field") is read_attr(source_lhs, "output_field")
     assert sealed.query.model is Category
 
 
@@ -4316,7 +4347,10 @@ def test_value_payload_mapping_key_plain_data_subclass_normalizes() -> None:
     assert defect is None
     assert sealed is not None
     assert isinstance(sealed.query.annotations["probe"], models.Value)
-    (sealed_key,) = sealed.query.annotations["probe"].value
+    (sealed_key,) = require(
+        read_attr(sealed.query.annotations["probe"], "value"),
+        is_iterable,
+    )
     assert type(sealed_key) is str
     assert sealed_key == "a"
 
@@ -4334,7 +4368,10 @@ def test_value_payload_mapping_key_enum_member_normalizes() -> None:
     assert defect is None
     assert sealed is not None
     assert isinstance(sealed.query.annotations["probe"], models.Value)
-    (sealed_key,) = sealed.query.annotations["probe"].value
+    (sealed_key,) = require(
+        read_attr(sealed.query.annotations["probe"], "value"),
+        is_iterable,
+    )
     assert type(sealed_key) is str
     assert sealed_key == "keep"
 
@@ -4359,7 +4396,7 @@ def test_value_payload_opaque_object_fails_closed() -> None:
     assert defect == ("untrusted", "QuerySet binds a _OpaquePayload bound value")
     # The candidate keeps its own payload: the seal never mutates the candidate graph.
     assert isinstance(source.query.annotations["probe"], models.Value)
-    assert source.query.annotations["probe"].value is payload
+    assert read_attr(source.query.annotations["probe"], "value") is payload
 
 
 def test_value_payload_mutable_container_subclass_fails_closed() -> None:
@@ -4406,12 +4443,12 @@ def test_value_payload_plain_containers_rebuild_without_sharing() -> None:
     assert defect is None
     assert sealed is not None
     assert isinstance(sealed.query.annotations["probe"], models.Value)
-    sealed_payload = sealed.query.annotations["probe"].value
+    sealed_payload = read_attr(sealed.query.annotations["probe"], "value")
     assert type(sealed_payload) is dict
     assert sealed_payload == payload
     assert sealed_payload is not payload
     payload["a"] = 99
-    assert sealed.query.annotations["probe"].value["a"] == 1
+    assert require(read_attr(sealed.query.annotations["probe"], "value"), is_dict)["a"] == 1
 
     members = ["a", "b"]
     source = Category.objects.filter(is_private=False).annotate(probe=models.Value(members))
@@ -4419,12 +4456,12 @@ def test_value_payload_plain_containers_rebuild_without_sharing() -> None:
     assert defect is None
     assert sealed is not None
     assert isinstance(sealed.query.annotations["probe"], models.Value)
-    sealed_members = sealed.query.annotations["probe"].value
+    sealed_members = read_attr(sealed.query.annotations["probe"], "value")
     assert type(sealed_members) is list
     assert sealed_members == members
     assert sealed_members is not members
     members.append("c")
-    assert sealed.query.annotations["probe"].value == ["a", "b"]
+    assert read_attr(sealed.query.annotations["probe"], "value") == ["a", "b"]
 
 
 def test_value_payload_plain_data_subclass_normalizes_to_exact_value() -> None:
@@ -4455,18 +4492,18 @@ def test_value_payload_plain_data_subclass_normalizes_to_exact_value() -> None:
     assert sealed is not None
     assert isinstance(sealed.query.annotations["choice"], models.Value)
     assert isinstance(sealed.query.annotations["day"], models.Value)
-    sealed_choice = sealed.query.annotations["choice"].value
+    sealed_choice = read_attr(sealed.query.annotations["choice"], "value")
     assert type(sealed_choice) is str
     assert sealed_choice == "keep"
-    sealed_day = sealed.query.annotations["day"].value
+    sealed_day = read_attr(sealed.query.annotations["day"], "value")
     assert type(sealed_day) is datetime.date
     assert sealed_day == datetime.date(2020, 1, 2)
     assert fired == []
     # The candidate keeps its own instances: normalization applies to the sealed query only.
     assert isinstance(source.query.annotations["choice"], models.Value)
     assert isinstance(source.query.annotations["day"], models.Value)
-    assert type(source.query.annotations["choice"].value) is _PayloadChoices
-    assert type(source.query.annotations["day"].value) is _LoudDate
+    assert type(read_attr(source.query.annotations["choice"], "value")) is _PayloadChoices
+    assert type(read_attr(source.query.annotations["day"], "value")) is _LoudDate
 
 
 def test_value_payload_field_instance_is_retained_schema() -> None:
@@ -4487,7 +4524,7 @@ def test_value_payload_field_instance_is_retained_schema() -> None:
     assert defect is None
     assert sealed is not None
     assert isinstance(sealed.query.annotations["probe"], models.Value)
-    assert sealed.query.annotations["probe"].value is field
+    assert read_attr(sealed.query.annotations["probe"], "value") is field
 
 
 def test_enum_member_with_model_value_fails_closed() -> None:
@@ -4557,7 +4594,7 @@ def test_trunc_tzinfo_is_retained_and_rows_survive() -> None:
     assert defect is None
     assert sealed is not None
     assert isinstance(sealed.query.annotations["day"], Trunc)
-    assert sealed.query.annotations["day"].tzinfo is tz
+    assert read_attr(sealed.query.annotations["day"], "tzinfo") is tz
     assert [row.name for row in _rows_of(Category, sealed)] == ["tz_row"]
 
     source = Category.objects.filter(is_private=False).annotate(
@@ -4567,7 +4604,7 @@ def test_trunc_tzinfo_is_retained_and_rows_survive() -> None:
     assert defect is None
     assert sealed is not None
     assert isinstance(sealed.query.annotations["day"], Trunc)
-    assert sealed.query.annotations["day"].tzinfo is datetime.timezone.utc
+    assert read_attr(sealed.query.annotations["day"], "tzinfo") is datetime.timezone.utc
     assert [row.name for row in _rows_of(Category, sealed)] == ["tz_row"]
 
 
@@ -5000,7 +5037,7 @@ def test_concrete_model_probe_fails_closed_for_unreadable_model_metadata(
         def __getattribute__(self, name: str) -> object:
             if name == "_meta" and type.__getattribute__(self, "_hostile_meta"):
                 raise RuntimeError("model metadata exploded")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _HostileModel(models.Model, metaclass=_HostileModelBase):
         _hostile_meta = False
@@ -5152,7 +5189,7 @@ def test_visible_related_object_resolution() -> None:
     cat = Category.objects.create(name="Electronics")
     info = SimpleNamespace(context=SimpleNamespace(request=None))
 
-    resolved = visible_related_object(Category, cat.pk, info)
+    resolved = visible_related_object(Category, saved_pk(cat), info)
     assert resolved == cat
 
     missing = visible_related_object(Category, 999999, info)
@@ -5301,7 +5338,7 @@ def test_proxy_target_fixtures_allow_category_deletion() -> None:
     seed_data(1)
     category = Category.objects.first()
     assert category is not None
-    pk = category.pk
+    pk = saved_pk(category)
     with CaptureQueriesContext(connection) as captured:
         category.delete()
     assert not Category.objects.filter(pk=pk).exists()
@@ -5648,8 +5685,8 @@ def test_seal_serves_a_combinator_as_a_single_table_primary_key_membership_query
     first, second = Category.objects.order_by("pk")[:2]
     combined = (
         Category.objects.using("default")
-        .filter(pk=first.pk)
-        .union(Category.objects.filter(pk=second.pk))
+        .filter(pk=saved_pk(first))
+        .union(Category.objects.filter(pk=saved_pk(second)))
         .order_by("-name")
     )
 
@@ -5662,17 +5699,18 @@ def test_seal_serves_a_combinator_as_a_single_table_primary_key_membership_query
     assert queryset_fields(sealed) is None
     (membership,) = sealed.query.where.children
     assert isinstance(membership, In)
-    assert membership.lhs.target is Category._meta.pk
-    assert membership.rhs.combinator == "union"
-    assert len(membership.rhs.combined_queries) == 2
-    assert membership.rhs.values_select == ("pk",)
+    assert read_attr(read_attr(membership, "lhs"), "target") is Category._meta.pk
+    membership_rhs = require_instance(read_attr(membership, "rhs"), SqlQuery)
+    assert membership_rhs.combinator == "union"
+    assert len(membership_rhs.combined_queries) == 2
+    assert membership_rhs.values_select == ("pk",)
     # Vendor-neutral text only: a backend may parenthesize each compound branch.
     sql = str(sealed.query)
     table = Category._meta.db_table
     assert sql.startswith(f'SELECT "{table}"."id"')
     assert sql.endswith(f'ORDER BY "{table}"."name" DESC')
-    assert [row.pk for row in _rows_of(Category, sealed)] == [
-        row.pk for row in sorted((first, second), key=lambda c: c.name, reverse=True)
+    assert [saved_pk(row) for row in _rows_of(Category, sealed)] == [
+        saved_pk(row) for row in sorted((first, second), key=lambda c: c.name, reverse=True)
     ]
 
 
@@ -5682,15 +5720,18 @@ def test_seal_carries_a_primary_key_ordering_of_a_combinator() -> None:
     seed_data(1)
     first, second = Category.objects.order_by("pk")[:2]
     combined = (
-        Category.objects.filter(pk=first.pk)
-        .union(Category.objects.filter(pk=second.pk))
+        Category.objects.filter(pk=saved_pk(first))
+        .union(Category.objects.filter(pk=saved_pk(second)))
         .order_by("-pk")
     )
     sealed, defect = _seal_or_defect(combined, Category, None)
     assert defect is None
     assert sealed is not None
     assert sealed.query.combinator is None
-    assert [row.pk for row in _rows_of(Category, sealed)] == [second.pk, first.pk]
+    assert [saved_pk(row) for row in _rows_of(Category, sealed)] == [
+        saved_pk(second),
+        saved_pk(first),
+    ]
 
 
 def _union_of_an_annotated_intersection(
@@ -5760,14 +5801,19 @@ def test_seal_serves_a_nested_combinator_as_its_primary_key_set() -> None:
     seed_data(1)
     first, second, third = Category.objects.order_by("pk")[:3]
     qs = Category.objects.all()
-    combined = qs.filter(pk=first.pk).union(
-        qs.filter(pk__in=[second.pk, third.pk]).difference(qs.filter(pk=third.pk)),
+    combined = qs.filter(pk=saved_pk(first)).union(
+        qs.filter(pk__in=[saved_pk(second), saved_pk(third)]).difference(
+            qs.filter(pk=saved_pk(third)),
+        ),
     )
     sealed, defect = _seal_or_defect(combined, Category, None)
     assert defect is None
     assert sealed is not None
     assert sealed.query.combinator is None
-    assert sorted(row.pk for row in _rows_of(Category, sealed)) == [first.pk, second.pk]
+    assert sorted(saved_pk(row) for row in _rows_of(Category, sealed)) == [
+        saved_pk(first),
+        saved_pk(second),
+    ]
 
 
 class _RawListSourceQuerySet(models.QuerySet[Category]):
@@ -5812,8 +5858,8 @@ def test_raw_list_row_source_keeps_a_combinator_as_it_is(
     first, second, third = Category.objects.order_by("pk")[:3]
     base = _RawListSourceQuerySet(model=Category)
     source = build(
-        base.filter(pk__in=[first.pk, second.pk]),
-        base.filter(pk__in=[second.pk, third.pk]),
+        base.filter(pk__in=[saved_pk(first), saved_pk(second)]),
+        base.filter(pk__in=[saved_pk(second), saved_pk(third)]),
     )
     rebuilt = normalized_row_source(source)
     assert type(rebuilt) is models.QuerySet
@@ -5926,7 +5972,7 @@ def test_seal_carry_result_cache_carries_the_rows_the_source_holds() -> None:
     """
     qs = Category.objects.all()
     list(qs)
-    held = object.__getattribute__(qs, "__dict__")["_result_cache"]
+    held = instance_dict(qs)["_result_cache"]
 
     sealed, defect = _seal_or_defect(
         qs,
@@ -6038,7 +6084,10 @@ def test_apply_type_visibility_sync_serves_a_combined_result_as_its_pk_set() -> 
     refuses both on the combinator itself; the rows are the combinator's row set.
     """
     seed_data(1)
-    names = sorted(Category.objects.values_list("name", flat=True))
+    names = sorted(
+        require_instance(name, str)
+        for name in list_of(Category.objects.values_list("name", flat=True))
+    )
     first, second = names[0], names[1]
 
     def _union_hook(
@@ -6187,7 +6236,10 @@ def test_validate_post_orderset_result_serves_a_combined_result_and_refuses_a_lo
     combined-queryset text rather than the one-sentence shape wording.
     """
     seed_data(1)
-    names = sorted(Category.objects.values_list("name", flat=True))
+    names = sorted(
+        require_instance(name, str)
+        for name in list_of(Category.objects.values_list("name", flat=True))
+    )
 
     DummyType = _declared_type(Category, "DummyType")
 
@@ -6368,7 +6420,7 @@ def test_validate_post_orderset_result_zero_consumer_dispatch_on_getattribute() 
         def __getattribute__(self, name: str) -> object:
             if name in ("_db", "_hints"):
                 raise AssertionError(f"Hostile consumer __getattribute__ invoked for '{name}'")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     source_qs = HostileGetattributeQuerySet(model=Category)
     # Should safely read _db and _hints via raw instance __dict__ without invoking

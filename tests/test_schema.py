@@ -17,7 +17,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Iterator
 from functools import partial
 from types import SimpleNamespace
-from typing import Any, NoReturn, TypedDict
+from typing import NoReturn, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -56,8 +56,15 @@ from django_strawberry_framework.schema import (
     _is_extension,
     _refuse_operation_document,
 )
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    instance_dict,
+    is_tuple,
+    read_attr,
+)
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
-from tests._idioms import ClaimsClassBase, ClassReadRaisesBase
+from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, json_at
 
 
 def _unchecked_entries(*entries: object) -> list[SchemaExtension]:
@@ -69,7 +76,7 @@ def _unchecked_entries(*entries: object) -> list[SchemaExtension]:
 def _error_code(error: GraphQLError) -> object:
     """Return the ``code`` extension a refused operation's error carries."""
     assert error.extensions is not None
-    return error.extensions["code"]
+    return json_at(error.extensions, "code")
 
 
 class CustomErrorPolicyExtension(DjangoErrorPolicyExtension):
@@ -368,7 +375,8 @@ def test_execute_mutation_field_sync_exception_rolls_back() -> None:
         _mutation_meta = MagicMock(model=None)
 
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
-    ctx.schema = MagicMock()
+    mutation_type = MagicMock()
+    ctx.schema = MagicMock(mutation_type=mutation_type)
     ctx.errors = []
 
     with (
@@ -380,7 +388,7 @@ def test_execute_mutation_field_sync_exception_rolls_back() -> None:
         ),
         pytest.raises(RuntimeError, match="sync field crash"),
     ):
-        ctx.execute_field(ctx.schema.mutation_type, None, [MagicMock()], _MUTATION_ROOT_PATH)
+        ctx.execute_field(mutation_type, None, [MagicMock()], _MUTATION_ROOT_PATH)
 
 
 class FlipFlopErrorList:
@@ -448,7 +456,8 @@ def test_sync_window_hostile_error_container_rolls_back_and_leaks_no_transaction
     package could not certify. Only the absence assertion below fails there.
     """
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
-    ctx.schema = MagicMock()
+    mutation_type = MagicMock()
+    ctx.schema = MagicMock(mutation_type=mutation_type)
     # basedpyright: each graphql-core shape is planted on the bare context under test; the
     # installed release declares only one of them
     ctx.collected_errors = SimpleNamespace(errors=FlipFlopErrorList())  # pyright: ignore[reportAttributeAccessIssue]
@@ -458,7 +467,7 @@ def test_sync_window_hostile_error_container_rolls_back_and_leaks_no_transaction
         patch.object(ExecutionContext, "execute_field", side_effect=_write_the_rollback_probe_row),
         pytest.raises(RuntimeError, match="hostile len"),
     ):
-        ctx.execute_field(ctx.schema.mutation_type, None, [MagicMock()], _MUTATION_ROOT_PATH)
+        ctx.execute_field(mutation_type, None, [MagicMock()], _MUTATION_ROOT_PATH)
 
     assert not connection.in_atomic_block
     assert not _rollback_probe_row_exists()
@@ -488,7 +497,8 @@ async def test_async_window_hostile_error_container_rolls_back_and_leaks_no_tran
     window committed.
     """
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
-    ctx.schema = MagicMock()
+    mutation_type = MagicMock()
+    ctx.schema = MagicMock(mutation_type=mutation_type)
     # basedpyright: each graphql-core shape is planted on the bare context under test; the
     # installed release declares only one of them
     ctx.collected_errors = SimpleNamespace(errors=FlipFlopErrorList())  # pyright: ignore[reportAttributeAccessIssue]
@@ -501,7 +511,7 @@ async def test_async_window_hostile_error_container_rolls_back_and_leaks_no_tran
         patch.object(ExecutionContext, "execute_field", side_effect=_write_in_the_window_worker),
     ):
         pending = ctx.execute_field(
-            ctx.schema.mutation_type,
+            mutation_type,
             None,
             [MagicMock()],
             _MUTATION_ROOT_PATH,
@@ -521,7 +531,8 @@ async def test_execute_mutation_field_async_exception_rolls_back() -> None:
         _mutation_meta = MagicMock(model=None)
 
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
-    ctx.schema = MagicMock()
+    mutation_type = MagicMock()
+    ctx.schema = MagicMock(mutation_type=mutation_type)
     ctx.errors = []
 
     def _is_awaitable(val: object) -> bool:
@@ -541,7 +552,7 @@ async def test_execute_mutation_field_async_exception_rolls_back() -> None:
         ),
     ):
         pending = ctx.execute_field(
-            ctx.schema.mutation_type,
+            mutation_type,
             None,
             [MagicMock()],
             _MUTATION_ROOT_PATH,
@@ -632,8 +643,8 @@ def test_a_schema_policy_attribute_answers_with_a_copy(row: _PolicyKeyword) -> N
     [(attribute, policy)] = row.items()
     schema = DjangoSchema(query=DummyQuery, **row)
 
-    first = getattr(schema, attribute)
-    second = getattr(schema, attribute)
+    first = read_attr(schema, attribute)
+    second = read_attr(schema, attribute)
 
     assert first == second
     assert first is not second
@@ -918,9 +929,8 @@ class _FactorySchema(DjangoSchema):
         """Build this schema's consumer extension, fresh per operation."""
         return _MarkerExtension()
 
-    # basedpyright: verbatim forward to DjangoSchema.__init__; object fails its typed params
-    def __init__(self, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
-        super().__init__(extensions=[self.make_extension], **kwargs)
+    def __init__(self, *, query: type) -> None:
+        super().__init__(query=query, extensions=[self.make_extension])
 
 
 def _reachability_after_dropping(
@@ -1029,7 +1039,7 @@ def test_no_name_on_a_schema_answers_with_a_policy() -> None:
     """
     schema = DjangoSchema(query=DummyQuery, resource_policy=ResourcePolicy(max_list_rows=1))
 
-    held = list(vars(schema).values())
+    held = list(instance_dict(schema).values())
     assert held
     for value in held:
         assert not isinstance(value, (ResourcePolicy, ErrorPolicy))
@@ -1083,7 +1093,7 @@ def _widening_factory() -> _ForgedMarkerExtension:
 _EXTENSION_ENTRY_ATTACKS: list[Callable[[DjangoSchema], object]] = [
     lambda schema: schema.__dict__.update(_django_extensions=()),
     lambda schema: schema.__dict__.update(_django_extensions=(_widening_factory,)),
-    lambda schema: schema.__dict__.pop("_django_extensions"),
+    lambda schema: object_result(schema.__dict__.pop, "_django_extensions"),
 ]
 
 
@@ -1123,7 +1133,7 @@ def test_the_accepted_extensions_are_answered_for_entry_by_entry(
 
 _UNREADABLE_EXTENSION_ATTACKS: list[Callable[[DjangoSchema], object]] = [
     lambda schema: schema.__dict__.update(_django_extensions=("forged",)),
-    lambda schema: schema.__dict__.pop("_django_extensions"),
+    lambda schema: object_result(schema.__dict__.pop, "_django_extensions"),
 ]
 
 
@@ -1347,16 +1357,14 @@ def test_the_box_a_slotted_entry_is_answered_through_cannot_be_rebound(
         resource_policy=ResourcePolicy(max_list_rows=1),
         extensions=[accepted],
     )
-    box = next(
-        held
-        for held in schema.__dict__["_django_extensions"]
-        if getattr(held, "__self__", None) is accepted
-    )
+    entries = object_result(schema.__dict__.__getitem__, "_django_extensions")
+    assert is_tuple(entries)
+    box = next(held for held in entries if read_attr(held, "__self__", None) is accepted)
 
     with pytest.raises(AttributeError):
         tamper(box, replacement)
 
-    assert box.__self__ is accepted
+    assert read_attr(box, "__self__") is accepted
     assert schema.execute_sync("{ rows }").data == {"rows": ["a"]}
     assert _MARKS == ["accepted"]
 
@@ -1373,15 +1381,13 @@ def test_rebuilding_the_box_a_slotted_entry_is_answered_through_changes_nothing(
         resource_policy=ResourcePolicy(max_list_rows=1),
         extensions=[accepted],
     )
-    box = next(
-        held
-        for held in schema.__dict__["_django_extensions"]
-        if getattr(held, "__self__", None) is accepted
-    )
+    entries = object_result(schema.__dict__.__getitem__, "_django_extensions")
+    assert is_tuple(entries)
+    box = next(held for held in entries if read_attr(held, "__self__", None) is accepted)
 
-    box.__init__(_WideningSlottedFactory())
+    call_method(box, "__init__", _WideningSlottedFactory())
 
-    assert box.__self__ is accepted
+    assert read_attr(box, "__self__") is accepted
     assert schema.execute_sync("{ rows }").data == {"rows": ["a"]}
     assert _MARKS == ["accepted"]
 
@@ -1432,7 +1438,7 @@ def test_a_retained_policy_argument_is_not_the_one_the_schema_enforces(
 
     policy.__dict__[field] = widened
 
-    assert getattr(getattr(schema, argument), field) != widened
+    assert read_attr(read_attr(schema, argument), field) != widened
 
 
 def test_a_policy_behind_the_setting_is_snapshotted_like_an_explicit_one(

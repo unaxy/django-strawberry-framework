@@ -15,6 +15,7 @@ injectivity -- construction and private helpers a request cannot name.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import decimal
 import gc
@@ -50,6 +51,8 @@ from django_filters import (
 from django_filters import RangeFilter as DjangoRangeFilter
 from django_filters.filters import BaseInFilter as DjangoBaseInFilter
 from strawberry import relay
+from strawberry.types.base import get_object_definition
+from strawberry.types.field import StrawberryField
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
@@ -104,8 +107,10 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
 from django_strawberry_framework.types.finalizer import finalize_django_types
 from django_strawberry_framework.types.relay import apply_interfaces
+from django_strawberry_framework.utils._narrowing import dict_of, read_attr
+from django_strawberry_framework.utils.input_values import UNSET
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import ClaimsClass, ClassReadRaises, is_object_list
+from tests._idioms import ClaimsClass, ClassReadRaises, is_object_dict, is_object_list
 from tests._soft_dependency import blocked_modules
 from tests.filters.fixtures.filtersets import ShelfFilter
 
@@ -118,6 +123,35 @@ if TYPE_CHECKING:
     # spelled out because the checker runs without the django-stubs mypy plugin.
     _Char: TypeAlias = models.CharField[str | int | Combinable, str]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
+
+
+def _args(annotation: object) -> tuple[object, ...]:
+    """``typing.get_args`` with each member typed ``object`` (typeshed declares them ``Any``)."""
+    return get_args(annotation)
+
+
+def _class_arg(annotation: object) -> type:
+    """The one non-``None`` member of ``annotation`` (``X | None``), asserted to be a class."""
+    (member,) = (arg for arg in _args(annotation) if arg is not type(None))
+    assert isinstance(member, type), member
+    return member
+
+
+def _annotations(cls: type) -> dict[object, object]:
+    """A copy of ``cls.__annotations__`` (typeshed types its values ``Any``)."""
+    return dict_of(read_attr(cls, "__annotations__"))
+
+
+def _type_annotation(field: StrawberryField) -> object:
+    """``field``'s declared annotation, failing when the field carries none."""
+    annotation = field.type_annotation
+    assert annotation is not None
+    return annotation.annotation
+
+
+def _definition_fields(cls: object) -> list[StrawberryField]:
+    """The Strawberry fields of generated input class ``cls``, failing when it has no definition."""
+    return get_object_definition(cls, strict=True).fields
 
 
 @runtime_checkable
@@ -197,29 +231,27 @@ def test_build_logic_fields_uses_inside_list_annotated_for_and_or() -> None:
     for attr in ("and_", "or_"):
         annotation, _ = by_attr[attr]
         # Strip the `| None` to inspect the list shape.
-        non_none_args = [arg for arg in get_args(annotation) if arg is not type(None)]
+        non_none_args = [arg for arg in _args(annotation) if arg is not type(None)]
         assert len(non_none_args) == 1
         list_type = non_none_args[0]
         assert get_origin(list_type) is list
-        inner = get_args(list_type)[0]
+        inner = _args(list_type)[0]
         # The inner type must be Annotated with a string forward ref.
         assert get_origin(inner) is typing.Annotated or hasattr(inner, "__metadata__")
-        inner_args = get_args(inner)
+        inner_args = _args(inner)
         assert inner_args[0] == "DemoFilterInputType" or (
-            hasattr(inner_args[0], "__forward_arg__")
-            and inner_args[0].__forward_arg__ == "DemoFilterInputType"
+            read_attr(inner_args[0], "__forward_arg__", None) == "DemoFilterInputType"
         )
 
     # `not_` -> `Annotated["X", strawberry.lazy(...)] | None`
     annotation, _ = by_attr["not_"]
-    non_none_args = [arg for arg in get_args(annotation) if arg is not type(None)]
+    non_none_args = [arg for arg in _args(annotation) if arg is not type(None)]
     assert len(non_none_args) == 1
     not_inner = non_none_args[0]
     assert hasattr(not_inner, "__metadata__")
-    not_inner_args = get_args(not_inner)
+    not_inner_args = _args(not_inner)
     assert not_inner_args[0] == "DemoFilterInputType" or (
-        hasattr(not_inner_args[0], "__forward_arg__")
-        and not_inner_args[0].__forward_arg__ == "DemoFilterInputType"
+        read_attr(not_inner_args[0], "__forward_arg__", None) == "DemoFilterInputType"
     )
 
 
@@ -379,10 +411,8 @@ def test_build_input_fields_pins_every_lookup_name_to_its_camel_name() -> None:
     # Find the `name` field's bag class and walk its Strawberry fields.
     name_annotation = by_attr["name"][0]
     # `bag_class | None` -> strip None to get the bag class.
-    bag = next(arg for arg in get_args(name_annotation) if arg is not type(None))
-    bag_fields = {
-        field.python_name: field.graphql_name for field in bag.__strawberry_definition__.fields
-    }
+    bag = next(arg for arg in _args(name_annotation) if arg is not type(None))
+    bag_fields = {field.python_name: field.graphql_name for field in _definition_fields(bag)}
     # `exact` -> attr `exact`, pinned by the shared builder rather than Strawberry.
     assert bag_fields["exact"] == "exact"
     # `icontains` -> attr `i_contains`, alias `iContains`.
@@ -391,10 +421,8 @@ def test_build_input_fields_pins_every_lookup_name_to_its_camel_name() -> None:
     assert bag_fields["is_null"] == "isNull"
 
     id_annotation = by_attr["id"][0]
-    id_bag = next(arg for arg in get_args(id_annotation) if arg is not type(None))
-    id_fields = {
-        field.python_name: field.graphql_name for field in id_bag.__strawberry_definition__.fields
-    }
+    id_bag = next(arg for arg in _args(id_annotation) if arg is not type(None))
+    id_fields = {field.python_name: field.graphql_name for field in _definition_fields(id_bag)}
     # `in_` -> alias `in`.
     assert id_fields["in_"] == "in"
 
@@ -477,8 +505,7 @@ def _bag_lookup_attrs(filterset_cls: type[FilterSet], python_attr: str) -> list[
     """Return the lookup attrs of one generated operator-bag field, in emission order."""
     triples = _build_input_fields(filterset_cls)
     annotation = {attr: annotation for attr, annotation, _kwargs in triples}[python_attr]
-    (bag_class,) = (arg for arg in get_args(annotation) if arg is not type(None))
-    return list(bag_class.__dataclass_fields__)
+    return [field.name for field in dataclasses.fields(_class_arg(annotation))]
 
 
 def test_overlap_head_emits_one_bag_with_each_lookup_keeping_its_own_form_key() -> None:
@@ -623,11 +650,11 @@ def test_convert_filter_to_input_annotation_handles_range_filter() -> None:
     f = RangeFilter(field_name="value")
     model_field: _Int = models.IntegerField()
     annotation = convert_filter_to_input_annotation(f, model_field)
-    non_none = [arg for arg in get_args(annotation) if arg is not type(None)]
+    non_none = [arg for arg in _args(annotation) if arg is not type(None)]
     assert len(non_none) == 1
     range_cls = non_none[0]
     assert hasattr(range_cls, "__strawberry_definition__")
-    fields = {field.python_name for field in range_cls.__strawberry_definition__.fields}
+    fields = {field.python_name for field in _definition_fields(range_cls)}
     assert fields == {"start", "end"}
 
 
@@ -644,10 +671,11 @@ def test_convert_filter_to_input_annotation_handles_choice_filter_via_converter_
     f = ChoiceFilter()
     model_field: ModelField = library_models.Book._meta.get_field("circulation_status")
     annotation = convert_filter_to_input_annotation(f, model_field)
-    non_none = [arg for arg in get_args(annotation) if arg is not type(None)]
+    non_none = [arg for arg in _args(annotation) if arg is not type(None)]
     assert len(non_none) == 1
     enum_cls = non_none[0]
     # The converter pipeline yields a Strawberry-decorated enum.
+    assert isinstance(enum_cls, type)
     assert issubclass(enum_cls, Enum)
 
 
@@ -853,26 +881,26 @@ def test_normalize_input_value_range_filter_drops_unset_axes_partial_range() -> 
 
     @dataclass
     class _RangeInput:
-        start: object = strawberry.UNSET
-        end: object = strawberry.UNSET
+        start: object = UNSET
+        end: object = UNSET
 
     # Dataclass inputs with UNSET
     assert normalize_input_value(
         f,
-        _RangeInput(start=5, end=strawberry.UNSET),
+        _RangeInput(start=5, end=UNSET),
         field_name="lifetime_fines_cents",
     ) == {"lifetime_fines_cents_0": 5}
 
     assert normalize_input_value(
         f,
-        _RangeInput(start=strawberry.UNSET, end=10),
+        _RangeInput(start=UNSET, end=10),
         field_name="lifetime_fines_cents",
     ) == {"lifetime_fines_cents_1": 10}
 
     assert (
         normalize_input_value(
             f,
-            _RangeInput(start=strawberry.UNSET, end=strawberry.UNSET),
+            _RangeInput(start=UNSET, end=UNSET),
             field_name="lifetime_fines_cents",
         )
         == {}
@@ -881,20 +909,20 @@ def test_normalize_input_value_range_filter_drops_unset_axes_partial_range() -> 
     # Dict inputs with UNSET
     assert normalize_input_value(
         f,
-        {"start": 5, "end": strawberry.UNSET},
+        {"start": 5, "end": UNSET},
         field_name="lifetime_fines_cents",
     ) == {"lifetime_fines_cents_0": 5}
 
     assert normalize_input_value(
         f,
-        {"start": strawberry.UNSET, "end": 10},
+        {"start": UNSET, "end": 10},
         field_name="lifetime_fines_cents",
     ) == {"lifetime_fines_cents_1": 10}
 
     assert (
         normalize_input_value(
             f,
-            {"start": strawberry.UNSET, "end": strawberry.UNSET},
+            {"start": UNSET, "end": UNSET},
             field_name="lifetime_fines_cents",
         )
         == {}
@@ -1064,7 +1092,7 @@ def test_normalize_input_value_unset_returns_none() -> None:
     ``_q_for_branch`` recursion.
     """
     for f in (GlobalIDFilter(), GlobalIDMultipleChoiceFilter()):
-        assert normalize_input_value(f, strawberry.UNSET) is None
+        assert normalize_input_value(f, UNSET) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1109,10 +1137,10 @@ def test_filter_input_type_returns_annotated_with_lazy_module_path() -> None:
             fields = {"name": ["exact"]}
 
     result = filter_input_type(MyFilter)
-    metadata = get_args(result)[1:]
+    metadata = _args(result)[1:]
     # The strawberry.lazy marker is a `StrawberryLazyReference` whose
     # `module` attr carries the module path.
-    assert any(getattr(marker, "module", None) == INPUTS_MODULE_PATH for marker in metadata)
+    assert any(read_attr(marker, "module", None) == INPUTS_MODULE_PATH for marker in metadata)
 
 
 def test_filter_input_type_returns_forwardref_in_annotation_args() -> None:
@@ -1124,7 +1152,7 @@ def test_filter_input_type_returns_forwardref_in_annotation_args() -> None:
             fields = {"name": ["exact"]}
 
     result = filter_input_type(MyFilter)
-    inner = get_args(result)[0]
+    inner = _args(result)[0]
     assert isinstance(inner, typing.ForwardRef)
     assert inner.__forward_arg__ == "MyFilterInputType"
 
@@ -1151,8 +1179,12 @@ def test_filter_input_type_is_idempotent_under_repeated_calls() -> None:
     second = filter_input_type(MyFilter)
     third = filter_input_type(MyFilter)
     assert len(_helper_referenced_filtersets) == 1
-    assert get_args(first)[0].__forward_arg__ == get_args(second)[0].__forward_arg__
-    assert get_args(second)[0].__forward_arg__ == get_args(third)[0].__forward_arg__
+    first_ref, second_ref, third_ref = (_args(arg)[0] for arg in (first, second, third))
+    assert isinstance(first_ref, typing.ForwardRef)
+    assert isinstance(second_ref, typing.ForwardRef)
+    assert isinstance(third_ref, typing.ForwardRef)
+    assert first_ref.__forward_arg__ == second_ref.__forward_arg__
+    assert second_ref.__forward_arg__ == third_ref.__forward_arg__
 
 
 def test_filter_input_type_rejects_non_filterset() -> None:
@@ -1193,11 +1225,11 @@ def test_filter_input_subscript_returns_the_filter_input_type_annotation() -> No
     subscripted = FilterInput[MyFilter]
     called = filter_input_type(MyFilter)
     assert get_origin(subscripted) is typing.Annotated
-    inner = get_args(subscripted)[0]
+    inner = _args(subscripted)[0]
     assert isinstance(inner, typing.ForwardRef)
     assert inner.__forward_arg__ == "MyFilterInputType"
-    assert inner == get_args(called)[0]
-    assert [getattr(marker, "module", None) for marker in get_args(subscripted)[1:]] == [
+    assert inner == _args(called)[0]
+    assert [read_attr(marker, "module", None) for marker in _args(subscripted)[1:]] == [
         INPUTS_MODULE_PATH,
     ]
 
@@ -1310,7 +1342,7 @@ def test_filter_input_type_accepts_a_lazy_proxy_of_a_filterset() -> None:
     # basedpyright: a lazy proxy is not a ``type[FilterSet]`` to the checker; the proxied class
     # answering the guard at run time is the behavior under test
     result = filter_input_type(SimpleLazyObject(lambda: MyFilter))  # pyright: ignore[reportArgumentType]
-    inner = get_args(result)[0]
+    inner = _args(result)[0]
     assert isinstance(inner, typing.ForwardRef)
     assert inner.__forward_arg__ == "MyFilterInputType"
 
@@ -1655,15 +1687,17 @@ def test_convert_filter_to_input_annotation_derives_enum_for_choice_fields_on_li
     # TypedFilter
     tf = TypedFilter(field_name="circulation_status")
     tf_anno = convert_filter_to_input_annotation(tf, model_field)
-    tf_cls = next(arg for arg in get_args(tf_anno) if arg is not type(None))
+    tf_cls = _class_arg(tf_anno)
     assert issubclass(tf_cls, Enum)
 
     # ListFilter
     lf = ListFilter(field_name="circulation_status")
     lf_anno = convert_filter_to_input_annotation(lf, model_field)
-    lf_list = next(arg for arg in get_args(lf_anno) if arg is not type(None))
+    lf_list = next(arg for arg in _args(lf_anno) if arg is not type(None))
     assert get_origin(lf_list) is list
-    assert issubclass(get_args(lf_list)[0], Enum)
+    lf_member = _args(lf_list)[0]
+    assert isinstance(lf_member, type)
+    assert issubclass(lf_member, Enum)
 
     # BaseCSVFilter
     class CSVFilter(BaseInFilter, CharFilter):
@@ -1671,9 +1705,11 @@ def test_convert_filter_to_input_annotation_derives_enum_for_choice_fields_on_li
 
     csv_f = CSVFilter(field_name="circulation_status")
     csv_anno = convert_filter_to_input_annotation(csv_f, model_field)
-    csv_list = next(arg for arg in get_args(csv_anno) if arg is not type(None))
+    csv_list = next(arg for arg in _args(csv_anno) if arg is not type(None))
     assert get_origin(csv_list) is list
-    assert issubclass(get_args(csv_list)[0], Enum)
+    csv_member = _args(csv_list)[0]
+    assert isinstance(csv_member, type)
+    assert issubclass(csv_member, Enum)
 
 
 def test_element_annotation_fallback_branches_when_model_field_is_none() -> None:
@@ -1869,15 +1905,15 @@ def test_range_input_type_name_is_scoped_per_filterset() -> None:
             fields = []
 
     def _range_cls_of(bag: type) -> type:
-        for annotation in bag.__annotations__.values():
-            for arg in get_args(annotation):
-                if getattr(arg, "__name__", "").endswith("RangeInputType"):
+        for annotation in _annotations(bag).values():
+            for arg in _args(annotation):
+                if isinstance(arg, type) and arg.__name__.endswith("RangeInputType"):
                     return arg
         raise AssertionError("no RangeInputType found in operator bag")
 
     def _bag(triples: list[tuple[str, object, dict[str, object]]]) -> type:
         by_attr = {p: a for p, a, _ in triples}
-        return next(x for x in get_args(by_attr["price"]) if x is not type(None))
+        return _class_arg(by_attr["price"])
 
     bag1 = _bag(_build_input_fields(ScalarPriceFilter))
     bag2 = _bag(_build_input_fields(TextPriceFilter))
@@ -1920,19 +1956,19 @@ def test_direct_range_conversion_does_not_poison_owned_input_build() -> None:
     declared_filter = OwnedPriceFilter.base_filters["price"]
     model_field = scalar_models.ScalarSpecimen._meta.get_field("price")
     direct = convert_filter_to_input_annotation(declared_filter, model_field)
-    direct_cls = next(arg for arg in get_args(direct) if arg is not type(None))
+    direct_cls = _class_arg(direct)
     assert direct_cls.__name__ == "PriceRangeInputType"
 
     triples = _build_input_fields(OwnedPriceFilter)
     price_annotation = next(
         annotation for python_attr, annotation, _kwargs in triples if python_attr == "price"
     )
-    bag = next(arg for arg in get_args(price_annotation) if arg is not type(None))
+    bag = _class_arg(price_annotation)
     owned_cls = next(
         arg
-        for annotation in bag.__annotations__.values()
-        for arg in get_args(annotation)
-        if getattr(arg, "__name__", "").endswith("RangeInputType")
+        for annotation in _annotations(bag).values()
+        for arg in _args(annotation)
+        if isinstance(arg, type) and arg.__name__.endswith("RangeInputType")
     )
     assert owned_cls.__name__ == "OwnedPriceFilterPriceRangeInputType"
     assert owned_cls is not direct_cls
@@ -2050,7 +2086,7 @@ def test_build_input_fields_keeps_digit_boundary_operator_bags_distinct() -> Non
     by_attr = {python_attr: annotation for python_attr, annotation, _kwargs in triples}
 
     def _bag(attr: str) -> type:
-        return next(arg for arg in get_args(by_attr[attr]) if arg is not type(None))
+        return _class_arg(by_attr[attr])
 
     bag_underscore = _bag("field_2")
     bag_plain = _bag("field2")
@@ -2127,7 +2163,7 @@ def test_build_input_fields_keeps_underscore_edge_operator_bags_distinct() -> No
     by_attr = {python_attr: annotation for python_attr, annotation, _kwargs in triples}
 
     def _bag(attr: str) -> type:
-        return next(arg for arg in get_args(by_attr[attr]) if arg is not type(None))
+        return _class_arg(by_attr[attr])
 
     bag_plain = _bag("price")
     bag_under = _bag("price_")
@@ -2136,8 +2172,8 @@ def test_build_input_fields_keeps_underscore_edge_operator_bags_distinct() -> No
     assert bag_plain is not bag_under
     # The two bags carry DIFFERENT shapes: the CharFilter bag's ``exact`` is a
     # scalar, the RangeFilter bag's ``exact`` embeds the range sub-input.
-    assert "RangeInputType" not in str(bag_plain.__annotations__["exact"])
-    assert "RangeInputType" in str(bag_under.__annotations__["exact"])
+    assert "RangeInputType" not in str(_annotations(bag_plain)["exact"])
+    assert "RangeInputType" in str(_annotations(bag_under)["exact"])
 
     @strawberry.type
     class Query:
@@ -2293,10 +2329,9 @@ def test_relay_relation_isnull_generates_boolean_input_not_globalid_list() -> No
     # the ``exact`` sub-field keeps the ``list[str]`` GlobalID list wire shape.
     triples = _build_input_fields(RelayRelationIsnullBookFilter)
     by_attr = {python_attr: annotation for python_attr, annotation, _kwargs in triples}
-    genres_bag = next(arg for arg in get_args(by_attr["genres"]) if arg is not type(None))
-    bag_annotations = {
-        field.graphql_name: field.type_annotation.annotation
-        for field in genres_bag.__strawberry_definition__.fields
+    genres_bag = _class_arg(by_attr["genres"])
+    bag_annotations: dict[str | None, object] = {
+        field.graphql_name: _type_annotation(field) for field in _definition_fields(genres_bag)
     }
     assert bag_annotations["isNull"] == (bool | None)
     assert bag_annotations["exact"] == (list[str] | None)
@@ -2331,12 +2366,20 @@ def test_relay_relation_isnull_generates_boolean_input_not_globalid_list() -> No
     )
     assert introspection.errors is None, introspection.errors
     assert introspection.data is not None
-    input_fields = {
-        field["name"]: field["type"] for field in introspection.data["__type"]["inputFields"]
-    }
+    introspection_data: dict[str, object] = introspection.data
+    type_payload = introspection_data["__type"]
+    assert is_object_dict(type_payload)
+    raw_input_fields = type_payload["inputFields"]
+    assert is_object_list(raw_input_fields)
+    input_fields: dict[object, object] = {}
+    for field in raw_input_fields:
+        assert is_object_dict(field)
+        input_fields[field["name"]] = field["type"]
     assert input_fields["isNull"] == {"kind": "SCALAR", "name": "Boolean"}
     # ``exact`` is the GlobalID membership list, NOT a Boolean scalar.
-    assert input_fields["exact"]["kind"] == "LIST"
+    exact_type = input_fields["exact"]
+    assert is_object_dict(exact_type)
+    assert exact_type["kind"] == "LIST"
 
     accepted_true = schema.execute_sync("{ probe(genres: { isNull: true }) }")
     assert accepted_true.errors is None, accepted_true.errors

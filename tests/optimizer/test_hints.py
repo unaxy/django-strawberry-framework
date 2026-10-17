@@ -23,6 +23,7 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     WindowedPrefetchStrategy,
     resolve_strategy,
 )
+from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import ClaimsClassBase, ClassReadRaisesBase
 
 _RAISING_CLASS_ERRORS = [RuntimeError, TypeError, KeyboardInterrupt]
@@ -282,7 +283,7 @@ class TestStrategyFactory:
             def __getattribute__(self, name: str) -> object:
                 if name == "plan":
                     raise RuntimeError("plan read should never run")
-                return super().__getattribute__(name)
+                return object_result(super().__getattribute__, name)
 
         # Unknown names raise the unknown-name rejection rendered safely.
         for hostile in (HostileRepr("winowed"), HostileHash("winowed")):
@@ -514,7 +515,7 @@ class TestSkipPredicate:
             def __getattribute__(self, name: str) -> object:
                 if armed and name == "skip":
                     raise RuntimeError("skip should never run")
-                return super().__getattribute__(name)
+                return object_result(super().__getattribute__, name)
 
         class HostileBoolean:
             def __bool__(self) -> bool:

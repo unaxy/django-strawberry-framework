@@ -35,6 +35,7 @@ from typing import Any, get_type_hints
 import pytest
 
 import django_strawberry_framework
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._soft_dependency import simulated_absence
 
 # The verified DRF floor; the install hint must name it (place 2 of the
@@ -133,7 +134,7 @@ def test_star_import_stays_drf_free_and_binds_no_serializer_surface() -> None:
 def test_other_attribute_miss_raises_attribute_error() -> None:
     """A non-``SerializerMutation`` attribute miss raises the normal ``AttributeError`` (not ImportError)."""
     with pytest.raises(AttributeError, match="DefinitelyNotAName"):
-        _ = django_strawberry_framework.DefinitelyNotAName
+        _ = read_attr(django_strawberry_framework, "DefinitelyNotAName")
 
 
 @pytest.mark.parametrize("name", tuple(django_strawberry_framework._DRF_SOFT_EXPORTS))
@@ -147,7 +148,7 @@ def test_successful_lookup_does_not_memoize(name: str) -> None:
     """
     with contextlib.suppress(AttributeError):
         delattr(django_strawberry_framework, name)
-    exported = getattr(django_strawberry_framework, name)
+    exported = read_attr(django_strawberry_framework, name)
     assert exported is not None
     assert name not in vars(django_strawberry_framework)
 

@@ -43,7 +43,7 @@ import itertools
 from collections.abc import Generator, Iterator
 from enum import Enum
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
 import strawberry
@@ -79,10 +79,21 @@ from django_strawberry_framework.forms.resolvers import (
     _to_form_key_value,
 )
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
+from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils._narrowing import (
+    dict_of,
+    enum_value,
+    pk_of,
+    read_attr,
+    require_instance,
+)
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import SyncMisuseError, visible_related_object
+from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
+from tests._idioms import is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
 
 if TYPE_CHECKING:
@@ -92,6 +103,33 @@ if TYPE_CHECKING:
     # out because the checker runs without the django-stubs mypy plugin that would infer them.
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
     _Text: TypeAlias = models.TextField[str | Combinable, str]
+
+
+def _json_at(value: object, *path: str | int) -> object:
+    """``value`` followed down ``path``: a ``str`` key into an object, an ``int`` index into a list."""
+    found = value
+    for key in path:
+        if isinstance(key, str):
+            assert is_object_dict(found), found
+            found = found[key]
+        else:
+            assert is_object_list(found), found
+            found = found[key]
+    return found
+
+
+def _json_object(value: object, *path: str | int) -> dict[object, object]:
+    """The JSON object at ``path`` under ``value`` (see ``_json_at``)."""
+    found = _json_at(value, *path)
+    assert is_object_dict(found), found
+    return found
+
+
+def _json_list(value: object, *path: str | int) -> list[object]:
+    """The JSON list at ``path`` under ``value`` (see ``_json_at``)."""
+    found = _json_at(value, *path)
+    assert is_object_list(found), found
+    return found
 
 
 @pytest.fixture(autouse=True)
@@ -280,13 +318,13 @@ def test_decode_split_relation_lands_under_form_key_not_id_attr() -> None:
     assert input_cls is not None
     data = _keyword_constructor(input_cls)(
         name="X",
-        category_id=_relay_global_id(CategoryT, cat.pk),
+        category_id=_relay_global_id(CategoryT, saved_pk(cat)),
     )
     info = make_info(context=SimpleNamespace())
     provided_data, provided_files, error = form_resolvers._decode_form_data(CreateItem, data, info)
     assert error is None
     # The form key is "category" (the form field name), NOT "category_id".
-    assert provided_data["category"] == cat.pk
+    assert provided_data["category"] == saved_pk(cat)
     assert "category_id" not in provided_data
     assert provided_files == {}
 
@@ -393,8 +431,8 @@ def test_decode_unwraps_choice_enum_to_raw_value() -> None:
     assert isinstance(enum_def, StrawberryEnumDefinition)
     enum_cls = enum_def.wrapped_cls
     assert issubclass(enum_cls, Enum)
-    member = next(m for m in enum_cls if m.value == "available")
-    data = input_cls(**{status_attr: member, "title": "T", "shelf_id": strawberry.UNSET})
+    member = next(m for m in enum_cls if enum_value(m) == "available")
+    data = input_cls(**{status_attr: member, "title": "T", "shelf_id": UNSET})
     info = make_info(context=SimpleNamespace())
     provided_data, _files, error = form_resolvers._decode_form_data(CreateBook, data, info)
     assert error is None
@@ -430,7 +468,9 @@ def _build_book_m2m_schema(*, genre_relay: bool, genre_get_queryset: object = No
     }
     if genre_get_queryset is not None:
         genre_body["get_queryset"] = genre_get_queryset
-    GenreT = type("GenreT", genre_bases, genre_body)
+    GenreT = object_result(type, "GenreT", genre_bases, genre_body)
+    assert isinstance(GenreT, type)
+    assert issubclass(GenreT, DjangoType)
 
     class ShelfT(DjangoType, relay.Node):
         class Meta:
@@ -486,8 +526,8 @@ def test_relation_visibility_relay_multi_hidden_rejected() -> None:
         variable_values={
             "d": {
                 "title": "B",
-                "shelfId": global_id_for(ShelfT, shelf.pk),
-                "genres": [global_id_for(GenreT, genre.pk)],
+                "shelfId": global_id_for(ShelfT, saved_pk(shelf)),
+                "genres": [global_id_for(GenreT, saved_pk(genre))],
             },
         },
     )
@@ -695,15 +735,15 @@ def test_get_form_kwargs_queryset_scoping_leaves_the_generated_input_shape_uncha
     class CategoryPickForm(forms.Form):
         category = forms.ModelChoiceField(queryset=product_models.Category.objects.all())
 
-        def __init__(
+        # basedpyright: the verbatim forward to forms.Form.__init__ runs through call_forwarded,
+        # which the checker does not read as a super() call
+        def __init__(  # pyright: ignore[reportMissingSuperCall]
             self,
-            # basedpyright: verbatim forward to forms.Form.__init__; object fails its typed params
-            *args: Any,  # pyright: ignore[reportExplicitAny]
+            *args: object,
             allowed_categories: models.QuerySet[product_models.Category] | None = None,
-            # basedpyright: verbatim forward to forms.Form.__init__; object fails its typed params
-            **kwargs: Any,  # pyright: ignore[reportExplicitAny]
+            **kwargs: object,
         ) -> None:
-            super().__init__(*args, **kwargs)
+            call_forwarded(super().__init__, args, kwargs)
             if allowed_categories is not None:
                 assert isinstance(self.fields["category"], forms.ModelChoiceField)
                 self.fields["category"].queryset = allowed_categories
@@ -753,9 +793,9 @@ def test_get_form_kwargs_queryset_scoping_leaves_the_generated_input_shape_uncha
 
     inside = product_models.Category.objects.create(name=_uniq("Inside"))
     outside = product_models.Category.objects.create(name=_uniq("Outside"))
-    allowed["queryset"] = product_models.Category.objects.filter(pk=inside.pk)
+    allowed["queryset"] = product_models.Category.objects.filter(pk=saved_pk(inside))
 
-    outside_id = global_id_for(CategoryT, outside.pk)
+    outside_id = global_id_for(CategoryT, saved_pk(outside))
     scoped = schema.execute_sync(
         "mutation($d: CategoryPickFormInput!){ pickScoped(data:$d){ ok errors{ field messages } } }",
         variable_values={"d": {"categoryId": outside_id}},
@@ -763,7 +803,8 @@ def test_get_form_kwargs_queryset_scoping_leaves_the_generated_input_shape_uncha
     assert scoped.errors is None, scoped.errors
     assert scoped.data is not None
     assert scoped.data["pickScoped"]["ok"] is False
-    assert [e["field"] for e in scoped.data["pickScoped"]["errors"]] == ["categoryId"]
+    errors = _json_list(scoped.data, "pickScoped", "errors")
+    assert [_json_at(error, "field") for error in errors] == ["categoryId"]
 
     unscoped = schema.execute_sync(
         "mutation($d: CategoryPickFormInput!){ pickAny(data:$d){ ok errors{ field messages } } }",
@@ -847,16 +888,16 @@ def test_partial_update_preserves_unprovided_m2m_with_to_field_name() -> None:
     res = schema.execute_sync(
         "mutation($id: ID!, $d: BookFormPartialInput!){ updateBook(id:$id, data:$d){ "
         "node{ title } errors{ field messages } } }",
-        variable_values={"id": global_id_for(BookT, book.pk), "d": {"title": "Renamed"}},
+        variable_values={"id": global_id_for(BookT, saved_pk(book)), "d": {"title": "Renamed"}},
     )
     assert res.errors is None, res.errors
     assert res.data is not None
-    payload = res.data["updateBook"]
+    payload = _json_object(res.data, "updateBook")
     # The omitted to_field_name M2M did NOT spuriously fail validation.
     assert payload["errors"] == [], payload["errors"]
-    assert payload["node"]["title"] == "Renamed"
+    assert _json_at(payload, "node", "title") == "Renamed"
     book.refresh_from_db()
-    assert list(book.genres.values_list("pk", flat=True)) == [genre.pk]  # preserved
+    assert list(book.genres.values_list("pk", flat=True)) == [saved_pk(genre)]  # preserved
 
 
 @pytest.mark.django_db
@@ -924,17 +965,17 @@ def test_m2m_member_whose_to_field_name_value_is_empty_stays_linked(
     if value == "omitted":
         book.genres.add(empty)
     else:
-        data["genres"] = [global_id_for(GenreT, empty.pk)]
+        data["genres"] = [global_id_for(GenreT, saved_pk(empty))]
     with CaptureQueriesContext(connection) as captured:
         res = schema.execute_sync(
             "mutation($id: ID!, $d: BookFormPartialInput!){ updateBook(id:$id, data:$d){ "
             "node{ title } errors{ field messages } } }",
-            variable_values={"id": global_id_for(BookT, book.pk), "d": data},
+            variable_values={"id": global_id_for(BookT, saved_pk(book)), "d": data},
         )
     assert res.errors is None, res.errors
     assert res.data is not None
     assert res.data["updateBook"] == {"node": {"title": "Renamed"}, "errors": []}
-    assert list(book.genres.values_list("pk", flat=True)) == [empty.pk]
+    assert list(book.genres.values_list("pk", flat=True)) == [saved_pk(empty)]
     reads = [
         query["sql"]
         for query in captured.captured_queries
@@ -999,18 +1040,18 @@ def test_partial_update_preserves_unprovided_fk_with_to_field_name() -> None:
     res = schema.execute_sync(
         "mutation($id: ID!, $d: BookFormPartialInput!){ updateBook(id:$id, data:$d){ "
         "node{ title } errors{ field messages } } }",
-        variable_values={"id": global_id_for(BookT, book.pk), "d": {"title": "Renamed"}},
+        variable_values={"id": global_id_for(BookT, saved_pk(book)), "d": {"title": "Renamed"}},
     )
     assert res.errors is None, res.errors
     assert res.data is not None
-    payload = res.data["updateBook"]
+    payload = _json_object(res.data, "updateBook")
     # The omitted to_field_name FK did NOT spuriously fail validation.
     assert payload["errors"] == [], payload["errors"]
-    assert payload["node"]["title"] == "Renamed"
+    assert _json_at(payload, "node", "title") == "Renamed"
     book.refresh_from_db()
     assert book.title == "Renamed"
     # the unchanged FK preserved
-    assert book.shelf_id == shelf.pk
+    assert book.shelf_id == saved_pk(shelf)
 
 
 @pytest.mark.django_db
@@ -1118,7 +1159,7 @@ def test_required_extra_field_omitted_on_update_is_coercion_error() -> None:
     res = schema.execute_sync(
         "mutation($id: ID!, $d: ConfirmFormPartialInput!){ updateItem(id:$id, data:$d){ "
         "node{ name } errors{ field messages } } }",
-        variable_values={"id": global_id_for(ItemT, item.pk), "d": {"name": "Y"}},
+        variable_values={"id": global_id_for(ItemT, saved_pk(item)), "d": {"name": "Y"}},
     )
     # The required ``confirm`` is non-null in SDL AND rejects omission at coercion:
     # a top-level error, no in-band envelope (the resolver is never reached).
@@ -1225,7 +1266,7 @@ def _save_refusal_schema(flavor: str) -> tuple[strawberry.Schema, str, str, str]
         )
         name_input = "itemName"
     category = product_models.Category.objects.create(name=_uniq("Cat"))
-    return schema, query, name_input, global_id_for(CategoryT, category.pk)
+    return schema, query, name_input, global_id_for(CategoryT, saved_pk(category))
 
 
 @pytest.mark.django_db
@@ -1388,7 +1429,7 @@ def test_perform_mutate_override_runs_only_on_success() -> None:
         message = forms.CharField()
 
         def clean_message(self) -> object:
-            value = self.cleaned_data["message"]
+            value = dict_of(self.cleaned_data)["message"]
             if value == "fail":
                 raise forms.ValidationError("nope")
             return value
@@ -1404,7 +1445,7 @@ def test_perform_mutate_override_runs_only_on_success() -> None:
             form: forms.BaseForm,
             info: strawberry.Info[object, object],
         ) -> None:
-            calls.append(form.cleaned_data["message"])
+            calls.append(dict_of(form.cleaned_data)["message"])
 
     @strawberry.type
     class Mutation:
@@ -1437,7 +1478,7 @@ def test_plain_form_rejects_write_sql_outside_the_write_phase() -> None:
 
         def clean_message(self) -> object:
             product_models.Category.objects.create(name=_uniq("PhaseLeak"))
-            return self.cleaned_data["message"]
+            return dict_of(self.cleaned_data)["message"]
 
     class Submit(DjangoFormMutation):
         class Meta:
@@ -1576,7 +1617,9 @@ def test_sync_create_meeting_async_get_queryset_raises_sync_misuse() -> None:
     cat = product_models.Category.objects.create(name=_uniq("Cat"))
     res = schema.execute_sync(
         "mutation($d: ItemModelFormInput!){ createItem(data:$d){ node{ name } errors{ field } } }",
-        variable_values={"d": {"name": "X", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        variable_values={
+            "d": {"name": "X", "categoryId": global_id_for(CategoryT, saved_pk(cat))},
+        },
     )
     assert res.errors is not None
     assert any(isinstance(e.original_error, SyncMisuseError) for e in res.errors)
@@ -1608,11 +1651,13 @@ def test_modelform_refetch_keeps_select_related_and_suppresses_only() -> None:
     ctx = SimpleNamespace()
     res = schema.execute_sync(
         _CREATE,
-        variable_values={"d": {"name": "G", "categoryId": global_id_for(CategoryT, cat.pk)}},
+        variable_values={
+            "d": {"name": "G", "categoryId": global_id_for(CategoryT, saved_pk(cat))},
+        },
         context_value=ctx,
     )
     assert res.errors is None, res.errors
-    plan = ctx.dst_optimizer_plan
+    plan = require_instance(read_attr(ctx, "dst_optimizer_plan"), OptimizationPlan)
     # The relation selection (`category { name }`) is planned via select_related.
     assert plan.select_related == ("category",)
     # No `.only(...)` projection under a MUTATION (the G2 gate suppresses it).
@@ -1681,29 +1726,31 @@ def test_narrowed_update_preserves_excluded_required_fk_and_validates_constraint
     # 1) the excluded required FK is preserved from the located row.
     res = schema.execute_sync(
         query,
-        variable_values={"id": global_id_for(ItemT, item.pk), "d": {"name": "After"}},
+        variable_values={"id": global_id_for(ItemT, saved_pk(item)), "d": {"name": "After"}},
     )
     assert res.errors is None, res.errors
     assert res.data is not None
-    payload = res.data["updateItem"]
+    payload = _json_object(res.data, "updateItem")
     assert payload["errors"] == []
-    assert payload["node"]["name"] == "After"
-    assert payload["node"]["category"]["name"] == cat.name  # category preserved
+    assert _json_at(payload, "node", "name") == "After"
+    assert _json_at(payload, "node", "category", "name") == cat.name  # category preserved
     item.refresh_from_db()
-    assert item.category_id == cat.pk
+    assert item.category_id == saved_pk(cat)
 
     # 2) the preserved FK still feeds composite-uniqueness validation: a name-only
     # update colliding within the preserved category trips unique_item_per_category.
     product_models.Item.objects.create(name="Taken", category=cat)
     res2 = schema.execute_sync(
         query,
-        variable_values={"id": global_id_for(ItemT, item.pk), "d": {"name": "Taken"}},
+        variable_values={"id": global_id_for(ItemT, saved_pk(item)), "d": {"name": "Taken"}},
     )
     assert res2.errors is None, res2.errors
     assert res2.data is not None
-    payload2 = res2.data["updateItem"]
+    payload2 = _json_object(res2.data, "updateItem")
     assert payload2["node"] is None
-    assert NON_FIELD_ERROR_KEY in [e["field"] for e in payload2["errors"]]
+    assert NON_FIELD_ERROR_KEY in [
+        _json_at(error, "field") for error in _json_list(payload2, "errors")
+    ]
 
 
 @pytest.mark.django_db
@@ -1762,8 +1809,8 @@ def test_visible_related_object_no_primary_uses_default_manager() -> None:
     serializer relation decoders share one object-returning visibility query.
     """
     genre = library_models.Genre.objects.create(name=_uniq("G"))
-    assert visible_related_object(library_models.Genre, genre.pk, None) == genre
-    assert visible_related_object(library_models.Genre, genre.pk + 9999, None) is None
+    assert visible_related_object(library_models.Genre, saved_pk(genre), None) == genre
+    assert visible_related_object(library_models.Genre, saved_pk(genre) + 9999, None) is None
 
 
 @pytest.mark.django_db
@@ -1796,14 +1843,14 @@ def test_decode_form_relation_multi_collects_valid_then_short_circuits_on_bad() 
     # A valid element is decoded, to_field_name-converted (default ``obj.pk``), and collected.
     assert field.queryset is not None
     keys, error = form_resolvers._decode_form_relation_multi(
-        [genre.pk],
+        [saved_pk(genre)],
         graphql_name="genres",
         related_model=field.queryset.model,
         form_field=field,
         info=unread_info(),
     )
     assert error is None
-    assert keys == [genre.pk]
+    assert keys == [saved_pk(genre)]
     # A bad element short-circuits to the field-keyed error.
     keys, error = form_resolvers._decode_form_relation_multi(
         ["abc"],
@@ -1855,9 +1902,9 @@ def test_plain_form_relation_decode_error_yields_not_ok_envelope() -> None:
     )
     assert res.errors is None, res.errors
     assert res.data is not None
-    payload = res.data["pick"]
+    payload = _json_object(res.data, "pick")
     assert payload["ok"] is False
-    assert [e["field"] for e in payload["errors"]] == ["genreId"]
+    assert [_json_at(error, "field") for error in _json_list(payload, "errors")] == ["genreId"]
 
 
 @pytest.mark.django_db
@@ -1875,7 +1922,7 @@ def test_decode_form_relation_multi_keeps_a_member_whose_to_field_name_value_is_
     )
     with CaptureQueriesContext(connection) as captured:
         keys, error = _decode_form_relation_multi(
-            [empty.pk],
+            [saved_pk(empty)],
             graphql_name="genres",
             related_model=library_models.Genre,
             form_field=field,
@@ -1982,10 +2029,11 @@ def test_m2m_raw_pk_element_empty_is_decoded_never_a_clear(
         isbn_10="",
         publisher=publisher,
     )
+    shown_pk = require_instance(pk_of(shown), str)
     with CaptureQueriesContext(connection) as captured:
         res = schema.execute_sync(
             _CREATE_PRINTING,
-            variable_values={"d": {"editionId": shown.pk, "runSize": 1, "boundWith": [""]}},
+            variable_values={"d": {"editionId": shown_pk, "runSize": 1, "boundWith": [""]}},
         )
     assert res.errors is None, res.errors
     assert res.data is not None
@@ -2016,15 +2064,16 @@ def test_m2m_raw_pk_element_naming_a_visible_edition_links_it(
         isbn_10=isbn_10,
         publisher=publisher,
     )
+    shown_pk = require_instance(pk_of(shown), str)
     res = schema.execute_sync(
         _CREATE_PRINTING,
-        variable_values={"d": {"editionId": shown.pk, "runSize": 1, "boundWith": [shown.pk]}},
+        variable_values={"d": {"editionId": shown_pk, "runSize": 1, "boundWith": [shown_pk]}},
     )
     assert res.errors is None, res.errors
     assert res.data is not None
     assert res.data["createPrinting"] == {"node": {"runSize": 1}, "errors": []}
     printing = library_models.Printing.objects.get()
-    assert list(printing.bound_with.values_list("isbn_13", flat=True)) == [shown.pk]
+    assert list(printing.bound_with.values_list("isbn_13", flat=True)) == [shown_pk]
 
 
 def test_decode_form_relation_multi_non_iterable_returns_field_error() -> None:
@@ -2076,7 +2125,7 @@ def test_partial_update_reconstruct_with_extra_model_choice_field() -> None:
     assert unresolved == {}
     assert "extra_choice" not in data
     assert data["name"] == "updated"
-    assert data["category"] == cat.pk
+    assert data["category"] == saved_pk(cat)
 
 
 @pytest.mark.django_db
@@ -2109,7 +2158,7 @@ def test_partial_update_reconstruct_with_reverse_relation_field() -> None:
     assert unresolved == {}
     assert "entries" not in data
     assert data["name"] == "updated"
-    assert data["category"] == cat.pk
+    assert data["category"] == saved_pk(cat)
 
 
 @pytest.mark.django_db
@@ -2149,12 +2198,12 @@ def test_partial_update_reconstruct_reads_the_related_row_only_off_the_stored_ke
             form_class = BookForm
             operation = "update"
 
-    located = library_models.Book.objects.get(pk=book.pk)
+    located = library_models.Book.objects.get(pk=saved_pk(book))
     with CaptureQueriesContext(connection) as captured:
         data, unresolved = form_resolvers._reconstruct_partial_data(UpdateBook, located, {})
     assert len(captured.captured_queries) == reads
     assert unresolved == {}
-    assert data["shelf"] == (shelf.code if to_field_name == "code" else shelf.pk)
+    assert data["shelf"] == (shelf.code if to_field_name == "code" else saved_pk(shelf))
 
 
 @pytest.mark.django_db
@@ -2182,7 +2231,7 @@ def test_partial_update_reconstruct_reports_an_unresolvable_stored_key(
     as an id, nor the empty value, which would clear the relation, is ever bound.
     """
     other = library_models.Genre.objects.create(name=_uniq("Other"))
-    genre = library_models.Genre.objects.create(name=str(other.pk))
+    genre = library_models.Genre.objects.create(name=str(saved_pk(other)))
     patron = library_models.Patron.objects.create(name=_uniq("Patron"))
     library_models.PatronProfile.objects.create(
         patron=patron,
@@ -2212,10 +2261,10 @@ def test_partial_update_reconstruct_reports_an_unresolvable_stored_key(
             with connection.cursor() as cursor:
                 cursor.execute(
                     "DELETE FROM library_genre WHERE id = %s",
-                    [genre.pk],
+                    [saved_pk(genre)],
                 )
         try:
-            located = profiles.get(pk=patron.pk)
+            located = profiles.get(pk=saved_pk(patron))
             with CaptureQueriesContext(connection) as captured:
                 data, unresolved = form_resolvers._reconstruct_partial_data(
                     UpdateProfile,
@@ -2223,13 +2272,15 @@ def test_partial_update_reconstruct_reports_an_unresolvable_stored_key(
                     {"address_2": "Suite 9"},
                 )
         finally:
-            library_models.PatronProfile.objects.filter(pk=patron.pk).update(favorite_genre=None)
+            library_models.PatronProfile.objects.filter(pk=saved_pk(patron)).update(
+                favorite_genre=None,
+            )
     assert len(captured.captured_queries) == reads
     assert data["address_2"] == "Suite 9"
     if stored == "null":
         assert (data["favorite_genre"], unresolved) == (None, {})
     elif stored == "genre":
-        assert (data["favorite_genre"], unresolved) == (genre.pk, {})
+        assert (data["favorite_genre"], unresolved) == (saved_pk(genre), {})
     else:
         assert "favorite_genre" not in data
         assert list(unresolved) == ["favorite_genre"]
@@ -2314,14 +2365,14 @@ def test_decode_form_relation_multi_one_shot_generator_fully_decoded() -> None:
     second = library_models.Genre.objects.create(name=_uniq("G2"))
     field = forms.ModelMultipleChoiceField(queryset=library_models.Genre.objects.all())
     keys, error = form_resolvers._decode_form_relation_multi(
-        iter([first.pk, second.pk]),
+        iter([saved_pk(first), saved_pk(second)]),
         graphql_name="genres",
         related_model=library_models.Genre,
         form_field=field,
         info=unread_info(),
     )
     assert error is None
-    assert keys == [first.pk, second.pk]
+    assert keys == [saved_pk(first), saved_pk(second)]
 
 
 def test_decode_form_relation_multi_iteration_failures_stay_in_envelope() -> None:
@@ -2371,7 +2422,7 @@ def test_decode_form_relation_multi_materializes_before_any_visibility_query() -
     field = forms.ModelMultipleChoiceField(queryset=library_models.Genre.objects.all())
 
     def _container() -> Iterator[int]:
-        yield genre.pk
+        yield saved_pk(genre)
         raise RuntimeError("hostile second pull")
 
     with CaptureQueriesContext(connection) as ctx:
@@ -2591,7 +2642,7 @@ def test_modelform_blank_choice_save_failure_is_field_keyed_null_error(
             res = schema.execute_sync(
                 f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
                 "result{ id } errors{ field messages codes } } }",
-                variable_values={"id": str(row.pk), "d": pick_input},
+                variable_values={"id": str(saved_pk(row)), "d": pick_input},
             )
             payload = res.data and res.data["updateRow"]
         assert res.errors is None, res.errors
@@ -2619,13 +2670,12 @@ def test_modelform_blank_choice_filled_in_by_model_save_writes() -> None:
             managed = False
 
         @override
-        # basedpyright: verbatim forward to Model.save; object fails its typed params
-        def save(self, *args: Any, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
+        def save(self, *args: object, **kwargs: object) -> None:
             # Django keeps an assigned value unconverted in the instance dict the column's
             # descriptor reads, so the form's cleaned "" is still "" there.
             if vars(self)["pick"] == "":
                 self.pick = 2
-            super().save(*args, **kwargs)
+            call_forwarded(super().save, args, kwargs)
 
     with _blank_choice_table(FilledPickRow):
         schema, create_input, _ = _blank_choice_schema(FilledPickRow, ("pick",))
@@ -2664,8 +2714,7 @@ def test_modelform_unrelated_save_value_error_propagates() -> None:
             managed = False
 
         @override
-        # basedpyright: Model.save override signature; object fails its typed params
-        def save(self, *args: Any, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
+        def save(self, *args: object, **kwargs: object) -> None:
             raise _CONSUMER_SAVE_ERROR
 
     with _blank_choice_table(FailingPickRow):

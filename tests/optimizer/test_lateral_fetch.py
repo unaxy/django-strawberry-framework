@@ -69,10 +69,11 @@ from django_strawberry_framework.optimizer.plans import (
     OptimizationPlan,
     apply_window_pagination,
 )
-from django_strawberry_framework.utils._narrowing import is_list
+from django_strawberry_framework.utils._narrowing import is_list, read_attr
 from django_strawberry_framework.utils._queryset_private import (
     chain_queryset,
 )
+from tests._idioms import saved_pk
 from tests.optimizer._builders import filter_prefetch_queryset
 from tests.optimizer._builders import nested_connection_request as _request
 
@@ -1153,7 +1154,7 @@ class _PostgresFacade:
         return self.scripted_cursor
 
     def __getattr__(self, name: str) -> object:
-        return getattr(self._real, name)
+        return read_attr(self._real, name)
 
 
 def test_lateral_execution_instantiates_window_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1196,7 +1197,7 @@ def test_lateral_execution_instantiates_window_rows(monkeypatch: pytest.MonkeyPa
     assert "unnest(%s::bigint[])" in sql  # the FK db_type drives the parent array cast.
     assert params == [[1, 2], 2]
     assert [type(row) for row in rows] == [Book, Book, Book]
-    assert [(row.pk, row.title, row.shelf_id) for row in _books(rows)] == [
+    assert [(saved_pk(row), row.title, row.shelf_id) for row in _books(rows)] == [
         (101, "Alpha", 1),
         (102, "Beta", 1),
         (201, "Gamma", 2),
@@ -1410,7 +1411,7 @@ def test_auto_fallback_executes_the_windowed_body_end_to_end() -> None:
     shelves = list(Shelf.objects.order_by("code").prefetch_related(entry))
     # Prefetch(to_attr=...) sets the attribute on each row at run time; the model class does not
     # declare it
-    a_rows = _book_rows(getattr(shelves[0], entry.to_attr))
+    a_rows = _book_rows(read_attr(shelves[0], entry.to_attr))
     assert [row.title for row in a_rows] == ["t1", "t2"]
     assert [getattr(row, WINDOW_ROW_NUMBER) for row in a_rows] == [1, 2]
     assert [getattr(row, WINDOW_TOTAL_COUNT) for row in a_rows] == [3, 3]

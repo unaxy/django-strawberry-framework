@@ -72,6 +72,14 @@ from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    list_of,
+    read_attr,
+    require_instance,
+)
+from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import saved_pk
 from tests.filters.fixtures.filtersets import (
     BranchFilter,
     BranchFilterByPath,
@@ -80,6 +88,16 @@ from tests.filters.fixtures.filtersets import (
 )
 
 _FilterT = TypeVar("_FilterT", bound=Filter)
+
+
+def _widget_value_from_datadict(field: object, *args: object) -> object:
+    """``field.widget.value_from_datadict(*args)``, read as ``object`` (the stubs type it ``Any``)."""
+    return call_method(read_attr(field, "widget"), "value_from_datadict", *args)
+
+
+def _widget_decompress(field: object, value: object) -> object:
+    """``field.widget.decompress(value)``, read as ``object`` (the stubs type it ``Any``)."""
+    return call_method(read_attr(field, "widget"), "decompress", value)
 
 
 class _RecordingQs(QuerySet[Model]):
@@ -215,15 +233,16 @@ def test_range_field_missing_pair_cleans_to_none() -> None:
     ``test_scalars_filter_api.py::test_scalars_filter_by_price_span_range``.
     """
     field = RangeField(required=False)
-    assert field.widget.value_from_datadict({}, {}, "price_span") == [None, None]
+    assert _widget_value_from_datadict(field, {}, {}, "price_span") == [None, None]
     assert field.clean([None, None]) is None
-    assert field.widget.value_from_datadict(
+    assert _widget_value_from_datadict(
+        field,
         {"price_span_0": "10", "price_span_1": "100"},
         {},
         "price_span",
     ) == ["10", "100"]
-    assert field.widget.decompress(("10", "100")) == ["10", "100"]
-    assert field.widget.decompress(None) == [None, None]
+    assert _widget_decompress(field, ("10", "100")) == ["10", "100"]
+    assert _widget_decompress(field, None) == [None, None]
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +414,8 @@ def test_global_id_multiple_choice_field_distinguishes_absent_from_explicit_empt
     """Form cleaning keeps omission as ``None`` and a supplied empty list as ``[]``."""
     field = GlobalIDMultipleChoiceFilter(field_name="id").field
 
-    absent = field.widget.value_from_datadict(QueryDict(), {}, "id")
-    explicit_empty = field.widget.value_from_datadict({"id": []}, {}, "id")
+    absent = _widget_value_from_datadict(field, QueryDict(), {}, "id")
+    explicit_empty = _widget_value_from_datadict(field, {"id": []}, {}, "id")
 
     assert field.clean(absent) is None
     assert field.clean(explicit_empty) == []
@@ -414,10 +433,10 @@ def test_membership_in_field_reads_a_raw_empty_string_as_omission() -> None:
     """
     field = membership_in_filter_class(_CharInFilter)(field_name="code", lookup_expr="in").field
 
-    raw_empty = field.widget.value_from_datadict(QueryDict("code__in="), {}, "code__in")
-    explicit_empty = field.widget.value_from_datadict({"code__in": []}, {}, "code__in")
-    absent = field.widget.value_from_datadict(QueryDict(), {}, "code__in")
-    csv = field.widget.value_from_datadict(QueryDict("code__in=a,b"), {}, "code__in")
+    raw_empty = _widget_value_from_datadict(field, QueryDict("code__in="), {}, "code__in")
+    explicit_empty = _widget_value_from_datadict(field, {"code__in": []}, {}, "code__in")
+    absent = _widget_value_from_datadict(field, QueryDict(), {}, "code__in")
+    csv = _widget_value_from_datadict(field, QueryDict("code__in=a,b"), {}, "code__in")
 
     assert field.clean(raw_empty) is None
     assert field.clean(absent) is None
@@ -439,7 +458,7 @@ def test_membership_in_filter_class_wraps_a_new_class_per_call_and_rejects_a_sca
 def test_global_id_multiple_choice_field_omission_still_enforces_required() -> None:
     """Preserving ``None`` must not bypass Django's required-field validation."""
     field = GlobalIDMultipleChoiceFilter(field_name="id", required=True).field
-    absent = field.widget.value_from_datadict(QueryDict(), {}, "id")
+    absent = _widget_value_from_datadict(field, QueryDict(), {}, "id")
 
     with pytest.raises(ValidationError, match="required"):
         field.clean(absent)
@@ -496,10 +515,13 @@ def test_excluded_empty_membership_matches_every_row_as_a_constraint(
     models.Shelf.objects.create(code="A-2", topic="general", branch=branch)
     qs = models.Shelf.objects.order_by("code")
 
-    result = excluding().filter(qs, [])
+    result = object_result(excluding().filter, qs, [])
 
     assert result is not qs
-    assert [shelf.code for shelf in result] == ["A-1", "A-2"]
+    assert [require_instance(shelf, models.Shelf).code for shelf in list_of(result)] == [
+        "A-1",
+        "A-2",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -638,8 +660,8 @@ def test_global_id_filter_non_pk_to_field_matches_by_target_pk() -> None:
     column and matches nothing.
     """
     alpha, _beta = _seed_favorite_genre_profiles("ALPHA", "BETA")
-    assert str(alpha.pk) != alpha.name
-    encoded = relay.to_base64("GenreType", str(alpha.pk))
+    assert str(saved_pk(alpha)) != alpha.name
+    encoded = relay.to_base64("GenreType", str(saved_pk(alpha)))
 
     f = GlobalIDFilter(field_name="favorite_genre", lookup_expr="exact")
     # Boolean flag: ``filter`` derives ``f"{field_name}__pk"``.
@@ -649,7 +671,7 @@ def test_global_id_filter_non_pk_to_field_matches_by_target_pk() -> None:
 
     # The unqualified predicate compares the pk value against the stored
     # ``name`` column and returns the WRONG (empty) result.
-    wrong = models.PatronProfile.objects.filter(favorite_genre__exact=str(alpha.pk))
+    wrong = models.PatronProfile.objects.filter(favorite_genre__exact=str(saved_pk(alpha)))
     assert wrong.count() == 0
 
 
@@ -658,8 +680,8 @@ def test_global_id_multiple_choice_filter_non_pk_to_field_union_by_pk() -> None:
     """A marked multi-choice ``in`` filter unions both genres' profiles by pk."""
     alpha, beta, _gamma = _seed_favorite_genre_profiles("ALPHA", "BETA", "GAMMA")
     encoded = [
-        relay.to_base64("GenreType", str(alpha.pk)),
-        relay.to_base64("GenreType", str(beta.pk)),
+        relay.to_base64("GenreType", str(saved_pk(alpha))),
+        relay.to_base64("GenreType", str(saved_pk(beta))),
     ]
     f = GlobalIDMultipleChoiceFilter(field_name="favorite_genre", lookup_expr="in")
     # Boolean flag: ``filter`` derives ``f"{field_name}__pk"``.
@@ -670,7 +692,7 @@ def test_global_id_multiple_choice_filter_non_pk_to_field_union_by_pk() -> None:
     # The unqualified ``favorite_genre__in`` compares the pk values against the
     # stored ``name`` column and matches nothing.
     wrong = models.PatronProfile.objects.filter(
-        favorite_genre__in=[str(alpha.pk), str(beta.pk)],
+        favorite_genre__in=[str(saved_pk(alpha)), str(saved_pk(beta))],
     )
     assert wrong.count() == 0
 
@@ -1778,8 +1800,11 @@ def test_relation_pk_filters_generated_for_non_pk_to_field_match_by_target_pk() 
         )
         return list(filterset.qs.values_list("postal_code", flat=True))
 
-    assert codes({"favorite_genre": alpha.pk}) == ["ALPHA-zip"]
-    assert codes({"favorite_genre__in": [alpha.pk, beta.pk]}) == ["ALPHA-zip", "BETA-zip"]
+    assert codes({"favorite_genre": saved_pk(alpha)}) == ["ALPHA-zip"]
+    assert codes({"favorite_genre__in": [saved_pk(alpha), saved_pk(beta)]}) == [
+        "ALPHA-zip",
+        "BETA-zip",
+    ]
 
 
 @pytest.mark.django_db
@@ -1808,7 +1833,7 @@ def test_relation_pk_filters_drop_a_value_the_target_column_cannot_hold() -> Non
 
     assert titles({"shelf": "not-a-pk"}) == []
     assert titles({"shelf__in": ["not-a-pk"]}) == []
-    assert titles({"shelf__in": ["not-a-pk", shelf.pk]}) == ["Kept"]
+    assert titles({"shelf__in": ["not-a-pk", saved_pk(shelf)]}) == ["Kept"]
 
 
 @pytest.mark.django_db
@@ -1851,7 +1876,7 @@ def test_unbound_relation_pk_filters_apply_the_value_uncoerced() -> None:
 
     single = RelationPkFilter(field_name="shelf", lookup_expr="exact")
     many = RelationPkMultipleFilter(field_name="shelf", lookup_expr="in")
-    assert list(single.filter(books, shelf.pk).values_list("title", flat=True)) == ["Kept"]
-    assert list(many.filter(books, [other.pk]).values_list("title", flat=True)) == ["Other"]
+    assert list(single.filter(books, saved_pk(shelf)).values_list("title", flat=True)) == ["Kept"]
+    assert list(many.filter(books, [saved_pk(other)]).values_list("title", flat=True)) == ["Other"]
     assert single.filter(books, None) is books
     assert many.filter(books, None) is books

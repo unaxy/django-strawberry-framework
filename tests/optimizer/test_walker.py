@@ -106,6 +106,7 @@ from django_strawberry_framework.optimizer.walker import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.finalizer import _record_relation_connection
+from django_strawberry_framework.utils._narrowing import is_list, list_of, read_attr, require
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
     queryset_prefetch_lookups,
@@ -113,6 +114,7 @@ from django_strawberry_framework.utils._queryset_private import (
 from django_strawberry_framework.utils.connections import ConnectionWindowBounds
 from django_strawberry_framework.utils.querysets import _COMBINED_WHAT
 from tests._definition import make_definition
+from tests._idioms import saved_pk
 from tests._info import make_info
 
 from ._link_models import LnkPairChild, LnkParent, LnkSlugChild
@@ -214,6 +216,11 @@ def _prefetches(lookups: Iterable[object]) -> list[Prefetch[str]]:
         assert isinstance(lookup, Prefetch)
         proven.append(lookup)
     return proven
+
+
+def _children(selection: object) -> list[object]:
+    """The ``selections`` list a ``_sel`` fake (or a merged clone of one) carries."""
+    return require(read_attr(selection, "selections"), is_list)
 
 
 def _fake_fields(selections: Sequence[object]) -> list[SimpleNamespace]:
@@ -616,8 +623,10 @@ def test_plan_uses_exact_graphql_names_for_explicitly_named_fields() -> None:
     try:
 
         class PatronProfileNode(DjangoType):
-            address_2: str = strawberry.field(name="secondaryAddress")
-            postal_code: str = strawberry.field(name="secondary_address")
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            address_2: str = strawberry.field(name="secondaryAddress")  # pyright: ignore[reportAny]
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            postal_code: str = strawberry.field(name="secondary_address")  # pyright: ignore[reportAny]
 
             class Meta:
                 model = PatronProfile
@@ -783,7 +792,8 @@ def test_forward_name_maps_wait_for_finalization() -> None:
     try:
 
         class PatronProfileNode(DjangoType):
-            address_2: str = strawberry.field(name="secondaryAddress")
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            address_2: str = strawberry.field(name="secondaryAddress")  # pyright: ignore[reportAny]
 
             class Meta:
                 model = PatronProfile
@@ -977,7 +987,7 @@ def test_merge_aliased_selections_merges_same_field() -> None:
     assert len(merged) == 1
     assert len(merged[0].selections) == 2
     assert isinstance(merged[0], SimpleNamespace)
-    assert merged[0]._optimizer_response_keys == ["first", "second"]
+    assert read_attr(merged[0], "_optimizer_response_keys") == ["first", "second"]
 
 
 def test_merge_aliased_selections_preserves_different_fields() -> None:
@@ -1009,7 +1019,7 @@ def test_merge_runtime_prefixes_adopts_then_unions_connection_prefixes() -> None
         merged,
         SimpleNamespace(_optimizer_runtime_prefixes=[("conn", "edges", "node")]),
     )
-    assert merged._optimizer_runtime_prefixes == [("conn", "edges", "node")]
+    assert read_attr(merged, "_optimizer_runtime_prefixes") == [("conn", "edges", "node")]
 
     # Second incoming unions a new prefix while skipping the duplicate.
     _merge_runtime_prefixes(
@@ -1018,14 +1028,14 @@ def test_merge_runtime_prefixes_adopts_then_unions_connection_prefixes() -> None
             _optimizer_runtime_prefixes=[("conn", "edges", "node"), ("alias", "edges", "node")],
         ),
     )
-    assert merged._optimizer_runtime_prefixes == [
+    assert read_attr(merged, "_optimizer_runtime_prefixes") == [
         ("conn", "edges", "node"),
         ("alias", "edges", "node"),
     ]
 
     # Incoming ``None`` (a plain non-connection selection) is a no-op.
     _merge_runtime_prefixes(merged, SimpleNamespace(_optimizer_runtime_prefixes=None))
-    assert merged._optimizer_runtime_prefixes == [
+    assert read_attr(merged, "_optimizer_runtime_prefixes") == [
         ("conn", "edges", "node"),
         ("alias", "edges", "node"),
     ]
@@ -1062,9 +1072,9 @@ def test_merge_aliased_selections_preserves_per_response_key_arguments() -> None
     assert len(merged) == 1
     assert merged[0].arguments == {"active": True}
     assert isinstance(merged[0], SimpleNamespace)
-    assert merged[0]._optimizer_response_keys == ["first", "second"]
+    assert read_attr(merged[0], "_optimizer_response_keys") == ["first", "second"]
     # Per-response-key payloads recorded for both aliases; divergence detected.
-    assert merged[0]._optimizer_response_key_arguments == {
+    assert read_attr(merged[0], "_optimizer_response_key_arguments") == {
         "first": {"active": True},
         "second": {"active": False},
     }
@@ -1866,7 +1876,7 @@ def test_plan_rewrites_a_combined_prefetch_obj_hint_to_its_primary_key_set(
     first, second, third = Item.objects.order_by("pk")[:3]
     combined = build(
         Item.objects.using("default").prefetch_related("entries"),
-        (first.pk, second.pk, third.pk),
+        (saved_pk(first), saved_pk(second), saved_pk(third)),
     )
     explicit = Prefetch("items", queryset=combined)
 
@@ -1893,12 +1903,14 @@ def test_plan_rewrites_a_combined_prefetch_obj_hint_to_its_primary_key_set(
     assert queryset_db(planned.queryset) == "default"
     assert queryset_prefetch_lookups(planned.queryset) == ("entries",)
     served = {
-        category.pk: sorted(item.pk for item in category.items.all())
+        saved_pk(category): sorted(saved_pk(item) for item in category.items.all())
         for category in Category.objects.prefetch_related(planned)
     }
-    expected: dict[int, list[int]] = {category.pk: [] for category in Category.objects.all()}
+    expected: dict[int, list[int]] = {
+        saved_pk(category): [] for category in Category.objects.all()
+    }
     for item in (first, second):
-        expected[item.category_id] = sorted([*expected[item.category_id], item.pk])
+        expected[item.category_id] = sorted([*expected[item.category_id], saved_pk(item)])
     assert served == expected
 
 
@@ -3369,9 +3381,9 @@ def test_nested_connection_total_count_planned_only_when_observable(
             arguments={"first": 3},
         )
         if count_observer == "totalCount":
-            connection.selections.append(_sel("totalCount"))
+            _children(connection).append(_sel("totalCount"))
         elif count_observer is not None:
-            connection.selections.append(
+            _children(connection).append(
                 _sel("pageInfo", selections=[_sel(count_observer)]),
             )
         plan = plan_optimizations(
@@ -3406,7 +3418,7 @@ def test_nested_connection_first_page_has_next_uses_probe_not_count() -> None:
             node_selections=[_sel("title")],
             arguments={"first": 3},
         )
-        connection.selections.append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
+        _children(connection).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
         plan = plan_optimizations(
             [connection],
             genre_model,
@@ -3440,8 +3452,8 @@ def test_nested_connection_first_page_total_count_keeps_count_and_skips_probe() 
             node_selections=[_sel("title")],
             arguments={"first": 3},
         )
-        connection.selections.append(_sel("totalCount"))
-        connection.selections.append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
+        _children(connection).append(_sel("totalCount"))
+        _children(connection).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
         plan = plan_optimizations(
             [connection],
             genre_model,
@@ -3772,11 +3784,13 @@ def test_m2m_shared_child_partitions_per_parent(direction: str) -> None:
         assert prefetch.to_attr == to_attr
 
         rows = list(
-            parent_model._default_manager.filter(pk__in=[parent.pk for parent in parents])
+            parent_model._default_manager.filter(pk__in=[saved_pk(parent) for parent in parents])
             .order_by("pk")
             .prefetch_related(prefetch),
         )
-        pages = [[getattr(child, label) for child in getattr(row, to_attr)] for row in rows]
+        pages = [
+            [read_attr(child, label) for child in list_of(read_attr(row, to_attr))] for row in rows
+        ]
         # Independent per-parent pages: BOTH parents get row 1 of their OWN
         # partition, which is the shared child for each.
         assert pages == [["shared"], ["shared"]]
@@ -4378,14 +4392,14 @@ def test_divergent_union_observer_keeps_count_on_every_window() -> None:
             arguments={"first": 2},
             alias="a",
         )
-        has_next.selections.append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
+        _children(has_next).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
         total = _conn_sel(
             "booksConnection",
             node_selections=[_sel("title")],
             arguments={"first": 5},
             alias="b",
         )
-        total.selections.append(_sel("totalCount"))
+        _children(total).append(_sel("totalCount"))
         plan = plan_optimizations(
             [has_next, total],
             genre_model,
@@ -4745,14 +4759,14 @@ def test_alias_merge_total_count_observer_keeps_count_and_skips_probe() -> None:
             arguments={"first": 2},
             alias="a",
         )
-        has_next.selections.append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
+        _children(has_next).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
         total = _conn_sel(
             "booksConnection",
             node_selections=[_sel("title")],
             arguments={"first": 2},
             alias="b",
         )
-        total.selections.append(_sel("totalCount"))
+        _children(total).append(_sel("totalCount"))
         plan = plan_optimizations(
             [has_next, total],
             genre_model,
@@ -5252,8 +5266,12 @@ def test_mutation_payload_child_selections_flattens_slot_children_only(slot: str
     """
     derived = _mutation_refetch_selections(_op_info(OperationType.MUTATION), slot)
     fields = _fake_fields(derived)
-    assert [selection.name for selection in fields] == ["name", "category", "entries"]
-    assert [child.name for child in fields[1].selections] == ["name"]
+    assert [read_attr(selection, "name") for selection in fields] == [
+        "name",
+        "category",
+        "entries",
+    ]
+    assert [read_attr(child, "name") for child in _children(fields[1])] == ["name"]
 
 
 def test_mutation_refetch_plan_drops_only_keeps_relations() -> None:

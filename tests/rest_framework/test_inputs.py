@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Callable, Iterator, Mapping
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 from apps.library import models as library_models
@@ -41,7 +41,7 @@ from apps.products import models as product_models
 from django.db import models
 from django.utils.functional import SimpleLazyObject
 from rest_framework import serializers
-from strawberry import UNSET, relay
+from strawberry import relay
 from strawberry.types.base import StrawberryOptional, get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 from strawberry.types.field import StrawberryField
@@ -89,12 +89,15 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
 )
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_choices_to_enum
+from django_strawberry_framework.utils._narrowing import dict_of, require_instance
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import InputFieldSpec, normalize_field_name_sequence
 from tests._idioms import (
     ClassReadRaises,
     ModelSerializerBase,
     bind_unparented,
     definition_raises,
+    module_binding,
 )
 
 if TYPE_CHECKING:
@@ -286,9 +289,8 @@ def test_kwarg_requiring_serializer_rejected_loudly() -> None:
     class KwargSer(serializers.Serializer[object]):
         email = serializers.EmailField()
 
-        # basedpyright: verbatim forward to Serializer.__init__; object fails its typed params
-        def __init__(self, *args: Any, user: object, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
-            super().__init__(*args, **kwargs)
+        def __init__(self, *, user: object) -> None:
+            super().__init__()
             self.user = user
 
     with pytest.raises(ConfigurationError, match="schema-time field set"):
@@ -306,7 +308,7 @@ def test_context_reading_get_fields_rejected_at_fields_access() -> None:
     class CtxSer(serializers.Serializer[object]):
         @override
         def get_fields(self) -> dict[str, DRFField]:
-            _ = self.context["tenant"]  # raises at .fields access, not construction
+            _ = dict_of(self.context)["tenant"]  # raises at .fields access, not construction
             return {}
 
     # Construction itself does NOT raise (proves the guard is not on the constructor).
@@ -327,7 +329,7 @@ def test_schema_hook_stable_field_map_generates_input() -> None:
     class CtxSer(serializers.Serializer[object]):
         @override
         def get_fields(self) -> dict[str, DRFField]:  # never called; field_map is supplied.
-            _ = self.context["tenant"]
+            _ = dict_of(self.context)["tenant"]
             return {}
 
     stable = {"name": bind_unparented(serializers.CharField(), "name")}
@@ -770,7 +772,7 @@ def test_identical_descriptor_dedupes_via_ledger() -> None:
     cre, _, _, _ = _build_serializer_inputs(_item_serializer())
     materialize_serializer_input_class("ItemSerInput", cre)
     materialize_serializer_input_class("ItemSerInput", cre)  # idempotent, no raise
-    assert sys.modules[SERIALIZER_INPUTS_MODULE_PATH].ItemSerInput is cre
+    assert module_binding(sys.modules[SERIALIZER_INPUTS_MODULE_PATH], "ItemSerInput") is cre
 
 
 def test_distinct_descriptors_colliding_on_one_name_raise() -> None:
@@ -1221,7 +1223,7 @@ def test_materialized_input_is_module_global() -> None:
     _register_products_types()
     cre, _, _, _ = _build_serializer_inputs(_item_serializer())
     materialize_serializer_input_class("ItemSerInput", cre)
-    assert sys.modules[SERIALIZER_INPUTS_MODULE_PATH].ItemSerInput is cre
+    assert module_binding(sys.modules[SERIALIZER_INPUTS_MODULE_PATH], "ItemSerInput") is cre
 
 
 # ---------------------------------------------------------------------------
@@ -2072,7 +2074,7 @@ def test_nested_serializer_fields_access_exception_raises_configuration_error() 
     class CtxChild(serializers.Serializer[object]):
         @override
         def get_fields(self) -> dict[str, DRFField]:
-            user = self.context["user"]
+            user = require_instance(dict_of(self.context)["user"], str)
             return {"a": serializers.CharField(default=user)}
 
     class Parent(serializers.Serializer[object]):

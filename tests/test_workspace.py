@@ -30,7 +30,9 @@ from typing import cast
 import pytest
 import yaml
 
+from django_strawberry_framework.utils.typing import object_result
 from scripts import workspace
+from tests._idioms import json_at, json_list, json_loads, json_object
 
 PACKAGE = workspace.PACKAGE_DIR
 
@@ -737,7 +739,7 @@ class _Actors:
         record = self.sync / f"{name}.json"
         if not record.exists():
             return None
-        document: object = json.loads(record.read_text(encoding="utf-8"))
+        document = json_loads(record.read_text(encoding="utf-8"))
         assert workspace._is_json_object(document)
         return document
 
@@ -1635,14 +1637,7 @@ def test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order() -> None:
     prefix, in the workflow's order; a step added to the workflow and not here
     would let a gate pass that CI fails.
     """
-    workflow = workspace.REPO_ROOT / ".github" / "workflows" / "django.yml"
-    job = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]["lint"]
-    lines = [
-        line.strip()
-        for step in job["steps"]
-        for line in str(step.get("run", "")).splitlines()
-        if line.strip()
-    ]
+    lines = _run_lines(_django_workflow_job("lint"))
     setup = [line for line in lines if line.startswith("uv python install") or line == "uv sync"]
     commands = [line for line in lines if line not in setup]
 
@@ -1654,21 +1649,35 @@ def test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order() -> None:
     assert cell == "default"
 
 
-def _ci_floor_node() -> tuple[dict[str, str], list[str]]:
-    """The push/PR compatibility node of ``django.yml``'s ``test`` job and its ``run:`` lines."""
+def _django_workflow_job(name: str) -> dict[object, object]:
+    """The ``name`` job of ``django.yml``, as the YAML loader reads it."""
     workflow = workspace.REPO_ROOT / ".github" / "workflows" / "django.yml"
-    job = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]["test"]
-    lists = re.findall(r"fromJSON\('(\[.*?\])'\)", job["strategy"]["matrix"]["include"], re.DOTALL)
-    push_nodes = json.loads(lists[-1])
-    floor = [node for node in push_nodes if node.get("compatibility_only") == "1"]
-    lines = [
+    document = object_result(yaml.safe_load, workflow.read_text(encoding="utf-8"))
+    return json_object(document, "jobs", name)
+
+
+def _run_lines(job: dict[object, object]) -> list[str]:
+    """Every non-blank line of the ``run:`` steps of ``job``, in order."""
+    return [
         line.strip()
-        for step in job["steps"]
-        for line in str(step.get("run", "")).splitlines()
+        for step in json_list(job, "steps")
+        for line in str(json_object(step).get("run", "")).splitlines()
         if line.strip()
     ]
+
+
+def _ci_floor_node() -> tuple[dict[object, object], list[str]]:
+    """The push/PR compatibility node of ``django.yml``'s ``test`` job and its ``run:`` lines."""
+    job = _django_workflow_job("test")
+    include = json_at(job, "strategy", "matrix", "include")
+    assert isinstance(include, str), include
+    lists: list[str] = re.findall(r"fromJSON\('(\[.*?\])'\)", include, re.DOTALL)
+    push_nodes = json_list(json_loads(lists[-1]))
+    floor = [
+        node for node in map(json_object, push_nodes) if node.get("compatibility_only") == "1"
+    ]
     assert len(floor) == 1
-    return floor[0], lines
+    return floor[0], _run_lines(job)
 
 
 def test_floor_pins_are_the_pyproject_lower_bounds(tmp_path: Path) -> None:
@@ -1748,7 +1757,7 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
     own virtualenv and only adds ``-p no:cacheprovider``.
     """
     _node, lines = _ci_floor_node()
-    ci_addopts = re.findall(r'addopts="(-[^"]*)"', "\n".join(lines))
+    ci_addopts: list[str] = re.findall(r'addopts="(-[^"]*)"', "\n".join(lines))
     pins = {"python": "3.10", "Django": "5.2.16", "strawberry-graphql": "0.322.2"}
     venv = tmp_path / "gate-floor"
     python = str(venv / "bin" / "python")

@@ -10,13 +10,13 @@ no live sibling in ``examples/fakeshop/test_query/``.
 real repository.
 """
 
-import json
 import textwrap
 from pathlib import Path
 
 import pytest
 
 from scripts import check_citations
+from tests._idioms import json_at, json_list, json_loads, json_object
 
 MODULE = '''\
 """Fixture module."""
@@ -266,10 +266,10 @@ def test_json_reports_every_citation_with_its_verdict(
     _write(tree, "tests/test_citer.py", "# widgets.py::build widgets.py::Widget.gone\n")
     assert check_citations.main(["--paths", "tests/test_citer.py", "--json"]) == 1
     captured = capsys.readouterr()
-    payload = json.loads(captured.out)
+    payload = json_object(json_loads(captured.out))
     assert captured.err.startswith("FAIL: 1 unresolvable citation(s) of 2 checked")
     assert (payload["checked"], payload["violations"]) == (2, 1)
-    ok, bad = payload["citations"]
+    ok, bad = map(json_object, json_list(payload, "citations"))
     assert ok["file"] == "tests/test_citer.py"
     assert (ok["symbol"], ok["kind"], ok["resolved"]) == ("build", "symbol", True)
     assert ok["target"] == "django_strawberry_framework/widgets.py"
@@ -284,7 +284,7 @@ def test_json_hint_names_where_a_moved_symbol_now_lives(
     _write(tree, "tests/helpers.py", "def relocated():\n    pass\n")
     _write(tree, "tests/test_citer.py", "# widgets.py::relocated\n")
     check_citations.main(["--paths", "tests/test_citer.py", "--json"])
-    (record,) = json.loads(capsys.readouterr().out)["citations"]
+    (record,) = map(json_object, json_list(json_loads(capsys.readouterr().out), "citations"))
     assert record["now_lives_in"] == ["tests/helpers.py"]
 
 
@@ -378,11 +378,10 @@ def test_cited_by_json_carries_the_gated_flag(
     _write(tree, "docs/design.md", "cites `widgets.py::LIMIT`\n")
     check_citations.main(["--cited-by", "django_strawberry_framework/widgets.py", "--json"])
     captured = capsys.readouterr()
-    payload = json.loads(captured.out)
-    assert [(row["file"], row["gated"]) for row in payload["citers"]] == [
-        ("tests/test_citer.py", True),
-        ("docs/design.md", False),
-    ]
+    payload = json_loads(captured.out)
+    assert [
+        (json_at(row, "file"), json_at(row, "gated")) for row in json_list(payload, "citers")
+    ] == [("tests/test_citer.py", True), ("docs/design.md", False)]
     assert captured.err.startswith("2 citing site(s)")
 
 

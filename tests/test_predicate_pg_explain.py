@@ -34,10 +34,18 @@ from apps.scalars.filters import ScalarSpecimenFilter
 from apps.scalars.models import ScalarSpecimen
 from django.db import connection as db_connection
 from django.db.models import Model, QuerySet
+from django.db.models.sql.compiler import SQLCompiler
 from django.http import HttpRequest
 from schema_reload import reload_all_project_schemas
 
 from django_strawberry_framework.filters import FilterSet
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_list_or_tuple,
+    require_instance,
+)
+from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import is_object_list, saved_pk
 
 pytestmark = [pytest.mark.pg, pytest.mark.django_db]
 
@@ -105,7 +113,7 @@ def _seed_specimens() -> list[int]:
             if parent is None:
                 parent = specimen
             elif (parent_index + offset) % 4 == 0:
-                needle.append(specimen.pk)
+                needle.append(saved_pk(specimen))
     return needle
 
 
@@ -137,12 +145,30 @@ def _referenced_tables(qs: QuerySet[Model]) -> set[str]:
     }
 
 
+def _first_column_texts(cursor: object) -> list[str]:
+    """The first column of every row the cursor's last statement returned, each a ``str``.
+
+    Django's ``CursorWrapper`` delegates ``fetchall`` to the driver cursor through
+    ``__getattr__``, so the stub types the read ``Any``; each row is checked here instead.
+    """
+    rows = call_method(cursor, "fetchall")
+    assert is_object_list(rows), rows
+    texts: list[str] = []
+    for row in rows:
+        assert is_list_or_tuple(row), row
+        first = row[0]
+        assert isinstance(first, str), first
+        texts.append(first)
+    return texts
+
+
 def _top_actual_rows(qs: QuerySet[Model]) -> tuple[str, int]:
     """Run ``EXPLAIN (ANALYZE, BUFFERS)`` on ``qs``'s exact statement; return the plan and top rows."""
-    compiled_sql, compiled_params = qs.query.get_compiler(using=qs.db).as_sql()
+    compiler = require_instance(object_result(qs.query.get_compiler, using=qs.db), SQLCompiler)
+    compiled_sql, compiled_params = compiler.as_sql()
     with db_connection.cursor() as cursor:
         cursor.execute("EXPLAIN (ANALYZE, BUFFERS) " + compiled_sql, compiled_params)
-        plan = "\n".join(row[0] for row in cursor.fetchall())
+        plan = "\n".join(_first_column_texts(cursor))
     top_rows = re.search(r"actual time=[\d.]+\.\.[\d.]+ rows=(\d+)", plan)
     assert top_rows is not None
     return plan, int(top_rows.group(1))

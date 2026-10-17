@@ -59,7 +59,7 @@ import subprocess
 import sys
 import tempfile
 import types
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -67,7 +67,9 @@ import pytest
 from django.conf import settings
 
 import django_strawberry_framework
+from django_strawberry_framework.utils._narrowing import read_attr
 from scripts import prove_failability
+from tests._idioms import is_object_dict, json_at, json_list, json_loads
 
 if TYPE_CHECKING:
     from typing_extensions import TypeIs
@@ -78,9 +80,23 @@ def _is_json_object(value: object) -> "TypeIs[dict[str, object]]":
     return isinstance(value, dict)
 
 
+def _text(value: object, *path: str | int) -> str:
+    """The string ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    assert isinstance(found, str), found
+    return found
+
+
+def _hook(probe: types.ModuleType, name: str) -> "Callable[[object], object]":
+    """The probe module's hook ``name``, checked to be callable (``exec`` defines it untyped)."""
+    hook = read_attr(probe, name)
+    assert callable(hook), name
+    return hook
+
+
 def _json_object(text: str) -> dict[str, object]:
     """Decode ``text``, which every marker and report this script writes holds as one object."""
-    document: object = json.loads(text)
+    document = json_loads(text)
     assert _is_json_object(document), f"expected a JSON object, got {document!r}"
     return document
 
@@ -414,7 +430,7 @@ def test_a_failed_restore_raises_writes_a_marker_and_stops_the_run(
     with pytest.raises(prove_failability.RestoreProofError):
         prove_failability.execute_entry(_single_entry(tmp_path), scratch_root)
 
-    marker = json.loads(
+    marker = _json_object(
         (scratch_root / prove_failability.RESTORE_FAILED_MARKER_NAME).read_text(encoding="utf-8"),
     )
     assert marker["mutated_file"] == str(fake_repo / "package" / "views.py")
@@ -2373,15 +2389,18 @@ def test_one_unprovable_restore_still_restores_every_other_site(
         prove_failability.execute_entry(_sites_manifest(tmp_path, _two_sites()), scratch_root)
 
     assert other.read_text(encoding="utf-8") == OTHER_SOURCE
-    marker = json.loads(
+    marker = _json_object(
         (scratch_root / prove_failability.RESTORE_FAILED_MARKER_NAME).read_text(encoding="utf-8"),
     )
     assert marker["mutated_file"] == str(views)
-    assert [item["mutated_file"] for item in marker["files"]] == [str(views)]
-    active = json.loads(
+    assert [json_at(item, "mutated_file") for item in json_list(marker, "files")] == [str(views)]
+    active = _json_object(
         (scratch_root / prove_failability.ACTIVE_MARKER_NAME).read_text(encoding="utf-8"),
     )
-    assert [item["mutated_file"] for item in active["files"]] == [str(views), str(other)]
+    assert [json_at(item, "mutated_file") for item in json_list(active, "files")] == [
+        str(views),
+        str(other),
+    ]
 
 
 def test_a_site_that_does_not_match_names_itself_and_nothing_is_written(
@@ -2771,12 +2790,12 @@ def test_the_probe_records_package_file_database_names_and_crash_lines(
         longrepr=types.SimpleNamespace(reprcrash=crash),
     )
 
-    probe.pytest_configure(config)
-    probe.pytest_runtest_logreport(report)
-    probe.pytest_collectreport(
+    _hook(probe, "pytest_configure")(config)
+    _hook(probe, "pytest_runtest_logreport")(report)
+    _hook(probe, "pytest_collectreport")(
         types.SimpleNamespace(failed=True, nodeid="tests/test_y.py", longrepr="ImportError: x"),
     )
-    probe.pytest_sessionfinish(types.SimpleNamespace(config=config))
+    _hook(probe, "pytest_sessionfinish")(types.SimpleNamespace(config=config))
     crash_lines, provenance = prove_failability._read_probe(output)
 
     assert dict(crash_lines) == {
@@ -2788,8 +2807,10 @@ def test_the_probe_records_package_file_database_names_and_crash_lines(
     assert record.role == "controller"
     assert record.package_file == django_strawberry_framework.__file__
     assert record.package_imported_by_run is True
+    databases = read_attr(settings, "DATABASES")
+    assert is_object_dict(databases)
     assert dict(record.databases) == {
-        alias: str(options["NAME"]) for alias, options in settings.DATABASES.items()
+        alias: str(json_at(options, "NAME")) for alias, options in databases.items()
     }
 
 
@@ -2804,9 +2825,9 @@ def test_an_xdist_worker_reports_provenance_but_leaves_rows_to_the_controller(
     config = types.SimpleNamespace(rootpath=tmp_path, workerinput={"workerid": "gw0"})
     report = types.SimpleNamespace(failed=True, when="call", nodeid=COUNT_ROW, longrepr="boom")
 
-    probe.pytest_configure(config)
-    probe.pytest_runtest_logreport(report)
-    probe.pytest_sessionfinish(types.SimpleNamespace(config=config))
+    _hook(probe, "pytest_configure")(config)
+    _hook(probe, "pytest_runtest_logreport")(report)
+    _hook(probe, "pytest_sessionfinish")(types.SimpleNamespace(config=config))
     crash_lines, provenance = prove_failability._read_probe(output)
 
     assert crash_lines == ()
@@ -2963,28 +2984,28 @@ def test_the_json_record_carries_the_whole_mutation_blob_ids_and_provenance(
 
     assert code == 0
     assert all(capture is not None for capture in calls)
-    document = json.loads(output.read_text(encoding="utf-8"))
+    document = _json_object(output.read_text(encoding="utf-8"))
     assert document["exit_code"] == 0
     assert document["repo_root"] == str(fake_repo)
     assert document["workspace"] is None
-    (entry,) = document["entries"]
-    assert entry["sites"][0]["anchor"] == "\n".join([*LONG_ANCHOR, long_line])
-    assert long_line in entry["files"][0]["diff"]
+    (entry,) = json_list(document, "entries")
+    assert json_at(entry, "sites", 0, "anchor") == "\n".join([*LONG_ANCHOR, long_line])
+    assert long_line in _text(entry, "files", 0, "diff")
     original = SOURCE.replace("    return value", long_line).encode("utf-8")
-    assert entry["files"][0]["blob_before"] == prove_failability.git_blob_id(original)
-    assert entry["files"][0]["blob_after"] == entry["files"][0]["blob_before"]
-    assert entry["mutant"]["crash_lines"][COUNT_ROW].endswith("where 6 = len(queries)")
-    assert entry["mutant"]["provenance"][0]["databases"] == {
+    assert json_at(entry, "files", 0, "blob_before") == prove_failability.git_blob_id(original)
+    assert json_at(entry, "files", 0, "blob_after") == json_at(entry, "files", 0, "blob_before")
+    assert _text(entry, "mutant", "crash_lines", COUNT_ROW).endswith("where 6 = len(queries)")
+    assert json_at(entry, "mutant", "provenance", 0, "databases") == {
         "default": "/ws/examples/fakeshop/db.sqlite3",
     }
-    assert entry["baseline"]["wall_seconds"] == 1.0
-    assert entry["expectation"] == {
+    assert json_at(entry, "baseline", "wall_seconds") == 1.0
+    assert json_at(entry, "expectation") == {
         "met": True,
         "missing": [],
         "unexpected": [],
         "missing_but_failing_at_baseline": [],
     }
-    assert entry["weakly_pinned"] is False
+    assert json_at(entry, "weakly_pinned") is False
     rendered = markdown.read_text(encoding="utf-8")
     assert f"Workspace: repository root mutated `{fake_repo}`" in rendered
     assert "crash: `t.py:9: assert 6 == 1` (+1 more line(s) in --json)" in rendered
@@ -3011,11 +3032,10 @@ def test_the_json_record_is_written_for_an_aborted_run_too(
     )
 
     assert code == 3
-    document = json.loads(output.read_text(encoding="utf-8"))
+    document = _json_object(output.read_text(encoding="utf-8"))
     assert document["exit_code"] == 3
-    assert (
-        "could not be restored" in document["aborted"] or "does NOT match" in document["aborted"]
-    )
+    aborted = _text(document, "aborted")
+    assert "could not be restored" in aborted or "does NOT match" in aborted
 
 
 def test_workspace_refuses_a_repository_root_outside_the_given_path(
@@ -3090,11 +3110,11 @@ def test_workspace_accepts_the_copy_and_requires_observed_provenance(
 
     # The stub reports no provenance, which a workspace run may not accept.
     assert code == 1
-    document = json.loads(output.read_text(encoding="utf-8"))
+    document = _json_object(output.read_text(encoding="utf-8"))
     assert document["workspace"] == str(tmp_path.resolve())
     assert any(
-        "reported no package `__file__`" in reason
-        for reason in document["entries"][0]["invalid_count_reasons"]
+        "reported no package `__file__`" in _text(reason)
+        for reason in json_list(document, "entries", 0, "invalid_count_reasons")
     )
 
 

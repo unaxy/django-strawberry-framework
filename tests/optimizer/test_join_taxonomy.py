@@ -5,6 +5,7 @@ window SQL is ``examples/fakeshop/test_query/test_single_parent_fastpath_api.py`
 and ``examples/fakeshop/test_query/test_optimizer_auto_api.py``.
 """
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn
 
@@ -353,14 +354,16 @@ class _TruthinessRaises:
     [_AttributeReadRaises, _TruthinessRaises],
     ids=["attribute_read_raises", "truthiness_raises"],
 )
-def test_classifier_fail_closes_on_hostile_many_to_many_metadata(field_factory: type) -> None:
+def test_classifier_fail_closes_on_hostile_many_to_many_metadata(
+    field_factory: Callable[[], object],
+) -> None:
     """Hostile ``many_to_many`` metadata yields the fully unresolved descriptor.
 
     Neither a raising attribute read nor a value whose ``bool()`` raises may
     escape ``classify_relation_join``; both degrade to the single
     nothing-resolved shape the callers treat as "do not plan this relation".
     """
-    descriptor = classify_relation_join(field_factory())
+    descriptor = classify_relation_join(_as_field(field_factory()))
     assert descriptor == RelationJoinDescriptor(
         kind="forward_single",
         windowable=False,

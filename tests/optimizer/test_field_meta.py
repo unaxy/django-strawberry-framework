@@ -32,9 +32,12 @@ from typing_extensions import override
 
 from django_strawberry_framework import DjangoOptimizerExtension, DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
+from django_strawberry_framework.optimizer._context import DST_OPTIMIZER_PLAN
 from django_strawberry_framework.optimizer.field_meta import FieldMeta, _target_pk_name
+from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.optimizer.walker import _resolve_field_map, plan_optimizations
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils._narrowing import read_attr, require_instance
 from django_strawberry_framework.utils.relations import has_composite_pk
 from tests._idioms import pickle_roundtrip
 from tests._relation_fixtures import RpCompositeParent
@@ -727,7 +730,8 @@ def test_walker_produces_same_plan_with_cached_map() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
         def all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
@@ -740,7 +744,7 @@ def test_walker_produces_same_plan_with_cached_map() -> None:
         context_value=ctx,
     )
     assert result.errors is None
-    plan = ctx.dst_optimizer_plan
+    plan = require_instance(read_attr(ctx, DST_OPTIMIZER_PLAN), OptimizationPlan)
     # The plan should contain select_related for the forward FK.
     assert "category" in plan.select_related
 

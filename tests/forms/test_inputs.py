@@ -38,7 +38,7 @@ import sys
 from collections.abc import Callable, Iterator
 from enum import Enum
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 import strawberry
@@ -51,7 +51,7 @@ from django import forms
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from django.db.models.expressions import Combinable
-from strawberry import UNSET, relay
+from strawberry import relay
 from strawberry.types.base import StrawberryList, StrawberryOptional, get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 from strawberry.types.field import StrawberryField
@@ -87,8 +87,10 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import Upload, strawberry_config
 from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.converters import convert_choices_to_enum
+from django_strawberry_framework.utils._narrowing import enum_value
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import InputFieldSpec
-from tests._idioms import ClassReadRaises
+from tests._idioms import ClassReadRaises, module_binding
 
 if TYPE_CHECKING:
     from django.db.models import Model
@@ -195,11 +197,10 @@ def test_get_form_fields_does_not_instantiate_kwarg_requiring_form() -> None:
     class KwargForm(forms.Form):
         email = forms.EmailField()
 
-        # basedpyright: verbatim forward to forms.Form.__init__; object fails its typed params
-        def __init__(self, *args: Any, user: object, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
+        def __init__(self, *, user: object) -> None:
             # No-arg instantiation would raise TypeError (missing ``user``); the
             # discovery never instantiates, so the shape is still readable.
-            super().__init__(*args, **kwargs)
+            super().__init__()
             self.user = user
 
     discovered = get_form_fields(KwargForm)
@@ -710,7 +711,7 @@ def _enum_of(field: StrawberryField) -> type[Enum]:
 
 
 def _members(enum_cls: type[Enum]) -> dict[str, object]:
-    return {member.name: member.value for member in enum_cls}
+    return {member.name: enum_value(member) for member in enum_cls}
 
 
 @pytest.mark.parametrize(
@@ -1353,7 +1354,7 @@ def test_identical_shape_dedupes_via_ledger() -> None:
     cre, _, _, _ = build_form_inputs(_item_model_form(), operation_kind=CREATE)
     materialize_form_input_class("ItemModelFormInput", cre)
     materialize_form_input_class("ItemModelFormInput", cre)  # idempotent, no raise
-    assert sys.modules[INPUTS_MODULE_PATH].ItemModelFormInput is cre
+    assert module_binding(sys.modules[INPUTS_MODULE_PATH], "ItemModelFormInput") is cre
 
 
 def test_distinct_shapes_colliding_on_one_name_raise() -> None:
@@ -1404,7 +1405,7 @@ def test_materialized_input_is_module_global() -> None:
     """A materialized input class is a real global of ``forms.inputs`` (the lazy-ref contract)."""
     cre, _, _, _ = build_form_inputs(_item_model_form(), operation_kind=CREATE)
     materialize_form_input_class("ItemModelFormInput", cre)
-    assert sys.modules[INPUTS_MODULE_PATH].ItemModelFormInput is cre
+    assert module_binding(sys.modules[INPUTS_MODULE_PATH], "ItemModelFormInput") is cre
 
 
 # ---------------------------------------------------------------------------

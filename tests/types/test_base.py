@@ -84,6 +84,7 @@ from django_strawberry_framework.types.relay import (
     _resolve_globalid_strategy,
     _validated_globalid_setting,
 )
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import ClaimsClass, ClassReadRaisesBase, definition_raises, is_object_dict
 from tests.optimizer import _link_models
 
@@ -3518,7 +3519,7 @@ def test_multi_column_forward_foreign_object_maps_to_its_related_type(
     required link is ``LnkParentType``, a ``null=True`` link over nullable
     carriers is ``LnkParentType | None``.
     """
-    child_model = getattr(_link_models, child_name)
+    child_model = read_attr(_link_models, child_name)
     parent_type = type(
         "LnkParentType",
         (DjangoType,),

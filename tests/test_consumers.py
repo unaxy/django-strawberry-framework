@@ -36,6 +36,7 @@ from typing_extensions import override
 
 from django_strawberry_framework import consumers as cmod
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.sessions import (
     _ACTOR_STATE_SCOPE_KEY,
     ConnectionActorState,
@@ -55,6 +56,31 @@ def _fresh_scope() -> dict[str, object]:
     scope: dict[str, object] = {}
     scope[_ACTOR_STATE_SCOPE_KEY] = ConnectionActorState()
     return scope
+
+
+def _raising_property(error: BaseException) -> property:
+    """A property whose every read raises ``error``."""
+
+    def fget(_self: object) -> NoReturn:
+        raise error
+
+    return property(fget)
+
+
+def _revocation_is_decided(self: object) -> bool:
+    """``_ConnectionRevocation.revoked``'s own rule, read off ``self``."""
+    return read_attr(self, "state") != cmod._REVOCATION_PERMITTED
+
+
+def _mock_handler(view: Mock) -> Mock:
+    """An acknowledged handler duck-shape whose ``view`` is also its ``websocket.ws_consumer``."""
+    websocket = Mock()
+    websocket.ws_consumer = view
+    handler = Mock()
+    handler.connection_acknowledged = True
+    handler.view = view
+    handler.websocket = websocket
+    return handler
 
 
 # ---------------------------------------------------------------------------
@@ -206,9 +232,7 @@ async def test_actor_is_current_hostile_window_attribute_fails_closed() -> None:
     scope[_ACTOR_STATE_SCOPE_KEY] = ConnectionActorState()
     consumer = Mock()
     # hostile property for revalidation_window
-    type(consumer).revalidation_window = property(
-        lambda _self: (_ for _ in ()).throw(AttributeError("hostile window")),
-    )
+    type(consumer).revalidation_window = _raising_property(AttributeError("hostile window"))
 
     # Actually Mock property trick is messy; use a real object with hostile property
     class HostileConsumer:
@@ -427,13 +451,10 @@ async def test_revalidate_hostile_actor_lease_fails_closed() -> None:
         def __setitem__(self, k: str, v: object) -> None:
             raise TypeError("hostile lease set")
 
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = HostileScope()
-    handler.view._revocation = cmod._ConnectionRevocation()
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    view = Mock()
+    view.scope = HostileScope()
+    view._revocation = cmod._ConnectionRevocation()
+    handler = _mock_handler(view)
     # actor_lease will now raise ConfigurationError via connection_actor_state
     result = await cmod.revalidate_operation_actor(handler)
     assert result is False
@@ -441,15 +462,13 @@ async def test_revalidate_hostile_actor_lease_fails_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_revalidate_revoked_short_circuits_without_db() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
-    handler.view._revocation = cmod._ConnectionRevocation()
-    handler.view._revocation.decide()  # revoked
-    handler.view.revalidation_window = 0.0
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    revocation = cmod._ConnectionRevocation()
+    revocation.decide()  # revoked
+    view = Mock()
+    view.scope = _fresh_scope()
+    view._revocation = revocation
+    view.revalidation_window = 0.0
+    handler = _mock_handler(view)
     # Mock _revoke_connection to avoid real close
     with patch.object(cmod, "_revoke_connection", new_callable=AsyncMock) as mock_revoke:
         result = await cmod.revalidate_operation_actor(handler)
@@ -670,9 +689,10 @@ async def test_send_revalidated_cancellation_reading_revoked_is_re_raised() -> N
         def revoked(self) -> NoReturn:
             raise asyncio.CancelledError
 
+    consumer = _revalidating_consumer()
+    consumer._revocation = CancellingRevocation()
     ws = Mock()
-    ws.ws_consumer = _revalidating_consumer()
-    ws.ws_consumer._revocation = CancellingRevocation()
+    ws.ws_consumer = consumer
 
     with pytest.raises(asyncio.CancelledError):
         await cmod.send_revalidated_operation_frame(ws, {"type": "next"}, AsyncMock())
@@ -844,8 +864,9 @@ async def test_actor_is_current_hostile_is_authenticated_and_hostile_provenance_
         def is_authenticated(self) -> NoReturn:
             raise ValueError("hostile is_authenticated")
 
-    consumer = _revalidating_consumer()
-    consumer.scope["user"] = HostileIsAuth()
+    scope = _fresh_scope()
+    scope["user"] = HostileIsAuth()
+    consumer = _revalidating_consumer(scope)
 
     with patch.object(
         cmod,
@@ -864,8 +885,9 @@ async def test_actor_is_current_cancellation_in_the_provenance_check_is_re_raise
         def is_authenticated(self) -> NoReturn:
             raise ValueError("hostile is_authenticated")
 
-    consumer = _revalidating_consumer()
-    consumer.scope["user"] = HostileIsAuth()
+    scope = _fresh_scope()
+    scope["user"] = HostileIsAuth()
+    consumer = _revalidating_consumer(scope)
 
     with (
         patch.object(
@@ -1191,33 +1213,28 @@ async def test_revalidate_hostile_view_cancelled_propagates() -> None:
 
 @pytest.mark.asyncio
 async def test_revalidate_hostile_revoked_cancelled_propagates() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
     # Make _revocation.revoked raise Cancelled
-    type(handler.view._revocation).revoked = property(
-        lambda _self: (_ for _ in ()).throw(asyncio.CancelledError("cancelled")),
-    )
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    revocation = Mock()
+    type(revocation).revoked = _raising_property(asyncio.CancelledError("cancelled"))
+    view = Mock()
+    view.scope = _fresh_scope()
+    view._revocation = revocation
+    handler = _mock_handler(view)
     with pytest.raises(asyncio.CancelledError):
         await cmod.revalidate_operation_actor(handler)
 
 
 @pytest.mark.asyncio
 async def test_revalidate_hostile_is_current_cancelled_propagates() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
-    handler.view.scope["user"] = Mock(is_authenticated=True)
+    scope = _fresh_scope()
+    scope["user"] = Mock(is_authenticated=True)
 
-    note_authenticated_actor(handler.view.scope)
-    handler.view._revocation = cmod._ConnectionRevocation()
-    handler.view.revalidation_window = 0.0
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    note_authenticated_actor(scope)
+    view = Mock()
+    view.scope = scope
+    view._revocation = cmod._ConnectionRevocation()
+    view.revalidation_window = 0.0
+    handler = _mock_handler(view)
     with (
         patch.object(cmod, "_actor_is_current", side_effect=asyncio.CancelledError("cancelled")),
         pytest.raises(asyncio.CancelledError),
@@ -1550,38 +1567,31 @@ async def test_revalidate_ack_hostile_revoke_value_error_still_fails_closed() ->
 
 @pytest.mark.asyncio
 async def test_revalidate_revoked_hostile_fails_closed() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
     # Make revoked raise ValueError
-    type(handler.view._revocation).revoked = property(
-        lambda _self: (_ for _ in ()).throw(ValueError("hostile revoked")),
-    )
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    revocation = Mock()
+    type(revocation).revoked = _raising_property(ValueError("hostile revoked"))
+    view = Mock()
+    view.scope = _fresh_scope()
+    view._revocation = revocation
+    handler = _mock_handler(view)
     with patch.object(cmod, "_revoke_connection", new_callable=AsyncMock):
         result = await cmod.revalidate_operation_actor(handler)
         assert result is False
     # Restore
-    type(handler.view._revocation).revoked = property(
-        lambda self: self.state != cmod._REVOCATION_PERMITTED,
-    )
+    type(revocation).revoked = property(_revocation_is_decided)
 
 
 @pytest.mark.asyncio
 async def test_revalidate_is_current_hostile_fails_closed() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
-    handler.view.scope["user"] = Mock(is_authenticated=True)
+    scope = _fresh_scope()
+    scope["user"] = Mock(is_authenticated=True)
 
-    note_authenticated_actor(handler.view.scope)
-    handler.view._revocation = cmod._ConnectionRevocation()
-    handler.view.revalidation_window = 0.0
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    note_authenticated_actor(scope)
+    view = Mock()
+    view.scope = scope
+    view._revocation = cmod._ConnectionRevocation()
+    view.revalidation_window = 0.0
+    handler = _mock_handler(view)
     with (
         patch.object(cmod, "_actor_is_current", side_effect=ValueError("hostile is_current")),
         patch.object(cmod, "_revoke_connection", new_callable=AsyncMock) as mock_revoke,
@@ -1593,14 +1603,7 @@ async def test_revalidate_is_current_hostile_fails_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_revalidate_actor_lease_hostile_value_error_fails_closed() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
-    handler.view._revocation = cmod._ConnectionRevocation()
-    handler.view.revalidation_window = 0.0
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    handler = _mock_handler(_revalidating_consumer())
     with (
         patch(
             "django_strawberry_framework.consumers.actor_lease",
@@ -1633,13 +1636,13 @@ async def test_send_revalidated_revoked_hostile() -> None:
     consumer = Mock()
     consumer.scope = _fresh_scope()
     # Make revoked raise
-    type(consumer._revocation).revoked = property(
-        lambda _self: (_ for _ in ()).throw(ValueError("hostile")),
-    )
+    first_rev = Mock()
+    type(first_rev).revoked = _raising_property(ValueError("hostile"))
+    consumer._revocation = first_rev
     # Need to actually set _revocation to a real one with hostile property
     # Use a mock revocation
     mock_rev = Mock()
-    type(mock_rev).revoked = property(lambda _self: (_ for _ in ()).throw(ValueError("hostile")))
+    type(mock_rev).revoked = _raising_property(ValueError("hostile"))
     consumer._revocation = mock_rev
     consumer.revalidation_window = 0.0
     ws = Mock()
@@ -1653,12 +1656,14 @@ async def test_send_revalidated_revoked_hostile() -> None:
 
 @pytest.mark.asyncio
 async def test_send_revalidated_is_current_hostile() -> None:
-    consumer = Mock()
-    consumer.scope = _fresh_scope()
-    consumer.scope["user"] = Mock(is_authenticated=True)
+    scope = _fresh_scope()
+    scope["user"] = Mock(is_authenticated=True)
 
-    note_authenticated_actor(consumer.scope)
-    consumer._revocation = cmod._ConnectionRevocation()
+    note_authenticated_actor(scope)
+    revocation = cmod._ConnectionRevocation()
+    consumer = Mock()
+    consumer.scope = scope
+    consumer._revocation = revocation
     consumer.revalidation_window = 0.0
     ws = Mock()
     ws.ws_consumer = consumer
@@ -1672,12 +1677,14 @@ async def test_send_revalidated_is_current_hostile() -> None:
 
 @pytest.mark.asyncio
 async def test_send_revalidated_send_hostile() -> None:
-    consumer = Mock()
-    consumer.scope = _fresh_scope()
-    consumer.scope["user"] = Mock(is_authenticated=True)
+    scope = _fresh_scope()
+    scope["user"] = Mock(is_authenticated=True)
 
-    note_authenticated_actor(consumer.scope)
-    consumer._revocation = cmod._ConnectionRevocation()
+    note_authenticated_actor(scope)
+    revocation = cmod._ConnectionRevocation()
+    consumer = Mock()
+    consumer.scope = scope
+    consumer._revocation = revocation
     consumer.revalidation_window = 0.0
     ws = Mock()
     ws.ws_consumer = consumer
@@ -1688,7 +1695,7 @@ async def test_send_revalidated_send_hostile() -> None:
     with patch.object(cmod, "_refreshed_actor", return_value=Mock(is_authenticated=True)):
         await cmod.send_revalidated_operation_frame(ws, {"type": "next"}, hostile_send)
         # Should have revoked, not raised
-        assert consumer._revocation.revoked is True
+        assert revocation.revoked is True
 
 
 @pytest.mark.asyncio
@@ -1726,14 +1733,7 @@ async def test_revalidate_ack_hostile_revoke_cancelled() -> None:
 
 @pytest.mark.asyncio
 async def test_revalidate_outer_lease_cancelled() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
-    handler.view._revocation = cmod._ConnectionRevocation()
-    handler.view.revalidation_window = 0.0
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    handler = _mock_handler(_revalidating_consumer())
     with (
         patch(
             "django_strawberry_framework.consumers.actor_lease",
@@ -1746,14 +1746,7 @@ async def test_revalidate_outer_lease_cancelled() -> None:
 
 @pytest.mark.asyncio
 async def test_revalidate_outer_lease_hostile_revoke_cancelled() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
-    handler.view._revocation = cmod._ConnectionRevocation()
-    handler.view.revalidation_window = 0.0
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    handler = _mock_handler(_revalidating_consumer())
     with (
         patch(
             "django_strawberry_framework.consumers.actor_lease",
@@ -1771,12 +1764,14 @@ async def test_revalidate_outer_lease_hostile_revoke_cancelled() -> None:
 
 @pytest.mark.asyncio
 async def test_send_revalidated_send_cancelled() -> None:
-    consumer = Mock()
-    consumer.scope = _fresh_scope()
-    consumer.scope["user"] = Mock(is_authenticated=True)
+    scope = _fresh_scope()
+    scope["user"] = Mock(is_authenticated=True)
 
-    note_authenticated_actor(consumer.scope)
-    consumer._revocation = cmod._ConnectionRevocation()
+    note_authenticated_actor(scope)
+    revocation = cmod._ConnectionRevocation()
+    consumer = Mock()
+    consumer.scope = scope
+    consumer._revocation = revocation
     consumer.revalidation_window = 0.0
     ws = Mock()
     ws.ws_consumer = consumer
@@ -1820,14 +1815,7 @@ def test_utils_connection_actor_state_hostile_isinstance() -> None:
 
 @pytest.mark.asyncio
 async def test_revalidate_outer_lease_value_error_revoke_value_error() -> None:
-    handler = Mock()
-    handler.connection_acknowledged = True
-    handler.view = Mock()
-    handler.view.scope = _fresh_scope()
-    handler.view._revocation = cmod._ConnectionRevocation()
-    handler.view.revalidation_window = 0.0
-    handler.websocket = Mock()
-    handler.websocket.ws_consumer = handler.view
+    handler = _mock_handler(_revalidating_consumer())
     with (
         patch(
             "django_strawberry_framework.consumers.actor_lease",

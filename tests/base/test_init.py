@@ -77,6 +77,7 @@ from django_strawberry_framework.types import converters
 from django_strawberry_framework.types import (
     finalize_django_types as types_finalize_django_types,
 )
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.connections import (
     PaginationArgumentError as ConnectionsPaginationArgumentError,
 )
@@ -219,7 +220,7 @@ def test_dynamic_getattr_non_memoization() -> None:
 def test_dynamic_getattr_unknown_attribute_error() -> None:
     """Verify unknown attribute access on package root raises AttributeError."""
     with pytest.raises(AttributeError, match="has no attribute 'unregistered_symbol_xyz'"):
-        _ = django_strawberry_framework.unregistered_symbol_xyz
+        _ = read_attr(django_strawberry_framework, "unregistered_symbol_xyz")
 
 
 def test_star_import_preserves_namespace_hygiene() -> None:

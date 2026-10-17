@@ -27,6 +27,12 @@ from django_strawberry_framework.utils.converters import (
     make_scalar_converter,
 )
 from django_strawberry_framework.utils.inputs import FILE, SCALAR, FieldConversionBase
+from django_strawberry_framework.utils.typing import object_result
+
+
+def _answer(value: object) -> Callable[[object], object]:
+    """A precheck handler that ignores the field and returns ``value``."""
+    return lambda _f: value
 
 
 class _Base:
@@ -47,7 +53,7 @@ def test_precheck_match_wins_over_registry() -> None:
     field = _Child()
     result = convert_with_mro(
         field,
-        isinstance_prechecks=[(_Base, lambda _f: "precheck-won")],
+        isinstance_prechecks=[(_Base, _answer("precheck-won"))],
         scalar_registry={_Child: "registry-value"},
         fallthrough_error_factory=lambda _f: AssertionError("should not raise"),
     )
@@ -59,7 +65,7 @@ def test_prechecks_run_in_order() -> None:
     field = _Child()
     result = convert_with_mro(
         field,
-        isinstance_prechecks=[(_Child, lambda _f: "first"), (_Base, lambda _f: "second")],
+        isinstance_prechecks=[(_Child, _answer("first")), (_Base, _answer("second"))],
         scalar_registry={},
         fallthrough_error_factory=lambda _f: AssertionError("should not raise"),
     )
@@ -77,7 +83,7 @@ def test_precheck_returning_mro_continue_continues_to_walk() -> None:
     field = _Child()
     result = convert_with_mro(
         field,
-        isinstance_prechecks=[(_Base, lambda _f: MRO_CONTINUE)],
+        isinstance_prechecks=[(_Base, _answer(MRO_CONTINUE))],
         scalar_registry={_Child: "registry-value"},
         fallthrough_error_factory=lambda _f: AssertionError("should not raise"),
     )
@@ -94,7 +100,7 @@ def test_precheck_returning_none_is_a_value() -> None:
     field = _Child()
     result = convert_with_mro(
         field,
-        isinstance_prechecks=[(_Child, lambda _f: None)],
+        isinstance_prechecks=[(_Child, _answer(None))],
         scalar_registry={_Child: "registry-value"},
         fallthrough_error_factory=lambda _f: AssertionError("should not raise"),
     )
@@ -152,7 +158,7 @@ def test_unhandled_field_raises_via_factory() -> None:
     with pytest.raises(ValueError, match="unsupported: _Unrelated"):
         convert_with_mro(
             _Unrelated(),
-            isinstance_prechecks=[(_Base, lambda _f: "won't match")],
+            isinstance_prechecks=[(_Base, _answer("won't match"))],
             scalar_registry=scalar_registry,
             fallthrough_error_factory=_factory,
         )
@@ -166,7 +172,7 @@ def test_mro_walk_bypasses_hostile_field_metaclass_attribute_access() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__mro__":
                 raise RuntimeError("mro descriptor failed")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class HostileFormField(forms.Field, metaclass=HostileMeta):
         pass

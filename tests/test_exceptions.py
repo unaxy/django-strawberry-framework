@@ -49,6 +49,7 @@ from django_strawberry_framework.exceptions import (
 from django_strawberry_framework.types import converters as _converters_module
 from django_strawberry_framework.utils import errors as _errors_module
 from django_strawberry_framework.utils.querysets import SyncMisuseError
+from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import (
     ClassReadRaises,
     ClassReadRaisesBase,
@@ -102,7 +103,7 @@ class _HostileTypeNameMeta(type):
     def __getattribute__(cls, name: str) -> object:
         if name == "__name__":
             raise RuntimeError("type name failed")
-        return super().__getattribute__(name)
+        return object_result(super().__getattribute__, name)
 
 
 class _UnprintableTypeName(metaclass=_HostileTypeNameMeta):
@@ -137,7 +138,7 @@ class _HostileMetadata:
     def __getattribute__(self, name: str) -> object:
         if name in {"_meta", "name"}:
             raise RuntimeError(f"{name} unavailable")
-        return super().__getattribute__(name)
+        return object_result(super().__getattribute__, name)
 
 
 class _NonStringTypeNameMeta(type):
@@ -147,7 +148,7 @@ class _NonStringTypeNameMeta(type):
     def __getattribute__(cls, name: str) -> object:
         if name == "__name__":
             return 42
-        return super().__getattribute__(name)
+        return object_result(super().__getattribute__, name)
 
 
 class _NonStringTypeName(metaclass=_NonStringTypeNameMeta):
@@ -557,7 +558,7 @@ def test_safe_arg_repr_falls_back_for_hostile_values_and_type_metadata() -> None
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 raise RuntimeError("name unavailable")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _HostileValue(metaclass=_HostileNameMeta):
         @override
@@ -571,7 +572,7 @@ def test_safe_arg_repr_falls_back_for_hostile_values_and_type_metadata() -> None
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 return 42
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _NonStringName(metaclass=_NonStringNameMeta):
         @override

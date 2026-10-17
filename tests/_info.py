@@ -21,6 +21,7 @@ attribute's name, where a placeholder ``None`` would only fail on some reads and
 """
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING, TypeAlias, TypeGuard
 
 import strawberry
 from graphql import (
@@ -31,6 +32,7 @@ from graphql import (
     InlineFragmentNode,
     OperationDefinitionNode,
     OperationType,
+    is_output_type,
     parse,
 )
 from graphql.pyutils import Path, is_awaitable
@@ -38,6 +40,30 @@ from strawberry.annotation import StrawberryAnnotation
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types.field import StrawberryField
 from typing_extensions import override
+
+from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
+
+if TYPE_CHECKING:
+    from graphql import (
+        GraphQLEnumType,
+        GraphQLInterfaceType,
+        GraphQLObjectType,
+        GraphQLScalarType,
+        GraphQLType,
+        GraphQLUnionType,
+        GraphQLWrappingType,
+    )
+
+    #: graphql-core's ``GraphQLOutputType``, with the wrapping member it leaves bare
+    #: parametrized by ``GraphQLWrappingType``'s own bound.
+    _GraphQLOutputType: TypeAlias = (
+        GraphQLScalarType
+        | GraphQLObjectType
+        | GraphQLInterfaceType
+        | GraphQLUnionType
+        | GraphQLEnumType
+        | GraphQLWrappingType[GraphQLType]
+    )
 
 
 @strawberry.type
@@ -48,6 +74,11 @@ class _Query:
 
 
 _DEFAULT_SCHEMA = strawberry.Schema(query=_Query)
+
+
+def _is_output_type(value: object) -> "TypeGuard[_GraphQLOutputType]":
+    """Whether ``value`` is a GraphQL output type (graphql-core's ``is_output_type``, as a guard)."""
+    return is_output_type(value)
 
 
 def response_path(*keys: str | int) -> Path:
@@ -111,10 +142,12 @@ def make_info(
     graphql_schema = schema._schema
     query_type = graphql_schema.query_type
     assert query_type is not None
+    return_type = graphql_type_of(graphql_fields(query_type)["field"])
+    assert _is_output_type(return_type), return_type
     raw_info = GraphQLResolveInfo(
         resolved_name,
         [field_node],
-        query_type.fields["field"].type,
+        return_type,
         query_type,
         path or response_path(resolved_name),
         graphql_schema,

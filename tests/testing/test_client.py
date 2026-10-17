@@ -56,6 +56,8 @@ from django_strawberry_framework.testing import (
     Response,
     TestClient,
 )
+from django_strawberry_framework.utils._narrowing import read_attr
+from tests._idioms import json_at, json_loads
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedASGIResponse, _MonkeyPatchedWSGIResponse
@@ -288,7 +290,7 @@ def test_per_call_url_outranks_the_constructor_and_never_persists() -> None:
     assert client.path == "/constructor/"
     assert isinstance(res, Response)
     assert res.data == {"ok": True}
-    assert res.response is transport.responses[0]
+    assert read_attr(res, "response") is transport.responses[0]
 
     client.query("{ ok }")
     assert [url for url, _ in transport.posts] == ["/percall/", "/constructor/"]
@@ -660,9 +662,13 @@ def test_build_body_map_rule_is_uniform_across_path_shapes() -> None:
     )
 
     assert isinstance(body["operations"], str)
-    operations = json.loads(body["operations"])
-    assert operations["operationName"] == "Up"
-    assert operations["variables"] == {"file": None, "data": {"image": None}, "tags": [None, None]}
+    operations = json_loads(body["operations"])
+    assert json_at(operations, "operationName") == "Up"
+    assert json_at(operations, "variables") == {
+        "file": None,
+        "data": {"image": None},
+        "tags": [None, None],
+    }
     assert isinstance(body["map"], str)
     assert json.loads(body["map"]) == {
         "file": ["variables.file"],
@@ -807,7 +813,7 @@ async def test_async_client_posts_a_real_query_through_a_falsy_transport(
 
     assert [url for url, _ in transport.posts] == ["/async/"]
     assert res.data == {"ok": True}
-    assert res.response is transport.responses[0]
+    assert read_attr(res, "response") is transport.responses[0]
 
 
 def test_export_surface_is_the_testing_root_not_the_package_root() -> None:
@@ -837,7 +843,9 @@ def test_export_surface_is_the_testing_root_not_the_package_root() -> None:
         getattr(django_strawberry_framework, root_name)
     with pytest.raises(ImportError):
         # The import statement is the probe; it raises, so the name is never bound.
-        from django_strawberry_framework import TestClient as _  # noqa: F401, PLC0415
+        # basedpyright: the package root's PEP 562 __getattr__ returns Any; the statement
+        # under test raises before it binds anything
+        from django_strawberry_framework import TestClient as _  # noqa: F401, PLC0415  # pyright: ignore[reportAny]
 
 
 # ---------------------------------------------------------------------------

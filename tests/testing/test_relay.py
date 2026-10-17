@@ -39,6 +39,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import relay as testing_relay
 from django_strawberry_framework.testing.relay import decode_global_id, global_id_for
 from django_strawberry_framework.types import relay as types_relay
+from tests._idioms import json_at, saved_pk
 
 if TYPE_CHECKING:
     from django_strawberry_framework.types.definition import GlobalIDStrategy
@@ -110,9 +111,10 @@ def test_global_id_for_type_strategy() -> None:
     result = schema.execute_sync(_ROW_ID_QUERY)
     assert result.errors is None
     assert result.data is not None
-    live_id = result.data["row"]["id"]
+    live_id = json_at(result.data, "row", "id")
+    assert isinstance(live_id, str)
     assert row is not None
-    assert live_id == global_id_for(category_node, row.pk)
+    assert live_id == global_id_for(category_node, saved_pk(row))
     # The payload slot is the graphql_type_name (the honored ``Meta.name``).
     assert relay.GlobalID.from_id(live_id).type_name == "CategoryNode"
 
@@ -127,9 +129,10 @@ def test_global_id_for_type_plus_model_strategy() -> None:
     result = schema.execute_sync(_ROW_ID_QUERY)
     assert result.errors is None
     assert result.data is not None
-    live_id = result.data["row"]["id"]
+    live_id = json_at(result.data, "row", "id")
+    assert isinstance(live_id, str)
     assert row is not None
-    assert live_id == global_id_for(category_node, row.pk)
+    assert live_id == global_id_for(category_node, saved_pk(row))
     assert relay.GlobalID.from_id(live_id).type_name == "products.category"
 
 
@@ -153,12 +156,15 @@ def test_global_id_for_type_strategy_with_schema_mints_the_published_name() -> N
     result = schema.execute_sync(_ROW_ID_QUERY)
     assert result.errors is None
     assert result.data is not None
-    live_id = result.data["row"]["id"]
+    live_id = json_at(result.data, "row", "id")
+    assert isinstance(live_id, str)
 
-    assert live_id == global_id_for(category_node, row.pk, schema=schema)
+    assert live_id == global_id_for(category_node, saved_pk(row), schema=schema)
     assert relay.GlobalID.from_id(live_id).type_name == "ApiCategoryNode"
-    assert global_id_for(category_node, row.pk) == str(relay.GlobalID("CategoryNode", str(row.pk)))
-    assert decode_global_id(live_id, schema=schema) == (category_node, str(row.pk))
+    assert global_id_for(category_node, saved_pk(row)) == str(
+        relay.GlobalID("CategoryNode", str(saved_pk(row))),
+    )
+    assert decode_global_id(live_id, schema=schema) == (category_node, str(saved_pk(row)))
 
 
 def test_global_id_for_model_label_strategy_ignores_the_schema() -> None:

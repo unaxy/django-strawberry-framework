@@ -47,9 +47,9 @@ definition, its hooks) resolves.
 object is a plain function; Strawberry annotates ``base_resolver`` as the bare generic
 ``StrawberryResolver``, so the one read that inherits its Unknown lives here.
 
-``pickle_roundtrip`` dumps a value and loads the bytes straight back, typed as the value it
-was given, so every pickle test shares the one unpickle (and its one lint suppression) and
-reads its result as the original type rather than ``Any``.
+``pickle_roundtrip`` dumps a value and loads the bytes straight back, so every pickle test
+shares the one unpickle; the loaded value is asserted to be an instance of the original's
+class, so the result reads as the original type rather than ``Any``.
 
 ``run_capturing`` is the target a test hands a ``threading.Thread`` (``args=(errors, fn)``):
 it runs ``fn`` and appends whatever it raises to ``errors``, so the main thread asserts the
@@ -95,10 +95,33 @@ or ``dict`` hashes its members.
 result, a hook's input) the way ``isinstance`` does at run time, but to ``dict[object,
 object]`` / ``list[object]``: a bare ``isinstance`` on an ``object`` narrows to the class
 over Unknown element types, which every later read inherits.
+
+``saved_pk`` reads a saved row's integer primary key. django-stubs types ``Model.pk`` as
+``Any``, so a bare ``row.pk`` hands ``Any`` to every global-id build, filter and assertion
+that reads it; the helper reads it as ``object`` and fails the test on an unsaved row or a
+non-integer key instead of passing either on.
+
+``json_loads`` is ``json.loads`` typed as returning ``object``, so a decoded payload is
+narrowed like any other value the test did not build. ``json_at`` reads one value out of a
+JSON-shaped payload (a ``result.data``, a decoded response body, a ``receive_json_from``
+message) along a path of keys: a ``str`` step reads a ``dict``, an ``int`` step a ``list``,
+and each step's container is checked first, so every read is typed ``object`` instead of
+inheriting the ``Any`` of ``ExecutionResult.data``'s values. A step whose container is the
+wrong kind raises ``TypeError`` and a missing key raises what the bare subscript raises, so
+a payload of the wrong shape fails the test where the subscript chain it replaces would.
+``json_object`` / ``json_list`` are ``json_at`` asserting the kind of the value it reaches.
+
+``receive_json`` awaits a channels WebsocketCommunicator's next JSON frame (``receive_json_from``),
+typed ``object``: channels annotates the decoded frame ``Any``.
+
+``type_args`` is ``typing.get_args`` typed as returning ``tuple[object, ...]``: typeshed
+declares its members ``Any``, so every annotation argument a test inspects would read as
+``Any`` without it.
 """
 
 import enum
 import inspect
+import json
 import pickle
 from collections.abc import Callable, Iterable, Mapping
 from types import FunctionType, ModuleType
@@ -111,6 +134,7 @@ from typing import (
     TypeGuard,
     TypeVar,
     cast,
+    get_args,
     overload,
 )
 
@@ -121,10 +145,13 @@ from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
+from django_strawberry_framework.utils._narrowing import instance_dict, is_awaitable, pk_of
 from django_strawberry_framework.utils.querysets import model_for
+from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
     from asgiref.typing import WebSocketScope
+    from channels.testing import WebsocketCommunicator
     from strawberry.types.field import StrawberryField
     from typing_extensions import TypeIs
 
@@ -169,7 +196,8 @@ def comparing_metaclass(
         return verdict == "equal"
 
     namespace = {"__eq__": answer, "__hash__": base.__hash__}
-    meta = type(f"{verdict.title()}EqMeta", (base,), namespace)
+    meta = object_result(type, f"{verdict.title()}EqMeta", (base,), namespace)
+    assert isinstance(meta, type)
     assert issubclass(meta, base)
     return meta
 
@@ -201,7 +229,10 @@ def str_subclass_name(kind: str, text: str, calls: list[str]) -> str:
     if kind == "str-enum-mixin":
         member: object = enum.Enum("Names", {"MEMBER": text}, type=str)["MEMBER"]
     elif kind == "str-enum":
-        member = STR_ENUM("Names", {"MEMBER": text})["MEMBER"]
+        names = object_result(STR_ENUM, "Names", {"MEMBER": text})
+        assert isinstance(names, type)
+        assert issubclass(names, enum.Enum)
+        member = names["MEMBER"]
     else:
         assert kind in ("honest", "unequal", "raises"), kind
 
@@ -230,7 +261,9 @@ def str_subclass_name(kind: str, text: str, calls: list[str]) -> str:
             "__repr__": record("__repr__", str.__repr__),
             "__str__": record("__str__", str.__str__),
         }
-        member = type(f"{kind.title()}Name", (str,), namespace)(text)
+        member_cls = object_result(type, f"{kind.title()}Name", (str,), namespace)
+        assert isinstance(member_cls, type)
+        member = object_result(member_cls, text)
     assert isinstance(member, str)
     assert type(member) is not str
     return member
@@ -255,6 +288,51 @@ def is_object_dict(value: object) -> "TypeIs[dict[object, object]]":
 def is_object_list(value: object) -> "TypeIs[list[object]]":
     """Whether ``value`` is a ``list`` (subclasses included), its items typed ``object``."""
     return isinstance(value, list)
+
+
+#: ``json.loads``, its result typed ``object``.
+json_loads: Callable[..., object] = json.loads
+
+
+async def receive_json(communicator: "WebsocketCommunicator", timeout: float = 10) -> object:
+    """Return the communicator's next JSON frame (``receive_json_from(timeout=...)``)."""
+    pending = object_result(communicator.receive_json_from, timeout=timeout)
+    assert is_awaitable(pending), pending
+    return await pending
+
+
+#: ``typing.get_args``, its members typed ``object``.
+type_args: Callable[[object], tuple[object, ...]] = get_args
+
+
+def json_at(value: object, *path: str | int) -> object:
+    """Return ``value[path[0]][path[1]]...``, checking each step's container kind first."""
+    for key in path:
+        if isinstance(key, str):
+            if not is_object_dict(value):
+                raise TypeError(f"expected a JSON object to read {key!r} from, got {value!r}")
+            value = value[key]
+        else:
+            if not is_object_list(value):
+                raise TypeError(f"expected a JSON array to read [{key}] from, got {value!r}")
+            value = value[key]
+    return value
+
+
+def json_object(value: object, *path: str | int) -> dict[object, object]:
+    """Return the JSON object ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    if not is_object_dict(found):
+        raise TypeError(f"expected a JSON object at {path!r}, got {found!r}")
+    return found
+
+
+def json_list(value: object, *path: str | int) -> list[object]:
+    """Return the JSON array ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    if not is_object_list(found):
+        raise TypeError(f"expected a JSON array at {path!r}, got {found!r}")
+    return found
 
 
 class ClassReadRaisesBase:
@@ -328,8 +406,18 @@ class ClaimsClass(ClaimsClassBase):
 
 def pickle_roundtrip(value: _T) -> _T:
     """``value`` after a pickle dump and load: the one place a test unpickles."""
-    # The bytes were produced one line up from ``value``, so loading them reads no untrusted input.
-    return pickle.loads(pickle.dumps(value))  # noqa: S301 - round-trips the object this test just pickled
+    # The bytes were produced from ``value`` on the same line, so loading them reads no untrusted input.
+    restored = object_result(pickle.loads, pickle.dumps(value))
+    assert isinstance(restored, type(value)), restored
+    return restored
+
+
+def saved_pk(row: Model) -> int:
+    """Return ``row``'s integer primary key, failing the test when the row has none."""
+    pk = pk_of(row)
+    if type(pk) is not int:
+        raise TypeError(f"expected a saved row with an integer pk, got {pk!r}")
+    return pk
 
 
 def run_capturing(errors: list[BaseException], fn: Callable[[], object]) -> None:
@@ -352,7 +440,7 @@ def definition_raises(cls: _ClassT) -> _ClassT:
 
 def module_binding(module: ModuleType, name: str) -> object:
     """Return ``module``'s own binding for ``name`` (its ``__dict__`` entry)."""
-    return vars(module)[name]
+    return instance_dict(module)[name]
 
 
 def stub_module(name: str, **attributes: object) -> ModuleType:
@@ -371,7 +459,7 @@ def _remove_databases_failures_descriptor(
     ``inspect.getattr_static`` fetches the descriptor without binding it and the
     ``isinstance`` check makes the read assert the shape the callers use.
     """
-    descriptor: object = inspect.getattr_static(cls, "_remove_databases_failures")
+    descriptor = object_result(inspect.getattr_static, cls, "_remove_databases_failures")
     assert _is_test_case_classmethod(descriptor)
     return descriptor
 

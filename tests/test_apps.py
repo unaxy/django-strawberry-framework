@@ -36,6 +36,7 @@ from django_strawberry_framework import (
     _strawberry_patches,
 )
 from django_strawberry_framework.apps import DjangoStrawberryFrameworkConfig
+from django_strawberry_framework.utils._narrowing import class_dict
 
 
 def test_djangostrawberryframeworkconfig_importable_from_apps_module() -> None:
@@ -99,7 +100,7 @@ def test_djangostrawberryframeworkconfig_defines_ready_for_django_patches() -> N
     ``test_ready_dispatches_all_four_patch_appliers_and_refires_safely``.
     """
     assert "ready" in DjangoStrawberryFrameworkConfig.__dict__
-    assert callable(DjangoStrawberryFrameworkConfig.__dict__["ready"])
+    assert callable(class_dict(DjangoStrawberryFrameworkConfig)["ready"])
 
 
 # Every upstream class attribute the four patch modules replace. A test that
@@ -241,7 +242,7 @@ def test_ready_reinstalls_patches_after_their_modules_reload(
     config = django.apps.apps.get_app_config("django_strawberry_framework")
     saved_namespace = dict(module.__dict__)
     saved_slots = tuple(
-        (owner, attribute, owner.__dict__[attribute]) for owner, attribute in _PATCHED_SLOTS
+        (owner, attribute, class_dict(owner)[attribute]) for owner, attribute in _PATCHED_SLOTS
     )
     try:
         original_captures = tuple(getattr(module, name) for name in original_names)

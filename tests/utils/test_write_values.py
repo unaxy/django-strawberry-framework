@@ -54,7 +54,7 @@ from django_strawberry_framework.utils.write_values import (
     store_decoded,
     unencodable_text_error,
 )
-from tests._idioms import module_binding
+from tests._idioms import module_binding, saved_pk
 from tests._info import make_info, unread_info
 
 if TYPE_CHECKING:
@@ -64,10 +64,15 @@ if TYPE_CHECKING:
     _FieldHandler: TypeAlias = Callable[[InputFieldSpec, object], FieldError | None]
 
 
+# basedpyright: Strawberry's idiom for an omittable input field defaults it to UNSET, which its
+# stub types Any so it fits any annotation; this is that default under the field annotation
+_OMITTED: None = strawberry.UNSET  # pyright: ignore[reportAny]
+
+
 @strawberry.input
 class _TriStateInput:
-    scalar: str | None = strawberry.UNSET
-    relation: int | None = strawberry.UNSET
+    scalar: str | None = _OMITTED
+    relation: int | None = _OMITTED
 
 
 _TRI_STATE_SPECS = [
@@ -109,7 +114,7 @@ def test_decode_layers_preserve_omitted_null_and_provided_values() -> None:
             info=unread_info(),
             async_recourse="Use a synchronous visibility hook.",
             skip=lambda candidate: candidate is None,
-            project=lambda obj: obj.pk,
+            project=saved_pk,
         )
         if error is None:
             decoded[spec.input_attr] = result
@@ -142,12 +147,12 @@ def test_decode_layers_preserve_omitted_null_and_provided_values() -> None:
     category = Category.objects.create(name="TriState")
     error = decode_provided_fields(
         _TRI_STATE_SPECS,
-        _TriStateInput(scalar="provided", relation=category.pk),
+        _TriStateInput(scalar="provided", relation=saved_pk(category)),
         handlers={"relation": relation_handler},
         scalar_handler=scalar_handler,
     )
     assert error is None
-    assert decoded == {"scalar": "provided", "relation": category.pk}
+    assert decoded == {"scalar": "provided", "relation": saved_pk(category)}
 
 
 @pytest.mark.django_db
@@ -160,7 +165,7 @@ def test_decode_visible_relation_ids_rejects_uncoercible_member_without_a_visibi
 
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
-            [first.pk, "bad"],
+            [saved_pk(first), "bad"],
             graphql_name="categoryIds",
             related_model=Category,
             info=unread_info(),
@@ -656,7 +661,7 @@ def test_decode_visible_relation_ids_rejects_non_collection_types() -> None:
         b"123",
         bytearray(b"123"),
         memoryview(b"123"),
-        {"category": category.pk},
+        {"category": saved_pk(category)},
     ]:
         pks, error = decode_visible_relation_ids(
             bad_container,
@@ -766,7 +771,7 @@ def test_decode_visible_relation_handles_invalid_id_and_missing_object() -> None
         info=unread_info(),
         async_recourse=recourse,
         skip=lambda x: x is None,
-        project=lambda obj: obj.pk,
+        project=saved_pk,
     )
     assert val is None
     assert error is not None
@@ -780,7 +785,7 @@ def test_decode_visible_relation_handles_invalid_id_and_missing_object() -> None
         info=unread_info(),
         async_recourse=recourse,
         skip=lambda x: x is None,
-        project=lambda obj: obj.pk,
+        project=saved_pk,
     )
     assert val is None
     assert error is not None
@@ -847,18 +852,18 @@ def test_decode_visible_relation_ids_accepts_global_id_members_with_one_query() 
 
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
-            [relay.GlobalID("products.category", str(row.pk)), row.pk],
+            [relay.GlobalID("products.category", str(saved_pk(row))), saved_pk(row)],
             graphql_name="categoryIds",
             related_model=Category,
             info=make_info(),
             async_recourse=recourse,
         )
     assert error is None
-    assert pks == [row.pk, row.pk]
+    assert pks == [saved_pk(row), saved_pk(row)]
     assert len(ctx.captured_queries) == 1
 
     for bad_gid in (
-        relay.GlobalID("unknown.model", str(row.pk)),
+        relay.GlobalID("unknown.model", str(saved_pk(row))),
         relay.GlobalID("products.category", "not-a-pk"),
     ):
         pks, error = decode_visible_relation_ids(
@@ -886,14 +891,14 @@ def test_decode_visible_relation_ids_accepts_duplicate_pks_with_one_query() -> N
     second = Category.objects.create(name="DupB")
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
-            [first.pk, second.pk, first.pk],
+            [saved_pk(first), saved_pk(second), saved_pk(first)],
             graphql_name="categoryIds",
             related_model=Category,
             info=unread_info(),
             async_recourse="Use a synchronous visibility hook.",
         )
     assert error is None
-    assert pks == [first.pk, second.pk, first.pk]
+    assert pks == [saved_pk(first), saved_pk(second), saved_pk(first)]
     assert len(ctx.captured_queries) == 1
 
 
@@ -944,8 +949,8 @@ def test_decode_visible_relation_ids_materializes_generators_once_and_clears_emp
 
     def _one_shot() -> Iterator[int]:
         for item in created:
-            consumed.append(item.pk)
-            yield item.pk
+            consumed.append(saved_pk(item))
+            yield saved_pk(item)
 
     pks, error = decode_visible_relation_ids(
         _one_shot(),
@@ -955,8 +960,8 @@ def test_decode_visible_relation_ids_materializes_generators_once_and_clears_emp
         async_recourse="Use a synchronous visibility hook.",
     )
     assert error is None
-    assert pks == [item.pk for item in created]
-    assert consumed == [item.pk for item in created]
+    assert pks == [saved_pk(item) for item in created]
+    assert consumed == [saved_pk(item) for item in created]
 
     def _empty() -> Iterator[object]:
         yield from ()
@@ -1022,14 +1027,14 @@ def test_decode_visible_relation_ids_coercion_and_null_boundaries_stay_contained
     # A string the pk field coerces to a REAL pk passes the same visibility
     # gate as the int literal (to_python mechanics are the documented contract).
     pks, error = decode_visible_relation_ids(
-        [str(category.pk)],
+        [str(saved_pk(category))],
         graphql_name="categoryIds",
         related_model=Category,
         info=unread_info(),
         async_recourse=recourse,
     )
     assert error is None
-    assert pks == [category.pk]
+    assert pks == [saved_pk(category)]
 
 
 def _relation_decoder_never_called(*_args: object, **_kwargs: object) -> NoReturn:

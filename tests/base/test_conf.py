@@ -48,6 +48,7 @@ from django_strawberry_framework.conf import (
 )
 from django_strawberry_framework.conf import settings as bound_settings
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import ClaimsClassBase, ClassReadRaises
 
 _PATCH_DEPENDENCIES = sorted(conf.UPSTREAM_PATCH_DEPENDENCIES)
@@ -379,8 +380,7 @@ def test_testing_endpoint_setting_carries_pytest_collection_guard() -> None:
     function, its ``str`` return trips ``PytestReturnNotNoneWarning``, and
     the suite fails under ``filterwarnings = error`` at this very import.
     """
-    # basedpyright: ``conf.py`` sets ``__test__`` on the function; ``FunctionType`` declares none
-    assert testing_endpoint_setting.__test__ is False  # pyright: ignore[reportFunctionMemberAccess]
+    assert read_attr(testing_endpoint_setting, "__test__") is False
 
 
 def test_single_parent_fast_path_setting_defaults_true_when_absent() -> None:

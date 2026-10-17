@@ -27,7 +27,6 @@ from types import SimpleNamespace
 from typing import NoReturn, SupportsIndex, TypeVar, overload
 
 import pytest
-import strawberry
 from apps.library.models import Book, Branch, Genre, Patron, PatronProfile, Shelf, TaggedItem
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import AnonymousUser, User
@@ -35,7 +34,6 @@ from django.db.models import F, Min, Model, QuerySet
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
 from graphql import GraphQLError
-from strawberry import UNSET
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -58,6 +56,7 @@ from django_strawberry_framework.orders.sets import (
 )
 from django_strawberry_framework.types.base import DjangoType
 from django_strawberry_framework.utils import relations
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     promote_set_meta_fields,
     read_set_meta_fields,
@@ -1487,7 +1486,7 @@ def test_input_has_active_terms() -> None:
 
     # Falsy / empty / unset cases
     assert not BookOrder._input_has_active_terms(None)
-    assert not BookOrder._input_has_active_terms(strawberry.UNSET)
+    assert not BookOrder._input_has_active_terms(UNSET)
     assert not BookOrder._input_has_active_terms([])
     assert not BookOrder._input_has_active_terms([BookInput()])
     assert not BookOrder._input_has_active_terms([BookInput(title=None)])
@@ -1556,7 +1555,7 @@ def test_input_has_active_terms_purity_structure_disagreement() -> None:
     ("input_value", "expected"),
     [
         (None, False),
-        (strawberry.UNSET, False),
+        (UNSET, False),
         ([], False),
         (["__EMPTY_BOOK_INPUT__"], False),
         (["__NULL_TITLE_BOOK_INPUT__"], False),

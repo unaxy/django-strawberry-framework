@@ -51,6 +51,8 @@ from django.db import models
 from django.db.models.expressions import Combinable
 from django.db.models.fields.reverse_related import ManyToManyRel
 
+from django_strawberry_framework.utils._narrowing import read_attr
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FAKESHOP_ROOT = REPO_ROOT / "examples" / "fakeshop"
 FAKESHOP_APP_LABELS = (
@@ -364,13 +366,13 @@ def resolve(name: Name) -> object:
         imported = src.imports.get(head) if src is not None else None
         if imported is not None:
             target = importlib.import_module(imported[0])
-            obj = target if imported[1] is None else getattr(target, imported[1])
+            obj = target if imported[1] is None else read_attr(target, imported[1])
         elif hasattr(builtins, head):
-            obj = getattr(builtins, head)
+            obj = read_attr(builtins, head)
         else:
             raise UndecidableError(f"{name.module}: cannot resolve {name.dotted!r}")
     for part in rest.split(".") if rest else ():
-        obj = getattr(obj, part)
+        obj = read_attr(obj, part)
     return obj
 
 

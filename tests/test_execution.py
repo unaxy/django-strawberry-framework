@@ -10,6 +10,7 @@ from graphql import GraphQLError
 from strawberry.types.execution import ExecutionContext
 
 from django_strawberry_framework import DjangoSchema
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._execution import execution_result, make_execution_context
 
 
@@ -36,7 +37,7 @@ def test_make_execution_context_reads_back_what_the_test_varied() -> None:
     assert isinstance(context, ExecutionContext)
     assert context.schema is schema
     assert context.query == "{ hello }"
-    assert context.context is request
+    assert read_attr(context, "context") is request
     assert context.pre_execution_errors == [error]
 
 
@@ -46,7 +47,7 @@ def test_make_execution_context_defaults_to_an_unparsed_plain_schema_request() -
 
     assert type(context.schema) is strawberry.Schema
     assert context.query == "{ field }"
-    assert context.context is None
+    assert read_attr(context, "context") is None
     assert context.graphql_document is None
     assert context.operation_name is None
     assert context.pre_execution_errors is None

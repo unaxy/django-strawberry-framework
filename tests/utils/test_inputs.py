@@ -36,6 +36,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_tuple,
 )
 from django_strawberry_framework.utils.canonical import base_container_values
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     FILTERSET_FIELDS_ALIAS,
     GeneratedInputArgumentsFactory,
@@ -383,7 +384,7 @@ def test_make_input_namespace_returns_ledger_materialize_clear_trio() -> None:
 
     materialize("ProbeNamespaceInputType", _ProbeInput)
     assert ledger["ProbeNamespaceInputType"] is _ProbeInput
-    assert module.ProbeNamespaceInputType is _ProbeInput
+    assert module_binding(module, "ProbeNamespaceInputType") is _ProbeInput
     # Idempotent on the same pair; a distinct class under one name raises (the
     # ledger collision, named by the family label).
     materialize("ProbeNamespaceInputType", _ProbeInput)
@@ -397,7 +398,7 @@ def test_make_input_namespace_returns_ledger_materialize_clear_trio() -> None:
     clear()
     assert ledger == {}
     # The materialized global stays PARKED (not delattr'd) per the lifecycle.
-    assert module.ProbeNamespaceInputType is _ProbeInput
+    assert module_binding(module, "ProbeNamespaceInputType") is _ProbeInput
     delattr(module, "ProbeNamespaceInputType")
 
 
@@ -441,7 +442,7 @@ def test_make_set_input_namespace_returns_heavy_ledger_field_specs_materialize_c
 
     materialize("ProbeSetInputType", _ProbeInput)
     assert ledger["ProbeSetInputType"] is _ProbeInput
-    assert module.ProbeSetInputType is _ProbeInput
+    assert module_binding(module, "ProbeSetInputType") is _ProbeInput
     field_specs[(_ProbeSet, "title")] = GeneratedInputFieldSpec(
         python_attr="title",
         graphql_name="title",
@@ -458,7 +459,7 @@ def test_make_set_input_namespace_returns_heavy_ledger_field_specs_materialize_c
     clear()
     assert ledger == {}
     assert field_specs == {}
-    assert module.ProbeSetInputType is _ProbeInput
+    assert module_binding(module, "ProbeSetInputType") is _ProbeInput
     delattr(module, "ProbeSetInputType")
 
 
@@ -1104,7 +1105,7 @@ def test_optional_input_field_widens_and_aliases_per_flags() -> None:
         widen=True,
     )
     assert annotation == (int | None)
-    assert kwargs == {"name": "categoryId", "default": strawberry.UNSET}
+    assert kwargs == {"name": "categoryId", "default": UNSET}
 
     annotation, kwargs = optional_input_field(
         str,

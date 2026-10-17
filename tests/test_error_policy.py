@@ -75,8 +75,10 @@ from django_strawberry_framework.extensions.error_policy import (
     schema_error_policy,
 )
 from django_strawberry_framework.extensions.resource_policy import DjangoResourcePolicyExtension
+from django_strawberry_framework.utils._narrowing import read_attr, require_instance
+from django_strawberry_framework.utils.typing import object_result
 from tests._execution import execution_result, make_execution_context
-from tests._idioms import ClassReadRaises
+from tests._idioms import ClassReadRaises, json_at, json_list
 
 _SENSITIVE = "standalone schema secret /srv/private/standalone.key"
 
@@ -452,7 +454,7 @@ def test_a_declared_policy_beside_a_debug_factory_preserves_debug_exception_capt
     result = schema.execute_sync("{ boom }")
 
     assert result.extensions is not None
-    assert len(result.extensions["debug"]["exceptions"]) == 1
+    assert len(json_list(result.extensions, "debug", "exceptions")) == 1
 
 
 def test_a_consumer_extension_is_prepended_behind_the_policy_not_in_front_of_it() -> None:
@@ -507,7 +509,7 @@ def test_a_plain_schema_with_the_extension_installed_by_hand_falls_back_to_the_d
     configuration. This is a supported standalone use, so it must not raise
     either.
     """
-    assert settings.DEBUG is False
+    assert read_attr(settings, "DEBUG") is False
     schema = strawberry.Schema(query=_Query, extensions=[DjangoErrorPolicyExtension])
     assert not hasattr(schema, "error_policy")
 
@@ -518,7 +520,8 @@ def test_a_plain_schema_with_the_extension_installed_by_hand_falls_back_to_the_d
     assert _SENSITIVE not in error.message
     assert error.original_error is None
     assert error.extensions is not None
-    assert len(error.extensions[DEFAULT_ERROR_POLICY.correlation_extension_key]) == 32
+    correlation_id = json_at(error.extensions, DEFAULT_ERROR_POLICY.correlation_extension_key)
+    assert len(require_instance(correlation_id, str)) == 32
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +573,7 @@ def test_a_graphql_core_execution_result_is_rewritten_in_place_preserving_order(
     matching errors to its document by index is unaffected - asserted here over a
     mixed list, which a single-error response cannot show.
     """
-    assert settings.DEBUG is False
+    assert read_attr(settings, "DEBUG") is False
     deliberate = GraphQLError("Deliberate.", original_error=GraphQLError("Deliberate."))
     unexpected = GraphQLError(_SENSITIVE, original_error=ValueError(_SENSITIVE))
     result = GraphQLExecutionResult(data=None, errors=[deliberate, unexpected])
@@ -595,7 +598,7 @@ async def test_an_async_pre_execution_error_carries_no_original_error(
     client-visible message, ``data: null``, and absent correlation id live in
     ``examples/fakeshop/test_query/test_error_policy_api.py``.
     """
-    assert settings.DEBUG is False
+    assert read_attr(settings, "DEBUG") is False
     schema = DjangoSchema(query=_Query)
 
     result = await schema.execute("{ notAField }")
@@ -682,7 +685,7 @@ class _HostileError(GraphQLError):
     def __getattribute__(self, name: str) -> object:
         if name == "original_error":
             raise RuntimeError(_SENSITIVE)
-        return super().__getattribute__(name)
+        return object_result(super().__getattribute__, name)
 
 
 class _HostileResult(GraphQLExecutionResult):
@@ -695,7 +698,7 @@ class _HostileResult(GraphQLExecutionResult):
     def __getattribute__(self, name: str) -> object:
         if name == "errors":
             raise RuntimeError(_SENSITIVE)
-        return super().__getattribute__(name)
+        return object_result(super().__getattribute__, name)
 
 
 class _HostileStrawberryResult(StrawberryExecutionResult):
@@ -864,7 +867,11 @@ def test_a_teardown_with_unreadable_debug_masks_normally_and_keeps_data(
     assert result.errors[0].message == DEFAULT_ERROR_POLICY.message
     assert _SENSITIVE not in result.errors[0].message
     assert result.errors[0].extensions is not None
-    assert len(result.errors[0].extensions[DEFAULT_ERROR_POLICY.correlation_extension_key]) == 32
+    correlation_id = json_at(
+        result.errors[0].extensions,
+        DEFAULT_ERROR_POLICY.correlation_extension_key,
+    )
+    assert len(require_instance(correlation_id, str)) == 32
 
 
 def test_a_hostile_policy_message_read_degrades_to_the_package_message(

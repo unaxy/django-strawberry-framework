@@ -33,7 +33,7 @@ import sys
 from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 import strawberry
@@ -43,6 +43,9 @@ from django.http import HttpRequest
 from django_filters import Filter
 from strawberry import relay
 from typing_extensions import override
+
+if TYPE_CHECKING:
+    from typing_extensions import TypeIs
 
 from django_strawberry_framework import (
     DjangoConnection,
@@ -72,6 +75,23 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.finalizer import _bind_filterset_owner
 from django_strawberry_framework.types.relay import apply_interfaces
+from django_strawberry_framework.utils._narrowing import (
+    class_dict,
+    is_dict,
+    is_str,
+    read_attr,
+    require,
+)
+from django_strawberry_framework.utils.typing import object_result
+
+
+def _is_filter_map(value: object) -> TypeIs[OrderedDict[str, Filter]]:
+    """Whether ``value`` is the ``OrderedDict`` of named filters ``get_filters`` returns."""
+    return (
+        is_dict(value)
+        and isinstance(value, OrderedDict)
+        and all(is_str(name) and isinstance(leaf, Filter) for name, leaf in value.items())
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -133,7 +153,7 @@ def test_phase_2_5_binds_all_owners_before_expansion() -> None:
     @classmethod
     def instrumented_get_filters(cls: type[FilterSet]) -> OrderedDict[str, Filter]:
         observations.append(cls._owner_definition is not None)
-        return original_get_filters(cls)
+        return require(object_result(original_get_filters, cls), _is_filter_map)
 
     # basedpyright: the classmethod spy installed on the class is the probe under test; the
     # checker compares the descriptor against the bound hook signature
@@ -528,12 +548,12 @@ def test_a_filterset_subclass_binds_its_own_owner_apart_from_its_base(
             interfaces = (relay.Node,)
 
     finalize_django_types()
-    assert ShelfFilter.__dict__["_owner_definition"].origin is (
-        hiding_type if base_on_hiding else plain_type
-    )
-    assert SubShelfFilter.__dict__["_owner_definition"].origin is (
-        plain_type if base_on_hiding else hiding_type
-    )
+    shelf_owner = class_dict(ShelfFilter)["_owner_definition"]
+    sub_shelf_owner = class_dict(SubShelfFilter)["_owner_definition"]
+    assert isinstance(shelf_owner, DjangoTypeDefinition)
+    assert isinstance(sub_shelf_owner, DjangoTypeDefinition)
+    assert shelf_owner.origin is (hiding_type if base_on_hiding else plain_type)
+    assert sub_shelf_owner.origin is (plain_type if base_on_hiding else hiding_type)
 
     # ``from __future__ import annotations`` leaves a class-body annotation a string
     # naming a function local, so the root type is built with resolved annotations.
@@ -954,7 +974,7 @@ def test_materialize_input_class_is_idempotent_on_same_pair() -> None:
     materialize_input_class("StubInputType", _Stub)
 
     inputs_module = sys.modules[INPUTS_MODULE_PATH]
-    assert inputs_module.StubInputType is _Stub
+    assert read_attr(inputs_module, "StubInputType") is _Stub
     assert _materialized_names["StubInputType"] is _Stub
 
     delattr(inputs_module, "StubInputType")
@@ -1019,7 +1039,7 @@ def test_registry_clear_clears_filter_input_namespace_and_helper_set() -> None:
     assert _field_specs == {}
     assert _helper_referenced_filtersets == set()
     assert hasattr(inputs_module, "LedgerStubInputType")
-    assert inputs_module.LedgerStubInputType is _Stub
+    assert read_attr(inputs_module, "LedgerStubInputType") is _Stub
 
     # Teardown the parked global so the autouse fixture starts clean.
     delattr(inputs_module, "LedgerStubInputType")
@@ -1043,7 +1063,7 @@ def test_clear_filter_input_namespace_can_be_called_directly() -> None:
     # resolves until the next `materialize_input_class` overwrites it.
     assert _materialized_names == {}
     assert hasattr(inputs_module, "DirectClearInputType")
-    assert inputs_module.DirectClearInputType is _Stub
+    assert read_attr(inputs_module, "DirectClearInputType") is _Stub
 
     # Teardown the parked global so the autouse fixture starts clean.
     delattr(inputs_module, "DirectClearInputType")

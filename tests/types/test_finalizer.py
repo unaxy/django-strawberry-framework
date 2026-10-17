@@ -28,6 +28,7 @@ from django_strawberry_framework.types.finalizer import (
     _warn_model_label_secondary_collapse,
 )
 from django_strawberry_framework.types.relations import PendingRelation
+from django_strawberry_framework.utils.typing import object_result
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
@@ -209,7 +210,7 @@ def test_finalizer_diagnostic_renderers_survive_hostile_metadata() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name in {"__name__", "__qualname__", "__module__"}:
                 return _HostileText("Hostile")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _Hostile(metaclass=_HostileMeta):
         pass
@@ -230,7 +231,7 @@ def test_finalizer_diagnostic_renderers_survive_hostile_metadata() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 return 123
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _NonStringName(metaclass=_NonStringNameMeta):
         pass
@@ -240,7 +241,7 @@ def test_finalizer_diagnostic_renderers_survive_hostile_metadata() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__module__":
                 raise RuntimeError("module exploded")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _UnreadableModule(metaclass=_UnreadableModuleMeta):
         pass
@@ -250,7 +251,7 @@ def test_finalizer_diagnostic_renderers_survive_hostile_metadata() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__module__":
                 return 123
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _NonStringModule(metaclass=_NonStringModuleMeta):
         pass

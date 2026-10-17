@@ -61,7 +61,7 @@ from apps.scalars.models import MediaSpecimen
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
-from strawberry import UNSET, relay
+from strawberry import relay
 from strawberry.types.base import (
     StrawberryList,
     StrawberryOptional,
@@ -106,6 +106,8 @@ from django_strawberry_framework.rest_framework import (
 )
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar
+from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     FILE,
     RELATION_MULTI,
@@ -1028,7 +1030,7 @@ def test_identical_shape_dedupes_via_ledger() -> None:
     # Idempotent re-materialize of the SAME (name, cls) pair: no raise.
     materialize_mutation_input_class("ItemInput", cls)
 
-    assert sys.modules[INPUTS_MODULE_PATH].ItemInput is cls
+    assert module_binding(sys.modules[INPUTS_MODULE_PATH], "ItemInput") is cls
 
 
 def test_distinct_shapes_colliding_on_one_name_raise_configuration_error() -> None:
@@ -1287,8 +1289,16 @@ def test_editable_fields_keep_foreign_object_carriers_not_the_relation(
     input writes the carriers as the scalars they are. A ``ForeignKey`` keeps
     its ``<field>_id`` input whatever column it targets.
     """
-    model = getattr(_link_models, child_name)
+    model = _link_model(child_name)
     assert [field.name for field in editable_input_fields(model)] == names
+
+
+def _link_model(name: str) -> type[models.Model]:
+    """Return the link fixture model ``tests.optimizer._link_models`` declares as ``name``."""
+    model = read_attr(_link_models, name)
+    assert isinstance(model, type)
+    assert issubclass(model, models.Model)
+    return model
 
 
 def _carrier_backed_link_message(
@@ -1323,7 +1333,7 @@ def test_editable_fields_reject_naming_a_foreign_object(
     every other non-basis field gets, worded with the relation's target and
     carrier columns and the remedy for each key.
     """
-    model = getattr(_link_models, child_name)
+    model = _link_model(child_name)
     remedy = (
         f"Name its carrier field(s) ({carriers}) in `fields` instead."
         if key == "fields"

@@ -7,17 +7,16 @@ live sibling in ``examples/fakeshop/test_query/``. Every row runs against a
 fixture package under ``tmp_path``.
 """
 
-import json
 import subprocess
 from pathlib import Path
 from typing import NoReturn, TypeAlias
 
 import pytest
-from graphql_client import JSONObject
 
 from scripts import review_inspect
+from tests._idioms import json_at, json_list, json_loads, json_object
 
-_JSONDocument: TypeAlias = JSONObject
+_JSONDocument: TypeAlias = dict[object, object]
 
 PACKAGE = "django_strawberry_framework"
 REL_PATH = f"{PACKAGE}/sample.py"
@@ -111,11 +110,15 @@ def _run(tmp_path: Path, *extra: str, source: str = SAMPLE) -> tuple[Path, Path]
 def document(tmp_path: Path) -> _JSONDocument:
     json_path = tmp_path / "sample.json"
     _run(tmp_path, "--json", str(json_path))
-    return json.loads(json_path.read_text(encoding="utf-8"))
+    return json_object(json_loads(json_path.read_text(encoding="utf-8")))
 
 
 def _symbol(document: _JSONDocument, qualname: str) -> _JSONDocument:
-    matches = [entry for entry in document["symbols"] if entry["qualname"] == qualname]
+    matches = [
+        json_object(entry)
+        for entry in json_list(document, "symbols")
+        if json_at(entry, "qualname") == qualname
+    ]
     assert len(matches) == 1, qualname
     return matches[0]
 
@@ -215,7 +218,7 @@ def test_every_row_names_its_enclosing_symbol_or_module_line(tmp_path: Path) -> 
 def test_meta_call_filter_matches_attribute_access_not_substring(
     document: _JSONDocument,
 ) -> None:
-    calls = [item["call"] for item in document["calls_of_interest"]["items"]]
+    calls = [json_at(item, "call") for item in json_list(document, "calls_of_interest", "items")]
 
     assert "model._meta.get_field" in calls
     assert "plan.merge_metadata_from" not in calls
@@ -249,7 +252,7 @@ def test_json_header_carries_the_git_blob_id(tmp_path: Path, document: _JSONDocu
         check=True,
     ).stdout.strip()
 
-    header = document["header"]
+    header = json_object(document, "header")
     assert header["blob"] == expected
     assert header["blob_source"] == "git"
     assert header["path"] == REL_PATH
@@ -295,28 +298,34 @@ def test_symbol_table_fields(document: _JSONDocument) -> None:
 
     load = _symbol(document, "Loader._load")
     assert load["is_public"] is False
-    assert [call["reason"] for call in load["db_calls"]] == ["orm:.filter", "orm:.filter"]
+    assert [json_at(call, "reason") for call in json_list(load, "db_calls")] == [
+        "orm:.filter",
+        "orm:.filter",
+    ]
 
     build = _symbol(document, "build")
     assert build["kind"] == "function"
     assert build["has_docstring"] is False
     assert build["callers_approximate"] is True
-    callers = build["callers"]
-    assert isinstance(callers, list)
+    callers = json_list(build, "callers")
     assert f'{PACKAGE}/other.py #"VALUE = build(None, None)"' in callers
     assert _symbol(document, "Loader")["kind"] == "class"
 
 
 def test_per_row_leads_flag_loop_bodies_only(document: _JSONDocument) -> None:
     per_row = {
-        (lead["where"], lead["line"]): lead for lead in document["performance_leads"]["per_row"]
+        (json_at(lead, "where"), json_at(lead, "line")): lead
+        for lead in json_list(document, "performance_leads", "per_row")
     }
 
     positive = per_row[(f"{REL_PATH}::Loader.resolve_items", _line_of(SAMPLE, "filter(pk=row)"))]
-    assert positive["reason"] == "orm:.filter"
-    assert positive["loop"] == {"kind": "for", "line": _line_of(SAMPLE, "for row in rows:")}
+    assert json_at(positive, "reason") == "orm:.filter"
+    assert json_at(positive, "loop") == {
+        "kind": "for",
+        "line": _line_of(SAMPLE, "for row in rows:"),
+    }
     awaited = per_row[(f"{REL_PATH}::Loader.afetch", _line_of(SAMPLE, "await row.asave()"))]
-    assert awaited["loop"]["kind"] == "comprehension"
+    assert json_at(awaited, "loop", "kind") == "comprehension"
 
     # Negative controls: a queryset call outside any loop, a loop iterable (evaluated
     # once), and ``dict.get(key)`` inside a loop body are not per-row work.
@@ -328,19 +337,19 @@ def test_per_row_leads_flag_loop_bodies_only(document: _JSONDocument) -> None:
 
 
 def test_hot_path_reachability_follows_self_calls(document: _JSONDocument) -> None:
-    leads = document["performance_leads"]
+    leads = json_object(document, "performance_leads")
 
-    entries = [entry["where"] for entry in leads["hot_entry_points"]]
+    entries = [json_at(entry, "where") for entry in json_list(leads, "hot_entry_points")]
     assert f"{REL_PATH}::Loader.resolve_items" in entries
     assert {"where": f"{REL_PATH}::Loader._load", "via": f"{REL_PATH}::Loader.resolve_items"} in (
-        leads["hot_reachable"]
+        json_list(leads, "hot_reachable")
     )
 
 
 def test_import_time_work_lists_module_and_class_body_calls(document: _JSONDocument) -> None:
     rows = {
-        (row["line"], row["kind"], row["text"])
-        for row in document["performance_leads"]["import_time"]
+        (json_at(row, "line"), json_at(row, "kind"), json_at(row, "text"))
+        for row in json_list(document, "performance_leads", "import_time")
     }
 
     assert rows == {
@@ -352,17 +361,24 @@ def test_import_time_work_lists_module_and_class_body_calls(document: _JSONDocum
 
 
 def test_comments_census_flags(document: _JSONDocument) -> None:
-    census = {(entry["kind"], entry["owner"]): entry for entry in document["comments_census"]}
+    census = {
+        (json_at(entry, "kind"), json_at(entry, "owner")): entry
+        for entry in json_list(document, "comments_census")
+    }
 
     comment = census[("comment", "Loader._load")]
-    assert "previously" in comment["flags"]["provenance"]
-    assert comment["flags"]["line-cite"] == ["walker.py:12"]
-    assert comment["flags"]["symbol-cite"] == ["walker.py::Walker.walk"]
-    assert census[("docstring", "test_behaviour")]["flags"]["test-docstring-prefix"] == ["Tests"]
-    assert census[("missing-docstring", "build")]["flags"] == {"public-no-docstring": ["build"]}
-    assert census[("docstring", "Loader.afetch")]["flags"] == {
+    assert "previously" in json_list(comment, "flags", "provenance")
+    assert json_at(comment, "flags", "line-cite") == ["walker.py:12"]
+    assert json_at(comment, "flags", "symbol-cite") == ["walker.py::Walker.walk"]
+    assert json_at(census[("docstring", "test_behaviour")], "flags", "test-docstring-prefix") == [
+        "Tests",
+    ]
+    assert json_at(census[("missing-docstring", "build")], "flags") == {
+        "public-no-docstring": ["build"],
+    }
+    assert json_at(census[("docstring", "Loader.afetch")], "flags") == {
         "first-line-no-period": ["Fetch rows"],
     }
     # Negative control: a present-tense docstring ending in a period carries no flag.
-    assert census[("docstring", "Loader")]["flags"] == {}
+    assert json_at(census[("docstring", "Loader")], "flags") == {}
     assert ("missing-docstring", "Loader._load") not in census

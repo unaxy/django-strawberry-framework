@@ -132,7 +132,14 @@ from django_strawberry_framework.resource_policy import (
     ResourcePolicy,
     _windowed_rows,
 )
+from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.relay import SyncMisuseError
+from django_strawberry_framework.utils._narrowing import (
+    class_dict,
+    list_of,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
@@ -145,7 +152,14 @@ from django_strawberry_framework.utils.querysets import (
     unwrap_async_queryset_adapter,
     wrap_async_queryset_adapter,
 )
-from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, pickle_roundtrip
+from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import (
+    ClaimsClassBase,
+    ClassReadRaisesBase,
+    json_at,
+    json_list,
+    pickle_roundtrip,
+)
 from tests._info import make_info
 
 _M = TypeVar("_M", bound=models.Model)
@@ -171,7 +185,7 @@ def _info_failing_on(attribute: str, error: Exception) -> Info[object, object]:
         def __getattribute__(self, name: str) -> object:
             if name == attribute:
                 raise error
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     built = make_info()
     return FailingInfo(_raw_info=built._raw_info, _field=built._field)
@@ -487,10 +501,13 @@ def test_djangolistfield_rejects_a_target_whose_class_cannot_be_trusted(
     assert str(exc_info.value) == f"DjangoListField requires a DjangoType class; got {tail}."
 
 
+_FIELD_FACTORIES = (DjangoConnectionField, DjangoNodeField, DjangoNodesField)
+
+
 @pytest.mark.parametrize(
     "factory",
-    [DjangoConnectionField, DjangoNodeField, DjangoNodesField],
-    ids=lambda factory: factory.__name__,
+    _FIELD_FACTORIES,
+    ids=[factory.__name__ for factory in _FIELD_FACTORIES],
 )
 def test_every_field_factory_shares_the_class_test_of_the_target_guard(
     factory: Callable[[type[object]], object],
@@ -686,12 +703,13 @@ def test_resolve_argument_wire_name_never_runs_the_schema_name_converter(
 
     converter = DummyConverter()
     schema_config = SimpleNamespace(name_converter=converter)
+    context: dict[str, object] = {}
     info = SimpleNamespace(
-        context={},
+        context=context,
         schema=SimpleNamespace(config=schema_config),
         get_argument_definition=_named_argument,
     )
-    arm_resource_budget(info.context, ResourcePolicy(max_list_rows=100))
+    arm_resource_budget(context, ResourcePolicy(max_list_rows=100))
 
     record = _normalize_list_arguments(
         "items",
@@ -891,7 +909,7 @@ async def test_async_iterable_early_cleanup_hostile_aclose_lookup_notes() -> Non
         def __getattribute__(self, name: str) -> object:
             if name == "aclose":
                 raise RuntimeError("hostile aclose on tracker")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     tracker = HostileTracker()
 
@@ -912,9 +930,9 @@ async def test_async_iterable_early_cleanup_hostile_aclose_lookup_notes() -> Non
     res = await schema.execute("{ cats(offset: 5) { id } }", context_value={})
     assert res.errors is not None
     assert "requires an active ordering" in str(res.errors[0])
-    original_error = getattr(res.errors[0], "original_error", None)
+    original_error = read_attr(res.errors[0], "original_error", None)
     if original_error is not None:
-        notes = getattr(original_error, "__notes__", [])
+        notes = list_of(read_attr(original_error, "__notes__", []))
         assert any("hostile aclose on tracker" in str(note) for note in notes)
 
 
@@ -970,14 +988,14 @@ def test_list_field_signature_without_orderset() -> None:
 
     assert sig.parameters["info"].kind == inspect.Parameter.KEYWORD_ONLY
     assert sig.parameters["offset"].kind == inspect.Parameter.KEYWORD_ONLY
-    assert sig.parameters["offset"].default is None
-    assert sig.parameters["offset"].annotation == int | None
+    assert read_attr(sig.parameters["offset"], "default") is None
+    assert read_attr(sig.parameters["offset"], "annotation") == int | None
     assert sig.parameters["limit"].kind == inspect.Parameter.KEYWORD_ONLY
-    assert sig.parameters["limit"].default is None
-    assert sig.parameters["limit"].annotation == int | None
+    assert read_attr(sig.parameters["limit"], "default") is None
+    assert read_attr(sig.parameters["limit"], "annotation") == int | None
     assert "order_by" not in sig.parameters
     assert "orderBy" not in sig.parameters
-    assert sig.return_annotation is inspect.Signature.empty
+    assert read_attr(sig, "return_annotation") is inspect.Signature.empty
     assert "return" not in ann
 
 
@@ -1002,12 +1020,12 @@ def test_list_field_signature_with_orderset() -> None:
 
     assert "order_by" in sig.parameters
     assert sig.parameters["order_by"].kind == inspect.Parameter.KEYWORD_ONLY
-    assert sig.parameters["order_by"].default is None
-    assert sig.parameters["order_by"].annotation == ann["order_by"]
+    assert read_attr(sig.parameters["order_by"], "default") is None
+    assert read_attr(sig.parameters["order_by"], "annotation") == ann["order_by"]
 
     order_input_type(ItemOrder)
     assert ItemOrder in _helper_referenced_ordersets
-    assert sig.return_annotation is inspect.Signature.empty
+    assert read_attr(sig, "return_annotation") is inspect.Signature.empty
     assert "return" not in ann
 
 
@@ -1113,7 +1131,7 @@ def test_list_field_reads_the_target_definition_once_and_dispatches_through_it()
                 reads.append(name)
                 if state["decoy"] is not None:
                     return state["decoy"]
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class PublishedOrder(OrderSet):
         class Meta:
@@ -1188,7 +1206,7 @@ def test_list_field_reads_the_target_definition_once_and_dispatches_through_it()
     assert result.errors is None, result.errors
     assert reads == ["__django_strawberry_definition__"]
     assert result.data is not None
-    returned = {row["name"] for row in result.data["items"]}
+    returned = {json_at(row, "name") for row in json_list(result.data, "items")}
     assert target_item.name in returned
     # Rows of the decoy definition's table never appear: the seed and both seals
     # stayed on the captured model.
@@ -1215,7 +1233,7 @@ def test_a_consumer_resolver_list_field_also_reads_the_definition_only_at_constr
                 reads.append(name)
                 if state["decoy"] is not None:
                     return state["decoy"]
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class ResolverOrder(OrderSet):
         class Meta:
@@ -1274,7 +1292,7 @@ def test_a_consumer_resolver_list_field_also_reads_the_definition_only_at_constr
     assert result.errors is None, result.errors
     assert reads == ["__django_strawberry_definition__"]
     assert result.data is not None
-    returned = {row["name"] for row in result.data["items"]}
+    returned = {json_at(row, "name") for row in json_list(result.data, "items")}
     assert target_item.name in returned
     assert not returned & decoy_names
 
@@ -1302,7 +1320,8 @@ def test_an_abstract_model_type_serves_concrete_rows_and_its_default_seed_names_
     class Query:
         entries: list[TitledEntryType] = DjangoListField(TitledEntryType)
 
-        @strawberry.field(graphql_type=list[TitledEntryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[TitledEntryType])  # pyright: ignore[reportAny]
         def reading_lists(self) -> list[library_models.TitledEntry]:
             return list(library_models.ReadingList.objects.all())
 
@@ -1337,7 +1356,7 @@ def test_the_default_seed_and_both_visibility_seals_use_the_captured_model() -> 
                 reads.append(name)
                 if state["decoy"] is not None:
                     return state["decoy"]
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class SealCountedType(DjangoType, metaclass=CountingMeta):
         class Meta:
@@ -1380,7 +1399,7 @@ def test_the_default_seed_and_both_visibility_seals_use_the_captured_model() -> 
     assert result.errors is None, result.errors
     assert seen_models == [Item]
     assert result.data is not None
-    assert [row["name"] for row in result.data["items"]] == [target_item.name]
+    assert [json_at(row, "name") for row in json_list(result.data, "items")] == [target_item.name]
     assert services.DECOY_CATEGORY_NAME in decoy_names
     assert reads == ["__django_strawberry_definition__"]
 
@@ -1520,12 +1539,13 @@ def test_list_field_direct_call_schema_name_fallback_and_definition_lookup(
     def _order_by_definition(_name: str) -> ArgDef:
         return ArgDef()
 
+    stub_context: dict[str, object] = {}
     info_stub = SimpleNamespace(
         schema=SimpleNamespace(config=SimpleNamespace(name_converter=object())),
         get_argument_definition=_order_by_definition,
-        context={},
+        context=stub_context,
     )
-    arm_resource_budget(info_stub.context, ResourcePolicy(max_list_rows=10))
+    arm_resource_budget(stub_context, ResourcePolicy(max_list_rows=10))
     _normalize_list_arguments(
         "field",
         _as_strawberry_info(info_stub),
@@ -1774,7 +1794,7 @@ async def test_list_field_rejected_async_iterator_cleanup_and_notes() -> None:
     assert exc_fail.value.reason == "queryset_required"
     assert src_fail.anext_calls == 0
     assert src_fail.aclose_calls == 1
-    notes = getattr(exc_fail.value, "__notes__", [])
+    notes = list_of(read_attr(exc_fail.value, "__notes__", []))
     assert any("DjangoListField iterator cleanup failed" in str(n) for n in notes)
 
 
@@ -1933,8 +1953,9 @@ def test_list_field_declined_sync_cleanup_generator_suspended(
         finally:
             finally_ran = True
 
-    info = SimpleNamespace(context={}, schema=None)
-    arm_resource_budget(info.context, ResourcePolicy(max_list_rows=10))
+    context: dict[str, object] = {}
+    info = SimpleNamespace(context=context, schema=None)
+    arm_resource_budget(context, ResourcePolicy(max_list_rows=10))
 
     g = sync_numbers()
     args_record = _ListArguments(
@@ -2288,7 +2309,7 @@ def test_list_field_post_orderset_validator_zero_consumer_dispatch() -> None:
         def __getattribute__(self, name: str) -> object:
             if name in ("_db", "_hints"):
                 raise RuntimeError(f"consumer __getattribute__ called for {name}")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     poison_qs = PoisonGetattributeQS(model=Category)
     sealed = _validate_post_orderset_result(
@@ -2527,7 +2548,7 @@ async def test_list_field_rejected_async_iterator_is_closed_when_building_the_re
         )
     assert src_fail.anext_calls == 0
     assert src_fail.aclose_calls == 1
-    notes = getattr(exc_fail.value, "__notes__", [])
+    notes = list_of(read_attr(exc_fail.value, "__notes__", []))
     assert any("DjangoListField iterator cleanup failed" in str(n) for n in notes)
 
     # A source that is not async-only owes no close on the same exit.
@@ -2546,7 +2567,10 @@ def _swap_definition_attribute(
     replacement: object,
 ) -> Generator[None, None, None]:
     """Put ``replacement`` on ``target_type``'s definition attribute, restoring after."""
-    original = target_type.__dict__["__django_strawberry_definition__"]
+    original = require_instance(
+        class_dict(target_type)["__django_strawberry_definition__"],
+        DjangoTypeDefinition,
+    )
     # basedpyright: the planted stand-in definition is the hostile input under test; DjangoType
     # types the slot as DjangoTypeDefinition
     target_type.__django_strawberry_definition__ = replacement  # pyright: ignore[reportAttributeAccessIssue]
@@ -2826,7 +2850,7 @@ def test_a_list_field_completes_synchronously_outside_an_event_loop(field: str) 
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    assert len(result.data[field]) == Category.objects.count()
+    assert len(json_list(result.data, field)) == Category.objects.count()
 
 
 @pytest.mark.asyncio
@@ -2841,7 +2865,7 @@ async def test_a_list_field_completes_asynchronously_inside_an_event_loop(field:
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    assert len(result.data[field]) == await Category.objects.acount()
+    assert len(json_list(result.data, field)) == await Category.objects.acount()
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,7 @@ from django_strawberry_framework.connection import DjangoConnectionField, _conne
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.schema import DjangoSchema
+from tests._idioms import is_object_dict, is_object_list, saved_pk
 
 # Every test declares fresh ``DjangoType`` classes over the library models.
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
@@ -119,7 +120,20 @@ def _names(
         result = schema.execute_sync(query, context_value=HttpRequest())
     assert result.errors is None, result.errors
     assert result.data is not None
-    return [edge["node"][label] for edge in result.data[field]["edges"]]
+    data: dict[str, object] = result.data
+    connection = data[field]
+    assert is_object_dict(connection)
+    edges = connection["edges"]
+    assert is_object_list(edges)
+    labels: list[str] = []
+    for edge in edges:
+        assert is_object_dict(edge)
+        node = edge["node"]
+        assert is_object_dict(node)
+        value = node[label]
+        assert isinstance(value, str)
+        labels.append(value)
+    return labels
 
 
 def _branch_world() -> None:
@@ -132,7 +146,7 @@ def _branch_world() -> None:
     for owner, alternate in (("a", "p"), ("b", "x")):
         shelf = Shelf.objects.create(branch=rows[owner], code=owner)
         shelf.alt_branches.add(rows[alternate])
-        BranchNote.objects.create(branch_id=rows[owner].pk, body=owner.upper())
+        BranchNote.objects.create(branch_id=saved_pk(rows[owner]), body=owner.upper())
 
 
 def _proxy_root_schema(set_model: type[Branch], *, hooked: bool) -> DjangoSchema:
@@ -265,7 +279,7 @@ def test_a_relation_declared_to_a_proxy_of_the_roots_table_answers_with_the_root
     """
     rows = {city: Branch.objects.create(name=city.upper(), city=city) for city in "ax"}
     for row in rows.values():
-        BranchNote.objects.create(branch_id=row.pk, body=row.name)
+        BranchNote.objects.create(branch_id=saved_pk(row), body=row.name)
     _node("ProxyBranchNode", ProxyBranch, hides=("city", "x"))
 
     class NoteBranchFilter(FilterSet):

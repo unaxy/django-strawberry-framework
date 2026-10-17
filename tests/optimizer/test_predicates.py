@@ -23,6 +23,8 @@ from django_strawberry_framework.optimizer.predicates import (
     correlated_inner_root,
     related_rows_exist,
 )
+from django_strawberry_framework.utils._narrowing import list_of, read_attr
+from tests._idioms import saved_pk
 from tests._relation_fixtures import (
     RpCompositeChild,
     RpCompositeParent,
@@ -181,7 +183,7 @@ def test_evaluated_outer_parity() -> None:
 
     rows_e = list(result_e.order_by("pk").values_list("pk", flat=True))
     rows_f = list(result_f.order_by("pk").values_list("pk", flat=True))
-    assert rows_e == rows_f == [matching.pk]
+    assert rows_e == rows_f == [saved_pk(matching)]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -208,9 +210,12 @@ def test_composite_pk_correlation_executes_on_composite_fixture() -> None:
     assert child.lookup_name == "exact"
     composite_pk = RpCompositeParent._meta.pk
     assert isinstance(composite_pk, CompositePrimaryKey)
-    assert tuple(child.lhs.targets) == tuple(composite_pk.fields)
-    assert child.rhs.name == "pk"
-    assert "OuterRef" in type(child.rhs).__name__
+    assert tuple(list_of(read_attr(read_attr(child, "lhs"), "targets"))) == tuple(
+        composite_pk.fields,
+    )
+    rhs = read_attr(child, "rhs")
+    assert read_attr(rhs, "name") == "pk"
+    assert "OuterRef" in type(rhs).__name__
 
     with relation_fixture_tables(connection):
         matched = RpCompositeParent.objects.create(tenant_id=1, code="MATCH", label="m")

@@ -77,7 +77,8 @@ from django_strawberry_framework.types.resolvers import (
     _make_relation_resolver,
     _visible_related_object,
 )
-from django_strawberry_framework.utils._narrowing import is_iterable
+from django_strawberry_framework.utils._narrowing import is_awaitable, is_iterable, read_attr
+from tests._idioms import saved_pk
 from tests._info import make_info, response_path, unread_info
 
 if TYPE_CHECKING:
@@ -178,7 +179,7 @@ def test_b2_forward_fk_id_elision_returns_stub_without_accessing_relation() -> N
     root = Root()
     result = resolver(root, fake_info)
     assert isinstance(result, Category)
-    assert result.pk == 42
+    assert saved_pk(result) == 42
     assert result._state.adding is False
     assert result._state.db == router.db_for_read(Category)
 
@@ -224,7 +225,7 @@ def test_fk_id_elision_stub_is_scoped_when_the_relation_was_not_planned() -> Non
 
     # Bound outside the class body: ``category`` is class-local there (the
     # property below), so the class body cannot read the enclosing name.
-    elided_pk = category.pk
+    elided_pk = saved_pk(category)
 
     class Root:
         category_id = elided_pk
@@ -259,7 +260,7 @@ def test_fk_id_elision_stub_is_scoped_when_the_relation_was_not_planned() -> Non
     finally:
         _end_execution_frame(frame)
     assert isinstance(scoped, Category)
-    assert scoped.pk == category.pk
+    assert saved_pk(scoped) == saved_pk(category)
 
 
 def test_b2_forward_fk_id_elision_uses_registered_field_meta_attname() -> None:
@@ -285,7 +286,7 @@ def test_b2_forward_fk_id_elision_uses_registered_field_meta_attname() -> None:
     result = resolver(Root(), fake_info)
 
     assert isinstance(result, Category)
-    assert result.pk == 42
+    assert saved_pk(result) == 42
 
 
 def test_b2_forward_fk_id_elision_returns_none_for_null_fk() -> None:
@@ -779,18 +780,18 @@ def test_forward_resolver_nullable_dangling_fk_resolves_to_none() -> None:
     disabled = db_connection.disable_constraint_checking()
     try:
         with db_connection.cursor() as cursor:
-            cursor.execute("DELETE FROM scalars_scalarspecimen WHERE id = %s", [parent.pk])
+            cursor.execute("DELETE FROM scalars_scalarspecimen WHERE id = %s", [saved_pk(parent)])
         # Re-read so the instance carries the dangling column with an EMPTY
         # relation cache: the row created above still holds the parent object
         # in ``_state.fields_cache`` and would answer from it without a query.
-        dangling = ScalarSpecimen.objects.get(pk=child.pk)
-        assert dangling.parent_id == parent.pk
+        dangling = ScalarSpecimen.objects.get(pk=saved_pk(child))
+        assert dangling.parent_id == saved_pk(parent)
         assert resolver(dangling, fake_info) is None
     finally:
         # Clear the dangling column BEFORE re-enabling constraint checks so
         # the fixture teardown's ``PRAGMA foreign_key_check`` sees a
         # consistent database (the test's transaction rolls back anyway).
-        ScalarSpecimen.objects.filter(pk=child.pk).update(parent=None)
+        ScalarSpecimen.objects.filter(pk=saved_pk(child)).update(parent=None)
         if disabled:
             db_connection.enable_constraint_checking()
 
@@ -858,8 +859,8 @@ def test_fk_id_elision_stub_sets_state_db_via_router_db_for_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Decision 3 axis 1 - stub's ``_state.db`` is set via ``router.db_for_read``."""
-    mock_router = Mock()
-    mock_router.db_for_read.return_value = "default"
+    db_for_read = Mock(return_value="default")
+    mock_router = Mock(db_for_read=db_for_read)
     monkeypatch.setattr(resolvers_module, "router", mock_router)
 
     parent_row = Item(category_id=42)
@@ -874,17 +875,17 @@ def test_fk_id_elision_stub_sets_state_db_via_router_db_for_read(
 
     assert stub is not None
     assert isinstance(stub, Category)
-    assert stub.pk == 42
+    assert saved_pk(stub) == 42
     assert stub._state.db == "default"
-    mock_router.db_for_read.assert_called_once()
+    db_for_read.assert_called_once()
 
 
 def test_fk_id_elision_router_call_passes_parent_row_as_instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Decision 3 axis 1 - ``router.db_for_read`` receives ``instance=<parent_row>`` with ``_state``."""
-    mock_router = Mock()
-    mock_router.db_for_read.return_value = "default"
+    db_for_read = Mock(return_value="default")
+    mock_router = Mock(db_for_read=db_for_read)
     monkeypatch.setattr(resolvers_module, "router", mock_router)
 
     parent_row = Item(category_id=42)
@@ -900,15 +901,15 @@ def test_fk_id_elision_router_call_passes_parent_row_as_instance(
 
     # ``instance=`` is load-bearing - a regression switching it to ``instance=None``
     # would silently break consumer routers that consult the parent row's ``_state.db``.
-    mock_router.db_for_read.assert_called_once_with(Category, instance=parent_row)
+    db_for_read.assert_called_once_with(Category, instance=parent_row)
 
 
 def test_fk_id_elision_router_call_passes_none_instance_when_parent_lacks_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Decision 3 axis 1 - router.db_for_read receives ``instance=None`` when parent lacks ``_state``."""
-    mock_router = Mock()
-    mock_router.db_for_read.return_value = "default"
+    db_for_read = Mock(return_value="default")
+    mock_router = Mock(db_for_read=db_for_read)
     monkeypatch.setattr(resolvers_module, "router", mock_router)
 
     # ``SimpleNamespace`` has no ``_state`` attribute, so the
@@ -928,15 +929,15 @@ def test_fk_id_elision_router_call_passes_none_instance_when_parent_lacks_state(
     stub = _build_fk_id_stub(parent_row, field_meta)
 
     assert stub is not None
-    mock_router.db_for_read.assert_called_once_with(Category, instance=None)
+    db_for_read.assert_called_once_with(Category, instance=None)
 
 
 def test_fk_id_elision_returns_none_for_null_fk_and_does_not_call_router(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Decision 3 axis 1 - null FK takes the early-return branch BEFORE the router is consulted."""
-    mock_router = Mock()
-    mock_router.db_for_read.return_value = "default"
+    db_for_read = Mock(return_value="default")
+    mock_router = Mock(db_for_read=db_for_read)
     monkeypatch.setattr(resolvers_module, "router", mock_router)
 
     parent_row = SimpleNamespace(category_id=None)
@@ -955,7 +956,7 @@ def test_fk_id_elision_returns_none_for_null_fk_and_does_not_call_router(
     result = _build_fk_id_stub(parent_row, field_meta)
 
     assert result is None
-    mock_router.db_for_read.assert_not_called()
+    db_for_read.assert_not_called()
 
 
 def test_strictness_check_is_connection_agnostic_under_non_default_alias() -> None:
@@ -966,10 +967,11 @@ def test_strictness_check_is_connection_agnostic_under_non_default_alias() -> No
     # without altering the check's shape; ``fields_cache`` is empty so the
     # second lazy-load gate at ``_will_lazy_load_single`` reports the
     # relation is unloaded.
-    state = SimpleNamespace(db="shard_b", fields_cache={})
+    fields_cache: dict[str, object] = {}
+    state = SimpleNamespace(db="shard_b", fields_cache=fields_cache)
     root = SimpleNamespace(_state=state)
     assert "shelf" not in vars(root)
-    assert "shelf" not in state.fields_cache
+    assert "shelf" not in fields_cache
 
     # Non-empty planned set that does NOT include this resolver's key so
     # the lazy-load gate is reached (an empty planned set is also valid;
@@ -1020,7 +1022,7 @@ def test_fk_id_elision_enabled_under_mutation() -> None:
     )
     result = resolver(Root(), fake_info)
     assert isinstance(result, Category)
-    assert result.pk == 42
+    assert saved_pk(result) == 42
 
 
 @pytest.mark.parametrize("operation_arm", ["query", "mutation"])
@@ -1096,7 +1098,7 @@ def test_fk_id_elision_falls_back_when_consumer_only_defers_fk(
     assert any("Potential N+1 on category" in r.message for r in caplog.records)
     assert root.accessed_relation is True
     assert isinstance(result, SimpleNamespace)
-    assert result.pk == 42
+    assert read_attr(result, "pk") == 42
 
 
 def test_fk_id_stub_returns_unsafe_sentinel_when_attname_deferred() -> None:
@@ -1126,7 +1128,7 @@ def test_fk_id_stub_returns_unsafe_sentinel_when_attname_deferred() -> None:
     # A fully-loaded double (column in ``__dict__``) still builds the stub.
     stub = _build_fk_id_stub(SimpleNamespace(category_id=42), field_meta)
     assert isinstance(stub, Category)
-    assert stub.pk == 42
+    assert saved_pk(stub) == 42
 
 
 @pytest.mark.django_db
@@ -1294,16 +1296,16 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
 
         res = rev_resolver(fake_root, fake_info)
 
-        if inspect.isawaitable(res):
+        if is_awaitable(res):
             res = await res
         assert res == cat
 
         unscoped_info = make_info(path=response_path("other", "profile"), context={})
         res_unscoped = rev_resolver(fake_root, unscoped_info)
-        if inspect.isawaitable(res_unscoped):
+        if is_awaitable(res_unscoped):
             res_unscoped = await res_unscoped
         assert isinstance(res_unscoped, Category)
-        assert res_unscoped.pk == cat.pk
+        assert saved_pk(res_unscoped) == saved_pk(cat)
 
         # Forward resolver (scoped and unscoped, without strictness)
         fwd_field = Item._meta.get_field("category")
@@ -1313,23 +1315,23 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
         fwd_info = make_info(path=response_path("item", "category"), context={})
 
         res_fwd = fwd_resolver(
-            Item(name="Test Item 1", category_id=cat.pk),
+            Item(name="Test Item 1", category_id=saved_pk(cat)),
             fwd_info,
         )
-        if inspect.isawaitable(res_fwd):
+        if is_awaitable(res_fwd):
             res_fwd = await res_fwd
         assert isinstance(res_fwd, Category)
-        assert res_fwd.pk == cat.pk
+        assert saved_pk(res_fwd) == saved_pk(cat)
 
         fwd_unscoped_info = make_info(path=response_path("other", "category"), context={})
         res_fwd_unscoped = fwd_resolver(
-            Item(name="Test Item 2", category_id=cat.pk),
+            Item(name="Test Item 2", category_id=saved_pk(cat)),
             fwd_unscoped_info,
         )
-        if inspect.isawaitable(res_fwd_unscoped):
+        if is_awaitable(res_fwd_unscoped):
             res_fwd_unscoped = await res_fwd_unscoped
         assert isinstance(res_fwd_unscoped, Category)
-        assert res_fwd_unscoped.pk == cat.pk
+        assert saved_pk(res_fwd_unscoped) == saved_pk(cat)
 
         # Forward resolver under an execution armed at ``warn``, which is a
         # whole execution rather than a switch inside one: strictness is part of
@@ -1340,30 +1342,30 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
             publish_scoped_relations({fwd_key})
             # Scoped
             res_strict_scoped = fwd_resolver(
-                Item(name="Test Item 3", category_id=cat.pk),
+                Item(name="Test Item 3", category_id=saved_pk(cat)),
                 fwd_info,
             )
-            if inspect.isawaitable(res_strict_scoped):
+            if is_awaitable(res_strict_scoped):
                 res_strict_scoped = await res_strict_scoped
             assert isinstance(res_strict_scoped, Category)
-            assert res_strict_scoped.pk == cat.pk
+            assert saved_pk(res_strict_scoped) == saved_pk(cat)
 
             # Unscoped
             res_strict_unscoped = fwd_resolver(
-                Item(name="Test Item 4", category_id=cat.pk),
+                Item(name="Test Item 4", category_id=saved_pk(cat)),
                 fwd_unscoped_info,
             )
-            if inspect.isawaitable(res_strict_unscoped):
+            if is_awaitable(res_strict_unscoped):
                 res_strict_unscoped = await res_strict_unscoped
             assert isinstance(res_strict_unscoped, Category)
-            assert res_strict_unscoped.pk == cat.pk
+            assert saved_pk(res_strict_unscoped) == saved_pk(cat)
 
             # Sync / loaded path under strictness
-            loaded_item = Item(name="Test Item Loaded", category_id=cat.pk)
+            loaded_item = Item(name="Test Item Loaded", category_id=saved_pk(cat))
             loaded_item._state.fields_cache["category"] = cat
             res_sync_scoped = fwd_resolver(loaded_item, fwd_info)
             assert isinstance(res_sync_scoped, Category)
-            assert res_sync_scoped.pk == cat.pk
+            assert saved_pk(res_sync_scoped) == saved_pk(cat)
         finally:
             end_execution_frame(strict_frame)
 
@@ -1373,30 +1375,30 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
             resolvers_mod._visible_related_object = lambda rel, _vt, _inf: rel
 
             res_rev_sync = rev_resolver(FakeRevRoot(), unscoped_info)
-            if inspect.isawaitable(res_rev_sync):
+            if is_awaitable(res_rev_sync):
                 res_rev_sync = await res_rev_sync
             assert isinstance(res_rev_sync, Category)
-            assert res_rev_sync.pk == cat.pk
+            assert saved_pk(res_rev_sync) == saved_pk(cat)
 
             res_fwd_sync = fwd_resolver(
-                Item(name="Test Item 5", category_id=cat.pk),
+                Item(name="Test Item 5", category_id=saved_pk(cat)),
                 fwd_unscoped_info,
             )
-            if inspect.isawaitable(res_fwd_sync):
+            if is_awaitable(res_fwd_sync):
                 res_fwd_sync = await res_fwd_sync
             assert isinstance(res_fwd_sync, Category)
-            assert res_fwd_sync.pk == cat.pk
+            assert saved_pk(res_fwd_sync) == saved_pk(cat)
 
             strict_frame = begin_execution_frame({}, nested=False, strictness="warn")
             try:
                 res_strict_sync = fwd_resolver(
-                    Item(name="Test Item 6", category_id=cat.pk),
+                    Item(name="Test Item 6", category_id=saved_pk(cat)),
                     fwd_unscoped_info,
                 )
-                if inspect.isawaitable(res_strict_sync):
+                if is_awaitable(res_strict_sync):
                     res_strict_sync = await res_strict_sync
                 assert isinstance(res_strict_sync, Category)
-                assert res_strict_sync.pk == cat.pk
+                assert saved_pk(res_strict_sync) == saved_pk(cat)
 
                 class FakeItemNull:
                     _state = SimpleNamespace(fields_cache={})
@@ -1406,7 +1408,7 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
                     FakeItemNull(),
                     fwd_unscoped_info,
                 )
-                if inspect.isawaitable(res_strict_null):
+                if is_awaitable(res_strict_null):
                     res_strict_null = await res_strict_null
                 assert res_strict_null is None
 
@@ -1425,7 +1427,7 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
             items=cat.items,
         )
         many_res_unscoped = many_resolver(cat_with_cache, unscoped_info)
-        if inspect.isawaitable(many_res_unscoped):
+        if is_awaitable(many_res_unscoped):
             many_res_unscoped = await many_res_unscoped
         assert isinstance(many_res_unscoped, Sized)
         assert len(many_res_unscoped) == 1
@@ -1481,12 +1483,12 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
         fwd_scoped_info = make_info(path=response_path("item", "category"), context={})
         res_scoped = fwd_resolver(item, fwd_scoped_info)
         assert isinstance(res_scoped, Category)
-        assert res_scoped.pk == cat.pk
+        assert saved_pk(res_scoped) == saved_pk(cat)
 
         fwd_unscoped_info = make_info(path=response_path("other", "category"), context={})
         res_unscoped = fwd_resolver(item, fwd_unscoped_info)
         assert isinstance(res_unscoped, Category)
-        assert res_unscoped.pk == cat.pk
+        assert saved_pk(res_unscoped) == saved_pk(cat)
 
         many_field = Category._meta.get_field("items")
         many_resolver = _make_relation_resolver(many_field, parent_type=CustomCategoryType)
@@ -1539,7 +1541,7 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
             assert rev_resolver(FakeRevRoot(), rev_info) == cat
             related = fwd_resolver(item, fwd_scoped_info)
             assert isinstance(related, Category)
-            assert related.pk == cat.pk
+            assert saved_pk(related) == saved_pk(cat)
         finally:
             end_execution_frame(warn_frame)
     finally:
@@ -1765,7 +1767,8 @@ def _mti_tag_schema(
 
     @strawberry.type(name="Query")
     class AsyncQuery:
-        @strawberry.field(graphql_type=list[MtiShopType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[MtiShopType])  # pyright: ignore[reportAny]
         async def shops(self) -> list[Model]:
             return await sync_to_async(_shops_reached_through_prefetched_places)(
                 place_model,
@@ -1773,7 +1776,8 @@ def _mti_tag_schema(
 
     @strawberry.type(name="Query")
     class SyncQuery:
-        @strawberry.field(graphql_type=list[MtiShopType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[MtiShopType])  # pyright: ignore[reportAny]
         def shops(self) -> list[Model]:
             return _shops_reached_through_prefetched_places(place_model)
 

@@ -50,6 +50,7 @@ from django_strawberry_framework.optimizer.selections import (
     response_keys,
     should_include,
 )
+from django_strawberry_framework.utils._narrowing import is_list, read_attr, require
 from tests._info import make_info
 
 if TYPE_CHECKING:
@@ -267,8 +268,10 @@ def test_node_children_with_runtime_prefix_clones_with_prefix() -> None:
     """Node children are cloned carrying the connection-aware runtime prefix."""
     node = _field("node", selections=[_field("title"), _field("author")])
     children = node_children_with_runtime_prefix(node, runtime_prefixes=(("booksConnection",),))
-    assert {c.name for c in children} == {"title", "author"}
-    assert all(c._optimizer_runtime_prefixes == [("booksConnection",)] for c in children)
+    assert {read_attr(c, "name") for c in children} == {"title", "author"}
+    assert all(
+        read_attr(c, "_optimizer_runtime_prefixes") == [("booksConnection",)] for c in children
+    )
 
 
 def test_connection_node_children_unwraps_edges_node_with_prefixes() -> None:
@@ -300,12 +303,12 @@ def test_connection_node_children_unwraps_edges_node_with_prefixes() -> None:
         connection,
         runtime_prefixes=(("booksConnection",),),
     )
-    by_name = {c.name: c for c in children}
+    by_name = {read_attr(c, "name"): c for c in children}
     assert set(by_name) == {"title", "author", "isbn"}
-    assert by_name["title"]._optimizer_runtime_prefixes == [
+    assert read_attr(by_name["title"], "_optimizer_runtime_prefixes") == [
         ("booksConnection", "edges", "node"),
     ]
-    assert by_name["isbn"]._optimizer_runtime_prefixes == [
+    assert read_attr(by_name["isbn"], "_optimizer_runtime_prefixes") == [
         ("booksConnection", "more", "node"),
     ]
 
@@ -661,7 +664,7 @@ def test_connection_predicates_consume_the_resolved_names() -> None:
         runtime_prefixes=(("conn",),),
         names=snake,
     )
-    assert [child.name for child in node_children] == ["title"]
+    assert [read_attr(child, "name") for child in node_children] == ["title"]
 
 
 def test_ast_to_converted_selections_converts_anonymous_and_named_fragments() -> None:
@@ -754,9 +757,10 @@ def test_prime_selected_fields_lifecycle() -> None:
     info_to_prime = SimpleNamespace(_raw_info=raw_info)
     prime_selected_fields(_as_strawberry_info(info_to_prime))
     assert "selected_fields" in info_to_prime.__dict__
-    assert len(info_to_prime.selected_fields) == 1
-    assert isinstance(info_to_prime.selected_fields[0], SelectedField)
-    assert info_to_prime.selected_fields[0].name == "item"
+    primed = require(read_attr(info_to_prime, "selected_fields"), is_list)
+    assert len(primed) == 1
+    assert isinstance(primed[0], SelectedField)
+    assert primed[0].name == "item"
 
 
 def test_connection_total_count_and_has_next_page_selected_direct() -> None:

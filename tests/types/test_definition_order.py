@@ -39,9 +39,18 @@ from django_strawberry_framework import DjangoType, auto, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.base import _build_annotations
-from tests._idioms import definition_raises, resolver_function
+from django_strawberry_framework.utils._narrowing import (
+    class_dict,
+    dict_of,
+    is_tuple,
+    read_attr,
+    require,
+)
+from tests._idioms import definition_raises, is_object_dict, is_object_list, resolver_function
 
 if TYPE_CHECKING:
+    from strawberry.types.execution import ExecutionResult
+
     from tests.types.fixtures.lazy_relation_target_module import LazyItemType
 
 # Dotted path of the module holding the ``strawberry.lazy`` relation-override
@@ -49,6 +58,30 @@ if TYPE_CHECKING:
 # ``strawberry.lazy("...")`` calls in the tests keep the literal, because a
 # consumer writes a literal there and that literal is what is under test.
 _LAZY_TARGET_MODULE = "tests.types.fixtures.lazy_relation_target_module"
+
+
+def _lazy_reference(type_cls: type, name: str) -> object:
+    """The first ``Annotated`` metadata of ``type_cls``'s own annotation for ``name``."""
+    annotations: dict[str, object] = type_cls.__annotations__
+    args: tuple[object, ...] = get_args(annotations[name])
+    metadata = require(read_attr(args[0], "__metadata__"), is_tuple)
+    return metadata[0]
+
+
+def _introspected_field_types(
+    result: "ExecutionResult",
+    alias: str,
+) -> dict[object, dict[object, object]]:
+    """``{field name: type}`` from the ``__type`` introspection the query aliased ``alias``."""
+    assert result.data is not None
+    data: dict[str, object] = result.data
+    type_payload = require(data[alias], is_object_dict)
+    fields = require(type_payload["fields"], is_object_list)
+    by_name: dict[object, dict[object, object]] = {}
+    for field in fields:
+        entry = require(field, is_object_dict)
+        by_name[entry["name"]] = require(entry["type"], is_object_dict)
+    return by_name
 
 
 class _FakeUnsupportedField(models.Field[object, object]):
@@ -422,7 +455,7 @@ def test_cross_module_lazy_relation_override_types_the_field_as_the_referenced_c
 
     # The consumer's annotation object survives collection: a rewrite would
     # leave ``PendingRelationAnnotation`` or a concrete class here instead.
-    lazy_reference = get_args(CategoryType.__annotations__["items"])[0].__metadata__[0]
+    lazy_reference = _lazy_reference(CategoryType, "items")
     assert isinstance(lazy_reference, StrawberryLazyReference)
     assert lazy_reference.module == _LAZY_TARGET_MODULE
 
@@ -450,7 +483,7 @@ def test_cross_module_lazy_relation_override_types_the_field_as_the_referenced_c
     lazy_item_type = schema.get_type_by_name("LazyItemType")
     assert lazy_item_type is not None
     assert isinstance(lazy_item_type, StrawberryObjectDefinition)
-    assert lazy_item_type.origin is lazy_relation_target_module.LazyItemType
+    assert lazy_item_type.origin is read_attr(lazy_relation_target_module, "LazyItemType")
     assert "items: [LazyItemType!]!" in schema.as_str()
 
 
@@ -492,7 +525,7 @@ def test_cross_module_lazy_relation_override_wins_over_the_registered_primary_ty
     assert definition.consumer_annotated_relation_fields == frozenset({"items"})
     assert definition.consumer_assigned_relation_fields == frozenset()
 
-    lazy_reference = get_args(CategoryType.__annotations__["items"])[0].__metadata__[0]
+    lazy_reference = _lazy_reference(CategoryType, "items")
     assert isinstance(lazy_reference, StrawberryLazyReference)
     assert lazy_reference.module == _LAZY_TARGET_MODULE
 
@@ -517,7 +550,7 @@ def test_cross_module_lazy_relation_override_wins_over_the_registered_primary_ty
     lazy_item_type = schema.get_type_by_name("LazyItemType")
     assert lazy_item_type is not None
     assert isinstance(lazy_item_type, StrawberryObjectDefinition)
-    assert lazy_item_type.origin is lazy_relation_target_module.LazyItemType
+    assert lazy_item_type.origin is read_attr(lazy_relation_target_module, "LazyItemType")
     assert "items: [LazyItemType!]!" in schema.as_str()
     assert "PrimaryItemType" not in schema.as_str()
 
@@ -627,7 +660,8 @@ def test_explicit_graphql_field_name_collision_raises() -> None:
             managed = False
 
     class ExplicitNameCollisionType(DjangoType):
-        @strawberry.field(name="fooBar")
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(name="fooBar")  # pyright: ignore[reportAny]
         def custom(self) -> int:
             return 1
 
@@ -1045,11 +1079,13 @@ def test_annotation_override_does_not_populate_shared_enum_cache_for_co_resident
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=OverrideType)
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=OverrideType)  # pyright: ignore[reportAny]
         def override(self) -> CoResidentChoiceOwner:
             return CoResidentChoiceOwner(status="a")
 
-        @strawberry.field(graphql_type=NonOverrideType)
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=NonOverrideType)  # pyright: ignore[reportAny]
         def non_override(self) -> CoResidentChoiceOwner:
             return CoResidentChoiceOwner(status="a")
 
@@ -1063,16 +1099,13 @@ def test_annotation_override_does_not_populate_shared_enum_cache_for_co_resident
     result = schema.execute_sync(query)
     assert result.errors is None, result.errors
 
-    assert result.data is not None
-    override_fields = {f["name"]: f["type"] for f in result.data["__type"]["fields"]}
-    override_status = override_fields["status"]
+    override_status = _introspected_field_types(result, "__type")["status"]
     assert override_status["kind"] == "NON_NULL"
-    assert override_status["ofType"]["name"] == "String"
+    assert require(override_status["ofType"], is_object_dict)["name"] == "String"
 
-    non_override_fields = {f["name"]: f["type"] for f in result.data["__overrideTwo"]["fields"]}
-    non_override_status = non_override_fields["status"]
+    non_override_status = _introspected_field_types(result, "__overrideTwo")["status"]
     assert non_override_status["kind"] == "NON_NULL"
-    assert non_override_status["ofType"]["name"] == cached.__name__
+    assert require(non_override_status["ofType"], is_object_dict)["name"] == cached.__name__
 
 
 # ---------------------------------------------------------------------------
@@ -1207,7 +1240,8 @@ def test_consumer_id_relay_nodeid_annotation_on_relay_node_type_is_accepted() ->
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=CategoryNode)
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=CategoryNode)  # pyright: ignore[reportAny]
         def category(self) -> Category:
             return Category(id=1, name="x")
 
@@ -1231,7 +1265,8 @@ def test_consumer_id_resolved_string_relay_nodeid_annotation_on_relay_node_type_
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=CategoryNode)
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=CategoryNode)  # pyright: ignore[reportAny]
         def category(self) -> Category:
             return Category(id=1, name="x")
 
@@ -1239,11 +1274,9 @@ def test_consumer_id_resolved_string_relay_nodeid_annotation_on_relay_node_type_
     query = '{ __type(name: "CategoryNode") { fields { name type { kind name ofType { kind name } } } } }'
     result = schema.execute_sync(query)
     assert result.errors is None, result.errors
-    assert result.data is not None
-    fields = {f["name"]: f["type"] for f in result.data["__type"]["fields"]}
-    id_type = fields["id"]
+    id_type = _introspected_field_types(result, "__type")["id"]
     assert id_type["kind"] == "NON_NULL"
-    assert id_type["ofType"]["name"] == "ID"
+    assert require(id_type["ofType"], is_object_dict)["name"] == "ID"
 
 
 def test_consumer_id_unresolved_nodeid_shaped_string_on_relay_node_type_passes_guard_only() -> (
@@ -1322,15 +1355,14 @@ def test_inherited_id_annotation_on_relay_node_subclass_is_handled_by_pk_suppres
     # because Python does not promote inherited annotations into the
     # subclass's dict.
     # Raw ``__dict__`` on purpose: the subclass's OWN dict is the subject here.
-    assert "id" not in dict(
-        ChildRelayType.__dict__.get("__annotations__", {}),  # noqa: RUF063
-    )
+    assert "id" not in dict_of(class_dict(ChildRelayType).get("__annotations__", {}))
 
     finalize_django_types()
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=ChildRelayType)
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=ChildRelayType)  # pyright: ignore[reportAny]
         def category(self) -> Category:
             return Category(id=1, name="x")
 
@@ -1338,11 +1370,9 @@ def test_inherited_id_annotation_on_relay_node_subclass_is_handled_by_pk_suppres
     query = '{ __type(name: "ChildRelayType") { fields { name type { kind name ofType { kind name } } } } }'
     result = schema.execute_sync(query)
     assert result.errors is None, result.errors
-    assert result.data is not None
-    fields = {f["name"]: f["type"] for f in result.data["__type"]["fields"]}
-    id_type = fields["id"]
+    id_type = _introspected_field_types(result, "__type")["id"]
     assert id_type["kind"] == "NON_NULL"
-    assert id_type["ofType"]["name"] == "ID"
+    assert require(id_type["ofType"], is_object_dict)["name"] == "ID"
 
 
 def test_scalar_field_class_attribute_shadowing_raises() -> None:

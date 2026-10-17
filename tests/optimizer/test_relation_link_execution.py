@@ -24,7 +24,6 @@ import strawberry
 from django.db import connection
 from django.db.models import QuerySet
 from django.test.utils import CaptureQueriesContext
-from graphql_client import JSONObject
 from strategy_schemas import make_django_type
 from strawberry import relay
 
@@ -40,7 +39,8 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.utils._narrowing import is_dict, is_list
+from django_strawberry_framework.utils._narrowing import is_dict, is_list, is_str, require
+from tests._idioms import is_object_dict, is_object_list
 
 from ._link_models import (
     LnkColumnChild,
@@ -127,7 +127,7 @@ def _schema(*, optimizer: bool, parent_hook: bool) -> strawberry.Schema:
     return strawberry.Schema(query=query_cls, config=strawberry_config(), extensions=extensions)
 
 
-def _run(query: str, *, parent_hook: bool = False) -> tuple[JSONObject, int]:
+def _run(query: str, *, parent_hook: bool = False) -> tuple["_WireData", int]:
     """Execute ``query`` optimized; return its data and query count after the oracle agrees."""
     expected = _schema(optimizer=False, parent_hook=parent_hook).execute_sync(query)
     assert expected.errors is None, expected.errors
@@ -137,18 +137,32 @@ def _run(query: str, *, parent_hook: bool = False) -> tuple[JSONObject, int]:
     assert result.errors is None, result.errors
     assert result.data is not None
     assert result.data == expected.data
-    return result.data, len(ctx.captured_queries)
+    return require(result.data, is_object_dict), len(ctx.captured_queries)
 
 
-_WireData = JSONObject
+#: One decoded GraphQL wire object; each member is narrowed where a test reads it.
+_WireData = dict[object, object]
 
 
-def _names(rows: list[_WireData], key: str) -> list[list[str]]:
-    return [[child["name"] for child in row[key]] for row in rows]
+def _at(value: object, *keys: str) -> object:
+    """The member of wire value ``value`` at the object-key path ``keys``."""
+    for key in keys:
+        assert is_object_dict(value), value
+        value = value[key]
+    return value
 
 
-def _edge_names(rows: list[_WireData], key: str) -> list[list[str]]:
-    return [[edge["node"]["name"] for edge in row[key]["edges"]] for row in rows]
+def _list_at(value: object, *keys: str) -> list[object]:
+    """The wire list member of ``value`` at the object-key path ``keys``."""
+    return require(_at(value, *keys), is_object_list)
+
+
+def _names(rows: list[object], key: str) -> list[list[object]]:
+    return [[_at(child, "name") for child in _list_at(row, key)] for row in rows]
+
+
+def _edge_names(rows: list[object], key: str) -> list[list[object]]:
+    return [[_at(edge, "node", "name") for edge in _list_at(row, key, "edges")] for row in rows]
 
 
 _EXPECTED_ROWS = [["a1", "a2", "a3"], ["b1"], []]
@@ -165,21 +179,21 @@ def test_two_column_link_list_prefetch_loads_every_carrier() -> None:
     link targets the selection never names), so no row refetches either.
     """
     data, queries = _run("{ parents { label pairChildren { name } } }")
-    assert _names(data["parents"], "pairChildren") == _EXPECTED_ROWS
+    assert _names(_list_at(data, "parents"), "pairChildren") == _EXPECTED_ROWS
     assert queries == 2
 
 
-_LINK_CONNECTION_ROOT_ROWS: list[tuple[str, Callable[[_WireData], list[_WireData]]]] = [
+_LINK_CONNECTION_ROOT_ROWS: list[tuple[str, Callable[[_WireData], list[object]]]] = [
     (
         "{ parents { label pairChildrenConnection(first: 2) { edges { node { name } } } } }",
-        lambda data: data["parents"],
+        lambda data: _list_at(data, "parents"),
     ),
     (
         (
             "{ parentsConnection(first: 10) { edges { node { label "
             "pairChildrenConnection(first: 2) { edges { node { name } } } } } } }"
         ),
-        lambda data: [edge["node"] for edge in data["parentsConnection"]["edges"]],
+        lambda data: [_at(edge, "node") for edge in _list_at(data, "parentsConnection", "edges")],
     ),
 ]
 
@@ -193,7 +207,7 @@ _LINK_CONNECTION_ROOT_ROWS: list[tuple[str, Callable[[_WireData], list[_WireData
 @pytest.mark.usefixtures("link_tables")
 def test_two_column_link_connection_resolves_per_parent(
     query: str,
-    rows_of: Callable[[_WireData], list[_WireData]],
+    rows_of: Callable[[_WireData], list[object]],
 ) -> None:
     """A nested connection over the two-column link has no partition and resolves per parent.
 
@@ -224,7 +238,7 @@ def test_one_column_link_list_prefetch_is_batched(relation: str, query: str) -> 
     neither side refetches per row.
     """
     data, queries = _run(query)
-    assert _names(data["parents"], relation) == _EXPECTED_ROWS
+    assert _names(_list_at(data, "parents"), relation) == _EXPECTED_ROWS
     assert queries == 2
 
 
@@ -251,7 +265,7 @@ def test_one_column_link_connection_is_one_window(relation: str, query: str) -> 
     the link columns, so no page row and no parent refetches a deferred column.
     """
     data, queries = _run(query)
-    assert _edge_names(data["parents"], relation) == _EXPECTED_PAGE
+    assert _edge_names(_list_at(data, "parents"), relation) == _EXPECTED_PAGE
     assert queries == 2
 
 
@@ -270,7 +284,7 @@ def test_forward_link_prefetch_loads_the_child_carrier(root: str) -> None:
     ``.only()`` carries it, so no child row refetches it.
     """
     data, queries = _run(f"{{ {root} {{ name parent {{ label }} }} }}", parent_hook=True)
-    assert [row["parent"]["label"] for row in data[root]] == [
+    assert [_at(row, "parent", "label") for row in _list_at(data, root)] == [
         "pa",
         "pa",
         "pa",
@@ -297,14 +311,16 @@ def test_conflicting_alias_connection_loads_the_parent_link_columns() -> None:
         "b: parent { label slugChildrenConnection(first: 2) { edges { node { name } } } } } }"
     )
     data, queries = _run(query)
-    first_child = data["slugChildren"][0]
+    first_child = _list_at(data, "slugChildren")[0]
     assert [
-        edge["node"]["name"] for edge in first_child["a"]["slugChildrenConnection"]["edges"]
+        _at(edge, "node", "name")
+        for edge in _list_at(first_child, "a", "slugChildrenConnection", "edges")
     ] == [
         "a1",
     ]
     assert [
-        edge["node"]["name"] for edge in first_child["b"]["slugChildrenConnection"]["edges"]
+        _at(edge, "node", "name")
+        for edge in _list_at(first_child, "b", "slugChildrenConnection", "edges")
     ] == ["a1", "a2"]
     assert queries == 1 + 4 * 2
 
@@ -332,10 +348,10 @@ def _related_nodes(related: object) -> list[object]:
 
 def _m2m_rows(data: _WireData) -> list[list[str]]:
     """Each root row's related leaves, from a list field or a connection's edges."""
-    root = data.get("parents", data.get("tags"))
-    assert root is not None
+    root = require(data.get("parents", data.get("tags")), is_object_list)
     rows: list[list[str]] = []
     for row in root:
+        assert is_object_dict(row)
         related = next(value for key, value in row.items() if key not in {"label", "name"})
         rows.append([_leaf(node) for node in _related_nodes(related)])
     return rows
@@ -437,7 +453,9 @@ def test_consumer_authored_two_column_forward_link_prefetch_loads_every_target(
     assert result.errors is None, result.errors
     assert result.data == expected.data
     assert result.data is not None
-    assert [(row["name"], row["parent"]["label"]) for row in result.data["pairs"]] == [
+    assert [
+        (_at(row, "name"), _at(row, "parent", "label")) for row in _list_at(result.data, "pairs")
+    ] == [
         ("a1", "pa"),
         ("a2", "pa"),
         ("a3", "pa"),
@@ -504,7 +522,7 @@ def _run_generated(
     *,
     parent_hook: bool = False,
     child_model: type = LnkPairChild,
-) -> tuple[JSONObject, list[str]]:
+) -> tuple[_WireData, list[str]]:
     """Execute ``query`` optimized over the generated link; return its data and SQL.
 
     The optimizer-off wire is the oracle: the optimized data must equal it.
@@ -525,14 +543,16 @@ def _run_generated(
     assert result.errors is None, result.errors
     assert result.data is not None
     assert result.data == expected.data
-    return result.data, [captured["sql"] for captured in ctx.captured_queries]
+    return require(result.data, is_object_dict), [
+        captured["sql"] for captured in ctx.captured_queries
+    ]
 
 
-def _pair_rows(data: _WireData) -> list[_WireData]:
+def _pair_rows(data: _WireData) -> list[object]:
     """The child rows of a ``pairs`` list or a ``pairsConnection`` page."""
     if "pairs" in data:
-        return data["pairs"]
-    return [edge["node"] for edge in data["pairsConnection"]["edges"]]
+        return _list_at(data, "pairs")
+    return [_at(edge, "node") for edge in _list_at(data, "pairsConnection", "edges")]
 
 
 _PAIR_PARENTS = [
@@ -572,7 +592,9 @@ def test_generated_two_column_forward_link_resolves_every_parent(
     ``Prefetch`` matched on ``(tenant, code)``, one query more.
     """
     data, sql = _run_generated(query, parent_hook=parent_hook)
-    assert [(row["name"], row["parent"]["label"]) for row in _pair_rows(data)] == _PAIR_PARENTS
+    assert [
+        (_at(row, "name"), _at(row, "parent", "label")) for row in _pair_rows(data)
+    ] == _PAIR_PARENTS
     assert len(sql) == queries
 
 
@@ -588,7 +610,8 @@ def test_generated_two_column_forward_link_id_selection_joins_the_parent() -> No
     data, sql = _run_generated("{ pairs { name parent { id } } }")
     parent_ids = dict(LnkParent.objects.values_list("label", "id"))
     assert [
-        (row["name"], int(relay.from_base64(row["parent"]["id"])[1])) for row in data["pairs"]
+        (_at(row, "name"), int(relay.from_base64(require(_at(row, "parent", "id"), is_str))[1]))
+        for row in _list_at(data, "pairs")
     ] == [(name, parent_ids[label]) for name, label in _PAIR_PARENTS]
     assert len(sql) == 1
     assert 'JOIN "products_lnkparent"' in sql[0]
@@ -616,9 +639,11 @@ def test_generated_two_column_forward_link_round_trips_through_the_reverse_side(
     """
     data, sql = _run_generated(f"{{ pairs {{ name parent {{ label {relation} }} }} }}")
     siblings = {"pa": ["a1", "a2", "a3"], "pb": ["b1"]}
-    for row in data["pairs"]:
-        related = next(value for key, value in row["parent"].items() if key != "label")
-        expected = siblings[row["parent"]["label"]]
+    for row in _list_at(data, "pairs"):
+        parent = _at(row, "parent")
+        assert is_object_dict(parent)
+        related = next(value for key, value in parent.items() if key != "label")
+        expected = siblings[require(parent["label"], is_str)]
         if not is_list(related):
             expected = expected[:2]
         assert [_leaf(node) for node in _related_nodes(related)] == expected
@@ -648,7 +673,10 @@ def test_generated_nullable_two_column_forward_link_resolves_absent_parents_to_n
         parent_hook=parent_hook,
         child_model=LnkOptionalPairChild,
     )
-    assert [(row["name"], row["parent"] and row["parent"]["label"]) for row in data["pairs"]] == [
+    assert [
+        (_at(row, "name"), _at(row, "parent") and _at(row, "parent", "label"))
+        for row in _list_at(data, "pairs")
+    ] == [
         ("o1", "pa"),
         ("o2", None),
         ("o3", None),

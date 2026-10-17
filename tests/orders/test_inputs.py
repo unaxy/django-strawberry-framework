@@ -30,7 +30,6 @@ from apps.library.models import Book, Shelf
 from django.db.models import F
 from django.db.models.expressions import OrderBy
 from django.utils.functional import SimpleLazyObject
-from strawberry import UNSET
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -60,9 +59,11 @@ from django_strawberry_framework.orders.inputs import (
     normalize_input_value,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils.input_values import UNSET
 from tests._definition import make_definition
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import ClaimsClass, ClassReadRaises
+from tests._idioms import ClaimsClass, ClassReadRaises, type_args
 from tests._soft_dependency import blocked_modules
 
 # The module declares function-scope ``OrderSet`` subclasses whose class-derived
@@ -189,7 +190,7 @@ def test_materialize_input_class_writes_to_module_global() -> None:
 
     materialize_input_class("FooInputType", Foo)
     module = sys.modules[INPUTS_MODULE_PATH]
-    assert module.FooInputType is Foo
+    assert read_attr(module, "FooInputType") is Foo
     assert _materialized_names["FooInputType"] is Foo
 
 
@@ -502,11 +503,11 @@ def test_clear_order_input_namespace_leaves_module_globals_parked() -> None:
 
     materialize_input_class("FooParkedOrderInputType", FooParked)
     module = sys.modules[INPUTS_MODULE_PATH]
-    assert module.FooParkedOrderInputType is FooParked
+    assert read_attr(module, "FooParkedOrderInputType") is FooParked
     clear_order_input_namespace()
     # Class object stays parked -- parking is load-bearing for the lazy
     # Strawberry annotation that still resolves this name.
-    assert module.FooParkedOrderInputType is FooParked
+    assert read_attr(module, "FooParkedOrderInputType") is FooParked
 
 
 @pytest.mark.usefixtures("_namespace_cleanup")
@@ -559,7 +560,7 @@ def test_order_input_type_returns_element_annotation_for_orderset_subclass() -> 
         pass
 
     result = order_input_type(HelperOrderA)
-    args = get_args(result)
+    args = type_args(result)
     # First positional arg of Annotated is the (string-wrapped) forward
     # reference; Python stores it as a ForwardRef when the position is a
     # string literal.
@@ -620,11 +621,11 @@ def test_order_input_subscript_returns_the_order_input_type_element_annotation()
     subscripted = OrderInput[HelperOrderD]
     called = order_input_type(HelperOrderD)
     assert get_origin(subscripted) is Annotated
-    forward = get_args(subscripted)[0]
+    forward = type_args(subscripted)[0]
     assert isinstance(forward, ForwardRef)
     assert forward.__forward_arg__ == "HelperOrderDInputType"
     assert forward == get_args(called)[0]
-    assert [getattr(marker, "module", None) for marker in get_args(subscripted)[1:]] == [
+    assert [read_attr(marker, "module", None) for marker in type_args(subscripted)[1:]] == [
         INPUTS_MODULE_PATH,
     ]
 
@@ -737,7 +738,7 @@ def test_order_input_type_accepts_a_lazy_proxy_of_an_orderset() -> None:
     # basedpyright: a lazy proxy is not a ``type[OrderSet]`` to the checker; the proxied class
     # answering the guard at run time is the behavior under test
     annotation = order_input_type(SimpleLazyObject(lambda: HelperOrderLazy))  # pyright: ignore[reportArgumentType]
-    inner = get_args(annotation)[0]
+    inner = type_args(annotation)[0]
     assert isinstance(inner, ForwardRef)
     assert inner.__forward_arg__ == "HelperOrderLazyInputType"
     _helper_referenced_ordersets.intersection_update(initial)

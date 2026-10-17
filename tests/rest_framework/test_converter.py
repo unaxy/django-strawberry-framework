@@ -54,7 +54,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Iterator
 from enum import Enum
-from typing import TYPE_CHECKING, Any, NoReturn, get_args, get_origin
+from typing import TYPE_CHECKING, NoReturn, get_args, get_origin
 
 import pytest
 import strawberry
@@ -92,6 +92,8 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.converters import convert_choices_to_enum
+from django_strawberry_framework.utils._narrowing import dict_of, enum_value, read_attr
+from django_strawberry_framework.utils.typing import call_forwarded
 from tests._idioms import ModelSerializerBase, bind_unparented
 
 if TYPE_CHECKING:
@@ -116,6 +118,18 @@ if TYPE_CHECKING:
     # because the checker runs without the django-stubs mypy plugin that would infer them.
     _Char: TypeAlias = models.CharField[str | int | Combinable, str]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
+
+
+def _type_args(annotation: object) -> tuple[object, ...]:
+    """``typing.get_args(annotation)``, its members typed ``object`` (typeshed declares ``Any``)."""
+    return get_args(annotation)
+
+
+def _enum_members(enum_cls: object) -> dict[str, object]:
+    """``{name: value}`` for every member of ``enum_cls``, which must be an ``Enum`` class."""
+    assert isinstance(enum_cls, type)
+    assert issubclass(enum_cls, Enum)
+    return {member.name: enum_value(member) for member in enum_cls}
 
 
 @pytest.fixture
@@ -829,7 +843,7 @@ def test_many_pk_related_field_over_reverse_fk_column_emits_multi() -> None:
     assert spec.graphql_name == "shelves"
     assert spec.related_model is library_models.Shelf
     assert get_origin(annotation) is list
-    assert relay.GlobalID in get_args(annotation)
+    assert relay.GlobalID in _type_args(annotation)
 
 
 def test_many_pk_related_field_over_generic_relation_column_emits_multi() -> None:
@@ -1301,7 +1315,7 @@ def test_serializer_only_choicefield_becomes_enum() -> None:
     assert spec.kind == SCALAR
     assert isinstance(annotation, type)
     assert issubclass(annotation, Enum)
-    assert {member.value for member in annotation} == {"r", "g"}
+    assert set(_enum_members(annotation).values()) == {"r", "g"}
 
 
 def test_serializer_only_multiple_choicefield_becomes_list_enum() -> None:
@@ -1313,9 +1327,10 @@ def test_serializer_only_multiple_choicefield_becomes_list_enum() -> None:
     field = bound_fields(MultiSer())["tags"]
     _attr, annotation, _spec = resolve_serializer_field(field, None, "X")
     assert get_origin(annotation) is list
-    (inner,) = get_args(annotation)
+    (inner,) = _type_args(annotation)
+    assert isinstance(inner, type)
     assert issubclass(inner, Enum)
-    assert {member.value for member in inner} == {"a", "b"}
+    assert set(_enum_members(inner).values()) == {"a", "b"}
 
 
 def test_serializer_only_multiple_choicefield_allow_blank_enum_has_blank_member() -> None:
@@ -1326,8 +1341,8 @@ def test_serializer_only_multiple_choicefield_allow_blank_enum_has_blank_member(
 
     field = bound_fields(MultiSer())["tags"]
     _attr, annotation, _spec = resolve_serializer_field(field, None, "X")
-    (inner,) = get_args(annotation)
-    assert {member.name: member.value for member in inner} == {"BLANK": "", "a": "a"}
+    (inner,) = _type_args(annotation)
+    assert _enum_members(inner) == {"BLANK": "", "a": "a"}
 
 
 def test_listfield_choice_child_allow_null_makes_the_enum_element_nullable() -> None:
@@ -1340,11 +1355,12 @@ def test_listfield_choice_child_allow_null_makes_the_enum_element_nullable() -> 
 
     field = bound_fields(ListSer())["tags"]
     _attr, annotation, _spec = resolve_serializer_field(field, None, "X")
-    (element,) = get_args(annotation)
-    inner, none_type = get_args(element)
+    (element,) = _type_args(annotation)
+    inner, none_type = _type_args(element)
     assert none_type is type(None)
+    assert isinstance(inner, type)
     assert issubclass(inner, Enum)
-    assert {member.value for member in inner} == {"a"}
+    assert set(_enum_members(inner).values()) == {"a"}
 
 
 def test_listfield_multiple_choice_child_stays_list_of_list_str() -> None:
@@ -1385,7 +1401,7 @@ def test_declared_choicefield_allow_blank_over_model_column_enum_has_blank_membe
     _attr, annotation, _spec = resolve_serializer_field(field, library_models.Shelf, "X")
     assert isinstance(annotation, type)
     assert issubclass(annotation, Enum)
-    assert {member.name: member.value for member in annotation} == {"BLANK": "", "x": "x"}
+    assert _enum_members(annotation) == {"BLANK": "", "x": "x"}
 
 
 def _value_refusal(
@@ -1634,8 +1650,8 @@ def test_declared_choice_allow_blank_over_blank_choice_column_accepted() -> None
         _concrete_field(library_models.Shelf, "condition"),
         "ShelfReadType",
     )
-    assert {member.name: member.value for member in annotation}["BLANK"] == ""
-    assert {member.name: member.value for member in read_enum}["BLANK"] == ""
+    assert _enum_members(annotation)["BLANK"] == ""
+    assert _enum_members(read_enum)["BLANK"] == ""
 
 
 def test_declared_choice_allow_blank_over_strict_non_choice_column_accepted() -> None:
@@ -1656,7 +1672,7 @@ def test_declared_choice_allow_blank_over_strict_non_choice_column_accepted() ->
     _attr, annotation, _spec = resolve_serializer_field(field, library_models.Book, "X")
     assert isinstance(annotation, type)
     assert issubclass(annotation, Enum)
-    assert {member.name: member.value for member in annotation} == {"BLANK": "", "dune": "dune"}
+    assert _enum_members(annotation) == {"BLANK": "", "dune": "dune"}
 
 
 def test_serializer_only_choice_allow_blank_on_model_serializer_accepted() -> None:
@@ -1673,7 +1689,7 @@ def test_serializer_only_choice_allow_blank_on_model_serializer_accepted() -> No
     _attr, annotation, _spec = resolve_serializer_field(field, library_models.Book, "X")
     assert isinstance(annotation, type)
     assert issubclass(annotation, Enum)
-    assert {member.name: member.value for member in annotation} == {"BLANK": "", "calm": "calm"}
+    assert _enum_members(annotation) == {"BLANK": "", "calm": "calm"}
 
 
 class _Condition(models.TextChoices):
@@ -1697,7 +1713,7 @@ def test_auto_model_serializer_over_empty_label_column_builds_the_read_enum() ->
 
     field = bound_fields(AutoConditionSer())["condition"]
     assert isinstance(field, serializers.ChoiceField)
-    assert None in field.choices
+    assert None in dict_of(read_attr(field, "choices"))
     _attr, annotation, _spec = resolve_serializer_field(field, library_models.Shelf, "X")
     read_enum = convert_choices_to_enum(
         _concrete_field(library_models.Shelf, "condition"),
@@ -1730,7 +1746,7 @@ def test_serializer_only_choice_over_empty_label_choices_gets_no_none_member(
     _attr, annotation, _spec = resolve_serializer_field(field, None, "EmptyLabelX")
     assert isinstance(annotation, type)
     assert issubclass(annotation, Enum)
-    assert {member.name: member.value for member in annotation} == {"good": "good", "worn": "worn"}
+    assert _enum_members(annotation) == {"good": "good", "worn": "worn"}
     if allow_null:
         assert field.run_validation(None) is None
     else:
@@ -1753,8 +1769,8 @@ def test_serializer_only_multiple_choice_over_empty_label_choices_keeps_a_non_nu
     field = bound_fields(TagsSer())["tags"]
     _attr, annotation, _spec = resolve_serializer_field(field, None, "EmptyLabelTagsX")
     assert get_origin(annotation) is list
-    (inner,) = get_args(annotation)
-    assert {member.name: member.value for member in inner} == {"good": "good", "worn": "worn"}
+    (inner,) = _type_args(annotation)
+    assert _enum_members(inner) == {"good": "good", "worn": "worn"}
 
 
 def _multiple_choice_refusal(
@@ -1900,16 +1916,15 @@ def test_multiple_choice_over_column_without_choices_accepted(
     field = bound_fields(serializer_cls())[column_name]
     _attr, annotation, _spec = resolve_serializer_field(field, model, "X")
     assert get_origin(annotation) is list
-    (inner,) = get_args(annotation)
-    assert {member.value for member in inner} == {"a", "b"}
+    (inner,) = _type_args(annotation)
+    assert set(_enum_members(inner).values()) == {"a", "b"}
 
 
 class _FakeArrayField(models.Field[object, object]):
     """An ``ArrayField`` stand-in: ``django.contrib.postgres`` needs a Postgres driver."""
 
-    # basedpyright: verbatim forward to Field.__init__; object fails its typed params
-    def __init__(self, base_field: ConcreteField, **kwargs: Any) -> None:  # pyright: ignore[reportExplicitAny]
-        super().__init__(**kwargs)
+    def __init__(self, base_field: ConcreteField) -> None:
+        super().__init__()
         self.base_field = base_field
 
 
@@ -1928,18 +1943,16 @@ def _array_choice_column(
     return column
 
 
-# basedpyright: verbatim forward to MultipleChoiceField.__init__; object fails its typed params
-def _multi_tags_field(**kwargs: Any) -> DRFField:  # pyright: ignore[reportExplicitAny]
+def _multi_tags_field(**kwargs: object) -> DRFField:
     class TagsSer(serializers.Serializer[object]):
-        tags = serializers.MultipleChoiceField(**kwargs)
+        tags = call_forwarded(serializers.MultipleChoiceField, (), kwargs)
 
     return bound_fields(TagsSer())["tags"]
 
 
-# basedpyright: verbatim forward to ChoiceField.__init__; object fails its typed params
-def _list_choice_tags_field(**kwargs: Any) -> DRFField:  # pyright: ignore[reportExplicitAny]
+def _list_choice_tags_field(**kwargs: object) -> DRFField:
     class TagsSer(serializers.Serializer[object]):
-        tags = serializers.ListField(child=serializers.ChoiceField(**kwargs))
+        tags = serializers.ListField(child=call_forwarded(serializers.ChoiceField, (), kwargs))
 
     return bound_fields(TagsSer())["tags"]
 
@@ -1958,8 +1971,8 @@ def test_multiple_choice_over_array_choice_column_accepted(
     field = make_field(choices=[("a", "A"), ("b", "B")])
     annotation = serializer_converter._model_backed_scalar_annotation(field, column, "X")
     assert get_origin(annotation) is list
-    (inner,) = get_args(annotation)
-    assert {member.value for member in inner} == {"a", "b"}
+    (inner,) = _type_args(annotation)
+    assert set(_enum_members(inner).values()) == {"a", "b"}
 
 
 def test_listfield_choice_child_element_missing_from_array_base_enum_refused(
@@ -2018,8 +2031,8 @@ def test_multiple_choice_blank_element_over_blank_array_base_accepted(
     column = _array_choice_column(monkeypatch, blank=True)
     field = _multi_tags_field(choices=[("a", "A")], allow_blank=True)
     annotation = serializer_converter._model_backed_scalar_annotation(field, column, "X")
-    (inner,) = get_args(annotation)
-    assert {member.name: member.value for member in inner} == {"BLANK": "", "a": "a"}
+    (inner,) = _type_args(annotation)
+    assert _enum_members(inner) == {"BLANK": "", "a": "a"}
 
 
 def test_multiple_choice_over_empty_label_array_base_accepted(
@@ -2038,8 +2051,8 @@ def test_multiple_choice_over_empty_label_array_base_accepted(
         model_field.model = product_models.Category
     field = _multi_tags_field(choices=_Condition.choices)
     annotation = serializer_converter._model_backed_scalar_annotation(field, column, "X")
-    (inner,) = get_args(annotation)
-    assert {member.name: member.value for member in inner} == {"good": "good", "worn": "worn"}
+    (inner,) = _type_args(annotation)
+    assert _enum_members(inner) == {"good": "good", "worn": "worn"}
 
 
 _GROUPED_CHOICES = [("Fiction", [("a", "A"), ("b", "B")]), ("Other", [("c", "C")])]
@@ -2093,7 +2106,7 @@ def test_declared_flat_choice_over_grouped_column_accepted(
     _attr, annotation, _spec = resolve_serializer_field(field, model, "X")
     assert isinstance(annotation, type)
     assert issubclass(annotation, Enum)
-    assert [member.value for member in annotation] == [value for value, _label in declared]
+    assert list(_enum_members(annotation).values()) == [value for value, _label in declared]
     assert registry.get_enum(model, "status") is None
 
 
@@ -2223,8 +2236,8 @@ def test_multiple_choice_over_grouped_array_base_accepted(
     field = make_field(choices=[("a", "A")])
     annotation = serializer_converter._model_backed_scalar_annotation(field, column, "X")
     assert get_origin(annotation) is list
-    (inner,) = get_args(annotation)
-    assert [member.value for member in inner] == ["a"]
+    (inner,) = _type_args(annotation)
+    assert list(_enum_members(inner).values()) == ["a"]
 
 
 @pytest.mark.parametrize(
@@ -2522,7 +2535,7 @@ def test_declared_choicefield_over_model_column_emits_serializer_enum() -> None:
     _attr, annotation, spec = resolve_serializer_field(field, product_models.Item, "X")
     assert isinstance(annotation, type)
     assert issubclass(annotation, Enum)
-    assert {member.value for member in annotation} == {"a", "b"}
+    assert set(_enum_members(annotation).values()) == {"a", "b"}
     assert spec.source == "name"  # still writes through to the model column
 
 

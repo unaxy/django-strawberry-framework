@@ -20,7 +20,11 @@ from django.db.models import QuerySet
 from strawberry import relay
 
 from django_strawberry_framework import DjangoOptimizerExtension, DjangoType, finalize_django_types
+from django_strawberry_framework.optimizer._context import DST_OPTIMIZER_PLAN
+from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils._narrowing import read_attr, require_instance
+from tests._idioms import is_object_dict, is_object_list, saved_pk
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +64,8 @@ def test_relay_id_with_custom_pk_attname_avoids_lazy_load(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[PatronProfileNode])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[PatronProfileNode])  # pyright: ignore[reportAny]
         def all_profiles(self) -> QuerySet[PatronProfile]:
             return PatronProfile.objects.all()
 
@@ -72,13 +77,20 @@ def test_relay_id_with_custom_pk_attname_avoids_lazy_load(
         result = schema.execute_sync("{ allProfiles { id postalCode } }", context_value=ctx)
 
     assert result.errors is None
-    plan = ctx.dst_optimizer_plan
+    plan = require_instance(read_attr(ctx, DST_OPTIMIZER_PLAN), OptimizationPlan)
     assert "patron_id" in plan.only_fields
     assert "id" not in plan.only_fields
     assert result.data is not None
     assert result.data == {
         "allProfiles": [{"id": result.data["allProfiles"][0]["id"], "postalCode": "EC1"}],
     }
-    node_id = relay.GlobalID.from_id(result.data["allProfiles"][0]["id"])
+    data: dict[str, object] = result.data
+    profiles = data["allProfiles"]
+    assert is_object_list(profiles)
+    profile = profiles[0]
+    assert is_object_dict(profile)
+    profile_id = profile["id"]
+    assert isinstance(profile_id, str)
+    node_id = relay.GlobalID.from_id(profile_id)
     assert node_id.type_name == PatronProfile._meta.label_lower
-    assert node_id.node_id == str(patron.pk)
+    assert node_id.node_id == str(saved_pk(patron))

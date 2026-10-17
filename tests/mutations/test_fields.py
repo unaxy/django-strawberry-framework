@@ -20,6 +20,7 @@ import pytest
 import strawberry
 from apps.products import models as product_models
 from django import forms
+from graphql import GraphQLField
 from strawberry import relay
 from strawberry.schema_directive import Location, schema_directive
 from typing_extensions import override
@@ -42,7 +43,8 @@ from django_strawberry_framework.mutations.sets import DjangoMutationMetaclass, 
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import resolvers as serializer_resolvers
 from django_strawberry_framework.rest_framework.inputs import SERIALIZER_INPUTS_MODULE_PATH
-from tests._idioms import ModelSerializerBase
+from django_strawberry_framework.utils._narrowing import read_attr, require, require_instance
+from tests._idioms import ModelSerializerBase, is_object_dict
 
 
 @pytest.fixture(autouse=True)
@@ -109,12 +111,24 @@ def _operation_mutations() -> tuple[type[DjangoMutation], ...]:
     return CreateItem, UpdateItem, DeleteItem
 
 
-def _field_arg_map(schema: strawberry.Schema, field_name: str) -> dict[str, str]:
-    """Return ``{arg_name: type_str}`` for a Mutation field from the built schema."""
+def _mutation_field(schema: strawberry.Schema, field_name: str) -> GraphQLField:
+    """Return the built schema's ``Mutation.<field_name>`` field.
+
+    graphql-core declares ``GraphQLObjectType.fields`` through its own ``cached_property``,
+    which the checker reads as ``Any``; the read is narrowed to the field map it is.
+    """
     mutation_type = schema._schema.mutation_type
     assert mutation_type is not None
-    field = mutation_type.fields[field_name]
-    return {arg_name: str(arg.type) for arg_name, arg in field.args.items()}
+    fields = require(read_attr(mutation_type, "fields"), is_object_dict)
+    return require_instance(fields[field_name], GraphQLField)
+
+
+def _field_arg_map(schema: strawberry.Schema, field_name: str) -> dict[str, str]:
+    """Return ``{arg_name: type_str}`` for a Mutation field from the built schema."""
+    field = _mutation_field(schema, field_name)
+    # graphql-core's wrapping types are generic over an unparameterized base, so ``.type``
+    # reads partially Unknown; ``str()`` needs only the object.
+    return {arg_name: str(read_attr(arg, "type")) for arg_name, arg in field.args.items()}
 
 
 def test_no_class_attribute_annotation_builds_and_types_payload() -> None:
@@ -135,9 +149,7 @@ def test_no_class_attribute_annotation_builds_and_types_payload() -> None:
 
     finalize_django_types()
     schema = DjangoSchema(query=_Query, mutation=Mutation)
-    mutation_type = schema._schema.mutation_type
-    assert mutation_type is not None
-    assert str(mutation_type.fields["createItem"].type) == "CreateItemPayload!"
+    assert str(read_attr(_mutation_field(schema, "createItem"), "type")) == "CreateItemPayload!"
 
 
 def test_payload_lazy_ref_resolves_to_materialized_payload_after_bind() -> None:
@@ -499,9 +511,7 @@ def test_mutation_field_metadata_passthrough() -> None:
 
     finalize_django_types()
     schema = DjangoSchema(query=_Query, mutation=Mutation)
-    mutation_type = schema._schema.mutation_type
-    assert mutation_type is not None
-    field = mutation_type.fields["createItem"]
+    field = _mutation_field(schema, "createItem")
     assert field.description == "Create a new item entity"
     assert field.deprecation_reason == "Use createItemV2 instead"
 

@@ -12,7 +12,6 @@ These tests don't require ``FAKESHOP_SHARDED=1``; the helper operates
 on any Django connection, and the `default` alias is always present.
 """
 
-from collections.abc import Callable
 from unittest import mock
 
 import pytest
@@ -23,10 +22,11 @@ from typing_extensions import override
 
 from django_strawberry_framework import _django_patches
 from django_strawberry_framework.testing import safe_wrap_connection_method
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import call_remove_databases_failures
 
 
-def _database_failure(wrapped: Callable[..., object]) -> object:
+def _database_failure(wrapped: object) -> object:
     if _django_patches._DatabaseFailure is None:
         pytest.skip("Django private _DatabaseFailure symbol is unavailable.")
     return _django_patches._DatabaseFailure(wrapped, "test message")
@@ -143,7 +143,7 @@ def test_safe_wrap_connection_method_pairs_with_unwrap_time_patch_for_defense_in
     connection = connections["default"]
     original_cursor = connection.cursor
 
-    sentinel_original = mock.sentinel.untouched_original
+    sentinel_original = read_attr(mock.sentinel, "untouched_original")
 
     # Simulate Django's setUpClass installing the ``_DatabaseFailure``.
     django_wrapper = _database_failure(sentinel_original)

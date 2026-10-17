@@ -20,6 +20,7 @@ from django_strawberry_framework.utils.context import (
     restored_context_keys,
     stash_on_context,
 )
+from django_strawberry_framework.utils.typing import object_result
 
 
 def test_context_stash_round_trips_and_clears_object_dict_and_slots_mapping() -> None:
@@ -76,7 +77,7 @@ def test_context_read_tries_mapping_after_hostile_attribute() -> None:
         def __getattribute__(self, name: str) -> object:
             if name == "dst_context_test":
                 raise RuntimeError("descriptor failed")
-            return object.__getattribute__(self, name)
+            return object_result(object.__getattribute__, self, name)
 
         def __getitem__(self, key: str) -> int:
             return self.values[key]

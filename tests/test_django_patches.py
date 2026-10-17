@@ -43,7 +43,8 @@ cursor before ``tearDownClass``.
 """
 
 import importlib
-from typing import TYPE_CHECKING, NoReturn
+from collections.abc import Callable
+from typing import TYPE_CHECKING, NoReturn, Protocol
 from unittest import mock
 
 import pytest
@@ -52,6 +53,7 @@ from django.db import connections
 from django.test.testcases import SimpleTestCase, TestCase, TransactionTestCase
 
 from django_strawberry_framework import _django_patches
+from django_strawberry_framework.utils._narrowing import class_dict, read_attr
 from tests._idioms import call_remove_databases_failures, remove_databases_failures_function
 
 if TYPE_CHECKING:
@@ -61,6 +63,19 @@ if TYPE_CHECKING:
 def _is_test_case_classmethod(value: object) -> "TypeIs[classmethod[SimpleTestCase, ..., object]]":
     """Whether ``value`` is a ``classmethod`` descriptor, the shape every captured upstream has."""
     return isinstance(value, classmethod)
+
+
+class _WrappedConnectionMethod(Protocol):
+    """A connection method ``_DatabaseFailure`` replaced: the original rides on ``wrapped``."""
+
+    wrapped: object
+
+
+#: ``getattr`` itself, typed for the one read the pinned upstream bodies make: a connection
+#: method ``_DatabaseFailure`` replaced, whose original rides on ``wrapped``. Those bodies
+#: are compared to Django's source text, so a line inside them cannot carry an annotation or a
+#: suppression; the test binds this as its local ``getattr`` and the body resolves to it.
+_failure_getattr: Callable[[object, str], _WrappedConnectionMethod] = getattr
 
 
 def _database_failure(wrapped: object) -> object:
@@ -186,7 +201,7 @@ def test_patched_remove_databases_failures_unwraps_a_real_wrapper(
 
     connection = connections["default"]
     original_cursor = connection.cursor
-    sentinel = mock.sentinel.original_cursor
+    sentinel = read_attr(mock.sentinel, "original_cursor")
 
     wrapper = _database_failure(sentinel)
     monkeypatch.setattr(connection, "cursor", wrapper)
@@ -358,6 +373,10 @@ def test_apply_fails_loudly_when_upstream_body_drifts(monkeypatch: pytest.Monkey
     monkeypatch.setattr(SimpleTestCase, "_remove_databases_failures", classmethod(_foreign))
     assert _django_patches._patch_is_installed() is False
 
+    # The body below must match Django's source byte for byte, so its ``getattr`` read is typed
+    # by this local binding (the builtin itself at run time), not by a comment inside the body.
+    getattr = _failure_getattr  # noqa: A001 - the pinned body's read, see _failure_getattr
+
     class _DriftedShape:
         # The slots the body reads; bare annotations create no attribute.
         databases: set[str]
@@ -381,7 +400,7 @@ def test_apply_fails_loudly_when_upstream_body_drifts(monkeypatch: pytest.Monkey
         mock.patch.object(
             _django_patches,
             "_original_remove_databases_failures",
-            _DriftedShape.__dict__["_remove_databases_failures"],
+            class_dict(_DriftedShape)["_remove_databases_failures"],
         ),
         pytest.raises(RuntimeError, match="upstream body"),
     ):
@@ -404,6 +423,9 @@ def test_validation_accepts_the_class_attribute_upstream_body() -> None:
     Nested so ``inspect.getsource`` after ``textwrap.dedent`` matches the
     pinned constant.
     """
+    # The body below must match Django's source byte for byte, so its ``getattr`` read is typed
+    # by this local binding (the builtin itself at run time), not by a comment inside the body.
+    getattr = _failure_getattr  # noqa: A001 - the pinned body's read, see _failure_getattr
 
     class _ClassAttributeShape:
         # The two slots the pinned body reads; bare annotations create no attribute.
@@ -426,7 +448,7 @@ def test_validation_accepts_the_class_attribute_upstream_body() -> None:
     with mock.patch.object(
         _django_patches,
         "_original_remove_databases_failures",
-        _ClassAttributeShape.__dict__["_remove_databases_failures"],
+        class_dict(_ClassAttributeShape)["_remove_databases_failures"],
     ):
         assert (
             _django_patches._validate_upstream_shape()
@@ -440,6 +462,9 @@ def test_validation_accepts_the_feature_flag_upstream_body() -> None:
     Nested so ``inspect.getsource`` after ``textwrap.dedent`` matches the
     pinned constant.
     """
+    # The body below must match Django's source byte for byte, so its ``getattr`` read is typed
+    # by this local binding (the builtin itself at run time), not by a comment inside the body.
+    getattr = _failure_getattr  # noqa: A001 - the pinned body's read, see _failure_getattr
 
     class _FeatureFlagShape:
         # The slot the pinned body reads; a bare annotation creates no attribute.
@@ -464,7 +489,7 @@ def test_validation_accepts_the_feature_flag_upstream_body() -> None:
     with mock.patch.object(
         _django_patches,
         "_original_remove_databases_failures",
-        _FeatureFlagShape.__dict__["_remove_databases_failures"],
+        class_dict(_FeatureFlagShape)["_remove_databases_failures"],
     ):
         assert (
             _django_patches._validate_upstream_shape()
@@ -493,7 +518,7 @@ def test_validation_refuses_an_unaudited_upstream_body() -> None:
         mock.patch.object(
             _django_patches,
             "_original_remove_databases_failures",
-            _UnauditedShape.__dict__["_remove_databases_failures"],
+            class_dict(_UnauditedShape)["_remove_databases_failures"],
         ),
         pytest.raises(RuntimeError, match="upstream body"),
     ):
@@ -526,7 +551,7 @@ def test_disallowed_methods_read_prefers_the_class_attribute_shape(
         )
 
     original_cursor = connection.cursor
-    sentinel = mock.sentinel.class_attribute_cursor
+    sentinel = read_attr(mock.sentinel, "class_attribute_cursor")
     monkeypatch.setattr(connection, "cursor", _database_failure(sentinel))
     try:
         with mock.patch.object(
@@ -577,8 +602,8 @@ def test_disallowed_methods_read_falls_back_to_the_connection_feature_flag(
 
     original_cursor = connection.cursor
     original_chunked_cursor = connection.chunked_cursor
-    cursor_sentinel = mock.sentinel.feature_flag_cursor
-    chunked_cursor_sentinel = mock.sentinel.feature_flag_chunked_cursor
+    cursor_sentinel = read_attr(mock.sentinel, "feature_flag_cursor")
+    chunked_cursor_sentinel = read_attr(mock.sentinel, "feature_flag_chunked_cursor")
     monkeypatch.setattr(connection, "cursor", _database_failure(cursor_sentinel))
     monkeypatch.setattr(connection, "chunked_cursor", _database_failure(chunked_cursor_sentinel))
     # The patched loop visits every alias, so the flag has to be readable on
@@ -726,7 +751,7 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         SimpleTestCase,
         "_remove_databases_failures",
-        SimpleTestCase.__dict__["_remove_databases_failures"],
+        class_dict(SimpleTestCase)["_remove_databases_failures"],
     )
     try:
         assert _django_patches._patch_is_installed() is True
@@ -736,7 +761,7 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
         # The reload re-executed the module: its module-level function object is
         # a NEW generation, while the app-load generation remains installed.
         assert (
-            SimpleTestCase.__dict__["_remove_databases_failures"].__func__
+            read_attr(class_dict(SimpleTestCase)["_remove_databases_failures"], "__func__")
             is not _django_patches._patched_remove_databases_failures
         )
         assert _django_patches._patch_is_installed() is False
@@ -752,7 +777,7 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
 
         connection = connections["default"]
         original_cursor = connection.cursor
-        sentinel = mock.sentinel.reload_survivor
+        sentinel = read_attr(mock.sentinel, "reload_survivor")
         monkeypatch.setattr(connection, "cursor", _database_failure(sentinel))
         try:
             # The still-installed PREVIOUS-generation function must unwrap
@@ -767,7 +792,7 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
         _django_patches.apply()
         assert _django_patches._patch_is_installed() is True
         assert (
-            SimpleTestCase.__dict__["_remove_databases_failures"].__func__
+            read_attr(class_dict(SimpleTestCase)["_remove_databases_failures"], "__func__")
             is _django_patches._patched_remove_databases_failures
         )
     finally:

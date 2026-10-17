@@ -10,7 +10,7 @@ none of those are a JSON selection.
 
 import enum
 import functools
-from typing import Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Literal, NoReturn
 
 import pytest
 import pytest_django
@@ -48,9 +48,25 @@ from django_strawberry_framework.types.relay import (
     install_relay_node_resolvers,
     published_node_type_name,
 )
+from django_strawberry_framework.utils._narrowing import class_dict, require
 from django_strawberry_framework.utils.querysets import model_for
-from tests._idioms import async_relay_hooks, comparing_metaclass, relay_hooks
+from django_strawberry_framework.utils.typing import call_forwarded, object_result
+from tests._idioms import async_relay_hooks, comparing_metaclass, relay_hooks, saved_pk
 from tests._info import make_info, unread_info
+
+if TYPE_CHECKING:
+    from typing_extensions import TypeIs
+
+
+def _is_classmethod(value: object) -> "TypeIs[classmethod[object, ..., object]]":
+    """Whether ``value`` is a ``classmethod`` descriptor, its parameters typed ``object``."""
+    return isinstance(value, classmethod)
+
+
+def _classmethod_func(cls: type, attr: str) -> object:
+    """The function behind the ``classmethod`` ``cls`` declares in its own namespace as ``attr``."""
+    return require(class_dict(cls)[attr], _is_classmethod).__func__
+
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
@@ -83,7 +99,7 @@ def test_safe_class_name_renders_non_string_metaclass_name_metadata() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 return 42
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class _MalformedName(metaclass=_NonStringNameMeta):
         pass
@@ -335,7 +351,8 @@ def test_is_type_of_injected_for_all_djangotypes() -> None:
         (ItemNode, Item, Category),
     ):
         assert "is_type_of" in type_cls.__dict__
-        is_type_of = type_cls.__dict__["is_type_of"]
+        is_type_of = class_dict(type_cls)["is_type_of"]
+        assert callable(is_type_of)
         assert is_type_of(model_cls(), None) is True
         assert is_type_of(other_model_cls(), None) is False
         assert is_type_of(object(), None) is False
@@ -378,14 +395,15 @@ def test_is_type_of_hostile_hint_descriptor_falls_back_to_instance_check() -> No
         def __getattribute__(self, name: str) -> object:
             if name == "_dsf_node_type_hint":
                 raise RuntimeError("hostile hint descriptor")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class CategoryNode(DjangoType):
         class Meta:
             model = Category
             fields = ("id", "name")
 
-    is_type_of = CategoryNode.__dict__["is_type_of"]
+    is_type_of = class_dict(CategoryNode)["is_type_of"]
+    assert callable(is_type_of)
     assert is_type_of(Category(), None) is True
     assert is_type_of(HostileObject(), None) is False
 
@@ -538,7 +556,7 @@ def test_relay_node_injects_default_resolvers() -> None:
         "resolve_nodes",
     ):
         assert attr in CategoryNode.__dict__, f"{attr} was not injected"
-        descriptor = CategoryNode.__dict__[attr]
+        descriptor = class_dict(CategoryNode)[attr]
         assert isinstance(descriptor, classmethod)
 
 
@@ -626,10 +644,10 @@ def test_resolve_node_applies_get_queryset() -> None:
     assert public_row is not None
     assert private_row is not None
     hooks = relay_hooks(CategoryNode, Category)
-    public_result = hooks.resolve_node(info=None, node_id=public_row.pk)
+    public_result = hooks.resolve_node(info=None, node_id=saved_pk(public_row))
     assert public_result is not None
-    assert public_result.pk == public_row.pk
-    assert hooks.resolve_node(info=None, node_id=private_row.pk) is None
+    assert saved_pk(public_result) == saved_pk(public_row)
+    assert hooks.resolve_node(info=None, node_id=saved_pk(private_row)) is None
 
 
 @pytest.mark.django_db
@@ -656,12 +674,12 @@ def test_resolve_node_accepts_strawberry_positional_call_shape() -> None:
     assert target is not None
     hooks = relay_hooks(CategoryNode, Category)
     # Positional node_id matches Strawberry's bound call site exactly.
-    result = hooks.resolve_node(str(target.pk), info=None)
+    result = hooks.resolve_node(str(saved_pk(target)), info=None)
     assert result is not None
-    assert result.pk == target.pk
+    assert saved_pk(result) == saved_pk(target)
     # required=True via positional node_id keeps the same shape.
-    required_result = hooks.resolve_node(str(target.pk), info=None, required=True)
-    assert required_result.pk == target.pk
+    required_result = hooks.resolve_node(str(saved_pk(target)), info=None, required=True)
+    assert saved_pk(required_result) == saved_pk(target)
 
 
 @pytest.mark.django_db
@@ -697,7 +715,7 @@ def test_resolve_nodes_accepts_generator_node_ids() -> None:
     a, b = rows[0], rows[1]
     node_ids = (
         relay.GlobalID(type_name="CategoryNode", node_id=str(node_id))
-        for node_id in (a.pk, 999999, b.pk)
+        for node_id in (saved_pk(a), 999999, saved_pk(b))
     )
 
     results = relay_hooks(CategoryNode, Category).resolve_nodes(
@@ -735,7 +753,7 @@ def test_resolve_nodes_required_raises_for_missing() -> None:
     with pytest.raises(Category.DoesNotExist):
         hooks.resolve_nodes(
             info=None,
-            node_ids=[a.pk, 999999],
+            node_ids=[saved_pk(a), 999999],
             required=True,
         )
 
@@ -787,10 +805,10 @@ async def test_resolve_node_async_context() -> None:
 
     result = await async_relay_hooks(CategoryNode, Category).resolve_node(
         info=None,
-        node_id=target.pk,
+        node_id=saved_pk(target),
     )
     assert result is not None
-    assert result.pk == target.pk
+    assert saved_pk(result) == saved_pk(target)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -802,11 +820,11 @@ async def test_resolve_node_async_context_required() -> None:
 
     result = await async_relay_hooks(CategoryNode, Category).resolve_node(
         info=None,
-        node_id=target.pk,
+        node_id=saved_pk(target),
         required=True,
     )
     assert result is not None
-    assert result.pk == target.pk
+    assert saved_pk(result) == saved_pk(target)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -818,10 +836,14 @@ async def test_resolve_nodes_async_context() -> None:
 
     result = await async_relay_hooks(CategoryNode, Category).resolve_nodes(
         info=None,
-        node_ids=[a.pk, 999999, b.pk],
+        node_ids=[saved_pk(a), 999999, saved_pk(b)],
         required=False,
     )
-    assert [obj.pk if obj is not None else None for obj in result] == [a.pk, None, b.pk]
+    assert [saved_pk(obj) if obj is not None else None for obj in result] == [
+        saved_pk(a),
+        None,
+        saved_pk(b),
+    ]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -892,11 +914,11 @@ async def test_resolve_node_async_awaits_async_get_queryset() -> None:
     assert private_row is not None
 
     hooks = async_relay_hooks(CategoryNode, Category)
-    public_result = await hooks.resolve_node(public_row.pk, info=None)
+    public_result = await hooks.resolve_node(saved_pk(public_row), info=None)
     assert public_result is not None
-    assert public_result.pk == public_row.pk
+    assert saved_pk(public_result) == saved_pk(public_row)
     # Rows the async hook filters out are invisible to the node lookup.
-    assert await hooks.resolve_node(private_row.pk, info=None) is None
+    assert await hooks.resolve_node(saved_pk(private_row), info=None) is None
 
 
 @pytest.mark.django_db(transaction=True)
@@ -919,11 +941,15 @@ async def test_resolve_nodes_async_awaits_async_get_queryset() -> None:
 
     result = await async_relay_hooks(CategoryNode, Category).resolve_nodes(
         info=None,
-        node_ids=[a.pk, private_row.pk, b.pk],
+        node_ids=[saved_pk(a), saved_pk(private_row), saved_pk(b)],
         required=False,
     )
     # The private row is filtered out by the async hook, so its slot is None.
-    assert [obj.pk if obj is not None else None for obj in result] == [a.pk, None, b.pk]
+    assert [saved_pk(obj) if obj is not None else None for obj in result] == [
+        saved_pk(a),
+        None,
+        saved_pk(b),
+    ]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1213,12 +1239,12 @@ def test_relay_chain_child_resolvers_do_not_recurse() -> None:
 
     row = Item.objects.first()
     assert row is not None
-    assert child_hooks.resolve_id(row, info=None) == str(row.pk)
-    child_result = child_hooks.resolve_node(str(row.pk), info=None)
+    assert child_hooks.resolve_id(row, info=None) == str(saved_pk(row))
+    child_result = child_hooks.resolve_node(str(saved_pk(row)), info=None)
     assert child_result is not None
-    assert child_result.pk == row.pk
-    child_results = child_hooks.resolve_nodes(info=None, node_ids=[str(row.pk)])
-    assert [obj.pk if obj is not None else None for obj in child_results] == [row.pk]
+    assert saved_pk(child_result) == saved_pk(row)
+    child_results = child_hooks.resolve_nodes(info=None, node_ids=[str(saved_pk(row))])
+    assert [saved_pk(obj) if obj is not None else None for obj in child_results] == [saved_pk(row)]
 
 
 def test_relay_chain_child_node_id_annotation_wins() -> None:
@@ -1554,10 +1580,10 @@ def test_resolve_node_default_invoked_via_helper() -> None:
     assert implements_relay_node(CategoryNode)
     target = Category.objects.first()
     assert target is not None
-    result = _resolve_node_default(CategoryNode, info=make_info(), node_id=target.pk)
+    result = _resolve_node_default(CategoryNode, info=make_info(), node_id=saved_pk(target))
     assert result is not None
     assert isinstance(result, Category)
-    assert result.pk == target.pk
+    assert saved_pk(result) == saved_pk(target)
 
 
 @pytest.mark.django_db
@@ -1575,7 +1601,7 @@ def test_resolve_nodes_default_invoked_via_helper() -> None:
     assert implements_relay_node(CategoryNode)
     target = Category.objects.first()
     assert target is not None
-    global_id = relay.GlobalID(type_name="CategoryNode", node_id=str(target.pk))
+    global_id = relay.GlobalID(type_name="CategoryNode", node_id=str(saved_pk(target)))
     result = _resolve_nodes_default(
         CategoryNode,
         info=make_info(),
@@ -1585,7 +1611,7 @@ def test_resolve_nodes_default_invoked_via_helper() -> None:
     assert isinstance(result, list)
     assert len(result) == 1
     assert result[0] is not None
-    assert result[0].pk == target.pk
+    assert saved_pk(result[0]) == saved_pk(target)
 
 
 def test_install_relay_node_resolvers_idempotent() -> None:
@@ -1600,7 +1626,7 @@ def test_install_relay_node_resolvers_idempotent() -> None:
     finalize_django_types()
     assert implements_relay_node(CategoryNode)
     snapshot = {
-        attr: CategoryNode.__dict__[attr]
+        attr: _classmethod_func(CategoryNode, attr)
         for attr in (
             "resolve_id",
             "resolve_id_attr",
@@ -1609,13 +1635,13 @@ def test_install_relay_node_resolvers_idempotent() -> None:
         )
     }
     install_relay_node_resolvers(CategoryNode)
-    after = {attr: CategoryNode.__dict__[attr] for attr in snapshot}
+    after = {attr: _classmethod_func(CategoryNode, attr) for attr in snapshot}
     # After the first install the inherited defaults are framework defaults, so
     # the second install also writes framework defaults; identity should match
     # the first-pass snapshot because the underlying default callables are
     # module-level constants in ``types/relay.py``.
     for attr, before in snapshot.items():
-        assert after[attr].__func__ is before.__func__
+        assert after[attr] is before
 
 
 # ---------------------------------------------------------------------------
@@ -1693,10 +1719,10 @@ def test_direct_relay_node_inheritance_injects_resolvers_and_suppresses_id() -> 
     # Sanity: the injected defaults actually fetch by pk through ``get_queryset``.
     target = Category.objects.first()
     assert target is not None
-    resolved = CategoryNode.resolve_node(str(target.pk), info=make_info())
+    resolved = CategoryNode.resolve_node(str(saved_pk(target)), info=make_info())
     assert resolved is not None
     assert isinstance(resolved, Category)
-    assert resolved.pk == target.pk
+    assert saved_pk(resolved) == saved_pk(target)
 
 
 def test_direct_relay_node_inheritance_composite_pk_raises(
@@ -1780,13 +1806,13 @@ def test_install_relay_node_resolvers_preserves_consumer_override() -> None:
         def resolve_id_attr(cls) -> str:
             return sentinel_value
 
-    consumer_func = CategoryNode.__dict__["resolve_id_attr"].__func__
+    consumer_func = _classmethod_func(CategoryNode, "resolve_id_attr")
     # Manually drive the host class through Phase 2.5 without finalizing the
     # whole registry (the goal is to exercise the install helper directly).
     CategoryNode.__bases__ = (*CategoryNode.__bases__, relay.Node)
     assert implements_relay_node(CategoryNode)
     install_relay_node_resolvers(CategoryNode)
-    assert CategoryNode.__dict__["resolve_id_attr"].__func__ is consumer_func
+    assert _classmethod_func(CategoryNode, "resolve_id_attr") is consumer_func
     assert CategoryNode.resolve_id_attr() == sentinel_value
 
 
@@ -1798,7 +1824,7 @@ def test_apply_interfaces_diagnostic_survives_hostile_class_names() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name in {"__name__", "__qualname__"}:
                 raise RuntimeError(f"hostile {name}")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class BadInterface(metaclass=HostileMeta):
         pass
@@ -2015,10 +2041,10 @@ def test_consumer_resolve_typename_override_preserved_and_recorded_custom() -> N
         def resolve_typename(cls, _root: object, _info: object) -> str:
             return "ConsumerOwned"
 
-    consumer_func = CategoryNode.__dict__["resolve_typename"].__func__
+    consumer_func = _classmethod_func(CategoryNode, "resolve_typename")
     finalize_django_types()
     # The override is left in place (the __func__ identity test preserved it).
-    assert CategoryNode.__dict__["resolve_typename"].__func__ is consumer_func
+    assert _classmethod_func(CategoryNode, "resolve_typename") is consumer_func
     assert _definition_of(CategoryNode).effective_globalid_strategy == "custom"
 
 
@@ -2736,12 +2762,10 @@ def test_setting_read_and_validated_once_per_finalize(
         read_calls += 1
         return real_read()
 
-    # basedpyright: verbatim forward to _validate_globalid_strategy (the spy replaces it); object
-    # fails its typed params
-    def _counting_validate(*args: Any, **kwargs: Any) -> object:  # pyright: ignore[reportExplicitAny]
+    def _counting_validate(*args: object, **kwargs: object) -> object:
         nonlocal validate_calls
         validate_calls += 1
-        return real_validate(*args, **kwargs)
+        return call_forwarded(real_validate, args, kwargs)
 
     monkeypatch.setattr(types_relay, "relay_globalid_strategy_setting", _counting_read)
     monkeypatch.setattr(types_base, "_validate_globalid_strategy", _counting_validate)
@@ -3098,7 +3122,7 @@ def test_decode_hostile_input_type_name_stays_typed() -> None:
         def __getattribute__(cls, name: str) -> object:
             if name == "__name__":
                 raise RuntimeError("hostile type name")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     class BadInput(metaclass=HostileMeta):
         pass
@@ -3115,7 +3139,7 @@ def test_decode_hostile_globalid_slots_stay_typed() -> None:
         def __getattribute__(self, name: str) -> object:
             if name in {"type_name", "node_id"}:
                 raise RuntimeError(f"hostile {name}")
-            return super().__getattribute__(name)
+            return object_result(super().__getattribute__, name)
 
     value = object.__new__(HostileGlobalID)
     object.__setattr__(value, "type_name", "CategoryNode")
