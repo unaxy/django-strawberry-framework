@@ -5324,13 +5324,15 @@ def test_item_save_time_validation_error_returns_the_name_keyed_envelope(mutatio
 #: pipeline opens. Each is three below its sync row's count: the async middleware's
 #: session and user reads run on a connection opened before the request, outside the
 #: recorder, and the closing ``COMMIT`` is logged by Django from ``connection.commit()``,
-#: not through a cursor, so it reaches no execute wrapper.
+#: not through a cursor, so it reaches no execute wrapper. The opening ``BEGIN`` is not
+#: counted either: Django's SQLite backend issues it through a cursor, while psycopg opens
+#: the transaction implicitly, so only SQLite's reaches the wrapper.
 _ASYNC_SAVE_REJECTED_QUERIES: dict[str, int] = {
-    "createItem": 9,
-    "updateItem": 12,
-    "deleteItem": 8,
-    "createItemViaForm": 10,
-    "createItemViaSerializer": 12,
+    "createItem": 8,
+    "updateItem": 11,
+    "deleteItem": 7,
+    "createItemViaForm": 9,
+    "createItemViaSerializer": 11,
 }
 _REQUEST_QUERY_RECORDER_UID = "test_products_api.request_query_recorder"
 
@@ -5402,7 +5404,8 @@ async def test_item_save_time_validation_error_returns_the_envelope_over_graphql
         )
     assert "errors" not in payload, payload
     assert payload["data"][mutation] == {"node": None, "errors": _SAVE_REJECTED_ERRORS}
-    assert len(recorded) == _ASYNC_SAVE_REJECTED_QUERIES[mutation], recorded
+    statements = [sql for sql in recorded if sql != "BEGIN"]
+    assert len(statements) == _ASYNC_SAVE_REJECTED_QUERIES[mutation], statements
     await sync_to_async(_assert_save_rejected_rolled_back)(row.operation, item, before)
 
 
