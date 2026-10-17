@@ -439,33 +439,6 @@ class _UnexpandableOrderError(Exception):
     """An order name the compiler reads as written: it rejects the expansion, or cannot run it."""
 
 
-def related_order_substitute(
-    final_field: ModelField,
-    related_opts: Options[models.Model] | None,
-    name: str,
-) -> Sequence[str | Combinable] | None:
-    """Return the related ``Meta.ordering`` the compiler orders an order name by, or ``None``.
-
-    The condition ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name``
-    tests once ``Query.names_to_path`` has resolved every piece of ``name`` (the
-    name without its direction, no transform left over): ``final_field`` - the
-    join field of the last hop, which for a many-to-many is the through table's
-    key to the target - is a relation, the model the path ends on
-    (``related_opts``) declares ``Meta.ordering``, and the name is neither that
-    field's ``attname`` (``"author_id"``) nor ``"pk"``. A reverse relation has no
-    ``attname``, which the compiler reads as ``None`` too.
-    """
-    if (
-        final_field.is_relation
-        and related_opts is not None
-        and related_opts.ordering
-        and getattr(final_field, "attname", None) != name.rsplit(LOOKUP_SEP, maxsplit=1)[-1]
-        and name != "pk"
-    ):
-        return related_opts.ordering
-    return None
-
-
 def _names_to_path(
     query: sql.Query,
     names: Sequence[str],
@@ -478,6 +451,67 @@ def _names_to_path(
     names left over.
     """
     return query.names_to_path(names, opts, allow_many=True, fail_on_missing=False)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ResolvedOrderName:
+    """An order name as ``Query.setup_joins`` resolves it (``resolve_order_name``).
+
+    ``path`` is the ``PathInfo`` steps of the joins the name sets up.
+    ``final_field`` is the field the walk ends on: a local column, or the join
+    field of the last hop - for a many-to-many the through table's key to the
+    target, for a generic relation its reverse relation. It is the field
+    ``Query.build_filter`` compares a lookup against and
+    ``SQLCompiler.find_ordering_name`` tests for expansion. ``lookups`` is the
+    pieces left over once a piece names no field: transforms and a final lookup.
+    ``related_opts`` is the model the last hop reaches when nothing is left
+    over. ``substitute`` is the related ``Meta.ordering`` the compiler orders the
+    name by instead of a column, or ``None``.
+    """
+
+    path: Sequence[_PathStep]
+    final_field: ModelField
+    lookups: Sequence[str]
+    related_opts: Options[models.Model] | None
+    substitute: Sequence[str | Combinable] | None
+
+
+def resolve_order_name(
+    query: sql.Query,
+    name: str,
+    opts: Options[models.Model],
+) -> ResolvedOrderName:
+    """Resolve ``name`` (no direction) against ``opts`` the way the compiler resolves an order name.
+
+    ``Query.names_to_path`` is the walk ``setup_joins`` runs for
+    ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name``,
+    ``Query.resolve_ref`` and ``Query.solve_lookup_type`` alike: ``pk`` names the
+    primary key, a reverse relation names its model, a field on a concrete
+    parent adds the parent hop, and the first piece naming no field ends the
+    walk. It reads ``query`` only for the annotation and filtered-relation names
+    it falls back to, and adds no join to it. Raises ``FieldError`` where Django
+    raises: a first piece naming nothing, or a generic foreign key.
+
+    The substitution is the condition ``find_ordering_name`` tests on what
+    ``setup_joins`` returns: no transform left over, the final field a relation,
+    the model the path ends on declaring ``Meta.ordering``, and the name neither
+    the final field's ``attname`` (``"author_id"``) nor ``"pk"``. A reverse
+    relation has no ``attname``, which the compiler reads as ``None`` too, and a
+    many-to-many's final field is the through key (``"genre_id"``), so its name
+    always expands.
+    """
+    path, final_field, _targets, rest = _names_to_path(query, name.split(LOOKUP_SEP), opts)
+    related_opts: Options[models.Model] | None = path[-1].to_opts if path and not rest else None
+    substitute = (
+        related_opts.ordering
+        if related_opts is not None
+        and related_opts.ordering
+        and final_field.is_relation
+        and getattr(final_field, "attname", None) != name.rsplit(LOOKUP_SEP, maxsplit=1)[-1]
+        and name != "pk"
+        else None
+    )
+    return ResolvedOrderName(path, final_field, rest, related_opts, substitute)
 
 
 def _expanded_order_name(
@@ -509,16 +543,14 @@ def _expanded_order_name(
     expression.
     """
     try:
-        path, final_field, _targets, rest = _names_to_path(query, name.split(LOOKUP_SEP), opts)
+        resolved = resolve_order_name(query, name, opts)
     except FieldError:
         raise _UnexpandableOrderError(name) from None
-    # A transform left over (``rest``) is never expanded, nor spelled by carriers.
-    terminal: object = None if rest else final_field
-    related_opts: Options[models.Model] | None = path[-1].to_opts if path and not rest else None
-    ordering = (
-        None if related_opts is None else related_order_substitute(final_field, related_opts, name)
-    )
+    ordering = resolved.substitute
+    related_opts = resolved.related_opts
     if related_opts is None or ordering is None:
+        # A transform left over is never spelled by carriers either.
+        terminal: object = None if resolved.lookups else resolved.final_field
         sign = "-" if descending else ""
         # ``"pk"`` inside a related ordering is never expanded there; spelled from the
         # outer query it must name the key column, or a relation key would expand.
@@ -528,7 +560,7 @@ def _expanded_order_name(
         start,
         *(
             tuple((lhs.column, rhs.column) for lhs, rhs in hop.join_field.get_joining_fields())
-            for hop in path
+            for hop in resolved.path
         ),
     )
     if step in seen:
@@ -568,9 +600,10 @@ def expand_relation_order(
 
     ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name`` does not
     order a STRING term ending on a relation by the relation's key when the
-    related model declares ``Meta.ordering`` (unless the name is the field's
-    ``attname``, as a multi-column ``ForeignObject``'s always is, which keeps
-    its carrier columns): it substitutes that ordering,
+    related model declares ``Meta.ordering`` (unless the name is the final join
+    field's ``attname``, as a multi-column ``ForeignObject``'s always is, which
+    keeps its carrier columns; a many-to-many's final join field is the through
+    table's key, so its name always expands): it substitutes that ordering,
     recursively, a ``-`` inverting each string and bare-expression item while an
     ``OrderBy`` item keeps its own direction. An expression term never takes that
     path (``Query.resolve_ref`` reads ``F("author")`` as the key column), and

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 150 done, 117 to do.
+Progress: 151 done, 117 to do.
 
 ## Done
 
@@ -475,6 +475,10 @@ Progress: 150 done, 117 to do.
   `forms/resolvers.py::_decode_form_relation_multi` decodes every element; only the whole value can be a clear
 - [x] 268. A filter whose instance carries its own `filter` was judged by the class `filter` and deferred: fixed,
   `filters/sets.py::_own_filter_skips` accepts only the bound `FilterMethod` `method=` installs
+- [x] 257. A list-field `offset` was certified over a `Meta.ordering` path ending on a forward many-to-many or generic
+  relation whose target orders at random, since the guard read the relation's own `attname`, not the join field the
+  compiler expands on: fixed, `utils/querysets.py::resolve_order_name` is the one reading of a relation order name for
+  the offset guard, the connection window and `optimizer/plans.py::ends_in_unique_column`; a many-to-many loop is refused
 
 ## Outside review of the fixes
 
@@ -629,10 +633,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
-- [ ] 257. `list_field.py::_is_deterministic_order_field_path` reads a relation's model-field `attname`, which for a
-  many-to-many equals its name, so it never sees a many-to-many order name expand into the related `Meta.ordering`:
-  `Book.Meta.ordering = ["genres"]` with `Genre.Meta.ordering = [Random()]` certifies a positive `offset` while the
-  compiled order is random; read the expansion through `utils/querysets.py::related_order_substitute`
 - [ ] 269. A flat copy whose instance `filter` is a bound method reading `self.field_name` breaks even when the request
   names it: `_bound_terminal` copies the filter and rebinds `field_name`, but the bound method still points at the
   pre-copy object (`books__title`), so the query raises `FieldError: Cannot resolve keyword 'books'`; `_owner_bound_child`
@@ -865,6 +865,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
   field's `invalid_choice` error with nothing written (0.0.14 could link the row whose form key equals the stored key); also covers
   266 and 267 (a stored or supplied single key `""` is that error instead of a clear; an M2M element `""` is decoded
   and visibility-checked)
+- [ ] 270. CHANGELOG entry for item 257: a nonzero list-field `offset` over a `Meta.ordering` path ending on a
+  many-to-many or generic relation is refused when the target's `Meta.ordering` is random or loops back (0.0.14 served
+  the page over a random or erroring order), and served as before when that ordering is stable
 - [ ] 108. A serializer-only source over the default `create()` / `update()` (`gs = PrimaryKeyRelatedField(many=True,
   source="genres_id")`) builds; create raises a masked TypeError and update is a silent no-op. Refuse a column-less
   writable source at class creation, as item 103 does for an `attname` source, or leave it to DRF's default `create()` /

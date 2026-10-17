@@ -95,7 +95,9 @@ the release wording.
         approved transforms and lookups a predicate applies - and refuses every other node,
         subclasses of approved ones included. Which arm a term takes is decided by
         `resolve_expression`, the way the compiler decides it, so a name that is an expression
-        is classified as one.
+        is classified as one. A string name ending on a relation expands where the compiler
+        expands it, decided on the field `Query.names_to_path` ends on, so a many-to-many or
+        generic relation name always expands.
   - [ ] Sync and async paths run visibility, then `OrderSet`, then the offset/order guard,
         then the one raw-list slice.
   - [ ] The result of a public `OrderSet.apply_*` override is validated as an unevaluated,
@@ -1133,10 +1135,14 @@ column orders. Only a name that survives every resolution step orders by a colum
 
 A STRING name surviving to a field path is still not a column when that path ends on a relation.
 [`django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name`][django-compiler] does not
-order by a relation: unless the last piece is the field's own `attname`, the whole name is
-`pk`, or a transform intervenes, it REPLACES the term with the related model's `Meta.ordering`
-and resolves each of those terms against that model, recursively, raising
-`FieldError("Infinite loop caused by ordering.")` when the relation walk repeats a join. A
+order by a relation: unless the last piece is the `attname` of the field the join walk ends
+on, the whole name is `pk`, or a transform intervenes, it REPLACES the term with the related
+model's `Meta.ordering` and resolves each of those terms against that model, recursively,
+raising `FieldError("Infinite loop caused by ordering.")` when the relation walk repeats a
+join. That field is the one `Query.names_to_path` ends on, not the relation as declared: a
+many-to-many ends on the through table's key to its target and a generic relation on its
+reverse relation, which has no `attname`, so either name always expands, while a multi-column
+`ForeignObject` ends on itself and orders by its carrier columns. A
 relation name is therefore one more indirection of exactly the kind the annotation and `extra`
 steps are: a model declaring `Meta.ordering = ("branch",)` over a branch declaring
 `Meta.ordering = (Random(),)` compiles to a random order, and a classifier built from the term
@@ -2010,7 +2016,9 @@ been here, so the close weakens no obligation, it only names which card carries 
   guard.
 - A STRING term naming a relation is judged by the related model's own `Meta.ordering`, which
   the compiler expands it into: a relation whose target orders at random carries the random
-  verdict, and one whose target orders by a column satisfies the guard. The expansion is
+  verdict, and one whose target orders by a column satisfies the guard. A many-to-many and a
+  generic relation expand the same way, since neither name is the `attname` of the field the
+  join walk ends on. The expansion is
   recursive, so a random default two relations away decides the same way. Naming the foreign
   key column instead - `branch_id`, or `branch__pk` - is an ordinary column order and is
   unaffected. A relation walk that repeats, which Django rejects with
@@ -2326,7 +2334,16 @@ the shipped SDL.
     `F("branch")` - are each SERVED under the same randomly ordered related model, with the
     statement carrying the raised low mark and no random function: only a string expands, and a
     guard that expanded a reference too would refuse three requests Django answers in foreign
-    key order. The package tier carries what needs no second wire spelling: a relation cycle
+    key order. The same holder carries the to-many relations, in both colorings: a shelf
+    ordering through its books to their genres, or through its branch to the branch's generic
+    tags, under a target ordering by `Random()` is refused with no row SQL, as are (sync) two
+    many-to-many walks Django rejects as a loop - a genre ordering leading back to the shelf,
+    and a branch ordering repeating the branch's own walk - while the same
+    names under a target ordering by a column, and (sync) the genre's `pk` under a random genre
+    default, are each served with the raised low mark and no random function. Every patched
+    ordering passes Django's system check, since a bare many-to-many or generic name in
+    `Meta.ordering` is `models.E015`. The package tier carries what needs no second wire
+    spelling: a relation cycle
     refused rather than followed, a path piece that is not a field refused, a reverse relation
     read through to its target's default, a chain of two relations whose far end decides the
     verdict, an `F` naming a random annotation still refused, and a reference lifted out of an
@@ -2912,7 +2929,9 @@ complete extension payload over HTTP.
       transforms and its final lookup are matched against approved sets the same way. A STRING term naming a relation is judged by the related model's
       own `Meta.ordering`, which the compiler expands it into and which the term as written
       never shows, so a random default one or more relations away disqualifies the request
-      while the foreign key column named directly does not, and a relation walk Django rejects
+      while the foreign key column named directly does not; a many-to-many or generic relation
+      name always expands, since the field its join walk ends on carries no `attname` it spells,
+      and a relation walk Django rejects
       as an infinite loop is refused rather than followed; an expression reference to that same
       relation does NOT expand, resolving to the foreign key column, so it still backs the
       window. A conditional order's predicate is read on both sides, so the reference a lookup
