@@ -1495,6 +1495,28 @@ is the serializer field's `field.required`, minus the `Meta.optional_fields` ove
 read-only / hidden field is server-supplied, not client input). `<Serializer>PartialInput`
 is every input field optional.
 
+**An update input never carries the primary key.** A writable field whose `source`
+resolves (through `django_strawberry_framework/rest_framework/inputs.py::write_source_key`)
+to the model's primary key is a create input and is left out of the root
+`<Serializer>PartialInput`: DRF's own `ModelSerializer` publishes a
+`OneToOneField(primary_key=True)` such as `PatronProfile.patron` as a writable
+`PrimaryKeyRelatedField` and a client-assigned text key such as `Edition.isbn_13` as a
+writable `CharField`, and `ModelSerializer.update` would assign a sent key so that `save()`
+updates or inserts a different row, while the mutation's `id` argument already names the
+row. Every spelling counts: the key's own name, a renamed field whose `source` names it,
+its `attname`, and the `pk` alias. A nested serializer field sourced on a key relation is
+not such a field: its data is a nested mapping the consumer's own `update()` writes, never
+a value assigned to the key column, so it stays an update input. A partial serializer skips
+the absent field, so the
+located row keeps its key. An update `Meta.fields` naming such a field raises
+[`ConfigurationError`][glossary-configurationerror] at class creation, an update
+`Meta.exclude` naming it is accepted as the no-op it states, and a serializer whose only
+writable field is the key has no update input (the empty-input error). The field leaves the
+basis before it converts, so a key relation bound to its `attname` builds the update input
+while the create still refuses that binding. A nested level is untouched: its rows are
+written by the consumer's own `create()` / `update()`
+(`django_strawberry_framework/rest_framework/inputs.py::resolve_effective_serializer_fields`).
+
 **Nullability and defaults — `allow_null` and `required` are two different axes.**
 GraphQL input nullability and DRF requiredness are **orthogonal**, so the converter pins
 them separately:

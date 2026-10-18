@@ -88,7 +88,6 @@ from .inputs import (
     FORM,
     _form_basis_content_identity,
     build_form_input_class,
-    build_form_inputs,
     form_input_type_name,
     get_form_fields,
     guard_create_required_fields,
@@ -292,11 +291,9 @@ def _cached_build_form_input(
     lookup, so a waiving mutation that materializes a narrowed shape first cannot
     suppress the guard for a later non-waiving mutation reusing the cached shape
     (the cache key excludes ``guard_required`` - spec-038 Decision 7).
-    The create-shaped kinds (``CREATE`` / ``FORM``) then route through
-    ``build_form_inputs`` (with ``guard_required=False`` - already guarded), and
-    only the matching input + its specs are returned (the partial it also builds is
-    discarded). ``PARTIAL`` builds the partial directly (never create-required
-    guarded - it widens model-backed fields optional).
+    Every kind then builds its own input through ``build_form_input_class`` (the
+    guard already ran); ``PARTIAL`` is never create-required guarded - it widens
+    model-backed fields optional.
 
     Returns the ``(input_cls, field_specs)`` pair so the reverse-map specs
     survive the per-shape dedupe and reach the bind's ``_input_field_specs`` stash
@@ -307,6 +304,7 @@ def _cached_build_form_input(
         fields=fields,
         exclude=exclude,
         form_fields=form_fields,
+        operation_kind=operation_kind,
     )
 
     # Run the create-required-narrowing guard PER declaration, BEFORE the per-shape
@@ -330,25 +328,16 @@ def _cached_build_form_input(
             guard_create_required_fields(form_class, effective, form_fields)
 
     def _build() -> tuple[type[object], list[InputFieldSpec]]:
-        if operation_kind == PARTIAL:
-            return build_form_input_class(
-                form_class,
-                operation_kind=PARTIAL,
-                fields=fields,
-                exclude=exclude,
-                form_fields=form_fields,
-            )
-        # The guard already ran per-declaration above; ``build_form_inputs`` would
-        # otherwise re-run it only on a cache MISS (the bypass this fix closes).
-        input_cls, field_specs, _partial_cls, _partial_specs = build_form_inputs(
+        # The guard already ran per-declaration above, so each operation builds only its
+        # own input: a create never builds the partial, whose row-identity drop can leave
+        # it empty for a form whose only field is the primary key.
+        return build_form_input_class(
             form_class,
             operation_kind=operation_kind,
             fields=fields,
             exclude=exclude,
-            guard_required=False,
             form_fields=form_fields,
         )
-        return input_cls, field_specs
 
     cache_key = (
         form_class,
@@ -370,6 +359,7 @@ def _resolve_effective_form_field_names(
     fields: tuple[str, ...] | None,
     exclude: tuple[str, ...] | None,
     form_fields: Mapping[str, forms.Field] | None = None,
+    operation_kind: str | None = None,
 ) -> tuple[str, ...]:
     """Return the effective form-field names after ``Meta.fields`` / ``Meta.exclude``.
 
@@ -384,6 +374,7 @@ def _resolve_effective_form_field_names(
         fields=fields,
         exclude=exclude,
         form_fields=form_fields,
+        operation_kind=operation_kind,
     )
     return tuple(effective)
 
@@ -393,6 +384,7 @@ def _normalized_form_field_selection(
     form_class: FormClass,
     *,
     form_fields: Mapping[str, forms.Field] | None = None,
+    operation_kind: str | None = None,
 ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
     """Normalize + fail-loud-validate ``Meta.fields`` / ``Meta.exclude`` for both form bases.
 
@@ -409,6 +401,7 @@ def _normalized_form_field_selection(
         fields=fields,
         exclude=exclude,
         form_fields=form_fields,
+        operation_kind=operation_kind,
     )
     return fields, exclude
 
@@ -559,8 +552,15 @@ def _form_input_type_name_for(
         fields=meta.fields,
         exclude=meta.exclude,
         form_fields=form_fields,
+        operation_kind=operation_kind,
     )
-    full = tuple(form_fields)
+    full = _resolve_effective_form_field_names(
+        form_class,
+        fields=None,
+        exclude=None,
+        form_fields=form_fields,
+        operation_kind=operation_kind,
+    )
     return form_input_type_name(form_class, operation_kind, effective, full_field_names=full)
 
 
@@ -778,13 +778,15 @@ class DjangoModelFormMutation(_ModelFormMutationBase):
         operation = require_non_delete_operation("DjangoModelFormMutation", name, meta)
 
         # Validate the narrowing fail-loud via the shared machinery (mutual
-        # exclusion, bare-string / duplicate / unknown-name, empty-set guard); the
-        # snapshot stores the normalized declarations (``build_input`` re-resolves
-        # them).
+        # exclusion, bare-string / duplicate / unknown-name, empty-set guard, and
+        # on update the row-identity rule: a field writing the primary key is not
+        # an update input, so naming it fails here); the snapshot stores the
+        # normalized declarations (``build_input`` re-resolves them).
         fields, exclude = _normalized_form_field_selection(
             meta,
             form_class,
             form_fields=_mutation_form_fields(cls, form_class),
+            operation_kind=NON_DELETE_OPERATION_INPUT_KIND[operation],
         )
 
         permission_classes, select_for_update = model_backed_permission_and_lock(

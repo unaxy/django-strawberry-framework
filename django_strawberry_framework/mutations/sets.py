@@ -74,6 +74,7 @@ from django_strawberry_framework.utils.typing import unwrap_return_type
 from .inputs import (
     CREATE,
     INPUTS_MODULE_PATH,
+    PARTIAL,
     build_mutation_input,
     build_payload_type,
     editable_input_fields,
@@ -840,7 +841,13 @@ def _validate_input_class(
             f"@strawberry.input-decorated type; got {_safe_arg_repr(input_class)}.",
         )
 
-    expected = _expected_input_attr_names(model, fields=fields, exclude=exclude)
+    expected = _expected_input_attr_names(
+        model,
+        fields=fields,
+        exclude=exclude,
+        # ``input_class`` customizes the create input, ``partial_input_class`` the update.
+        operation_kind=CREATE if attr_name == "input_class" else PARTIAL,
+    )
     supplied = {field.python_name for field in input_class.__strawberry_definition__.fields}
     diverging = sorted(supplied - expected)
     if diverging:
@@ -859,6 +866,7 @@ def _expected_input_attr_names(
     *,
     fields: tuple[str, ...] | None,
     exclude: tuple[str, ...] | None,
+    operation_kind: str,
 ) -> set[str]:
     """Return the python-attr set the generator would emit for ``model``.
 
@@ -870,7 +878,12 @@ def _expected_input_attr_names(
     related-primary argument is passed ``None``.
     """
     names: set[str] = set()
-    for field in editable_input_fields(model, fields=fields, exclude=exclude):
+    for field in editable_input_fields(
+        model,
+        fields=fields,
+        exclude=exclude,
+        operation_kind=operation_kind,
+    ):
         if getattr(field, "is_relation", False):
             python_attr, _graphql_name, _annotation = relation_input_annotation(
                 field,
@@ -1375,7 +1388,12 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         # deferred finalize-time ``ConfigurationError`` after the class already
         # registered. Delete is excluded above (it takes no input).
         if operation != "delete":
-            selected = editable_input_fields(model, fields=fields, exclude=exclude)
+            selected = editable_input_fields(
+                model,
+                fields=fields,
+                exclude=exclude,
+                operation_kind=NON_DELETE_OPERATION_INPUT_KIND[operation],
+            )
             if not selected:
                 raise ConfigurationError(
                     f"DjangoMutation {name}.Meta.fields / Meta.exclude narrowed the "

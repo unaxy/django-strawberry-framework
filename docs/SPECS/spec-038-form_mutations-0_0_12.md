@@ -1143,6 +1143,22 @@ from) keeps its declared `field.required` (see
 required-extra-field rule), so a required extra field stays required on update and an
 optional one may be omitted.
 
+**An update input never carries the primary key.** A `ModelForm` field whose backing
+column is the model's primary key (a `OneToOneField(primary_key=True)` such as
+`PatronProfile.patron`, a client-assigned text key such as `Edition.isbn_13`) is a create
+input (a create names its row by it) and is left out of `<FormClass>PartialInput`: the
+mutation's `id` argument names the row, and `construct_instance` would assign a sent key
+to the located instance so that `save()` updates or inserts a different row (an
+`editable=False` key is exempt: `construct_instance` never writes it, so a declared field
+named like one stays an input). Decision 8's
+reconstruction rebinds the omitted field from the located row, so the bound form still
+validates it at its stored value. An update `Meta.fields` naming such a field raises
+[`ConfigurationError`][glossary-configurationerror] at class creation, an update
+`Meta.exclude` naming it is accepted as the no-op it states, and a form whose only field
+is the key has no update input (the empty-input error). The canonical
+`<FormClass>PartialInput` name is the full shape minus the key
+(`django_strawberry_framework/forms/inputs.py::resolve_effective_form_fields`).
+
 **Shape identity + naming + collision (the `036` discipline).** A generated form
 input's identity is **not** its name — it is the tuple **`(form_class, operation
 kind, frozenset(effective field names after `Meta.fields` / `Meta.exclude`),

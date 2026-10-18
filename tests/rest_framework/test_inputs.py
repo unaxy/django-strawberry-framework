@@ -1047,6 +1047,166 @@ def test_write_source_key_resolves_every_spelling_of_one_model_attribute(
     assert serializer_inputs.write_source_key(model, source) == expected
 
 
+def _keyed_serializer(
+    model: type[models.Model],
+    basis: str,
+    **declared: DRFField,
+) -> type[serializers.ModelSerializer[models.Model]]:
+    """A ``ModelSerializer`` over ``model`` listing ``basis`` plus the ``declared`` fields."""
+    meta = type("Meta", (), {"model": model, "fields": (basis, *declared)})
+    return type(
+        f"{model.__name__}KeyedSer",
+        (serializers.ModelSerializer,),
+        {**declared, "Meta": meta},
+    )
+
+
+def _profile_serializer(**declared: DRFField) -> type[serializers.ModelSerializer[models.Model]]:
+    """A ``PatronProfile`` serializer (keyed by its one-to-one ``patron``) over ``address_2``."""
+    return _keyed_serializer(library_models.PatronProfile, "address_2", **declared)
+
+
+def _edition_serializer(**declared: DRFField) -> type[serializers.ModelSerializer[models.Model]]:
+    """An ``Edition`` serializer (keyed by its ISBN text) over ``imprint``."""
+    return _keyed_serializer(library_models.Edition, "imprint", **declared)
+
+
+def _patron_key(source: str | None = None) -> DRFField:
+    """A writable ``Patron`` key relation, bound to ``source`` when one is given."""
+    queryset = library_models.Patron.objects.all()
+    relation: _PkRelation[library_models.Patron] = (
+        serializers.PrimaryKeyRelatedField(queryset=queryset)
+        if source is None
+        else serializers.PrimaryKeyRelatedField(queryset=queryset, source=source)
+    )
+    return relation
+
+
+@pytest.mark.parametrize(
+    ("serializer_class", "key"),
+    [
+        pytest.param(
+            _profile_serializer(patron=_patron_key()),
+            "patron",
+            id="own-name-relation",
+        ),
+        pytest.param(
+            _profile_serializer(owner=_patron_key("patron")),
+            "owner",
+            id="renamed-relation",
+        ),
+        pytest.param(
+            _profile_serializer(owner=_patron_key("patron_id")),
+            "owner",
+            id="attname-relation",
+        ),
+        pytest.param(
+            _edition_serializer(isbn_13=serializers.CharField()),
+            "isbn_13",
+            id="own-name-text-key",
+        ),
+        pytest.param(
+            _edition_serializer(isbn=serializers.CharField(source="isbn_13")),
+            "isbn",
+            id="renamed-text-key",
+        ),
+        pytest.param(
+            _edition_serializer(key=serializers.CharField(source="pk")),
+            "key",
+            id="pk-alias",
+        ),
+    ],
+)
+def test_update_basis_leaves_out_every_spelling_of_the_primary_key(
+    serializer_class: type[serializers.ModelSerializer[models.Model]],
+    key: str,
+) -> None:
+    """A writable field whose source resolves to the model's primary key is no update input.
+
+    Whatever spells the key (its own name, a renamed field over it, the relation's
+    ``attname``, the ``pk`` alias), the update basis leaves the field out and naming it in
+    ``fields`` is refused, while the create keeps it: a client-assigned key is how a create
+    names its row.
+    """
+    create = resolve_effective_serializer_fields(serializer_class, operation_kind=CREATE)
+    update = resolve_effective_serializer_fields(serializer_class, operation_kind=PARTIAL)
+
+    assert key in create
+    assert list(update) == [name for name in create if name != key]
+    assert list(
+        resolve_effective_serializer_fields(
+            serializer_class,
+            exclude=(key,),
+            operation_kind=PARTIAL,
+        ),
+    ) == list(update)
+    with pytest.raises(ConfigurationError, match=re.escape(f"declares `fields` naming {[key]!r}")):
+        resolve_effective_serializer_fields(
+            serializer_class,
+            fields=(key,),
+            operation_kind=PARTIAL,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model", "field", "name"),
+    [
+        pytest.param(None, serializers.CharField(), "patron", id="no-model"),
+        pytest.param(
+            library_models.PatronProfile,
+            serializers.CharField(),
+            "confirm",
+            id="serializer-only-key",
+        ),
+        pytest.param(
+            library_models.PatronProfile,
+            serializers.CharField(source="patron.name"),
+            "patron_name",
+            id="dotted-source",
+        ),
+        pytest.param(
+            library_models.Patron,
+            serializers.CharField(),
+            "profile",
+            id="reverse-relation",
+        ),
+        pytest.param(
+            library_models.PatronProfile,
+            _keyed_serializer(library_models.Patron, "name")(),
+            "patron",
+            id="nested-serializer-on-the-key",
+        ),
+    ],
+)
+def test_a_field_writing_no_primary_key_column_stays_an_update_input(
+    model: type[models.Model] | None,
+    field: DRFField,
+    name: str,
+) -> None:
+    """A source naming no concrete column of ``model`` never counts as writing its key.
+
+    A model-less serializer, a serializer-only key a custom ``update()`` reads, a dotted
+    source, a reverse accessor and a nested serializer (whose data the consumer's own
+    ``update()`` writes) write no primary-key column, so the update keeps them.
+    """
+    assert serializer_inputs._writes_primary_key(model, field, name) is False
+
+
+def test_attname_bound_key_relation_builds_on_update_and_is_refused_on_create() -> None:
+    """A key relation bound to its ``attname`` builds the update input and is refused on create.
+
+    The update leaves the key out before any field converts, so the update input builds
+    without it; the create converts it and fails loud on the ``attname`` binding.
+    """
+    serializer_class = _profile_serializer(owner=_patron_key("patron_id"))
+
+    partial_cls, _shape = build_serializer_input_class(serializer_class, operation_kind=PARTIAL)
+
+    assert set(_field_map(partial_cls)) == {"address_2"}
+    with pytest.raises(ConfigurationError, match="binds source 'patron_id', the column"):
+        build_serializer_input_class(serializer_class, operation_kind=CREATE)
+
+
 def test_writable_source_collisions_keys_by_resolved_model_attribute() -> None:
     """With a model, the attname and ``pk`` spellings collide with the field they alias."""
     assert serializer_inputs.writable_source_collisions(
@@ -1609,6 +1769,34 @@ def test_nested_multi_field_builds_list_of_nested_input() -> None:
     assert items_spec.kind == NESTED_MULTI
     assert items_spec.nested_specs is not None
     assert [s.target_name for s in items_spec.nested_specs] == ["code", "note"]
+
+
+def test_nested_update_input_keeps_a_client_assigned_primary_key() -> None:
+    """A nested level of an update input keeps its rows' primary key.
+
+    Only the root update input leaves the key out (its ``id`` argument names the row); a
+    nested level's rows are written by the consumer's own ``update()``, which may name
+    each nested row by its key, so the nested ``Edition`` input keeps ``isbn_13``.
+    """
+
+    class EditionChild(ModelSerializerBase[library_models.Edition]):
+        class Meta:
+            model = library_models.Edition
+            fields = ("isbn_13", "imprint")
+
+    class Parent(serializers.Serializer[object]):
+        title = serializers.CharField()
+        editions = EditionChild(many=True)
+
+    _cls, shape = build_serializer_input_class(
+        Parent,
+        operation_kind=PARTIAL,
+        nested_configs={"editions": NestedSerializerConfig()},
+    )
+
+    editions_spec = next(s for s in shape.field_specs if s.target_name == "editions")
+    assert editions_spec.nested_specs is not None
+    assert [s.target_name for s in editions_spec.nested_specs] == ["isbn_13", "imprint"]
 
 
 def test_nested_config_narrows_nested_fields() -> None:

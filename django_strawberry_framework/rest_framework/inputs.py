@@ -653,6 +653,29 @@ def write_source_key(model: type[models.Model] | None, source: str) -> str:
     return field.name if isinstance(field, models.Field) else source
 
 
+def _writes_primary_key(model: type[models.Model] | None, field: DRFField, name: str) -> bool:
+    """Return whether a writable serializer field's write lands on ``model``'s primary key.
+
+    The write target is the one ``write_source_key`` resolves the field's ``source``
+    (else its declared ``name``) to, so every spelling of the key counts: the key's own
+    name (``patron``, ``isbn_13``), its ``attname``, the ``pk`` alias, and a renamed field
+    whose ``source`` names any of them. Under multi-table inheritance an inherited parent
+    key (``id`` on a child) is a primary key too. A source naming no concrete field, a
+    dotted or ``"*"`` source, and a model-less serializer write no key. Neither does a
+    nested serializer field, even one sourced on the key relation: its validated data is a
+    nested mapping the consumer's own ``create()`` / ``update()`` writes (DRF refuses to
+    write it by default), never a value assigned to the key column.
+    """
+    if model is None or is_nested_serializer_field(field):
+        return False
+    key = write_source_key(model, field.source or name)
+    try:
+        target = model._meta.get_field(key)
+    except FieldDoesNotExist:
+        return False
+    return isinstance(target, models.Field) and target.primary_key
+
+
 def writable_serializer_fields(
     field_map: Mapping[str, DRFField],
 ) -> dict[str, DRFField]:
@@ -798,6 +821,7 @@ def resolve_effective_serializer_fields(
     fields: object = None,
     exclude: object = None,
     field_map: dict[str, DRFField] | None = None,
+    operation_kind: str | None = None,
 ) -> dict[str, DRFField]:
     """Return the effective ``{name: serializers.Field}`` dict after dropping + narrowing.
 
@@ -828,6 +852,14 @@ def resolve_effective_serializer_fields(
     error: the dropped field is simply not in the writable set the narrowing is checked
     against. Excluding a read-only field is NOT a silent no-op - a read-only field is never
     an input field, so neither selecting nor excluding it is meaningful, and both fail loud.
+
+    For the ``PARTIAL`` (update) ``operation_kind`` the writable basis also leaves out
+    every field whose write lands on the row's primary key (``_writes_primary_key``):
+    DRF's ``ModelSerializer.update`` would assign it and ``save()`` would update or
+    insert a different row. A partial serializer skips an absent field, so the located
+    row keeps its key. The same fail-loud rule applies to naming one. ``None`` (a create,
+    or a nested serializer level, whose rows the consumer's own ``update()`` writes) keeps
+    the full writable basis.
     """
     discovered = get_serializer_for_schema(serializer_class) if field_map is None else field_map
     # Drop read-only + HiddenField: neither is an input field. ``read_only``
@@ -838,6 +870,7 @@ def resolve_effective_serializer_fields(
     # form flavor; this wrapper supplies the WRITABLE basis + the serializer message
     # knobs so the read-only drop stays intrinsic to the serializer flavor.
     writable = writable_serializer_fields(discovered)
+    model = serializer_model(serializer_class)
     effective = resolve_effective_fields(
         writable,
         fields=fields,
@@ -850,6 +883,13 @@ def resolve_effective_serializer_fields(
             "Meta.fields / Meta.exclude narrowed the writable serializer field set to empty "
             "(or the serializer declares no writable fields). A serializer input must define "
             "at least one field."
+        ),
+        row_identity=(
+            frozenset(
+                name for name, field in writable.items() if _writes_primary_key(model, field, name)
+            )
+            if operation_kind == PARTIAL
+            else frozenset()
         ),
     )
     unusable = [name for name in effective if not _is_input_attribute_name(name)]
@@ -1691,6 +1731,7 @@ def _default_full_shape_identity(
     provisional_name: str,
     *,
     is_partial: bool,
+    operation_kind: str | None = None,
 ) -> (
     tuple[tuple[InputFieldSpec, ...], tuple[str, ...], tuple[str | None, ...], tuple[bool, ...]]
     | None
@@ -1720,7 +1761,10 @@ def _default_full_shape_identity(
     stay collision-free via the per-field token).
     """
     try:
-        default_effective = resolve_effective_serializer_fields(serializer_class)
+        default_effective = resolve_effective_serializer_fields(
+            serializer_class,
+            operation_kind=operation_kind,
+        )
         field_specs, annotation_reprs, descriptions, required_state, _triples = (
             _walk_serializer_fields(
                 default_effective,
@@ -1783,11 +1827,15 @@ def build_serializer_input_class(
     ``materialize_serializer_input_class`` to pin the class as a module global.
     Any NESTED input classes are deduped + materialized during the walk.
     """
+    # The row-identity rule is the ROOT update input's: a nested level's rows are
+    # written by the consumer's own ``create()`` / ``update()`` override.
+    root_operation_kind = None if _nested_path else operation_kind
     effective = resolve_effective_serializer_fields(
         serializer_class,
         fields=fields,
         exclude=exclude,
         field_map=field_map,
+        operation_kind=root_operation_kind,
     )
     # fail loud NOW (at every nesting level) if a ``nested_fields`` key does not name
     # an effective nested serializer field - a typo / excluded / non-nested key is a config error.
@@ -1855,6 +1903,7 @@ def build_serializer_input_class(
         model,
         provisional_name,
         is_partial=is_partial,
+        operation_kind=root_operation_kind,
     )
     is_full_shape = (
         default_identity is not None

@@ -273,6 +273,7 @@ def _checked_schema_field_map(
             fields=meta.fields,
             exclude=meta.exclude,
             field_map=field_map,
+            operation_kind=NON_DELETE_OPERATION_INPUT_KIND[meta.operation],
         )
         if (
             serializer_schema_fingerprint(effective, nested_configs=meta.nested_fields)
@@ -677,6 +678,7 @@ class SerializerMutation(DjangoMutation):
             fields=fields,
             exclude=exclude,
             field_map=field_map,
+            operation_kind=NON_DELETE_OPERATION_INPUT_KIND[operation],
         )
         # ``Meta.optional_fields`` is the MUTATION's key (spec-039 - the
         # documented public surface, NOT the serializer's own ``Meta``): normalize its

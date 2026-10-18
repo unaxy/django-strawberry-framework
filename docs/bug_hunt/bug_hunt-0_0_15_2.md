@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 152 done, 119 to do.
+Progress: 153 done, 120 to do.
 
 ## Done
 
@@ -331,6 +331,14 @@ Progress: 152 done, 119 to do.
   written column, every card and planning error in one run, orphan mentions reaped, no restamp of unchanged rows), a
   pre-commit hook and the CI lint step run it, `check_spec_glossary.py` refuses a repeated anchor, the DB is re-synced
   and card 056 / 053 board text it falsified is corrected
+- [x] 107. `DjangoModelFormMutation` and `SerializerMutation` published the model's primary key (a one-to-one
+  `primary_key=True`, a text key, a serializer field whose source resolves to it) on the update input, so another row's
+  key wrote that row and the post-write guard answered a masked error, while `DjangoMutation` dropped every key on
+  create too (a text-key create committed `""` and the next one overwrote it); an update input now never carries the
+  primary key (update `fields` naming it raises at class creation, `exclude` naming it is accepted), a model create
+  takes a client-assigned key under the default / `db_default` required rule (a `db_default` column is optional), a
+  nested serializer field and a non-editable form key are not the key, `build_form_inputs` is gone; specs 036, 038, 039
+  say so
 - [x] 110. The item-56 alias message labelling an owner `'category_id' (source 'category_id')`: not a defect (cosmetic,
   no contract row): the label comes from `rest_framework/inputs.py::raise_writable_source_ownership_errors` and the
   refusal stays the typed `ConfigurationError`
@@ -525,11 +533,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 107. A writable primary-key relation (OneToOne `primary_key=True`) in an update input fails at request time
-  instead of at class creation (The MTI half is not a defect: an auto-created parent link such as `venue_ptr` is not
-  published as a writable input.)
 - [ ] 109. `pid = PrimaryKeyRelatedField(source="pk")` over a relation primary key builds and every create raises a masked
-  TypeError: `backing_model_field` does not resolve `"pk"`, while `write_source_key` does
+  TypeError: `backing_model_field` does not resolve `"pk"`, while `write_source_key` does (the update half closed with
+  item 107: an update input no longer carries a field that writes the primary key)
 - [ ] 111. A GenericForeignKey own-name `PrimaryKeyRelatedField(source="content_object")` raises `AttributeError` in
   `_require_relation_primary` (`related_model` is None) instead of `ConfigurationError`
 - [ ] 120. `prove_failability.py` has no SIGTERM / SIGHUP handler: a terminated run leaves its mutation in the tree and
@@ -648,6 +654,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 272. A `get_queryset` hook returning `qs.extra(order_by=[<TextChoices or StrEnum member>])` is refused by the
   visibility seal (`utils/querysets.py::_raw_sql_sequence_defect` admits only exact `str` terms) with a
   `ConfigurationError`, while Django compiles the member as the field name it equals
+- [ ] 274. A create that takes a client-assigned primary key (a `DjangoMutation` create over `library.Edition` or
+  `PatronProfile`, a `ModelForm` or serializer create naming the key) can overwrite a row inserted concurrently: the
+  key's uniqueness is checked in `full_clean()` / `is_valid()`, then a plain `save()` runs UPDATE-then-INSERT, so a
+  second create with the same key landing between the two updates the first row instead of failing;
+  `save(force_insert=True)` closes it but reaches consumer `save()` overrides
 ## To do: holes found re-checking the fixes
 
 
@@ -884,6 +895,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   and nested connections alike (0.0.14 served the pk or `Meta.ordering` order instead, and a keyset hook that also
   called `order_by()` could repeat and skip rows); a keyset target whose extra ordering names no anchorable field gets
   the keyset order error
+- [ ] 275. CHANGELOG entry for item 107: a `DjangoModelFormMutation` or `SerializerMutation` update input no longer
+  carries a field that writes the primary key (0.0.14 published it and answered a masked error for another row's key),
+  update `Meta.fields` naming it raises at class creation, an update whose only field is the key raises "has no fields";
+  a `DjangoMutation` create takes a client-assigned key (0.0.14 left it out: a text-key create committed `""`), and a
+  `db_default` column is optional on create; input type names move where explicit `fields` now equal or differ from the
+  canonical shape (a canonical `<Model>Input` over a client-assigned key gains it); `build_form_inputs` is removed
 - [ ] 108. A serializer-only source over the default `create()` / `update()` (`gs = PrimaryKeyRelatedField(many=True,
   source="genres_id")`) builds; create raises a masked TypeError and update is a silent no-op. Refuse a column-less
   writable source at class creation, as item 103 does for an `attname` source, or leave it to DRF's default `create()` /

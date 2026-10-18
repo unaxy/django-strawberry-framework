@@ -37,6 +37,7 @@ registries, and bind/dedupe.
 from __future__ import annotations
 
 import itertools
+import re
 import sys
 from collections.abc import Callable, Iterator
 from typing import NoReturn
@@ -585,6 +586,113 @@ def test_modelform_unknown_field_name_routes_through_slice1_narrowing() -> None:
                 form_class = form_cls
                 operation = "create"
                 fields = ("definitely_not_a_field",)
+
+
+def _profile_model_form(
+    *names: str,
+) -> type[forms.ModelForm[library_models.PatronProfile]]:
+    """A ``ModelForm`` over ``PatronProfile`` (keyed by its one-to-one ``patron``)."""
+
+    class ProfileModelForm(forms.ModelForm[library_models.PatronProfile]):
+        class Meta:
+            model = library_models.PatronProfile
+            fields = names
+
+    return ProfileModelForm
+
+
+def test_modelform_update_meta_fields_naming_the_primary_key_raises_at_class_creation() -> None:
+    """An update ``Meta.fields`` naming the form's primary-key field is refused at class creation.
+
+    The form publishes ``patron`` on create; the update input never carries it, since the
+    mutation's ``id`` argument names the row. The same ``Meta.fields`` builds a create and
+    an update ``Meta.exclude`` naming the key builds, stating what the update already does.
+    """
+    form_cls = _profile_model_form("patron", "address_2")
+
+    class ProfileT(DjangoType):
+        class Meta:
+            model = library_models.PatronProfile
+            fields = ("address_2",)
+            primary = True
+
+    class CreateProfile(DjangoModelFormMutation):
+        class Meta:
+            form_class = form_cls
+            operation = "create"
+            fields = ("patron", "address_2")
+
+    class UpdateProfileExcludingKey(DjangoModelFormMutation):
+        class Meta:
+            form_class = form_cls
+            operation = "update"
+            exclude = ("patron",)
+
+    assert CreateProfile._mutation_meta.fields == ("patron", "address_2")
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "DjangoFormMutation for ProfileModelForm declares `fields` naming ['patron'], "
+            "which write(s) the row's primary key.",
+        ),
+    ):
+
+        @definition_raises
+        class UpdateProfile(DjangoModelFormMutation):
+            class Meta:
+                form_class = form_cls
+                operation = "update"
+                fields = ("patron", "address_2")
+
+    assert registry.get(library_models.PatronProfile) is ProfileT
+    finalize_django_types()
+    # The excluded key is no update input, so the update keeps the canonical name.
+    partial_name = "ProfileModelFormPartialInput"
+    assert UpdateProfileExcludingKey.input_type_name(UpdateProfileExcludingKey._mutation_meta) == (
+        partial_name
+    )
+    assert UpdateProfileExcludingKey._input_class is not None
+    assert UpdateProfileExcludingKey._input_class.__name__ == partial_name
+
+
+def test_modelform_update_over_only_the_primary_key_raises_at_class_creation() -> None:
+    """A form whose only field is its primary key has no update input and is refused.
+
+    The create over the same form builds and binds, its input carrying only the key: the
+    bind builds the create input alone, never the update input the form has none of.
+    """
+    form_cls = _profile_model_form("patron")
+
+    class ProfileT(DjangoType):
+        class Meta:
+            model = library_models.PatronProfile
+            fields = ("address_2",)
+            primary = True
+
+    class CreateProfile(DjangoModelFormMutation):
+        class Meta:
+            form_class = form_cls
+            operation = "create"
+            permission_classes = []
+
+    with pytest.raises(
+        ConfigurationError,
+        match="DjangoFormMutation input for ProfileModelForm has no fields",
+    ):
+
+        @definition_raises
+        class UpdateProfile(DjangoModelFormMutation):
+            class Meta:
+                form_class = form_cls
+                operation = "update"
+
+    assert registry.get(library_models.PatronProfile) is ProfileT
+    finalize_django_types()
+    assert CreateProfile._input_class is not None
+    assert [
+        field.python_name
+        for field in get_object_definition(CreateProfile._input_class, strict=True).fields
+    ] == ["patron_id"]
 
 
 def test_cached_build_form_input_runs_required_guard_per_declaration() -> None:

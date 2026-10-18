@@ -157,7 +157,7 @@ The two [`FilterSet`][glossary-filterset]s and two [`OrderSet`][glossary-orderse
 }
 ```
 
-**Write.** `createItem` takes a generated `ItemInput!` whose required-ness follows the column's `default` / `blank` / `null`; the FK is `categoryId`, a `GlobalID` taken from any `id` the read side returned and type-checked against `Category` at decode. The permission boundary has two layers that never mix: a caller without the Django `products.add_item` permission (anonymous included) is refused with a top-level `GraphQLError` before any write; a caller who passes it but fails `full_clean()` or a model constraint gets a `null` node and one `FieldError` per offending field in `errors`, with `"__all__"` for multi-field constraints. The whole operation, including serialization of the returned `node`, runs inside one transaction because `DjangoSchema` installs the execution context that holds it open.
+**Write.** `createItem` takes a generated `ItemInput!` whose required-ness follows the column's `default` / `db_default` / `blank` / `null`; the FK is `categoryId`, a `GlobalID` taken from any `id` the read side returned and type-checked against `Category` at decode. The permission boundary has two layers that never mix: a caller without the Django `products.add_item` permission (anonymous included) is refused with a top-level `GraphQLError` before any write; a caller who passes it but fails `full_clean()` or a model constraint gets a `null` node and one `FieldError` per offending field in `errors`, with `"__all__"` for multi-field constraints. The whole operation, including serialization of the returned `node`, runs inside one transaction because `DjangoSchema` installs the execution context that holds it open.
 
 ```graphql
 mutation {

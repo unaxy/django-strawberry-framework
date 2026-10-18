@@ -991,6 +991,168 @@ def test_meta_injected_field_still_in_input_raises_at_class_creation() -> None:
                 permission_classes = []
 
 
+def _profile_serializer(*names: str) -> type[ModelSerializerBase[library_models.PatronProfile]]:
+    """A ``PatronProfile`` serializer (keyed by its one-to-one ``patron``) over ``names``."""
+
+    class ProfileSerializer(ModelSerializerBase[library_models.PatronProfile]):
+        class Meta:
+            model = library_models.PatronProfile
+            fields = names
+
+    return ProfileSerializer
+
+
+def test_update_meta_fields_naming_the_primary_key_raises_at_class_creation() -> None:
+    """An update ``Meta.fields`` naming the serializer's primary-key field is refused.
+
+    DRF publishes ``patron`` writable, and the create input carries it; the update input
+    never does, since the mutation's ``id`` argument names the row. The same
+    ``Meta.fields`` builds a create, an update ``Meta.exclude`` naming the key builds, and
+    the un-narrowed update binds under the canonical partial name, the key not in its shape.
+    """
+    serializer_cls = _profile_serializer("patron", "address_2")
+
+    class PatronT(DjangoType):
+        class Meta:
+            model = library_models.Patron
+            fields = ("name",)
+            primary = True
+
+    class ProfileT(DjangoType):
+        class Meta:
+            model = library_models.PatronProfile
+            fields = ("address_2",)
+            primary = True
+
+    class CreateProfile(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = "create"
+            fields = ("patron", "address_2")
+            permission_classes = []
+
+    class UpdateProfileExcludingKey(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = "update"
+            exclude = ("patron",)
+            permission_classes = []
+
+    class UpdateProfileWhole(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = "update"
+            permission_classes = []
+
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "SerializerMutation for ProfileSerializer declares `fields` naming ['patron'], "
+            "which write(s) the row's primary key.",
+        ),
+    ):
+
+        @definition_raises
+        class UpdateProfile(SerializerMutation):
+            class Meta:
+                serializer_class = serializer_cls
+                operation = "update"
+                fields = ("patron", "address_2")
+                permission_classes = []
+
+    assert registry.get(library_models.Patron) is PatronT
+    assert registry.get(library_models.PatronProfile) is ProfileT
+    assert CreateProfile._mutation_meta.fields == ("patron", "address_2")
+    finalize_django_types()
+    # The key is no update input, so the un-narrowed update keeps the canonical name.
+    partial_name = "ProfileSerializerPartialInput"
+    assert UpdateProfileWhole.input_type_name(UpdateProfileWhole._mutation_meta) == partial_name
+    assert UpdateProfileWhole._input_class is not None
+    assert UpdateProfileWhole._input_class.__name__ == partial_name
+    assert UpdateProfileExcludingKey._input_class is not None
+
+
+def test_update_over_only_the_primary_key_raises_at_class_creation() -> None:
+    """A serializer whose only writable field is its primary key has no update input.
+
+    The create over the same serializer builds: its input carries the key.
+    """
+    serializer_cls = _profile_serializer("patron")
+
+    class CreateProfile(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = "create"
+            permission_classes = []
+
+    assert CreateProfile._mutation_meta.operation == "create"
+    with pytest.raises(
+        ConfigurationError,
+        match="SerializerMutation input for ProfileSerializer has no fields",
+    ):
+
+        @definition_raises
+        class UpdateProfile(SerializerMutation):
+            class Meta:
+                serializer_class = serializer_cls
+                operation = "update"
+                permission_classes = []
+
+
+def test_update_keeps_a_nested_serializer_sourced_on_the_key_relation() -> None:
+    """A nested serializer over the key relation stays an update input.
+
+    Its data is a nested mapping the consumer's own ``update()`` writes (here, renaming
+    the patron), never a value assigned to the ``patron`` key column, so the update input
+    keeps it beside ``address_2``.
+    """
+
+    class PatronT(DjangoType):
+        class Meta:
+            model = library_models.Patron
+            fields = ("name",)
+            primary = True
+
+    class ProfileT(DjangoType):
+        class Meta:
+            model = library_models.PatronProfile
+            fields = ("address_2",)
+            primary = True
+
+    class PatronNameSerializer(ModelSerializerBase[library_models.Patron]):
+        class Meta:
+            model = library_models.Patron
+            fields = ("name",)
+
+    class ProfileNestingSerializer(ModelSerializerBase[library_models.PatronProfile]):
+        patron = PatronNameSerializer()
+
+        class Meta:
+            model = library_models.PatronProfile
+            fields = ("patron", "address_2")
+
+        @override
+        def update(
+            self,
+            instance: library_models.PatronProfile,
+            validated_data: dict[str, object],
+        ) -> NoReturn:
+            raise AssertionError("the nested-write check reads this override; nothing calls it")
+
+    class UpdateProfileNesting(SerializerMutation):
+        class Meta:
+            serializer_class = ProfileNestingSerializer
+            operation = "update"
+            nested_fields = {"patron": NestedSerializerConfig()}
+            permission_classes = []
+
+    assert registry.get(library_models.Patron) is PatronT
+    assert registry.get(library_models.PatronProfile) is ProfileT
+    finalize_django_types()
+    assert UpdateProfileNesting._input_class is not None
+    assert set(_input_fields(UpdateProfileNesting._input_class)) == {"patron", "address_2"}
+
+
 @pytest.mark.parametrize(
     "field",
     [serializers.CharField(read_only=True), serializers.HiddenField(default="server")],
