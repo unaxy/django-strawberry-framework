@@ -23,7 +23,6 @@ from apps.library import schema as library_schema
 from apps.library.orders import BranchOrder
 from apps.products import schema as products_schema
 from apps.products.services import seed_cascade_split, seed_data
-from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import connection, models
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -35,7 +34,18 @@ from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext, register_lookup
 from django.urls import clear_url_caches, path
 from django.utils.functional import cached_property
-from graphql_client import JSONObject, graphql_payload, post_graphql
+from graphql_client import (
+    JSONObject,
+    graphql_payload,
+    is_json_object,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    post_graphql,
+    response_json,
+)
 from strawberry.django.context import StrawberryDjangoContext
 from strawberry.schema.name_converter import NameConverter
 from typing_extensions import TypedDict, Unpack, override
@@ -73,23 +83,18 @@ if TYPE_CHECKING:
     from django.views import View
     from strawberry.schema.name_converter import HasGraphQLName
     from strawberry.types.arguments import StrawberryArgument
-    from typing_extensions import TypeIs
 
     from django_strawberry_framework.resource_policy import ResourcePolicy
+
 
 _ListResolver: TypeAlias = Callable[[object, strawberry.Info[object, object]], object]
 
 
-def _is_dict(value: object) -> TypeIs[dict[object, object]]:
-    """Whether a parsed payload value is a JSON object, its members still unchecked."""
-    return isinstance(value, dict)
-
-
 def _error_extension(error: object, key: str) -> object:
     """One wire error's ``extensions[key]``, ``None`` when either level is absent."""
-    assert _is_dict(error), error
+    assert is_json_object(error), error
     extensions = error.get("extensions")
-    return extensions.get(key) if _is_dict(extensions) else None
+    return extensions.get(key) if is_json_object(extensions) else None
 
 
 _ShelfCarry: TypeAlias = Callable[
@@ -110,10 +115,7 @@ _ApplySyncOverride: TypeAlias = Callable[
 #: A ``Meta.ordering`` value: what ``Options.ordering`` holds, one tuple of terms.
 _ModelOrdering: TypeAlias = tuple[str | Combinable, ...]
 
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 
 class _CurrentView(TypedDict):
@@ -206,7 +208,7 @@ def _post_sync(
         view_class=view_class,
     )
     assert response.status_code == 200
-    return response.json()
+    return response_json(response)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +264,9 @@ _INTROSPECTION_QUERY = """
 def _introspected_query_fields() -> dict[str, JSONObject]:
     """The ``Query`` type's fields, keyed by published name."""
     payload = graphql_payload(_INTROSPECTION_QUERY)
-    return {f["name"]: f for f in payload["data"]["__type"]["fields"]}
+    return {
+        json_str(f, "name"): json_object(f) for f in json_list(payload, "data", "__type", "fields")
+    }
 
 
 @pytest.mark.django_db
@@ -279,21 +283,21 @@ def test_shipped_branches_introspection_arguments(field_name: str) -> None:
     """Every published list surface carries the same three arguments in the same types."""
     fields = _introspected_query_fields()
     assert field_name in fields
-    args_map = {a["name"]: a for a in fields[field_name]["args"]}
+    args_map = {json_str(a, "name"): json_object(a) for a in json_list(fields[field_name], "args")}
 
     assert "offset" in args_map
-    assert args_map["offset"]["type"]["kind"] == "SCALAR"
-    assert args_map["offset"]["type"]["name"] == "Int"
+    assert json_at(args_map, "offset", "type", "kind") == "SCALAR"
+    assert json_at(args_map, "offset", "type", "name") == "Int"
 
     assert "limit" in args_map
-    assert args_map["limit"]["type"]["kind"] == "SCALAR"
-    assert args_map["limit"]["type"]["name"] == "Int"
+    assert json_at(args_map, "limit", "type", "kind") == "SCALAR"
+    assert json_at(args_map, "limit", "type", "name") == "Int"
 
     assert "orderBy" in args_map
     order_type = args_map["orderBy"]["type"]
-    assert order_type["kind"] == "LIST"
-    assert order_type["ofType"]["kind"] == "NON_NULL"
-    assert order_type["ofType"]["ofType"]["name"] == "BranchOrderInputType"
+    assert json_at(order_type, "kind") == "LIST"
+    assert json_at(order_type, "ofType", "kind") == "NON_NULL"
+    assert json_at(order_type, "ofType", "ofType", "name") == "BranchOrderInputType"
 
 
 @pytest.mark.django_db
@@ -305,21 +309,21 @@ def test_shipped_branches_introspection_return_types() -> None:
     # annotation renders all four levels NON_NULL -> LIST -> NON_NULL -> OBJECT,
     # so neither the list nor an item may ever be null.
     ret_default = fields["allLibraryBranchesViaListField"]["type"]
-    assert ret_default["kind"] == "NON_NULL"
-    assert ret_default["ofType"]["kind"] == "LIST"
-    assert ret_default["ofType"]["ofType"]["kind"] == "NON_NULL"
-    assert ret_default["ofType"]["ofType"]["ofType"]["kind"] == "OBJECT"
-    assert ret_default["ofType"]["ofType"]["ofType"]["name"] == "BranchType"
+    assert json_at(ret_default, "kind") == "NON_NULL"
+    assert json_at(ret_default, "ofType", "kind") == "LIST"
+    assert json_at(ret_default, "ofType", "ofType", "kind") == "NON_NULL"
+    assert json_at(ret_default, "ofType", "ofType", "ofType", "kind") == "OBJECT"
+    assert json_at(ret_default, "ofType", "ofType", "ofType", "name") == "BranchType"
 
     # Nullable list return type: LIST -> NON_NULL -> OBJECT. Only the OUTER
     # nullability differs from the default sibling above, which is what makes
     # that sibling's four levels a statement about the annotation rather than
     # about ``DjangoListField`` rendering one fixed shape.
     ret_nullable = fields["allLibraryBranchesViaListFieldNullable"]["type"]
-    assert ret_nullable["kind"] == "LIST"
-    assert ret_nullable["ofType"]["kind"] == "NON_NULL"
-    assert ret_nullable["ofType"]["ofType"]["kind"] == "OBJECT"
-    assert ret_nullable["ofType"]["ofType"]["name"] == "BranchType"
+    assert json_at(ret_nullable, "kind") == "LIST"
+    assert json_at(ret_nullable, "ofType", "kind") == "NON_NULL"
+    assert json_at(ret_nullable, "ofType", "ofType", "kind") == "OBJECT"
+    assert json_at(ret_nullable, "ofType", "ofType", "name") == "BranchType"
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +368,10 @@ def test_shipped_branches_staff_ordered_offset_limit() -> None:
     with CaptureQueriesContext(connection) as ctx:
         payload = graphql_payload(query, client=client)
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["allLibraryBranchesViaListField"]]
+    names = [
+        json_at(row, "name")
+        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
+    ]
     assert names == ["Bravo", "Charlie"]
     branch_queries = [
         q["sql"].upper() for q in ctx.captured_queries if "LIBRARY_BRANCH" in q["sql"].upper()
@@ -394,7 +401,10 @@ def test_shipped_branches_anonymous_visibility_before_offset() -> None:
     """
     payload = graphql_payload(query)
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["allLibraryBranchesViaListField"]]
+    names = [
+        json_at(row, "name")
+        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
+    ]
     assert names == ["Bravo", "Charlie"]
 
 
@@ -414,7 +424,10 @@ def test_shipped_branches_order_by_alone() -> None:
     """
     payload = graphql_payload(query, client=client)
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["allLibraryBranchesViaListField"]]
+    names = [
+        json_at(row, "name")
+        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
+    ]
     assert names == ["Alpha", "Bravo", "Charlie"]
 
 
@@ -436,13 +449,19 @@ def test_shipped_branches_nonzero_offset_without_order_rejected() -> None:
     payload = graphql_payload(query)
     assert "errors" in payload
     assert payload["data"] is None, payload
-    err = payload["errors"][0]
-    assert err["extensions"]["code"] == "LIST_ARGUMENT_INVALID"
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
-    assert err["extensions"]["value"] == 1
-    assert "Invalid argument 'offset' on allLibraryBranchesViaListField:" in err["message"]
-    assert "requires an active ordering via 'orderBy' or model 'Meta.ordering'." in err["message"]
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
+    assert json_at(err, "extensions", "value") == 1
+    assert "Invalid argument 'offset' on allLibraryBranchesViaListField:" in json_str(
+        err,
+        "message",
+    )
+    assert "requires an active ordering via 'orderBy' or model 'Meta.ordering'." in json_str(
+        err,
+        "message",
+    )
 
 
 def _apply_order_unchanged(
@@ -507,9 +526,9 @@ def test_shipped_branches_offset_rejects_a_random_model_default(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -533,9 +552,9 @@ def test_shipped_branches_offset_rejects_a_random_expression_model_default(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -556,7 +575,7 @@ def test_shipped_branches_offset_accepts_a_stable_model_default(
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranchesViaListField"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
     assert len(branch_sql) == 1
     statement = branch_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -641,9 +660,9 @@ def test_holder_offset_rejects_a_relation_default_that_expands_to_a_random_order
 
     payload, shelf_sql = _shelf_offset_page(monkeypatch, ("branch",), (Random(),))
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == []
 
 
@@ -661,7 +680,7 @@ def test_holder_offset_accepts_a_relation_default_that_expands_to_a_stable_order
     payload, shelf_sql = _shelf_offset_page(monkeypatch, ("branch",), ("name",))
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -683,7 +702,7 @@ def test_holder_offset_accepts_a_relation_attname_over_a_random_related_default(
     payload, shelf_sql = _shelf_offset_page(monkeypatch, ("branch_id",), (Random(),))
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -716,7 +735,7 @@ def test_holder_offset_accepts_an_expression_reference_to_a_relation(
     payload, shelf_sql = _shelf_offset_page(monkeypatch, shelf_ordering, (Random(),))
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -790,9 +809,9 @@ def test_holder_offset_rejects_a_to_many_relation_default_that_expands_to_an_uns
     )
 
     _assert_orderings_pass_checks(library_models.Shelf, target)
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == []
 
 
@@ -824,7 +843,7 @@ def test_holder_offset_accepts_a_to_many_relation_default_that_expands_to_a_stab
 
     _assert_orderings_pass_checks(library_models.Shelf, target)
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -874,9 +893,9 @@ def test_holder_offset_rejects_a_conditional_order_over_a_random_predicate(
         resolver=lambda _root, _info: carry(library_models.Shelf.objects.all()),
     )
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == []
 
 
@@ -899,7 +918,7 @@ def test_holder_offset_accepts_a_conditional_order_over_a_column_alias_predicate
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -920,7 +939,7 @@ def test_holder_offset_accepts_a_conditional_order_over_a_plain_column_predicate
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1023,9 +1042,9 @@ def test_holder_offset_reads_an_expression_by_its_approved_form(
     payload, shelf_sql = _shelf_offset_page(monkeypatch, ordering, ("name",))
 
     if not served:
-        err = payload["errors"][0]
-        assert err["extensions"]["reason"] == "order_required"
-        assert err["extensions"]["argument"] == "offset"
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
         assert shelf_sql == []
         return
     assert "errors" not in payload, payload
@@ -1104,13 +1123,13 @@ def test_holder_offset_reads_a_term_by_the_form_it_resolves_into(
     payload, shelf_sql = _shelf_offset_page(monkeypatch, ordering, ("name",))
 
     if not served:
-        err = payload["errors"][0]
-        assert err["extensions"]["reason"] == "order_required"
-        assert err["extensions"]["argument"] == "offset"
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
         assert shelf_sql == []
         return
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1143,13 +1162,13 @@ def test_holder_offset_reads_a_conditional_predicate_by_its_exact_type(
     payload, shelf_sql = _shelf_offset_page(monkeypatch, _case_ordering_over(condition), ("name",))
 
     if not served:
-        err = payload["errors"][0]
-        assert err["extensions"]["reason"] == "order_required"
-        assert err["extensions"]["argument"] == "offset"
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
         assert shelf_sql == []
         return
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1183,9 +1202,9 @@ def test_holder_offset_rejects_a_predicate_chain_of_project_sql(
             ("name",),
         )
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == []
 
 
@@ -1247,9 +1266,9 @@ def test_holder_offset_refuses_a_reference_naming_an_extra_select_alias(
         resolver=lambda _root, _info: library_models.Shelf.objects.extra(select={"coin": "1"}),
     )
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == []
 
 
@@ -1315,9 +1334,9 @@ def test_holder_offset_reads_a_predicate_nested_inside_a_predicate(
     )
 
     if not served:
-        err = payload["errors"][0]
-        assert err["extensions"]["reason"] == "order_required"
-        assert err["extensions"]["argument"] == "offset"
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
         assert shelf_sql == []
         return
     assert "errors" not in payload, payload
@@ -1355,7 +1374,7 @@ def test_shipped_branches_offset_accepts_extra_ordering_over_a_dormant_random_or
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranchesViaListField"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
     assert len(branch_sql) == 1
     statement = branch_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1386,9 +1405,9 @@ def test_shipped_branches_offset_rejects_extra_random_ordering_over_a_stable_ord
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1418,9 +1437,9 @@ def test_shipped_branches_offset_rejects_an_annotated_random_order(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1448,9 +1467,9 @@ def test_shipped_branches_offset_rejects_an_f_reference_to_a_random_annotation(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1479,9 +1498,9 @@ def test_shipped_branches_offset_rejects_a_desc_or_lookup_random_alias(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1511,9 +1530,9 @@ def test_shipped_branches_offset_rejects_an_extra_select_ordering(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1542,9 +1561,9 @@ def test_shipped_branches_offset_rejects_a_dotted_extra_order(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1572,9 +1591,9 @@ def test_shipped_branches_offset_rejects_a_composed_random_order(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1602,9 +1621,9 @@ def test_shipped_branches_offset_rejects_a_raw_sql_order(monkeypatch: pytest.Mon
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1635,9 +1654,9 @@ def test_shipped_branches_offset_rejects_a_bare_database_function_order(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1669,9 +1688,9 @@ def test_shipped_branches_offset_rejects_a_subquery_order(monkeypatch: pytest.Mo
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1708,9 +1727,9 @@ def test_shipped_branches_offset_rejects_raw_sql_inside_a_predicate_container(
 
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -1746,7 +1765,7 @@ def test_shipped_branches_offset_accepts_a_conditional_order(
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranchesViaListField"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
     assert len(branch_sql) == 1
     statement = branch_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1779,7 +1798,7 @@ def test_shipped_branches_offset_accepts_a_stable_annotated_order(
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranchesViaListField"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
     assert len(branch_sql) == 1
     statement = branch_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1825,7 +1844,7 @@ def test_shipped_branches_offset_accepts_a_container_predicate_of_readable_leave
 
     assert "errors" not in payload, payload
     # Alpha and Charlie sort ahead of Bravo, so offset 1 lands on Charlie.
-    assert payload["data"]["allLibraryBranchesViaListField"] == [{"name": "Charlie"}]
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Charlie"}]
     assert len(branch_sql) == 1
     statement = branch_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1867,7 +1886,7 @@ def test_shipped_branches_offset_accepts_a_row_count_order(
     payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranchesViaListField"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
     assert len(branch_sql) == 1
     statement = branch_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1883,11 +1902,11 @@ def test_shipped_branches_offset_bounds_rejected() -> None:
     )
     assert "errors" in payload_neg
     assert payload_neg["data"] is None, payload_neg
-    err_neg = payload_neg["errors"][0]
-    assert err_neg["extensions"]["code"] == "LIST_ARGUMENT_INVALID"
-    assert err_neg["extensions"]["reason"] == "negative"
-    assert err_neg["extensions"]["argument"] == "offset"
-    assert err_neg["extensions"]["value"] == -1
+    err_neg = json_object(payload_neg, "errors", 0)
+    assert json_at(err_neg, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+    assert json_at(err_neg, "extensions", "reason") == "negative"
+    assert json_at(err_neg, "extensions", "argument") == "offset"
+    assert json_at(err_neg, "extensions", "value") == -1
 
     # Over ceiling (default policy max_list_rows is 100)
     payload_ceil = graphql_payload(
@@ -1895,12 +1914,12 @@ def test_shipped_branches_offset_bounds_rejected() -> None:
     )
     assert "errors" in payload_ceil
     assert payload_ceil["data"] is None, payload_ceil
-    err_ceil = payload_ceil["errors"][0]
-    assert err_ceil["extensions"]["code"] == "LIST_ARGUMENT_INVALID"
-    assert err_ceil["extensions"]["reason"] == "over_ceiling"
-    assert err_ceil["extensions"]["argument"] == "offset"
-    assert err_ceil["extensions"]["value"] == 101
-    assert err_ceil["extensions"]["ceiling"] == 100
+    err_ceil = json_object(payload_ceil, "errors", 0)
+    assert json_at(err_ceil, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+    assert json_at(err_ceil, "extensions", "reason") == "over_ceiling"
+    assert json_at(err_ceil, "extensions", "argument") == "offset"
+    assert json_at(err_ceil, "extensions", "value") == 101
+    assert json_at(err_ceil, "extensions", "ceiling") == 100
 
 
 @pytest.mark.django_db
@@ -1911,11 +1930,11 @@ def test_shipped_branches_limit_bounds_rejected() -> None:
     )
     assert "errors" in payload_neg
     assert payload_neg["data"] is None, payload_neg
-    err_neg = payload_neg["errors"][0]
-    assert err_neg["extensions"]["code"] == "LIST_ARGUMENT_INVALID"
-    assert err_neg["extensions"]["reason"] == "negative"
-    assert err_neg["extensions"]["argument"] == "limit"
-    assert err_neg["extensions"]["value"] == -1
+    err_neg = json_object(payload_neg, "errors", 0)
+    assert json_at(err_neg, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+    assert json_at(err_neg, "extensions", "reason") == "negative"
+    assert json_at(err_neg, "extensions", "argument") == "limit"
+    assert json_at(err_neg, "extensions", "value") == -1
 
     # Over ceiling (101 > 100)
     payload_ceil = graphql_payload(
@@ -1923,12 +1942,12 @@ def test_shipped_branches_limit_bounds_rejected() -> None:
     )
     assert "errors" in payload_ceil
     assert payload_ceil["data"] is None, payload_ceil
-    err_ceil = payload_ceil["errors"][0]
-    assert err_ceil["extensions"]["code"] == "LIST_ARGUMENT_INVALID"
-    assert err_ceil["extensions"]["reason"] == "over_ceiling"
-    assert err_ceil["extensions"]["argument"] == "limit"
-    assert err_ceil["extensions"]["value"] == 101
-    assert err_ceil["extensions"]["ceiling"] == 100
+    err_ceil = json_object(payload_ceil, "errors", 0)
+    assert json_at(err_ceil, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+    assert json_at(err_ceil, "extensions", "reason") == "over_ceiling"
+    assert json_at(err_ceil, "extensions", "argument") == "limit"
+    assert json_at(err_ceil, "extensions", "value") == 101
+    assert json_at(err_ceil, "extensions", "ceiling") == 100
 
 
 # ---------------------------------------------------------------------------
@@ -1977,7 +1996,7 @@ def test_shipped_branches_a_limit_variable_outside_int_is_refused_before_sql(
         payload = graphql_payload(_LIMIT_VARIABLE_QUERY, variables={"lim": bad_value})
 
     assert "errors" in payload
-    assert "Int cannot represent non-integer value" in payload["errors"][0]["message"]
+    assert "Int cannot represent non-integer value" in json_str(payload, "errors", 0, "message")
     assert payload["data"] is None, payload
     assert len(ctx.captured_queries) == 0
 
@@ -1999,7 +2018,7 @@ def test_shipped_branches_an_offset_variable_outside_int_is_refused_before_sql(
         payload = graphql_payload(_OFFSET_VARIABLE_QUERY, variables={"off": bad_value})
 
     assert "errors" in payload
-    assert "Int cannot represent non-integer value" in payload["errors"][0]["message"]
+    assert "Int cannot represent non-integer value" in json_str(payload, "errors", 0, "message")
     assert payload["data"] is None, payload
     assert len(ctx.captured_queries) == 0
 
@@ -2015,7 +2034,7 @@ def test_shipped_branches_a_float_limit_literal_is_refused_before_sql() -> None:
         )
 
     assert "errors" in payload
-    assert "Int cannot represent non-integer value" in payload["errors"][0]["message"]
+    assert "Int cannot represent non-integer value" in json_str(payload, "errors", 0, "message")
     assert payload["data"] is None, payload
     assert len(ctx.captured_queries) == 0
 
@@ -2031,7 +2050,7 @@ def test_shipped_branches_a_float_offset_literal_is_refused_before_sql() -> None
         )
 
     assert "errors" in payload
-    assert "Int cannot represent non-integer value" in payload["errors"][0]["message"]
+    assert "Int cannot represent non-integer value" in json_str(payload, "errors", 0, "message")
     assert payload["data"] is None, payload
     assert len(ctx.captured_queries) == 0
 
@@ -2048,7 +2067,7 @@ def test_shipped_branches_an_integral_float_limit_variable_coerces_and_runs() ->
     payload = graphql_payload(_LIMIT_VARIABLE_QUERY, variables={"lim": 1.0})
 
     assert "errors" not in payload, payload
-    assert len(payload["data"]["allLibraryBranchesViaListField"]) == 1
+    assert len(json_list(payload, "data", "allLibraryBranchesViaListField")) == 1
 
 
 @pytest.mark.django_db
@@ -2061,7 +2080,7 @@ def test_shipped_branches_limit_zero_short_circuits_sql() -> None:
             "{ allLibraryBranchesViaListField(limit: 0) { name } }",
         )
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranchesViaListField"] == []
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == []
     assert len(ctx.captured_queries) == 0
 
 
@@ -2073,7 +2092,7 @@ def test_shipped_branches_offset_with_limit_zero_precondition() -> None:
     )
     assert "errors" in payload_no_ord
     assert payload_no_ord["data"] is None, payload_no_ord
-    assert payload_no_ord["errors"][0]["extensions"]["reason"] == "order_required"
+    assert json_at(payload_no_ord, "errors", 0, "extensions", "reason") == "order_required"
 
     # offset: 1, limit: 0 with active ordering short-circuits with 0 row queries
     with CaptureQueriesContext(connection) as ctx:
@@ -2091,7 +2110,7 @@ def test_shipped_branches_offset_with_limit_zero_precondition() -> None:
             """,
         )
     assert "errors" not in payload_ord, payload_ord
-    assert payload_ord["data"]["allLibraryBranchesViaListField"] == []
+    assert json_at(payload_ord, "data", "allLibraryBranchesViaListField") == []
     assert len(ctx.captured_queries) == 0
 
 
@@ -2118,15 +2137,15 @@ def test_holder_trusted_widened_field() -> None:
     # Omitted client limit returns widened max_rows (105)
     payload_wide = _post_sync(schema, "{ branchesTrusted { name } }")
     assert "errors" not in payload_wide, payload_wide
-    assert len(payload_wide["data"]["branchesTrusted"]) == 105
+    assert len(json_list(payload_wide, "data", "branchesTrusted")) == 105
 
     # Client offset over policy ceiling (101 > 100) still rejects
     payload_offset = _post_sync(schema, "{ branchesTrusted(offset: 101) { name } }")
     assert "errors" in payload_offset
     assert payload_offset["data"] is None, payload_offset
-    err = payload_offset["errors"][0]
-    assert err["extensions"]["reason"] == "over_ceiling"
-    assert err["extensions"]["ceiling"] == 100
+    err = json_object(payload_offset, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "over_ceiling"
+    assert json_at(err, "extensions", "ceiling") == 100
 
 
 @pytest.mark.django_db
@@ -2145,9 +2164,9 @@ def test_holder_trusted_max_rows_rejects_a_limit_above_the_field_bound() -> None
     library_models.Branch.objects.create(name="Alpha", city="Boston")
 
     payload = _post_sync(schema, "{ branchesTrusted(limit: 106) { name } }")
-    assert payload["errors"][0]["extensions"]["reason"] == "over_ceiling"
-    assert payload["errors"][0]["extensions"]["argument"] == "limit"
-    assert payload["errors"][0]["extensions"]["ceiling"] == 105
+    assert json_at(payload, "errors", 0, "extensions", "reason") == "over_ceiling"
+    assert json_at(payload, "errors", 0, "extensions", "argument") == "limit"
+    assert json_at(payload, "errors", 0, "extensions", "ceiling") == 105
 
 
 @pytest.mark.django_db
@@ -2167,7 +2186,7 @@ def test_holder_untrusted_max_rows_caps_an_omitted_limit() -> None:
 
     payload = _post_sync(schema, "{ branchesNarrow { name } }")
     assert "errors" not in payload, payload
-    assert len(payload["data"]["branchesNarrow"]) == 1
+    assert len(json_list(payload, "data", "branchesNarrow")) == 1
 
 
 @pytest.mark.django_db
@@ -2185,9 +2204,9 @@ def test_holder_untrusted_max_rows_is_the_limit_ceiling() -> None:
     library_models.Branch.objects.create(name="Alpha", city="Boston")
 
     payload = _post_sync(schema, "{ branchesNarrow(limit: 51) { name } }")
-    assert payload["errors"][0]["extensions"]["reason"] == "over_ceiling"
-    assert payload["errors"][0]["extensions"]["argument"] == "limit"
-    assert payload["errors"][0]["extensions"]["ceiling"] == 50
+    assert json_at(payload, "errors", 0, "extensions", "reason") == "over_ceiling"
+    assert json_at(payload, "errors", 0, "extensions", "argument") == "limit"
+    assert json_at(payload, "errors", 0, "extensions", "ceiling") == 50
 
 
 @pytest.mark.django_db
@@ -2235,15 +2254,15 @@ def test_holder_materialized_sequence_subclass_is_still_row_bounded() -> None:
 
     payload = _post_sync(schema, "{ branchesEscaping { name } }")
     assert "errors" not in payload, payload
-    assert len(payload["data"]["branchesEscaping"]) == 2
+    assert len(json_list(payload, "data", "branchesEscaping")) == 2
 
     payload_windowed = _post_sync(schema, "{ branchesEscaping(limit: 1) { name } }")
     assert "errors" not in payload_windowed, payload_windowed
-    assert len(payload_windowed["data"]["branchesEscaping"]) == 1
+    assert len(json_list(payload_windowed, "data", "branchesEscaping")) == 1
 
     payload_zero = _post_sync(schema, "{ branchesEscaping(limit: 0) { name } }")
     assert "errors" not in payload_zero, payload_zero
-    assert payload_zero["data"]["branchesEscaping"] == []
+    assert json_at(payload_zero, "data", "branchesEscaping") == []
 
 
 @pytest.mark.django_db
@@ -2269,35 +2288,35 @@ def test_holder_materialized_and_nullable_none_fields() -> None:
     # Materialized list: limit and offset 0 work
     p_mat = _post_sync(schema, "{ branchesMaterialized(limit: 2) { name } }")
     assert "errors" not in p_mat, p_mat
-    assert len(p_mat["data"]["branchesMaterialized"]) == 2
+    assert len(json_list(p_mat, "data", "branchesMaterialized")) == 2
 
     p_mat_off0 = _post_sync(schema, "{ branchesMaterialized(offset: 0) { name } }")
     assert "errors" not in p_mat_off0, p_mat_off0
-    assert len(p_mat_off0["data"]["branchesMaterialized"]) == 3
+    assert len(json_list(p_mat_off0, "data", "branchesMaterialized")) == 3
 
     # Nonzero offset rejects order_required
     p_mat_off = _post_sync(schema, "{ branchesMaterialized(offset: 1) { name } }")
-    assert p_mat_off["errors"][0]["extensions"]["reason"] == "order_required"
+    assert json_at(p_mat_off, "errors", 0, "extensions", "reason") == "order_required"
 
     # Non-null orderBy rejects queryset_required
     p_mat_ord = _post_sync(schema, "{ branchesMaterialized(orderBy: []) { name } }")
-    assert p_mat_ord["errors"][0]["extensions"]["reason"] == "queryset_required"
-    assert "on branchesMaterialized" in p_mat_ord["errors"][0]["message"]
+    assert json_at(p_mat_ord, "errors", 0, "extensions", "reason") == "queryset_required"
+    assert "on branchesMaterialized" in json_str(p_mat_ord, "errors", 0, "message")
 
     # Nullable None list: limit and offset 0 return null
     p_none = _post_sync(schema, "{ branchesNullableNone(limit: 2) { name } }")
     assert "errors" not in p_none, p_none
-    assert p_none["data"]["branchesNullableNone"] is None
+    assert json_at(p_none, "data", "branchesNullableNone") is None
 
     p_none_off0 = _post_sync(schema, "{ branchesNullableNone(offset: 0) { name } }")
     assert "errors" not in p_none_off0, p_none_off0
-    assert p_none_off0["data"]["branchesNullableNone"] is None
+    assert json_at(p_none_off0, "data", "branchesNullableNone") is None
 
     p_none_off = _post_sync(schema, "{ branchesNullableNone(offset: 1) { name } }")
-    assert p_none_off["errors"][0]["extensions"]["reason"] == "order_required"
+    assert json_at(p_none_off, "errors", 0, "extensions", "reason") == "order_required"
 
     p_none_ord = _post_sync(schema, "{ branchesNullableNone(orderBy: []) { name } }")
-    assert p_none_ord["errors"][0]["extensions"]["reason"] == "queryset_required"
+    assert json_at(p_none_ord, "errors", 0, "extensions", "reason") == "queryset_required"
 
 
 @pytest.mark.django_db
@@ -2328,7 +2347,7 @@ def test_holder_a_query_source_resolver_still_applies_target_visibility(
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha"]
 
 
@@ -2352,7 +2371,7 @@ def test_holder_a_materialized_list_skips_target_visibility() -> None:
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha", "Hidden"]
 
 
@@ -2375,7 +2394,7 @@ def test_holder_presliced_configuration_error_under_pass_through() -> None:
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert p_omit["data"] is None
-    assert "sliced" in p_omit["errors"][0]["message"].lower()
+    assert "sliced" in json_str(p_omit, "errors", 0, "message").lower()
 
     # Active limit argument
     p_act = _post_sync(
@@ -2384,7 +2403,7 @@ def test_holder_presliced_configuration_error_under_pass_through() -> None:
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert p_act["data"] is None
-    assert "sliced" in p_act["errors"][0]["message"].lower()
+    assert "sliced" in json_str(p_act, "errors", 0, "message").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -2410,7 +2429,7 @@ def test_shipped_branches_an_ordering_with_no_terms_does_not_satisfy_an_offset(
     payload = graphql_payload(
         f"{{ allLibraryBranchesViaListField(orderBy: {order_by}, offset: 1) {{ name }} }}",
     )
-    assert payload["errors"][0]["extensions"]["reason"] == "order_required"
+    assert json_at(payload, "errors", 0, "extensions", "reason") == "order_required"
 
 
 @pytest.mark.django_db
@@ -2423,7 +2442,7 @@ def test_shipped_branches_an_order_permission_denial_precedes_the_order_requirem
     payload = graphql_payload(
         "{ allLibraryBranchesViaListField(orderBy: [{ name: ASC }], offset: 1) { name } }",
     )
-    assert payload["errors"][0]["extensions"]["code"] == "ORDER_PERMISSION_DENIED"
+    assert json_at(payload, "errors", 0, "extensions", "code") == "ORDER_PERMISSION_DENIED"
 
 
 @pytest.mark.django_db
@@ -2448,9 +2467,9 @@ def test_shipped_branches_aggregate_order_no_distinct_in_sql() -> None:
     with CaptureQueriesContext(connection) as ctx:
         payload = graphql_payload(query, client=client)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryBranchesViaListField"]
+    rows = json_list(payload, "data", "allLibraryBranchesViaListField")
     assert len(rows) == 2
-    assert len({r["name"] for r in rows}) == 2
+    assert len({json_at(r, "name") for r in rows}) == 2
 
     # Verify no SELECT DISTINCT was injected into SQL
     for q in ctx.captured_queries:
@@ -2463,8 +2482,8 @@ def test_shipped_branches_a_negative_offset_is_named_before_a_negative_limit() -
     payload = graphql_payload(
         "{ allLibraryBranchesViaListField(offset: -1, limit: -1) { name } }",
     )
-    assert payload["errors"][0]["extensions"]["reason"] == "negative"
-    assert payload["errors"][0]["extensions"]["argument"] == "offset"
+    assert json_at(payload, "errors", 0, "extensions", "reason") == "negative"
+    assert json_at(payload, "errors", 0, "extensions", "argument") == "offset"
 
 
 @pytest.mark.django_db
@@ -2484,7 +2503,7 @@ def test_shipped_branches_a_materialized_source_is_named_before_the_order_requir
         DjangoSchema(query=_MatQuery, config=strawberry_config()),
         "{ branchesMaterialized(orderBy: [{ city: ASC }], offset: 1) { name } }",
     )
-    assert payload["errors"][0]["extensions"]["reason"] == "queryset_required"
+    assert json_at(payload, "errors", 0, "extensions", "reason") == "queryset_required"
 
 
 @pytest.mark.django_db
@@ -2504,7 +2523,7 @@ def test_shipped_branches_a_presliced_source_is_named_before_the_ordering_runs()
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert payload["data"] is None
-    assert "sliced" in payload["errors"][0]["message"].lower()
+    assert "sliced" in json_str(payload, "errors", 0, "message").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -2565,7 +2584,9 @@ def test_holder_branches_serve_a_combined_source_and_result_as_their_primary_key
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert "errors" not in p_act, p_act
-    assert sorted(row["name"] for row in p_act["data"]["branchesCombined"]) == ["A", "B"]
+    assert sorted(
+        json_str(row, "name") for row in json_list(p_act, "data", "branchesCombined")
+    ) == ["A", "B"]
     assert visibility_calls == 1
 
     def _combined_apply_sync(
@@ -2592,7 +2613,7 @@ def test_holder_branches_serve_a_combined_source_and_result_as_their_primary_key
             """,
         )
     assert "errors" not in p_hook, p_hook
-    assert p_hook["data"]["allLibraryBranchesViaListField"] == [{"name": "B"}]
+    assert json_at(p_hook, "data", "allLibraryBranchesViaListField") == [{"name": "B"}]
 
 
 def _combined_genre_source(
@@ -2644,7 +2665,7 @@ def test_holder_genres_a_combined_source_is_bounded_with_the_optimizer_installed
         )
 
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["genresCombined"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "genresCombined")]
     assert len(names) == 3
     assert set(names) <= {
         "A",
@@ -2675,8 +2696,8 @@ def test_holder_genres_a_combined_connection_runs_unplanned_with_the_optimizer_i
     )
 
     assert "errors" not in payload, payload
-    edges = payload["data"]["genresCombinedConnection"]["edges"]
-    assert [edge["node"]["name"] for edge in edges] == ["A", "B", "C"]
+    edges = json_list(payload, "data", "genresCombinedConnection", "edges")
+    assert [json_at(edge, "node", "name") for edge in edges] == ["A", "B", "C"]
 
 
 class _ConsumerUpper(models.Func):
@@ -2715,7 +2736,7 @@ def test_holder_genres_a_hook_carrying_a_consumer_expression_names_the_state_on_
     )
 
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert "a consumer-defined expression, lookup" in message
     assert "Build the queryset with Django's own" in message
 
@@ -2899,7 +2920,7 @@ def test_holder_branches_a_malformed_apply_sync_result_names_its_own_defect(
         )
 
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert message.startswith(message_start), message
     for substring in substrings:
         assert substring in message, message
@@ -2946,7 +2967,7 @@ def test_holder_branches_hostile_normalized_term_is_rejected_before_it_can_run(
             "{ allLibraryBranchesViaListField(orderBy: [{ city: ASC }], offset: 1) { name } }",
         )
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert "BranchOrder._normalize_input returned invalid term" in message
     assert "hostile" not in message
     assert [q for q in ctx.captured_queries if "library_branch" in q["sql"].lower()] == []
@@ -2979,7 +3000,10 @@ def test_holder_naming_converters() -> None:
     }
     """
     p_intro = _post_sync(snake_schema, introspect_q)
-    field_args = {a["name"] for a in p_intro["data"]["__schema"]["queryType"]["fields"][0]["args"]}
+    field_args = {
+        json_at(a, "name")
+        for a in json_list(p_intro, "data", "__schema", "queryType", "fields", 0, "args")
+    }
     assert "order_by" in field_args
     assert "offset" in field_args
     assert "limit" in field_args
@@ -2989,7 +3013,7 @@ def test_holder_naming_converters() -> None:
         snake_schema,
         "{ branches(order_by: [{ id: null }], offset: 1) { name } }",
     )
-    assert p_err["errors"][0]["extensions"]["argument"] == "offset"
+    assert json_at(p_err, "errors", 0, "extensions", "argument") == "offset"
 
     # 2. Custom NameConverter
     class _UpperConverter(NameConverter):
@@ -3010,13 +3034,16 @@ def test_holder_naming_converters() -> None:
         upper_schema,
         "query { __schema { queryType { fields { name args { name } } } } }",
     )
-    up_args = {a["name"] for a in p_up_intro["data"]["__schema"]["queryType"]["fields"][0]["args"]}
+    up_args = {
+        json_at(a, "name")
+        for a in json_list(p_up_intro, "data", "__schema", "queryType", "fields", 0, "args")
+    }
     assert "OFFSET" in up_args
     assert "LIMIT" in up_args
     assert "ORDERBY" in up_args
 
     p_up_err = _post_sync(upper_schema, "{ BRANCHES(OFFSET: -1) { NAME } }")
-    assert p_up_err["errors"][0]["extensions"]["argument"] == "OFFSET"
+    assert json_at(p_up_err, "errors", 0, "extensions", "argument") == "OFFSET"
 
     # 3. The rejection reports the PUBLISHED name and runs the converter no more than
     #    a successful request does: Strawberry maps arguments through the converter
@@ -3041,7 +3068,10 @@ def test_holder_naming_converters() -> None:
         counting_schema,
         "query { __schema { queryType { fields { name args { name } } } } }",
     )
-    published = {a["name"] for a in p_intro["data"]["__schema"]["queryType"]["fields"][0]["args"]}
+    published = {
+        json_at(a, "name")
+        for a in json_list(p_intro, "data", "__schema", "queryType", "fields", 0, "args")
+    }
     assert published == {"OFFSET", "LIMIT", "ORDERBY"}
 
     before = _CountingConverter.calls
@@ -3051,7 +3081,7 @@ def test_holder_naming_converters() -> None:
 
     before = _CountingConverter.calls
     p_rejected = _post_sync(counting_schema, "{ branches(OFFSET: -1) { name } }")
-    assert p_rejected["errors"][0]["extensions"]["argument"] == "OFFSET"
+    assert json_at(p_rejected, "errors", 0, "extensions", "argument") == "OFFSET"
     assert _CountingConverter.calls - before == per_success
 
 
@@ -3103,7 +3133,9 @@ def test_holder_model_default_ordering_verdicts() -> None:
             "{ termsDefaultOrdered(offset: 1) { title } }",
         )
     assert "errors" not in payload_ok, payload_ok
-    titles = [row["title"] for row in payload_ok["data"]["termsDefaultOrdered"]]
+    titles = [
+        json_at(row, "title") for row in json_list(payload_ok, "data", "termsDefaultOrdered")
+    ]
     assert titles == ["Beta", "Gamma"]
 
     # Verify no injected pk tiebreaker in SQL (only entry_order, title_sort)
@@ -3116,7 +3148,7 @@ def test_holder_model_default_ordering_verdicts() -> None:
         schema,
         "{ termsClearedOrdering(offset: 1) { title } }",
     )
-    assert payload_cleared["errors"][0]["extensions"]["reason"] == "order_required"
+    assert json_at(payload_cleared, "errors", 0, "extensions", "reason") == "order_required"
 
 
 @pytest.mark.django_db
@@ -3161,7 +3193,7 @@ def test_holder_reversed_model_default_ordering_still_pages() -> None:
 
     payload = _post_sync(schema, "{ termsReversed(offset: 1) { title } }")
     assert "errors" not in payload, payload
-    titles = [row["title"] for row in payload["data"]["termsReversed"]]
+    titles = [json_at(row, "title") for row in json_list(payload, "data", "termsReversed")]
     assert titles == ["Beta", "Alpha"]
 
 
@@ -3183,7 +3215,7 @@ def test_holder_empty_model_ordered_queryset_still_pages() -> None:
         "{ rows(offset: 1) { title } }",
     )
     assert "errors" not in payload, payload
-    assert payload["data"]["rows"] == []
+    assert json_at(payload, "data", "rows") == []
 
 
 @pytest.mark.django_db
@@ -3203,7 +3235,7 @@ def test_holder_empty_unordered_queryset_still_requires_order() -> None:
         DjangoSchema(query=_EmptyQuery, config=strawberry_config()),
         "{ rows(offset: 1) { barcode } }",
     )
-    assert payload["errors"][0]["extensions"]["reason"] == "order_required"
+    assert json_at(payload, "errors", 0, "extensions", "reason") == "order_required"
 
 
 @pytest.mark.django_db
@@ -3221,16 +3253,19 @@ def test_holder_target_without_orderset_or_model_ordering() -> None:
         schema,
         "query { __schema { queryType { fields { args { name } } } } }",
     )
-    args = {a["name"] for a in p_intro["data"]["__schema"]["queryType"]["fields"][0]["args"]}
+    args = {
+        json_at(a, "name")
+        for a in json_list(p_intro, "data", "__schema", "queryType", "fields", 0, "args")
+    }
     assert "offset" in args
     assert "limit" in args
     assert "orderBy" not in args
 
     # Nonzero offset returns order_required
     p_err = _post_sync(schema, "{ cards(offset: 1) { barcode } }")
-    assert p_err["errors"][0]["extensions"]["reason"] == "order_required"
-    assert "on cards" in p_err["errors"][0]["message"]
-    assert "'orderBy'" not in p_err["errors"][0]["message"]
+    assert json_at(p_err, "errors", 0, "extensions", "reason") == "order_required"
+    assert "on cards" in json_str(p_err, "errors", 0, "message")
+    assert "'orderBy'" not in json_str(p_err, "errors", 0, "message")
 
 
 _PARITY_CAPTURE: dict[str, tuple[str, int, int | None]] = {}
@@ -3406,7 +3441,7 @@ class _ParityOracle(TypedDict):
 class _RowsParityOracle(_ParityOracle):
     """A :class:`_ParityOracle` that also carries the reference's parsed rows."""
 
-    rows: list[dict[str, object]]
+    rows: list[object]
 
 
 def _legacy_branch_oracle(
@@ -3433,10 +3468,10 @@ def _legacy_branch_oracle(
     current_schema = _build_current_parity_schema(source_factory)
 
     response, sql, visibility = _parity_run(_PARITY_OMITTED, counters, schema=legacy_schema)
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["branches"]
-    assert [row["name"] for row in rows] == ["Alpha", "Bravo", "Charlie"]
+    rows = json_list(payload, "data", "branches")
+    assert [json_at(row, "name") for row in rows] == ["Alpha", "Bravo", "Charlie"]
     assert len(sql) == 1
     assert visibility == 1
     marks = _PARITY_CAPTURE["legacy_marks"]
@@ -3501,9 +3536,9 @@ def test_branches_the_shipped_field_matches_the_legacy_reference(
     _PARITY_CAPTURE.pop("current_marks", None)
     response, sql, visibility = _parity_run(query, counters)
 
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranchesViaListField"] == oracle["rows"]
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == oracle["rows"]
     assert sql == oracle["sql"]
     assert visibility == oracle["visibility"]
     assert _PARITY_CAPTURE["current_marks"] == oracle["marks"]
@@ -3551,12 +3586,15 @@ def _combined_branch_oracle(
         client=client,
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
-    payload = response.json()
+    payload = response_json(response)
     assert visibility == 1
     marks = _PARITY_CAPTURE["legacy_marks"]
     assert "UNION" in marks[0].upper()
     assert "errors" not in payload, payload
-    assert sorted(row["name"] for row in payload["data"]["branches"]) == ["A", "B"]
+    assert sorted(json_str(row, "name") for row in json_list(payload, "data", "branches")) == [
+        "A",
+        "B",
+    ]
     assert len(sql) == 1
     oracle: _ParityOracle = {
         "response": response,
@@ -3619,8 +3657,8 @@ def test_holder_branches_an_argument_windows_the_combined_source_after_visibilit
     )
 
     assert "errors" not in payload, payload
-    assert len(payload["data"]["branches"]) == 1
-    assert payload["data"]["branches"][0]["name"] in {"A", "B"}
+    assert len(json_list(payload, "data", "branches")) == 1
+    assert json_at(payload, "data", "branches", 0, "name") in {"A", "B"}
     assert counters["visibility"] == 1
 
 
@@ -3648,7 +3686,7 @@ def test_shipped_branches_offset_alone_bounds() -> None:
     with CaptureQueriesContext(connection) as ctx:
         payload = graphql_payload(query, client=client)
     assert "errors" not in payload, payload
-    assert len(payload["data"]["allLibraryBranchesViaListField"]) == 3
+    assert len(json_list(payload, "data", "allLibraryBranchesViaListField")) == 3
 
     # Low mark 2, high mark 102 in SQL (slice [2:102] -> LIMIT 100 OFFSET 2)
     sql_candidates = [
@@ -3689,8 +3727,8 @@ def test_shipped_branches_independent_aliases() -> None:
     """
     payload = graphql_payload(query, client=client)
     assert "errors" not in payload, payload
-    assert payload["data"]["p1"] == [{"name": "Alpha"}]
-    assert payload["data"]["p2"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "p1") == [{"name": "Alpha"}]
+    assert json_at(payload, "data", "p2") == [{"name": "Bravo"}]
 
 
 _NEGATIVE_OFFSET = "expected a non-negative integer, got -1."
@@ -3749,8 +3787,8 @@ def test_holder_nullability_propagation_over_none_source(
     payload = _post_sync(schema, query)
     assert payload["data"] == data, payload
     assert [
-        (error["message"], _error_extension(error, "reason"))
-        for error in payload.get("errors", ())
+        (json_at(error, "message"), _error_extension(error, "reason"))
+        for error in json_list(payload.get("errors", []))
     ] == errors, payload
 
 
@@ -3795,7 +3833,7 @@ def test_holder_orderset_override_returning_queryset_subclass(
     """
     payload = graphql_payload(query, client=client)
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranchesViaListField"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
 
 
 # ---------------------------------------------------------------------------
@@ -3950,7 +3988,7 @@ def test_holder_a_frozen_context_still_returns_the_windowed_rows() -> None:
         view_class=_FrozenContextView,
     )
 
-    assert payload["data"]["branches"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
 
 
 def _policy_from_info_object(info: strawberry.Info[object, object]) -> ResourcePolicy:
@@ -4009,8 +4047,8 @@ def test_a_resolver_cannot_widen_the_row_bound_by_writing_a_policy_it_can_reach(
     payload = _post_sync(schema, "{ widen branches { name } }")
 
     assert "errors" not in payload, payload
-    assert payload["data"]["widen"] == "written"
-    assert [row["name"] for row in payload["data"]["branches"]] == ["B0", "B1"]
+    assert json_at(payload, "data", "widen") == "written"
+    assert [json_at(row, "name") for row in json_list(payload, "data", "branches")] == ["B0", "B1"]
 
 
 @pytest.mark.django_db
@@ -4043,11 +4081,11 @@ def test_a_policy_a_resolver_widened_does_not_outlive_its_own_request(
         resource_policy={"max_list_rows": 2},
     )
 
-    assert _post_sync(schema, "{ widen }")["data"]["widen"] == "written"
+    assert json_at(_post_sync(schema, "{ widen }"), "data", "widen") == "written"
     payload = _post_sync(schema, "{ branches { name } }")
 
     assert "errors" not in payload, payload
-    assert [row["name"] for row in payload["data"]["branches"]] == ["B0", "B1"]
+    assert [json_at(row, "name") for row in json_list(payload, "data", "branches")] == ["B0", "B1"]
 
 
 @pytest.mark.django_db
@@ -4064,7 +4102,7 @@ def test_holder_item_list_field_drops_rows_under_a_hidden_category() -> None:
         "{ items { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["items"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "items")]
     assert chain["item_under_public"].name in names
     assert chain["item_under_private"].name not in names
 
@@ -4091,7 +4129,9 @@ def test_holder_membership_card_list_elides_patron_id_to_one_query() -> None:
         payload = _post_sync(schema, "{ cards { barcode patron { id } } }")
 
     assert "errors" not in payload, payload
-    assert payload["data"]["cards"] == [{"barcode": "CARD-1", "patron": {"id": patron.pk}}]
+    assert json_at(payload, "data", "cards") == [
+        {"barcode": "CARD-1", "patron": {"id": patron.pk}},
+    ]
     card_sql = [
         entry["sql"]
         for entry in captured.captured_queries
@@ -4167,7 +4207,7 @@ def test_holder_list_field_uses_the_named_targets_queryset(
         f"{{ {field_name} {{ name }} }}",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"][field_name]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", field_name)]
     assert "kept" in names
     assert hidden_name not in names
     other = "from-secondary" if hidden_name == "from-primary" else "from-primary"
@@ -4198,7 +4238,12 @@ def test_shipped_branches_sync_http_rejects_an_async_get_queryset(
         payload = graphql_payload("{ allLibraryBranchesViaListField { name } }")
 
     assert payload["data"] is None
-    assert "returned a coroutine in a sync resolver context" in payload["errors"][0]["message"]
+    assert "returned a coroutine in a sync resolver context" in json_str(
+        payload,
+        "errors",
+        0,
+        "message",
+    )
 
 
 @pytest.mark.django_db
@@ -4230,7 +4275,12 @@ def test_shipped_branches_sync_http_rejects_an_awaitable_get_queryset(
         payload = graphql_payload("{ allLibraryBranchesViaListField { name } }")
 
     assert payload["data"] is None
-    assert "returned an awaitable in a sync resolver context" in payload["errors"][0]["message"]
+    assert "returned an awaitable in a sync resolver context" in json_str(
+        payload,
+        "errors",
+        0,
+        "message",
+    )
 
 
 @pytest.mark.django_db
@@ -4258,8 +4308,11 @@ def test_holder_sync_http_rejects_an_async_generator_resolver() -> None:
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert payload["data"] is None
-    assert (
-        "returned an AsyncIterable in a sync execution context" in payload["errors"][0]["message"]
+    assert "returned an AsyncIterable in a sync execution context" in json_str(
+        payload,
+        "errors",
+        0,
+        "message",
     )
 
 
@@ -4345,7 +4398,10 @@ def test_shipped_branches_hostile_queryset_subclass_cannot_leak_restricted_rows(
     payload = graphql_payload("{ allLibraryBranchesViaListField { name } }")
 
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["allLibraryBranchesViaListField"]]
+    names = [
+        json_at(row, "name")
+        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
+    ]
     assert names == ["Alpha"]
 
 
@@ -4366,7 +4422,7 @@ def test_holder_manager_that_degrades_to_a_list_is_rejected() -> None:
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert payload["data"] is None
-    assert "must produce a QuerySet" in payload["errors"][0]["message"]
+    assert "must produce a QuerySet" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -4386,7 +4442,7 @@ def test_holder_manager_that_drifts_alias_is_rejected() -> None:
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert payload["data"] is None
-    assert "preserve the manager's explicit routing" in payload["errors"][0]["message"]
+    assert "preserve the manager's explicit routing" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -4416,9 +4472,9 @@ def test_cascaded_item_list_stays_silent_under_strictness_raise() -> None:
     with CaptureQueriesContext(connection) as captured:
         payload = _post_sync(schema, "{ allItems { name category { name } } }")
     assert payload.get("errors") is None, payload
-    rows = payload["data"]["allItems"]
+    rows = json_list(payload, "data", "allItems")
     assert rows
-    assert all(row["category"]["name"] for row in rows)
+    assert all(json_at(row, "category", "name") for row in rows)
     # The item read carries a ``products_category`` visibility subquery, so the
     # category prefetch is told apart by the table it selects from, not by mention.
     item_sql = [
@@ -4458,13 +4514,15 @@ def test_consumer_prefetched_many_to_many_stays_silent_under_strictness_raise() 
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[library_schema.VenueType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[library_schema.VenueType])  # pyright: ignore[reportAny]
         def venues(self) -> list[library_models.Venue]:
             return list(
                 library_models.Venue.objects.prefetch_related("venuesponsor_set").order_by("name"),
             )
 
-        @strawberry.field(graphql_type=list[library_schema.VenueSponsorType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[library_schema.VenueSponsorType])  # pyright: ignore[reportAny]
         def sponsors(self) -> list[library_models.VenueSponsor]:
             return list(
                 library_models.VenueSponsor.objects.prefetch_related("venues").order_by("name"),

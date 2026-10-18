@@ -29,13 +29,11 @@ under a nested connection, whose seal licenses a slice the rewrite cannot carry.
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import pytest
 import strawberry
 from apps.library import models
 from apps.library import schema as library_schema
-from django.conf import settings
 from django.db import connection
 from django.db.models import F, Model, OrderBy, Prefetch, Q, QuerySet, Value
 from django.db.models.functions import Lower
@@ -44,7 +42,20 @@ from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from graphql_client import JSONObject, post_graphql
+from graphql_client import (
+    JSONObject,
+    is_json_list,
+    is_json_object,
+    json_at,
+    json_bool,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    post_graphql,
+    read_attr,
+    response_json,
+)
 from strategy_schemas import make_django_type
 from strawberry.extensions import SchemaExtension
 from typing_extensions import TypedDict, Unpack
@@ -63,16 +74,10 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import DjangoGraphQLView
 
-if TYPE_CHECKING:
-    from typing_extensions import TypeIs
-
 #: Opens the error policy's pass-through gate so a refusal's message reaches the
 #: wire; the toolbar middleware is dropped because ``config.urls`` computed its
 #: ``djdt`` routes under the ambient ``DEBUG=False``.
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
@@ -123,7 +128,7 @@ def _post(
         finally:
             _CURRENT["schema"] = None
     assert response.status_code == 200
-    return response.json()
+    return response_json(response)
 
 
 class _PostOptions(TypedDict, total=False):
@@ -137,17 +142,7 @@ class _PostOptions(TypedDict, total=False):
 def _data(query: str, **kwargs: Unpack[_PostOptions]) -> JSONObject:
     payload = _post(query, **kwargs)
     assert "errors" not in payload, payload
-    return payload["data"]
-
-
-def _is_dict(value: object) -> "TypeIs[dict[object, object]]":
-    """Whether a parsed payload value is a JSON object."""
-    return isinstance(value, dict)
-
-
-def _is_list(value: object) -> "TypeIs[list[object]]":
-    """Whether a parsed payload value is a JSON array."""
-    return isinstance(value, list)
+    return json_object(payload, "data")
 
 
 def _order_free(value: object) -> object:
@@ -158,9 +153,9 @@ def _order_free(value: object) -> object:
     happens to return primary-key order, Postgres a hash join's. The served SET is
     the contract; a test whose surface is ordered asserts that order itself.
     """
-    if _is_dict(value):
+    if is_json_object(value):
         return {key: _order_free(item) for key, item in value.items()}
-    if _is_list(value):
+    if is_json_list(value):
         return sorted(
             (_order_free(item) for item in value),
             key=lambda item: json.dumps(item, sort_keys=True),
@@ -272,7 +267,8 @@ def _install(
         del cls, kwargs
         return body(queryset, info)
 
-    monkeypatch.setattr(getattr(library_schema, type_name), "get_queryset", classmethod(_hook))
+    target = read_attr(library_schema, type_name)
+    monkeypatch.setattr(target, "get_queryset", classmethod(_hook))
 
 
 def _install_shape(
@@ -399,7 +395,9 @@ def test_root_list_without_arguments_serves_the_combined_rows(
         optimizer=optimizer,
     )
 
-    names = sorted(row["name"] for row in data["allLibraryGenresViaListField"])
+    names = sorted(
+        json_str(row, "name") for row in json_list(data, "allLibraryGenresViaListField")
+    )
     assert names == sorted(_visible_genres(shape))
 
 
@@ -424,7 +422,7 @@ def test_root_list_orders_the_combined_rows_by_order_by(
         optimizer=optimizer,
     )
 
-    names = [row["name"] for row in data["allLibraryGenresViaListField"]]
+    names = [json_at(row, "name") for row in json_list(data, "allLibraryGenresViaListField")]
     assert names == sorted(_visible_genres(shape), reverse=True)
 
 
@@ -449,7 +447,7 @@ def test_root_list_limits_the_ordered_combined_rows(
         optimizer=optimizer,
     )
 
-    names = [row["name"] for row in data["allLibraryGenresViaListField"]]
+    names = [json_at(row, "name") for row in json_list(data, "allLibraryGenresViaListField")]
     assert names == sorted(_visible_genres(shape))[:2]
 
 
@@ -481,10 +479,10 @@ def test_root_connection_pages_the_combined_rows(
         optimizer=optimizer,
     )
 
-    conn = data["allLibraryGenresConnection"]
+    conn = json_object(data, "allLibraryGenresConnection")
     visible = sorted(_visible_genres(shape))
-    assert [edge["node"]["name"] for edge in conn["edges"]] == visible[:2]
-    assert conn["pageInfo"]["hasNextPage"] is (len(visible) > 2)
+    assert [json_at(edge, "node", "name") for edge in json_list(conn, "edges")] == visible[:2]
+    assert json_at(conn, "pageInfo", "hasNextPage") is (len(visible) > 2)
 
 
 @_OPTIMIZER
@@ -517,7 +515,10 @@ def test_root_connection_filters_the_combined_rows(
         optimizer=optimizer,
     )
 
-    names = [edge["node"]["name"] for edge in data["allLibraryGenresConnection"]["edges"]]
+    names = [
+        json_at(edge, "node", "name")
+        for edge in json_list(data, "allLibraryGenresConnection", "edges")
+    ]
     assert names == sorted(name for name in _visible_genres(shape) if "o" in name)
 
 
@@ -558,15 +559,21 @@ def test_keyset_connection_seeks_through_the_combined_rows(
     pages = {}
     for combined in (True, False):
         _install_shape(monkeypatch, "IssueType", shape, "title", combined=combined)
-        first = _data(_ISSUES_PAGE, optimizer=optimizer)["allLibraryIssuesConnection"]
-        second = _data(
-            _ISSUES_PAGE,
-            optimizer=optimizer,
-            variables={"after": first["pageInfo"]["endCursor"]},
-        )["allLibraryIssuesConnection"]
+        first = json_object(
+            _data(_ISSUES_PAGE, optimizer=optimizer),
+            "allLibraryIssuesConnection",
+        )
+        second = json_object(
+            _data(
+                _ISSUES_PAGE,
+                optimizer=optimizer,
+                variables={"after": json_at(first, "pageInfo", "endCursor")},
+            ),
+            "allLibraryIssuesConnection",
+        )
         pages[combined] = [
-            [edge["node"]["title"] for edge in first["edges"]],
-            [edge["node"]["title"] for edge in second["edges"]],
+            [json_at(edge, "node", "title") for edge in json_list(first, "edges")],
+            [json_at(edge, "node", "title") for edge in json_list(second, "edges")],
         ]
 
     assert pages[True] == pages[False] == [newest_first[:2], newest_first[2:4]]
@@ -599,8 +606,8 @@ def test_reverse_foreign_key_list_child_serves_the_combined_rows(
     )
 
     served = {
-        row["code"]: sorted(book["title"] for book in row["books"])
-        for row in data["allLibraryShelves"]
+        json_at(row, "code"): sorted(json_str(book, "title") for book in json_list(row, "books"))
+        for row in json_list(data, "allLibraryShelves")
     }
     assert served == {
         code: sorted(t for t in titles if t in _VISIBLE[shape])
@@ -630,8 +637,8 @@ def test_many_to_many_list_child_serves_the_combined_rows(
     )
 
     served = {
-        row["name"]: sorted(book["title"] for book in row["books"])
-        for row in data["allLibraryGenres"]
+        json_at(row, "name"): sorted(json_str(book, "title") for book in json_list(row, "books"))
+        for row in json_list(data, "allLibraryGenres")
     }
     assert served == {
         name: sorted(t for t in titles if t in _VISIBLE[shape])
@@ -713,11 +720,14 @@ def _expected_nested_pages(shape: str) -> dict[str, _NestedPage]:
 
 def _nested_pages(data: JSONObject) -> dict[str, _NestedPage]:
     return {
-        row["name"]: {
-            "titles": [edge["node"]["title"] for edge in row["booksConnection"]["edges"]],
-            "has_next": row["booksConnection"]["pageInfo"]["hasNextPage"],
+        json_str(row, "name"): {
+            "titles": [
+                json_str(edge, "node", "title")
+                for edge in json_list(row, "booksConnection", "edges")
+            ],
+            "has_next": json_bool(row, "booksConnection", "pageInfo", "hasNextPage"),
         }
-        for row in data["allLibraryGenres"]
+        for row in json_list(data, "allLibraryGenres")
     }
 
 
@@ -863,7 +873,9 @@ def test_related_filter_matches_only_through_combined_rows(
         for code, titles in _BOOKS_BY_SHELF.items()
         if any(t in _VISIBLE[shape] and "r" in t for t in titles)
     )
-    assert sorted(row["code"] for row in data["allLibraryShelves"]) == expected
+    assert (
+        sorted(json_str(row, "code") for row in json_list(data, "allLibraryShelves")) == expected
+    )
 
 
 def _seed_desks(*, secret_word: str | None = None) -> None:
@@ -1015,8 +1027,8 @@ def test_mutation_locates_and_updates_only_a_combined_row(
         },
     )
 
-    assert updated["updateBookViaCustomInput"]["errors"] == []
-    assert updated["updateBookViaCustomInput"]["node"]["title"] == "Renamed"
+    assert json_at(updated, "updateBookViaCustomInput", "errors") == []
+    assert json_at(updated, "updateBookViaCustomInput", "node", "title") == "Renamed"
     books[excluded].refresh_from_db()
     assert books[excluded].title == excluded
     books[kept].refresh_from_db()
@@ -1100,8 +1112,8 @@ def test_consumer_prefetch_of_a_combined_queryset_serves_its_rows(
 
     assert _order_free(results[True]) == _order_free(results[False])
     served = {
-        row["name"]: sorted(book["title"] for book in row["books"])
-        for row in results[True]["allLibraryGenresViaListField"]
+        json_at(row, "name"): sorted(json_str(book, "title") for book in json_list(row, "books"))
+        for row in json_list(results[True], "allLibraryGenresViaListField")
     }
     assert served == {
         name: sorted(t for t in titles if t in _VISIBLE[shape])
@@ -1126,15 +1138,15 @@ def test_strictness_raise_plans_a_combined_child(
     )
 
     assert {
-        row["code"]: sorted(book["title"] for book in row["books"])
-        for row in data["allLibraryShelves"]
+        json_at(row, "code"): sorted(json_str(book, "title") for book in json_list(row, "books"))
+        for row in json_list(data, "allLibraryShelves")
     } == {
         code: sorted(t for t in titles if t in _VISIBLE[shape])
         for code, titles in _BOOKS_BY_SHELF.items()
     }
     assert {
-        row["name"]: sorted(book["title"] for book in row["books"])
-        for row in data["allLibraryGenres"]
+        json_at(row, "name"): sorted(json_str(book, "title") for book in json_list(row, "books"))
+        for row in json_list(data, "allLibraryGenres")
     } == {
         name: sorted(t for t in titles if t in _VISIBLE[shape])
         for name, titles in _BOOKS_BY_GENRE.items()
@@ -1168,7 +1180,9 @@ def test_reversed_outer_ordering_of_a_combined_hook_is_served_reversed(
         results[combined] = _data("{ allLibraryGenresViaListField { name } }", optimizer=optimizer)
 
     assert results[True] == results[False]
-    assert [row["name"] for row in results[True]["allLibraryGenresViaListField"]] == sorted(
+    assert [
+        json_at(row, "name") for row in json_list(results[True], "allLibraryGenresViaListField")
+    ] == sorted(
         _visible_genres("union"),
         reverse=True,
     )
@@ -1221,7 +1235,9 @@ def test_outer_f_ordering_of_a_combined_hook_is_served_in_that_order(
         expected = [name for name in reversed(_GENRE_NAMES) if name in visible]
     else:
         expected = sorted(visible, reverse=expected_order == "desc")
-    assert [row["name"] for row in results[True]["allLibraryGenresViaListField"]] == expected
+    assert [
+        json_at(row, "name") for row in json_list(results[True], "allLibraryGenresViaListField")
+    ] == expected
 
 
 #: Outer orderings by the entry's forward relation to ``ReadingList``, which
@@ -1268,9 +1284,13 @@ def test_outer_foreign_key_ordering_of_a_combined_hook_orders_by_the_key_column(
     def _union(queryset: QuerySet[Model]) -> QuerySet[Model]:
         return queryset.filter(_starts("title", "A")).union(queryset.filter(_starts("title", "B")))
 
-    pk_for = dict(models.ReadingListEntry.objects.values_list("title", "pk"))
+    pk_for = {entry.title: entry.pk for entry in models.ReadingListEntry.objects.all()}
     combinator_rows = _union(models.ReadingListEntry.objects.all()).order_by(term)
-    assert [row.pk for row in combinator_rows] == [pk_for[title] for title in expected]
+    served_pks: list[int | None] = []
+    for row in combinator_rows:
+        assert isinstance(row, models.ReadingListEntry), row
+        served_pks.append(row.pk)
+    assert served_pks == [pk_for[title] for title in expected]
     _install(
         monkeypatch,
         "ReadingListEntryType",
@@ -1282,8 +1302,8 @@ def test_outer_foreign_key_ordering_of_a_combined_hook_orders_by_the_key_column(
         optimizer=optimizer,
     )
 
-    edges = data["allLibraryReadingListEntriesConnection"]["edges"]
-    assert [edge["node"]["title"] for edge in edges] == expected
+    edges = json_list(data, "allLibraryReadingListEntriesConnection", "edges")
+    assert [json_at(edge, "node", "title") for edge in edges] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -1396,9 +1416,9 @@ def test_combined_shape_the_key_set_cannot_carry_is_refused_at_the_field(
         payload = _post("{ allLibraryGenresViaListField { name } }")
 
     assert payload["data"] is None, payload
-    [error] = payload["errors"]
-    assert error["path"] == ["allLibraryGenresViaListField"]
-    message = error["message"]
+    [error] = json_list(payload, "errors")
+    assert json_at(error, "path") == ["allLibraryGenresViaListField"]
+    message = json_str(error, "message")
     assert "GenreType" in message, message
     assert "combined" in message, message
     for fragment in shape.fragments:
@@ -1419,9 +1439,12 @@ def test_sliced_combined_hook_is_refused_as_sliced(monkeypatch: pytest.MonkeyPat
     payload = _post("{ allLibraryGenresViaListField { name } }")
 
     assert payload["data"] is None, payload
-    [error] = payload["errors"]
-    assert error["path"] == ["allLibraryGenresViaListField"]
-    assert "GenreType.get_queryset returned a sliced queryset (rows 0:2)" in error["message"]
+    [error] = json_list(payload, "errors")
+    assert json_at(error, "path") == ["allLibraryGenresViaListField"]
+    assert "GenreType.get_queryset returned a sliced queryset (rows 0:2)" in json_str(
+        error,
+        "message",
+    )
 
 
 @pytest.mark.django_db
@@ -1439,11 +1462,11 @@ def test_refused_combined_shape_is_masked_by_the_production_error_policy(
     response = post_graphql("{ allLibraryGenresViaListField { name } }")
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None, payload
-    [error] = payload["errors"]
-    assert error["path"] == ["allLibraryGenresViaListField"]
-    assert error["message"] == "An unexpected error occurred."
+    [error] = json_list(payload, "errors")
+    assert json_at(error, "path") == ["allLibraryGenresViaListField"]
+    assert json_at(error, "message") == "An unexpected error occurred."
     assert "union" not in str(error)
 
 
@@ -1468,9 +1491,12 @@ def test_outer_values_projection_after_a_combinator_is_refused_as_a_projection(
     payload = _post("{ allLibraryGenresViaListField { name } }")
 
     assert payload["data"] is None, payload
-    [error] = payload["errors"]
-    assert error["path"] == ["allLibraryGenresViaListField"]
-    assert "GenreType.get_queryset returned a ValuesIterable projection" in error["message"]
+    [error] = json_list(payload, "errors")
+    assert json_at(error, "path") == ["allLibraryGenresViaListField"]
+    assert "GenreType.get_queryset returned a ValuesIterable projection" in json_str(
+        error,
+        "message",
+    )
 
 
 @pytest.mark.django_db
@@ -1496,9 +1522,9 @@ def test_outer_values_projection_through_the_cascade_is_refused_as_combined(
     payload = _post("{ allLibraryCirculationDesks { name } }")
 
     assert payload["data"] is None, payload
-    [error] = payload["errors"]
-    assert error["path"] == ["allLibraryCirculationDesks"]
-    message = error["message"]
+    [error] = json_list(payload, "errors")
+    assert json_at(error, "path") == ["allLibraryCirculationDesks"]
+    message = json_str(error, "message")
     for fragment in (
         "ShelfType",
         "combined",
@@ -1532,10 +1558,10 @@ def test_sliced_combined_hook_on_a_nested_connection_is_refused_naming_the_slice
     payload = _post(_NESTED_CONNECTION)
 
     assert payload["data"] is None, payload
-    [error] = payload["errors"]
-    assert error["path"] == ["allLibraryGenres"]
-    assert "BookType.get_queryset returned a combined queryset" in error["message"]
-    assert "union: it is sliced" in error["message"]
+    [error] = json_list(payload, "errors")
+    assert json_at(error, "path") == ["allLibraryGenres"]
+    assert "BookType.get_queryset returned a combined queryset" in json_str(error, "message")
+    assert "union: it is sliced" in json_str(error, "message")
 
 
 def _hinted_shelf_schema(books: QuerySet[Model]) -> DjangoSchema:
@@ -1579,8 +1605,8 @@ def test_hinted_prefetch_of_a_combined_queryset_serves_its_rows(shape: str) -> N
 
     assert _order_free(results[True]) == _order_free(results[False])
     assert {
-        row["code"]: sorted(book["title"] for book in row["books"])
-        for row in results[True]["shelves"]
+        json_at(row, "code"): sorted(json_str(book, "title") for book in json_list(row, "books"))
+        for row in json_list(results[True], "shelves")
     } == {
         code: sorted(t for t in titles if t in _VISIBLE[shape])
         for code, titles in _BOOKS_BY_SHELF.items()

@@ -32,6 +32,7 @@ from django.db import connection as db_connection
 from django.db.models import QuerySet
 from django.test.utils import CaptureQueriesContext
 from graphql import GraphQLError
+from graphql_client import json_at, json_list, json_object
 from strawberry import relay
 
 from apps.library.models import Branch, Genre, ProxyBranch, TaggedItem
@@ -86,7 +87,8 @@ def _build_schema(*, strategy: str | None = None, total_count: bool = False) -> 
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[BranchNode])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[BranchNode])  # pyright: ignore[reportAny]
         def branches(self) -> QuerySet[Branch]:
             return Branch.objects.order_by("id")
 
@@ -147,14 +149,14 @@ def test_windowed_generic_connection_first_page_excludes_poison_row() -> None:
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    central = result.data["branches"][0]
-    conn = central["tagsConnection"]
-    assert [edge["node"]["tag"] for edge in conn["edges"]] == ["a1", "a2"]
-    assert all(edge["cursor"] for edge in conn["edges"])
+    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    edges = json_list(conn, "edges")
+    assert [json_at(edge, "node", "tag") for edge in edges] == ["a1", "a2"]
+    assert all(json_at(edge, "cursor") for edge in edges)
     # totalCount counts only the branch's own three tags - the poison row and
     # the other branch's tag are excluded by the morph WHERE / object_id partition.
     assert conn["totalCount"] == 3
-    assert conn["pageInfo"]["hasNextPage"] is True
+    assert json_at(conn, "pageInfo", "hasNextPage") is True
 
 
 @pytest.mark.django_db
@@ -178,9 +180,9 @@ def test_generic_connection_has_next_page_probe_composes_with_ws_a() -> None:
         )
     assert result.errors is None, result.errors
     assert result.data is not None
-    conn = result.data["branches"][0]["tagsConnection"]
-    assert [edge["node"]["tag"] for edge in conn["edges"]] == ["t0", "t1"]
-    assert conn["pageInfo"]["hasNextPage"] is True
+    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["t0", "t1"]
+    assert json_at(conn, "pageInfo", "hasNextPage") is True
     # Windowed path taken, and count-free: the probe replaces the partition count.
     window_sql = _window_sql(ctx.captured_queries)
     assert "COUNT(" not in window_sql.upper()
@@ -191,7 +193,7 @@ def test_generic_connection_has_next_page_probe_composes_with_ws_a() -> None:
     )
     assert exact.errors is None, exact.errors
     assert exact.data is not None
-    assert exact.data["branches"][0]["tagsConnection"]["pageInfo"]["hasNextPage"] is False
+    assert json_at(exact.data, "branches", 0, "tagsConnection", "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -245,8 +247,8 @@ def test_lateral_strategy_generic_connection_degrades_to_windowed() -> None:
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    conn = result.data["branches"][0]["tagsConnection"]
-    assert [edge["node"]["tag"] for edge in conn["edges"]] == ["t0", "t1"]
+    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["t0", "t1"]
 
 
 _OPTIMIZER_PATH_MARKER = os.sep + "optimizer" + os.sep
@@ -342,7 +344,8 @@ def _build_proxy_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[ProxyBranchNode])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[ProxyBranchNode])  # pyright: ignore[reportAny]
         def proxy_branches(self) -> QuerySet[ProxyBranch]:
             return ProxyBranch.objects.order_by("id")
 
@@ -377,7 +380,7 @@ def test_generic_connection_honors_non_default_for_concrete_model() -> None:
     concrete_ct = ContentType.objects.get_for_model(Branch)
     # A proxy model carries its own content type, distinct from the concrete
     # parent's - the whole point of ``for_concrete_model=False``.
-    assert proxy_ct.pk != concrete_ct.pk
+    assert proxy_ct.id != concrete_ct.id
 
     branch = Branch.objects.create(name="Central")
     for tag in ("p1", "p2", "p3"):
@@ -403,8 +406,8 @@ def test_generic_connection_honors_non_default_for_concrete_model() -> None:
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    conn = result.data["proxyBranches"][0]["proxyTagsConnection"]
+    conn = json_object(result.data, "proxyBranches", 0, "proxyTagsConnection")
     # Only the proxy-content-type rows come back; the concrete decoy is excluded.
-    assert [edge["node"]["tag"] for edge in conn["edges"]] == ["p1", "p2"]
+    assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["p1", "p2"]
     assert conn["totalCount"] == 3
-    assert conn["pageInfo"]["hasNextPage"] is True
+    assert json_at(conn, "pageInfo", "hasNextPage") is True

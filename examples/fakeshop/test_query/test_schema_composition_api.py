@@ -19,7 +19,7 @@ import pytest
 from apps.products import models as product_models
 from apps.products.services import seed_data
 from django.apps import apps as django_apps
-from graphql_client import assert_graphql_success
+from graphql_client import assert_graphql_success, json_at, json_list, json_str
 
 _TYPE_FIELDS_QUERY = """
 query($name: String!) {
@@ -86,8 +86,8 @@ def test_the_composed_schema_publishes_each_apps_types(
 
     published = data["__type"]
     assert published is not None, type_name
-    assert published["name"] == type_name
-    assert expected_fields <= {field["name"] for field in published["fields"]}
+    assert json_at(published, "name") == type_name
+    assert expected_fields <= {json_at(field, "name") for field in json_list(published, "fields")}
 
 
 @pytest.mark.django_db
@@ -108,16 +108,13 @@ def test_the_anonymous_category_page_lists_each_visible_category_with_its_own_vi
     """
     seed_data(1)
     expected: dict[str, list[str]] = defaultdict(list)
-    for name in product_models.Category.objects.filter(is_private=False).values_list(
-        "name",
-        flat=True,
-    ):
-        expected[name] = []
-    for category_name, item_name in product_models.Item.objects.filter(
+    for category in product_models.Category.objects.filter(is_private=False):
+        expected[category.name] = []
+    for item in product_models.Item.objects.filter(
         is_private=False,
         category__is_private=False,
-    ).values_list("category__name", "name"):
-        expected[category_name].append(item_name)
+    ).select_related("category"):
+        expected[item.category.name].append(item.name)
     assert expected, "the fixture must publish at least one visible category"
 
     data = assert_graphql_success(
@@ -125,7 +122,9 @@ def test_the_anonymous_category_page_lists_each_visible_category_with_its_own_vi
     )
 
     returned = {
-        edge["node"]["name"]: sorted(item["name"] for item in edge["node"]["items"])
-        for edge in data["allCategories"]["edges"]
+        json_at(edge, "node", "name"): sorted(
+            json_str(item, "name") for item in json_list(edge, "node", "items")
+        )
+        for edge in json_list(data, "allCategories", "edges")
     }
     assert returned == {name: sorted(items) for name, items in expected.items()}

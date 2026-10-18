@@ -34,18 +34,34 @@ from typing import NoReturn
 
 import pytest
 from apps.scalars import models
-from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.exceptions import SuspiciousFileOperation
-from django.core.files.base import ContentFile
+from django.core.files.base import ContentFile, File
 from django.core.files.storage import FileSystemStorage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    read_attr,
+    saved_pk,
+)
 from PIL import Image
 from strawberry import relay
 
 from django_strawberry_framework.testing import TestClient
+
+
+def _read_all(handle: "File[bytes]") -> object:
+    """The whole remaining content of an open stored file."""
+    read = read_attr(handle, "read")
+    assert callable(read), read
+    return read()
+
 
 # A 5x9 PNG so the live ``width`` / ``height`` assertions read distinct,
 # deterministic values rather than a square that could pass by coincidence.
@@ -58,10 +74,7 @@ _IMAGE_HEIGHT = 9
 # middleware is dropped in the same override because fakeshop wires
 # debug-toolbar behind ``DEBUG`` and it would inject a panel against ``djdt``
 # routes the URLconf never computed.
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 
 def _png_bytes() -> bytes:
@@ -76,7 +89,7 @@ def _introspect_type(name: str, selection: str) -> JSONObject:
     res = TestClient().query(f'query {{ __type(name: "{name}") {{ {selection} }} }}')
     assert res.response.status_code == 200
     assert res.data is not None
-    return res.data["__type"]
+    return json_object(res.data, "__type")
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +109,7 @@ def test_media_specimen_output_sdl_is_default_nullable_over_http() -> None:
         "MediaSpecimenType",
         "fields { name type { kind name } }",
     )
-    by_name = {f["name"]: f["type"] for f in media_type["fields"]}
+    by_name = {json_at(f, "name"): json_at(f, "type") for f in json_list(media_type, "fields")}
     assert by_name["attachment"] == {"kind": "OBJECT", "name": "DjangoFileType"}
     assert by_name["image"] == {"kind": "OBJECT", "name": "DjangoImageType"}
 
@@ -111,10 +124,11 @@ def test_default_file_output_objects_expose_no_filesystem_path_over_http() -> No
     """
     for type_name in ("DjangoFileType", "DjangoImageType"):
         output_type = _introspect_type(type_name, "fields { name }")
-        names = {field["name"] for field in output_type["fields"]}
+        names = {json_at(field, "name") for field in json_list(output_type, "fields")}
         assert "path" not in names, (type_name, names)
     file_names = {
-        field["name"] for field in _introspect_type("DjangoFileType", "fields { name }")["fields"]
+        json_at(field, "name")
+        for field in json_list(_introspect_type("DjangoFileType", "fields { name }"), "fields")
     }
     assert file_names == {"name", "size", "url"}
 
@@ -130,11 +144,11 @@ def test_file_output_objects_publish_nullable_subfields_over_http() -> None:
     is the stored column string and stays non-null.
     """
     image_fields = {
-        field["name"]: field["type"]
-        for field in _introspect_type(
-            "DjangoImageType",
-            "fields { name type { kind name } }",
-        )["fields"]
+        json_str(field, "name"): json_at(field, "type")
+        for field in json_list(
+            _introspect_type("DjangoImageType", "fields { name type { kind name } }"),
+            "fields",
+        )
     }
 
     assert image_fields == {
@@ -155,34 +169,34 @@ def test_filesystem_path_opt_in_is_absent_unless_declared_over_http() -> None:
     ``DjangoImageType`` (spec-048 Decision 2).
     """
     default_fields = {
-        field["name"]: field["type"]
-        for field in _introspect_type(
-            "MediaSpecimenType",
-            "fields { name type { kind name } }",
-        )["fields"]
+        json_str(field, "name"): json_at(field, "type")
+        for field in json_list(
+            _introspect_type("MediaSpecimenType", "fields { name type { kind name } }"),
+            "fields",
+        )
     }
     assert default_fields["attachment"] == {"kind": "OBJECT", "name": "DjangoFileType"}
     assert default_fields["image"] == {"kind": "OBJECT", "name": "DjangoImageType"}
 
     opt_in_fields = {
-        field["name"]: field["type"]
-        for field in _introspect_type(
-            "MediaSpecimenWithPathType",
-            "fields { name type { kind name } }",
-        )["fields"]
+        json_str(field, "name"): json_at(field, "type")
+        for field in json_list(
+            _introspect_type("MediaSpecimenWithPathType", "fields { name type { kind name } }"),
+            "fields",
+        )
     }
     assert opt_in_fields["attachment"] == {"kind": "OBJECT", "name": "DjangoFilePathType"}
     assert opt_in_fields["image"] == {"kind": "OBJECT", "name": "DjangoImageType"}
 
     path_field = next(
         field
-        for field in _introspect_type(
-            "DjangoFilePathType",
-            "fields { name description }",
-        )["fields"]
-        if field["name"] == "path"
+        for field in json_list(
+            _introspect_type("DjangoFilePathType", "fields { name description }"),
+            "fields",
+        )
+        if json_at(field, "name") == "path"
     )
-    assert "SECURITY" in path_field["description"]
+    assert "SECURITY" in json_str(path_field, "description")
 
 
 @pytest.mark.django_db
@@ -212,9 +226,9 @@ def test_opted_in_filesystem_path_resolves_over_http(tmp_path: Path) -> None:
         )
         assert res.response.status_code == 200
         assert res.data is not None
-        row = res.data["allMediaSpecimensWithPath"][0]
-        assert row["attachment"]["path"] == specimen.attachment.path
-        assert row["attachment"]["path"].startswith(str(tmp_path))
+        row = json_object(res.data, "allMediaSpecimensWithPath", 0)
+        assert json_at(row, "attachment", "path") == specimen.attachment.path
+        assert json_str(row, "attachment", "path").startswith(str(tmp_path))
 
         # The un-opted type cannot even be asked for it.
         refused = TestClient().query(
@@ -251,22 +265,22 @@ def test_populated_file_and_image_resolve_subfields_over_http(tmp_path: Path) ->
         )
         assert res.response.status_code == 200
         assert res.data is not None
-        rows = res.data["allMediaSpecimens"]
+        rows = json_list(res.data, "allMediaSpecimens")
         assert len(rows) == 1, rows
-        row = rows[0]
+        row = json_object(rows, 0)
 
     assert row["label"] == "m1"
-    assert row["attachment"]["name"].endswith("doc.txt")
-    assert row["attachment"]["size"] == len(b"hello bytes")
+    assert json_str(row, "attachment", "name").endswith("doc.txt")
+    assert json_at(row, "attachment", "size") == len(b"hello bytes")
     # ``url`` is string-built from MEDIA_URL (+ the stored name); it never raises.
-    assert row["attachment"]["url"].startswith("/media/")
-    assert row["attachment"]["url"].endswith("doc.txt")
-    assert row["image"]["name"].endswith("pic.png")
-    assert row["image"]["size"] == len(image_bytes)
-    assert row["image"]["url"].startswith("/media/")
-    assert row["image"]["url"].endswith("pic.png")
-    assert row["image"]["width"] == _IMAGE_WIDTH
-    assert row["image"]["height"] == _IMAGE_HEIGHT
+    assert json_str(row, "attachment", "url").startswith("/media/")
+    assert json_str(row, "attachment", "url").endswith("doc.txt")
+    assert json_str(row, "image", "name").endswith("pic.png")
+    assert json_at(row, "image", "size") == len(image_bytes)
+    assert json_str(row, "image", "url").startswith("/media/")
+    assert json_str(row, "image", "url").endswith("pic.png")
+    assert json_at(row, "image", "width") == _IMAGE_WIDTH
+    assert json_at(row, "image", "height") == _IMAGE_HEIGHT
 
 
 @pytest.mark.django_db
@@ -286,7 +300,7 @@ def test_empty_required_file_resolves_to_null_over_http(tmp_path: Path) -> None:
         assert res.response.status_code == 200
 
     assert res.data is not None
-    row = res.data["allMediaSpecimens"][0]
+    row = json_object(res.data, "allMediaSpecimens", 0)
     assert row["label"] == "empty"
     assert row["attachment"] is None
     assert row["image"] is None
@@ -314,10 +328,10 @@ def test_empty_image_beside_populated_file_resolves_only_the_image_to_null_over_
         )
         assert res.response.status_code == 200
         assert res.data is not None
-        row = res.data["allMediaSpecimens"][0]
+        row = json_object(res.data, "allMediaSpecimens", 0)
 
     assert row["label"] == "file-only"
-    assert row["attachment"]["name"].endswith("doc.txt")
+    assert json_str(row, "attachment", "name").endswith("doc.txt")
     assert row["image"] is None
 
 
@@ -350,12 +364,12 @@ def test_storage_without_absolute_paths_nulls_only_the_path_subfield_over_http(
         )
         assert res.response.status_code == 200
         assert res.data is not None
-        attachment = res.data["allMediaSpecimensWithPath"][0]["attachment"]
+        attachment = json_object(res.data, "allMediaSpecimensWithPath", 0, "attachment")
 
     assert attachment["path"] is None
-    assert attachment["name"].endswith("doc.txt")
+    assert json_str(attachment, "name").endswith("doc.txt")
     # ``url`` is string-built from MEDIA_URL and never consults storage paths.
-    assert attachment["url"].endswith("doc.txt")
+    assert json_str(attachment, "url").endswith("doc.txt")
 
 
 @pytest.mark.django_db
@@ -376,10 +390,10 @@ def test_vanished_file_resolves_size_to_null_over_http(tmp_path: Path) -> None:
         res = TestClient().query("{ allMediaSpecimens { attachment { name size } } }")
         assert res.response.status_code == 200
         assert res.data is not None
-        attachment = res.data["allMediaSpecimens"][0]["attachment"]
+        attachment = json_object(res.data, "allMediaSpecimens", 0, "attachment")
 
     assert attachment["size"] is None
-    assert attachment["name"].endswith("doc.txt")
+    assert json_str(attachment, "name").endswith("doc.txt")
 
 
 @pytest.mark.django_db
@@ -404,11 +418,11 @@ def test_corrupt_image_resolves_width_and_height_to_null_over_http(tmp_path: Pat
         res = TestClient().query("{ allMediaSpecimens { image { name width height } } }")
         assert res.response.status_code == 200
         assert res.data is not None
-        image = res.data["allMediaSpecimens"][0]["image"]
+        image = json_object(res.data, "allMediaSpecimens", 0, "image")
 
     assert image["width"] is None
     assert image["height"] is None
-    assert image["name"].endswith("broken.png")
+    assert json_str(image, "name").endswith("broken.png")
 
 
 @pytest.mark.django_db
@@ -465,7 +479,9 @@ def test_media_specimen_input_exposes_upload_over_http() -> None:
         "MediaSpecimenInput",
         "inputFields { name type { kind name ofType { kind name } } }",
     )
-    by_name = {f["name"]: f["type"] for f in input_type["inputFields"]}
+    by_name = {
+        json_at(f, "name"): json_at(f, "type") for f in json_list(input_type, "inputFields")
+    }
     assert "attachmentId" not in by_name, by_name
     # The columns are required (no null / blank / default), so the input field is
     # ``Upload!``. Assert the DIRECT wrapper is NON_NULL -> Upload: a nullable
@@ -530,20 +546,20 @@ def test_multipart_create_uploads_real_files_over_http(tmp_path: Path) -> None:
             )
         assert res.response.status_code == 200
         assert res.data is not None
-        payload = res.data["createMediaSpecimen"]
+        payload = json_object(res.data, "createMediaSpecimen")
         assert payload["errors"] == []
-        result = payload["result"]
+        result = json_object(payload, "result")
 
         # The row landed in the database with both files attached.
         assert models.MediaSpecimen.objects.filter(label="uploaded").exists()
 
     assert result["label"] == "uploaded"
-    assert result["attachment"]["name"].endswith("up.txt")
-    assert result["attachment"]["size"] == len(b"multipart bytes")
-    assert result["attachment"]["url"].endswith("up.txt")
-    assert result["image"]["name"].endswith("up.png")
-    assert result["image"]["width"] == _IMAGE_WIDTH
-    assert result["image"]["height"] == _IMAGE_HEIGHT
+    assert json_str(result, "attachment", "name").endswith("up.txt")
+    assert json_at(result, "attachment", "size") == len(b"multipart bytes")
+    assert json_str(result, "attachment", "url").endswith("up.txt")
+    assert json_str(result, "image", "name").endswith("up.png")
+    assert json_at(result, "image", "width") == _IMAGE_WIDTH
+    assert json_at(result, "image", "height") == _IMAGE_HEIGHT
 
 
 @pytest.mark.django_db
@@ -584,17 +600,17 @@ def test_multipart_create_media_specimen_image_via_form_over_http(tmp_path: Path
         )
         assert res.response.status_code == 200
         assert res.data is not None
-        payload = res.data["createMediaSpecimenImageViaForm"]
+        payload = json_object(res.data, "createMediaSpecimenImageViaForm")
         assert payload["errors"] == []
-        result = payload["result"]
+        result = json_object(payload, "result")
 
         # The row landed via the FORM path with the image routed into ``files=``.
         assert models.MediaSpecimen.objects.filter(label="form-uploaded").exists()
 
     assert result["label"] == "form-uploaded"
-    assert result["image"]["name"].endswith("form.png")
-    assert result["image"]["width"] == _IMAGE_WIDTH
-    assert result["image"]["height"] == _IMAGE_HEIGHT
+    assert json_str(result, "image", "name").endswith("form.png")
+    assert json_at(result, "image", "width") == _IMAGE_WIDTH
+    assert json_at(result, "image", "height") == _IMAGE_HEIGHT
 
 
 _UPDATE_MEDIA_SPECIMEN = """
@@ -639,7 +655,7 @@ def _update_specimen(
         )
     assert res.response.status_code == 200
     assert res.data is not None
-    return res.data["updateMediaSpecimen"]
+    return json_object(res.data, "updateMediaSpecimen")
 
 
 def test_media_specimen_partial_input_makes_the_required_file_an_optional_upload_over_http() -> (
@@ -655,7 +671,9 @@ def test_media_specimen_partial_input_makes_the_required_file_an_optional_upload
         "MediaSpecimenPartialInput",
         "inputFields { name type { kind name ofType { kind name } } }",
     )
-    by_name = {f["name"]: f["type"] for f in input_type["inputFields"]}
+    by_name = {
+        json_at(f, "name"): json_at(f, "type") for f in json_list(input_type, "inputFields")
+    }
     assert by_name["attachment"] == {"kind": "SCALAR", "name": "Upload", "ofType": None}
 
 
@@ -672,11 +690,11 @@ def test_update_omitting_the_file_keeps_the_stored_file_over_http(tmp_path: Path
         original_name = specimen.attachment.name
         payload = _update_specimen(specimen, {"label": "renamed"})
         assert payload["errors"] == [], payload
-        assert payload["result"]["label"] == "renamed"
+        assert json_at(payload, "result", "label") == "renamed"
         specimen.refresh_from_db()
         assert specimen.attachment.name == original_name
         with specimen.attachment.open("rb") as handle:
-            assert handle.read() == b"original"
+            assert _read_all(handle) == b"original"
 
 
 @pytest.mark.django_db
@@ -700,7 +718,7 @@ def test_update_with_a_new_upload_replaces_the_stored_file_over_http(tmp_path: P
         assert specimen.attachment.name is not None
         assert specimen.attachment.name.endswith("replacement.txt")
         with specimen.attachment.open("rb") as handle:
-            assert handle.read() == b"replaced bytes"
+            assert _read_all(handle) == b"replaced bytes"
 
 
 @pytest.mark.django_db
@@ -718,12 +736,15 @@ def test_update_explicit_null_on_the_required_file_is_a_field_error_over_http(
         specimen = _stored_specimen("null-file")
         payload = _update_specimen(specimen, {"attachment": None})
         assert payload["result"] is None, payload
-        assert [(error["field"], error["codes"]) for error in payload["errors"]] == [
+        assert [
+            (json_at(error, "field"), json_at(error, "codes"))
+            for error in json_list(payload, "errors")
+        ] == [
             ("attachment", ["null"]),
         ]
         specimen.refresh_from_db()
         with specimen.attachment.open("rb") as handle:
-            assert handle.read() == b"original"
+            assert _read_all(handle) == b"original"
 
 
 @pytest.mark.django_db
@@ -753,7 +774,10 @@ def test_update_with_an_uncoercible_raw_pk_is_the_not_found_field_error_over_htt
         specimen = _stored_specimen("bad-id")
         payload = _update_specimen(specimen, {"label": "renamed"}, lookup_id=raw_id)
         assert payload["result"] is None, payload
-        assert [(error["field"], error["codes"]) for error in payload["errors"]] == [
+        assert [
+            (json_at(error, "field"), json_at(error, "codes"))
+            for error in json_list(payload, "errors")
+        ] == [
             ("id", ["not_found"]),
         ]
         specimen.refresh_from_db()
@@ -775,9 +799,12 @@ def test_update_with_a_missing_raw_pk_is_the_not_found_field_error_over_http(
         payload = _update_specimen(
             specimen,
             {"label": "renamed"},
-            lookup_id=str(specimen.pk + 1000),
+            lookup_id=str(saved_pk(specimen.pk) + 1000),
         )
         assert payload["result"] is None, payload
-        assert [(error["field"], error["codes"]) for error in payload["errors"]] == [
+        assert [
+            (json_at(error, "field"), json_at(error, "codes"))
+            for error in json_list(payload, "errors")
+        ] == [
             ("id", ["not_found"]),
         ]

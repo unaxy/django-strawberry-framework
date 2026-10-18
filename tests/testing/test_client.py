@@ -931,7 +931,7 @@ class AssertionHelperFailureDirectionTests(GraphQLTestMixin, unittest.TestCase):
         errors: list[GraphQLFormattedError] | None,
         data: dict[str, object] | None,
         status_code: int = 200,
-    ) -> Response:
+    ) -> Response[JsonResponse]:
         raw = JsonResponse({"data": data}, status=status_code)
         return Response(errors=errors, data=data, extensions=None, response=raw)
 

@@ -50,7 +50,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import connection
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
-from graphql_client import assert_graphql_success
+from graphql_client import assert_graphql_success, json_at, json_list, json_object, json_str
 
 
 def _sql_from_table(captured: CaptureQueriesContext, table: str) -> list[str]:
@@ -104,7 +104,10 @@ def _introspect_input_fields(type_name: str) -> dict[str, dict[str, object]]:
         f'{{ __type(name: "{type_name}") {{ inputFields {{ name type {{ kind name ofType '
         "{ kind name } } } } }",
     )
-    return {field["name"]: field["type"] for field in data["__type"]["inputFields"]}
+    return {
+        json_str(field, "name"): json_object(field, "type")
+        for field in json_list(data, "__type", "inputFields")
+    }
 
 
 @pytest.mark.django_db
@@ -187,12 +190,12 @@ def test_lending_desks_order_by_the_inherited_opened_on_column() -> None:
         "{ allLibraryLendingDesks(orderBy: [{ openedOn: ASC }]) { name } }",
     )
 
-    assert [row["name"] for row in descending["allLibraryLendingDesks"]] == [
+    assert [json_at(row, "name") for row in json_list(descending, "allLibraryLendingDesks")] == [
         "Lobby Kiosk",
         "South Desk",
         "North Desk",
     ], descending
-    assert [row["name"] for row in ascending["allLibraryLendingDesks"]] == [
+    assert [json_at(row, "name") for row in json_list(ascending, "allLibraryLendingDesks")] == [
         "North Desk",
         "South Desk",
         "Lobby Kiosk",
@@ -218,12 +221,14 @@ def test_parent_link_cascade_hides_a_desk_whose_venue_is_hidden() -> None:
     (desk_sql,) = _sql_from_table(captured, "library_lendingdesk")
     kiosks = assert_graphql_success("{ allLibrarySelfServeDesks { name } }")
 
-    assert [row["name"] for row in desks["allLibraryLendingDesks"]] == [
+    assert [json_at(row, "name") for row in json_list(desks, "allLibraryLendingDesks")] == [
         "North Desk",
         "South Desk",
         "Lobby Kiosk",
     ], desks
-    assert [row["name"] for row in kiosks["allLibrarySelfServeDesks"]] == ["Lobby Kiosk"], kiosks
+    assert [json_at(row, "name") for row in json_list(kiosks, "allLibrarySelfServeDesks")] == [
+        "Lobby Kiosk",
+    ], kiosks
     assert models.LendingDesk.objects.filter(name="Closed East Desk").exists()
     assert models.SelfServeDesk.objects.filter(name="Closed Annex Kiosk").exists()
     assert '"library_lendingdesk"."venue_ptr_id" IN (SELECT' in desk_sql, desk_sql
@@ -389,7 +394,7 @@ def test_nullable_lead_ticket_cycle_cascades_one_way() -> None:
         )
 
     # ``Venue`` declares no ordering, so the rows compare by name, never by storage order.
-    assert sorted(data["allLibraryVenues"], key=lambda row: row["name"]) == [
+    assert sorted(json_list(data, "allLibraryVenues"), key=lambda row: json_str(row, "name")) == [
         {"name": "Annex", "leadTicket": {"code": "T-1", "venue": {"name": "Annex"}}},
         {"name": "Depot", "leadTicket": None},
     ], data
@@ -417,7 +422,7 @@ def test_open_venues_are_the_proxy_default_manager_rows() -> None:
     assert open_venues["allLibraryOpenVenues"] == [
         {"name": "Annex", "openedOn": "2020-05-01"},
     ], open_venues
-    assert [row["name"] for row in all_venues["allLibraryVenues"]] == [
+    assert [json_at(row, "name") for row in json_list(all_venues, "allLibraryVenues")] == [
         "Annex",
         "Planned Wing",
     ], all_venues
@@ -507,7 +512,7 @@ def test_circulation_desk_publishes_children_and_profile_under_a_scoped_cascade(
             "profile": {"code": "LATE-OPENING"},
         },
     ], anonymous
-    assert [row["name"] for row in staff["allLibraryCirculationDesks"]] == [
+    assert [json_at(row, "name") for row in json_list(staff, "allLibraryCirculationDesks")] == [
         "Front",
         "Vault Desk",
     ], staff
@@ -549,7 +554,7 @@ def _shelf_label_texts(
             f"{{ allLibraryShelfLabels(orderBy: [{{shelf: {direction}}}]) {{ text }} }}",
             client=client,
         )
-    texts = [row["text"] for row in data["allLibraryShelfLabels"]]
+    texts = [json_str(row, "text") for row in json_list(data, "allLibraryShelfLabels")]
     return texts, _sql_from_table(captured, "library_shelflabel")
 
 
@@ -742,7 +747,9 @@ def test_branches_order_by_label_shelves_aggregate_each_carrier_behind_the_label
             "{ name } }",
         )
 
-    assert [row["name"] for row in data["allLibraryBranches"]] == _ordered_with_missing(
+    assert [
+        json_at(row, "name") for row in json_list(data, "allLibraryBranches")
+    ] == _ordered_with_missing(
         direction,
         ["Central", "Annex"],
         "Vault",
@@ -768,7 +775,9 @@ def _filtered_shelf_label_texts(
             f"{{ allLibraryShelfLabelsFiltered(filter: {filter_input}) {{ text }} }}",
             client=client,
         )
-    texts = sorted(row["text"] for row in data["allLibraryShelfLabelsFiltered"])
+    texts = sorted(
+        json_str(row, "text") for row in json_list(data, "allLibraryShelfLabelsFiltered")
+    )
     return texts, _sql_from_table(captured, "library_shelflabel")
 
 

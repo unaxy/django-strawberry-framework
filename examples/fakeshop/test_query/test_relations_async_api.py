@@ -60,7 +60,7 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.urls import clear_url_caches, path
-from graphql_client import JSONObject
+from graphql_client import JSONObject, response_json
 
 from django_strawberry_framework import DjangoSchema, strawberry_config
 from django_strawberry_framework.testing import AsyncTestClient
@@ -120,7 +120,7 @@ async def _post_async(schema: strawberry.Schema, query: str) -> JSONObject:
                 url="/graphql-async/",
             )
         assert res.response.status_code == 200
-        return res.response.json()
+        return response_json(res.response)
     finally:
         _CURRENT["schema"] = None
         clear_url_caches()
@@ -139,7 +139,8 @@ async def test_async_forward_fk_lazy_loads_over_http() -> None:
 
         @strawberry.type
         class Query:
-            @strawberry.field(graphql_type=list[library_schema.LoanType])
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            @strawberry.field(graphql_type=list[library_schema.LoanType])  # pyright: ignore[reportAny]
             async def loans(self) -> list[models.Loan]:
                 return await sync_to_async(list)(models.Loan.objects.order_by("note"))
 
@@ -171,7 +172,8 @@ async def test_async_many_side_lazy_loads_over_http() -> None:
 
         @strawberry.type
         class Query:
-            @strawberry.field(graphql_type=list[library_schema.PatronType])
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            @strawberry.field(graphql_type=list[library_schema.PatronType])  # pyright: ignore[reportAny]
             async def patrons(self) -> list[models.Patron]:
                 return await sync_to_async(list)(models.Patron.objects.order_by("name"))
 
@@ -203,7 +205,8 @@ async def test_async_reverse_one_to_one_lazy_loads_over_http() -> None:
 
         @strawberry.type
         class Query:
-            @strawberry.field(graphql_type=list[library_schema.PatronType])
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            @strawberry.field(graphql_type=list[library_schema.PatronType])  # pyright: ignore[reportAny]
             async def patrons(self) -> list[models.Patron]:
                 return await sync_to_async(list)(models.Patron.objects.order_by("pk"))
 
@@ -305,7 +308,8 @@ async def test_async_consumer_prefetched_many_side_resolves_over_http() -> None:
 
         @strawberry.type
         class Query:
-            @strawberry.field(graphql_type=list[library_schema.VenueType])
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            @strawberry.field(graphql_type=list[library_schema.VenueType])  # pyright: ignore[reportAny]
             async def venues(self) -> list[models.Venue]:
                 return await sync_to_async(list)(
                     models.Venue.objects.prefetch_related(
@@ -314,7 +318,8 @@ async def test_async_consumer_prefetched_many_side_resolves_over_http() -> None:
                     ).order_by("name"),
                 )
 
-            @strawberry.field(graphql_type=list[library_schema.VenueSponsorType])
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            @strawberry.field(graphql_type=list[library_schema.VenueSponsorType])  # pyright: ignore[reportAny]
             async def sponsors(self) -> list[models.VenueSponsor]:
                 return await sync_to_async(list)(
                     models.VenueSponsor.objects.prefetch_related("venues").order_by("name"),
@@ -364,7 +369,8 @@ def _unoptimized_venue_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[library_schema.VenueType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[library_schema.VenueType])  # pyright: ignore[reportAny]
         async def all_library_venues(self) -> list[models.Venue]:
             return await sync_to_async(list)(models.Venue.objects.order_by("name"))
 

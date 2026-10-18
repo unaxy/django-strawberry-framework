@@ -34,7 +34,7 @@ from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from graphql_client import JSONObject
+from graphql_client import JSONObject, json_at, json_list, json_object, response_json
 from graphql_client import post_graphql as _post_graphql
 
 from django_strawberry_framework.testing import TestClient
@@ -69,7 +69,7 @@ def _capture(query: str) -> tuple[JSONObject, CaptureQueriesContext]:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     return payload, captured
 
@@ -90,7 +90,7 @@ def _capture_as_staff(query: str) -> tuple[JSONObject, CaptureQueriesContext]:
     with CaptureQueriesContext(connection) as captured, client.login(staff):
         response = client.query(query, assert_no_errors=False).response
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     return payload, captured
 
@@ -105,9 +105,9 @@ def _child_sql(captured: CaptureQueriesContext, table: str) -> list[str]:
     return [entry["sql"] for entry in captured.captured_queries if table in entry["sql"]]
 
 
-def _periodicals(payload: JSONObject) -> list[JSONObject]:
+def _periodicals(payload: JSONObject) -> list[object]:
     """The parent edges of the ``allLibraryPeriodicalsConnection`` root."""
-    return payload["data"]["allLibraryPeriodicalsConnection"]["edges"]
+    return json_list(payload, "data", "allLibraryPeriodicalsConnection", "edges")
 
 
 def _issues_query(inner: str) -> str:
@@ -131,9 +131,9 @@ def test_single_parent_first_page_skips_window_over_http() -> None:
     )
     parents = _periodicals(payload)
     assert len(parents) == 1
-    edges = parents[0]["node"]["issuesConnection"]["edges"]
-    assert [edge["node"]["title"] for edge in edges] == ["Astro #3", "Astro #2"]
-    assert all(edge["cursor"] for edge in edges)
+    edges = json_list(parents, 0, "node", "issuesConnection", "edges")
+    assert [json_at(edge, "node", "title") for edge in edges] == ["Astro #3", "Astro #2"]
+    assert all(json_at(edge, "cursor") for edge in edges)
     assert not _has_window(captured)
 
 
@@ -145,9 +145,12 @@ def test_single_parent_probe_shape_overfetches_without_window_over_http() -> Non
     payload, captured = _capture_as_staff(
         _issues_query("(first: 2) { edges { node { title } } pageInfo { hasNextPage } }"),
     )
-    conn = _periodicals(payload)[0]["node"]["issuesConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Astro #3", "Astro #2"]
-    assert conn["pageInfo"]["hasNextPage"] is True
+    conn = json_object(_periodicals(payload), 0, "node", "issuesConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Astro #3",
+        "Astro #2",
+    ]
+    assert json_at(conn, "pageInfo", "hasNextPage") is True
     assert not _has_window(captured)
     child_sql = _child_sql(captured, models.Issue._meta.db_table)
     assert any("LIMIT 3" in sql for sql in child_sql), child_sql
@@ -161,9 +164,12 @@ def test_single_parent_total_count_keeps_window_over_http() -> None:
     payload, captured = _capture_as_staff(
         _issues_query("(first: 2) { totalCount edges { node { title } } }"),
     )
-    conn = _periodicals(payload)[0]["node"]["issuesConnection"]
+    conn = json_object(_periodicals(payload), 0, "node", "issuesConnection")
     assert conn["totalCount"] == 3
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Astro #3", "Astro #2"]
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Astro #3",
+        "Astro #2",
+    ]
     assert _has_window(captured)
 
 
@@ -177,8 +183,9 @@ def test_multi_parent_keeps_window_over_http() -> None:
         _issues_query("(first: 2) { edges { node { title } } }"),
     )
     pages = {
-        edge["node"]["name"]: [
-            issue["node"]["title"] for issue in edge["node"]["issuesConnection"]["edges"]
+        json_at(edge, "node", "name"): [
+            json_at(issue, "node", "title")
+            for issue in json_list(edge, "node", "issuesConnection", "edges")
         ]
         for edge in _periodicals(payload)
     }
@@ -199,14 +206,14 @@ def test_single_parent_offset_page_keeps_window_over_http() -> None:
     first_payload, _ = _capture_as_staff(
         _issues_query("(first: 2) { edges { cursor node { title } } }"),
     )
-    first_edges = _periodicals(first_payload)[0]["node"]["issuesConnection"]["edges"]
-    after = first_edges[-1]["cursor"]
+    first_edges = json_list(_periodicals(first_payload), 0, "node", "issuesConnection", "edges")
+    after = json_at(first_edges, -1, "cursor")
 
     payload, captured = _capture_as_staff(
         _issues_query(f'(first: 2, after: "{after}") {{ edges {{ node {{ title }} }} }}'),
     )
-    conn = _periodicals(payload)[0]["node"]["issuesConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Astro #1"]
+    conn = json_object(_periodicals(payload), 0, "node", "issuesConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == ["Astro #1"]
     assert _has_window(captured)
 
 
@@ -223,16 +230,22 @@ def test_single_parent_keyset_first_page_skips_window_as_staff_over_http() -> No
     payload, captured = _capture_as_staff(
         _issues_query("(first: 2) { edges { cursor node { title number } } }"),
     )
-    conn = _periodicals(payload)[0]["node"]["issuesConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Astro #4", "Astro #3"]
+    conn = json_object(_periodicals(payload), 0, "node", "issuesConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Astro #4",
+        "Astro #3",
+    ]
     assert not _has_window(captured)
 
-    after = conn["edges"][-1]["cursor"]
+    after = json_at(conn, "edges", -1, "cursor")
     next_payload, _ = _capture_as_staff(
         _issues_query(f'(first: 2, after: "{after}") {{ edges {{ node {{ title }} }} }}'),
     )
-    next_conn = _periodicals(next_payload)[0]["node"]["issuesConnection"]
-    assert [edge["node"]["title"] for edge in next_conn["edges"]] == ["Astro #2", "Astro #1"]
+    next_conn = json_object(_periodicals(next_payload), 0, "node", "issuesConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(next_conn, "edges")] == [
+        "Astro #2",
+        "Astro #1",
+    ]
 
 
 @pytest.mark.django_db
@@ -253,15 +266,18 @@ def test_single_parent_keyset_seek_page_keeps_window_over_http() -> None:
         _issues_query("(first: 2) { edges { cursor node { title } } }"),
     )
     assert not _has_window(first_captured)
-    first_conn = _periodicals(first_payload)[0]["node"]["issuesConnection"]
-    after = first_conn["edges"][-1]["cursor"]
+    first_conn = json_object(_periodicals(first_payload), 0, "node", "issuesConnection")
+    after = json_at(first_conn, "edges", -1, "cursor")
 
     payload, captured = _capture_as_staff(
         _issues_query(f'(first: 2, after: "{after}") {{ edges {{ node {{ title }} }} }}'),
     )
 
-    conn = _periodicals(payload)[0]["node"]["issuesConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Astro #2", "Astro #1"]
+    conn = json_object(_periodicals(payload), 0, "node", "issuesConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Astro #2",
+        "Astro #1",
+    ]
     issue_sql = _child_sql(captured, "library_issue")
     assert issue_sql, captured.captured_queries
     assert any("OVER (" in sql for sql in issue_sql), issue_sql
@@ -280,8 +296,11 @@ def test_visibility_filtered_child_keeps_window_over_http() -> None:
     payload, captured = _capture(
         _issues_query("(first: 2) { edges { node { title } } }"),
     )
-    conn = _periodicals(payload)[0]["node"]["issuesConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Astro #3", "Astro #2"]
+    conn = json_object(_periodicals(payload), 0, "node", "issuesConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Astro #3",
+        "Astro #2",
+    ]
     assert _has_window(captured)
 
 
@@ -293,9 +312,9 @@ def test_single_parent_empty_children_over_http() -> None:
     payload, captured = _capture_as_staff(
         _issues_query("(first: 2) { edges { node { title } } pageInfo { hasNextPage } }"),
     )
-    conn = _periodicals(payload)[0]["node"]["issuesConnection"]
+    conn = json_object(_periodicals(payload), 0, "node", "issuesConnection")
     assert conn["edges"] == []
-    assert conn["pageInfo"]["hasNextPage"] is False
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
     assert not _has_window(captured)
 
 
@@ -308,8 +327,11 @@ def test_fast_path_disabled_by_setting_over_http() -> None:
         payload, captured = _capture_as_staff(
             _issues_query("(first: 2) { edges { node { title } } }"),
         )
-    conn = _periodicals(payload)[0]["node"]["issuesConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Astro #3", "Astro #2"]
+    conn = json_object(_periodicals(payload), 0, "node", "issuesConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Astro #3",
+        "Astro #2",
+    ]
     assert _has_window(captured)
 
 
@@ -327,6 +349,9 @@ def test_m2m_shape_keeps_window_over_http() -> None:
         }
         """,
     )
-    conn = payload["data"]["allLibraryGenres"][0]["booksConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Aurora", "Binti"]
+    conn = json_at(payload, "data", "allLibraryGenres", 0, "booksConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Aurora",
+        "Binti",
+    ]
     assert _has_window(captured)

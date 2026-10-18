@@ -38,10 +38,12 @@ from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django.contrib.auth.models import Permission, User
 from django.db import connection
+from django.db.backends.utils import CursorWrapper
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.urls import path
+from graphql_client import json_at, response_json
 from strawberry import relay
 
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
@@ -125,7 +127,7 @@ def _login_with_perm(username: str, *codenames: str) -> Client:
         permission = Permission.objects.get(codename=codename, content_type__app_label="products")
         user.user_permissions.add(permission)
     client = Client()
-    client.force_login(User.objects.get(pk=user.pk))
+    client.force_login(User.objects.get(username=user.username))
     return client
 
 
@@ -136,6 +138,12 @@ def _global_id(type_name: str, pk: int) -> str:
 _VALID_DATE = "2026-01-02 03:04:05"
 
 
+def _first_column(cursor: CursorWrapper) -> object:
+    """The first column of the first row the cursor's last statement returned."""
+    row: tuple[object, ...] = next(iter(cursor))
+    return row[0]
+
+
 def _execute_raw(sql: str, params: tuple[str | int | None, ...] = ()) -> int:
     """Run a raw ``INSERT ... RETURNING id`` (bypassing the ORM) and return the new pk.
 
@@ -144,7 +152,9 @@ def _execute_raw(sql: str, params: tuple[str | int | None, ...] = ()) -> int:
     """
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
-        return cursor.fetchone()[0]
+        pk = _first_column(cursor)
+    assert isinstance(pk, int), pk
+    return pk
 
 
 def _corrupt_created_date(table: str) -> str | None:
@@ -250,7 +260,9 @@ def _insert_item(name: str, category_pk: int, *, corrupt: bool = False) -> int:
 def _stored_item_name(item_pk: int) -> str:
     with connection.cursor() as cursor:
         cursor.execute("SELECT name FROM products_item WHERE id = %s", (item_pk,))
-        return cursor.fetchone()[0]
+        name = _first_column(cursor)
+    assert isinstance(name, str), name
+    return name
 
 
 @pytest.mark.django_db(transaction=True)
@@ -266,10 +278,10 @@ def test_update_does_not_commit_when_response_completion_fails() -> None:
 
     response = _post_update(client, item_pk, name="post-corruption-update")
 
-    payload = response.json()
+    payload = response_json(response)
     assert response.status_code == 200
     assert "errors" in payload
-    assert payload["errors"][0]["path"] == [
+    assert json_at(payload, "errors", 0, "path") == [
         "updateItem",
         "node",
         "category",
@@ -305,11 +317,11 @@ def test_delete_does_not_commit_when_own_scalar_response_completion_fails() -> N
     response = res.response
 
     assert response.status_code < 500
-    assert "errors" in response.json()
+    assert "errors" in response_json(response)
     # The delete rolled back: the row survives.
     with connection.cursor() as cursor:
         cursor.execute("SELECT COUNT(*) FROM products_item WHERE id = %s", (item_pk,))
-        assert cursor.fetchone()[0] == 1
+        assert _first_column(cursor) == 1
 
 
 @pytest.mark.django_db(transaction=True)
@@ -322,13 +334,13 @@ def test_create_does_not_commit_when_response_completion_fails() -> None:
     response = _post_create(client, category_pk)
 
     assert response.status_code < 500
-    assert "errors" in response.json()
+    assert "errors" in response_json(response)
     with connection.cursor() as cursor:
         cursor.execute(
             "SELECT COUNT(*) FROM products_item WHERE name = %s",
             ("create-post-corruption",),
         )
-        created_count = cursor.fetchone()[0]
+        created_count = _first_column(cursor)
     assert created_count == 0
 
 
@@ -343,10 +355,10 @@ def test_delete_does_not_commit_when_response_completion_fails() -> None:
     response = _post_delete(client, item_pk)
 
     assert response.status_code < 500
-    assert "errors" in response.json()
+    assert "errors" in response_json(response)
     with connection.cursor() as cursor:
         cursor.execute("SELECT COUNT(*) FROM products_item WHERE id = %s", (item_pk,))
-        remaining_count = cursor.fetchone()[0]
+        remaining_count = _first_column(cursor)
     assert remaining_count == 1
 
 
@@ -365,10 +377,10 @@ def test_successful_update_still_commits_through_the_completion_spanning_transac
 
     response = _post_update(client, item_pk, name="committed-update")
 
-    payload = response.json()
+    payload = response_json(response)
     assert response.status_code == 200
     assert "errors" not in payload, payload
-    assert payload["data"]["updateItem"]["errors"] == []
+    assert json_at(payload, "data", "updateItem", "errors") == []
     assert _stored_item_name(item_pk) == "committed-update"
 
 
@@ -397,15 +409,15 @@ def test_serial_top_level_mutations_keep_independent_transactions() -> None:
         assert_no_errors=False,
     )
 
-    payload = res.response.json()
+    payload = response_json(res.response)
     assert res.response.status_code < 500
     # The second field's completion failed (its category createdDate is corrupt);
     # the non-nullable error null-bubbles to the nearest nullable ancestor - the
     # payload's `node` slot - and surfaces as a top-level error...
     assert "errors" in payload
-    assert payload["data"]["second"]["node"] is None
+    assert json_at(payload, "data", "second", "node") is None
     # ...and only ITS write rolled back; the first field committed independently.
-    assert payload["data"]["first"]["node"]["name"] == "serial-first-updated"
+    assert json_at(payload, "data", "first", "node", "name") == "serial-first-updated"
     assert _stored_item_name(first_pk) == "serial-first-updated"
     assert _stored_item_name(second_pk) == "serial-second-item"
 
@@ -466,10 +478,10 @@ async def test_update_does_not_commit_when_response_completion_fails_over_graphq
         },
     )
 
-    payload = response.json()
+    payload = response_json(response)
     assert response.status_code == 200
     assert "errors" in payload
-    assert payload["errors"][0]["path"] == [
+    assert json_at(payload, "errors", 0, "path") == [
         "updateItem",
         "node",
         "category",
@@ -499,9 +511,9 @@ async def test_successful_update_still_commits_over_graphql_async() -> None:
         },
     )
 
-    payload = response.json()
+    payload = response_json(response)
     assert response.status_code == 200
     assert "errors" not in payload, payload
-    assert payload["data"]["updateItem"]["errors"] == []
+    assert json_at(payload, "data", "updateItem", "errors") == []
     stored = await sync_to_async(_stored_item_name)(item_pk)
     assert stored == "async-committed-update"

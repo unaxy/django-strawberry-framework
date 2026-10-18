@@ -125,6 +125,9 @@ class ScalarSpecimenTag(models.Model):
     the source specimen.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     label: _Text = models.TextField(unique=True)
     active: _Bool = models.BooleanField(default=True)
 
@@ -143,6 +146,9 @@ class ScalarSpecimen(models.Model):
     ``score`` -> ``FloatField``, ...) so the GraphQL response key reads as the
     target scalar in test assertions.
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     # ``label`` is a TextField rather than a generated identity column so each
     # row carries a human-readable handle inside the test response (the live
@@ -307,6 +313,9 @@ class MediaSpecimen(models.Model):
     ``null=True`` (it is deliberately not ``blank``).
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     label: _Text = models.TextField(unique=True)
     attachment = models.FileField(upload_to="scalar_media/files/")
     image = models.ImageField(upload_to="scalar_media/images/")
@@ -331,6 +340,9 @@ class OverrideSpecimen(models.Model):
     annotation alongside the four overrides while its GraphQL type is synthesized
     from the model exactly as bare ``Meta.fields`` selection would.
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     # Overridden by an assigned ``@strawberry.field`` resolver.
     label: _Text = models.TextField()

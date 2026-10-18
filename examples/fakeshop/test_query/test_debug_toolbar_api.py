@@ -35,17 +35,23 @@ import pytest
 from apps.products.services import seed_data
 from debug_toolbar import middleware as dt_middleware
 from debug_toolbar.toolbar import DebugToolbar
-from django.conf import settings
 from django.http import HttpRequest, HttpResponse
 from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
 from django.urls import include, path, reverse
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_object,
+    middleware,
+    response_json,
+)
 
 from django_strawberry_framework.testing import TestClient
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse
+
 
 # A distinctive substring of the package's appended bridge asset: present only
 # when the middleware's HTML branch fired, never in stock toolbar markup.
@@ -112,16 +118,16 @@ def _assert_content_length_matches_body(response: _MonkeyPatchedWSGIResponse) ->
 
 def _assert_injected_panel_payload(payload: JSONObject) -> JSONObject:
     """Named JSON operations carry panels, skip Templates, and null ``has_content``-false titles."""
-    toolbar_payload = payload["debugToolbar"]
+    toolbar_payload = json_object(payload, "debugToolbar")
     assert toolbar_payload["requestId"]
-    panels = toolbar_payload["panels"]
+    panels = json_object(toolbar_payload, "panels")
     assert panels
     assert "TemplatesPanel" not in panels
-    assert isinstance(panels["SQLPanel"]["title"], str)
-    assert panels["SQLPanel"]["subtitle"] is not None
+    assert isinstance(json_at(panels, "SQLPanel", "title"), str)
+    assert json_at(panels, "SQLPanel", "subtitle") is not None
     # RedirectsPanel is enabled in ``toolbar_client`` so ``has_content``-false is
     # a real panel, not a stub: the frontend is told not to open a content area.
-    assert panels["RedirectsPanel"]["title"] is None
+    assert json_at(panels, "RedirectsPanel", "title") is None
     return toolbar_payload
 
 
@@ -275,9 +281,9 @@ class TestToolbarPresent:
         response = _post_graphql(toolbar_client, _TOOLBAR_ITEMS_QUERY, "ToolbarItems")
         assert response.status_code == 200
         assert _content_type(response) == "application/json"
-        payload = json.loads(response.content)
+        payload = response_json(response)
         # The operation's own result is intact beside the injected key.
-        assert payload["data"]["allItems"]["edges"]
+        assert json_at(payload, "data", "allItems", "edges")
         _assert_injected_panel_payload(payload)
         _assert_content_length_matches_body(response)
 
@@ -285,8 +291,8 @@ class TestToolbarPresent:
         """No payload for ``operationName == "IntrospectionQuery"``."""
         response = _post_graphql(toolbar_client, _INTROSPECTION_QUERY, "IntrospectionQuery")
         assert response.status_code == 200
-        payload = json.loads(response.content)
-        assert payload["data"]["__schema"]["queryType"]["name"] == "Query"
+        payload = response_json(response)
+        assert json_at(payload, "data", "__schema", "queryType", "name") == "Query"
         assert "debugToolbar" not in payload
 
     def test_get_with_json_accept_hits_the_operation_name_except_branch(
@@ -308,8 +314,8 @@ class TestToolbarPresent:
         # Assert the content type BEFORE inspecting the body.
         assert _content_type(response) == "application/json"
         assert response.status_code == 200
-        payload = json.loads(response.content)
-        assert payload["data"]["__typename"] == "Query"
+        payload = response_json(response)
+        assert json_at(payload, "data", "__typename") == "Query"
         _assert_injected_panel_payload(payload)
         _assert_content_length_matches_body(response)
 
@@ -327,10 +333,11 @@ class TestToolbarPresent:
         """
         seed_data(1)
         response = _post_graphql(toolbar_client, _TOOLBAR_ITEMS_QUERY, "ToolbarItems")
-        payload = json.loads(response.content)
+        payload = response_json(response)
         _assert_injected_panel_payload(payload)
         _assert_content_length_matches_body(response)
-        request_id = payload["debugToolbar"]["requestId"]
+        request_id = json_at(payload, "debugToolbar", "requestId")
+        assert isinstance(request_id, str), request_id
 
         # Resolve through the route, staying correct under a custom prefix.
         panel_url = reverse("djdt:render_panel")
@@ -339,16 +346,18 @@ class TestToolbarPresent:
             {"request_id": request_id, "panel_id": "SQLPanel"},
         )
         assert panel_response.status_code == 200
-        panel_payload = json.loads(panel_response.content)
+        panel_payload = response_json(panel_response)
         assert set(panel_payload) >= {"content", "scripts"}
         # Panel JSON is not a Strawberry operation; the package must not add
         # ``debugToolbar`` here even if the content-type were injectable.
         assert "debugToolbar" not in panel_payload
-        assert _PANEL_FALLBACK not in panel_payload["content"]
+        content = panel_payload["content"]
+        assert isinstance(content, str), content
+        assert _PANEL_FALLBACK not in content
         # The stored SQL-panel content for THIS id: the seeded operation's SELECT
         # against the products table.
-        assert "SELECT" in panel_payload["content"]
-        assert "products_item" in panel_payload["content"]
+        assert "SELECT" in content
+        assert "products_item" in content
 
     @pytest.mark.parametrize("url", ["/", "/login/"])
     def test_non_strawberry_html_views_pass_through(
@@ -400,10 +409,9 @@ class TestToolbarPresent:
         seed_data(1)
         control_response = _post_graphql(Client(), _TOOLBAR_ITEMS_QUERY, "ToolbarItems")
         assert control_response.status_code == 200
-        _assert_injected_panel_payload(json.loads(control_response.content))
+        _assert_injected_panel_payload(response_json(control_response))
 
-        middleware = [*settings.MIDDLEWARE, encoding_middleware]
-        with override_settings(MIDDLEWARE=middleware):
+        with override_settings(MIDDLEWARE=[*middleware(), encoding_middleware]):
             client = Client()
             if kind == "html":
                 response = client.get("/graphql/", HTTP_ACCEPT="text/html")
@@ -413,8 +421,8 @@ class TestToolbarPresent:
             else:
                 response = _post_graphql(client, _TOOLBAR_ITEMS_QUERY, "ToolbarItems")
                 assert response.status_code == 200
-                payload = json.loads(response.content)
-                assert payload["data"]["allItems"]["edges"]
+                payload = response_json(response)
+                assert json_at(payload, "data", "allItems", "edges")
                 assert "debugToolbar" not in payload
             assert response["Content-Encoding"] == encoding
 

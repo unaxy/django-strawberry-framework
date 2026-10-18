@@ -93,7 +93,17 @@ from django.middleware.csrf import CsrfViewMiddleware, get_token
 from django.test import AsyncClient, Client, RequestFactory, override_settings
 from django.urls import include, path, resolve
 from graphql import NoSchemaIntrospectionCustomRule
-from graphql_client import assert_graphql_data, post_graphql, post_graphql_raw
+from graphql_client import (
+    assert_graphql_data,
+    json_list,
+    json_object,
+    json_str,
+    middleware,
+    post_graphql,
+    post_graphql_raw,
+    read_attr,
+    response_json,
+)
 from strawberry.django.views import GraphQLView as UpstreamGraphQLView
 from strawberry.extensions import AddValidationRules
 from strawberry.http.base import BaseView
@@ -119,6 +129,10 @@ if TYPE_CHECKING:
 
     #: What either test client answers with, once awaited on the async side.
     _TestResponse: TypeAlias = _MonkeyPatchedWSGIResponse | _MonkeyPatchedASGIResponse
+
+#: ``vars`` typed as the ``object`` members an instance namespace holds.
+_instance_vars: Callable[[object], dict[str, object]] = vars
+
 
 #: A view callback a probe decorator hands back unchanged.
 _ViewT = TypeVar("_ViewT", bound=Callable[..., object])
@@ -210,8 +224,9 @@ def _with_a_middleware_that_sets_the_encoding() -> override_settings:
     nothing else".
     """
     entry = f"{__name__}.{_LatinOneEncodingMiddleware.__qualname__}"
-    assert entry not in settings.MIDDLEWARE, settings.MIDDLEWARE
-    return override_settings(MIDDLEWARE=[*settings.MIDDLEWARE, entry])
+    configured = middleware()
+    assert entry not in configured, configured
+    return override_settings(MIDDLEWARE=[*configured, entry])
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +388,7 @@ def _carrying_the_packages_csrf_mark(
     is still the row that runs against fakeshop's real ``/graphql/`` mount, where no
     scaffolding is involved at all.
     """
-    mark = vars(view_class.as_view())["csrf_exempt"]
+    mark = _instance_vars(view_class.as_view())["csrf_exempt"]
 
     def decorate(view: _ViewT) -> _ViewT:
         vars(view)["csrf_exempt"] = mark
@@ -614,7 +629,7 @@ def _user_who_can_add_categories() -> User:
     user.user_permissions.add(
         Permission.objects.get(codename="add_category", content_type__app_label="products"),
     )
-    return User.objects.get(pk=user.pk)  # drop the stale per-request perm cache
+    return User.objects.get(pk=read_attr(user, "pk"))  # drop the stale per-request perm cache
 
 
 def _assert_body_limit_response(response: "_TestResponse") -> None:
@@ -1002,7 +1017,7 @@ def test_project_middleware_executes_on_the_graphql_http_route() -> None:
     _MIDDLEWARE_PATHS.clear()
 
     with override_settings(
-        MIDDLEWARE=[*settings.MIDDLEWARE, f"{__name__}.{_SentinelMiddleware.__qualname__}"],
+        MIDDLEWARE=[*middleware(), f"{__name__}.{_SentinelMiddleware.__qualname__}"],
     ):
         response = _post(Client(), _ITEMS)
 
@@ -1110,7 +1125,7 @@ def test_csrf_is_enforced_on_a_cookie_authenticated_graphql_mutation(
 
     assert response.status_code == expected_status
     if expected_status == 200:
-        payload = response.json()["data"]["createCategory"]
+        payload = json_object(response_json(response), "data", "createCategory")
         assert payload["errors"] == []
         assert payload["node"] == {"name": name}
         assert models.Category.objects.filter(name=name).exists()
@@ -1263,7 +1278,7 @@ def test_the_production_profile_mount_refuses_introspection_and_still_serves_ope
 
     # Both introspection entry points are validation-refused: errors without data.
     for refused in (schema_probe, type_probe):
-        payload = refused.json()
+        payload = response_json(refused)
         assert payload["errors"]
         assert payload.get("data") is None
 
@@ -1378,8 +1393,8 @@ async def test_the_async_package_view_parses_a_multibyte_utf8_body_unchanged() -
         response = await _post_bytes(AsyncClient(), document, path="/async-graphql/")
 
     assert response.status_code == 200
-    payload = response.json()
-    assert _MULTIBYTE_VALUE in payload["errors"][0]["message"], payload
+    payload = response_json(response)
+    assert _MULTIBYTE_VALUE in json_str(payload, "errors", 0, "message"), payload
 
 
 @pytest.mark.parametrize(
@@ -1421,9 +1436,12 @@ async def test_the_async_package_view_hands_sync_hooks_an_evaluated_session_acto
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    cities = [row["city"] for row in payload["data"]["allLibraryBranchesViaListField"]]
+    cities = [
+        json_str(row, "city")
+        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
+    ]
     assert sorted(cities) == expected_cities
 
 
@@ -1721,7 +1739,7 @@ def test_an_over_cap_mutation_is_rejected_before_any_parse_or_schema_execution()
     _assert_body_limit_response(over)
 
     assert under.status_code == 200
-    payload = under.json()["data"]["createCategory"]
+    payload = json_object(response_json(under), "data", "createCategory")
     assert payload["errors"] == []
     assert payload["node"] == {"name": under_name}
     assert models.Category.objects.filter(name=under_name).exists()
@@ -1891,7 +1909,7 @@ def test_a_non_mapping_framework_dict_fails_loud_on_get() -> None:
     the live-sync path reaches the view with the bad value still installed.
     """
     seed_data(1)
-    previous = settings.DJANGO_STRAWBERRY_FRAMEWORK
+    previous = read_attr(settings, "DJANGO_STRAWBERRY_FRAMEWORK")
     try:
         settings.DJANGO_STRAWBERRY_FRAMEWORK = ["not", "a", "mapping"]
         with pytest.raises(ConfigurationError, match=r"DJANGO_STRAWBERRY_FRAMEWORK.*list"):
@@ -3216,8 +3234,9 @@ def _without_the_global_csrf_middleware() -> override_settings:
     so the row removes exactly one entry and leaves fakeshop's session, auth and
     security middleware in place.
     """
-    remaining = [entry for entry in settings.MIDDLEWARE if "CsrfViewMiddleware" not in entry]
-    assert len(remaining) == len(settings.MIDDLEWARE) - 1, settings.MIDDLEWARE
+    configured = middleware()
+    remaining = [entry for entry in configured if "CsrfViewMiddleware" not in entry]
+    assert len(remaining) == len(configured) - 1, configured
     return override_settings(MIDDLEWARE=remaining)
 
 
@@ -3309,7 +3328,7 @@ def test_the_shipped_chain_supplies_the_ordering_for_fakeshops_real_mount() -> N
     is also the assertion that ``functools.wraps`` carries BOTH ordering marks
     through a real decorator rather than only the exemption.
     """
-    chain = list(settings.MIDDLEWARE)
+    chain = middleware()
     boundary = (
         "django_strawberry_framework.middleware.request_body.GraphQLRequestBodyBoundaryMiddleware"
     )
@@ -3411,11 +3430,11 @@ def _with_the_projects_own_csrf_class() -> override_settings:
     the whole subject of the row below.
     """
     entry = f"{__name__}._RecordingCsrfMiddleware"
+    configured = middleware()
     swapped = [
-        entry if "CsrfViewMiddleware" in candidate else candidate
-        for candidate in settings.MIDDLEWARE
+        entry if "CsrfViewMiddleware" in candidate else candidate for candidate in configured
     ]
-    assert swapped.count(entry) == 1, settings.MIDDLEWARE
+    assert swapped.count(entry) == 1, configured
     return override_settings(MIDDLEWARE=swapped)
 
 

@@ -525,11 +525,11 @@ reportPrivateUsage = "none"
 reportUnusedFunction = "none"
 reportImportCycles = "none"
 reportUninitializedInstanceVariable = "none"
-# The ratchet, off until their sites are fixed (turn one on to list them): `reportAny` is
-# on everywhere but the example project's test folders (off in their environments below),
-# `reportUnannotatedClassAttribute` in the scripts/, root-file and package environments, and
-# `reportUnusedCallResult` in those and the example project outside its tests.
+# On everywhere; its remaining ignores are counted in `[tool.type-suppressions]` below.
 reportAny = "error"
+# The ratchet, off until their sites are fixed (turn one on to list them):
+# `reportUnannotatedClassAttribute` is on in the scripts/, root-file and package environments,
+# `reportUnusedCallResult` in those and the example project outside its tests.
 reportUnannotatedClassAttribute = "none"
 reportUnusedCallResult = "none"
 
@@ -539,7 +539,6 @@ reportUnusedCallResult = "none"
 [[tool.basedpyright.executionEnvironments]]
 root = "scripts"
 extraPaths = ["examples/fakeshop", "."]
-reportAny = "error"
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 
@@ -548,14 +547,12 @@ reportUnusedCallResult = "error"
 [[tool.basedpyright.executionEnvironments]]
 root = "django_strawberry_framework/rest_framework"
 extraPaths = ["."]
-reportAny = "error"
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "django_strawberry_framework"
 extraPaths = ["."]
-reportAny = "error"
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 
@@ -566,58 +563,47 @@ reportUnusedCallResult = "error"
 [[tool.basedpyright.executionEnvironments]]
 root = "conftest.py"
 extraPaths = [".", "examples/fakeshop"]
-reportAny = "error"
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "line_count.py"
 extraPaths = [".", "examples/fakeshop"]
-reportAny = "error"
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "docs/dry/export_dry_review.py"
 extraPaths = [".", "examples/fakeshop"]
-reportAny = "error"
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 
 # The example project's test folders, listed before the project root: tests keep the root
 # environment's rules (a test calls for side effects: fixture rows, `delete()`, a call inside
-# `pytest.raises`), except `reportAny`, whose sites in these folders are not cleared yet.
+# `pytest.raises`).
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/tests"
-reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/test_query"
-reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/glossary/tests"
-reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/kanban/tests"
-reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/library/tests"
-reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/products/tests"
-reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop/apps/scalars/tests"
-reportAny = "none"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop"
-reportAny = "error"
 reportUnusedCallResult = "error"
 
 # The suppression budget scripts/check_type_suppressions.py holds the tree to: `cast` counts
@@ -626,7 +612,7 @@ reportUnusedCallResult = "error"
 # diagnostic instead); one below it fails until the budget is lowered to match, and a rule at
 # zero leaves `ignores` (marked `# Locked` above once it is on in every environment).
 [tool.type-suppressions]
-cast = 433
+cast = 432
 
 [tool.type-suppressions.ignores]
 reportArgumentType = 315
@@ -634,8 +620,8 @@ reportAssignmentType = 33
 reportAttributeAccessIssue = 142
 reportCallIssue = 15
 reportDeprecated = 2
-reportAny = 191
-reportExplicitAny = 40
+reportAny = 224
+reportExplicitAny = 38
 reportFunctionMemberAccess = 4
 reportGeneralTypeIssues = 5
 reportIncompatibleMethodOverride = 59

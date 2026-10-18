@@ -40,7 +40,7 @@ belong in ``tests/extensions/test_debug.py``.
 import contextlib
 import logging
 from collections.abc import Callable, Generator, Iterator, Sequence
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
 import strawberry
@@ -54,7 +54,17 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test.utils import override_settings
 from django.urls import path
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    is_json_object,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    read_attr,
+    response_json,
+)
 from strawberry import relay
 from strawberry.django.views import GraphQLView
 from strawberry.extensions import SchemaExtension
@@ -67,6 +77,15 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.extensions import DjangoDebugExtension
 from django_strawberry_framework.testing import Response, TestClient
+
+if TYPE_CHECKING:
+    from django.test.client import _MonkeyPatchedWSGIResponse
+
+
+def _rows(payload: JSONObject, key: str) -> list[JSONObject]:
+    """The JSON objects listed under ``key``, each checked to be an object."""
+    return [json_object(row) for row in json_list(payload, key)]
+
 
 # One module-level URLconf activation covering every request-driving scenario
 # (spec-044 DRY D3) - never per-test override_settings/clear_url_caches blocks.
@@ -211,11 +230,6 @@ def install_probe_schema(
     _current["schema"] = None
 
 
-def _middleware_without_debug_toolbar() -> list[str]:
-    """MIDDLEWARE minus the toolbar: a truthy ``DEBUG`` must not look up ``djdt`` routes."""
-    return [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry]
-
-
 @contextlib.contextmanager
 def _atomic_requests_enabled() -> Generator[None, None, None]:
     """Turn on ``ATOMIC_REQUESTS`` for the request's own alias without replacing ``DATABASES``.
@@ -232,7 +246,10 @@ def _atomic_requests_enabled() -> Generator[None, None, None]:
     database this test case never declared - which pytest-django refuses, for a
     connection the subject has nothing to do with.
     """
-    config = settings.DATABASES[DEFAULT_DB_ALIAS]
+    databases = read_attr(settings, "DATABASES")
+    assert is_json_object(databases), databases
+    config = databases[DEFAULT_DB_ALIAS]
+    assert is_json_object(config), config
     prior = config.get("ATOMIC_REQUESTS", False)
     try:
         config["ATOMIC_REQUESTS"] = True
@@ -247,7 +264,7 @@ def _grant_add_item_and_visible_category_gid() -> tuple[User, str]:
     user.user_permissions.add(
         Permission.objects.get(codename="add_item", content_type__app_label="products"),
     )
-    user = User.objects.get(pk=user.pk)
+    user = User.objects.get(pk=read_attr(user, "pk"))
     visible_category = Category.objects.filter(is_private=False).earliest("pk")
     category_gid = str(
         relay.GlobalID(type_name="products.category", node_id=str(visible_category.pk)),
@@ -255,7 +272,7 @@ def _grant_add_item_and_visible_category_gid() -> tuple[User, str]:
     return user, category_gid
 
 
-def _debug(response: Response) -> JSONObject:
+def _debug(response: "Response[_MonkeyPatchedWSGIResponse]") -> JSONObject:
     """Validate-and-return the debug payload for executed-operation happy paths.
 
     Never used by the absence scenarios (5's unknown-field half, both halves of
@@ -264,12 +281,12 @@ def _debug(response: Response) -> JSONObject:
     """
     extensions = response.extensions or {}
     assert "debug" in extensions, extensions
-    payload = extensions["debug"]
+    payload = json_object(extensions, "debug")
     assert set(payload) == {"sql", "exceptions"}  # both keys always present
-    for row in payload["sql"]:
+    for row in _rows(payload, "sql"):
         assert set(row) == _SQL_ROW_KEYS, row
         assert isinstance(row["duration"], float)
-    for row in payload["exceptions"]:
+    for row in _rows(payload, "exceptions"):
         assert set(row) == _EXCEPTION_ROW_KEYS, row
     return payload
 
@@ -296,7 +313,7 @@ def test_query_capture_uses_the_forced_debug_cursor_not_debug_query_logging(
     false unless the deployment acknowledges the disclosure - which is exactly
     why this scenario has to spell the acknowledgement to see a payload at all.
     """
-    assert settings.DEBUG is False  # proving the bracket did the work
+    assert read_attr(settings, "DEBUG") is False  # proving the bracket did the work
     seed_data(1)
     # One deterministically anonymous-visible row (seed_data fixed-seeds Item
     # privacy; the test_products_api precedent creates targeted rows after the
@@ -312,19 +329,19 @@ def test_query_capture_uses_the_forced_debug_cursor_not_debug_query_logging(
     res = client.query("query { allItems(first: 1) { edges { node { name } } } }")
 
     assert res.data is not None
-    assert len(res.data["allItems"]["edges"]) == 1  # the data is intact
+    assert len(json_list(res.data, "allItems", "edges")) == 1  # the data is intact
     payload = _debug(res)
     # Filter by row semantics - never positional indexing or raw counts,
     # because transaction rows are in contract.
-    select_rows = [row for row in payload["sql"] if row["isSelect"] is True]
+    select_rows = [row for row in _rows(payload, "sql") if row["isSelect"] is True]
     assert select_rows, payload["sql"]
     first_select = select_rows[0]
     assert first_select["vendor"] == connection.vendor
     assert first_select["alias"] == "default"
-    assert "SELECT" in first_select["sql"].upper()
+    assert "SELECT" in json_str(first_select, "sql").upper()
     # Interpolated per the spec: ``last_executed_query`` output carries the
     # bound values, so no placeholder survives (sqlite and postgres alike).
-    assert "%s" not in first_select["sql"]
+    assert "%s" not in json_str(first_select, "sql")
     assert isinstance(first_select["duration"], float)
     assert first_select["isSlow"] is False
     assert first_select["isSelect"] is True
@@ -369,8 +386,10 @@ def test_optimizer_composition_shows_the_two_query_prefetch_shape(
     res = client.query("query { allItems { edges { node { name category { name } } } } }")
 
     assert res.data is not None
-    assert len(res.data["allItems"]["edges"]) == visible_count
-    select_statements = [row["sql"].lower() for row in _debug(res)["sql"] if row["isSelect"]]
+    assert len(json_list(res.data, "allItems", "edges")) == visible_count
+    select_statements = [
+        json_str(row, "sql").lower() for row in _rows(_debug(res), "sql") if row["isSelect"]
+    ]
     # Exactly the two-query shape: one item slice + one category prefetch.
     assert len(select_statements) == 2, select_statements
     item_slices = [s for s in select_statements if "products_item" in s]
@@ -419,17 +438,21 @@ def test_mutation_capture_includes_the_insert_row(
         )
 
     assert res.data is not None
-    assert res.data["createItem"]["errors"] == []
-    assert res.data["createItem"]["node"]["name"] == "DebugWidget"
-    rows = _debug(res)["sql"]
+    assert json_at(res.data, "createItem", "errors") == []
+    assert json_at(res.data, "createItem", "node", "name") == "DebugWidget"
+    rows = _rows(_debug(res), "sql")
     # Assert by statement prefix, never by position or raw total: pipeline
     # SELECTs and Django's own BEGIN / COMMIT accounting rows may interleave.
-    insert_rows = [row for row in rows if row["sql"].upper().lstrip().startswith("INSERT")]
+    insert_rows = [
+        row for row in rows if json_str(row, "sql").upper().lstrip().startswith("INSERT")
+    ]
     assert insert_rows, [row["sql"] for row in rows]
     assert all(row["isSelect"] is False for row in insert_rows)
     assert any(row["isSelect"] is True for row in rows)  # the pipeline SELECTs ride along
-    begin_rows = [row for row in rows if row["sql"].upper().lstrip().startswith("BEGIN")]
-    commit_rows = [row for row in rows if row["sql"].upper().lstrip().startswith("COMMIT")]
+    begin_rows = [row for row in rows if json_str(row, "sql").upper().lstrip().startswith("BEGIN")]
+    commit_rows = [
+        row for row in rows if json_str(row, "sql").upper().lstrip().startswith("COMMIT")
+    ]
     assert begin_rows, [row["sql"] for row in rows]
     assert commit_rows, [row["sql"] for row in rows]
     assert all(row["isSelect"] is False for row in begin_rows)
@@ -456,7 +479,7 @@ def test_enclosing_atomic_requests_transaction_is_not_captured(
     client = TestClient()
 
     with (
-        override_settings(DEBUG=True, MIDDLEWARE=_middleware_without_debug_toolbar()),
+        override_settings(DEBUG=True, MIDDLEWARE=middleware_without_debug_toolbar()),
         _atomic_requests_enabled(),
         client.login(user),
     ):
@@ -468,10 +491,10 @@ def test_enclosing_atomic_requests_transaction_is_not_captured(
         )
 
     assert res.data is not None
-    assert res.data["createItem"]["errors"] == []
-    assert res.data["createItem"]["node"]["name"] == "AtomicRequestsWidget"
-    rows = _debug(res)["sql"]
-    statements = [row["sql"].upper() for row in rows]
+    assert json_at(res.data, "createItem", "errors") == []
+    assert json_at(res.data, "createItem", "node", "name") == "AtomicRequestsWidget"
+    rows = _rows(_debug(res), "sql")
+    statements = [json_str(row, "sql").upper() for row in rows]
     assert any("SAVEPOINT" in statement for statement in statements), statements
     assert not any(statement.lstrip().startswith("BEGIN") for statement in statements), statements
     assert not any(statement.lstrip().startswith("COMMIT") for statement in statements), statements
@@ -492,11 +515,11 @@ def test_resolver_exception_produces_an_unmasked_exception_row(
 
     assert res.errors  # the ordinary GraphQL error remains present
     payload = _debug(res)
-    assert len(payload["exceptions"]) == 1
-    row = payload["exceptions"][0]
+    assert len(json_list(payload, "exceptions")) == 1
+    row = json_object(payload, "exceptions", 0)
     assert row["excType"] == "<class 'ZeroDivisionError'>"
     assert row["message"] == "division by zero"
-    assert "Traceback" in row["stack"]
+    assert "Traceback" in json_str(row, "stack")
     # The two lists are independent: sql exists (empty or not) beside the row.
     assert isinstance(payload["sql"], list)
 
@@ -525,8 +548,8 @@ def test_validation_versus_execution_error_boundary(
     broken = client.query("query { brokenNonNull }", assert_no_errors=False)
     assert broken.errors
     payload = _debug(broken)  # execution happened, so the key is present
-    assert len(payload["exceptions"]) == 1
-    assert "non-nullable" in payload["exceptions"][0]["message"].lower()
+    assert len(json_list(payload, "exceptions")) == 1
+    assert "non-nullable" in json_str(payload, "exceptions", 0, "message").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +590,7 @@ def test_off_by_default_publishes_no_debug_key(install_probe_schema: _InstallPro
 
     assert res.data == {"__typename": "Query"}
     assert "debug" not in (res.extensions or {})
-    assert set(res.response.json()) == {"data"}  # no unrelated envelope widening
+    assert set(response_json(res.response)) == {"data"}  # no unrelated envelope widening
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +653,7 @@ def test_a_malformed_debug_setting_stays_fail_closed_on_the_bare_class_entry(
 
     with override_settings(
         DEBUG=debug_value,
-        MIDDLEWARE=_middleware_without_debug_toolbar(),
+        MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
         res = client.query("query { __typename }")
 
@@ -667,7 +690,7 @@ def test_acknowledged_factory_keeps_one_instance_per_operation(
     failing = client.query("query { boom }", assert_no_errors=False)
     clean = client.query("query { __typename }")
 
-    assert [row["message"] for row in _debug(failing)["exceptions"]] == ["division by zero"]
+    assert [row["message"] for row in _rows(_debug(failing), "exceptions")] == ["division by zero"]
     # The second operation's payload is its own - not the first operation's stash.
     assert _debug(clean) == {"sql": [], "exceptions": []}
 
@@ -688,12 +711,12 @@ def test_over_cap_exception_message_is_truncated_in_the_published_payload(
     res = client.query("query { hugeBoom }", assert_no_errors=False)
 
     assert res.errors
-    rows = _debug(res)["exceptions"]
+    rows = _rows(_debug(res), "exceptions")
     assert len(rows) == 1
-    message = rows[0]["message"]
+    message = json_str(rows, 0, "message")
     assert message == "x" * _EXCEPTION_MESSAGE_CAP + _TRUNCATION_MARKER
     assert message.endswith(_TRUNCATION_MARKER)
-    assert rows[0]["excType"] == "<class 'ValueError'>"
+    assert json_at(rows, 0, "excType") == "<class 'ValueError'>"
 
 
 # ---------------------------------------------------------------------------

@@ -60,6 +60,9 @@ SAVE_REJECTED_ITEM_CODE = "save_rejected"
 class Category(models.Model):
     """A Faker provider (e.g. ``bank``, ``person``, ``address``)."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     name: _Text = models.TextField(unique=True)
     description: _Text = models.TextField(
         blank=True,
@@ -89,6 +92,9 @@ class Category(models.Model):
 
 class Item(models.Model):
     """A generated instance produced from a category's Faker provider."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     name: _Text = models.TextField()
     description: _Text = models.TextField(
@@ -184,6 +190,9 @@ class Item(models.Model):
 class Property(models.Model):
     """A Faker method on a category's provider (e.g. ``iban``, ``first_name``)."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     name: _Text = models.TextField()
     description: _Text = models.TextField(
         blank=True,
@@ -224,6 +233,9 @@ class Property(models.Model):
 
 class Entry(models.Model):
     """The value Faker produced for one ``(item, property)`` pair."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     value: _Text = models.TextField()
     description: _Text = models.TextField(
@@ -280,6 +292,9 @@ class ItemHold(models.Model):
     explicit ``null`` is a field error rather than a silent skip past
     ``full_clean`` into a NOT NULL violation.
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     reason: _Text = models.TextField()
     item: _FK[Item] = models.ForeignKey(

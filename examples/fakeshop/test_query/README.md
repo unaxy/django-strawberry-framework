@@ -581,7 +581,7 @@ _SESSIONLESS_PASS_THROUGH = {
     "DEBUG": True,
     "MIDDLEWARE": [
         entry
-        for entry in settings.MIDDLEWARE
+        for entry in middleware()
         if not any(
             dropped in entry
             for dropped in (

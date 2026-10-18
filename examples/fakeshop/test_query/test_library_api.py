@@ -26,7 +26,6 @@ from apps.products.services import create_users
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django import forms
-from django.conf import settings
 from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
@@ -37,7 +36,17 @@ from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django_filters import CharFilter, Filter, TypedChoiceFilter
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_object,
+    json_optional_str,
+    json_str,
+    middleware_without_debug_toolbar,
+    response_json,
+    saved_pk,
+)
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import post_graphql as _post_graphql
 from strawberry import relay
@@ -74,6 +83,12 @@ from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGrap
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse
 
+
+def _error_code(error: object) -> object:
+    """A GraphQL error's ``extensions.code``, ``None`` when it carries no extensions or code."""
+    return json_object(json_object(error).get("extensions", {})).get("code")
+
+
 #: Settings that open the spec-048 error policy's pass-through gate for ONE live
 #: request. ``settings.DEBUG`` is the gate, and on this tier it is the only
 #: reachable instrument - the project schema is constructed by the app, not by the
@@ -84,10 +99,8 @@ if TYPE_CHECKING:
 #: that has nothing to do with the row. Dropping the middleware is the deterministic
 #: form of that - the toolbar's own show-gate is memoized per process, so overriding
 #: its callback would not reliably take effect.
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
+
 
 #: ``BookType.get_queryset``'s anonymous predicate as it compiles: a statement that
 #: filters through a declared ``book`` / ``books`` hop carries it inside that hop's
@@ -219,15 +232,19 @@ def _seed_medtrics_loan_graph() -> _MedtricsLoanGraph:
     )
 
     return _MedtricsLoanGraph(
-        relation_and_direct=relation_and_direct.pk,
-        relation_only=relation_only.pk,
-        direct_only=direct_only.pk,
-        unrelated=unrelated.pk,
+        relation_and_direct=saved_pk(relation_and_direct.pk),
+        relation_only=saved_pk(relation_only.pk),
+        direct_only=saved_pk(direct_only.pk),
+        unrelated=saved_pk(unrelated.pk),
     )
 
 
 def _field_type(type_info: JSONObject, field_name: str) -> JSONObject:
-    return next(field["type"] for field in type_info["fields"] if field["name"] == field_name)
+    return next(
+        json_object(field, "type")
+        for field in json_list(type_info, "fields")
+        if json_at(field, "name") == field_name
+    )
 
 
 def _input_field_names(type_name: str) -> set[str]:
@@ -241,11 +258,11 @@ def _input_field_names(type_name: str) -> set[str]:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    type_info = payload["data"]["__type"]
+    type_info = json_object(payload, "data", "__type")
     assert type_info is not None
-    return {field["name"] for field in type_info["inputFields"]}
+    return {json_str(field, "name") for field in json_list(type_info, "inputFields")}
 
 
 def _input_field_type(type_name: str, field_name: str) -> JSONObject:
@@ -268,11 +285,15 @@ def _input_field_type(type_name: str, field_name: str) -> JSONObject:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    type_info = payload["data"]["__type"]
+    type_info = json_object(payload, "data", "__type")
     assert type_info is not None
-    return next(f["type"] for f in type_info["inputFields"] if f["name"] == field_name)
+    return next(
+        json_object(f, "type")
+        for f in json_list(type_info, "inputFields")
+        if json_at(f, "name") == field_name
+    )
 
 
 def _mutation_data_input_type_name(field_name: str) -> str:
@@ -293,13 +314,15 @@ def _mutation_data_input_type_name(field_name: str) -> str:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    fields = payload["data"]["__type"]["fields"]
-    field = next(f for f in fields if f["name"] == field_name)
-    data_arg = next(arg for arg in field["args"] if arg["name"] == "data")
-    arg_type = data_arg["type"]
-    return arg_type["name"] or arg_type["ofType"]["name"]
+    fields = json_list(payload, "data", "__type", "fields")
+    field = next(f for f in fields if json_at(f, "name") == field_name)
+    data_arg = next(arg for arg in json_list(field, "args") if json_at(arg, "name") == "data")
+    arg_type = json_object(data_arg, "type")
+    name = arg_type["name"] or json_at(arg_type, "ofType", "name")
+    assert isinstance(name, str), arg_type
+    return name
 
 
 @pytest.mark.django_db
@@ -438,11 +461,11 @@ def test_library_patron_bigint_lifetime_fines_over_http() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = body["data"]["allLibraryPatrons"]
-    mae = next(row for row in rows if row["name"] == "Mae")
-    assert mae["lifetimeFinesCents"] == str(large_value)
+    rows = json_list(body, "data", "allLibraryPatrons")
+    mae = next(row for row in rows if json_at(row, "name") == "Mae")
+    assert json_at(mae, "lifetimeFinesCents") == str(large_value)
 
 
 @pytest.mark.django_db
@@ -462,7 +485,7 @@ def test_library_optimizer_selects_book_shelf_in_http_query() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryBooks": [
                 {"title": "Kindred", "shelf": {"code": "A-1"}},
@@ -504,7 +527,7 @@ def test_library_evaluated_queryset_not_re_executed_over_http() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {"allLibraryBranchesEagerEval": [{"name": "Central"}]},
     }
     # G1: exactly one query - the consumer's own ``bool(queryset)`` evaluation.
@@ -539,7 +562,7 @@ def test_scalar_only_branch_list_projects_name_without_a_join_or_unused_column()
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {"allLibraryBranches": [{"name": "Central"}]},
     }
     branch_sql = [
@@ -577,7 +600,7 @@ def test_library_reverse_fk_and_m2m_prefetch_sql_shape_over_http() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryShelves": [
                 {
@@ -635,7 +658,7 @@ def test_library_choice_enum_and_nullable_subtitle_are_deliberate_http_contracts
         """,
     )
     assert response.status_code == 200
-    type_info = response.json()["data"]["__type"]
+    type_info = json_object(response_json(response), "data", "__type")
     circulation_status_type = _field_type(type_info, "circulationStatus")
     assert circulation_status_type["kind"] == "NON_NULL"
     assert circulation_status_type["ofType"] == {
@@ -664,7 +687,7 @@ def test_library_consumer_prefetched_queryset_cooperates_with_optimizer_over_htt
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryPrefetchedBooks": [
                 {
@@ -720,7 +743,7 @@ def test_library_optimizer_hints_are_observable_over_http() -> None:
         )
 
     assert prefetch_response.status_code == 200
-    assert prefetch_response.json() == {
+    assert response_json(prefetch_response) == {
         "data": {
             "allLibraryLoans": [
                 {
@@ -752,7 +775,7 @@ def test_library_optimizer_hints_are_observable_over_http() -> None:
         )
 
     assert skip_response.status_code == 200
-    assert skip_response.json() == {
+    assert response_json(skip_response) == {
         "data": {
             "allLibraryLoans": [
                 {
@@ -801,7 +824,7 @@ def test_library_optimizer_reverse_o2o_card_joins_in_root_sql() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryPatrons": [
                 {"name": "Ada", "card": {"barcode": "CARD-1"}},
@@ -865,7 +888,7 @@ def test_library_force_select_book_hint_still_prefetches_when_book_is_hooked(
             hidden_response = _post_graphql(document)
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryLoans": [
                 {"book": {"title": "Kindred"}},
@@ -880,9 +903,9 @@ def test_library_force_select_book_hint_still_prefetches_when_book_is_hooked(
     assert len(book_sql) == 1, book_sql
 
     assert hidden_response.status_code == 200
-    hidden_payload = hidden_response.json()
+    hidden_payload = response_json(hidden_response)
     assert hidden_payload["data"] is None, hidden_payload
-    assert [error["path"] for error in hidden_payload["errors"]] == [
+    assert [json_at(error, "path") for error in json_list(hidden_payload, "errors")] == [
         ["allLibraryLoans", 1, "book"],
     ]
     assert "Dune" not in hidden_response.content.decode()
@@ -937,7 +960,7 @@ def test_library_prefetch_object_book_hint_is_scoped_by_book_type_get_queryset(
             hidden_response = _post_graphql(document)
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryLoans": [
                 {"book": {"title": "Kindred"}},
@@ -951,9 +974,9 @@ def test_library_prefetch_object_book_hint_is_scoped_by_book_type_get_queryset(
     assert "circulation_status" in book_sql[0].lower().split(" where ", 1)[1]
 
     assert hidden_response.status_code == 200
-    hidden_payload = hidden_response.json()
+    hidden_payload = response_json(hidden_response)
     assert hidden_payload["data"] is None, hidden_payload
-    assert [error["path"] for error in hidden_payload["errors"]] == [
+    assert [json_at(error, "path") for error in json_list(hidden_payload, "errors")] == [
         ["allLibraryLoans", 1, "book"],
     ]
     assert "Dune" not in hidden_response.content.decode()
@@ -1010,9 +1033,9 @@ def test_sliced_book_hook_on_plain_list_relation_is_refused_over_http(
         response = _post_graphql("{ allLibraryBranches { shelves { books { title } } } }")
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert "BookType.get_queryset returned a sliced queryset (rows 0:1)" in message
     assert _sql_from_table(captured, "library_book") == []
 
@@ -1044,9 +1067,9 @@ def test_sliced_book_hook_on_nested_connection_is_refused_at_resolve_time(
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert "BookType.get_queryset returned a sliced queryset (rows 0:1)" in message
     assert _sql_from_table(captured, "library_genre") != []
 
@@ -1079,14 +1102,15 @@ def test_library_optimizer_plan_cache_is_reused_across_http_requests() -> None:
     module-import-time reference would be to a discarded instance.
     """
     _seed_library_graph()
-    optimizer = sys.modules["config.schema"]._optimizer
+    optimizer = getattr(sys.modules["config.schema"], "_optimizer", None)
+    assert isinstance(optimizer, DjangoOptimizerExtension), optimizer
     # The per-test schema rebuild is what makes the counters below absolute.
     assert optimizer.cache_info().size == 0, optimizer.cache_info()
 
     with CaptureQueriesContext(connection) as first_capture:
         first = _post_graphql(_PLAN_CACHE_DOCUMENT)
     assert first.status_code == 200
-    first_payload = first.json()
+    first_payload = response_json(first)
     assert "errors" not in first_payload, first_payload
     assert optimizer.cache_info().misses == 1
     assert optimizer.cache_info().hits == 0
@@ -1094,7 +1118,7 @@ def test_library_optimizer_plan_cache_is_reused_across_http_requests() -> None:
     with CaptureQueriesContext(connection) as second_capture:
         second = _post_graphql(_PLAN_CACHE_DOCUMENT)
     assert second.status_code == 200
-    second_payload = second.json()
+    second_payload = response_json(second)
     assert "errors" not in second_payload, second_payload
     assert optimizer.cache_info().hits == 1
     assert optimizer.cache_info().misses == 1
@@ -1122,7 +1146,7 @@ def test_library_relation_override_shapes_http_response_data() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryBranches": [
                 {"name": "Override", "shelves": [{"code": "B-2"}, {"code": "A-1"}]},
@@ -1185,17 +1209,17 @@ def test_library_branches_via_djangolistfield_optimized_nested_selection() -> No
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    branches = payload["data"]["allLibraryBranchesViaListField"]
+    branches = json_list(payload, "data", "allLibraryBranchesViaListField")
     # Order-agnostic comparison: the new field has no ``order_by`` (the
     # add-only posture deliberately does NOT inherit ``order_by("id")``
     # from the sibling ``all_library_branches`` resolver because the new field
     # exercises the default-resolver code path, not a consumer resolver).
-    branches_by_name = {b["name"]: b for b in branches}
+    branches_by_name = {json_at(b, "name"): b for b in branches}
     assert set(branches_by_name) == {"ListField West", "ListField East"}
     for branch in branches_by_name.values():
-        assert {shelf["code"] for shelf in branch["shelves"]} == {"A-1", "B-2"}
+        assert {json_at(shelf, "code") for shelf in json_list(branch, "shelves")} == {"A-1", "B-2"}
     assert len(captured) == 3
     assert "library_branch" in captured[0]["sql"]
     # The two per-branch consumer-override queries; no prefetch query precedes
@@ -1228,11 +1252,11 @@ def test_library_branches_via_djangolistfield_consumer_manager_resolver_over_htt
         "{ allLibraryBranchesViaListFieldManagerResolver { id name } }",
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     names = {
-        branch["name"]
-        for branch in payload["data"]["allLibraryBranchesViaListFieldManagerResolver"]
+        json_at(branch, "name")
+        for branch in json_list(payload, "data", "allLibraryBranchesViaListFieldManagerResolver")
     }
     assert names == {"ManagerResolver West", "ManagerResolver East"}
 
@@ -1256,24 +1280,30 @@ def test_library_branches_via_djangolistfield_nullable_outer_renders_and_resolve
         "{ kind ofType { kind ofType { kind name } } } } } }",
     )
     assert introspection.status_code == 200
-    ibody = introspection.json()
+    ibody = response_json(introspection)
     assert "errors" not in ibody, ibody
-    fields = {f["name"]: f["type"] for f in ibody["data"]["__type"]["fields"]}
+    fields = {
+        json_at(f, "name"): json_at(f, "type")
+        for f in json_list(ibody, "data", "__type", "fields")
+    }
     nullable = fields["allLibraryBranchesViaListFieldNullable"]
-    assert nullable["kind"] == "LIST"  # outer NON_NULL absent -> nullable list
-    assert nullable["ofType"]["kind"] == "NON_NULL"
-    assert nullable["ofType"]["ofType"]["kind"] == "OBJECT"
-    assert nullable["ofType"]["ofType"]["name"] == "BranchType"
+    assert json_at(nullable, "kind") == "LIST"  # outer NON_NULL absent -> nullable list
+    assert json_at(nullable, "ofType", "kind") == "NON_NULL"
+    assert json_at(nullable, "ofType", "ofType", "kind") == "OBJECT"
+    assert json_at(nullable, "ofType", "ofType", "name") == "BranchType"
     # Load-bearing contrast: the sibling non-nullable field DOES wrap the list in NON_NULL.
-    assert fields["allLibraryBranchesViaListField"]["kind"] == "NON_NULL"
+    assert json_at(fields["allLibraryBranchesViaListField"], "kind") == "NON_NULL"
 
     # End-to-end resolve: the nullable-outer field still returns a real list over the wire.
     _seed_branch_with_two_shelves("Nullable West")
     response = _post_graphql("query { allLibraryBranchesViaListFieldNullable { id name } }")
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    names = {b["name"] for b in body["data"]["allLibraryBranchesViaListFieldNullable"]}
+    names = {
+        json_at(b, "name")
+        for b in json_list(body, "data", "allLibraryBranchesViaListFieldNullable")
+    }
     assert "Nullable West" in names
 
 
@@ -1310,18 +1340,18 @@ def test_library_relay_node_global_id_round_trips() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    genres = payload["data"]["allLibraryGenres"]
+    genres = json_list(payload, "data", "allLibraryGenres")
     assert len(genres) == 1
-    type_name, node_id = _decode_global_id(genres[0]["id"])
+    type_name, node_id = _decode_global_id(json_str(genres, 0, "id"))
     # Under the 0.0.9 model-label default the GlobalID carries the Django model
     # label (``library.genre``), not the GraphQL type name ``GenreType``.
     assert type_name == models.Genre._meta.label_lower
     assert node_id == str(genre.pk)
-    assert genres[0]["name"] == "Speculative"
+    assert json_at(genres, 0, "name") == "Speculative"
 
-    assert genres[0]["id"] == global_id_for(library_schema.GenreType, genre.pk)
+    assert json_at(genres, 0, "id") == global_id_for(library_schema.GenreType, genre.pk)
 
 
 # ---------------------------------------------------------------------------
@@ -1582,7 +1612,10 @@ def test_library_relation_key_is_no_existence_oracle_for_hidden_or_missing_rows_
     a visible one is dropped.
     """
     branches = _seed_shelves_on_alt_branches()
-    pks = {"missing": branches["hidden"].pk + 1000, **{k: v.pk for k, v in branches.items()}}
+    pks = {
+        "missing": saved_pk(branches["hidden"].pk) + 1000,
+        **{k: v.pk for k, v in branches.items()},
+    }
     _assert_graphql_data(
         _SHELVES_BY_ALT_BRANCHES,
         {"allLibraryShelves": [{"code": code} for code in codes]},
@@ -1635,7 +1668,7 @@ _UNDECLARED_RELATION_SPELLINGS = {
 }
 
 
-def _seed_undeclared_relation_world() -> dict[str, Model]:
+def _seed_undeclared_relation_world() -> dict[str, models.Branch | models.Shelf]:
     """Hidden rows linked through relations no ``RelatedFilter`` declares.
 
     ``B-2`` lists the ``restricted`` branch as an alternate; the ``secret`` shelf
@@ -1657,7 +1690,7 @@ def _keys_as(client: TestClient, query: str, ids: list[int]) -> list[str]:
     """Return the ``key`` of every row ``query`` returns to ``client`` for ``ids``."""
     data = client.query(query, variables={"ids": ids}).data
     assert data is not None
-    return [row["key"] for row in data["rows"]]
+    return [json_str(row, "key") for row in json_list(data, "rows")]
 
 
 @pytest.mark.django_db
@@ -1673,7 +1706,7 @@ def test_library_undeclared_relation_key_answers_as_if_hidden_rows_were_absent_o
     nested spellings through the declared ``branch`` hop agree.
     """
     query, hidden_key = _UNDECLARED_RELATION_SPELLINGS[spelling]
-    pk = _seed_undeclared_relation_world()[hidden_key].pk
+    pk = saved_pk(_seed_undeclared_relation_world()[hidden_key].pk)
     staff = User.objects.create_user(username="staff", password="pw", is_staff=True)
     client = TestClient()
 
@@ -1698,10 +1731,10 @@ def test_library_relation_key_rejects_an_uncoercible_primary_key_at_the_wire_ove
         '{ allLibraryShelves(filter: { altBranches: { exact: ["not-a-pk"] } }) { code } }',
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("data") is None
-    (error,) = payload["errors"]
-    assert "Int" in error["message"]
+    (error,) = json_list(payload, "errors")
+    assert "Int" in json_str(error, "message")
 
 
 @pytest.mark.django_db
@@ -1741,14 +1774,14 @@ def _assert_invalid_choice(query: str, variables: JSONObject, form_key: str) -> 
     """Assert the declared filter's own form field refused the value as "Select a valid choice"."""
     response = _post_graphql(query, variables=variables)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("data") is None, payload
-    (error,) = payload["errors"]
-    assert error["message"] == "Invalid filter input"
-    assert error["extensions"]["code"] == "FILTER_INVALID"
-    field_errors = error["extensions"]["errors"][form_key]
-    assert [entry["code"] for entry in field_errors] == ["invalid_choice"]
-    assert "Select a valid choice" in field_errors[0]["message"]
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "message") == "Invalid filter input"
+    assert json_at(error, "extensions", "code") == "FILTER_INVALID"
+    field_errors = json_list(error, "extensions", "errors", form_key)
+    assert [json_at(entry, "code") for entry in field_errors] == ["invalid_choice"]
+    assert "Select a valid choice" in json_str(field_errors, 0, "message")
 
 
 @pytest.mark.django_db
@@ -1971,6 +2004,11 @@ _FLAT_HOME_BRANCH_CASES = [
 ]
 
 
+def _flat_home_branch_case_id(case: _FlatHomeBranchCase) -> str:
+    """The parametrize id of ``case``: its flat filter field."""
+    return case.field
+
+
 def _flat_home_branch_value(case: _FlatHomeBranchCase, names: tuple[str, ...]) -> object:
     """Return the query variable naming ``names`` by ``case.column``."""
     values = [getattr(models.Branch.objects.get(name=name), case.column) for name in names]
@@ -1978,7 +2016,7 @@ def _flat_home_branch_value(case: _FlatHomeBranchCase, names: tuple[str, ...]) -
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("case", _FLAT_HOME_BRANCH_CASES, ids=lambda case: case.field)
+@pytest.mark.parametrize("case", _FLAT_HOME_BRANCH_CASES, ids=_flat_home_branch_case_id)
 def test_library_flat_expanded_declared_filter_keeps_its_own_validation_over_http(
     case: _FlatHomeBranchCase,
 ) -> None:
@@ -2006,11 +2044,11 @@ def test_library_flat_expanded_declared_filter_keeps_its_own_validation_over_htt
         query,
         variables={"value": _flat_home_branch_value(case, case.permitted)},
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert sorted(book["title"] for book in payload["data"]["allLibraryBooks"]) == (
-        case.permitted_books
-    )
+    assert sorted(
+        json_str(book, "title") for book in json_list(payload, "data", "allLibraryBooks")
+    ) == (case.permitted_books)
     _assert_invalid_choice(
         query,
         {"value": _flat_home_branch_value(case, case.restricted)},
@@ -2059,13 +2097,13 @@ def test_library_flat_expanded_method_filter_runs_in_its_own_filterset_over_http
     _assert_graphql_data(query, {"allLibraryLoans": []}, variables={"value": "nobody@x"})
     response = _post_graphql(query, variables={"value": "no-at-sign"})
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("data") is None, payload
-    (error,) = payload["errors"]
-    assert error["message"] == "Invalid filter input"
-    assert error["extensions"]["code"] == "FILTER_INVALID"
-    field_errors = error["extensions"]["errors"]["patron__email_must_have_at_sign"]
-    assert [entry["code"] for entry in field_errors] == ["missing_at_sign"]
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "message") == "Invalid filter input"
+    assert json_at(error, "extensions", "code") == "FILTER_INVALID"
+    field_errors = json_list(error, "extensions", "errors", "patron__email_must_have_at_sign")
+    assert [json_at(entry, "code") for entry in field_errors] == ["missing_at_sign"]
 
 
 @pytest.mark.django_db
@@ -2160,9 +2198,9 @@ def test_library_all_fields_filterset_filters_by_forward_relation_pks_over_http(
     for filter_input, names in (
         ({"shelf": {"exact": open_shelf.pk}}, ["Front"]),
         ({"shelf": {"exact": secret_shelf.pk}}, []),
-        ({"shelf": {"exact": secret_shelf.pk + 1000}}, []),
-        ({"contentType": {"exact": book_type.pk}}, ["Front"]),
-        ({"contentType": {"exact": book_type.pk + 1000}}, []),
+        ({"shelf": {"exact": saved_pk(secret_shelf.pk) + 1000}}, []),
+        ({"contentType": {"exact": book_type.id}}, ["Front"]),
+        ({"contentType": {"exact": book_type.id + 1000}}, []),
     ):
         _assert_graphql_data(
             query,
@@ -2294,9 +2332,9 @@ def test_relay_relation_isnull_absent_from_shipped_book_filter() -> None:
         '{ __type(name: "BookFilterGenresFilterInputType") { name } }',
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["__type"] is None
+    assert json_at(payload, "data", "__type") is None
 
 
 @pytest.mark.django_db
@@ -2333,13 +2371,14 @@ def test_relay_relation_isnull_is_boolean_not_globalid_list_over_http() -> None:
             """,
         )
         assert isnull_response.status_code == 200
-        introspected = isnull_response.json()
+        introspected = response_json(isnull_response)
         assert "errors" not in introspected, introspected
         input_fields = {
-            field["name"]: field["type"] for field in introspected["data"]["__type"]["inputFields"]
+            json_at(field, "name"): json_at(field, "type")
+            for field in json_list(introspected, "data", "__type", "inputFields")
         }
         assert input_fields["isNull"] == {"kind": "SCALAR", "name": "Boolean"}, input_fields
-        assert input_fields["exact"]["kind"] == "LIST", input_fields
+        assert json_at(input_fields["exact"], "kind") == "LIST", input_fields
 
         true_response = _post_holder(
             schema,
@@ -2350,7 +2389,7 @@ def test_relay_relation_isnull_is_boolean_not_globalid_list_over_http() -> None:
             """,
         )
         assert true_response.status_code == 200
-        true_payload = true_response.json()
+        true_payload = response_json(true_response)
         assert "errors" not in true_payload, true_payload
         assert true_payload["data"] == {"books": [{"title": "UnshelvedNotes"}]}
 
@@ -2363,7 +2402,7 @@ def test_relay_relation_isnull_is_boolean_not_globalid_list_over_http() -> None:
             """,
         )
         assert false_response.status_code == 200
-        false_payload = false_response.json()
+        false_payload = response_json(false_response)
         assert "errors" not in false_payload, false_payload
         assert false_payload["data"] == {"books": [{"title": "Kindred"}]}
 
@@ -2376,7 +2415,7 @@ def test_relay_relation_isnull_is_boolean_not_globalid_list_over_http() -> None:
             """,
         )
         assert exact_response.status_code == 200
-        exact_payload = exact_response.json()
+        exact_payload = response_json(exact_response)
         assert "errors" not in exact_payload, exact_payload
         assert exact_payload["data"] == {"books": [{"title": "Kindred"}]}
 
@@ -2392,10 +2431,10 @@ def test_relay_relation_isnull_is_boolean_not_globalid_list_over_http() -> None:
         registry.clear()
 
     assert rejected.status_code == 200
-    payload = rejected.json()
+    payload = response_json(rejected)
     assert payload.get("data") is None, payload
     assert "errors" in payload, payload
-    assert "Boolean cannot represent" in payload["errors"][0]["message"], payload
+    assert "Boolean cannot represent" in json_str(payload, "errors", 0, "message"), payload
 
 
 @pytest.mark.django_db
@@ -2454,10 +2493,10 @@ def test_library_genres_filter_by_relay_own_pk_global_id_in_rejects_wrong_type()
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    assert "GlobalID type mismatch" in payload["errors"][0]["message"]
+    assert "GlobalID type mismatch" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -2487,12 +2526,12 @@ def test_library_genres_filter_malformed_own_pk_global_id_raises_globalid_invali
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID", payload
-    assert "Invalid GlobalID" in error["message"], payload
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
+    assert "Invalid GlobalID" in json_str(error, "message"), payload
 
 
 @pytest.mark.django_db
@@ -2521,12 +2560,12 @@ def test_library_genres_filter_typed_global_id_with_invalid_pk_raises_globalid_i
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID", payload
-    assert "not a valid Genre primary-key value" in error["message"], payload
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
+    assert "not a valid Genre primary-key value" in json_str(error, "message"), payload
 
 
 @pytest.mark.django_db
@@ -2549,12 +2588,12 @@ def test_library_genres_filter_malformed_own_pk_global_id_in_names_index() -> No
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID", payload
-    assert "at index 0" in error["message"], payload
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
+    assert "at index 0" in json_str(error, "message"), payload
 
 
 @pytest.mark.django_db
@@ -2582,14 +2621,16 @@ def test_library_genres_filter_empty_id_scalar_global_id_raises_globalid_invalid
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID", payload
-    assert "empty node id" in error["message"], payload
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
+    assert "empty node id" in json_str(error, "message"), payload
     # Not silently widened: the query errors out rather than returning the full
     # (unfiltered) genre list.
-    assert payload.get("data") is None or payload["data"].get("allLibraryGenres") is None, payload
+    assert (
+        payload.get("data") is None or json_object(payload, "data").get("allLibraryGenres") is None
+    ), payload
 
 
 @pytest.mark.django_db
@@ -2615,13 +2656,15 @@ def test_library_genres_filter_empty_id_in_list_raises_globalid_invalid_at_index
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID", payload
-    assert "empty node id" in error["message"], payload
-    assert "at index 0" in error["message"], payload
-    assert payload.get("data") is None or payload["data"].get("allLibraryGenres") is None, payload
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
+    assert "empty node id" in json_str(error, "message"), payload
+    assert "at index 0" in json_str(error, "message"), payload
+    assert (
+        payload.get("data") is None or json_object(payload, "data").get("allLibraryGenres") is None
+    ), payload
 
 
 @pytest.mark.django_db
@@ -2650,13 +2693,15 @@ def test_library_genres_filter_mixed_empty_id_in_list_rejects_whole_input_at_ind
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID", payload
-    assert "empty node id" in error["message"], payload
-    assert "at index 1" in error["message"], payload
-    assert payload.get("data") is None or payload["data"].get("allLibraryGenres") is None, payload
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
+    assert "empty node id" in json_str(error, "message"), payload
+    assert "at index 1" in json_str(error, "message"), payload
+    assert (
+        payload.get("data") is None or json_object(payload, "data").get("allLibraryGenres") is None
+    ), payload
 
 
 @pytest.mark.django_db
@@ -2685,9 +2730,9 @@ def test_library_branches_filter_by_reverse_fk_lookup() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    names = [b["name"] for b in payload["data"]["allLibraryBranches"]]
+    names = [json_at(b, "name") for b in json_list(payload, "data", "allLibraryBranches")]
     assert names == ["With Match"]
 
 
@@ -2762,12 +2807,12 @@ def test_library_books_filter_preserves_optimizer_cooperation() -> None:
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryBooks"]
-    assert [row["title"] for row in rows] == ["Foundation"]
-    assert rows[0]["shelf"] == {"code": "A-1"}
-    assert rows[0]["genres"] == [{"name": "SciFi"}]
+    rows = json_list(payload, "data", "allLibraryBooks")
+    assert [json_at(row, "title") for row in rows] == ["Foundation"]
+    assert json_at(rows, 0, "shelf") == {"code": "A-1"}
+    assert json_at(rows, 0, "genres") == [{"name": "SciFi"}]
     # Optimizer plans the relations under filter cooperation: a root book
     # SELECT, a ``select_related("shelf")`` JOINed pull, and the
     # ``prefetch_related("genres")`` SELECT. The filter clause itself
@@ -2800,15 +2845,18 @@ def test_library_branches_filter_respects_related_queryset_boundary_on_parent() 
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryBranches"]
+    rows = json_list(payload, "data", "allLibraryBranches")
     # (a) ``branch_B`` is EXCLUDED - no shelf with ``topic="permanent collection"``.
-    assert [row["name"] for row in rows] == ["Branch A"]
+    assert [json_at(row, "name") for row in rows] == ["Branch A"]
     # (b) and (c) ``branch_A`` is INCLUDED and its consumer-authored ``shelves``
     # resolver returns BOTH shelves (the constraint scopes the parent
     # filter, NOT the nested resolver's output).
-    assert sorted(shelf["code"] for shelf in rows[0]["shelves"]) == ["A-1", "A-2"]
+    assert sorted(json_str(shelf, "code") for shelf in json_list(rows, 0, "shelves")) == [
+        "A-1",
+        "A-2",
+    ]
 
 
 @pytest.mark.django_db
@@ -2865,9 +2913,9 @@ def test_nested_related_filter_honors_target_get_queryset() -> None:
         """,
     )
     assert hidden_query_response.status_code == 200
-    hidden_payload = hidden_query_response.json()
+    hidden_payload = response_json(hidden_query_response)
     assert "errors" not in hidden_payload, hidden_payload
-    assert hidden_payload["data"]["allLibraryBooks"] == []
+    assert json_at(hidden_payload, "data", "allLibraryBooks") == []
 
     visible_query_response = _post_graphql(
         f"""
@@ -2879,9 +2927,11 @@ def test_nested_related_filter_honors_target_get_queryset() -> None:
         """,
     )
     assert visible_query_response.status_code == 200
-    visible_payload = visible_query_response.json()
+    visible_payload = response_json(visible_query_response)
     assert "errors" not in visible_payload, visible_payload
-    assert [row["title"] for row in visible_payload["data"]["allLibraryBooks"]] == [
+    assert [
+        json_at(row, "title") for row in json_list(visible_payload, "data", "allLibraryBooks")
+    ] == [
         "Visible Book",
     ]
 
@@ -2896,9 +2946,11 @@ def test_nested_related_filter_honors_target_get_queryset() -> None:
         """,
     )
     assert staff_response.status_code == 200
-    staff_payload = staff_response.json()
+    staff_payload = response_json(staff_response)
     assert "errors" not in staff_payload, staff_payload
-    assert [row["title"] for row in staff_payload["data"]["allLibraryBooks"]] == [
+    assert [
+        json_at(row, "title") for row in json_list(staff_payload, "data", "allLibraryBooks")
+    ] == [
         "Hidden Book",
     ]
 
@@ -3026,18 +3078,20 @@ def test_a_flat_filter_through_a_related_filter_cycle_reaches_past_its_first_lap
 
     response = _post_graphql(f"query {{ allLibraryPatrons(filter: {filter_input}) {{ name }} }}")
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert [row["name"] for row in payload["data"]["allLibraryPatrons"]] == ["Ada"]
+    assert [json_at(row, "name") for row in json_list(payload, "data", "allLibraryPatrons")] == [
+        "Ada",
+    ]
 
 
 def _flat_twin_names(row: _FlatTwinRow, filter_input: str, *, staff: bool) -> list[object]:
     query = f"query {{ {row.root}(filter: {filter_input}) {{ {row.selection} }} }}"
     response = _post_graphql_as_staff(query) if staff else _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    return [record[row.selection] for record in payload["data"][row.root]]
+    return [json_at(record, row.selection) for record in json_list(payload, "data", row.root)]
 
 
 @pytest.mark.django_db
@@ -3107,7 +3161,7 @@ async def test_flat_relation_leaf_answers_like_its_nested_twin_async(filter_inpu
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["genres"]["edges"] == []
+    assert json_at(payload, "data", "genres", "edges") == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -3149,7 +3203,7 @@ async def test_undeclared_relation_key_reads_its_target_visibility_async(
 
     assert "errors" not in payload, payload
     expected = [{"node": {"name": "Linked genre"}}] if staff else []
-    assert payload["data"]["genres"]["edges"] == expected
+    assert json_at(payload, "data", "genres", "edges") == expected
 
 
 class _VisibleWorld(NamedTuple):
@@ -3223,9 +3277,9 @@ def _seed_visible_world() -> _VisibleWorld:
         return json.dumps(str(relay.GlobalID(type_name="library.book", node_id=str(book.pk))))
 
     return _VisibleWorld(
-        secret_shelf=secret_shelf.pk,
-        null_shelf=null_shelf.pk,
-        permanent_shelf=permanent_shelf.pk,
+        secret_shelf=saved_pk(secret_shelf.pk),
+        null_shelf=saved_pk(null_shelf.pk),
+        permanent_shelf=saved_pk(permanent_shelf.pk),
         hidden_book=book_id(hidden_set),
         set_book=book_id(set_book),
     )
@@ -3534,9 +3588,9 @@ def _visible_world_names(
     query = f"query {{ {row.root}(filter: {filter_input}) {{ {row.selection} }} }}"
     response = _post_graphql_as_staff(query) if staff else _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    return [record[row.selection] for record in payload["data"][row.root]]
+    return [json_at(record, row.selection) for record in json_list(payload, "data", row.root)]
 
 
 @pytest.mark.django_db
@@ -3619,7 +3673,9 @@ async def test_walked_leaf_answers_over_the_visible_world_async(viewer: str, sha
     )
 
     assert "errors" not in payload, payload
-    names = [edge["node"]["name"] for edge in payload["data"]["genres"]["edges"]]
+    names = [
+        json_at(edge, "node", "name") for edge in json_list(payload, "data", "genres", "edges")
+    ]
     assert names == (row.staff if viewer == "staff" else row.anonymous)
 
 
@@ -3638,16 +3694,16 @@ def test_apply_raises_graphqlerror_on_invalid_filter_input() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    error = payload["errors"][0]
+    error = json_object(payload, "errors", 0)
     assert error["message"] == "Invalid filter input"
-    extensions = error["extensions"]
+    extensions = json_object(error, "extensions")
     assert extensions["code"] == "FILTER_INVALID"
-    field_errors = extensions["errors"]["email_must_have_at_sign"]
-    assert any("missing @" in entry["message"] for entry in field_errors)
-    assert any(entry["code"] == "missing_at_sign" for entry in field_errors)
+    field_errors = json_list(extensions, "errors", "email_must_have_at_sign")
+    assert any("missing @" in json_str(entry, "message") for entry in field_errors)
+    assert any(json_at(entry, "code") == "missing_at_sign" for entry in field_errors)
 
 
 @pytest.mark.django_db
@@ -3663,18 +3719,18 @@ def test_apply_passes_graphql_enum_coercion_before_form_validation() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    error = payload["errors"][0]
+    error = json_object(payload, "errors", 0)
     # GraphQL parser-level enum-coercion error names the offending value and
     # the enum type; the message wording is set by graphql-core and may
     # change across versions, so assert on substrings only.
-    assert "NOT_A_REAL_ENUM_VALUE" in error["message"]
-    assert "BookTypeCirculationStatusEnum" in error["message"]
+    assert "NOT_A_REAL_ENUM_VALUE" in json_str(error, "message")
+    assert "BookTypeCirculationStatusEnum" in json_str(error, "message")
     # The distinct error layer pinned by this test: coercion-level errors
     # do NOT carry the ``FILTER_INVALID`` extension code.
-    assert error.get("extensions", {}).get("code") != "FILTER_INVALID"
+    assert _error_code(error) != "FILTER_INVALID"
 
 
 @pytest.mark.django_db
@@ -3696,9 +3752,11 @@ def test_root_get_queryset_runs_before_filter_apply() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert [row["name"] for row in payload["data"]["allLibraryBranches"]] == ["Andromeda Main"]
+    assert [json_at(row, "name") for row in json_list(payload, "data", "allLibraryBranches")] == [
+        "Andromeda Main",
+    ]
 
     # Staff: both branches reappear under the same filter clause.
     staff_response = _post_graphql_as_staff(
@@ -3711,9 +3769,11 @@ def test_root_get_queryset_runs_before_filter_apply() -> None:
         """,
     )
     assert staff_response.status_code == 200
-    staff_payload = staff_response.json()
+    staff_payload = response_json(staff_response)
     assert "errors" not in staff_payload, staff_payload
-    staff_names = sorted(row["name"] for row in staff_payload["data"]["allLibraryBranches"])
+    staff_names = sorted(
+        json_str(row, "name") for row in json_list(staff_payload, "data", "allLibraryBranches")
+    )
     assert staff_names == ["Andromeda Main", "Andromeda Restricted"]
 
 
@@ -3741,10 +3801,10 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
         """,
     )
     assert wrong_response.status_code == 200
-    wrong_payload = wrong_response.json()
+    wrong_payload = response_json(wrong_response)
     assert "errors" in wrong_payload, wrong_payload
     assert wrong_payload["data"] is None, wrong_payload
-    message = wrong_payload["errors"][0]["message"]
+    message = json_str(wrong_payload, "errors", 0, "message")
     # Under the 0.0.9 model-label default the mismatch message reports the model
     # labels (``library.genre`` expected, ``library.loan`` received), not the
     # GraphQL type names.
@@ -3762,9 +3822,11 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
         """,
     )
     assert right_response.status_code == 200
-    right_payload = right_response.json()
+    right_payload = response_json(right_response)
     assert "errors" not in right_payload, right_payload
-    assert [row["title"] for row in right_payload["data"]["allLibraryBooks"]] == ["Hyperion"]
+    assert [
+        json_at(row, "title") for row in json_list(right_payload, "data", "allLibraryBooks")
+    ] == ["Hyperion"]
 
 
 @pytest.mark.django_db
@@ -3816,14 +3878,13 @@ def test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_mod
         """,
     )
     assert accepted.status_code == 200
-    accepted_payload = accepted.json()
+    accepted_payload = response_json(accepted)
     assert "errors" not in accepted_payload, accepted_payload
     # Every book sharing a genre with Hyperion, each reported once; the
     # Westerns title is excluded.
-    assert sorted(row["title"] for row in accepted_payload["data"]["allLibraryBooks"]) == [
-        "Endymion",
-        "Hyperion",
-    ]
+    assert sorted(
+        json_str(row, "title") for row in json_list(accepted_payload, "data", "allLibraryBooks")
+    ) == ["Endymion", "Hyperion"]
 
     rejected = _post_graphql(
         f"""
@@ -3835,10 +3896,10 @@ def test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_mod
         """,
     )
     assert rejected.status_code == 200
-    rejected_payload = rejected.json()
+    rejected_payload = response_json(rejected)
     assert "errors" in rejected_payload, rejected_payload
     assert rejected_payload["data"] is None, rejected_payload
-    message = rejected_payload["errors"][0]["message"]
+    message = json_str(rejected_payload, "errors", 0, "message")
     assert "GlobalID type mismatch" in message
     # ``library.book`` expected (the terminal), ``library.genre`` received (the
     # head). Pre-walk these two were swapped.
@@ -3863,7 +3924,7 @@ def _post_relation_pk_filter(schema: strawberry.Schema, input_name: str, wire: s
         f'{{ profiles(filter: {{ {input_name}: {{ exact: "{wire}" }} }}) {{ postalCode }} }}',
     )
     assert response.status_code == 200
-    return response.json()
+    return response_json(response)
 
 
 @pytest.mark.django_db
@@ -3902,12 +3963,12 @@ def test_relay_global_id_filter_through_a_relation_primary_key_validates_the_ter
     assert accepted["data"] == {"profiles": [{"postalCode": "02101"}]}
 
     assert rejected["data"] is None, rejected
-    message = rejected["errors"][0]["message"]
+    message = json_str(rejected, "errors", 0, "message")
     assert "GlobalID type mismatch" in message, rejected
     assert f"expects {card_label} but received {models.Patron._meta.label_lower}" in message
 
     assert invalid["data"] is None, invalid
-    assert invalid["errors"][0]["extensions"]["code"] == "GLOBALID_INVALID", invalid
+    assert json_at(invalid, "errors", 0, "extensions", "code") == "GLOBALID_INVALID", invalid
 
 
 @pytest.mark.django_db
@@ -3934,7 +3995,7 @@ def test_relay_global_id_filter_on_a_relation_primary_key_validates_its_target()
     assert "errors" not in accepted, accepted
     assert accepted["data"] == {"profiles": [{"postalCode": "02101"}]}
     assert rejected["data"] is None, rejected
-    assert "GlobalID type mismatch" in rejected["errors"][0]["message"], rejected
+    assert "GlobalID type mismatch" in json_str(rejected, "errors", 0, "message"), rejected
 
 
 # ---------------------------------------------------------------------------
@@ -4014,9 +4075,9 @@ def test_library_branches_order_by_name_asc() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["allLibraryBranches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "allLibraryBranches")]
     assert names == ["Alpha", "Bravo", "Charlie"]
 
 
@@ -4048,10 +4109,10 @@ def test_library_books_order_by_subtitle_null_positioning(
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryBooks"]
-    assert [row["subtitle"] for row in rows] == expected_subtitles
+    rows = json_list(payload, "data", "allLibraryBooks")
+    assert [json_at(row, "subtitle") for row in rows] == expected_subtitles
 
 
 @pytest.mark.django_db
@@ -4119,9 +4180,9 @@ def test_library_branches_order_by_reverse_fk_relation() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["allLibraryBranches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "allLibraryBranches")]
     assert names == ["Alpha", "Beta"]
 
 
@@ -4377,9 +4438,9 @@ def _hidden_order_answer(row: _HiddenOrderRow, *, staff: bool) -> list[object]:
     query = f"query {{ {row.root}(orderBy: {row.order}) {{ {row.selection} }} }}"
     response = _post_graphql_as_staff(query) if staff else _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    return [record[row.selection] for record in payload["data"][row.root]]
+    return [json_at(record, row.selection) for record in json_list(payload, "data", row.root)]
 
 
 @pytest.mark.django_db
@@ -4426,11 +4487,11 @@ def test_related_order_on_a_connection_reads_a_hidden_row_as_missing(
         " { edges { node { name } } } }"
     )
     response = _post_graphql_as_staff(query) if staff else _post_graphql(query)
-    payload = response.json()
+    payload = response_json(response)
 
     assert "errors" not in payload, payload
-    edges = payload["data"]["allLibraryGenresConnection"]["edges"]
-    assert [edge["node"]["name"] for edge in edges] == expected
+    edges = json_list(payload, "data", "allLibraryGenresConnection", "edges")
+    assert [json_at(edge, "node", "name") for edge in edges] == expected
 
 
 @pytest.mark.django_db
@@ -4457,13 +4518,15 @@ def test_related_order_on_a_list_field_keeps_a_positive_offset(
     deterministic, so the scoped term is a materially active order.
     """
     seed()
-    payload = _post_graphql(
-        f"query {{ allLibraryGenresViaListField(orderBy: {order}, offset: 1) {{ name }} }}",
-    ).json()
+    payload = response_json(
+        _post_graphql(
+            f"query {{ allLibraryGenresViaListField(orderBy: {order}, offset: 1) {{ name }} }}",
+        ),
+    )
 
     assert "errors" not in payload, payload
-    genres = payload["data"]["allLibraryGenresViaListField"]
-    assert [genre["name"] for genre in genres] == expected
+    genres = json_list(payload, "data", "allLibraryGenresViaListField")
+    assert [json_at(genre, "name") for genre in genres] == expected
 
 
 @pytest.mark.django_db
@@ -4475,9 +4538,11 @@ def test_related_order_adds_no_join_or_distinct_to_a_to_many_term() -> None:
     """
     _seed_genres_over_hidden_books()
     with CaptureQueriesContext(connection) as captured:
-        payload = _post_graphql(
-            f"query {{ allLibraryGenres(orderBy: {_GENRES_BY_BOOK_TITLE}) {{ name }} }}",
-        ).json()
+        payload = response_json(
+            _post_graphql(
+                f"query {{ allLibraryGenres(orderBy: {_GENRES_BY_BOOK_TITLE}) {{ name }} }}",
+            ),
+        )
     assert "errors" not in payload, payload
     (sql,) = [query["sql"] for query in captured.captured_queries if "MIN(" in query["sql"]]
     outer = _outside_parentheses(sql)
@@ -4533,12 +4598,12 @@ def test_nested_related_order_under_one_parent_reads_a_hidden_row_as_missing(
         " { edges { node { title } } } } } } }"
     )
     response = _post_graphql_as_staff(query) if staff else _post_graphql(query)
-    payload = response.json()
+    payload = response_json(response)
 
     assert "errors" not in payload, payload
-    (genre_edge,) = payload["data"]["allLibraryGenresConnection"]["edges"]
-    books = genre_edge["node"]["booksConnection"]["edges"]
-    assert [book["node"]["title"] for book in books] == expected
+    (genre_edge,) = json_list(payload, "data", "allLibraryGenresConnection", "edges")
+    books = json_list(genre_edge, "node", "booksConnection", "edges")
+    assert [json_at(book, "node", "title") for book in books] == expected
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4569,7 +4634,9 @@ async def test_related_order_reads_a_hidden_row_as_missing_async(
     )
 
     assert "errors" not in payload, payload
-    assert [edge["node"]["name"] for edge in payload["data"]["genres"]["edges"]] == expected
+    assert [
+        json_at(edge, "node", "name") for edge in json_list(payload, "data", "genres", "edges")
+    ] == expected
 
 
 @pytest.mark.django_db
@@ -4626,9 +4693,9 @@ def test_library_branches_order_by_scalar_then_to_many_aggregate_no_multiplicati
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["allLibraryBranches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "allLibraryBranches")]
     # city ASC primary (Austin < Boston), shelf-min ASC tiebreaker within Austin
     # (West min A < South min C) -- distinct from aggregate-only ["West","North","South"].
     assert names == ["West", "South", "North"]
@@ -4691,24 +4758,34 @@ def test_library_genres_connection_pages_by_to_many_aggregate() -> None:
                 """,
             )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        return payload["data"]["allLibraryGenresConnection"], captured
+        return json_object(payload, "data", "allLibraryGenresConnection"), captured
 
     page_one, captured = _page()
     aggregate_sql = next(query["sql"] for query in captured if "MIN(" in query["sql"].upper())
     assert "GROUP BY" in aggregate_sql.upper()
     assert "_dst_row_number" not in aggregate_sql
     assert page_one["totalCount"] == 4
-    assert [edge["node"]["name"] for edge in page_one["edges"]] == ["Aggregate A", "Aggregate B"]
-    assert page_one["pageInfo"]["hasNextPage"] is True
+    assert [json_at(edge, "node", "name") for edge in json_list(page_one, "edges")] == [
+        "Aggregate A",
+        "Aggregate B",
+    ]
+    assert json_at(page_one, "pageInfo", "hasNextPage") is True
 
-    page_two, _captured = _page(page_one["pageInfo"]["endCursor"])
+    page_two, _captured = _page(json_str(page_one, "pageInfo", "endCursor"))
     assert page_two["totalCount"] == 4
-    assert [edge["node"]["name"] for edge in page_two["edges"]] == ["Aggregate C", "Aggregate D"]
-    assert page_two["pageInfo"]["hasNextPage"] is False
+    assert [json_at(edge, "node", "name") for edge in json_list(page_two, "edges")] == [
+        "Aggregate C",
+        "Aggregate D",
+    ]
+    assert json_at(page_two, "pageInfo", "hasNextPage") is False
 
-    all_names = [edge["node"]["name"] for page in (page_one, page_two) for edge in page["edges"]]
+    all_names = [
+        json_at(edge, "node", "name")
+        for page in (page_one, page_two)
+        for edge in json_list(page, "edges")
+    ]
     assert all_names == [
         "Aggregate A",
         "Aggregate B",
@@ -4804,8 +4881,9 @@ def test_library_books_order_by_two_to_many_terms_each_get_their_own_aggregate()
     )
 
     with CaptureQueriesContext(connection) as captured:
-        data = _post_graphql(
-            """
+        data = response_json(
+            _post_graphql(
+                """
             query {
               allLibraryBooks(
                 orderBy: [{ genres: { name: ASC } }, { loans: { note: ASC } }]
@@ -4814,10 +4892,11 @@ def test_library_books_order_by_two_to_many_terms_each_get_their_own_aggregate()
               }
             }
             """,
-        ).json()
+            ),
+        )
 
     assert "errors" not in data, data
-    titles = [row["title"] for row in data["data"]["allLibraryBooks"]]
+    titles = [json_at(row, "title") for row in json_list(data, "data", "allLibraryBooks")]
     # genre-min ASC primary (Alpha, Alpha, Beta), loan-min ASC tiebreaker inside
     # the Alpha group (n-a before n-b).
     assert titles == ["Second", "First", "Third"]
@@ -4852,18 +4931,20 @@ def test_library_books_order_by_to_many_desc_uses_max_aggregate() -> None:
     zebra.genres.add(beta)
 
     with CaptureQueriesContext(connection) as captured:
-        data = _post_graphql(
-            """
+        data = response_json(
+            _post_graphql(
+                """
             query {
               allLibraryBooks(orderBy: [{ genres: { name: DESC } }]) {
                 title
               }
             }
             """,
-        ).json()
+            ),
+        )
 
     assert "errors" not in data, data
-    titles = [row["title"] for row in data["data"]["allLibraryBooks"]]
+    titles = [json_at(row, "title") for row in json_list(data, "data", "allLibraryBooks")]
     assert titles == ["Aardvark", "Zebra"]
     assert len(titles) == len(set(titles))
     book_queries = [
@@ -4915,7 +4996,9 @@ async def test_library_genres_order_by_to_many_desc_applies_over_graphql_async()
         """,
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["allLibraryGenresViaListField"]]
+    names = [
+        json_at(row, "name") for row in json_list(payload, "data", "allLibraryGenresViaListField")
+    ]
     assert names == ["Alpha", "Zeta", "Mira"]
     assert len(names) == len(set(names))
 
@@ -5008,12 +5091,12 @@ def test_library_books_order_preserves_optimizer_cooperation() -> None:
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryBooks"]
-    assert [row["title"] for row in rows] == ["Foundation"]
-    assert rows[0]["shelf"] == {"code": "A-1"}
-    assert rows[0]["genres"] == [{"name": "SciFi"}]
+    rows = json_list(payload, "data", "allLibraryBooks")
+    assert [json_at(row, "title") for row in rows] == ["Foundation"]
+    assert json_at(rows, 0, "shelf") == {"code": "A-1"}
+    assert json_at(rows, 0, "genres") == [{"name": "SciFi"}]
     # Optimizer cooperation: ``.order_by(...)`` does NOT add to the
     # query count; the plan stays at root SELECT + shelf JOIN +
     # genres prefetch.
@@ -5049,14 +5132,14 @@ def test_root_get_queryset_runs_before_order_apply() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryBranches"]
+    rows = json_list(payload, "data", "allLibraryBranches")
     # The hidden ``Zeta`` (``city="restricted"``) does NOT appear at
     # the head of the DESC list; the visibility scope ran BEFORE the
     # order clause.
-    assert [row["name"] for row in rows] == ["Alpha"]
-    assert rows[0]["city"] == "Boston"
+    assert [json_at(row, "name") for row in rows] == ["Alpha"]
+    assert json_at(rows, 0, "city") == "Boston"
 
     staff_response = _post_graphql_as_staff(
         """
@@ -5069,12 +5152,12 @@ def test_root_get_queryset_runs_before_order_apply() -> None:
         """,
     )
     assert staff_response.status_code == 200
-    staff_payload = staff_response.json()
+    staff_payload = response_json(staff_response)
     assert "errors" not in staff_payload, staff_payload
-    staff_rows = staff_payload["data"]["allLibraryBranches"]
+    staff_rows = json_list(staff_payload, "data", "allLibraryBranches")
     # Staff bypasses the visibility hook so both rows order
     # descending: "restricted" > "Boston" lexically.
-    assert [row["name"] for row in staff_rows] == ["Zeta", "Alpha"]
+    assert [json_at(row, "name") for row in staff_rows] == ["Zeta", "Alpha"]
 
 
 @pytest.mark.django_db
@@ -5097,10 +5180,10 @@ def test_order_check_permission_denies_for_active_field() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    assert payload["errors"][0]["extensions"]["code"] == "ORDER_PERMISSION_DENIED"
+    assert json_at(payload, "errors", 0, "extensions", "code") == "ORDER_PERMISSION_DENIED"
 
 
 @pytest.mark.django_db
@@ -5125,9 +5208,9 @@ def test_order_check_permission_quiet_for_inactive_field() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    cities = [row["city"] for row in payload["data"]["allLibraryBranches"]]
+    cities = [json_at(row, "city") for row in json_list(payload, "data", "allLibraryBranches")]
     assert cities == ["Boston", "Cambridge"]
 
 
@@ -5154,10 +5237,10 @@ def test_order_check_permission_denies_active_related_branch() -> None:
         """,
     )
     assert denial_response.status_code == 200
-    denial_payload = denial_response.json()
+    denial_payload = response_json(denial_response)
     assert "errors" in denial_payload, denial_payload
     assert denial_payload["data"] is None, denial_payload
-    assert denial_payload["errors"][0]["extensions"]["code"] == "ORDER_PERMISSION_DENIED"
+    assert json_at(denial_payload, "errors", 0, "extensions", "code") == "ORDER_PERMISSION_DENIED"
 
     quiet_response = _post_graphql(
         """
@@ -5169,9 +5252,11 @@ def test_order_check_permission_denies_active_related_branch() -> None:
         """,
     )
     assert quiet_response.status_code == 200
-    quiet_payload = quiet_response.json()
+    quiet_payload = response_json(quiet_response)
     assert "errors" not in quiet_payload, quiet_payload
-    assert [row["city"] for row in quiet_payload["data"]["allLibraryBranches"]] == [
+    assert [
+        json_at(row, "city") for row in json_list(quiet_payload, "data", "allLibraryBranches")
+    ] == [
         "Boston",
     ]
 
@@ -5205,10 +5290,10 @@ def test_library_books_order_by_multi_field_priority() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryBooks"]
-    assert [(row["shelf"]["code"], row["title"]) for row in rows] == [
+    rows = json_list(payload, "data", "allLibraryBooks")
+    assert [(json_at(row, "shelf", "code"), json_at(row, "title")) for row in rows] == [
         ("A", "Foo"),
         ("A", "Bar"),
         ("B", "Foo"),
@@ -5279,9 +5364,11 @@ def test_library_branches_order_empty_list_and_null_direction_no_op() -> None:
         """,
     )
     assert empty_response.status_code == 200
-    empty_payload = empty_response.json()
+    empty_payload = response_json(empty_response)
     assert "errors" not in empty_payload, empty_payload
-    empty_names = [row["name"] for row in empty_payload["data"]["allLibraryBranches"]]
+    empty_names = [
+        json_at(row, "name") for row in json_list(empty_payload, "data", "allLibraryBranches")
+    ]
     assert empty_names == ["Bravo", "Alpha", "Charlie"]
 
     null_response = _post_graphql(
@@ -5294,9 +5381,11 @@ def test_library_branches_order_empty_list_and_null_direction_no_op() -> None:
         """,
     )
     assert null_response.status_code == 200
-    null_payload = null_response.json()
+    null_payload = response_json(null_response)
     assert "errors" not in null_payload, null_payload
-    null_names = [row["name"] for row in null_payload["data"]["allLibraryBranches"]]
+    null_names = [
+        json_at(row, "name") for row in json_list(null_payload, "data", "allLibraryBranches")
+    ]
     assert null_names == ["Bravo", "Alpha", "Charlie"]
 
 
@@ -5335,9 +5424,9 @@ def test_nullability_override_flips_sdl_nullability() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    type_info = payload["data"]["__type"]
+    type_info = json_object(payload, "data", "__type")
     assert type_info is not None
 
     # title: NOT NULL column natively String! -> flipped to String by nullable_overrides.
@@ -5383,9 +5472,9 @@ def test_nullability_override_acceptance_api_is_queryable() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryNullabilityOverrideBooks"]
+    rows = json_at(payload, "data", "allLibraryNullabilityOverrideBooks")
     # Only the non-null-subtitle row survives the resolver's exclude().
     assert rows == [{"title": "Parable of the Sower", "subtitle": "Earthseed"}]
 
@@ -5427,12 +5516,12 @@ def test_secondary_book_global_id_refetches_as_primary_book_type_over_http(
             """,
         )
         assert listed.status_code == 200
-        listed_payload = listed.json()
+        listed_payload = response_json(listed)
         assert "errors" not in listed_payload, listed_payload
-        rows = listed_payload["data"]["allLibraryNullabilityOverrideBooks"]
+        rows = json_list(listed_payload, "data", "allLibraryNullabilityOverrideBooks")
         assert len(rows) == 1
-        emitted = rows[0]["id"]
-        assert rows[0]["title"] == "Parable of the Sower"
+        emitted = json_str(rows, 0, "id")
+        assert json_at(rows, 0, "title") == "Parable of the Sower"
         assert emitted == global_id_for(library_schema.NullabilityOverrideBookType, book.pk)
         assert emitted == global_id_for(library_schema.BookType, book.pk)
         type_name, node_id = _decode_global_id(emitted)
@@ -5451,7 +5540,7 @@ def test_secondary_book_global_id_refetches_as_primary_book_type_over_http(
             ),
         )
         assert "errors" not in as_primary, as_primary
-        node = as_primary["data"]["node"]
+        node = json_object(as_primary, "data", "node")
         assert node["__typename"] == "BookType"
         assert node["primaryTitle"] == "Parable of the Sower"
         assert "secondaryTitle" not in node
@@ -5467,10 +5556,11 @@ def test_secondary_book_global_id_refetches_as_primary_book_type_over_http(
         """,
     )
     assert default_sdl.status_code == 200
-    default_payload = default_sdl.json()
+    default_payload = response_json(default_sdl)
     assert "errors" not in default_payload, default_payload
-    interfaces = default_payload["data"]["__type"]["interfaces"] or ()
-    assert "Node" not in {entry["name"] for entry in interfaces}
+    interfaces = json_at(default_payload, "data", "__type", "interfaces")
+    entries = json_list(interfaces) if interfaces else []
+    assert "Node" not in {json_at(entry, "name") for entry in entries}
 
 
 @pytest.mark.django_db
@@ -5507,17 +5597,21 @@ def test_public_patron_exclude_deny_list_shapes_type_and_resolves() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     # Meta.name renamed the GraphQL type; the class-name type no longer resolves.
-    assert payload["data"]["public"] is not None
-    assert payload["data"]["renamedAway"] is None
+    assert json_at(payload, "data", "public") is not None
+    assert json_at(payload, "data", "renamedAway") is None
     # Meta.description surfaces verbatim through introspection.
-    assert payload["data"]["public"]["description"] == (
+    assert json_at(payload, "data", "public", "description") == (
         "A patron projection with PII (email) and financial (lifetime fines) columns removed."
     )
-    public_fields = {field["name"] for field in payload["data"]["public"]["fields"]}
-    primary_fields = {field["name"] for field in payload["data"]["primary"]["fields"]}
+    public_fields = {
+        json_at(field, "name") for field in json_list(payload, "data", "public", "fields")
+    }
+    primary_fields = {
+        json_at(field, "name") for field in json_list(payload, "data", "primary", "fields")
+    }
     assert "email" not in public_fields
     assert "lifetimeFinesCents" not in public_fields
     assert {
@@ -5540,15 +5634,15 @@ def test_public_patron_exclude_deny_list_shapes_type_and_resolves() -> None:
         """,
     )
     assert data_response.status_code == 200
-    data_payload = data_response.json()
+    data_payload = response_json(data_response)
     assert "errors" not in data_payload, data_payload
-    assert data_payload["data"]["allLibraryPublicPatrons"] == [{"name": "Ada"}]
+    assert json_at(data_payload, "data", "allLibraryPublicPatrons") == [{"name": "Ada"}]
 
     # 3. An excluded column is not selectable - the deny-list removed it from the type.
     excluded_response = _post_graphql(
         "query { allLibraryPublicPatrons { lifetimeFinesCents } }",
     )
-    excluded_payload = excluded_response.json()
+    excluded_payload = response_json(excluded_response)
     assert "errors" in excluded_payload, excluded_payload
     assert excluded_payload["data"] is None, excluded_payload
     assert "lifetimeFinesCents" in str(excluded_payload["errors"])
@@ -5617,20 +5711,20 @@ def test_genre_connection_full_round_trip() -> None:
         """,
     )
     assert page_one.status_code == 200
-    payload_one = page_one.json()
+    payload_one = response_json(page_one)
     assert "errors" not in payload_one, payload_one
-    conn_one = payload_one["data"]["allLibraryGenresConnection"]
+    conn_one = json_object(payload_one, "data", "allLibraryGenresConnection")
 
-    names_one = [edge["node"]["name"] for edge in conn_one["edges"]]
+    names_one = [json_at(edge, "node", "name") for edge in json_list(conn_one, "edges")]
     assert names_one == ["Alpha", "Banana"]
     # ``node.id`` is a decodable model-label GlobalID (``library.genre``), not
     # the raw pk, under the 0.0.9 model-label default.
-    for edge in conn_one["edges"]:
-        type_name, node_id = _decode_global_id(edge["node"]["id"])
+    for edge in json_list(conn_one, "edges"):
+        type_name, node_id = _decode_global_id(json_str(edge, "node", "id"))
         assert type_name == models.Genre._meta.label_lower
         assert node_id.isdigit()
-    assert conn_one["pageInfo"]["hasNextPage"] is True
-    end_cursor = conn_one["pageInfo"]["endCursor"]
+    assert json_at(conn_one, "pageInfo", "hasNextPage") is True
+    end_cursor = json_at(conn_one, "pageInfo", "endCursor")
     assert isinstance(end_cursor, str)
     assert end_cursor
     # ``totalCount`` counts the unpaginated post-filter set (4), NOT the page
@@ -5654,15 +5748,15 @@ def test_genre_connection_full_round_trip() -> None:
         """,
     )
     assert page_two.status_code == 200
-    payload_two = page_two.json()
+    payload_two = response_json(page_two)
     assert "errors" not in payload_two, payload_two
-    conn_two = payload_two["data"]["allLibraryGenresConnection"]
+    conn_two = json_object(payload_two, "data", "allLibraryGenresConnection")
 
-    names_two = [edge["node"]["name"] for edge in conn_two["edges"]]
+    names_two = [json_at(edge, "node", "name") for edge in json_list(conn_two, "edges")]
     # Next page advances with no overlap with page 1.
     assert names_two == ["Delta", "Gamma"]
     assert set(names_two).isdisjoint(set(names_one))
-    assert conn_two["pageInfo"]["hasNextPage"] is False
+    assert json_at(conn_two, "pageInfo", "hasNextPage") is False
     assert conn_two["totalCount"] == 4
 
 
@@ -5812,9 +5906,9 @@ def test_genre_connection_a_malformed_filter_apply_sync_result_names_its_own_def
     ):
         response = _post_graphql(_GENRE_CONNECTION_FILTERED_QUERY)
 
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert message.startswith(message_start), message
     for substring in substrings:
         assert substring in message, message
@@ -5840,10 +5934,11 @@ def test_genre_connection_healthy_filter_override_still_filters(
     monkeypatch.setattr(GenreFilter, "apply_sync", classmethod(_passthrough))
 
     response = _post_graphql(_GENRE_CONNECTION_FILTERED_QUERY)
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     names = {
-        edge["node"]["name"] for edge in payload["data"]["allLibraryGenresConnection"]["edges"]
+        json_at(edge, "node", "name")
+        for edge in json_list(payload, "data", "allLibraryGenresConnection", "edges")
     }
     assert names == {"Gamma", "Alpha"}
 
@@ -5865,10 +5960,11 @@ def test_genre_connection_serves_a_combined_filter_result_as_its_primary_key_set
     _seed_genres("Gamma", "Alpha", "Echo")
     monkeypatch.setattr(GenreFilter, "apply_sync", classmethod(_combined))
 
-    payload = _post_graphql(_GENRE_CONNECTION_FILTERED_QUERY).json()
+    payload = response_json(_post_graphql(_GENRE_CONNECTION_FILTERED_QUERY))
     assert "errors" not in payload, payload
     names = {
-        edge["node"]["name"] for edge in payload["data"]["allLibraryGenresConnection"]["edges"]
+        json_at(edge, "node", "name")
+        for edge in json_list(payload, "data", "allLibraryGenresConnection", "edges")
     }
     assert names == {"Alpha", "Echo"}
 
@@ -5891,10 +5987,10 @@ def test_genre_connection_filter_order_and_slice_compose(*, as_staff: bool) -> N
         else _post_graphql(_GENRE_CONNECTION_COMPOSITION_QUERY)
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenresConnection"]
-    assert [edge["node"]["name"] for edge in conn["edges"]] == ["Alpha"]
+    conn = json_object(payload, "data", "allLibraryGenresConnection")
+    assert [json_at(edge, "node", "name") for edge in json_list(conn, "edges")] == ["Alpha"]
     assert conn["totalCount"] == 2
 
 
@@ -5933,13 +6029,13 @@ def test_genre_connection_flat_leaf_total_count_is_row_preserving() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenresConnection"]
+    conn = json_object(payload, "data", "allLibraryGenresConnection")
 
     # Row-preserving: one genre, reported exactly once.
     assert conn["totalCount"] == 1
-    assert [edge["node"]["name"] for edge in conn["edges"]] == ["Cardiology"]
+    assert [json_at(edge, "node", "name") for edge in json_list(conn, "edges")] == ["Cardiology"]
 
 
 def _seed_two_matching_genres_over_two_books_each() -> tuple[models.Branch, models.Shelf]:
@@ -5999,13 +6095,15 @@ def test_genre_connection_expanded_origin_pagination_is_row_preserving() -> None
         """,
     )
     assert page_one.status_code == 200
-    payload_one = page_one.json()
+    payload_one = response_json(page_one)
     assert "errors" not in payload_one, payload_one
-    conn_one = payload_one["data"]["allLibraryGenresConnection"]
+    conn_one = json_object(payload_one, "data", "allLibraryGenresConnection")
 
-    assert [edge["node"]["name"] for edge in conn_one["edges"]] == ["Cardiac Care"]
-    assert conn_one["pageInfo"]["hasNextPage"] is True
-    end_cursor = conn_one["pageInfo"]["endCursor"]
+    assert [json_at(edge, "node", "name") for edge in json_list(conn_one, "edges")] == [
+        "Cardiac Care",
+    ]
+    assert json_at(conn_one, "pageInfo", "hasNextPage") is True
+    end_cursor = json_at(conn_one, "pageInfo", "endCursor")
     assert isinstance(end_cursor, str)
     assert end_cursor
     # Row-preserving pre-slice count: two genres, NOT four fanned-out rows.
@@ -6028,13 +6126,15 @@ def test_genre_connection_expanded_origin_pagination_is_row_preserving() -> None
         """,
     )
     assert page_two.status_code == 200
-    payload_two = page_two.json()
+    payload_two = response_json(page_two)
     assert "errors" not in payload_two, payload_two
-    conn_two = payload_two["data"]["allLibraryGenresConnection"]
+    conn_two = json_object(payload_two, "data", "allLibraryGenresConnection")
 
     # Second page carries the second genre once, no overlap, boundary reached.
-    assert [edge["node"]["name"] for edge in conn_two["edges"]] == ["Cardiology"]
-    assert conn_two["pageInfo"]["hasNextPage"] is False
+    assert [json_at(edge, "node", "name") for edge in json_list(conn_two, "edges")] == [
+        "Cardiology",
+    ]
+    assert json_at(conn_two, "pageInfo", "hasNextPage") is False
     assert conn_two["totalCount"] == 2
 
 
@@ -6066,10 +6166,12 @@ def test_genre_connection_nested_spelling_matches_flat_spelling() -> None:
             % filter_body,
         )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        conn = payload["data"]["allLibraryGenresConnection"]
-        return [edge["node"]["name"] for edge in conn["edges"]], conn["totalCount"]
+        conn = json_object(payload, "data", "allLibraryGenresConnection")
+        total_count = conn["totalCount"]
+        assert isinstance(total_count, int), conn
+        return [json_str(edge, "node", "name") for edge in json_list(conn, "edges")], total_count
 
     flat_names, flat_count = _fetch('{ booksTitle: { iContains: "cardio" } }')
     nested_names, nested_count = _fetch('{ books: { title: { iContains: "cardio" } } }')
@@ -6112,7 +6214,7 @@ def test_genre_connection_flat_leaf_sql_shape_is_row_preserving() -> None:
             """,
         )
     assert response.status_code == 200
-    assert "errors" not in response.json(), response.json()
+    assert "errors" not in response_json(response), response_json(response)
 
     genre_sql = [
         q["sql"] for q in captured.captured_queries if "library_genre" in q["sql"].lower()
@@ -6160,9 +6262,9 @@ def test_library_loans_deep_leaf_sql_shape_is_row_preserving() -> None:
             """,
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    ids = [row["id"] for row in payload["data"]["allLibraryLoans"]]
+    ids = [json_at(row, "id") for row in json_list(payload, "data", "allLibraryLoans")]
     assert len(ids) == 2
     assert len(set(ids)) == 2
 
@@ -6214,11 +6316,11 @@ def test_library_loans_mixed_direct_and_relational_or_is_row_preserving_over_htt
             """,
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
 
     # Row-preserving: exactly the three matching loans, id-ordered, each ONCE.
-    assert payload["data"]["allLibraryLoans"] == [
+    assert json_at(payload, "data", "allLibraryLoans") == [
         {"id": graph.relation_and_direct},
         {"id": graph.relation_only},
         {"id": graph.direct_only},
@@ -6257,8 +6359,8 @@ def test_library_loans_connection_mixed_or_paginates_row_preserved_roots_over_ht
         # model-anchored GlobalID (``base64("library.loan:<pk>")``); decode it
         # back to the raw pk.
         pks: list[int] = []
-        for edge in conn["edges"]:
-            type_name, node_id = _decode_global_id(edge["node"]["id"])
+        for edge in json_list(conn, "edges"):
+            type_name, node_id = _decode_global_id(json_str(edge, "node", "id"))
             assert type_name == "library.loan", type_name
             pks.append(int(node_id))
         return pks
@@ -6292,15 +6394,15 @@ def test_library_loans_connection_mixed_or_paginates_row_preserved_roots_over_ht
                 % filter_body,
             )
         assert page_one.status_code == 200
-        payload_one = page_one.json()
+        payload_one = response_json(page_one)
         assert "errors" not in payload_one, payload_one
-        conn_one = payload_one["data"]["allLibraryLoansConnection"]
+        conn_one = json_object(payload_one, "data", "allLibraryLoansConnection")
 
         # Row-preserving pre-slice count: three loans, NOT a fanned-out total.
         assert conn_one["totalCount"] == 3
         assert _edge_pks(conn_one) == [graph.relation_and_direct, graph.relation_only]
-        assert conn_one["pageInfo"]["hasNextPage"] is True
-        end_cursor = conn_one["pageInfo"]["endCursor"]
+        assert json_at(conn_one, "pageInfo", "hasNextPage") is True
+        end_cursor = json_at(conn_one, "pageInfo", "endCursor")
         assert isinstance(end_cursor, str)
         assert end_cursor
 
@@ -6335,21 +6437,24 @@ def test_library_loans_connection_mixed_or_paginates_row_preserved_roots_over_ht
             % (filter_body, end_cursor),
         )
         assert page_two.status_code == 200
-        payload_two = page_two.json()
+        payload_two = response_json(page_two)
         assert "errors" not in payload_two, payload_two
-        conn_two = payload_two["data"]["allLibraryLoansConnection"]
+        conn_two = json_object(payload_two, "data", "allLibraryLoansConnection")
 
         assert conn_two["totalCount"] == 3
         assert _edge_pks(conn_two) == [graph.direct_only]
-        assert conn_two["pageInfo"]["hasNextPage"] is False
+        assert json_at(conn_two, "pageInfo", "hasNextPage") is False
 
     # Flag off: rebuild the default schema and prove the connection field is GONE.
     project_schema_override()
     introspection = _post_graphql('{ __type(name: "Query") { fields { name } } }')
     assert introspection.status_code == 200
-    introspection_payload = introspection.json()
+    introspection_payload = response_json(introspection)
     assert "errors" not in introspection_payload, introspection_payload
-    query_fields = {field["name"] for field in introspection_payload["data"]["__type"]["fields"]}
+    query_fields = {
+        json_at(field, "name")
+        for field in json_list(introspection_payload, "data", "__type", "fields")
+    }
     assert "allLibraryLoans" in query_fields
     assert "allLibraryLoansConnection" not in query_fields
 
@@ -6374,9 +6479,9 @@ def test_genre_connection_flat_leaf_no_match_is_empty() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenresConnection"]
+    conn = json_object(payload, "data", "allLibraryGenresConnection")
     assert conn["edges"] == []
     assert conn["totalCount"] == 0
 
@@ -6401,10 +6506,10 @@ def test_genre_connection_first_and_last_rejected() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    messages = " ".join(error["message"] for error in payload["errors"])
+    messages = " ".join(json_str(error, "message") for error in json_list(payload, "errors"))
     assert "mutually exclusive" in messages
 
 
@@ -6432,14 +6537,14 @@ def test_genre_connection_first_zero_empty_edges() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenresConnection"]
+    conn = json_object(payload, "data", "allLibraryGenresConnection")
     assert conn["edges"] == []
     # ListConnection's real first:0-over-rows shape: more rows exist beyond the
     # zero window, so hasNextPage is True; endCursor is null (no edges).
-    assert conn["pageInfo"]["hasNextPage"] is True
-    assert conn["pageInfo"]["endCursor"] is None
+    assert json_at(conn, "pageInfo", "hasNextPage") is True
+    assert json_at(conn, "pageInfo", "endCursor") is None
     # Pre-slice count is unaffected by the zero window.
     assert conn["totalCount"] == 3
 
@@ -6468,10 +6573,10 @@ def test_genre_connection_total_count_omitted_no_count() -> None:
             """,
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenresConnection"]
-    names = [edge["node"]["name"] for edge in conn["edges"]]
+    conn = json_object(payload, "data", "allLibraryGenresConnection")
+    names = [json_at(edge, "node", "name") for edge in json_list(conn, "edges")]
     assert names == ["Alpha", "Beta"]
     assert "totalCount" not in conn
     # Selection-gating: no COUNT query is issued when totalCount is unselected.
@@ -6512,9 +6617,9 @@ def test_genre_connection_total_count_skip_include_no_count() -> None:
             """,
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert "totalCount" not in payload["data"]["allLibraryGenresConnection"]
+    assert "totalCount" not in json_object(payload, "data", "allLibraryGenresConnection")
     assert _count_queries(captured_skip) == 0
 
     # (2) variable-driven ``@include(if: $show)`` with ``$show = false`` -> excluded, no COUNT.
@@ -6531,9 +6636,9 @@ def test_genre_connection_total_count_skip_include_no_count() -> None:
             variables={"show": False},
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert "totalCount" not in payload["data"]["allLibraryGenresConnection"]
+    assert "totalCount" not in json_object(payload, "data", "allLibraryGenresConnection")
     assert _count_queries(captured_include) == 0
 
     # (3) named-fragment-wrapped ``totalCount`` under ``@skip(if: true)`` -> excluded, no COUNT.
@@ -6550,9 +6655,9 @@ def test_genre_connection_total_count_skip_include_no_count() -> None:
             """,
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert "totalCount" not in payload["data"]["allLibraryGenresConnection"]
+    assert "totalCount" not in json_object(payload, "data", "allLibraryGenresConnection")
     assert _count_queries(captured_fragment) == 0
 
     # Control: ``@skip(if: false)`` resolves to "keep" -> field present, COUNT fires.
@@ -6568,9 +6673,9 @@ def test_genre_connection_total_count_skip_include_no_count() -> None:
             """,
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryGenresConnection"]["totalCount"] == 3
+    assert json_at(payload, "data", "allLibraryGenresConnection", "totalCount") == 3
     assert _count_queries(captured_kept) == 1
 
 
@@ -6595,34 +6700,40 @@ def test_anonymous_inline_fragment_under_connection_field_resolves() -> None:
     expected = ["Alpha", "Beta", "Gamma"]
 
     # (a) anonymous inline fragment at the node level.
-    payload = _post_graphql(
-        """
+    payload = response_json(
+        _post_graphql(
+            """
         query {
           allLibraryGenresConnection {
             edges { node { ... { name } } }
           }
         }
         """,
-    ).json()
+        ),
+    )
     assert "errors" not in payload, payload
     node_names = [
-        edge["node"]["name"] for edge in payload["data"]["allLibraryGenresConnection"]["edges"]
+        json_str(edge, "node", "name")
+        for edge in json_list(payload, "data", "allLibraryGenresConnection", "edges")
     ]
     assert sorted(node_names) == expected
 
     # (b) anonymous inline fragment directly under the connection field.
-    payload = _post_graphql(
-        """
+    payload = response_json(
+        _post_graphql(
+            """
         query {
           allLibraryGenresConnection {
             ... { edges { node { name } } }
           }
         }
         """,
-    ).json()
+        ),
+    )
     assert "errors" not in payload, payload
     under_conn_names = [
-        edge["node"]["name"] for edge in payload["data"]["allLibraryGenresConnection"]["edges"]
+        json_str(edge, "node", "name")
+        for edge in json_list(payload, "data", "allLibraryGenresConnection", "edges")
     ]
     assert sorted(under_conn_names) == expected
 
@@ -6642,8 +6753,9 @@ def test_anonymous_inline_fragment_with_total_count_resolves() -> None:
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
-    payload = _post_graphql(
-        """
+    payload = response_json(
+        _post_graphql(
+            """
         query {
           allLibraryGenresConnection {
             totalCount
@@ -6651,11 +6763,16 @@ def test_anonymous_inline_fragment_with_total_count_resolves() -> None:
           }
         }
         """,
-    ).json()
+        ),
+    )
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenresConnection"]
+    conn = json_object(payload, "data", "allLibraryGenresConnection")
     assert conn["totalCount"] == 3
-    assert sorted(edge["node"]["name"] for edge in conn["edges"]) == ["Alpha", "Beta", "Gamma"]
+    assert sorted(json_str(edge, "node", "name") for edge in json_list(conn, "edges")) == [
+        "Alpha",
+        "Beta",
+        "Gamma",
+    ]
 
 
 @pytest.mark.django_db
@@ -6679,8 +6796,9 @@ def test_anonymous_inline_fragment_sibling_of_edges_resolves() -> None:
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
-    payload = _post_graphql(
-        """
+    payload = response_json(
+        _post_graphql(
+            """
         query {
           allLibraryGenresConnection(first: 2) {
             edges { node { name } }
@@ -6688,11 +6806,12 @@ def test_anonymous_inline_fragment_sibling_of_edges_resolves() -> None:
           }
         }
         """,
-    ).json()
+        ),
+    )
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenresConnection"]
+    conn = json_object(payload, "data", "allLibraryGenresConnection")
     assert conn["totalCount"] == 3
-    names = [edge["node"]["name"] for edge in conn["edges"]]
+    names = [json_at(edge, "node", "name") for edge in json_list(conn, "edges")]
     assert names == ["Alpha", "Beta"]
 
 
@@ -6710,19 +6829,21 @@ def test_anonymous_inline_fragment_with_directive_around_node_field_resolves() -
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
-    payload = _post_graphql(
-        """
+    payload = response_json(
+        _post_graphql(
+            """
         query {
           allLibraryGenresConnection(first: 2) {
             edges { node { name ... @skip(if: true) { id } } }
           }
         }
         """,
-    ).json()
+        ),
+    )
     assert "errors" not in payload, payload
-    edges = payload["data"]["allLibraryGenresConnection"]["edges"]
-    assert [edge["node"]["name"] for edge in edges] == ["Alpha", "Beta"]
-    assert all("id" not in edge["node"] for edge in edges)
+    edges = json_list(payload, "data", "allLibraryGenresConnection", "edges")
+    assert [json_at(edge, "node", "name") for edge in edges] == ["Alpha", "Beta"]
+    assert all("id" not in json_object(edge, "node") for edge in edges)
 
 
 # TODO(spec-035): extend this live connection-fragment block with the
@@ -6743,18 +6864,21 @@ def test_typed_inline_fragment_under_connection_field_still_resolves() -> None:
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
-    payload = _post_graphql(
-        """
+    payload = response_json(
+        _post_graphql(
+            """
         query {
           allLibraryGenresConnection {
             edges { node { ... on GenreType { name } } }
           }
         }
         """,
-    ).json()
+        ),
+    )
     assert "errors" not in payload, payload
     names = [
-        edge["node"]["name"] for edge in payload["data"]["allLibraryGenresConnection"]["edges"]
+        json_str(edge, "node", "name")
+        for edge in json_list(payload, "data", "allLibraryGenresConnection", "edges")
     ]
     assert sorted(names) == ["Alpha", "Beta", "Gamma"]
 
@@ -6786,11 +6910,11 @@ def test_genre_connection_two_aliases_independent_total_counts() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    data = payload["data"]
-    assert data["matchA"]["totalCount"] == 3
-    assert data["matchZ"]["totalCount"] == 1
+    data = json_object(payload, "data")
+    assert json_at(data, "matchA", "totalCount") == 3
+    assert json_at(data, "matchZ", "totalCount") == 1
 
 
 @pytest.mark.django_db
@@ -6829,10 +6953,10 @@ def test_genre_connection_order_by_to_many_no_node_multiplication() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenresConnection"]
-    names = [edge["node"]["name"] for edge in conn["edges"]]
+    conn = json_object(payload, "data", "allLibraryGenresConnection")
+    names = [json_at(edge, "node", "name") for edge in json_list(conn, "edges")]
     # Each genre appears exactly once, ordered by its MIN book title
     # (Fiction "Aaa" < History "Bbb") -- no duplicate Fiction despite two books.
     assert names == ["Fiction", "History"]
@@ -6851,9 +6975,9 @@ def _genres_connection(args: str, selection: str) -> JSONObject:
         f"query {{ allLibraryGenresConnection({args}) {{ {selection} }} }}",
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    return payload["data"]["allLibraryGenresConnection"]
+    return json_object(payload, "data", "allLibraryGenresConnection")
 
 
 @pytest.mark.django_db
@@ -6869,8 +6993,12 @@ def test_first_overrun() -> None:
         "first: 10",
         "edges { node { name } } pageInfo { hasNextPage }",
     )
-    assert [edge["node"]["name"] for edge in conn["edges"]] == ["Alpha", "Beta", "Gamma"]
-    assert conn["pageInfo"]["hasNextPage"] is False
+    assert [json_at(edge, "node", "name") for edge in json_list(conn, "edges")] == [
+        "Alpha",
+        "Beta",
+        "Gamma",
+    ]
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -6885,7 +7013,7 @@ def test_stale_after_cursor_no_error() -> None:
     _seed_genres("Alpha", "Beta", "Gamma", "Delta")
 
     page_one = _genres_connection("first: 2", "pageInfo { endCursor }")
-    end_cursor = page_one["pageInfo"]["endCursor"]
+    end_cursor = json_at(page_one, "pageInfo", "endCursor")
     # Delete the row the cursor position points at (the second row in
     # deterministic pk order).
     models.Genre.objects.order_by("pk")[1].delete()
@@ -6910,15 +7038,15 @@ def test_page_info_four_fields() -> None:
     selection = "edges { cursor } pageInfo { hasNextPage hasPreviousPage startCursor endCursor }"
 
     page_one = _genres_connection("first: 2", selection)
-    cursors = [edge["cursor"] for edge in page_one["edges"]]
-    info_one = page_one["pageInfo"]
+    cursors = [json_at(edge, "cursor") for edge in json_list(page_one, "edges")]
+    info_one = json_object(page_one, "pageInfo")
     assert info_one["hasNextPage"] is True
     assert info_one["hasPreviousPage"] is False
     assert info_one["startCursor"] == cursors[0]
     assert info_one["endCursor"] == cursors[1]
 
     page_two = _genres_connection(f'first: 2, after: "{info_one["endCursor"]}"', selection)
-    info_two = page_two["pageInfo"]
+    info_two = json_object(page_two, "pageInfo")
     assert info_two["hasNextPage"] is False
     assert info_two["hasPreviousPage"] is True
 
@@ -6936,10 +7064,10 @@ def test_has_next_page_correct_when_edges_unrequested() -> None:
     _seed_genres("Alpha", "Beta", "Gamma")
 
     windowed = _genres_connection("first: 2", "pageInfo { hasNextPage }")
-    assert windowed["pageInfo"]["hasNextPage"] is True
+    assert json_at(windowed, "pageInfo", "hasNextPage") is True
 
     exact = _genres_connection("first: 3", "pageInfo { hasNextPage }")
-    assert exact["pageInfo"]["hasNextPage"] is False
+    assert json_at(exact, "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -6957,21 +7085,27 @@ def test_backward_pagination_last_before() -> None:
         "last: 2",
         "edges { node { name } } pageInfo { hasNextPage hasPreviousPage }",
     )
-    assert [edge["node"]["name"] for edge in tail["edges"]] == ["Delta", "Echo"]
-    assert tail["pageInfo"]["hasPreviousPage"] is True
-    assert tail["pageInfo"]["hasNextPage"] is False
+    assert [json_at(edge, "node", "name") for edge in json_list(tail, "edges")] == [
+        "Delta",
+        "Echo",
+    ]
+    assert json_at(tail, "pageInfo", "hasPreviousPage") is True
+    assert json_at(tail, "pageInfo", "hasNextPage") is False
 
     full = _genres_connection("first: 5", "edges { cursor node { name } }")
-    last_row_cursor = full["edges"][-1]["cursor"]
+    last_row_cursor = json_at(full, "edges", -1, "cursor")
     window = _genres_connection(
         f'last: 2, before: "{last_row_cursor}"',
         "edges { node { name } } pageInfo { hasNextPage hasPreviousPage }",
     )
-    assert [edge["node"]["name"] for edge in window["edges"]] == ["Gamma", "Delta"]
+    assert [json_at(edge, "node", "name") for edge in json_list(window, "edges")] == [
+        "Gamma",
+        "Delta",
+    ]
     # Locked-Strawberry flag values: rows exist on both sides of the window
     # (the overfetch sees Echo; slice start > 0 sees Alpha / Beta).
-    assert window["pageInfo"]["hasNextPage"] is True
-    assert window["pageInfo"]["hasPreviousPage"] is True
+    assert json_at(window, "pageInfo", "hasNextPage") is True
+    assert json_at(window, "pageInfo", "hasPreviousPage") is True
 
 
 #: The page cap every fakeshop connection resolves to: Strawberry's default
@@ -7026,10 +7160,12 @@ def test_genre_connection_before_without_page_argument_serves_one_capped_page(
 
     conn = _genres_connection(arguments, selection)
 
-    assert [edge["node"]["name"] for edge in conn["edges"]] == [
+    assert [json_at(edge, "node", "name") for edge in json_list(conn, "edges")] == [
         f"Genre-{index:03d}" for index in page
     ]
-    assert [edge["cursor"] for edge in conn["edges"]] == [_array_cursor(index) for index in page]
+    assert [json_at(edge, "cursor") for edge in json_list(conn, "edges")] == [
+        _array_cursor(index) for index in page
+    ]
     assert conn["pageInfo"] == {
         "hasNextPage": True,
         "hasPreviousPage": start > 0,
@@ -7108,7 +7244,7 @@ def _post_node(global_id: str, selection: str = "__typename") -> JSONObject:
     """
     response = _post_graphql(f'query {{ node(id: "{global_id}") {{ {selection} }} }}')
     assert response.status_code == 200
-    return response.json()
+    return response_json(response)
 
 
 def _nodes_query(ids: tuple[str, ...]) -> str:
@@ -7207,7 +7343,7 @@ async def _post_async_genres(query: str, *, user: User | None = None) -> JSONObj
     finally:
         _CURRENT["schema"] = None
     assert result.response.status_code == 200
-    return result.response.json()
+    return response_json(result.response)
 
 
 def _post_holder(
@@ -7256,7 +7392,8 @@ def _relay_relation_isnull_holder_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[HolderRelayIsnullBookType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[HolderRelayIsnullBookType])  # pyright: ignore[reportAny]
         def books(
             self,
             info: Info,
@@ -7317,7 +7454,8 @@ def _relation_pk_global_id_holder_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[HolderRelationPkProfileType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[HolderRelationPkProfileType])  # pyright: ignore[reportAny]
         def profiles(
             self,
             info: Info,
@@ -7337,8 +7475,7 @@ class _DefaultBCleanField(forms.CharField):
 
     @override
     def clean(self, value: object) -> object:
-        cleaned: object = super().clean(value)
-        return cleaned or "B"
+        return super().clean(value) or "B"
 
 
 class _DefaultBToPythonField(forms.CharField):
@@ -7427,7 +7564,9 @@ class _InitOwnReaderFilter(CharFilter):
 
     def __init__(self, field_name: str) -> None:
         super().__init__(field_name=field_name)
-        vars(self.field.widget)["value_from_datadict"] = _read_b_from_bound_data
+        widget = getattr(self.field, "widget", None)
+        assert isinstance(widget, forms.Widget), widget
+        vars(widget)["value_from_datadict"] = _read_b_from_bound_data
 
 
 def _title_or_b(queryset: QuerySet[Model], value: object) -> QuerySet[Model]:
@@ -7700,18 +7839,23 @@ def test_library_parent_connection_answers_an_omitted_child_filter_as_a_full_cop
         registry.clear()
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     if case.expected is None:
         assert refused
         assert form_errors == {
             "books__status": [{"message": "This field is required.", "code": "required"}],
         }
         assert payload["data"] is None
-        assert [error["extensions"]["errors"] for error in payload["errors"]] == [form_errors]
+        assert [
+            json_at(error, "extensions", "errors") for error in json_list(payload, "errors")
+        ] == [form_errors]
     else:
         assert not refused
         assert "errors" not in payload, payload
-        codes = [edge["node"]["code"] for edge in payload["data"]["shelves"]["edges"]]
+        codes = [
+            json_at(edge, "node", "code")
+            for edge in json_list(payload, "data", "shelves", "edges")
+        ]
         assert codes == expected == list(case.expected)
     assert snapshot is not None
     assert ("books__status" in snapshot.deferred_copies) is case.deferred
@@ -7849,9 +7993,11 @@ def test_library_grandparent_connection_answers_an_omitted_grandchild_filter_as_
     assert "shelves__books__status" in snapshot.filters
     assert "shelves__books__status" not in snapshot.deferred_copies
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    names = [edge["node"]["name"] for edge in payload["data"]["branches"]["edges"]]
+    names = [
+        json_at(edge, "node", "name") for edge in json_list(payload, "data", "branches", "edges")
+    ]
     assert names == expected == (["Absent A"] if named else ["Absent B"])
 
 
@@ -7888,7 +8034,8 @@ def test_generic_relation_tags_resolve_over_http_with_optimizer() -> None:
 
         @strawberry.type
         class Query:
-            @strawberry.field(graphql_type=list[HolderTaggedBranchType])
+            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+            @strawberry.field(graphql_type=list[HolderTaggedBranchType])  # pyright: ignore[reportAny]
             def branches(self) -> QuerySet[models.Branch]:
                 return models.Branch.objects.filter(
                     pk__in=[branch.pk, other_branch.pk],
@@ -7903,9 +8050,9 @@ def test_generic_relation_tags_resolve_over_http_with_optimizer() -> None:
         registry.clear()
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors") is None, payload
-    assert payload["data"]["branches"] == [
+    assert json_at(payload, "data", "branches") == [
         {"name": branch.name, "tags": [{"tag": tag_row.tag}]},
         {"name": other_branch.name, "tags": [{"tag": other_tag_row.tag}]},
     ]
@@ -7929,7 +8076,7 @@ async def _post_async_shipped(
             url="/graphql-async/",
         )
     assert result.response.status_code == 200
-    return result.response.json()
+    return response_json(result.response)
 
 
 class _HostileBookQuerySet(QuerySet[models.Book]):
@@ -7988,7 +8135,10 @@ def _typed_genre_nodes_schema() -> strawberry.Schema:
 
 def _patch_book_cascade(monkeypatch: pytest.MonkeyPatch) -> None:
     """Compose ``BookType.get_queryset`` with ``apply_cascade_permissions`` (shelf visibility)."""
-    original = library_schema.BookType.get_queryset.__func__
+    original: Callable[
+        [type[library_schema.BookType], QuerySet[models.Book], strawberry.Info[object, object]],
+        QuerySet[models.Book],
+    ] = library_schema.BookType.get_queryset.__func__
 
     def _cascading(
         cls: type[library_schema.BookType],
@@ -8031,13 +8181,13 @@ def test_node_refetch_genre() -> None:
 
     listed = _post_graphql("query { allLibraryGenres { id name } }")
     assert listed.status_code == 200
-    listed_payload = listed.json()
+    listed_payload = response_json(listed)
     assert "errors" not in listed_payload, listed_payload
-    emitted = listed_payload["data"]["allLibraryGenres"][0]
+    emitted = json_object(listed_payload, "data", "allLibraryGenres", 0)
 
-    refetched = _post_node(emitted["id"], "... on GenreType { id name }")
+    refetched = _post_node(json_str(emitted, "id"), "... on GenreType { id name }")
     assert "errors" not in refetched, refetched
-    assert refetched["data"]["node"] == {"id": emitted["id"], "name": "Speculative"}
+    assert json_at(refetched, "data", "node") == {"id": emitted["id"], "name": "Speculative"}
 
 
 @pytest.mark.django_db
@@ -8048,9 +8198,9 @@ def test_typed_node_field_live() -> None:
 
     response = _post_graphql(f'query {{ genre(id: "{gid}") {{ id name }} }}')
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["genre"] == {"id": gid, "name": "Speculative"}
+    assert json_at(payload, "data", "genre") == {"id": gid, "name": "Speculative"}
 
 
 @pytest.mark.django_db
@@ -8068,11 +8218,13 @@ def test_typed_node_field_mismatch_live() -> None:
 
     response = _post_graphql(f'query {{ genre(id: "{book_gid}") {{ name }} }}')
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    messages = " ".join(error["message"] for error in payload["errors"])
+    messages = " ".join(json_str(error, "message") for error in json_list(payload, "errors"))
     assert "Wrong node type: expected a GenreType id, received a BookType id." in messages
-    assert [error.get("extensions", {}).get("code") for error in payload["errors"]] == [None]
+    assert [_error_code(error) for error in json_list(payload, "errors")] == [
+        None,
+    ]
     assert payload["data"] == {"genre": None}
 
 
@@ -8096,9 +8248,9 @@ def test_node_malformed_id_live(bad_id: str) -> None:
     """
     payload = _post_node(bad_id)
     assert "errors" in payload, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID"
-    assert error["message"].startswith("Invalid GlobalID:")
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID"
+    assert json_str(error, "message").startswith("Invalid GlobalID:")
     assert payload["data"] == {"node": None}
 
 
@@ -8114,7 +8266,7 @@ def test_node_uncoercible_pk_live() -> None:
     with CaptureQueriesContext(connection) as captured:
         payload = _post_node(gid)
     assert "errors" not in payload, payload
-    assert payload["data"]["node"] is None
+    assert json_at(payload, "data", "node") is None
     assert _sql_from_table(captured, "library_genre") == []
 
 
@@ -8123,7 +8275,7 @@ def test_node_missing_row_null_live() -> None:
     """A well-formed id for a nonexistent row resolves to null with NO error over HTTP."""
     shelf = _seed_shelf()
     book = models.Book.objects.create(title="ExistingBook", shelf=shelf)
-    missing_pk = book.pk + 9999
+    missing_pk = saved_pk(book.pk) + 9999
     missing_gid = global_id_for(library_schema.BookType, missing_pk)
     payload = _post_node(missing_gid, "... on BookType { title }")
     assert "errors" not in payload, payload
@@ -8140,7 +8292,7 @@ def test_node_hidden_and_missing_issue_equal_queries_live() -> None:
         shelf=shelf,
         circulation_status=models.Book.CirculationStatus.REPAIR,
     )
-    missing_pk = max(visible.pk, hidden.pk) + 9999
+    missing_pk = max(saved_pk(visible.pk), saved_pk(hidden.pk)) + 9999
     hidden_gid = global_id_for(library_schema.BookType, hidden.pk)
     missing_gid = global_id_for(library_schema.BookType, missing_pk)
 
@@ -8190,9 +8342,9 @@ def test_nodes_batch_mixed_types_order_and_null() -> None:
 
     response = _post_graphql(document)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["nodes"] == [
+    assert json_at(payload, "data", "nodes") == [
         {"__typename": "GenreType", "name": "Speculative"},
         None,
         None,
@@ -8202,9 +8354,9 @@ def test_nodes_batch_mixed_types_order_and_null() -> None:
 
     staff_response = _post_graphql_as_staff(document)
     assert staff_response.status_code == 200
-    staff_payload = staff_response.json()
+    staff_payload = response_json(staff_response)
     assert "errors" not in staff_payload, staff_payload
-    assert staff_payload["data"]["nodes"] == [
+    assert json_at(staff_payload, "data", "nodes") == [
         {"__typename": "GenreType", "name": "Speculative"},
         None,
         None,
@@ -8228,16 +8380,16 @@ def test_nodes_duplicates_and_empty_live() -> None:
         f'query {{ nodes(ids: ["{gid}", "{gid}"]) {{ ... on GenreType {{ name }} }} }}',
     )
     assert duplicated.status_code == 200
-    duplicated_payload = duplicated.json()
+    duplicated_payload = response_json(duplicated)
     assert "errors" not in duplicated_payload, duplicated_payload
-    assert duplicated_payload["data"]["nodes"] == [{"name": "Speculative"}] * 2
+    assert json_at(duplicated_payload, "data", "nodes") == [{"name": "Speculative"}] * 2
 
     with CaptureQueriesContext(connection) as captured:
         empty = _post_graphql("query { nodes(ids: []) { __typename } }")
     assert empty.status_code == 200
-    empty_payload = empty.json()
+    empty_payload = response_json(empty)
     assert "errors" not in empty_payload, empty_payload
-    assert empty_payload["data"]["nodes"] == []
+    assert json_at(empty_payload, "data", "nodes") == []
     assert not any("library_genre" in entry["sql"] for entry in captured.captured_queries), [
         entry["sql"] for entry in captured.captured_queries
     ]
@@ -8257,11 +8409,11 @@ def test_nodes_malformed_id_mid_batch_live() -> None:
         variables={"ids": [gid, "this-is-not-base64"]},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID"
-    assert error["message"].startswith("Invalid GlobalID:")
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID"
+    assert json_str(error, "message").startswith("Invalid GlobalID:")
     assert payload["data"] is None
 
 
@@ -8287,9 +8439,9 @@ def test_nodes_batches_per_type_live() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(document)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["nodes"] == [
+    assert json_at(payload, "data", "nodes") == [
         {"__typename": "GenreType", "name": "Alpha"},
         {"__typename": "BookType", "title": "Kindred"},
         {"__typename": "GenreType", "name": "Beta"},
@@ -8325,13 +8477,13 @@ def test_nodes_hidden_and_missing_issue_equal_per_table_queries() -> None:
 
     assert hidden_response.status_code == 200
     assert missing_response.status_code == 200
-    hidden_payload = hidden_response.json()
-    missing_payload = missing_response.json()
+    hidden_payload = response_json(hidden_response)
+    missing_payload = response_json(missing_response)
     assert "errors" not in hidden_payload, hidden_payload
     assert "errors" not in missing_payload, missing_payload
     expected = [{"__typename": "GenreType", "name": "Speculative"}, None]
-    assert hidden_payload["data"]["nodes"] == expected
-    assert missing_payload["data"]["nodes"] == expected
+    assert json_at(hidden_payload, "data", "nodes") == expected
+    assert json_at(missing_payload, "data", "nodes") == expected
 
     hidden_genre = _sql_from_table(hidden_captured, "library_genre")
     missing_genre = _sql_from_table(missing_captured, "library_genre")
@@ -8361,9 +8513,9 @@ def test_typed_nodes_field_resolves_targets_live() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["genres"] == [{"name": "Beta"}, {"name": "Alpha"}]
+    assert json_at(payload, "data", "genres") == [{"name": "Beta"}, {"name": "Alpha"}]
 
 
 @pytest.mark.django_db
@@ -8387,11 +8539,13 @@ def test_typed_nodes_field_mismatch_live() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    messages = " ".join(error["message"] for error in payload["errors"])
+    messages = " ".join(json_str(error, "message") for error in json_list(payload, "errors"))
     assert "Wrong node type: expected a GenreType id, received a BookType id." in messages
-    assert [error.get("extensions", {}).get("code") for error in payload["errors"]] == [None]
+    assert [_error_code(error) for error in json_list(payload, "errors")] == [
+        None,
+    ]
     assert payload["data"] is None
 
 
@@ -8404,7 +8558,7 @@ async def test_node_refetch_genre_async() -> None:
         f'query {{ node(id: "{gid}") {{ __typename ... on GenreType {{ name }} }} }}',
     )
     assert "errors" not in payload, payload
-    assert payload["data"]["node"] == {"__typename": "GenreType", "name": "Speculative"}
+    assert json_at(payload, "data", "node") == {"__typename": "GenreType", "name": "Speculative"}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -8417,7 +8571,7 @@ async def test_genres_connection_filter_applies_async() -> None:
         " { edges { node { name } } } }",
     )
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryGenresConnection"]["edges"] == [
+    assert json_at(payload, "data", "allLibraryGenresConnection", "edges") == [
         {"node": {"name": "Romance"}},
     ]
 
@@ -8441,7 +8595,7 @@ async def test_nodes_batch_mixed_types_async() -> None:
     )
     payload = await _post_async_shipped(document)
     assert "errors" not in payload, payload
-    assert payload["data"]["nodes"] == [
+    assert json_at(payload, "data", "nodes") == [
         {"__typename": "BookType", "title": "Kindred"},
         {"__typename": "GenreType", "name": "Speculative"},
     ]
@@ -8482,22 +8636,22 @@ def test_genre_books_connection_behavior() -> None:
             """,
         )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        return payload["data"]["allLibraryGenres"][0]["booksConnection"]
+        return json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
 
     page_one = _books_page("orderBy: [{ title: ASC }], first: 2")
-    titles_one = [edge["node"]["title"] for edge in page_one["edges"]]
+    titles_one = [json_at(edge, "node", "title") for edge in json_list(page_one, "edges")]
     assert titles_one == ["Aurora", "Binti"]
-    assert page_one["pageInfo"]["hasNextPage"] is True
+    assert json_at(page_one, "pageInfo", "hasNextPage") is True
 
-    end_cursor = page_one["pageInfo"]["endCursor"]
+    end_cursor = json_at(page_one, "pageInfo", "endCursor")
     page_two = _books_page(f'orderBy: [{{ title: ASC }}], first: 2, after: "{end_cursor}"')
-    titles_two = [edge["node"]["title"] for edge in page_two["edges"]]
+    titles_two = [json_at(edge, "node", "title") for edge in json_list(page_two, "edges")]
     # The continuation advances with no overlap, and the repair row stays
     # hidden from the anonymous client even through the nested connection.
     assert titles_two == ["Circe"]
-    assert page_two["pageInfo"]["hasNextPage"] is False
+    assert json_at(page_two, "pageInfo", "hasNextPage") is False
     assert "Withdrawn" not in titles_one + titles_two
 
 
@@ -8529,11 +8683,15 @@ def test_nested_books_connection_first_overrun_clamps() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenres"][0]["booksConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Alpha", "Beta", "Gamma"]
-    assert conn["pageInfo"]["hasNextPage"] is False
+    conn = json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Alpha",
+        "Beta",
+        "Gamma",
+    ]
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -8569,11 +8727,17 @@ def test_nested_books_connection_stale_after_is_not_an_error() -> None:
         """,
     )
     assert page_one_resp.status_code == 200
-    page_one = page_one_resp.json()
+    page_one = response_json(page_one_resp)
     assert "errors" not in page_one, page_one
-    end_cursor = page_one["data"]["allLibraryGenres"][0]["booksConnection"]["pageInfo"][
-        "endCursor"
-    ]
+    end_cursor = json_at(
+        page_one,
+        "data",
+        "allLibraryGenres",
+        0,
+        "booksConnection",
+        "pageInfo",
+        "endCursor",
+    )
 
     # Delete the row the cursor position points at (second in title order).
     models.Book.objects.get(genres=genre, title="Beta").delete()
@@ -8590,9 +8754,9 @@ def test_nested_books_connection_stale_after_is_not_an_error() -> None:
         """,
     )
     assert page_two_resp.status_code == 200
-    page_two = page_two_resp.json()
+    page_two = response_json(page_two_resp)
     assert "errors" not in page_two, page_two
-    edges = page_two["data"]["allLibraryGenres"][0]["booksConnection"]["edges"]
+    edges = json_list(page_two, "data", "allLibraryGenres", 0, "booksConnection", "edges")
     assert len(edges) >= 1, page_two
 
 
@@ -8621,10 +8785,10 @@ def test_nested_books_connection_first_and_last_rejected() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    messages = " ".join(error["message"] for error in payload["errors"])
+    messages = " ".join(json_str(error, "message") for error in json_list(payload, "errors"))
     assert "mutually exclusive" in messages
 
 
@@ -8663,14 +8827,17 @@ def test_genre_books_connection_has_next_page_served_count_free_via_probe() -> N
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(probe_query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenres"][0]["booksConnection"]
+    conn = json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
 
     # A full page over a 3-book set -> a next page exists, derived from the
     # overfetched sentinel row (not a count).
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Aurora", "Binti"]
-    assert conn["pageInfo"]["hasNextPage"] is True
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Aurora",
+        "Binti",
+    ]
+    assert json_at(conn, "pageInfo", "hasNextPage") is True
 
     # 2 queries, not 2 + N: the nested connection is windowed in one prefetch.
     assert len(captured) == 2
@@ -8694,11 +8861,15 @@ def test_genre_books_connection_has_next_page_served_count_free_via_probe() -> N
         """
     fallback_response = _post_graphql(fallback_query)
     assert fallback_response.status_code == 200
-    fallback_payload = fallback_response.json()
+    fallback_payload = response_json(fallback_response)
     assert "errors" not in fallback_payload, fallback_payload
-    fallback_conn = fallback_payload["data"]["allLibraryGenres"][0]["booksConnection"]
+    fallback_conn = json_object(fallback_payload, "data", "allLibraryGenres", 0, "booksConnection")
     assert fallback_conn["edges"] == conn["edges"]
-    assert fallback_conn["pageInfo"]["hasNextPage"] == conn["pageInfo"]["hasNextPage"]
+    assert json_at(fallback_conn, "pageInfo", "hasNextPage") == json_at(
+        conn,
+        "pageInfo",
+        "hasNextPage",
+    )
 
 
 @pytest.mark.django_db
@@ -8728,9 +8899,13 @@ def test_genre_books_connection_probe_short_page_reports_no_next_page() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    conn = response.json()["data"]["allLibraryGenres"][0]["booksConnection"]
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Aurora", "Binti", "Circe"]
-    assert conn["pageInfo"]["hasNextPage"] is False
+    conn = json_object(response_json(response), "data", "allLibraryGenres", 0, "booksConnection")
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Aurora",
+        "Binti",
+        "Circe",
+    ]
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
     assert len(captured) == 2
     window_sql = captured[1]["sql"]
     assert "_dst_total_count" not in window_sql
@@ -8775,15 +8950,20 @@ def test_genre_books_connection_probe_childless_and_populated_parents() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(edges_query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    by_name = {row["name"]: row["booksConnection"] for row in payload["data"]["allLibraryGenres"]}
+    by_name = {
+        json_at(row, "name"): json_at(row, "booksConnection")
+        for row in json_list(payload, "data", "allLibraryGenres")
+    }
     # Populated: a full first page over 3 books -> the sentinel signals a next page.
-    assert [edge["node"]["title"] for edge in by_name["Populated"]["edges"]] == ["Aurora", "Binti"]
-    assert by_name["Populated"]["pageInfo"]["hasNextPage"] is True
+    assert [
+        json_at(edge, "node", "title") for edge in json_list(by_name["Populated"], "edges")
+    ] == ["Aurora", "Binti"]
+    assert json_at(by_name["Populated"], "pageInfo", "hasNextPage") is True
     # Childless: empty edges + no next page (the empty-window branch, not a fallback).
-    assert by_name["Empty"]["edges"] == []
-    assert by_name["Empty"]["pageInfo"]["hasNextPage"] is False
+    assert json_at(by_name["Empty"], "edges") == []
+    assert json_at(by_name["Empty"], "pageInfo", "hasNextPage") is False
     # Still one root query + one windowed prefetch, count-free, for BOTH parents.
     assert len(captured) == 2
     window_sql = captured[1]["sql"]
@@ -8801,11 +8981,11 @@ def test_genre_books_connection_probe_childless_and_populated_parents() -> None:
         """
     no_edges_response = _post_graphql(no_edges_query)
     assert no_edges_response.status_code == 200
-    no_edges_payload = no_edges_response.json()
+    no_edges_payload = response_json(no_edges_response)
     assert "errors" not in no_edges_payload, no_edges_payload
     flags = {
-        row["name"]: row["booksConnection"]["pageInfo"]["hasNextPage"]
-        for row in no_edges_payload["data"]["allLibraryGenres"]
+        json_at(row, "name"): json_at(row, "booksConnection", "pageInfo", "hasNextPage")
+        for row in json_list(no_edges_payload, "data", "allLibraryGenres")
     }
     assert flags == {"Populated": True, "Empty": False}
 
@@ -8842,13 +9022,16 @@ def test_genre_books_connection_alias_merge_probe_plus_edges_drops_the_sentinel(
         """
     response = _post_graphql(merged_query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    node = payload["data"]["allLibraryGenres"][0]
+    node = json_object(payload, "data", "allLibraryGenres", 0)
     # ``b`` (edges-only) must NOT leak the overfetched sentinel: exactly its page.
-    assert [edge["node"]["title"] for edge in node["b"]["edges"]] == ["Aurora", "Binti"]
+    assert [json_at(edge, "node", "title") for edge in json_list(node, "b", "edges")] == [
+        "Aurora",
+        "Binti",
+    ]
     # ``a`` (hasNextPage-only) still reports the next page from the same window.
-    assert node["a"]["pageInfo"]["hasNextPage"] is True
+    assert json_at(node, "a", "pageInfo", "hasNextPage") is True
 
     # Byte parity: the per-parent fallback (via the ``orderBy`` sidecar) serves
     # the identical edges for the edges-only alias.
@@ -8861,8 +9044,14 @@ def test_genre_books_connection_alias_merge_probe_plus_edges_drops_the_sentinel(
           }
         }
         """
-    fallback = _post_graphql(fallback_query).json()["data"]["allLibraryGenres"][0]["b"]
-    assert fallback["edges"] == node["b"]["edges"]
+    fallback = json_object(
+        response_json(_post_graphql(fallback_query)),
+        "data",
+        "allLibraryGenres",
+        0,
+        "b",
+    )
+    assert fallback["edges"] == json_at(node, "b", "edges")
 
 
 @pytest.mark.django_db
@@ -8895,16 +9084,16 @@ def test_genres_connection_alias_merge_total_count_sibling_keeps_has_next() -> N
         """
     response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     target = next(
         bk
-        for bk in payload["data"]["allLibraryBooks"]
-        if bk["a"] is not None and bk["b"]["totalCount"] == 3
+        for bk in json_list(payload, "data", "allLibraryBooks")
+        if json_at(bk, "a") is not None and json_at(bk, "b", "totalCount") == 3
     )
     # 3 genres, page of 2 -> a next page exists, read from the retained count.
-    assert target["a"]["pageInfo"]["hasNextPage"] is True
-    assert len(target["b"]["edges"]) == 2
+    assert json_at(target, "a", "pageInfo", "hasNextPage") is True
+    assert len(json_list(target, "b", "edges")) == 2
 
 
 @pytest.mark.django_db
@@ -8955,22 +9144,25 @@ def test_genre_books_connection_divergent_aliases_batched_per_key() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(divergent_query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    rows = payload["data"]["allLibraryGenres"]
+    rows = json_list(payload, "data", "allLibraryGenres")
     assert len(rows) == 2  # the fixed cost below holds ACROSS parents.
     for row in rows:
         # ``a``: its own 2-bound window; the sentinel signals a next page.
-        assert [edge["node"]["title"] for edge in row["a"]["edges"]] == ["Aurora", "Binti"]
-        assert row["a"]["pageInfo"]["hasNextPage"] is True
+        assert [json_at(edge, "node", "title") for edge in json_list(row, "a", "edges")] == [
+            "Aurora",
+            "Binti",
+        ]
+        assert json_at(row, "a", "pageInfo", "hasNextPage") is True
         # ``b``: its own 9-bound window; all four books, no next page.
-        assert [edge["node"]["title"] for edge in row["b"]["edges"]] == [
+        assert [json_at(edge, "node", "title") for edge in json_list(row, "b", "edges")] == [
             "Aurora",
             "Binti",
             "Circe",
             "Dune",
         ]
-        assert row["b"]["pageInfo"]["hasNextPage"] is False
+        assert json_at(row, "b", "pageInfo", "hasNextPage") is False
 
     # 3 queries: root genres + ONE batched window per alias (never 1 + parents x aliases).
     assert len(captured) == 3
@@ -8997,7 +9189,7 @@ def test_genre_books_connection_divergent_aliases_batched_per_key() -> None:
           }
         }
         """
-    fallback_payload = _post_graphql(fallback_query).json()
+    fallback_payload = response_json(_post_graphql(fallback_query))
     assert "errors" not in fallback_payload, fallback_payload
     assert fallback_payload["data"] == payload["data"]
 
@@ -9035,9 +9227,9 @@ def _genre_books_connection(
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    return payload["data"]["allLibraryGenres"][0]["booksConnection"], captured
+    return json_object(payload, "data", "allLibraryGenres", 0, "booksConnection"), captured
 
 
 def _array_cursor(index: int) -> str:
@@ -9061,8 +9253,8 @@ def test_genre_books_connection_page_info_four_fields() -> None:
     selection = "edges { cursor } pageInfo { hasNextPage hasPreviousPage startCursor endCursor }"
 
     page_one, _ = _genre_books_connection("first: 2", selection)
-    cursors = [edge["cursor"] for edge in page_one["edges"]]
-    info_one = page_one["pageInfo"]
+    cursors = [json_at(edge, "cursor") for edge in json_list(page_one, "edges")]
+    info_one = json_object(page_one, "pageInfo")
     assert info_one["hasNextPage"] is True
     assert info_one["hasPreviousPage"] is False
     assert info_one["startCursor"] == cursors[0]
@@ -9072,7 +9264,7 @@ def test_genre_books_connection_page_info_four_fields() -> None:
         f'first: 2, after: "{info_one["endCursor"]}"',
         selection,
     )
-    info_two = page_two["pageInfo"]
+    info_two = json_object(page_two, "pageInfo")
     assert info_two["hasNextPage"] is False
     assert info_two["hasPreviousPage"] is True
 
@@ -9092,21 +9284,21 @@ def test_genre_books_connection_backward_pagination_last_before() -> None:
     selection = "edges { node { title } } pageInfo { hasNextPage hasPreviousPage }"
 
     tail, _ = _genre_books_connection("last: 2", selection)
-    assert [edge["node"]["title"] for edge in tail["edges"]] == ["d", "e"]
-    assert tail["pageInfo"]["hasPreviousPage"] is True
-    assert tail["pageInfo"]["hasNextPage"] is False
+    assert [json_at(edge, "node", "title") for edge in json_list(tail, "edges")] == ["d", "e"]
+    assert json_at(tail, "pageInfo", "hasPreviousPage") is True
+    assert json_at(tail, "pageInfo", "hasNextPage") is False
 
     full, _ = _genre_books_connection("first: 5", "edges { cursor node { title } }")
-    last_row_cursor = full["edges"][-1]["cursor"]
+    last_row_cursor = json_at(full, "edges", -1, "cursor")
     window, _ = _genre_books_connection(
         f'last: 2, before: "{last_row_cursor}"',
         selection,
     )
-    assert [edge["node"]["title"] for edge in window["edges"]] == ["c", "d"]
+    assert [json_at(edge, "node", "title") for edge in json_list(window, "edges")] == ["c", "d"]
     # Rows exist on both sides of the window: the overfetch sees "e", and the
     # slice starting past 0 sees "a" / "b".
-    assert window["pageInfo"]["hasNextPage"] is True
-    assert window["pageInfo"]["hasPreviousPage"] is True
+    assert json_at(window, "pageInfo", "hasNextPage") is True
+    assert json_at(window, "pageInfo", "hasPreviousPage") is True
 
 
 @pytest.mark.django_db
@@ -9131,10 +9323,12 @@ def test_genre_books_connection_before_without_page_argument_serves_one_capped_p
 
     conn, captured = _genre_books_connection(arguments, selection)
 
-    assert [edge["node"]["title"] for edge in conn["edges"]] == [
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
         f"Book-{index:03d}" for index in page
     ]
-    assert [edge["cursor"] for edge in conn["edges"]] == [_array_cursor(index) for index in page]
+    assert [json_at(edge, "cursor") for edge in json_list(conn, "edges")] == [
+        _array_cursor(index) for index in page
+    ]
     assert conn["pageInfo"] == {
         "hasNextPage": True,
         "hasPreviousPage": start > 0,
@@ -9256,7 +9450,7 @@ def test_genre_books_connection_last_with_empty_cursor_is_the_planned_tail(curso
 
     conn, captured = _genre_books_connection(f'last: 2, {cursor}: ""', selection)
 
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["d", "e"]
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == ["d", "e"]
     assert conn["pageInfo"] == {"hasNextPage": False, "hasPreviousPage": True}
     assert len(captured) == 2
     assert "_dst_row_number" in captured[1]["sql"]
@@ -9269,7 +9463,9 @@ def test_genre_books_connection_last_with_empty_cursor_is_the_planned_tail(curso
         f'last: 2, {cursor}: ""',
         "edges { cursor } pageInfo { hasNextPage hasPreviousPage }",
     )
-    assert root["edges"] == [{"cursor": edge["cursor"]} for edge in conn["edges"]]
+    assert root["edges"] == [
+        {"cursor": json_at(edge, "cursor")} for edge in json_list(conn, "edges")
+    ]
     assert root["pageInfo"] == conn["pageInfo"]
 
 
@@ -9290,9 +9486,12 @@ def test_genre_books_connection_offset_page_probe_composes_marker_count_free() -
         f'first: 2, after: "{_array_cursor(0)}"',
         "edges { node { title } } pageInfo { hasNextPage hasPreviousPage }",
     )
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Binti", "Circe"]
-    assert conn["pageInfo"]["hasNextPage"] is True
-    assert conn["pageInfo"]["hasPreviousPage"] is True
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Binti",
+        "Circe",
+    ]
+    assert json_at(conn, "pageInfo", "hasNextPage") is True
+    assert json_at(conn, "pageInfo", "hasPreviousPage") is True
     assert len(captured) == 2
     window_sql = captured[1]["sql"]
     assert "_dst_total_count" not in window_sql
@@ -9304,8 +9503,11 @@ def test_genre_books_connection_offset_page_probe_composes_marker_count_free() -
         f'first: 2, after: "{_array_cursor(2)}"',
         "edges { node { title } } pageInfo { hasNextPage }",
     )
-    assert [edge["node"]["title"] for edge in boundary["edges"]] == ["Delta", "Echo"]
-    assert boundary["pageInfo"]["hasNextPage"] is False
+    assert [json_at(edge, "node", "title") for edge in json_list(boundary, "edges")] == [
+        "Delta",
+        "Echo",
+    ]
+    assert json_at(boundary, "pageInfo", "hasNextPage") is False
     assert len(boundary_captured) == 2
     assert "_dst_total_count" not in boundary_captured[1]["sql"]
 
@@ -9324,7 +9526,10 @@ def test_genre_books_connection_offset_page_edges_only_served_count_free() -> No
         f'first: 2, after: "{_array_cursor(0)}"',
         "edges { cursor node { title } }",
     )
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Binti", "Circe"]
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Binti",
+        "Circe",
+    ]
     assert len(captured) == 2  # no per-parent fallback.
     window_sql = captured[1]["sql"]
     assert "_dst_total_count" not in window_sql
@@ -9348,7 +9553,7 @@ def test_genre_books_connection_offset_overshoot_served_count_free_no_fallback()
         "edges { node { title } } pageInfo { hasNextPage }",
     )
     assert has_next["edges"] == []
-    assert has_next["pageInfo"]["hasNextPage"] is False
+    assert json_at(has_next, "pageInfo", "hasNextPage") is False
     assert len(has_next_captured) == 2
     assert "_dst_total_count" not in has_next_captured[1]["sql"]
 
@@ -9375,7 +9580,7 @@ def test_genre_books_connection_unbounded_overshoot_served_count_free_no_fallbac
         "edges { node { title } } pageInfo { hasNextPage }",
     )
     assert conn["edges"] == []
-    assert conn["pageInfo"]["hasNextPage"] is False
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
     assert len(captured) == 2  # NO per-parent fallback.
     window_sql = captured[1]["sql"]
     assert "_dst_total_count" not in window_sql
@@ -9396,7 +9601,7 @@ def test_genre_books_connection_empty_partition_on_page_two_served_count_free() 
         "edges { node { title } } pageInfo { hasNextPage }",
     )
     assert conn["edges"] == []
-    assert conn["pageInfo"]["hasNextPage"] is False
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
     assert len(captured) == 2
     assert "_dst_total_count" not in captured[1]["sql"]
 
@@ -9415,9 +9620,12 @@ def test_genre_books_connection_last_page_has_next_page_constant_false_count_fre
         "last: 2",
         "edges { node { title } } pageInfo { hasNextPage hasPreviousPage }",
     )
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Delta", "Echo"]
-    assert conn["pageInfo"]["hasNextPage"] is False
-    assert conn["pageInfo"]["hasPreviousPage"] is True
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Delta",
+        "Echo",
+    ]
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
+    assert json_at(conn, "pageInfo", "hasPreviousPage") is True
     assert len(captured) == 2
     window_sql = captured[1]["sql"]
     assert "_dst_total_count" not in window_sql
@@ -9437,8 +9645,12 @@ def test_genre_books_connection_unbounded_edges_and_has_next_page_count_free() -
         "",
         "edges { node { title } } pageInfo { hasNextPage }",
     )
-    assert [edge["node"]["title"] for edge in conn["edges"]] == ["Aurora", "Binti", "Circe"]
-    assert conn["pageInfo"]["hasNextPage"] is False
+    assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
+        "Aurora",
+        "Binti",
+        "Circe",
+    ]
+    assert json_at(conn, "pageInfo", "hasNextPage") is False
     assert len(captured) == 2
     window_sql = captured[1]["sql"]
     assert "_dst_total_count" not in window_sql
@@ -9468,11 +9680,14 @@ def test_genre_books_connection_offset_alias_merge_composes_probe_and_marker() -
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    node = payload["data"]["allLibraryGenres"][0]
-    assert [edge["node"]["title"] for edge in node["b"]["edges"]] == ["Binti", "Circe"]
-    assert node["a"]["pageInfo"]["hasNextPage"] is True
+    node = json_object(payload, "data", "allLibraryGenres", 0)
+    assert [json_at(edge, "node", "title") for edge in json_list(node, "b", "edges")] == [
+        "Binti",
+        "Circe",
+    ]
+    assert json_at(node, "a", "pageInfo", "hasNextPage") is True
     for window_sql in (entry["sql"] for entry in captured.captured_queries[1:]):
         assert "_dst_total_count" not in window_sql
         assert "COUNT(" not in window_sql.upper()
@@ -9506,17 +9721,20 @@ def test_book_genres_connection_last_page_with_total_count_stays_counted() -> No
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     target = next(
-        row["genresConnection"]
-        for row in payload["data"]["allLibraryBooks"]
-        if row["genresConnection"]["totalCount"] == 3
+        json_at(row, "genresConnection")
+        for row in json_list(payload, "data", "allLibraryBooks")
+        if json_at(row, "genresConnection", "totalCount") == 3
     )
-    assert target["totalCount"] == 3
-    assert [edge["node"]["name"] for edge in target["edges"]] == ["Fantasy", "Horror"]
-    assert target["pageInfo"]["hasPreviousPage"] is True
-    assert target["pageInfo"]["hasNextPage"] is False
+    assert json_at(target, "totalCount") == 3
+    assert [json_at(edge, "node", "name") for edge in json_list(target, "edges")] == [
+        "Fantasy",
+        "Horror",
+    ]
+    assert json_at(target, "pageInfo", "hasPreviousPage") is True
+    assert json_at(target, "pageInfo", "hasNextPage") is False
     # The count IS annotated for the counted reverse page (regression pin).
     executed = " ".join(entry["sql"] for entry in captured)
     assert "_dst_total_count" in executed
@@ -9552,13 +9770,19 @@ def test_genre_books_connection_divergent_sidecar_alias_isolated() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    node = payload["data"]["allLibraryGenres"][0]
+    node = json_object(payload, "data", "allLibraryGenres", 0)
     # ``a`` honors its sidecar order (per-parent pipeline).
-    assert [edge["node"]["title"] for edge in node["a"]["edges"]] == ["Circe", "Binti"]
+    assert [json_at(edge, "node", "title") for edge in json_list(node, "a", "edges")] == [
+        "Circe",
+        "Binti",
+    ]
     # ``b`` serves its plain pk-order page (per-key window).
-    assert [edge["node"]["title"] for edge in node["b"]["edges"]] == ["Aurora", "Binti"]
+    assert [json_at(edge, "node", "title") for edge in json_list(node, "b", "edges")] == [
+        "Aurora",
+        "Binti",
+    ]
     # Exactly one batched window ran - ``b``'s; the sidecar alias planned none.
     window_sqls = [entry["sql"] for entry in captured if "_dst_row_number" in entry["sql"]]
     assert len(window_sqls) == 1
@@ -9591,15 +9815,15 @@ def test_genres_connection_divergent_total_count_sibling_keeps_count_on_both() -
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     target = next(
         bk
-        for bk in payload["data"]["allLibraryBooks"]
-        if bk["a"] is not None and bk["b"]["totalCount"] == 3
+        for bk in json_list(payload, "data", "allLibraryBooks")
+        if json_at(bk, "a") is not None and json_at(bk, "b", "totalCount") == 3
     )
-    assert target["a"]["pageInfo"]["hasNextPage"] is True
-    assert len(target["b"]["edges"]) == 2
+    assert json_at(target, "a", "pageInfo", "hasNextPage") is True
+    assert len(json_list(target, "b", "edges")) == 2
     # BOTH per-key windows carry the count; NEITHER overfetches a probe sentinel.
     window_sqls = [entry["sql"] for entry in captured if "_dst_row_number" in entry["sql"]]
     assert len(window_sqls) == 2
@@ -9652,20 +9876,23 @@ def test_divergent_aliases_nested_same_key_conflict_serves_each_subtree_args() -
 
     response = _post_graphql(_nested_query(""))
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    for genre_row in payload["data"]["allLibraryGenres"]:
+    for genre_row in json_list(payload, "data", "allLibraryGenres"):
         # ``a``'s subtree asked for 1 nested genre per book...
-        for edge in genre_row["a"]["edges"]:
-            assert len(edge["node"]["genresConnection"]["edges"]) == 1
+        for edge in json_list(genre_row, "a", "edges"):
+            assert len(json_list(edge, "node", "genresConnection", "edges")) == 1
         # ...and ``b``'s asked for 2 - the P0 served it 1 (first-payload-wins).
-        assert len(genre_row["b"]["edges"]) == 3
-        for edge in genre_row["b"]["edges"]:
-            nested = [e["node"]["name"] for e in edge["node"]["genresConnection"]["edges"]]
+        assert len(json_list(genre_row, "b", "edges")) == 3
+        for edge in json_list(genre_row, "b", "edges"):
+            nested = [
+                json_at(e, "node", "name")
+                for e in json_list(edge, "node", "genresConnection", "edges")
+            ]
             assert nested == ["G-Alpha", "G-Beta"]
 
     # Byte parity with the fully per-parent reference (outer sidecar fallback).
-    reference = _post_graphql(_nested_query("orderBy: [{ title: ASC }], ")).json()
+    reference = response_json(_post_graphql(_nested_query("orderBy: [{ title: ASC }], ")))
     assert "errors" not in reference, reference
     assert reference["data"] == payload["data"]
 
@@ -9701,13 +9928,13 @@ def test_identical_aliases_nested_same_key_conflict_serves_each_subtree_args() -
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    for genre_row in payload["data"]["allLibraryGenres"]:
-        for edge in genre_row["a"]["edges"]:
-            assert len(edge["node"]["genresConnection"]["edges"]) == 1
-        for edge in genre_row["b"]["edges"]:
-            assert len(edge["node"]["genresConnection"]["edges"]) == 2
+    for genre_row in json_list(payload, "data", "allLibraryGenres"):
+        for edge in json_list(genre_row, "a", "edges"):
+            assert len(json_list(edge, "node", "genresConnection", "edges")) == 1
+        for edge in json_list(genre_row, "b", "edges"):
+            assert len(json_list(edge, "node", "genresConnection", "edges")) == 2
 
 
 @pytest.mark.django_db
@@ -9732,14 +9959,16 @@ def test_plain_list_aliases_nested_same_key_conflict_serves_each_subtree_args() 
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    for genre_row in payload["data"]["allLibraryGenres"]:
-        assert len(genre_row["a"]) == 3
-        for book in genre_row["a"]:
-            assert len(book["genresConnection"]["edges"]) == 1
-        for book in genre_row["b"]:
-            nested = [e["node"]["name"] for e in book["genresConnection"]["edges"]]
+    for genre_row in json_list(payload, "data", "allLibraryGenres"):
+        assert len(json_list(genre_row, "a")) == 3
+        for book in json_list(genre_row, "a"):
+            assert len(json_list(book, "genresConnection", "edges")) == 1
+        for book in json_list(genre_row, "b"):
+            nested = [
+                json_at(e, "node", "name") for e in json_list(book, "genresConnection", "edges")
+            ]
             assert nested == ["G-Alpha", "G-Beta"]
 
 
@@ -9791,29 +10020,35 @@ def test_genre_books_connection_after_last_page_info_matches_per_parent() -> Non
             """,
         )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        return payload["data"]["allLibraryGenres"][0]["booksConnection"]
+        return json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
 
     # Page forward to the third book ("Circe") to obtain a real ``after`` cursor;
     # the after-set is then {Dune, Elantris} - exactly two rows, ``<= last: 3``.
     forward = _books_page("first: 3")
-    after_cursor = forward["pageInfo"]["endCursor"]
+    after_cursor = json_at(forward, "pageInfo", "endCursor")
 
     page = _books_page(f'after: "{after_cursor}", last: 3')
-    titles = [edge["node"]["title"] for edge in page["edges"]]
+    titles = [json_at(edge, "node", "title") for edge in json_list(page, "edges")]
     # Right rows: the whole two-row after-tail (last: 3 of 2 rows = both).
     assert titles == ["Dune", "Elantris"]
     # The regression assertion: the after-remainder (2) is ``<= last`` (3), so the
     # pipeline trims nothing off the front and ``hasPreviousPage`` is False - the
     # buggy reversed-window fast path reported True here.
-    assert page["pageInfo"]["hasPreviousPage"] is False
-    assert page["pageInfo"]["hasNextPage"] is False
+    assert json_at(page, "pageInfo", "hasPreviousPage") is False
+    assert json_at(page, "pageInfo", "hasNextPage") is False
     # Cursors stay positional and byte-match the forward window's (Dune/Elantris
     # are positions 3/4), proving the per-parent pipeline served the page.
     forward_two = _books_page("first: 5")
-    forward_cursors = {edge["node"]["title"]: edge["cursor"] for edge in forward_two["edges"]}
-    page_cursors = {edge["node"]["title"]: edge["cursor"] for edge in page["edges"]}
+    forward_cursors = {
+        json_at(edge, "node", "title"): json_at(edge, "cursor")
+        for edge in json_list(forward_two, "edges")
+    }
+    page_cursors = {
+        json_at(edge, "node", "title"): json_at(edge, "cursor")
+        for edge in json_list(page, "edges")
+    }
     assert page_cursors == {
         "Dune": forward_cursors["Dune"],
         "Elantris": forward_cursors["Elantris"],
@@ -9856,12 +10091,15 @@ def test_book_genres_connection_sidecars_and_total_count() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryBooks"][0]["genresConnection"]
+    conn = json_object(payload, "data", "allLibraryBooks", 0, "genresConnection")
     # ``iContains "a"`` matches Gamma / Alpha / Banana (Echo excluded); the
     # orderBy arranges, the first: 2 window slices.
-    assert [edge["node"]["name"] for edge in conn["edges"]] == ["Alpha", "Banana"]
+    assert [json_at(edge, "node", "name") for edge in json_list(conn, "edges")] == [
+        "Alpha",
+        "Banana",
+    ]
     assert conn["totalCount"] == 3
 
 
@@ -9876,9 +10114,12 @@ def test_book_loans_relation_stays_list_only() -> None:
     """
     introspected = _post_graphql('query { __type(name: "BookType") { fields { name } } }')
     assert introspected.status_code == 200
-    introspected_payload = introspected.json()
+    introspected_payload = response_json(introspected)
     assert "errors" not in introspected_payload, introspected_payload
-    field_names = {field["name"] for field in introspected_payload["data"]["__type"]["fields"]}
+    field_names = {
+        json_at(field, "name")
+        for field in json_list(introspected_payload, "data", "__type", "fields")
+    }
     assert "loans" in field_names
     assert "loansConnection" not in field_names
     assert "genresConnection" in field_names
@@ -9909,15 +10150,15 @@ def test_node_hidden_row_null_live() -> None:
 
     anonymous = _post_node(gid, "... on BookType { title }")
     assert "errors" not in anonymous, anonymous
-    assert anonymous["data"]["node"] is None
+    assert json_at(anonymous, "data", "node") is None
 
     staff = _post_graphql_as_staff(
         f'query {{ node(id: "{gid}") {{ ... on BookType {{ title }} }} }}',
     )
     assert staff.status_code == 200
-    staff_payload = staff.json()
+    staff_payload = response_json(staff)
     assert "errors" not in staff_payload, staff_payload
-    assert staff_payload["data"]["node"] == {"title": "Withdrawn"}
+    assert json_at(staff_payload, "data", "node") == {"title": "Withdrawn"}
 
 
 @pytest.mark.django_db
@@ -9942,14 +10183,14 @@ def test_node_hostile_subclass_hook_is_sealed_sync(monkeypatch: pytest.MonkeyPat
         "... on BookType { title }",
     )
     assert "errors" not in hidden, hidden
-    assert hidden["data"]["node"] is None
+    assert json_at(hidden, "data", "node") is None
 
     visible = _post_node(
         global_id_for(library_schema.BookType, public.pk),
         "... on BookType { title }",
     )
     assert "errors" not in visible, visible
-    assert visible["data"]["node"] == {"title": "Kindred"}
+    assert json_at(visible, "data", "node") == {"title": "Kindred"}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -9974,14 +10215,14 @@ async def test_node_hostile_subclass_hook_is_sealed_async(monkeypatch: pytest.Mo
         f'query {{ node(id: "{private_id}") {{ ... on BookType {{ title }} }} }}',
     )
     assert "errors" not in hidden, hidden
-    assert hidden["data"]["node"] is None
+    assert json_at(hidden, "data", "node") is None
 
     public_id = global_id_for(library_schema.BookType, public.pk)
     visible = await _post_async_shipped(
         f'query {{ node(id: "{public_id}") {{ ... on BookType {{ title }} }} }}',
     )
     assert "errors" not in visible, visible
-    assert visible["data"]["node"] == {"title": "Kindred"}
+    assert json_at(visible, "data", "node") == {"title": "Kindred"}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -10014,7 +10255,10 @@ async def test_nodes_hostile_subclass_hook_is_sealed_async_aiter(
     )
     payload = await _post_async_shipped(document)
     assert "errors" not in payload, payload
-    assert payload["data"]["nodes"] == [None, {"__typename": "BookType", "title": "Kindred"}]
+    assert json_at(payload, "data", "nodes") == [
+        None,
+        {"__typename": "BookType", "title": "Kindred"},
+    ]
 
 
 @pytest.mark.django_db
@@ -10033,23 +10277,23 @@ def test_node_refetch_of_cascade_hidden_row_returns_null(monkeypatch: pytest.Mon
         "... on BookType { title }",
     )
     assert "errors" not in anonymous, anonymous
-    assert anonymous["data"]["node"] is None
+    assert json_at(anonymous, "data", "node") is None
 
     control = _post_node(
         global_id_for(library_schema.BookType, visible.pk),
         "... on BookType { title }",
     )
     assert "errors" not in control, control
-    assert control["data"]["node"] == {"title": "Kindred"}
+    assert json_at(control, "data", "node") == {"title": "Kindred"}
 
     hidden_id = global_id_for(library_schema.BookType, hidden.pk)
     staff = _post_graphql_as_staff(
         f'query {{ node(id: "{hidden_id}") {{ ... on BookType {{ title }} }} }}',
     )
     assert staff.status_code == 200
-    staff_payload = staff.json()
+    staff_payload = response_json(staff)
     assert "errors" not in staff_payload, staff_payload
-    assert staff_payload["data"]["node"] == {"title": "Hidden"}
+    assert json_at(staff_payload, "data", "node") == {"title": "Hidden"}
 
 
 @pytest.mark.django_db
@@ -10070,15 +10314,18 @@ def test_nodes_batch_holes_for_cascade_hidden_rows(monkeypatch: pytest.MonkeyPat
 
     response = _post_graphql(document)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["nodes"] == [None, {"__typename": "BookType", "title": "Kindred"}]
+    assert json_at(payload, "data", "nodes") == [
+        None,
+        {"__typename": "BookType", "title": "Kindred"},
+    ]
 
     staff_response = _post_graphql_as_staff(document)
     assert staff_response.status_code == 200
-    staff_payload = staff_response.json()
+    staff_payload = response_json(staff_response)
     assert "errors" not in staff_payload, staff_payload
-    assert staff_payload["data"]["nodes"] == [
+    assert json_at(staff_payload, "data", "nodes") == [
         {"__typename": "BookType", "title": "Hidden"},
         {"__typename": "BookType", "title": "Kindred"},
     ]
@@ -10162,7 +10409,7 @@ def test_nested_books_connection_fixed_query_count() -> None:
         with CaptureQueriesContext(connection) as captured:
             response = _post_graphql(_NESTED_BOOKS_CONNECTION_QUERY)
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
         return len(captured), payload
 
@@ -10171,13 +10418,15 @@ def test_nested_books_connection_fixed_query_count() -> None:
     # Wire assertion: every parent genre returns its OWN windowed page of 2
     # books with hasNextPage True (3 books seeded per genre), proving the
     # window is per-parent-correct, not a single shared slice.
-    three_edges = three_payload["data"]["allLibraryGenresConnection"]["edges"]
+    three_edges = json_list(three_payload, "data", "allLibraryGenresConnection", "edges")
     assert len(three_edges) == 3
     for index, edge in enumerate(three_edges):
-        books_conn = edge["node"]["booksConnection"]
-        titles = [book_edge["node"]["title"] for book_edge in books_conn["edges"]]
+        books_conn = json_object(edge, "node", "booksConnection")
+        titles = [
+            json_at(book_edge, "node", "title") for book_edge in json_list(books_conn, "edges")
+        ]
         assert titles == [f"Book-{index}-a", f"Book-{index}-b"]
-        assert books_conn["pageInfo"]["hasNextPage"] is True
+        assert json_at(books_conn, "pageInfo", "hasNextPage") is True
 
     # Reset the graph so the 10-genre run starts from an empty library, then
     # re-run the identical query under a fresh capture.
@@ -10187,7 +10436,7 @@ def test_nested_books_connection_fixed_query_count() -> None:
     models.Branch.objects.all().delete()
 
     ten_count, ten_payload = _run(10)
-    assert len(ten_payload["data"]["allLibraryGenresConnection"]["edges"]) == 10
+    assert len(json_list(ten_payload, "data", "allLibraryGenresConnection", "edges")) == 10
 
     # The load-bearing pin: equal query count across the two parent counts -
     # the per-parent independence that disproves N+1. The absolute count is a
@@ -10252,13 +10501,13 @@ def test_nested_books_connection_has_next_page_without_edges() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    edges = payload["data"]["allLibraryGenresConnection"]["edges"]
+    edges = json_list(payload, "data", "allLibraryGenresConnection", "edges")
     assert len(edges) == 3
     for edge in edges:
         # No ``edges`` requested; the page-flag still resolves True (3 > first: 2).
-        assert edge["node"]["booksConnection"]["pageInfo"]["hasNextPage"] is True
+        assert json_at(edge, "node", "booksConnection", "pageInfo", "hasNextPage") is True
     # One root genres-connection query + one windowed prefetch; no per-parent COUNT
     # and no per-parent fallback despite ``edges`` being absent.
     assert len(captured) == 2
@@ -10270,10 +10519,10 @@ def test_nested_books_connection_has_next_page_without_edges() -> None:
 
     exact = _post_graphql(exact_query)
     assert exact.status_code == 200
-    exact_payload = exact.json()
+    exact_payload = response_json(exact)
     assert "errors" not in exact_payload, exact_payload
-    for edge in exact_payload["data"]["allLibraryGenresConnection"]["edges"]:
-        assert edge["node"]["booksConnection"]["pageInfo"]["hasNextPage"] is False
+    for edge in json_list(exact_payload, "data", "allLibraryGenresConnection", "edges"):
+        assert json_at(edge, "node", "booksConnection", "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -10312,12 +10561,12 @@ def test_nested_total_count_without_edges() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    books = payload["data"]["allLibraryBooks"]
+    books = json_list(payload, "data", "allLibraryBooks")
     assert books, payload
     for book in books:
-        assert book["genresConnection"]["totalCount"] == 4  # all four genres, no edges
+        assert json_at(book, "genresConnection", "totalCount") == 4  # all four genres, no edges
     # Root books list + one windowed genres prefetch; no per-book COUNT.
     assert len(captured) == 2
 
@@ -10375,13 +10624,13 @@ def test_nested_total_count_no_per_parent_count() -> None:
     with CaptureQueriesContext(connection) as without_captured:
         without_response = _post_graphql(without_query)
     assert without_response.status_code == 200
-    without_payload = without_response.json()
+    without_payload = response_json(without_response)
     assert "errors" not in without_payload, without_payload
 
     with CaptureQueriesContext(connection) as with_captured:
         with_response = _post_graphql(with_query)
     assert with_response.status_code == 200
-    with_payload = with_response.json()
+    with_payload = response_json(with_response)
     assert "errors" not in with_payload, with_payload
 
     # Selecting nested ``totalCount`` adds ZERO queries - the window already
@@ -10390,11 +10639,11 @@ def test_nested_total_count_no_per_parent_count() -> None:
 
     # The ``totalCount`` value is the full genre count per book (4), distinct
     # from the page size (first: 2) - and identical across every parent book.
-    books = with_payload["data"]["allLibraryBooks"]
+    books = json_list(with_payload, "data", "allLibraryBooks")
     assert len(books) == 3
     for book in books:
-        assert book["genresConnection"]["totalCount"] == 4
-        assert len(book["genresConnection"]["edges"]) == 2
+        assert json_at(book, "genresConnection", "totalCount") == 4
+        assert len(json_list(book, "genresConnection", "edges")) == 2
 
 
 @pytest.mark.django_db
@@ -10470,9 +10719,12 @@ def test_nested_window_respects_book_visibility() -> None:
             repair.genres.add(genre)
 
     def _nested_titles_by_genre(payload: JSONObject) -> list[list[str]]:
-        edges = payload["data"]["allLibraryGenresConnection"]["edges"]
+        edges = json_list(payload, "data", "allLibraryGenresConnection", "edges")
         return [
-            [book_edge["node"]["title"] for book_edge in edge["node"]["booksConnection"]["edges"]]
+            [
+                json_str(book_edge, "node", "title")
+                for book_edge in json_list(edge, "node", "booksConnection", "edges")
+            ]
             for edge in edges
         ]
 
@@ -10487,7 +10739,7 @@ def test_nested_window_respects_book_visibility() -> None:
     with CaptureQueriesContext(connection) as captured:
         anonymous = _post_graphql(query)
     assert anonymous.status_code == 200
-    anonymous_payload = anonymous.json()
+    anonymous_payload = response_json(anonymous)
     assert "errors" not in anonymous_payload, anonymous_payload
     anonymous_titles = _nested_titles_by_genre(anonymous_payload)
     assert anonymous_titles == [
@@ -10504,7 +10756,7 @@ def test_nested_window_respects_book_visibility() -> None:
     # bypass), in the same deterministic pk-terminal order after the visible set.
     staff = _post_graphql_as_staff(query)
     assert staff.status_code == 200
-    staff_payload = staff.json()
+    staff_payload = response_json(staff)
     assert "errors" not in staff_payload, staff_payload
     assert _nested_titles_by_genre(staff_payload) == [
         [
@@ -10574,27 +10826,27 @@ def test_list_relation_and_connection_sibling_coexist_live() -> None:
         with CaptureQueriesContext(connection) as captured:
             response = _post_graphql(_BOTH_SHAPE_QUERY)
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
         return len(captured), payload
 
     two_count, two_payload = _run(2)
-    genres = two_payload["data"]["allLibraryGenres"]
+    genres = json_list(two_payload, "data", "allLibraryGenres")
     assert len(genres) == 2
     for index, genre in enumerate(genres):
         # The list relation returns the FULL related set...
-        assert [b["title"] for b in genre["books"]] == [
+        assert [json_at(b, "title") for b in json_list(genre, "books")] == [
             f"Book-{index}-a",
             f"Book-{index}-b",
             f"Book-{index}-c",
         ]
         # ...while the connection sibling returns only the windowed page.
-        conn = genre["booksConnection"]
-        assert [e["node"]["title"] for e in conn["edges"]] == [
+        conn = json_object(genre, "booksConnection")
+        assert [json_at(e, "node", "title") for e in json_list(conn, "edges")] == [
             f"Book-{index}-a",
             f"Book-{index}-b",
         ]
-        assert conn["pageInfo"]["hasNextPage"] is True
+        assert json_at(conn, "pageInfo", "hasNextPage") is True
 
     # Reset and re-run with more parents: the count must be identical - the list
     # prefetch and the window each run ONCE over all parents, never per-parent.
@@ -10604,7 +10856,7 @@ def test_list_relation_and_connection_sibling_coexist_live() -> None:
     models.Branch.objects.all().delete()
 
     four_count, four_payload = _run(4)
-    assert len(four_payload["data"]["allLibraryGenres"]) == 4
+    assert len(json_list(four_payload, "data", "allLibraryGenres")) == 4
     # The coexistence + N+1-disproof pin: equal count across parent counts, and a
     # small fixed N - root genres query + the "books" list prefetch + the windowed
     # "_dst_books_connection" prefetch.
@@ -10644,11 +10896,11 @@ def test_nested_connection_pagination_from_graphql_variable_live() -> None:
     """
     response = _post_graphql(query, variables={"n": 2})
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenres"][0]["booksConnection"]
-    assert [e["node"]["title"] for e in conn["edges"]] == ["a", "b"]
-    assert conn["pageInfo"]["hasNextPage"] is True
+    conn = json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
+    assert [json_at(e, "node", "title") for e in json_list(conn, "edges")] == ["a", "b"]
+    assert json_at(conn, "pageInfo", "hasNextPage") is True
 
 
 @pytest.mark.django_db
@@ -10681,12 +10933,12 @@ def test_nested_connection_first_zero_empty_page_live() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    conn = payload["data"]["allLibraryGenres"][0]["booksConnection"]
+    conn = json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
     assert conn["edges"] == []
-    assert conn["pageInfo"]["hasNextPage"] is True
-    assert conn["pageInfo"]["endCursor"] is None
+    assert json_at(conn, "pageInfo", "hasNextPage") is True
+    assert json_at(conn, "pageInfo", "endCursor") is None
 
 
 _EMPTY_PARENT_GENRES_CONNECTION_QUERY = """
@@ -10735,15 +10987,15 @@ def test_nested_empty_parent_serves_zero_total_count_no_fallback_live() -> None:
         with CaptureQueriesContext(connection) as captured:
             response = _post_graphql(_EMPTY_PARENT_GENRES_CONNECTION_QUERY)
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
         return len(captured), payload
 
     three_count, three_payload = _run(3)
-    three_books = three_payload["data"]["allLibraryBooks"]
+    three_books = json_list(three_payload, "data", "allLibraryBooks")
     assert len(three_books) == 3
     for book in three_books:
-        conn = book["genresConnection"]
+        conn = json_object(book, "genresConnection")
         assert conn["edges"] == []
         assert conn["totalCount"] == 0
         assert conn["pageInfo"] == {"hasNextPage": False, "hasPreviousPage": False}
@@ -10754,7 +11006,7 @@ def test_nested_empty_parent_serves_zero_total_count_no_fallback_live() -> None:
     models.Branch.objects.all().delete()
 
     eight_count, eight_payload = _run(8)
-    assert len(eight_payload["data"]["allLibraryBooks"]) == 8
+    assert len(json_list(eight_payload, "data", "allLibraryBooks")) == 8
 
     # The load-bearing pin: equal query count across 3 vs 8 empty parents -
     # the genuinely-empty parents are served from the single window prefetch,
@@ -10815,9 +11067,9 @@ def test_nested_or_related_branch_constrains_parent_live() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["allLibraryBranches"] == [{"name": "alpha"}]
+    assert json_at(payload, "data", "allLibraryBranches") == [{"name": "alpha"}]
 
 
 @pytest.mark.django_db
@@ -10846,11 +11098,11 @@ def test_many_side_related_filter_returns_each_parent_once_live() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     # ``alpha`` appears exactly once despite two matching shelves; ``beta`` is
     # absent. A fan-out join would have returned ``[alpha, alpha]``.
-    assert payload["data"]["allLibraryBranches"] == [{"name": "alpha"}]
+    assert json_at(payload, "data", "allLibraryBranches") == [{"name": "alpha"}]
 
 
 @pytest.mark.django_db
@@ -10879,9 +11131,9 @@ def test_related_filter_identical_direct_and_inside_logic_tree_live() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    data = payload["data"]
+    data = json_object(payload, "data")
     assert data["direct"] == data["wrapped"] == [{"name": "alpha"}]
 
 
@@ -10911,9 +11163,9 @@ def _introspect_type(type_name: str) -> JSONObject:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    type_info = payload["data"]["__type"]
+    type_info = json_object(payload, "data", "__type")
     assert type_info is not None, f"{type_name} is not in the schema"
     return type_info
 
@@ -10929,10 +11181,10 @@ def test_book_genres_m2m_renders_as_list_shape_live() -> None:
     genres_type = _field_type(_introspect_type("BookType"), "genres")
     # ``[GenreType!]!`` unwraps NON_NULL -> LIST -> NON_NULL -> OBJECT GenreType.
     assert genres_type["kind"] == "NON_NULL"
-    assert genres_type["ofType"]["kind"] == "LIST"
-    assert genres_type["ofType"]["ofType"]["kind"] == "NON_NULL"
-    assert genres_type["ofType"]["ofType"]["ofType"]["kind"] == "OBJECT"
-    assert genres_type["ofType"]["ofType"]["ofType"]["name"] == "GenreType"
+    assert json_at(genres_type, "ofType", "kind") == "LIST"
+    assert json_at(genres_type, "ofType", "ofType", "kind") == "NON_NULL"
+    assert json_at(genres_type, "ofType", "ofType", "ofType", "kind") == "OBJECT"
+    assert json_at(genres_type, "ofType", "ofType", "ofType", "name") == "GenreType"
 
 
 @pytest.mark.django_db
@@ -10946,12 +11198,14 @@ def test_shelf_books_relation_resolves_to_primary_book_type_over_http() -> None:
     """
     books_type = _field_type(_introspect_type("ShelfType"), "books")
     assert books_type["kind"] == "NON_NULL"
-    assert books_type["ofType"]["kind"] == "LIST"
-    assert books_type["ofType"]["ofType"]["kind"] == "NON_NULL"
-    assert books_type["ofType"]["ofType"]["ofType"]["kind"] == "OBJECT"
-    assert books_type["ofType"]["ofType"]["ofType"]["name"] == "BookType"
+    assert json_at(books_type, "ofType", "kind") == "LIST"
+    assert json_at(books_type, "ofType", "ofType", "kind") == "NON_NULL"
+    assert json_at(books_type, "ofType", "ofType", "ofType", "kind") == "OBJECT"
+    assert json_at(books_type, "ofType", "ofType", "ofType", "name") == "BookType"
     _introspect_type("NullabilityOverrideBookType")
-    assert books_type["ofType"]["ofType"]["ofType"]["name"] != "NullabilityOverrideBookType"
+    assert (
+        json_at(books_type, "ofType", "ofType", "ofType", "name") != "NullabilityOverrideBookType"
+    )
 
 
 @pytest.mark.django_db
@@ -10963,11 +11217,11 @@ def test_relay_genre_type_emits_node_interface_and_global_id_live() -> None:
     the ``Node`` interface and its ``id`` renders as the GlobalID scalar ``ID!``.
     """
     genre_type = _introspect_type("GenreType")
-    interface_names = {iface["name"] for iface in genre_type["interfaces"]}
+    interface_names = {json_at(iface, "name") for iface in json_list(genre_type, "interfaces")}
     assert "Node" in interface_names
     id_type = _field_type(genre_type, "id")
     assert id_type["kind"] == "NON_NULL"
-    assert id_type["ofType"]["name"] == "ID"
+    assert json_at(id_type, "ofType", "name") == "ID"
 
 
 @pytest.mark.django_db
@@ -10981,14 +11235,14 @@ def test_mixed_relay_and_non_relay_no_interface_bleed_live() -> None:
     """
     genre_type = _introspect_type("GenreType")
     shelf_type = _introspect_type("ShelfType")
-    genre_interfaces = {iface["name"] for iface in genre_type["interfaces"]}
-    shelf_interfaces = {iface["name"] for iface in shelf_type["interfaces"]}
+    genre_interfaces = {json_at(iface, "name") for iface in json_list(genre_type, "interfaces")}
+    shelf_interfaces = {json_at(iface, "name") for iface in json_list(shelf_type, "interfaces")}
     assert "Node" in genre_interfaces
     assert "Node" not in shelf_interfaces
     # The Relay type's id is the GlobalID scalar; the plain type's id is a plain
     # scalar (NOT ``ID``), so the Relay interface does not bleed across.
-    assert _field_type(genre_type, "id")["ofType"]["name"] == "ID"
-    assert _field_type(shelf_type, "id")["ofType"]["name"] != "ID"
+    assert json_at(_field_type(genre_type, "id"), "ofType", "name") == "ID"
+    assert json_at(_field_type(shelf_type, "id"), "ofType", "name") != "ID"
 
 
 @pytest.mark.django_db
@@ -11001,7 +11255,9 @@ def test_periodical_type_issues_are_connection_only_live() -> None:
     introspection, so a client cannot bypass the connection's page cap through a
     raw list.
     """
-    names = {field["name"] for field in _introspect_type("PeriodicalType")["fields"]}
+    names = {
+        json_at(field, "name") for field in json_list(_introspect_type("PeriodicalType"), "fields")
+    }
     assert "issuesConnection" in names
     assert "issues" not in names
 
@@ -11013,11 +11269,14 @@ def test_periodical_issues_list_is_not_selectable_live() -> None:
         "{ allLibraryPeriodicalsConnection(first: 1) { edges { node { issues { title } } } } }",
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("data") is None, payload
+    messages = [
+        json_object(error).get("message", "") for error in json_list(payload.get("errors", []))
+    ]
     assert any(
-        "Cannot query field 'issues'" in error.get("message", "")
-        for error in payload.get("errors", [])
+        isinstance(message, str) and "Cannot query field 'issues'" in message
+        for message in messages
     ), payload
 
 
@@ -11044,9 +11303,12 @@ def test_branches_via_list_field_default_resolver_applies_get_queryset_live() ->
 
     response = _post_graphql("{ allLibraryBranchesViaListField { name } }")
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    names = [branch["name"] for branch in payload["data"]["allLibraryBranchesViaListField"]]
+    names = [
+        json_at(branch, "name")
+        for branch in json_list(payload, "data", "allLibraryBranchesViaListField")
+    ]
     assert "Visible" in names
     assert "Hidden" not in names
 
@@ -11088,11 +11350,11 @@ def test_scalar_or_branch_unions_matching_rows_live() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     # OR does not guarantee ordering; assert the matching set. ``no-match`` is
     # excluded; neither row is duplicated.
-    names = {row["name"] for row in payload["data"]["allLibraryBranches"]}
+    names = {json_at(row, "name") for row in json_list(payload, "data", "allLibraryBranches")}
     assert names == {"x-row", "other-name"}
 
 
@@ -11128,11 +11390,11 @@ def test_scalar_and_branch_intersects_matching_rows_live() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     # AND returns only the both-arm row; ``city-only`` (city arm only) is
     # excluded - a union would have returned it too.
-    assert payload["data"]["allLibraryBranches"] == [{"name": "both", "city": "downtown"}]
+    assert json_at(payload, "data", "allLibraryBranches") == [{"name": "both", "city": "downtown"}]
 
 
 @pytest.mark.django_db
@@ -11163,16 +11425,16 @@ def test_malformed_nested_branch_form_raises_filter_invalid_live() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    error = payload["errors"][0]
+    error = json_object(payload, "errors", 0)
     assert error["message"] == "Invalid filter input"
-    extensions = error["extensions"]
+    extensions = json_object(error, "extensions")
     assert extensions["code"] == "FILTER_INVALID"
-    field_errors = extensions["errors"]["email_must_have_at_sign"]
-    assert any("missing @" in entry["message"] for entry in field_errors)
-    assert any(entry["code"] == "missing_at_sign" for entry in field_errors)
+    field_errors = json_list(extensions, "errors", "email_must_have_at_sign")
+    assert any("missing @" in json_str(entry, "message") for entry in field_errors)
+    assert any(json_at(entry, "code") == "missing_at_sign" for entry in field_errors)
 
 
 # ---------------------------------------------------------------------------
@@ -11210,18 +11472,18 @@ def _seed_genre_book_loan_graph() -> None:
     models.Loan.objects.create(book=b2a, patron=reader_two, note="L3")
 
 
-def _assert_genre_book_loan_shape(rows: list[JSONObject]) -> None:
+def _assert_genre_book_loan_shape(rows: list[object]) -> None:
     """Assert the seeded Genre -> books -> loans graph renders intact."""
-    by_name = {genre["name"]: genre for genre in rows}
+    by_name = {json_at(genre, "name"): genre for genre in rows}
     assert set(by_name) == {"G1", "G2"}
     g1_books = {
-        book["title"]: sorted(loan["note"] for loan in book["loans"])
-        for book in by_name["G1"]["books"]
+        json_at(book, "title"): sorted(json_str(loan, "note") for loan in json_list(book, "loans"))
+        for book in json_list(by_name["G1"], "books")
     }
     assert g1_books == {"B1a": ["L1"], "B1b": []}
     g2_books = {
-        book["title"]: sorted(loan["note"] for loan in book["loans"])
-        for book in by_name["G2"]["books"]
+        json_at(book, "title"): sorted(json_str(loan, "note") for loan in json_list(book, "loans"))
+        for book in json_list(by_name["G2"], "books")
     }
     assert g2_books == {"B2a": ["L2", "L3"]}
 
@@ -11252,9 +11514,11 @@ def test_b8_consumer_descendant_prefetch_stays_flat_over_http() -> None:
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    _assert_genre_book_loan_shape(payload["data"]["allLibraryGenresConsumerDescendantPrefetch"])
+    _assert_genre_book_loan_shape(
+        json_list(payload, "data", "allLibraryGenresConsumerDescendantPrefetch"),
+    )
     # Flat: genres + books prefetch + loans prefetch. An N+1 collision would
     # have raised or issued one loans query per book.
     assert len(captured) == 3
@@ -11284,10 +11548,10 @@ def test_b8_consumer_exact_plus_descendant_prefetch_stays_flat_over_http() -> No
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     _assert_genre_book_loan_shape(
-        payload["data"]["allLibraryGenresConsumerExactPlusDescendantPrefetch"],
+        json_list(payload, "data", "allLibraryGenresConsumerExactPlusDescendantPrefetch"),
     )
     assert len(captured) == 3
 
@@ -11328,11 +11592,11 @@ def test_create_shelf_via_form_hidden_branch_fk_is_relation_field_error() -> Non
         variables={"d": {"code": "RF-1", "branchId": restricted.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaForm"]
+    result = json_object(payload, "data", "createShelfViaForm")
     assert result["result"] is None
-    assert [e["field"] for e in result["errors"]] == ["branchId"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["branchId"]
     assert not models.Shelf.objects.filter(code="RF-1").exists()
 
 
@@ -11346,11 +11610,11 @@ def test_create_shelf_via_form_hidden_branch_in_alt_branches_is_field_error() ->
         variables={"d": {"code": "RM-1", "branchId": visible.pk, "altBranches": [restricted.pk]}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaForm"]
+    result = json_object(payload, "data", "createShelfViaForm")
     assert result["result"] is None
-    assert [e["field"] for e in result["errors"]] == ["altBranches"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["altBranches"]
     assert not models.Shelf.objects.filter(code="RM-1").exists()
 
 
@@ -11371,11 +11635,11 @@ def test_create_shelf_via_form_visible_branch_resolves_by_to_field_name_and_writ
         variables={"d": {"code": "OK-1", "branchId": visible.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaForm"]
+    result = json_object(payload, "data", "createShelfViaForm")
     assert result["errors"] == []
-    assert result["result"]["code"] == "OK-1"
+    assert json_at(result, "result", "code") == "OK-1"
     shelf = models.Shelf.objects.get(code="OK-1")
     assert shelf.branch_id == visible.pk  # resolved by name (to_field_name) + written
 
@@ -11406,9 +11670,9 @@ def test_create_shelf_via_form_explicit_null_tier_is_field_keyed_null_error_with
             variables={"d": {"code": "TIER-NULL", "branchId": branch.pk, "tier": None}},
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaForm"]
+    result = json_at(payload, "data", "createShelfViaForm")
     assert result == {
         "result": None,
         "errors": [
@@ -11443,9 +11707,12 @@ def test_create_shelf_via_form_tier_member_or_omission_writes(
         variables={"d": {"code": "TIER-OK", "branchId": branch.pk, **tier_input}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["createShelfViaForm"] == {"result": {"code": "TIER-OK"}, "errors": []}
+    assert json_at(payload, "data", "createShelfViaForm") == {
+        "result": {"code": "TIER-OK"},
+        "errors": [],
+    }
     assert models.Shelf.objects.get(code="TIER-OK").tier == stored
 
 
@@ -11465,11 +11732,11 @@ def test_create_shelf_model_mutation_hidden_branch_is_field_error() -> None:
         variables={"d": {"code": "MM-1", "branchId": restricted.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelf"]
+    result = json_object(payload, "data", "createShelf")
     assert result["result"] is None
-    assert [e["field"] for e in result["errors"]] == ["branchId"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["branchId"]
     assert not models.Shelf.objects.filter(code="MM-1").exists()
 
 
@@ -11491,11 +11758,11 @@ def test_create_shelf_model_mutation_hidden_alt_branch_m2m_is_field_error() -> N
         variables={"d": {"code": "MM-2", "branchId": visible.pk, "altBranches": [restricted.pk]}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelf"]
+    result = json_object(payload, "data", "createShelf")
     assert result["result"] is None
-    assert [e["field"] for e in result["errors"]] == ["altBranches"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["altBranches"]
     assert not models.Shelf.objects.filter(code="MM-2").exists()
 
 
@@ -11519,12 +11786,12 @@ def test_create_shelf_model_mutation_nonexistent_alt_branch_is_field_error() -> 
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelf"]
+    result = json_object(payload, "data", "createShelf")
     assert result["result"] is None
-    missing_errors = result["errors"]
-    assert [e["field"] for e in missing_errors] == ["altBranches"]
+    missing_errors = json_list(result, "errors")
+    assert [json_at(e, "field") for e in missing_errors] == ["altBranches"]
     assert models.Shelf.objects.count() == before
     assert not models.Shelf.objects.filter(code="MM-3").exists()
 
@@ -11534,7 +11801,7 @@ def test_create_shelf_model_mutation_nonexistent_alt_branch_is_field_error() -> 
             "d": {"code": "MM-3H", "branchId": visible.pk, "altBranches": [hidden.pk]},
         },
     )
-    hidden_result = hidden_response.json()["data"]["createShelf"]
+    hidden_result = json_object(response_json(hidden_response), "data", "createShelf")
     assert hidden_result["result"] is None
     assert hidden_result["errors"] == missing_errors
     assert not models.Shelf.objects.filter(code="MM-3H").exists()
@@ -11549,9 +11816,9 @@ def test_create_shelf_model_mutation_nonexistent_alt_branch_is_field_error() -> 
             },
         },
     )
-    mixed_result = mixed.json()["data"]["createShelf"]
+    mixed_result = json_object(response_json(mixed), "data", "createShelf")
     assert mixed_result["result"] is None
-    assert [e["field"] for e in mixed_result["errors"]] == ["altBranches"]
+    assert [json_at(e, "field") for e in json_list(mixed_result, "errors")] == ["altBranches"]
     assert not models.Shelf.objects.filter(code="MM-3X").exists()
 
 
@@ -11569,11 +11836,11 @@ def test_create_shelf_model_mutation_visible_alt_branches_attach() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelf"]
+    result = json_object(payload, "data", "createShelf")
     assert result["errors"] == []
-    assert result["result"]["code"] == "MM-4"
+    assert json_at(result, "result", "code") == "MM-4"
     shelf = models.Shelf.objects.get(code="MM-4")
     assert shelf.branch_id == home.pk
     assert set(shelf.alt_branches.values_list("pk", flat=True)) == {alt1.pk, alt2.pk}
@@ -11609,11 +11876,11 @@ def test_update_book_via_form_partial_update_preserves_m2m_over_http() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookViaForm"]
+    result = json_object(payload, "data", "updateBookViaForm")
     assert result["errors"] == []
-    assert result["node"]["title"] == "AfterFormTitle"
+    assert json_at(result, "node", "title") == "AfterFormTitle"
     book.refresh_from_db()
     assert book.title == "AfterFormTitle"
     # The OMITTED required M2M was reconstructed from the row (not cleared).
@@ -11638,11 +11905,11 @@ def test_update_book_via_form_explicit_null_genres_is_form_required_error() -> N
         variables={"id": global_id_for(library_schema.BookType, book.pk), "d": {"genres": None}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookViaForm"]
+    result = json_object(payload, "data", "updateBookViaForm")
     assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["genres"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["genres"]
     book.refresh_from_db()
     assert book.title == "NullBeforeTitle"
     assert set(book.genres.values_list("pk", flat=True)) == {genre.pk}
@@ -11680,21 +11947,22 @@ def test_update_book_at_repair_desk_publishes_only_the_form_choices_over_http() 
         variables={"id": book_id, "d": {"circulationStatus": "repair"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookAtRepairDeskViaForm"]
+    result = json_at(payload, "data", "updateBookAtRepairDeskViaForm")
     assert result == {"node": {"circulationStatus": "repair"}, "errors": []}
     book.refresh_from_db()
     assert book.circulation_status == "repair"
 
-    refused = _post_graphql(
-        _UPDATE_BOOK_AT_REPAIR_DESK,
-        variables={"id": book_id, "d": {"circulationStatus": "checked_out"}},
-    ).json()
+    refused = response_json(
+        _post_graphql(
+            _UPDATE_BOOK_AT_REPAIR_DESK,
+            variables={"id": book_id, "d": {"circulationStatus": "checked_out"}},
+        ),
+    )
     assert refused.get("data") is None
-    assert (
-        "does not exist in 'BookRepairDeskFormPartialInputCirculationStatusEnum'"
-        in (refused["errors"][0]["message"])
+    assert "does not exist in 'BookRepairDeskFormPartialInputCirculationStatusEnum'" in (
+        json_str(refused, "errors", 0, "message")
     )
     book.refresh_from_db()
     assert book.circulation_status == "repair"
@@ -11796,9 +12064,9 @@ def test_update_book_via_form_partial_update_preserves_optional_nullable_scalar_
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookViaForm"]
+    result = json_object(payload, "data", "updateBookViaForm")
     assert result["errors"] == []
     book.refresh_from_db()
     assert book.title == "SubAfterTitle"
@@ -11819,11 +12087,14 @@ def _input_fields_by_name(type_name: str) -> dict[str, JSONObject]:
         + '") { inputFields { name type { kind name ofType { kind name } } } } }',
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    introspected = payload["data"]["__type"]
+    introspected = json_object(payload, "data", "__type")
     assert introspected is not None, f"{type_name} not in schema"
-    return {field["name"]: field["type"] for field in introspected["inputFields"]}
+    return {
+        json_str(field, "name"): json_object(field, "type")
+        for field in json_list(introspected, "inputFields")
+    }
 
 
 @pytest.mark.django_db
@@ -11909,17 +12180,20 @@ def test_create_publisher_errors_key_to_the_input_fields_sent() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    duplicate = payload["data"]["dup"]
+    duplicate = json_object(payload, "data", "dup")
     assert duplicate["node"] is None
-    assert sorted(duplicate["errors"], key=lambda error: error["field"]) == [
+    assert sorted(json_list(duplicate, "errors"), key=lambda error: json_str(error, "field")) == [
         {"field": "houseCode", "path": ["houseCode"], "codes": ["unique"]},
         {"field": "publisherName", "path": ["publisherName"], "codes": ["unique"]},
     ]
-    undecodable = payload["data"]["bad"]
+    undecodable = json_object(payload, "data", "bad")
     assert undecodable["node"] is None
-    assert [(error["field"], error["path"]) for error in undecodable["errors"]] == [
+    assert [
+        (json_at(error, "field"), json_at(error, "path"))
+        for error in json_list(undecodable, "errors")
+    ] == [
         ("publisherName", ["publisherName"]),
     ]
     assert models.Publisher.objects.count() == 1
@@ -11952,9 +12226,9 @@ def test_create_book_via_custom_input_happy_path() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBookViaCustomInput"]
+    result = json_object(payload, "data", "createBookViaCustomInput")
     assert result["errors"] == []
     assert result["node"] == {
         "title": "CustomBook",
@@ -11991,9 +12265,9 @@ def test_create_book_via_custom_input_attaches_provided_genres() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBookViaCustomInput"]
+    result = json_object(payload, "data", "createBookViaCustomInput")
     assert result["errors"] == []
     book = models.Book.objects.get(title="GenreCreateBook", shelf=shelf)
     assert set(book.genres.values_list("name", flat=True)) == {"CreateSciFi", "CreateFantasy"}
@@ -12021,11 +12295,11 @@ def test_create_book_via_custom_input_saves_circulation_status_choice_value() ->
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBookViaCustomInput"]
+    result = json_object(payload, "data", "createBookViaCustomInput")
     assert result["errors"] == []
-    assert result["node"]["circulationStatus"] == "available"
+    assert json_at(result, "node", "circulationStatus") == "available"
     created = models.Book.objects.get(title="ChoiceCreateBook", shelf=shelf)
     assert created.circulation_status == models.Book.CirculationStatus.AVAILABLE
 
@@ -12055,11 +12329,11 @@ def test_update_book_via_custom_input_saves_circulation_status_choice_value() ->
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookViaCustomInput"]
+    result = json_object(payload, "data", "updateBookViaCustomInput")
     assert result["errors"] == []
-    assert result["node"]["circulationStatus"] == "checked_out"
+    assert json_at(result, "node", "circulationStatus") == "checked_out"
     book.refresh_from_db()
     assert book.circulation_status == models.Book.CirculationStatus.CHECKED_OUT
 
@@ -12099,9 +12373,9 @@ def test_update_book_via_custom_input_genres_omit_vs_empty_list(
         variables={"id": global_id_for(library_schema.BookType, book.pk), "d": data},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookViaCustomInput"]
+    result = json_object(payload, "data", "updateBookViaCustomInput")
     assert result["errors"] == []
     book.refresh_from_db()
     assert set(book.genres.values_list("name", flat=True)) == expected_names
@@ -12127,11 +12401,11 @@ def test_create_book_via_custom_input_explicit_null_genres_is_field_error() -> N
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBookViaCustomInput"]
+    result = json_object(payload, "data", "createBookViaCustomInput")
     assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["genres"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["genres"]
     assert not models.Book.objects.filter(title="NullGenresBook").exists()
 
 
@@ -12153,11 +12427,11 @@ def test_create_book_via_custom_input_wrong_type_genre_id_is_field_error() -> No
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBookViaCustomInput"]
+    result = json_object(payload, "data", "createBookViaCustomInput")
     assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["genres"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["genres"]
     assert not models.Book.objects.filter(title="WrongTypeGenresBook").exists()
 
 
@@ -12178,11 +12452,11 @@ def test_create_book_via_custom_input_uncoercible_genre_pk_is_field_error() -> N
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBookViaCustomInput"]
+    result = json_object(payload, "data", "createBookViaCustomInput")
     assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["genres"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["genres"]
     assert not models.Book.objects.filter(title="UncoercibleGenresBook").exists()
 
 
@@ -12201,7 +12475,7 @@ def test_create_book_via_custom_input_omitting_overridden_required_field_errors(
         variables={"d": {"title": "NoSubtitleBook", "shelfId": shelf.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload  # top-level coercion error
     assert "subtitle" in str(payload["errors"])
     assert not models.Book.objects.filter(title="NoSubtitleBook").exists()
@@ -12228,11 +12502,11 @@ def test_update_book_via_custom_partial_input_happy_path() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookViaCustomInput"]
+    result = json_object(payload, "data", "updateBookViaCustomInput")
     assert result["errors"] == []
-    assert result["node"]["title"] == "NewBookTitle"
+    assert json_at(result, "node", "title") == "NewBookTitle"
     book.refresh_from_db()
     assert book.title == "NewBookTitle"
     assert book.subtitle == "keep"
@@ -12268,11 +12542,11 @@ def test_update_book_replaces_m2m_and_returns_row_after_visibility_exit_over_htt
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookViaCustomInput"]
+    result = json_object(payload, "data", "updateBookViaCustomInput")
     assert result["errors"] == []
-    assert result["node"]["title"] == "HiddenAfterUpdate"
+    assert json_at(result, "node", "title") == "HiddenAfterUpdate"
     book.refresh_from_db()
     assert book.circulation_status == models.Book.CirculationStatus.REPAIR
     assert set(book.genres.values_list("pk", flat=True)) == {replacement.pk}
@@ -12302,16 +12576,20 @@ def test_named_interface_is_implemented_by_library_types_over_http() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    iface = payload["data"]["iface"]
+    iface = json_object(payload, "data", "iface")
     assert iface is not None, "Named interface missing from the SDL"
     assert iface["kind"] == "INTERFACE"
-    assert {"name"} <= {f["name"] for f in iface["fields"]}
-    possible = {pt["name"] for pt in iface["possibleTypes"]}
+    assert {"name"} <= {json_at(f, "name") for f in json_list(iface, "fields")}
+    possible = {json_at(pt, "name") for pt in json_list(iface, "possibleTypes")}
     assert {"BranchType", "GenreType", "PatronType"} <= possible
-    assert {"Node", "Named"} <= {i["name"] for i in payload["data"]["genre"]["interfaces"]}
-    assert "Named" in {i["name"] for i in payload["data"]["branch"]["interfaces"]}
+    assert {"Node", "Named"} <= {
+        json_at(i, "name") for i in json_list(payload, "data", "genre", "interfaces")
+    }
+    assert "Named" in {
+        json_at(i, "name") for i in json_list(payload, "data", "branch", "interfaces")
+    }
 
 
 @pytest.mark.django_db
@@ -12328,9 +12606,12 @@ def test_named_library_records_returns_polymorphic_interface_list_over_http() ->
 
     response = _post_graphql("query { namedLibraryRecords { __typename name } }")
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    pairs = {(r["__typename"], r["name"]) for r in payload["data"]["namedLibraryRecords"]}
+    pairs = {
+        (json_at(r, "__typename"), json_at(r, "name"))
+        for r in json_list(payload, "data", "namedLibraryRecords")
+    }
     assert ("BranchType", "IfaceBranch") in pairs
     assert ("GenreType", "IfaceGenre") in pairs
     assert ("PatronType", "IfacePatron") in pairs
@@ -12351,12 +12632,12 @@ def test_named_library_records_hides_restricted_branch_from_anonymous_over_http(
 
     response = _post_graphql("query { namedLibraryRecords { __typename name } }")
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     branch_names = {
-        r["name"]
-        for r in payload["data"]["namedLibraryRecords"]
-        if r["__typename"] == "BranchType"
+        json_at(r, "name")
+        for r in json_list(payload, "data", "namedLibraryRecords")
+        if json_at(r, "__typename") == "BranchType"
     }
     assert "NamedVisible" in branch_names
     assert "NamedRestricted" not in branch_names  # hidden by get_queryset for anonymous
@@ -12364,12 +12645,12 @@ def test_named_library_records_hides_restricted_branch_from_anonymous_over_http(
     # Staff bypasses the gate, so the restricted branch is visible to them.
     staff_response = _post_graphql_as_staff("query { namedLibraryRecords { __typename name } }")
     assert staff_response.status_code == 200
-    staff_payload = staff_response.json()
+    staff_payload = response_json(staff_response)
     assert "errors" not in staff_payload, staff_payload
     staff_branch_names = {
-        r["name"]
-        for r in staff_payload["data"]["namedLibraryRecords"]
-        if r["__typename"] == "BranchType"
+        json_at(r, "name")
+        for r in json_list(staff_payload, "data", "namedLibraryRecords")
+        if json_at(r, "__typename") == "BranchType"
     }
     assert {"NamedVisible", "NamedRestricted"} <= staff_branch_names
 
@@ -12394,9 +12675,9 @@ def test_create_branch_with_shelf_perform_mutate_runs_custom_write() -> None:
         variables={"d": {"branchName": "HookBranch", "shelfCode": "H-1"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBranchWithShelf"]
+    result = json_object(payload, "data", "createBranchWithShelf")
     assert result["ok"] is True
     assert result["errors"] == []
     # perform_mutate ran the custom multi-row write inside the mutation transaction.
@@ -12424,11 +12705,11 @@ def test_create_branch_pair_rolls_back_first_write_when_second_conflicts() -> No
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBranchPair"]
+    result = json_object(payload, "data", "createBranchPair")
     assert result["ok"] is False
-    assert result["errors"][0]["field"] == "__all__"
+    assert json_at(result, "errors", 0, "field") == "__all__"
     assert not models.Branch.objects.filter(name="RollbackFirst").exists()
 
 
@@ -12455,9 +12736,9 @@ def test_create_shelf_via_serializer_happy_path() -> None:
         variables={"d": {"code": "SerShelf", "branchId": branch.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaSerializer"]
+    result = json_object(payload, "data", "createShelfViaSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "SerShelf"}
     assert models.Shelf.objects.filter(code="SerShelf", branch=branch).exists()
@@ -12481,9 +12762,9 @@ def test_create_shelf_via_schema_hook_serializer_executes_over_http() -> None:
     )
     response = _post_graphql_as_staff(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaSchemaHookSerializer"]
+    result = json_object(payload, "data", "createShelfViaSchemaHookSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "HookShelf", "topic": "tenant:staff"}
     shelf = models.Shelf.objects.get(code="HookShelf", branch=branch)
@@ -12509,9 +12790,9 @@ def test_create_shelf_via_subclassed_serializer_validates_against_child_serializ
     )
     response = _post_graphql_as_staff(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaSubclassedSerializer"]
+    result = json_object(payload, "data", "createShelfViaSubclassedSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "SubclassShelf"}
     assert models.Shelf.objects.filter(code="SubclassShelf", branch=branch).exists()
@@ -12534,9 +12815,9 @@ def test_create_shelf_via_subclassed_serializer_error_keys_to_the_renamed_input(
     )
     response = _post_graphql_as_staff(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaSubclassedSerializer"]
+    result = json_object(payload, "data", "createShelfViaSubclassedSerializer")
     assert result["result"] is None
     assert result["errors"] == [{"field": "shelfCode", "path": ["shelfCode"], "codes": ["blank"]}]
     assert not models.Shelf.objects.filter(branch=branch).exists()
@@ -12558,9 +12839,9 @@ def test_create_shelf_rejecting_serializer_save_time_all_sentinel() -> None:
         variables={"d": {"code": "RejShelf", "branchId": branch.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfRejectingViaSerializer"]
+    result = json_object(payload, "data", "createShelfRejectingViaSerializer")
     assert result["result"] is None
     assert result["errors"] == [
         {"field": "__all__", "messages": ["Shelf rejected by a whole-object business rule."]},
@@ -12615,9 +12896,9 @@ def test_serializer_hook_same_serializer_different_targets_distinct_inputs_and_d
         "}) { result { code } errors { field messages } } }",
     )
     assert patron_response.status_code == 200
-    patron_payload = patron_response.json()
+    patron_payload = response_json(patron_response)
     assert "errors" not in patron_payload, patron_payload
-    patron_result = patron_payload["data"]["createShelfViaHookTargetingPatron"]
+    patron_result = json_object(patron_payload, "data", "createShelfViaHookTargetingPatron")
     assert patron_result["errors"] == []
     assert patron_result["result"] == {"code": "CollisionViaPatron"}
     assert models.Shelf.objects.filter(code="CollisionViaPatron", branch=branch).exists()
@@ -12630,11 +12911,11 @@ def test_serializer_hook_same_serializer_different_targets_distinct_inputs_and_d
         "}) { result { code } errors { field messages } } }",
     )
     assert loan_response.status_code == 200
-    loan_payload = loan_response.json()
+    loan_payload = response_json(loan_response)
     assert "errors" not in loan_payload, loan_payload
-    loan_result = loan_payload["data"]["createShelfViaHookTargetingLoan"]
+    loan_result = json_object(loan_payload, "data", "createShelfViaHookTargetingLoan")
     assert loan_result["result"] is None
-    assert [e["field"] for e in loan_result["errors"]] == ["targetId"]
+    assert [json_at(e, "field") for e in json_list(loan_result, "errors")] == ["targetId"]
     assert not models.Shelf.objects.filter(code="CollisionViaLoanWrongTarget").exists()
 
 
@@ -12658,9 +12939,9 @@ def test_create_shelf_via_hook_narrowed_serializer_recovers_unsupported_default_
         "}) { result { code } errors { field messages } } }",
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaHookNarrowedSerializer"]
+    result = json_object(payload, "data", "createShelfViaHookNarrowedSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "NarrowShelf"}
     assert models.Shelf.objects.filter(code="NarrowShelf", branch=branch).exists()
@@ -12691,11 +12972,11 @@ def test_create_shelf_via_serializer_hidden_branch_is_relation_field_error() -> 
         variables={"d": {"code": "HiddenSerShelf", "branchId": restricted.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaSerializer"]
+    result = json_object(payload, "data", "createShelfViaSerializer")
     assert result["result"] is None
-    assert [e["field"] for e in result["errors"]] == ["branchId"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["branchId"]
     assert not models.Shelf.objects.filter(code="HiddenSerShelf").exists()
 
 
@@ -12720,11 +13001,11 @@ def test_create_shelf_via_schema_hook_serializer_hidden_branch_is_relation_field
         "}) { result { code } errors { field messages } } }",
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaSchemaHookSerializer"]
+    result = json_object(payload, "data", "createShelfViaSchemaHookSerializer")
     assert result["result"] is None
-    assert [e["field"] for e in result["errors"]] == ["branchId"]
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["branchId"]
     assert not models.Shelf.objects.filter(code="HiddenHookShelf").exists()
 
 
@@ -12746,7 +13027,7 @@ def test_create_shelf_via_blank_code_serializer_accepts_empty_string_over_http()
     # allow_blank leaves the type alone: the required code input is a non-null String!.
     code_type = _input_field_type("BlankCodeShelfSerializerInput", "code")
     assert code_type["kind"] == "NON_NULL"
-    assert code_type["ofType"]["name"] == "String"
+    assert json_at(code_type, "ofType", "name") == "String"
 
     response = _post_graphql(
         "mutation($d: BlankCodeShelfSerializerInput!) { createShelfViaBlankCodeSerializer(data: $d) { "
@@ -12754,9 +13035,9 @@ def test_create_shelf_via_blank_code_serializer_accepts_empty_string_over_http()
         variables={"d": {"code": "", "branchId": branch.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaBlankCodeSerializer"]
+    result = json_object(payload, "data", "createShelfViaBlankCodeSerializer")
     # The serializer accepted the blank (a plain required CharField would have rejected it).
     assert result["errors"] == []
     assert result["result"] == {"code": ""}
@@ -12783,13 +13064,13 @@ def test_serializer_optional_fields_over_http_uses_distinct_input_and_in_band_re
 
     strict_code = _input_field_type(strict_input, "code")
     assert strict_code["kind"] == "NON_NULL"
-    assert strict_code["ofType"]["name"] == "String"
+    assert json_at(strict_code, "ofType", "name") == "String"
     optional_code = _input_field_type(optional_input, "code")
     assert optional_code["kind"] == "SCALAR"
     assert optional_code["name"] == "String"
     optional_branch = _input_field_type(optional_input, "branchId")
     assert optional_branch["kind"] == "NON_NULL"
-    assert optional_branch["ofType"]["name"] == "Int"
+    assert json_at(optional_branch, "ofType", "name") == "Int"
 
     omitted_response = _post_graphql(
         f"mutation($d: {optional_input}!) {{ createShelfViaOptionalCodeSerializer(data: $d) {{ "
@@ -12797,11 +13078,11 @@ def test_serializer_optional_fields_over_http_uses_distinct_input_and_in_band_re
         variables={"d": {"branchId": branch.pk}},
     )
     assert omitted_response.status_code == 200
-    omitted_payload = omitted_response.json()
+    omitted_payload = response_json(omitted_response)
     assert "errors" not in omitted_payload, omitted_payload
-    omitted_result = omitted_payload["data"]["createShelfViaOptionalCodeSerializer"]
+    omitted_result = json_object(omitted_payload, "data", "createShelfViaOptionalCodeSerializer")
     assert omitted_result["result"] is None
-    assert [error["field"] for error in omitted_result["errors"]] == ["code"]
+    assert [json_at(error, "field") for error in json_list(omitted_result, "errors")] == ["code"]
     assert not models.Shelf.objects.filter(branch=branch, code="").exists()
 
     success_response = _post_graphql(
@@ -12810,9 +13091,9 @@ def test_serializer_optional_fields_over_http_uses_distinct_input_and_in_band_re
         variables={"d": {"code": "OptionalCodeShelf", "branchId": branch.pk}},
     )
     assert success_response.status_code == 200
-    success_payload = success_response.json()
+    success_payload = response_json(success_response)
     assert "errors" not in success_payload, success_payload
-    success_result = success_payload["data"]["createShelfViaOptionalCodeSerializer"]
+    success_result = json_object(success_payload, "data", "createShelfViaOptionalCodeSerializer")
     assert success_result["errors"] == []
     assert success_result["result"] == {"code": "OptionalCodeShelf"}
     assert models.Shelf.objects.filter(code="OptionalCodeShelf", branch=branch).exists()
@@ -12854,7 +13135,7 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
     # nullable String (required-AND-nullable is omittable, DRF enforces presence in-band).
     non_null_note = _input_field_type(non_null_input, "note")
     assert non_null_note["kind"] == "NON_NULL"
-    assert non_null_note["ofType"]["name"] == "String"
+    assert json_at(non_null_note, "ofType", "name") == "String"
     nullable_note = _input_field_type(nullable_input, "note")
     assert nullable_note["kind"] == "SCALAR"
     assert nullable_note["name"] == "String"
@@ -12867,9 +13148,9 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
         "}) { result { code } errors { field messages } } }",
     )
     assert non_null_response.status_code == 200
-    non_null_payload = non_null_response.json()
+    non_null_payload = response_json(non_null_response)
     assert "errors" not in non_null_payload, non_null_payload
-    non_null_result = non_null_payload["data"]["createShelfViaHookNonNullNote"]
+    non_null_result = json_object(non_null_payload, "data", "createShelfViaHookNonNullNote")
     assert non_null_result["errors"] == []
     assert non_null_result["result"] == {"code": "NonNullNoteShelf"}
     assert models.Shelf.objects.filter(code="NonNullNoteShelf", branch=branch).exists()
@@ -12882,9 +13163,9 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
         "}) { result { code } errors { field messages } } }",
     )
     assert nullable_response.status_code == 200
-    nullable_payload = nullable_response.json()
+    nullable_payload = response_json(nullable_response)
     assert "errors" not in nullable_payload, nullable_payload
-    nullable_result = nullable_payload["data"]["createShelfViaHookNullableNote"]
+    nullable_result = json_object(nullable_payload, "data", "createShelfViaHookNullableNote")
     assert nullable_result["errors"] == []
     assert nullable_result["result"] == {"code": "NullableNoteShelf"}
     assert models.Shelf.objects.filter(code="NullableNoteShelf", branch=branch).exists()
@@ -12897,11 +13178,11 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
         "}) { result { code } errors { field messages } } }",
     )
     assert omitted_response.status_code == 200
-    omitted_payload = omitted_response.json()
+    omitted_payload = response_json(omitted_response)
     assert "errors" not in omitted_payload, omitted_payload
-    omitted_result = omitted_payload["data"]["createShelfViaHookNullableNote"]
+    omitted_result = json_object(omitted_payload, "data", "createShelfViaHookNullableNote")
     assert omitted_result["result"] is None
-    assert [error["field"] for error in omitted_result["errors"]] == ["note"]
+    assert [json_at(error, "field") for error in json_list(omitted_result, "errors")] == ["note"]
     assert not models.Shelf.objects.filter(code="OmittedNullableNoteShelf", branch=branch).exists()
 
 
@@ -12935,15 +13216,22 @@ def test_create_shelf_via_metadata_serializer_expanded_input_type_system_over_ht
     assert accent_type["name"] == "String"
 
     # The generated enum exposes the choice VALUES as its member names (sanitized).
-    enum_values = _post_graphql(
-        """
+    enum_values = json_list(
+        response_json(
+            _post_graphql(
+                """
         query {
           __type(name: "ShelfMetadataSerializerInputPriorityEnum") { enumValues { name } }
         }
         """,
-    ).json()["data"]["__type"]["enumValues"]
+            ),
+        ),
+        "data",
+        "__type",
+        "enumValues",
+    )
     # ``allow_blank=True`` adds the ``BLANK`` member for the ``""`` DRF admits.
-    assert {v["name"] for v in enum_values} == {
+    assert {json_at(v, "name") for v in enum_values} == {
         "BLANK",
         "low",
         "normal",
@@ -12965,9 +13253,9 @@ def test_create_shelf_via_metadata_serializer_expanded_input_type_system_over_ht
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaMetadataSerializer"]
+    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
     assert result["errors"] == []
     # The enum value round-tripped into ``topic``; the JSON + custom field were dropped.
     assert result["result"] == {"code": "MetaShelf", "topic": "priority:high"}
@@ -13022,10 +13310,17 @@ def test_create_shelf_list_of_choices_enum_blank_member_writes_empty_string_over
 
     rendered = {name: typ for name, typ, _ in _input_fields_sdl("ShelfMetadataSerializerInput")}
     assert rendered[field_name] == f"[{enum_name}!]"
-    enum_values = _post_graphql(
-        'query { __type(name: "' + enum_name + '") { enumValues { name } } }',
-    ).json()["data"]["__type"]["enumValues"]
-    assert "BLANK" in {v["name"] for v in enum_values}
+    enum_values = json_list(
+        response_json(
+            _post_graphql(
+                'query { __type(name: "' + enum_name + '") { enumValues { name } } }',
+            ),
+        ),
+        "data",
+        "__type",
+        "enumValues",
+    )
+    assert "BLANK" in {json_at(v, "name") for v in enum_values}
 
     response = _post_graphql(
         "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
@@ -13035,20 +13330,22 @@ def test_create_shelf_list_of_choices_enum_blank_member_writes_empty_string_over
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaMetadataSerializer"]
+    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": f"ListChoice-{field_name}", "topic": topic}
 
     # A value outside the enum is refused by GraphQL before the serializer runs.
-    refused = _post_graphql(
-        "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
-        "result { code } errors { field messages } } }",
-        variables={"d": {"code": "x", "branchId": branch.pk, field_name: ["nope"]}},
-    ).json()
+    refused = response_json(
+        _post_graphql(
+            "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
+            "result { code } errors { field messages } } }",
+            variables={"d": {"code": "x", "branchId": branch.pk, field_name: ["nope"]}},
+        ),
+    )
     assert refused["data"] is None
-    assert f"does not exist in '{enum_name}' enum" in refused["errors"][0]["message"]
+    assert f"does not exist in '{enum_name}' enum" in json_str(refused, "errors", 0, "message")
 
 
 def _input_field_description(type_name: str, field_name: str) -> str | None:
@@ -13061,10 +13358,14 @@ def _input_field_description(type_name: str, field_name: str) -> str | None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    fields = payload["data"]["__type"]["inputFields"]
-    return next(f["description"] for f in fields if f["name"] == field_name)
+    fields = json_list(payload, "data", "__type", "inputFields")
+    description = next(
+        json_at(f, "description") for f in fields if json_at(f, "name") == field_name
+    )
+    assert description is None or isinstance(description, str), description
+    return description
 
 
 @pytest.mark.django_db
@@ -13118,9 +13419,9 @@ def test_serializer_unencodable_text_in_a_list_or_json_leaf_is_field_error_over_
     )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaMetadataSerializer"]
+    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
     assert result["result"] is None
     assert result["errors"] == [
         {
@@ -13176,10 +13477,10 @@ def _post_printing_write(
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query, variables=variables)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     return (
-        cast("JSONObject", payload["data"][field]),
+        cast("JSONObject", json_at(payload, "data", field)),
         [query["sql"] for query in captured.captured_queries],
     )
 
@@ -13329,10 +13630,10 @@ def _post_edition_locating_write(write: str, lookup_id: str) -> tuple[JSONObject
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query, variables=variables)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
     return (
-        cast("JSONObject", payload["data"][field]),
+        cast("JSONObject", json_at(payload, "data", field)),
         [query["sql"] for query in captured.captured_queries],
     )
 
@@ -13491,14 +13792,14 @@ def test_serializer_error_envelope_carries_codes_and_path_over_http() -> None:
         variables={"d": {"code": "CodesShelf", "branchId": branch.pk, "label": "x" * 50}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaMetadataSerializer"]
+    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
     assert result["result"] is None
-    (err,) = result["errors"]
-    assert err["field"] == "label"
-    assert err["path"] == ["label"]
-    assert "max_length" in err["codes"]  # the DRF ErrorDetail.code is preserved (#4).
+    (err,) = json_list(result, "errors")
+    assert json_at(err, "field") == "label"
+    assert json_at(err, "path") == ["label"]
+    assert "max_length" in json_list(err, "codes")  # the DRF ErrorDetail.code is preserved (#4).
     assert not models.Shelf.objects.filter(code="CodesShelf").exists()
 
     # A framework relation-decode error: a nonexistent branch pk -> code "invalid", path=["branchId"].
@@ -13507,12 +13808,12 @@ def test_serializer_error_envelope_carries_codes_and_path_over_http() -> None:
         "result { code } errors { field messages codes path } } }",
         variables={"d": {"code": "CodesShelf2", "branchId": 999999}},
     )
-    bad_result = bad.json()["data"]["createShelfViaMetadataSerializer"]
+    bad_result = json_object(response_json(bad), "data", "createShelfViaMetadataSerializer")
     assert bad_result["result"] is None
-    (rel_err,) = bad_result["errors"]
-    assert rel_err["field"] == "branchId"
-    assert rel_err["codes"] == ["invalid"]
-    assert rel_err["path"] == ["branchId"]
+    (rel_err,) = json_list(bad_result, "errors")
+    assert json_at(rel_err, "field") == "branchId"
+    assert json_at(rel_err, "codes") == ["invalid"]
+    assert json_at(rel_err, "path") == ["branchId"]
 
 
 @pytest.mark.django_db
@@ -13538,9 +13839,9 @@ def test_serializer_injected_field_contract_over_http() -> None:
         variables={"d": {"code": "InjectShelf", "branchId": branch.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfWithInjectedTopic"]
+    result = json_object(payload, "data", "createShelfWithInjectedTopic")
     assert result["errors"] == []
     # The override supplied the narrowed-away required ``topic``; the write succeeded with it.
     assert result["result"] == {"code": "InjectShelf", "topic": "stamped-by-injection"}
@@ -13580,9 +13881,9 @@ def test_serializer_update_injected_field_contract_over_http() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookWithInjectedStatus"]
+    result = json_object(payload, "data", "updateBookWithInjectedStatus")
     assert result["errors"] == []
     # The override supplied the narrowed-away required ``status``; the write succeeded with it
     # (the serializer's update() stamped the resolved enum value into ``subtitle``).
@@ -13615,9 +13916,9 @@ def test_serializer_m2m_relation_visibility_over_http() -> None:
         },
     )
     assert ok.status_code == 200
-    ok_payload = ok.json()
+    ok_payload = response_json(ok)
     assert "errors" not in ok_payload, ok_payload
-    ok_result = ok_payload["data"]["createShelfViaAltBranchesSerializer"]
+    ok_result = json_object(ok_payload, "data", "createShelfViaAltBranchesSerializer")
     assert ok_result["errors"] == []
     shelf = models.Shelf.objects.get(code="M2MShelf", branch=branch)
     assert set(shelf.alt_branches.values_list("pk", flat=True)) == {alt1.pk, alt2.pk}
@@ -13634,11 +13935,11 @@ def test_serializer_m2m_relation_visibility_over_http() -> None:
             },
         },
     )
-    bad_result = bad.json()["data"]["createShelfViaAltBranchesSerializer"]
+    bad_result = json_object(response_json(bad), "data", "createShelfViaAltBranchesSerializer")
     assert bad_result["result"] is None
-    (err,) = bad_result["errors"]
-    assert err["field"] == "altBranches"
-    assert err["codes"] == ["invalid"]
+    (err,) = json_list(bad_result, "errors")
+    assert json_at(err, "field") == "altBranches"
+    assert json_at(err, "codes") == ["invalid"]
     assert not models.Shelf.objects.filter(code="M2MBadShelf").exists()
 
 
@@ -13684,9 +13985,9 @@ def test_serializer_m2m_alt_branches_visibility_is_one_batched_query_over_http()
                 },
             )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        assert payload["data"]["createShelfViaAltBranchesSerializer"]["errors"] == []
+        assert json_at(payload, "data", "createShelfViaAltBranchesSerializer", "errors") == []
         in_sql = _branch_batched_visibility_queries(captured)
         assert in_sql, captured.captured_queries
         return in_sql
@@ -13717,9 +14018,9 @@ def test_serializer_m2m_duplicate_alt_branch_pks_still_one_visibility_query() ->
             },
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["createShelfViaAltBranchesSerializer"]["errors"] == []
+    assert json_at(payload, "data", "createShelfViaAltBranchesSerializer", "errors") == []
     assert len(_branch_batched_visibility_queries(captured)) == 1
     shelf = models.Shelf.objects.get(code="BatchShelfDupes")
     assert set(shelf.alt_branches.values_list("pk", flat=True)) == {alt1.pk, alt2.pk}
@@ -13738,9 +14039,9 @@ def test_serializer_m2m_empty_alt_branches_issues_no_visibility_in_query() -> No
             variables={"d": {"code": "EmptyAlts", "branchId": home.pk, "altBranches": []}},
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["createShelfViaAltBranchesSerializer"]["errors"] == []
+    assert json_at(payload, "data", "createShelfViaAltBranchesSerializer", "errors") == []
     assert _branch_batched_visibility_queries(captured) == []
     shelf = models.Shelf.objects.get(code="EmptyAlts")
     assert list(shelf.alt_branches.all()) == []
@@ -13763,9 +14064,9 @@ def test_serializer_save_kwargs_hook_injects_server_side_data_over_http() -> Non
         variables={"d": {"code": "SaveKwargsShelf", "branchId": branch.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfWithSaveKwargs"]
+    result = json_object(payload, "data", "createShelfWithSaveKwargs")
     assert result["errors"] == []
     assert result["result"] == {"code": "SaveKwargsShelf", "topic": "stamped-at-save"}
     assert models.Shelf.objects.filter(
@@ -13798,9 +14099,9 @@ def test_serializer_save_kwargs_naming_a_model_field_is_rejected_over_http() -> 
         variables={"d": {"code": "ModelFieldSaveKwargsShelf", "branchId": branch.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    assert "model field" in payload["errors"][0]["message"]
+    assert "model field" in json_str(payload, "errors", 0, "message")
     assert not models.Shelf.objects.filter(code="ModelFieldSaveKwargsShelf").exists()
 
 
@@ -13829,13 +14130,13 @@ def test_serializer_save_kwargs_rejects_renamed_source_shadow_over_http() -> Non
     )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    assert payload["errors"][0]["path"] == ["createShelfWithRenamedSaveKwargsCollision"]
+    assert json_at(payload, "errors", 0, "path") == ["createShelfWithRenamedSaveKwargsCollision"]
     # The hardened check compares against the ACTUAL validated_data keys (the resolved
     # `source="code"` key), not a reconstruction from the input specs.
-    assert "['code']" in payload["errors"][0]["message"]
-    assert "validated_data" in payload["errors"][0]["message"]
+    assert "['code']" in json_str(payload, "errors", 0, "message")
+    assert "validated_data" in json_str(payload, "errors", 0, "message")
     assert not models.Shelf.objects.filter(
         code__in=("client-value", "server-shadow"),
         branch=branch,
@@ -13865,11 +14166,11 @@ def test_serializer_update_with_select_for_update_over_http() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateBookViaSerializerWithLock"]
+    result = json_object(payload, "data", "updateBookViaSerializerWithLock")
     assert result["errors"] == []
-    assert result["node"]["title"] == "AfterLock"
+    assert json_at(result, "node", "title") == "AfterLock"
     book.refresh_from_db()
     assert book.title == "AfterLock"
 
@@ -13898,9 +14199,9 @@ def test_serializer_update_provided_genres_list_replaces_complete_set_over_http(
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["updateBookGenresViaSerializer"]["errors"] == []
+    assert json_at(payload, "data", "updateBookGenresViaSerializer", "errors") == []
     assert list(book.genres.values_list("name", flat=True)) == ["ReplaceNew"]
 
 
@@ -13927,9 +14228,11 @@ def test_serializer_update_omitted_genres_leaves_relation_unchanged_over_http() 
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["updateBookGenresViaSerializer"]["node"]["title"] == "TitleOnly"
+    assert (
+        json_at(payload, "data", "updateBookGenresViaSerializer", "node", "title") == "TitleOnly"
+    )
     # The omitted M2M is unchanged.
     assert list(book.genres.values_list("name", flat=True)) == ["KeptGenre"]
 
@@ -13967,10 +14270,10 @@ def test_unauthorized_book_genres_update_never_queries_m2m_membership_over_http(
         variables = {"id": book_id, "d": {"title": "DeniedTitle"}}
         with CaptureQueriesContext(connection) as captured:
             response = _post_graphql(mutation, variables=variables)
-        payload = response.json()
+        payload = response_json(response)
         assert payload.get("data") is None, payload
         assert payload.get("errors"), payload
-        assert "Not authorized" in payload["errors"][0]["message"]
+        assert "Not authorized" in json_str(payload, "errors", 0, "message")
         membership_sql = [
             entry["sql"] for entry in captured.captured_queries if through_table in entry["sql"]
         ]
@@ -13982,7 +14285,7 @@ def test_unauthorized_book_genres_update_never_queries_m2m_membership_over_http(
             content_type__app_label="library",
         )
         user.user_permissions.add(perm)
-        user = User.objects.get(pk=user.pk)
+        user = User.objects.get(username="regular_1")
         client = Client()
         client.force_login(user)
         with CaptureQueriesContext(connection) as granted_captured:
@@ -13991,12 +14294,16 @@ def test_unauthorized_book_genres_update_never_queries_m2m_membership_over_http(
                 client=client,
                 variables={"id": book_id, "d": {"title": "AllowedTitle"}},
             )
-        allowed_payload = allowed.json()
+        allowed_payload = response_json(allowed)
         assert "errors" not in allowed_payload, allowed_payload
-        assert allowed_payload["data"]["updateBookGenresViaSerializer"]["errors"] == []
-        assert allowed_payload["data"]["updateBookGenresViaSerializer"]["node"]["title"] == (
-            "AllowedTitle"
-        )
+        assert json_at(allowed_payload, "data", "updateBookGenresViaSerializer", "errors") == []
+        assert json_at(
+            allowed_payload,
+            "data",
+            "updateBookGenresViaSerializer",
+            "node",
+            "title",
+        ) == ("AllowedTitle")
         granted_sqls = [q["sql"] for q in granted_captured.captured_queries]
         through_indices = [i for i, sql in enumerate(granted_sqls) if through_table in sql]
         auth_indices = [
@@ -14030,18 +14337,18 @@ def test_serializer_update_genres_empty_and_duplicates_have_set_semantics_over_h
         mutation,
         variables={"id": book_id, "d": {"genres": [genre_id, genre_id]}},
     )
-    duplicate_payload = duplicate_response.json()
+    duplicate_payload = response_json(duplicate_response)
     assert "errors" not in duplicate_payload, duplicate_payload
-    assert duplicate_payload["data"]["updateBookGenresViaSerializer"]["errors"] == []
+    assert json_at(duplicate_payload, "data", "updateBookGenresViaSerializer", "errors") == []
     assert list(book.genres.values_list("pk", flat=True)) == [genre.pk]
 
     clear_response = _post_graphql(
         mutation,
         variables={"id": book_id, "d": {"genres": []}},
     )
-    clear_payload = clear_response.json()
+    clear_payload = response_json(clear_response)
     assert "errors" not in clear_payload, clear_payload
-    assert clear_payload["data"]["updateBookGenresViaSerializer"]["errors"] == []
+    assert json_at(clear_payload, "data", "updateBookGenresViaSerializer", "errors") == []
     assert not book.genres.exists()
 
 
@@ -14066,12 +14373,20 @@ def test_serializer_update_invalid_or_hidden_genre_preserves_prior_set_over_http
         mutation,
         variables={
             "id": book_id,
-            "d": {"genres": [global_id_for(library_schema.GenreType, hidden.pk + 100_000)]},
+            "d": {
+                "genres": [
+                    global_id_for(library_schema.GenreType, saved_pk(hidden.pk) + 100_000),
+                ],
+            },
         },
     )
-    invalid_result = invalid_response.json()["data"]["updateBookGenresViaSerializer"]
+    invalid_result = json_object(
+        response_json(invalid_response),
+        "data",
+        "updateBookGenresViaSerializer",
+    )
     assert invalid_result["node"] is None
-    assert invalid_result["errors"][0]["field"] == "genres"
+    assert json_at(invalid_result, "errors", 0, "field") == "genres"
     assert list(book.genres.values_list("pk", flat=True)) == [kept.pk]
 
     def _hide_genre(
@@ -14090,9 +14405,13 @@ def test_serializer_update_invalid_or_hidden_genre_preserves_prior_set_over_http
             "d": {"genres": [global_id_for(library_schema.GenreType, hidden.pk)]},
         },
     )
-    hidden_result = hidden_response.json()["data"]["updateBookGenresViaSerializer"]
+    hidden_result = json_object(
+        response_json(hidden_response),
+        "data",
+        "updateBookGenresViaSerializer",
+    )
     assert hidden_result["node"] is None
-    assert hidden_result["errors"][0]["field"] == "genres"
+    assert json_at(hidden_result, "errors", 0, "field") == "genres"
     assert list(book.genres.values_list("pk", flat=True)) == [kept.pk]
 
 
@@ -14126,9 +14445,9 @@ def test_serializer_update_substituted_instance_is_rejected_without_writes_over_
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    assert "`instance` kwarg" in payload["errors"][0]["message"]
+    assert "`instance` kwarg" in json_str(payload, "errors", 0, "message")
     addressed.refresh_from_db()
     victim.refresh_from_db()
     assert addressed.title == "AddressedRow"
@@ -14221,12 +14540,14 @@ def test_serializer_to_field_relation_create_stores_the_target_key_over_http(
         variables={"d": data},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"][shape.mutation]
+    result = json_object(payload, "data", shape.mutation)
     assert result["errors"] == []
     expected = "ToFieldFiction" if value == "genre" else None
-    assert result["node"]["favoriteGenre"] == (None if expected is None else {"name": expected})
+    assert json_at(result, "node", "favoriteGenre") == (
+        None if expected is None else {"name": expected}
+    )
     assert _profile_genre_column(patron) == [expected]
 
 
@@ -14261,11 +14582,11 @@ def test_serializer_to_field_relation_update_stores_the_target_key_over_http(
         variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updatePatronProfileViaSerializer"]
+    result = json_object(payload, "data", "updatePatronProfileViaSerializer")
     assert result["errors"] == []
-    assert result["node"]["secondaryAddress"] == "Suite 2"
+    assert json_at(result, "node", "secondaryAddress") == "Suite 2"
     assert _profile_genre_column(patron) == [expected]
 
 
@@ -14304,9 +14625,9 @@ def test_serializer_to_field_relation_replaced_by_custom_create_is_rejected_over
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert f"the database column for relation {shape.relation!r} holds" in message
     assert "ignored or replaced a validated relation" in message
     assert _profile_genre_column(patron) == []
@@ -14338,9 +14659,9 @@ def test_serializer_to_field_relation_key_repointed_by_validator_is_rejected_ove
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert "'favorite_genre' is not the exact object(s) the field's run_validation" in message
     assert "replaced a visibility-checked relation" in message
     assert _profile_genre_column(patron) == []
@@ -14402,9 +14723,9 @@ def test_model_to_field_relation_update_stores_the_target_key_over_http(
         variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updatePatronProfile"]
+    result = json_object(payload, "data", "updatePatronProfile")
     assert result["errors"] == []
     assert result["node"] == {
         "secondaryAddress": "Suite 3",
@@ -14461,9 +14782,9 @@ def test_form_to_field_relation_update_keeps_an_omitted_genre_over_http(value: s
         variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updatePatronProfileViaForm"]
+    result = json_object(payload, "data", "updatePatronProfileViaForm")
     assert result["errors"] == []
     assert result["node"] == {
         "secondaryAddress": "Suite 4",
@@ -14533,9 +14854,9 @@ def test_form_to_field_relation_update_refuses_an_omitted_dangling_genre_over_ht
         finally:
             models.PatronProfile.objects.filter(patron=patron).update(favorite_genre=None)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updatePatronProfileViaForm"]
+    result = json_object(payload, "data", "updatePatronProfileViaForm")
     updates = [q["sql"] for q in captured if q["sql"].lstrip().upper().startswith("UPDATE")]
     if value in {"genre", "null"}:
         expected = new.name if value == "genre" else None
@@ -14634,9 +14955,9 @@ def test_form_name_keyed_genre_update_refuses_a_genre_named_empty_over_http(
         finally:
             models.PatronProfile.objects.filter(patron=patron).update(favorite_genre=None)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["updatePatronProfileByGenreNameViaForm"] == {
+    assert json_at(payload, "data", "updatePatronProfileByGenreNameViaForm") == {
         "node": None,
         "errors": [{"field": "favoriteGenreId", "messages": [_INVALID_CHOICE]}],
     }
@@ -14697,9 +15018,9 @@ def test_form_name_keyed_genre_update_keeps_or_replaces_the_genre_over_http(valu
                 favorite_genre=None,
             )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["updatePatronProfileByGenreNameViaForm"] == {
+    assert json_at(payload, "data", "updatePatronProfileByGenreNameViaForm") == {
         "node": {
             "secondaryAddress": "Suite 4",
             "favoriteGenre": None if expected is None else {"name": expected},
@@ -14750,9 +15071,9 @@ def test_form_shelf_update_refuses_a_branch_named_empty_over_http(
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(_UPDATE_SHELF_VIA_FORM, variables={"id": shelf.pk, "d": data})
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["updateShelfViaForm"] == {
+    assert json_at(payload, "data", "updateShelfViaForm") == {
         "result": None,
         "errors": [{"field": "branchId", "messages": [_INVALID_CHOICE]}],
     }
@@ -14779,9 +15100,9 @@ def test_form_shelf_update_keeps_or_replaces_the_branch_over_http(value: str) ->
 
     response = _post_graphql(_UPDATE_SHELF_VIA_FORM, variables={"id": shelf.pk, "d": data})
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["updateShelfViaForm"] == {
+    assert json_at(payload, "data", "updateShelfViaForm") == {
         "result": {"code": "EN-4", "branch": {"name": expected.name}},
         "errors": [],
     }
@@ -14800,9 +15121,9 @@ def test_form_shelf_create_refuses_a_branch_named_empty_over_http() -> None:
         variables={"d": {"code": "EN-5", "branchId": empty.pk}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["createShelfViaForm"] == {
+    assert json_at(payload, "data", "createShelfViaForm") == {
         "result": None,
         "errors": [{"field": "branchId", "messages": [_INVALID_CHOICE]}],
     }
@@ -14924,9 +15245,9 @@ def test_model_to_field_relation_update_rejects_a_missing_genre_over_http() -> N
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["updatePatronProfile"] == {
+    assert json_at(payload, "data", "updatePatronProfile") == {
         "node": None,
         "errors": [
             {
@@ -14971,9 +15292,9 @@ def test_create_branch_with_nested_shelves_over_http() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBranchWithNestedShelves"]
+    result = json_object(payload, "data", "createBranchWithNestedShelves")
     assert result["errors"] == []
     # ``BranchType.shelves`` orders by ``-code``, so N2 then N1.
     assert result["result"] == {
@@ -15013,9 +15334,9 @@ def test_nested_shelf_alt_branches_visibility_is_one_batched_query_over_http() -
                 },
             )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        assert payload["data"]["createBranchWithNestedShelves"]["errors"] == []
+        assert json_at(payload, "data", "createBranchWithNestedShelves", "errors") == []
         in_sql = _branch_batched_visibility_queries(captured)
         assert in_sql, captured.captured_queries
         return in_sql
@@ -15050,14 +15371,14 @@ def test_nested_shelf_hidden_alt_branch_is_structured_path_error_over_http() -> 
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBranchWithNestedShelves"]
+    result = json_object(payload, "data", "createBranchWithNestedShelves")
     assert result["result"] is None
-    (err,) = result["errors"]
-    assert err["field"] == "shelves.0.altBranches"
-    assert err["path"] == ["shelves", "0", "altBranches"]
-    assert err["codes"] == ["invalid"]
+    (err,) = json_list(result, "errors")
+    assert json_at(err, "field") == "shelves.0.altBranches"
+    assert json_at(err, "path") == ["shelves", "0", "altBranches"]
+    assert json_at(err, "codes") == ["invalid"]
     # The error envelope committed nothing.
     assert not models.Branch.objects.filter(name="NestedRollback").exists()
     assert not models.Shelf.objects.filter(code="N1", branch__name="NestedRollback").exists()
@@ -15082,14 +15403,14 @@ def test_nested_shelf_validation_error_flattens_to_structured_path_over_http() -
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBranchWithNestedShelves"]
+    result = json_object(payload, "data", "createBranchWithNestedShelves")
     assert result["result"] is None
-    (err,) = result["errors"]
-    assert err["field"] == "shelves.1.code"
-    assert err["path"] == ["shelves", "1", "code"]
-    assert err["messages"] == ["This shelf code is not allowed."]
+    (err,) = json_list(result, "errors")
+    assert json_at(err, "field") == "shelves.1.code"
+    assert json_at(err, "path") == ["shelves", "1", "code"]
+    assert json_at(err, "messages") == ["This shelf code is not allowed."]
     assert not models.Branch.objects.filter(name="NestedBadCode").exists()
 
 
@@ -15122,9 +15443,9 @@ def test_nested_shelf_save_time_error_keys_to_the_item_path_over_http(
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createBranchWithNestedShelves"]
+    result = json_object(payload, "data", "createBranchWithNestedShelves")
     assert result["result"] is None
     assert result["errors"] == [
         {
@@ -15146,10 +15467,10 @@ def _render_gql_type(type_dict: JSONObject) -> str:
     """Render an introspected GraphQL type tree to its SDL string (``String!`` / ``[FieldError!]!``)."""
     kind = type_dict["kind"]
     if kind == "NON_NULL":
-        return _render_gql_type(type_dict["ofType"]) + "!"
+        return _render_gql_type(json_object(type_dict, "ofType")) + "!"
     if kind == "LIST":
-        return "[" + _render_gql_type(type_dict["ofType"]) + "]"
-    return type_dict["name"]
+        return "[" + _render_gql_type(json_object(type_dict, "ofType")) + "]"
+    return json_str(type_dict, "name")
 
 
 def _input_fields_sdl(type_name: str) -> list[tuple[str, str, str | None]]:
@@ -15159,10 +15480,17 @@ def _input_fields_sdl(type_name: str) -> list[tuple[str, str, str | None]]:
         "type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } }",
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    fields = payload["data"]["__type"]["inputFields"]
-    return [(f["name"], _render_gql_type(f["type"]), f["description"]) for f in fields]
+    fields = json_list(payload, "data", "__type", "inputFields")
+    return [
+        (
+            json_str(f, "name"),
+            _render_gql_type(json_object(f, "type")),
+            json_optional_str(f, "description"),
+        )
+        for f in fields
+    ]
 
 
 def _type_fields_sdl(type_name: str) -> list[tuple[str, str, str | None]]:
@@ -15172,10 +15500,17 @@ def _type_fields_sdl(type_name: str) -> list[tuple[str, str, str | None]]:
         "type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } }",
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    fields = payload["data"]["__type"]["fields"]
-    return [(f["name"], _render_gql_type(f["type"]), f["description"]) for f in fields]
+    fields = json_list(payload, "data", "__type", "fields")
+    return [
+        (
+            json_str(f, "name"),
+            _render_gql_type(json_object(f, "type")),
+            json_optional_str(f, "description"),
+        )
+        for f in fields
+    ]
 
 
 def test_golden_sdl_library_schema_hook_serializer_input() -> None:
@@ -15306,10 +15641,10 @@ def test_nested_books_connection_overlap_single_through_join() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
 
-    edges = payload["data"]["allLibraryGenresConnection"]["edges"]
+    edges = json_list(payload, "data", "allLibraryGenresConnection", "edges")
     expected_pages = {
         "Overlap genre 0": ["Overlap-0", "Overlap-1"],
         "Overlap genre 1": ["Overlap-1", "Overlap-2"],
@@ -15317,16 +15652,18 @@ def test_nested_books_connection_overlap_single_through_join() -> None:
     }
     assert len(edges) == 3
     for edge in edges:
-        node = edge["node"]
-        books_conn = node["booksConnection"]
-        titles = [book_edge["node"]["title"] for book_edge in books_conn["edges"]]
+        node = json_object(edge, "node")
+        books_conn = json_object(node, "booksConnection")
+        titles = [
+            json_at(book_edge, "node", "title") for book_edge in json_list(books_conn, "edges")
+        ]
         # Per-parent pk-ordered page - a duplicated join would repeat titles
         # or leak another parent's books into the page.
-        assert titles == expected_pages[node["name"]]
+        assert titles == expected_pages[json_str(node, "name")]
         # Every genre carries >2 books, so the flag (derived from the window's
         # per-partition count) is True; an inflated count stays True, but a
         # partition corrupted by duplicates surfaces above in the titles.
-        assert books_conn["pageInfo"]["hasNextPage"] is True
+        assert json_at(books_conn, "pageInfo", "hasNextPage") is True
 
     # Root genres-connection query + ONE windowed prefetch (never per-parent).
     assert len(captured) == 2
@@ -15374,7 +15711,7 @@ def test_nested_genres_connection_overlap_single_through_join() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
 
     expected_pages = {
@@ -15382,16 +15719,18 @@ def test_nested_genres_connection_overlap_single_through_join() -> None:
         "Fledgling": ["Shared genre 1", "Shared genre 2"],
         "Survivor": ["Shared genre 0", "Shared genre 2"],
     }
-    books = payload["data"]["allLibraryBooks"]
+    books = json_list(payload, "data", "allLibraryBooks")
     assert len(books) == 3
     for book in books:
-        genres_conn = book["genresConnection"]
-        names = [genre_edge["node"]["name"] for genre_edge in genres_conn["edges"]]
-        assert names == expected_pages[book["title"]]
+        genres_conn = json_object(book, "genresConnection")
+        names = [
+            json_at(genre_edge, "node", "name") for genre_edge in json_list(genres_conn, "edges")
+        ]
+        assert names == expected_pages[json_str(book, "title")]
         # Every book carries exactly 3 genres; a duplicated join would report
         # an inflated multiple here.
         assert genres_conn["totalCount"] == 3
-        assert genres_conn["pageInfo"]["hasNextPage"] is True
+        assert json_at(genres_conn, "pageInfo", "hasNextPage") is True
 
     # Root books-list query + ONE windowed prefetch.
     assert len(captured) == 2
@@ -15435,17 +15774,24 @@ def test_nested_cheap_page_window_omits_total_count_annotation() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
 
-    edges = payload["data"]["allLibraryGenresConnection"]["edges"]
+    edges = json_list(payload, "data", "allLibraryGenresConnection", "edges")
     assert len(edges) == 3
     for index, edge in enumerate(edges):
-        books_conn = edge["node"]["booksConnection"]
-        titles = [book_edge["node"]["title"] for book_edge in books_conn["edges"]]
+        books_conn = json_object(edge, "node", "booksConnection")
+        titles = [
+            json_at(book_edge, "node", "title") for book_edge in json_list(books_conn, "edges")
+        ]
         assert titles == [f"Cheap-{index}-a", f"Cheap-{index}-b"]
-        assert books_conn["pageInfo"]["hasPreviousPage"] is False
-        assert books_conn["pageInfo"]["startCursor"] == books_conn["edges"][0]["cursor"]
+        assert json_at(books_conn, "pageInfo", "hasPreviousPage") is False
+        assert json_at(books_conn, "pageInfo", "startCursor") == json_at(
+            books_conn,
+            "edges",
+            0,
+            "cursor",
+        )
 
     # Two queries (root + one window), and the window SQL carries the row
     # number but NOT the count aggregate.
@@ -15495,21 +15841,21 @@ def test_nested_ambiguous_empty_served_from_marker_in_fixed_queries(args: str) -
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query)
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
 
     overshot = "after" in args
-    edges = payload["data"]["allLibraryGenresConnection"]["edges"]
+    edges = json_list(payload, "data", "allLibraryGenresConnection", "edges")
     assert len(edges) == 3
     for edge in edges:
-        books_conn = edge["node"]["booksConnection"]
+        books_conn = json_object(edge, "node", "booksConnection")
         assert books_conn["edges"] == []
         # Pipeline-parity flags (pinned against ListConnection in
         # tests/test_relay_connection.py): first: 0 -> a next page exists
         # (3 books past position 0); overshot after -> a previous page exists
         # (start > 0) and nothing follows.
-        assert books_conn["pageInfo"]["hasNextPage"] is (not overshot)
-        assert books_conn["pageInfo"]["hasPreviousPage"] is overshot
+        assert json_at(books_conn, "pageInfo", "hasNextPage") is (not overshot)
+        assert json_at(books_conn, "pageInfo", "hasPreviousPage") is overshot
 
     # Root genres-connection + ONE window query - never 2 + parent_count.
     assert len(captured) == 2
@@ -15539,7 +15885,7 @@ def test_library_card_projection_survives_select_related_relation() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryCardsProjected": [
                 {"barcode": "CARD-1", "patron": {"name": "Ada"}},
@@ -15574,7 +15920,7 @@ def test_library_card_deferred_projection_survives_select_related() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryCardsDeferred": [
                 {"barcode": "CARD-1", "patron": {"name": "Ada"}},
@@ -15697,7 +16043,7 @@ def _post_hooked_holder(
             response = _post_holder(schema, document)
     finally:
         registry.clear()
-    payload: JSONObject = response.json()
+    payload: JSONObject = response_json(response)
     assert payload.get("errors") is None, payload
     return payload, [entry["sql"] for entry in captured.captured_queries]
 
@@ -15732,9 +16078,9 @@ async def test_library_root_hook_projection_loads_the_selection_on_async(method:
         _CURRENT["schema"] = None
         registry.clear()
 
-    payload = result.response.json()
+    payload = response_json(result.response)
     assert payload.get("errors") is None, payload
-    assert sorted(genre["name"] for genre in payload["data"]["genres"]) == [
+    assert sorted(json_str(genre, "name") for genre in json_list(payload, "data", "genres")) == [
         "Mystery",
         "Speculative",
     ]
@@ -15785,8 +16131,8 @@ def test_library_child_hook_projection_unions_with_the_selection(
         ),
     )
 
-    [shelf] = payload["data"]["shelves"]
-    assert sorted(str(book["subtitle"]) for book in shelf["books"]) == [
+    [shelf] = json_list(payload, "data", "shelves")
+    assert sorted(str(json_at(book, "subtitle")) for book in json_list(shelf, "books")) == [
         "None",
         "Part 0",
         "Part 1",
@@ -15816,8 +16162,8 @@ def test_library_child_hook_prefetch_meets_the_planned_prefetch() -> None:
         lambda: _hooked_holder_schema(books=lambda queryset: queryset.prefetch_related("loans")),
     )
 
-    [shelf] = payload["data"]["shelves"]
-    assert sorted(shelf["books"], key=lambda book: book["title"]) == [
+    [shelf] = json_list(payload, "data", "shelves")
+    assert sorted(json_list(shelf, "books"), key=lambda book: json_str(book, "title")) == [
         {"title": "Kindred", "loans": [{"note": "first checkout"}]},
         {"title": "Volume 0", "loans": [{"note": "loan 0"}]},
         {"title": "Volume 1", "loans": [{"note": "loan 1"}]},
@@ -15912,9 +16258,9 @@ def test_library_skip_relation_keeps_its_link_column_beside_a_sibling_scalar() -
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql("{ allLibraryLoans { note patron { name } } }")
 
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors") is None, payload
-    assert payload["data"]["allLibraryLoans"] == [
+    assert json_at(payload, "data", "allLibraryLoans") == [
         {"note": "first checkout", "patron": {"name": "Ada"}},
         {"note": "loan 0", "patron": {"name": "Ada"}},
         {"note": "loan 1", "patron": {"name": "Ada"}},
@@ -15938,7 +16284,7 @@ def test_library_typename_only_reverse_one_to_one_join_projects_its_key() -> Non
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql("{ allLibraryPatrons { name card { __typename } } }")
 
-    assert response.json() == {
+    assert response_json(response) == {
         "data": {
             "allLibraryPatrons": [
                 {"name": "Ada", "card": {"__typename": "MembershipCardType"}},
@@ -15986,7 +16332,8 @@ def _unplanned_relation_holder_schema() -> strawberry.Schema:
             name = "HolderOwnBookType"
 
     class HolderOwnLoanType(DjangoType):
-        @strawberry.field(graphql_type=HolderOwnBookType)
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=HolderOwnBookType)  # pyright: ignore[reportAny]
         @staticmethod
         def book(root: strawberry.Parent[models.Loan]) -> models.Book:
             """The loan's book, resolved by the consumer."""
@@ -16082,7 +16429,7 @@ def test_library_unplanned_relations_keep_their_link_columns(
     finally:
         registry.clear()
 
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors") is None, payload
     found = re.findall(rf'"{leaf}": "([^"]*)"', json.dumps(payload["data"]))
     assert sorted(cast("list[str]", found)) == leaves
@@ -16111,12 +16458,12 @@ async def test_library_skip_non_pk_link_resolves_on_async() -> None:
         _CURRENT["schema"] = None
         registry.clear()
 
-    payload = result.response.json()
+    payload = response_json(result.response)
     assert payload.get("errors") is None, payload
     assert sorted(
-        profile["postalCode"]
-        for genre in payload["data"]["genres"]
-        for profile in genre["favoringProfiles"]
+        json_str(profile, "postalCode")
+        for genre in json_list(payload, "data", "genres")
+        for profile in json_list(genre, "favoringProfiles")
     ) == ["02101", "02139"]
 
 
@@ -16190,7 +16537,7 @@ def test_library_consumer_join_survives_the_optimizers_projection(
         response = _post_graphql(query)
 
     assert response.status_code == 200
-    assert response.json() == {"data": data}
+    assert response_json(response) == {"data": data}
     assert len(captured) == query_count
     assert joined_column in captured[0]["sql"]
 
@@ -16227,19 +16574,19 @@ def test_nested_connection_last_zero_serves_the_first_zero_page() -> None:
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(query % "last")
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    edges = payload["data"]["allLibraryGenresConnection"]["edges"]
+    edges = json_list(payload, "data", "allLibraryGenresConnection", "edges")
     assert len(edges) == 2
     for edge in edges:
-        assert edge["node"]["booksConnection"] == {
+        assert json_at(edge, "node", "booksConnection") == {
             "edges": [],
             "pageInfo": {"hasNextPage": True, "hasPreviousPage": False},
         }
     # Root genres connection + ONE window query - never one per genre.
     assert len(captured) == 2
     assert "_dst_row_number" in captured[1]["sql"]
-    assert payload == _post_graphql(query % "first").json()
+    assert payload == response_json(_post_graphql(query % "first"))
 
 
 def _seed_branch_notes() -> None:
@@ -16293,9 +16640,9 @@ def test_library_prefetch_child_of_proxy_targeted_relation_resolves_over_http(fi
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"][field] == [
+    assert json_at(payload, "data", field) == [
         {"body": "shelving audit", "branch": {"name": "Proxy Central", "city": "Boston"}},
         {"body": "reopened after repairs", "branch": {"name": "Proxy Central", "city": "Boston"}},
     ]
@@ -16331,23 +16678,23 @@ def test_library_prefetch_child_over_unrelated_table_is_refused_over_http() -> N
     response = _post_graphql(query)
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None, payload
-    assert [error["path"] for error in payload["errors"]] == [
+    assert [json_at(error, "path") for error in json_list(payload, "errors")] == [
         ["allLibraryBranchNotesOverUnrelatedChild"],
     ]
     # The shipped error policy masks the seal's own detail; what the default
     # wire shows is that the field failed closed with no rows.
-    assert payload["errors"][0]["message"] == "An unexpected error occurred."
+    assert json_at(payload, "errors", 0, "message") == "An unexpected error occurred."
 
     # Under error policy debug pass-through, the seal's unmasked refusal wording
     # travels over the wire.
     with override_settings(**_ERROR_POLICY_PASS_THROUGH):
         debug_response = _post_graphql(query)
     assert debug_response.status_code == 200
-    debug_payload = debug_response.json()
+    debug_payload = response_json(debug_response)
     assert debug_payload["data"] is None, debug_payload
-    debug_message = debug_payload["errors"][0]["message"]
+    debug_message = json_str(debug_payload, "errors", 0, "message")
     assert "prefetch 'branch' queryset is over Genre rows" in debug_message
     assert "relation targets ProxyBranch rows" in debug_message
     assert (
@@ -16363,11 +16710,15 @@ def test_library_prefetch_child_over_unrelated_table_is_refused_over_http() -> N
 
 def _enum_member_names(enum_name: str) -> list[str]:
     """Return a generated enum's member names in declaration order, via introspection."""
-    payload = _post_graphql(
-        f'query {{ __type(name: "{enum_name}") {{ enumValues {{ name }} }} }}',
-    ).json()
+    payload = response_json(
+        _post_graphql(
+            f'query {{ __type(name: "{enum_name}") {{ enumValues {{ name }} }} }}',
+        ),
+    )
     assert "errors" not in payload, payload
-    return [value["name"] for value in payload["data"]["__type"]["enumValues"]]
+    return [
+        json_str(value, "name") for value in json_list(payload, "data", "__type", "enumValues")
+    ]
 
 
 _SHELF_CONDITIONS = """
@@ -16598,33 +16949,43 @@ def test_shelf_condition_empty_label_is_no_member_on_filter_or_write_over_http()
     models.Shelf.objects.create(code="E-blank", branch=branch)
     models.Shelf.objects.create(code="E-good", branch=branch, condition="good")
 
-    filtered = _post_graphql(
-        _SHELF_CONDITIONS,
-        variables={"filter": {"condition": {"exact": "_None"}}},
-    ).json()
+    filtered = response_json(
+        _post_graphql(
+            _SHELF_CONDITIONS,
+            variables={"filter": {"condition": {"exact": "_None"}}},
+        ),
+    )
     assert filtered["data"] is None, filtered
-    assert (
-        "Value '_None' does not exist in 'ShelfTypeConditionEnum' enum."
-        in filtered["errors"][0]["message"]
+    assert "Value '_None' does not exist in 'ShelfTypeConditionEnum' enum." in json_str(
+        filtered,
+        "errors",
+        0,
+        "message",
     ), filtered
 
-    written = _post_graphql(
-        "mutation($d: ShelfAlt_ubranchesBranchCodeConditionInput!) { createShelf(data: $d) { "
-        "result { code } errors { field messages } } }",
-        variables={"d": {"code": "E-none", "branchId": branch.pk, "condition": "_None"}},
-    ).json()
+    written = response_json(
+        _post_graphql(
+            "mutation($d: ShelfAlt_ubranchesBranchCodeConditionInput!) { createShelf(data: $d) { "
+            "result { code } errors { field messages } } }",
+            variables={"d": {"code": "E-none", "branchId": branch.pk, "condition": "_None"}},
+        ),
+    )
     assert written["data"] is None, written
-    assert (
-        "Value '_None' does not exist in 'ShelfTypeConditionEnum' enum."
-        in written["errors"][0]["message"]
+    assert "Value '_None' does not exist in 'ShelfTypeConditionEnum' enum." in json_str(
+        written,
+        "errors",
+        0,
+        "message",
     ), written
     assert not models.Shelf.objects.filter(code="E-none").exists()
 
-    blank = _post_graphql(
-        _SHELF_CONDITIONS,
-        variables={"filter": {"condition": {"exact": "BLANK"}}},
-    ).json()
-    blank_codes = {row["code"] for row in blank["data"]["allLibraryShelves"]}
+    blank = response_json(
+        _post_graphql(
+            _SHELF_CONDITIONS,
+            variables={"filter": {"condition": {"exact": "BLANK"}}},
+        ),
+    )
+    blank_codes = {json_at(row, "code") for row in json_list(blank, "data", "allLibraryShelves")}
     assert "E-blank" in blank_codes, blank
     assert "E-good" not in blank_codes, blank
 
@@ -16672,11 +17033,11 @@ def _create_condition_shelves() -> None:
     models.Shelf.objects.create(code="L-worn", branch=branch, condition="worn")
 
 
-def _shelf_codes(variables: JSONObject) -> list[str]:
+def _shelf_codes(variables: Mapping[str, object]) -> list[str]:
     """POST ``_SHELF_CONDITIONS`` with ``variables`` and return the matching shelf codes."""
-    payload = _post_graphql(_SHELF_CONDITIONS, variables=variables).json()
+    payload = response_json(_post_graphql(_SHELF_CONDITIONS, variables=variables))
     assert "errors" not in payload, payload
-    return [row["code"] for row in payload["data"]["allLibraryShelves"]]
+    return [json_str(row, "code") for row in json_list(payload, "data", "allLibraryShelves")]
 
 
 @pytest.mark.parametrize(
@@ -16790,9 +17151,9 @@ def test_shelf_condition_blank_writes_empty_string_through_every_write_flavor_ov
                 variables={"d": {"code": code, "branchId": branch.pk, "condition": member}},
             )
             assert response.status_code == 200
-            payload = response.json()
+            payload = response_json(response)
             assert "errors" not in payload, payload
-            result = payload["data"][field]
+            result = json_object(payload, "data", field)
             assert result["errors"] == [], (field, member)
             assert result["result"] == {"code": code, "condition": member}
             assert models.Shelf.objects.get(code=code).condition == stored
@@ -16820,9 +17181,9 @@ def test_serializer_only_choice_allow_blank_writes_blank_over_http() -> None:
         variables={"d": {"code": "PriorityBlank", "branchId": branch.pk, "priority": "BLANK"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaMetadataSerializer"]
+    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "PriorityBlank", "topic": "priority:"}
 
@@ -16845,9 +17206,9 @@ def test_serializer_list_field_nullable_child_round_trips_null_element_over_http
         variables={"d": {"code": "TagsShelf", "branchId": branch.pk, "tags": ["a", None]}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createShelfViaMetadataSerializer"]
+    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "TagsShelf", "topic": 'tags:["a", null]'}
 
@@ -16880,9 +17241,9 @@ def test_update_shelf_condition_writes_blank_over_http() -> None:
         variables={"id": str(shelf.pk), "d": {"condition": "BLANK"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateShelfCondition"]
+    result = json_object(payload, "data", "updateShelfCondition")
     assert result["errors"] == []
     assert result["result"] == {"code": "U-worn", "condition": "BLANK"}
     shelf.refresh_from_db()

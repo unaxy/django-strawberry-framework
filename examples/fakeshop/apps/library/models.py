@@ -49,6 +49,9 @@ if TYPE_CHECKING:
 class TaggedItem(models.Model):
     """A generic tag attached to any library-domain object."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     tag: _Slug = models.SlugField()
     content_type: _FK[ContentType] = models.ForeignKey(
         ContentType,
@@ -76,6 +79,9 @@ class TaggedItem(models.Model):
 
 class Branch(models.Model):
     """A physical library branch that owns shelves."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     name: _Text = models.TextField(unique=True)
     city: _Text = models.TextField(blank=True, default="")
@@ -141,6 +147,9 @@ class BranchNote(models.Model):
     relation declared to a proxy is the shape that distinguishes them.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     branch: _FK[ProxyBranch] = models.ForeignKey(
         ProxyBranch,
         related_name="notes",
@@ -155,6 +164,9 @@ class BranchNote(models.Model):
 
 class Shelf(models.Model):
     """A shelf inside a branch."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     class Condition(models.TextChoices):
         # ``__empty__`` adds a ``(None, "Unassessed")`` pair to ``.choices``: the label of the
@@ -235,6 +247,9 @@ class ShelfLabel(models.Model):
     ``shelf`` the way Django's ``order_by("shelf")`` does, by both carriers.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     text: _Text = models.TextField()
     branch: _FK[Branch] = models.ForeignKey(
         Branch,
@@ -264,6 +279,9 @@ class ShelfLabel(models.Model):
 class Genre(models.Model):
     """A genre used to group books."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     name: _Text = models.TextField(unique=True)
     # Reverse accessor Django adds at class creation, declared for the type checker.
     books: ManyRelatedManager[Book]
@@ -275,6 +293,9 @@ class Genre(models.Model):
 
 class Book(models.Model):
     """A shelved book with circulation state and genres."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     class CirculationStatus(models.TextChoices):
         AVAILABLE = "available", "Available"
@@ -330,6 +351,9 @@ class Book(models.Model):
 class Patron(models.Model):
     """A library patron who can borrow books."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     name: _Text = models.TextField(unique=True)
     email: _Text = models.TextField(blank=True, default="")
     # Signed 64-bit counter exercising the package's ``BigIntegerField -> BigInt``
@@ -351,6 +375,9 @@ class Patron(models.Model):
 class MembershipCard(models.Model):
     """One-to-one membership card for a patron."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     patron: _OneToOne[Patron] = models.OneToOneField(
         Patron,
         related_name="card",
@@ -365,6 +392,9 @@ class MembershipCard(models.Model):
 
 class Periodical(models.Model):
     """A periodical whose issues paginate with keyset (value) cursors."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     name: _Text = models.TextField(unique=True)
 
@@ -385,6 +415,9 @@ class Issue(models.Model):
     cursor-decode coverage: a cursor minted under staff visibility replays
     for anonymous viewers without leaking embargoed rows).
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     periodical: _FK[Periodical] = models.ForeignKey(
         Periodical,
@@ -419,6 +452,9 @@ class LoanQuerySet(models.QuerySet["Loan"]):
 
 class Loan(models.Model):
     """A checkout record connecting a patron to a book."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     # ``as_manager()`` keeps this project-only queryset out of migration state while
     # exercising the public Django manager shape through every real loan relation.
@@ -461,6 +497,9 @@ class Publisher(models.Model):
     join to the publisher row even when only the id is selected.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     name: _Text = models.TextField(unique=True)
     house_code: _Text = models.TextField(unique=True)
 
@@ -480,6 +519,9 @@ class Edition(models.Model):
     same digit boundary on a plain scalar; ``publisher_2`` is the second
     house on a jointly issued edition, carrying it on a relation.
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. It is the row's ``isbn_13``.
+    pk: str
 
     isbn_13: _Text = models.TextField(primary_key=True)
     isbn_10: _Text = models.TextField(blank=True, default="")
@@ -510,6 +552,9 @@ class Printing(models.Model):
     relation carries a ``<word>_<digit>`` accessor that a nested connection
     over it must resolve before the window can be planned.
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     edition: _FK[Edition] = models.ForeignKey(
         Edition,
@@ -562,6 +607,9 @@ class PatronProfile(models.Model):
     and the join it needs cannot be skipped.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     patron: _OneToOne[Patron] = models.OneToOneField(
         Patron,
         related_name="profile",
@@ -602,6 +650,9 @@ class AnnotationManager(models.Manager["Annotation"]):
 class Annotation(models.Model):
     """A patron's note on a page, read through their profile."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     objects = AnnotationManager()
 
     profile: _FK[PatronProfile] = models.ForeignKey(
@@ -625,6 +676,9 @@ class Distributor(models.Model):
     relation ``consignmentItems`` carries the same shape on a relation.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     displayName: _Text = models.TextField(unique=True)  # noqa: N815
 
     # Reverse accessor Django adds at class creation, declared for the type checker.
@@ -643,6 +697,9 @@ class Consignment(models.Model):
     published spelling.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     label: _Text = models.TextField()
     distributorRef: _FK[Distributor] = models.ForeignKey(  # noqa: N815
         Distributor,
@@ -657,6 +714,9 @@ class Consignment(models.Model):
 
 class TitledEntry(models.Model):
     """Abstract base for catalogue records listed alphabetically by title."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     title: _Text = models.TextField()
 
@@ -711,6 +771,9 @@ class Venue(models.Model):
     name is the bare model name. ``lead_ticket`` points back at ``RepairTicket``,
     closing a nullable foreign-key cycle between the two models.
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     name: _Text = models.TextField()
     opened_on: _NullDate = models.DateField(null=True, blank=True)
@@ -777,6 +840,9 @@ class RepairTicket(models.Model):
     ``Meta.ordering``, so that accessor carries no default order.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     code: _Text = models.TextField(unique=True)
     venue: _FK[Venue] = models.ForeignKey(
         Venue,
@@ -795,6 +861,9 @@ class VenueBadge(models.Model):
     is the default ``venuebadge``.
     """
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     code: _Text = models.TextField(unique=True)
     venue: _OneToOne[Venue] = models.OneToOneField(
         Venue,
@@ -812,6 +881,9 @@ class VenueSponsor(models.Model):
     ``venues`` declares no ``related_name``, so a venue reaches its sponsors
     through the default ``venuesponsor_set`` accessor.
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     name: _Text = models.TextField(unique=True)
     venues: models.ManyToManyField[Venue, models.Model] = models.ManyToManyField(
@@ -855,6 +927,9 @@ class VisibleBranch(Branch):
 class BranchSignage(models.Model):
     """A sign mounted at a branch, declared against the filtering ``VisibleBranch`` proxy."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     code: _Text = models.TextField(unique=True)
     branch: _FK[VisibleBranch] = models.ForeignKey(
         VisibleBranch,
@@ -879,6 +954,9 @@ class CirculationDesk(models.Model):
     single-column forward relations; every other kind is reached through a join
     table, a pair of columns, or the other model's column.
     """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     name: _Text = models.TextField(unique=True)
     branch: _FK[Branch] = models.ForeignKey(
@@ -921,6 +999,9 @@ class CirculationDesk(models.Model):
 class DeskShift(models.Model):
     """A staffed shift at a circulation desk, reached from the desk as ``children``."""
 
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
     name: _Text = models.TextField()
     desk: _FK[CirculationDesk] = models.ForeignKey(
         CirculationDesk,
@@ -935,6 +1016,9 @@ class DeskShift(models.Model):
 
 class DeskProfile(models.Model):
     """A circulation desk's service profile, reached from the desk as ``profile``."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
 
     code: _Text = models.TextField(unique=True)
     desk: _OneToOne[CirculationDesk] = models.OneToOneField(

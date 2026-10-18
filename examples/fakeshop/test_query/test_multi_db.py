@@ -87,7 +87,6 @@ if os.environ.get("FAKESHOP_SHARDED") != "1":
 
 import strawberry
 from apps.library import models
-from django.conf import settings
 from django.db import connections
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
@@ -97,6 +96,13 @@ from django.urls import clear_url_caches, path
 from graphql_client import (
     JSONObject,
     graphql_payload,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    read_attr,
+    saved_pk,
 )
 from graphql_client import (
     assert_graphql_success as _graphql_data,
@@ -212,7 +218,7 @@ def test_post_orderset_routing_mismatch_rejected_on_sharded_db() -> None:
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
-        MIDDLEWARE=[entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
+        MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
         clear_url_caches()
         try:
@@ -222,7 +228,7 @@ def test_post_orderset_routing_mismatch_rejected_on_sharded_db() -> None:
 
     assert payload["data"] is None
     assert "errors" in payload
-    err_msg = payload["errors"][0]["message"]
+    err_msg = json_str(payload, "errors", 0, "message")
     assert "apply_sync changed database routing intent" in err_msg
     assert "expected db='shard_b'" in err_msg
     assert "got db='default'" in err_msg
@@ -287,7 +293,7 @@ def test_post_orderset_routing_mismatch_rejected_on_connection_field() -> None:
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
-        MIDDLEWARE=[entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
+        MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
         clear_url_caches()
         try:
@@ -297,7 +303,7 @@ def test_post_orderset_routing_mismatch_rejected_on_connection_field() -> None:
 
     assert payload["data"] is None
     assert "errors" in payload
-    err_msg = payload["errors"][0]["message"]
+    err_msg = json_str(payload, "errors", 0, "message")
     assert "apply_sync changed database routing intent" in err_msg
     assert "expected db='shard_b'" in err_msg
     assert "got db='default'" in err_msg
@@ -362,7 +368,7 @@ def test_post_orderset_hints_routing_mismatch_rejected_on_sharded_db() -> None:
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
-        MIDDLEWARE=[entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
+        MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
         clear_url_caches()
         try:
@@ -372,7 +378,7 @@ def test_post_orderset_hints_routing_mismatch_rejected_on_sharded_db() -> None:
 
     assert payload["data"] is None
     assert "errors" in payload
-    err_msg = payload["errors"][0]["message"]
+    err_msg = json_str(payload, "errors", 0, "message")
     assert "apply_sync changed database routing intent" in err_msg
     assert "expected db=None, hints={'tenant': 1}" in err_msg
     assert "got db=None, hints={'tenant': 2}" in err_msg
@@ -447,7 +453,7 @@ def test_post_orderset_in_place_routing_mutation_rejected_on_sharded_db() -> Non
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
-        MIDDLEWARE=[entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
+        MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
         clear_url_caches()
         try:
@@ -460,7 +466,7 @@ def test_post_orderset_in_place_routing_mutation_rejected_on_sharded_db() -> Non
             clear_url_caches()
 
     assert payload["data"] is None
-    err_msg = payload["errors"][0]["message"]
+    err_msg = json_str(payload, "errors", 0, "message")
     assert "apply_sync changed database routing intent" in err_msg
     assert "expected db='shard_b', hints={'tenant': 1}" in err_msg
     assert "got db='default', hints={'tenant': 2}" in err_msg
@@ -562,7 +568,7 @@ def test_post_orderset_equal_but_distinct_hint_token_rejected_under_identity_rou
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
-        MIDDLEWARE=[entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
+        MIDDLEWARE=middleware_without_debug_toolbar(),
         DATABASE_ROUTERS=[_IdentitySensitiveRouter()],
     ):
         clear_url_caches()
@@ -580,11 +586,11 @@ def test_post_orderset_equal_but_distinct_hint_token_rejected_under_identity_rou
             clear_url_caches()
 
     assert "errors" not in control, control
-    assert control["data"]["branchesTenant"] == [{"name": "Branch-ShardB"}]
+    assert json_at(control, "data", "branchesTenant") == [{"name": "Branch-ShardB"}]
     assert len(_branch_sql(control_shard_ctx.captured_queries)) == 1
 
     assert rejected["data"] is None
-    err_msg = rejected["errors"][0]["message"]
+    err_msg = json_str(rejected, "errors", 0, "message")
     assert "apply_sync changed database routing intent" in err_msg
     assert "expected db=None, hints={'tenant': 'tenant-a'}" in err_msg
     assert "got db=None, hints={'tenant': 'tenant-a'}" in err_msg
@@ -698,7 +704,7 @@ def test_post_orderset_mutable_hint_cannot_reroute_the_completed_read(
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
-        MIDDLEWARE=[entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
+        MIDDLEWARE=middleware_without_debug_toolbar(),
         DATABASE_ROUTERS=[_NestedTenantRouter()],
     ):
         clear_url_caches()
@@ -712,7 +718,7 @@ def test_post_orderset_mutable_hint_cannot_reroute_the_completed_read(
             clear_url_caches()
 
     assert "errors" not in payload, payload
-    assert payload["data"]["branchesTenant"] == [{"name": "Branch-ShardB"}]
+    assert json_at(payload, "data", "branchesTenant") == [{"name": "Branch-ShardB"}]
     assert len(_branch_sql(shard_ctx.captured_queries)) == 1
     assert _branch_sql(default_ctx.captured_queries) == []
     # The override really did change what a late resolution would have answered.
@@ -736,7 +742,8 @@ def _build_test_schema(_reload_project_schema_for_acceptance_tests: None) -> Ite
     # The dependency ensures the read runs after that reload.
     @strawberry.type
     class _MultiDbTestQuery:
-        @strawberry.field(graphql_type=list[library_schema.BookType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[library_schema.BookType])  # pyright: ignore[reportAny]
         def books_on_shard_b(self) -> QuerySet[models.Book]:
             return models.Book.objects.using("shard_b").select_related(
                 "shelf__branch",
@@ -772,7 +779,8 @@ def _build_debug_test_schema(_reload_project_schema_for_acceptance_tests: None) 
 
     @strawberry.type
     class _MultiDbDebugTestQuery:
-        @strawberry.field(graphql_type=list[library_schema.BookType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[library_schema.BookType])  # pyright: ignore[reportAny]
         def books_on_shard_b(self) -> QuerySet[models.Book]:
             return models.Book.objects.using("shard_b").select_related(
                 "shelf__branch",
@@ -806,7 +814,8 @@ def _build_loan_filter_test_schema(
 
     @strawberry.type
     class _LoanFilterShardQuery:
-        @strawberry.field(graphql_type=list[library_schema.LoanType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[library_schema.LoanType])  # pyright: ignore[reportAny]
         def loans_on_shard_b(
             self,
             info: Info[object, object],
@@ -885,7 +894,7 @@ def test_using_shard_b_resolver_returns_rows_seeded_on_shard_b() -> None:
         finally:
             clear_url_caches()
 
-    titles = {b["title"] for b in data["booksOnShardB"]}
+    titles = {json_at(b, "title") for b in json_list(data, "booksOnShardB")}
     assert titles == {"A", "B"}
 
 
@@ -906,7 +915,7 @@ def test_cross_shard_isolation_default_rows_not_visible_via_shard_b_resolver() -
         finally:
             clear_url_caches()
 
-    titles = {b["title"] for b in data["booksOnShardB"]}
+    titles = {json_at(b, "title") for b in json_list(data, "booksOnShardB")}
     assert titles == {"shard-b-only"}
     assert "default-only" not in titles  # explicit negative pin
 
@@ -946,12 +955,14 @@ def test_debug_extension_captures_shard_b_alias_rows() -> None:
             clear_url_caches()
 
     assert res.data is not None
-    assert [book["title"] for book in res.data["booksOnShardB"]] == ["DebugShard"]
-    payload = (res.extensions or {})["debug"]
-    shard_rows = [row for row in payload["sql"] if row["alias"] == "shard_b"]
+    assert [json_at(book, "title") for book in json_list(res.data, "booksOnShardB")] == [
+        "DebugShard",
+    ]
+    payload = json_object(res.extensions or {}, "debug")
+    shard_rows = [row for row in json_list(payload, "sql") if json_at(row, "alias") == "shard_b"]
     assert shard_rows, payload["sql"]
-    assert shard_rows[0]["vendor"] == connections["shard_b"].vendor
-    assert shard_rows[0]["isSelect"] is True
+    assert json_at(shard_rows, 0, "vendor") == connections["shard_b"].vendor
+    assert json_at(shard_rows, 0, "isSelect") is True
     assert payload["exceptions"] == []
     for database_connection in connections.all():
         assert database_connection.force_debug_cursor is prior_flags[database_connection.alias]
@@ -994,7 +1005,11 @@ def _seed_loan_relation_graph_on_shard_b() -> dict[str, int]:
         patron=patron_c,
         note="checkout",
     )
-    return {"relation_a": relation_a.pk, "relation_b": relation_b.pk, "unrelated": unrelated.pk}
+    return {
+        "relation_a": saved_pk(relation_a.pk),
+        "relation_b": saved_pk(relation_b.pk),
+        "unrelated": saved_pk(unrelated.pk),
+    }
 
 
 @pytest.mark.usefixtures("_build_loan_filter_test_schema")
@@ -1034,7 +1049,7 @@ def test_row_preserving_relational_leaf_predicate_executes_on_shard_b_alias() ->
 
     # Row-preserving: exactly both shared-book loans, id-ordered, each once.
     assert res.data is not None
-    assert [loan["id"] for loan in res.data["loansOnShardB"]] == [
+    assert [json_at(loan, "id") for loan in json_list(res.data, "loansOnShardB")] == [
         pks["relation_a"],
         pks["relation_b"],
     ]
@@ -1085,7 +1100,7 @@ class _ProductsWriteToShardBRouter:
         # pipeline's pinning must override.
         instance = hints.get("instance")
         instance_db = getattr(getattr(instance, "_state", None), "db", None)
-        if instance_db is not None:
+        if isinstance(instance_db, str):
             return instance_db
         return "default"
 
@@ -1133,7 +1148,7 @@ def _login_products_writer(*codenames: str) -> Client:
             Permission.objects.get(codename=codename, content_type__app_label="products"),
         )
     client = Client()
-    client.force_login(User.objects.get(pk=user.pk))
+    client.force_login(User.objects.get(pk=read_attr(user, "pk")))
     return client
 
 
@@ -1180,11 +1195,11 @@ def test_mutation_write_pins_locate_write_and_refetch_to_the_write_alias() -> No
 
     assert res.data is not None
 
-    payload = res.data["updateItem"]
+    payload = json_object(res.data, "updateItem")
     assert payload["errors"] == []
-    assert payload["node"]["name"] == "pinned-write"
+    assert json_at(payload, "node", "name") == "pinned-write"
     # The re-fetch and its relation came from shard_b (the write alias)...
-    assert payload["node"]["category"]["name"] == "pin-category-shard_b-90001"
+    assert json_at(payload, "node", "category", "name") == "pin-category-shard_b-90001"
     # ...the shard_b twin was written, and the default twin never touched.
     assert product_models.Item.objects.using("shard_b").get(pk=90001).name == "pinned-write"
     assert product_models.Item.objects.using("default").get(pk=90001).name == "pin-item-default"
@@ -1309,7 +1324,10 @@ def test_mutation_validation_envelope_rolls_back_on_the_write_alias() -> None:
         try:
             res = TestClient(client=client).query(
                 _UPDATE_ITEM_MUTATION,
-                variables={"id": _item_gid(sibling.pk), "d": {"name": "pin-item-shard_b"}},
+                variables={
+                    "id": _item_gid(saved_pk(sibling.pk)),
+                    "d": {"name": "pin-item-shard_b"},
+                },
                 assert_no_errors=False,
             )
         finally:
@@ -1317,7 +1335,7 @@ def test_mutation_validation_envelope_rolls_back_on_the_write_alias() -> None:
 
     assert res.data is not None
 
-    payload = res.data["updateItem"]
+    payload = json_object(res.data, "updateItem")
     assert payload["node"] is None
     assert payload["errors"], payload
     # Nothing changed on either alias.
@@ -1345,7 +1363,7 @@ class _LibraryWriteToShardBRouter:
             return None
         instance = hints.get("instance")
         instance_db = getattr(getattr(instance, "_state", None), "db", None)
-        if instance_db is not None:
+        if isinstance(instance_db, str):
             return instance_db
         return "default"
 
@@ -1426,7 +1444,7 @@ def test_serializer_mutation_pins_locate_relation_save_and_refetch_to_write_alia
                     "id": _library_gid("library.book", 91001),
                     "d": {
                         "title": "ser-pinned-write",
-                        "genres": [_library_gid("library.genre", shard_genre.pk)],
+                        "genres": [_library_gid("library.genre", saved_pk(shard_genre.pk))],
                     },
                 },
             )
@@ -1435,9 +1453,9 @@ def test_serializer_mutation_pins_locate_relation_save_and_refetch_to_write_alia
 
     assert res.data is not None
 
-    payload = res.data["updateBookGenresViaSerializer"]
+    payload = json_object(res.data, "updateBookGenresViaSerializer")
     assert payload["errors"] == []
-    assert payload["node"]["title"] == "ser-pinned-write"
+    assert json_at(payload, "node", "title") == "ser-pinned-write"
     shard_book = models.Book.objects.using("shard_b").get(pk=91001)
     assert shard_book.title == "ser-pinned-write"
     assert list(shard_book.genres.values_list("name", flat=True)) == ["ser-genre-shard-b-only"]
@@ -1475,9 +1493,9 @@ def test_serializer_unique_validator_reads_write_alias() -> None:
 
     assert res.data is not None
 
-    payload = res.data["updateBookTitleWithAliasValidator"]
+    payload = json_object(res.data, "updateBookTitleWithAliasValidator")
     assert payload["errors"] == []
-    assert payload["node"]["title"] == "validator-default-only-collision"
+    assert json_at(payload, "node", "title") == "validator-default-only-collision"
     assert (
         models.Book.objects.using("shard_b").get(pk=91006).title
         == "validator-default-only-collision"
@@ -1521,7 +1539,7 @@ def test_serializer_mutation_envelope_rolls_back_on_the_write_alias() -> None:
 
     assert res.data is not None
 
-    payload = res.data["updateBookGenresViaSerializer"]
+    payload = json_object(res.data, "updateBookGenresViaSerializer")
     assert payload["node"] is None
     assert payload["errors"], payload
     # Nothing changed on either alias.
@@ -1569,7 +1587,8 @@ def _prefetch_alias_schema(
 
     @strawberry.type
     class _PrefetchAliasQuery:
-        @strawberry.field(graphql_type=list[shelf_type])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[shelf_type])  # pyright: ignore[reportAny]
         def shelves(self) -> QuerySet[models.Shelf]:
             queryset = models.Shelf.objects.all()
             if root_alias is not None:
@@ -1636,8 +1655,8 @@ def test_planned_prefetch_child_cannot_route_itself_to_the_other_shard() -> None
     )
 
     assert payload["data"] is None
-    assert len(payload["errors"]) == 1, payload
-    message = payload["errors"][0]["message"]
+    assert len(json_list(payload, "errors")) == 1, payload
+    message = json_str(payload, "errors", 0, "message")
     assert "AliasBookType.get_queryset" in message
     assert "routed to alias 'shard_b'" in message
     assert book_sql == {"default": [], "shard_b": []}
@@ -1654,7 +1673,11 @@ def test_planned_prefetch_child_inherits_an_unrouted_parents_connection() -> Non
     )
 
     assert payload.get("errors") is None, payload
-    titles = [row["title"] for shelf in payload["data"]["shelves"] for row in shelf["books"]]
+    titles = [
+        json_at(row, "title")
+        for shelf in json_list(payload, "data", "shelves")
+        for row in json_list(shelf, "books")
+    ]
     assert titles == ["on-default"]
     assert len(book_sql["default"]) == 1, book_sql
     assert book_sql["shard_b"] == []
@@ -1680,7 +1703,11 @@ def test_planned_prefetch_child_follows_a_routed_parent_onto_its_shard() -> None
     )
 
     assert payload.get("errors") is None, payload
-    titles = [row["title"] for shelf in payload["data"]["shelves"] for row in shelf["books"]]
+    titles = [
+        json_at(row, "title")
+        for shelf in json_list(payload, "data", "shelves")
+        for row in json_list(shelf, "books")
+    ]
     assert titles == ["on-shard-b"]
     assert len(book_sql["shard_b"]) == 1, book_sql
     assert book_sql["default"] == []

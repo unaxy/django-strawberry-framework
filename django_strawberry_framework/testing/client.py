@@ -33,7 +33,7 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast, overload
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast, overload
 
 from asgiref.sync import sync_to_async
 from django.test import AsyncClient, Client, TestCase, TransactionTestCase
@@ -46,7 +46,6 @@ from django_strawberry_framework.exceptions import _safe_arg_repr
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
     is_list_or_tuple,
-    read_attr,
 )
 from django_strawberry_framework.utils.typing import object_result
 
@@ -55,6 +54,7 @@ if TYPE_CHECKING:
     from typing import Protocol, TypedDict
 
     from django.contrib.auth.models import _User
+    from django.http.response import HttpResponseBase
     from django.test.client import _MonkeyPatchedASGIResponse, _MonkeyPatchedWSGIResponse
     from graphql import GraphQLFormattedError
 
@@ -105,18 +105,23 @@ __all__ = [
 
 #: The wrapped Django test client: sync ``Client`` or ``AsyncClient``.
 _ClientT = TypeVar("_ClientT", Client, AsyncClient)
+#: The raw response the wrapped client's ``post()`` returned.
+_ResponseT = TypeVar("_ResponseT", bound="HttpResponseBase")
 
 
 @dataclass
-class Response(_EngineResponse):
+class Response(_EngineResponse, Generic[_ResponseT]):
     """A decoded GraphQL response: the engine's typed triple plus the raw ``HttpResponse``.
 
     Subclasses ``strawberry.test.client.Response``, inheriting the ``errors``
     / ``data`` / ``extensions`` field schema (the engine's wire contract), and
     adds ``response`` - the raw ``django.http.HttpResponse`` the operation
     rode - so status, header, and cookie assertions need no separate raw post
-    (spec-043 Decision 6). The clients always populate ``response``; the
-    ``None`` default is never observed in practice.
+    (spec-043 Decision 6). It is typed as the wrapped client returns it:
+    :class:`TestClient` and :class:`GraphQLTestMixin` hand back
+    ``Response[_MonkeyPatchedWSGIResponse]``, :class:`AsyncTestClient`
+    ``Response[_MonkeyPatchedASGIResponse]`` (django-stubs' names for Django's
+    test-client responses, which carry ``.json()`` and ``.content``).
 
     Assert on fields (``res.data``, ``res.errors``,
     ``res.response.status_code``), never on whole ``Response`` objects -
@@ -124,8 +129,7 @@ class Response(_EngineResponse):
     meaningless.
     """
 
-    # basedpyright: public field: Optional breaks res.response.status_code; None bars HttpResponse
-    response: Any = None  # pyright: ignore[reportExplicitAny]
+    response: _ResponseT
 
 
 class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
@@ -161,11 +165,11 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
 
     def _finish_response(
         self,
-        resp: _MonkeyPatchedWSGIResponse | _MonkeyPatchedASGIResponse,
+        resp: _ResponseT,
         *,
         files: dict[str, object] | None,
         assert_no_errors: bool | None,
-    ) -> Response:
+    ) -> Response[_ResponseT]:
         """Decode ``resp`` into the typed :class:`Response` + the ``assert_no_errors`` raise.
 
         The un-colored tail both ``query()`` colors share: only
@@ -449,7 +453,7 @@ class TestClient(_GraphQLTestClientBase[Client]):
         *,
         operation_name: str | None = None,
         url: str | None = None,
-    ) -> Response:
+    ) -> Response[_MonkeyPatchedWSGIResponse]:
         """Post a GraphQL operation and return the decoded, typed :class:`Response`.
 
         Mutations and subscriptions-over-POST go through this same method -
@@ -547,7 +551,7 @@ class AsyncTestClient(_GraphQLTestClientBase[AsyncClient]):
         *,
         operation_name: str | None = None,
         url: str | None = None,
-    ) -> Response:
+    ) -> Response[_MonkeyPatchedASGIResponse]:
         """Post a GraphQL operation and return the typed :class:`Response` - awaited.
 
         The async re-color of :meth:`TestClient.query` (upstream's own
@@ -615,7 +619,7 @@ class GraphQLTestMixin:
         files: dict[str, object] | None = None,
         url: str | None = None,
         assert_no_errors: bool | None = False,
-    ) -> Response:
+    ) -> Response[_MonkeyPatchedWSGIResponse]:
         """Post a GraphQL operation through the test case's own ``self.client``.
 
         The same call as :meth:`TestClient.query`, keyword-only after the
@@ -640,7 +644,7 @@ class GraphQLTestMixin:
 
     def assertResponseNoErrors(  # noqa: N802 - unittest/graphene assertion vocabulary
         self: _GraphQLTestHost,
-        resp: Response,
+        resp: Response[_ResponseT],
         msg: str | None = None,
     ) -> None:
         """Assert the response is HTTP 200 AND carries no GraphQL ``errors``.
@@ -652,13 +656,12 @@ class GraphQLTestMixin:
         """
         details = msg if msg is not None else {"errors": resp.errors, "data": resp.data}
         # The mixin delegates to the host TestCase's assertions, so a bare `assert` would be wrong.
-        status_code = read_attr(read_attr(resp, "response"), "status_code")
-        self.assertEqual(status_code, 200, details)  # noqa: PT009
+        self.assertEqual(resp.response.status_code, 200, details)  # noqa: PT009
         self.assertIsNone(resp.errors, details)  # noqa: PT009
 
     def assertResponseHasErrors(  # noqa: N802 - unittest/graphene assertion vocabulary
         self: _GraphQLTestHost,
-        resp: Response,
+        resp: Response[_ResponseT],
         msg: str | None = None,
     ) -> None:
         """Assert the response carries GraphQL ``errors``.
