@@ -3513,10 +3513,11 @@ def test_filtered_relation_hostile_resolved_condition_never_dispatches() -> None
             return "1", ()
 
     frq, _alias, join = _filtered_relation_join()
-    assert join.filtered_relation is not None
-    # basedpyright: django-stubs omits FilteredRelation.resolved_condition, reported as an unknown
-    # attribute
-    join.filtered_relation.resolved_condition.children.append(_BuriedHostile(models.F("name")))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    assert has_resolved_condition(join.filtered_relation)
+    condition = join.filtered_relation.resolved_condition
+    assert isinstance(condition, WhereNode)
+    # basedpyright: a Func in a where tree is the hostile node under test; children holds nodes
+    condition.children.append(_BuriedHostile(models.F("name")))  # pyright: ignore[reportArgumentType]
     sealed, defect = _seal_or_defect(frq, Category, None)
     assert sealed is None
     assert defect == ("untrusted", "where clause carries a _BuriedHostile node")
@@ -4101,7 +4102,7 @@ def test_hostile_set_container_member_fails_closed() -> None:
     )
 
 
-def test_hostile_filtered_relation_payload_fails_closed() -> None:
+def test_hostile_filtered_relation_payload_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``_filtered_relations`` value must be a genuine, unshadowed Django object."""
     source = Category.objects.filter(is_private=False)
     str(source.query)
@@ -4112,9 +4113,7 @@ def test_hostile_filtered_relation_payload_fails_closed() -> None:
         "query _filtered_relations['rel'] is a object",
     )
     relation = models.FilteredRelation("items", condition=models.Q(pk=1))
-    # basedpyright: the instance-level as_sql shadow is the hostile input under test; the stubs
-    # declare a method there
-    relation.as_sql = _noop  # must never run  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(relation, "as_sql", _noop)  # must never run
     source.query._filtered_relations = {"rel": relation}
     assert _query_container_defect(source.query) == (
         "untrusted",
@@ -4191,10 +4190,12 @@ def test_mutating_a_candidate_filtered_relation_cannot_change_the_sealed_join() 
     before = sealed.query.sql_with_params()
     source_before = source.query.sql_with_params()
     source_join = _join_with_filtered_relation(source.query)
-    assert source_join.filtered_relation is not None
-    # basedpyright: django-stubs omits FilteredRelation.resolved_condition, reported as an unknown
-    # attribute
-    source_join.filtered_relation.resolved_condition.children[0].rhs = True  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    assert has_resolved_condition(source_join.filtered_relation)
+    condition = source_join.filtered_relation.resolved_condition
+    assert isinstance(condition, WhereNode)
+    leaf = condition.children[0]
+    assert isinstance(leaf, Lookup)
+    leaf.rhs = True
     assert sealed.query.sql_with_params() == before
     assert source.query.sql_with_params() != source_before
 

@@ -5079,7 +5079,7 @@ def test_model_for_type_reverse_lookup_works_for_secondary_type() -> None:
 
 
 @pytest.mark.django_db
-def test_optimizer_helper_extraction_no_regression() -> None:
+def test_optimizer_helper_extraction_no_regression(monkeypatch: pytest.MonkeyPatch) -> None:
     """Extracting ``apply_to`` from ``_optimize`` leaves the middleware path identical.
 
     Per spec-030 Decision 11 the plan-build-and-apply tail was extracted into
@@ -5116,9 +5116,7 @@ def test_optimizer_helper_extraction_no_regression() -> None:
         delegations.append((target_type, target_model))
         return real_apply_to(target_type, target_model, queryset, info)
 
-    # basedpyright: the instance-level apply_to spy is the delegation probe under test; the class
-    # declares a method there
-    ext.apply_to = _spy_apply_to  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(ext, "apply_to", _spy_apply_to)
 
     @strawberry.type
     class Query:

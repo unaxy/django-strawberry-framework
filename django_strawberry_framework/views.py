@@ -117,15 +117,17 @@ if TYPE_CHECKING:
 
     from cross_web import AsyncHTTPRequestAdapter, SyncHTTPRequestAdapter
     from django.http import HttpRequest, HttpResponseBase
-    from django.views import View
-    from strawberry.http.base import BaseView
 
-    # Both package views compose the boundary mixin ahead of a Django ``View``
-    # subclass that is also a Strawberry ``BaseView`` (its ``as_view`` extends the
-    # one, its ``parse_json`` delegates to the other); at run time the mixin's base
-    # stays ``object`` so it adds nothing to either view's MRO.
-    class _BoundaryMixinBase(BaseView[HttpRequest], View):
-        """The Strawberry ``BaseView`` plus Django ``View`` the boundary mixin extends."""
+    # The one upstream member the boundary mixin extends (``parse_json`` delegates to
+    # Strawberry's ``BaseView``); at run time the mixin's base stays ``object`` so it
+    # adds nothing to either view's MRO. Declared without a constructor so each view
+    # below inherits exactly one.
+    class _BoundaryMixinBase:
+        """The one upstream member the boundary mixin extends."""
+
+        def parse_json(self, data: str | bytes) -> object:
+            """Return upstream's parse of ``data``."""
+            return data
 else:
     _BoundaryMixinBase = object
 
@@ -1058,9 +1060,7 @@ def _evaluate_request_user(request: HttpRequest) -> None:
     _ = getattr(user, "is_authenticated", None)
 
 
-# basedpyright: the mixin defines no ``__init__`` (its base is ``object`` at run time), so
-# construction runs the Strawberry view's ``BaseView.__init__``, which chains to ``View``'s
-class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValue]):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValue]):
     """The package's synchronous Django GraphQL view.
 
         A subclass of ``strawberry.django.views.GraphQLView`` that overrides exactly
@@ -1138,9 +1138,7 @@ class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValu
         return super().parse_multipart(request)
 
 
-# basedpyright: the mixin defines no ``__init__`` (its base is ``object`` at run time), so
-# construction runs the Strawberry view's ``BaseView.__init__``, which chains to ``View``'s
-class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context, RootValue]):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context, RootValue]):
     """The asynchronous twin, with an identical surface.
 
     The shape an ASGI deployment generally wants: ``AsyncGraphQLView.as_view``

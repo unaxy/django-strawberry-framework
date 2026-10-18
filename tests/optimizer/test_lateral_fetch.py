@@ -72,6 +72,7 @@ from django_strawberry_framework.optimizer.plans import (
 from django_strawberry_framework.utils._narrowing import is_list, read_attr
 from django_strawberry_framework.utils._queryset_private import (
     chain_queryset,
+    super_clone_queryset,
 )
 from tests._idioms import saved_pk
 from tests.optimizer._builders import filter_prefetch_queryset
@@ -983,9 +984,9 @@ def test_normalize_window_node_fails_closed_on_a_nested_unmapped_leaf() -> None:
     assert _normalize_window_node(marker_or, {}) is None
 
 
-# basedpyright: django-stubs types QuerySet.extra as returning a plain QuerySet; Django's _chain()
-# keeps the LateralQuerySet subclass the recognizer reads
-_UNRECOGNIZED_LATERAL_SHAPES: list[tuple[Callable[[LateralQuerySet], LateralQuerySet], str]] = [  # pyright: ignore[reportAssignmentType]
+_UNRECOGNIZED_LATERAL_SHAPES: list[
+    tuple[Callable[[LateralQuerySet], QuerySet[models.Model, object]], str]
+] = [
     (lambda qs: qs.filter(title="x"), "an unexpected consumer filter"),
     (lambda qs: qs.filter(pk__in=[1]), "an IN lookup on the wrong column"),
     (
@@ -1032,6 +1033,7 @@ def test_extract_returns_none_for_unrecognized_shapes(
     """
     queryset = _prefetch_filtered(_shelf_books_request(), "shelf", [Shelf(pk=1)])
     mutated = mutate(queryset)
+    assert isinstance(mutated, LateralQuerySet)
     assert _recognize_lateral_fetch(mutated, _lateral_spec(queryset)) is None, reason
 
 
@@ -1433,8 +1435,7 @@ def test_spec_downgrades_for_custom_queryset_subclasses() -> None:
         marker: str | None = None
 
         def _clone(self) -> Self:
-            # basedpyright: django-stubs omits QuerySet._clone, reported as an unknown attribute
-            clone = super()._clone()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+            clone = super_clone_queryset(_StatefulQuerySet, self)
             assert isinstance(clone, type(self))
             clone.marker = self.marker
             return clone

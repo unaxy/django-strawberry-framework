@@ -99,9 +99,7 @@ def _window_rows(*row_numbers: int) -> list[djmodels.Model]:
 
 def _synthesized_field() -> StrawberryField:
     """A resolver-backed Strawberry field, as connection synthesis plants one."""
-    # basedpyright: Strawberry types field(resolver=...) as the resolver's return so a class body
-    # can declare it; the call returns the StrawberryField the teardown restores
-    return strawberry.field(resolver=lambda: None)  # pyright: ignore[reportReturnType]
+    return strawberry.field(lambda: None)
 
 
 def _path(*keys: str | int) -> object:

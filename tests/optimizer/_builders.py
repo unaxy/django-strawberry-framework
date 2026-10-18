@@ -9,7 +9,7 @@ lateral and single-parent strategy modules apply to a planned queryset.
 
 import dataclasses
 from collections.abc import Sequence
-from typing import TypeVar
+from typing import Protocol, TypeVar, runtime_checkable
 
 from django.db import models
 from django.db.models.fields import related_descriptors
@@ -20,15 +20,26 @@ from django_strawberry_framework.optimizer.nested_fetch import NestedConnectionR
 _QuerySetT = TypeVar("_QuerySetT", bound="models.QuerySet[models.Model, object]")
 
 
+@runtime_checkable
+class _PrefetchFilterModule(Protocol):
+    """``related_descriptors`` as the module defining Django's ``_filter_prefetch_queryset``."""
+
+    def _filter_prefetch_queryset(
+        self,
+        queryset: _QuerySetT,
+        field_name: str,
+        instances: Sequence[models.Model],
+    ) -> _QuerySetT: ...
+
+
 def filter_prefetch_queryset(
     queryset: _QuerySetT,
     field_name: str,
     instances: Sequence[models.Model],
 ) -> _QuerySetT:
     """Django's own prefetch filter: ``queryset`` narrowed to the rows of ``instances``."""
-    # basedpyright: django-stubs omits _filter_prefetch_queryset from
-    # django.db.models.fields.related_descriptors, where Django defines it
-    filtered = related_descriptors._filter_prefetch_queryset(queryset, field_name, instances)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+    assert isinstance(related_descriptors, _PrefetchFilterModule)
+    filtered = related_descriptors._filter_prefetch_queryset(queryset, field_name, instances)
     assert isinstance(filtered, type(queryset))
     return filtered
 

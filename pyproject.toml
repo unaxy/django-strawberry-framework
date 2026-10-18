@@ -612,16 +612,16 @@ reportUnusedCallResult = "error"
 # diagnostic instead); one below it fails until the budget is lowered to match, and a rule at
 # zero leaves `ignores` (marked `# Locked` above once it is on in every environment).
 [tool.type-suppressions]
-cast = 432
+cast = 410
 
 [tool.type-suppressions.ignores]
-reportArgumentType = 314
-reportAssignmentType = 33
-reportAttributeAccessIssue = 142
-reportCallIssue = 15
+reportArgumentType = 307
+reportAssignmentType = 30
+reportAttributeAccessIssue = 119
+reportCallIssue = 13
 reportDeprecated = 2
 reportAny = 39
-reportExplicitAny = 38
+reportExplicitAny = 36
 reportFunctionMemberAccess = 4
 reportGeneralTypeIssues = 5
 reportIncompatibleMethodOverride = 59
@@ -632,13 +632,13 @@ reportInvalidTypeArguments = 5
 reportMissingSuperCall = 3
 reportOptionalMemberAccess = 3
 reportPropertyTypeMismatch = 5
-reportReturnType = 27
+reportReturnType = 24
 reportUndefinedVariable = 5
 reportUnknownArgumentType = 14
-reportUnknownMemberType = 46
-reportUnknownVariableType = 32
-reportUnnecessaryIsInstance = 11
-reportUnsafeMultipleInheritance = 14
+reportUnknownMemberType = 33
+reportUnknownVariableType = 21
+reportUnnecessaryIsInstance = 6
+reportUnsafeMultipleInheritance = 12
 reportUntypedFunctionDecorator = 2
 
 [tool.coverage.run]

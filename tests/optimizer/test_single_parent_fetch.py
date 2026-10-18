@@ -154,11 +154,9 @@ def test_fetch_returns_none_without_a_spec() -> None:
     assert _fetch_single_parent_rows(SingleParentWindowQuerySet(model=Book)) is None
 
 
-_SingleParentShape = Callable[[SingleParentWindowQuerySet], SingleParentWindowQuerySet]
+_SingleParentShape = Callable[[SingleParentWindowQuerySet], QuerySet[Model, object]]
 
-# basedpyright: django-stubs types QuerySet.extra / values_list as returning a plain QuerySet;
-# Django's _chain() keeps the SingleParentWindowQuerySet subclass the recognizer reads
-_UNRECOGNIZED_SINGLE_PARENT_SHAPES: list[tuple[_SingleParentShape, str]] = [  # pyright: ignore[reportAssignmentType]
+_UNRECOGNIZED_SINGLE_PARENT_SHAPES: list[tuple[_SingleParentShape, str]] = [
     (lambda qs: qs.values_list("id"), "a values() iterable changes row shape"),
     (lambda qs: qs[:5], "a sliced queryset"),
     (lambda qs: qs.distinct(), "a DISTINCT queryset"),
@@ -197,7 +195,9 @@ def test_fetch_returns_none_for_unrecognized_shapes(
     originally-planned page.
     """
     queryset = _prefetch_filtered(_shelf_books_request(), "shelf", [Shelf(pk=1)])
-    assert _fetch_single_parent_rows(mutate(queryset)) is None, reason
+    mutated = mutate(queryset)
+    assert isinstance(mutated, SingleParentWindowQuerySet)
+    assert _fetch_single_parent_rows(mutated) is None, reason
 
 
 def test_fetch_returns_none_without_a_parent_filter() -> None:

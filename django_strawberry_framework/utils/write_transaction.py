@@ -1183,7 +1183,7 @@ def assert_no_target_drift(owner: str, instance: models.Model) -> None:
 def base_locked_queryset(
     model: type[_ModelT],
     alias: str,
-    visible_queryset: QuerySet[models.Model],
+    visible_queryset: QuerySet[models.Model, object],
 ) -> QuerySet[_ModelT]:
     """Build the ``SELECT ... FOR UPDATE`` base query constrained by the visibility pk subquery.
 

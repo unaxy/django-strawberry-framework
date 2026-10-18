@@ -1493,9 +1493,15 @@ def test_list_field_direct_call_safe_non_integer_rendering(
     assert "Invalid argument 'offset' on test_field" in str(exc_info.value)
 
 
+class _TaggedListArgumentError(ListArgumentError):
+    """A ``ListArgumentError`` carrying the extra instance state a roundtrip must keep."""
+
+    custom_tag: str
+
+
 def test_list_field_error_pickle_round_trip() -> None:
     """ListArgumentError preserves constructor args, extensions, and state across pickle."""
-    err = ListArgumentError(
+    err = _TaggedListArgumentError(
         "books",
         "offset",
         reason="negative",
@@ -1503,9 +1509,7 @@ def test_list_field_error_pickle_round_trip() -> None:
         ceiling=10,
         order_argument="sort",
     )
-    # basedpyright: the undeclared attribute is the extra instance state the roundtrip must carry;
-    # ListArgumentError declares no such attribute
-    err.custom_tag = "tagged"  # pyright: ignore[reportAttributeAccessIssue]
+    err.custom_tag = "tagged"
 
     restored = pickle_roundtrip(err)
 
@@ -2001,6 +2005,14 @@ def test_order_term_classifier_rejects_a_non_expression_term() -> None:
     to a verdict.
     """
     assert _is_deterministic_order_term(Category.objects.all().query, 42) is False
+
+
+def test_order_term_classifier_refuses_a_reference_with_a_non_str_name() -> None:
+    """An ``F`` whose stored name is not a ``str`` names no field path to classify."""
+    reference = models.F("code")
+    object.__setattr__(reference, "name", 42)
+
+    assert _is_deterministic_order_term(Category.objects.all().query, reference) is False
 
 
 def test_order_term_classifier_refuses_a_relation_ordering_cycle(

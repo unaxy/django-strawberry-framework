@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
@@ -1599,10 +1599,15 @@ def test_schema_fingerprint_sensitive_to_converter_extras() -> None:
     )
 
 
-def _list_of_choices(**kwargs: object) -> serializers.ListField:
-    """A ``ListField`` whose choice child carries ``kwargs``: the third list-of-choices shape."""
-    # basedpyright: verbatim forward to ChoiceField.__init__; object fails its typed params
-    return serializers.ListField(child=serializers.ChoiceField(**kwargs))  # pyright: ignore[reportArgumentType]
+def _list_of_choices(
+    *,
+    choices: Sequence[tuple[str, str]],
+    allow_blank: bool = False,
+) -> serializers.ListField:
+    """A ``ListField`` whose choice child carries the choices: the third list-of-choices shape."""
+    return serializers.ListField(
+        child=serializers.ChoiceField(choices=choices, allow_blank=allow_blank),
+    )
 
 
 @pytest.mark.parametrize(

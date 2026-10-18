@@ -315,9 +315,7 @@ def test_streaming_response_gets_no_package_mutation(middleware: DebugToolbarMid
     ``examples/fakeshop/test_query/test_debug_toolbar_api.py``.
     """
     request = RequestFactory().post("/graphql/")
-    # basedpyright: the middleware stamps _is_graphiql on the request at run time; HttpRequest
-    # declares no such attribute
-    request._is_graphiql = True  # pyright: ignore[reportAttributeAccessIssue]
+    setattr(request, _IS_GRAPHIQL, True)
     response = StreamingHttpResponse(iter([b'{"data": 1}']), content_type="application/json")
     # basedpyright: the streaming response is the input under test, and a stand-in toolbar carries
     # only the slots the code under test reads; _postprocess types them as HttpResponse and
@@ -401,9 +399,7 @@ def test_malformed_json_body_gets_no_package_rewrite(
     stock postprocess may still add its normal toolbar headers.
     """
     request = RequestFactory().post("/graphql/", data="{}", content_type="application/json")
-    # basedpyright: the middleware stamps _is_graphiql on the request at run time; HttpRequest
-    # declares no such attribute
-    request._is_graphiql = True  # pyright: ignore[reportAttributeAccessIssue]
+    setattr(request, _IS_GRAPHIQL, True)
     response = HttpResponse(content, content_type="application/json; charset=utf-8")
     response["Content-Length"] = len(response.content)
 

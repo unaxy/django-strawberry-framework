@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import NoReturn
 
@@ -54,7 +55,9 @@ from django.conf import settings as django_settings
 from graphql import GraphQLError
 from graphql.execution import ExecutionResult as GraphQLExecutionResult
 from strawberry.extensions import SchemaExtension
+from strawberry.types.execution import ExecutionContext
 from strawberry.types.execution import ExecutionResult as StrawberryExecutionResult
+from strawberry.types.graphql import OperationType
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema
@@ -75,7 +78,7 @@ from django_strawberry_framework.extensions.error_policy import (
     schema_error_policy,
 )
 from django_strawberry_framework.extensions.resource_policy import DjangoResourcePolicyExtension
-from django_strawberry_framework.utils._narrowing import read_attr, require_instance
+from django_strawberry_framework.utils._narrowing import instance_dict, read_attr, require_instance
 from django_strawberry_framework.utils.typing import object_result
 from tests._execution import execution_result, make_execution_context
 from tests._idioms import ClassReadRaises, json_at, json_list
@@ -177,8 +180,23 @@ class _HostileMessage(str):
         raise RuntimeError("Hostile message format")
 
 
-@pytest.mark.parametrize("field", ["message", "correlation_extension_key"])
-def test_a_str_subclass_is_rejected_at_construction(field: str) -> None:
+def _with_message(value: str) -> ErrorPolicy:
+    return ErrorPolicy(message=value)
+
+
+def _with_key(value: str) -> ErrorPolicy:
+    return ErrorPolicy(correlation_extension_key=value)
+
+
+@pytest.mark.parametrize(
+    ("field", "build"),
+    [("message", _with_message), ("correlation_extension_key", _with_key)],
+    ids=["message", "correlation_extension_key"],
+)
+def test_a_str_subclass_is_rejected_at_construction(
+    field: str,
+    build: Callable[[str], ErrorPolicy],
+) -> None:
     """The string fields take the built-in type only, the bound rule's own terms.
 
     ``isinstance`` admits a subclass, whose ``__str__`` / ``__format__`` are
@@ -192,9 +210,7 @@ def test_a_str_subclass_is_rejected_at_construction(field: str) -> None:
         ConfigurationError,
         match=f"ErrorPolicy.{field} must be a non-empty string",
     ):
-        # basedpyright: the str subclass is the hostile input under test; the splat is checked
-        # against every ErrorPolicy keyword, enabled: bool among them
-        ErrorPolicy(**{field: _HostileMessage("Nope.")})  # pyright: ignore[reportArgumentType]
+        build(_HostileMessage("Nope."))
 
 
 def test_a_schema_refuses_a_policy_option_carrying_a_str_subclass() -> None:
@@ -1121,37 +1137,35 @@ def test_the_extension_teardown_fails_closed_when_context_schema_raises(
     caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
     extension = DjangoErrorPolicyExtension()
 
-    class _HostileContext:
-        @property
-        def schema(self) -> NoReturn:
-            raise RuntimeError("Hostile schema lookup")
+    class _HostileContext(ExecutionContext):
+        @override
+        def __getattribute__(self, name: str) -> object:
+            if name == "schema":
+                raise RuntimeError("Hostile schema lookup")
+            if name == "result":
+                return StrawberryExecutionResult(
+                    data={"leak": _SENSITIVE},
+                    errors=[GraphQLError(_SENSITIVE, original_error=RuntimeError(_SENSITIVE))],
+                )
+            return object_result(super().__getattribute__, name)
 
-        @property
-        def result(self) -> StrawberryExecutionResult:
-            return StrawberryExecutionResult(
-                data={"leak": _SENSITIVE},
-                errors=[GraphQLError(_SENSITIVE, original_error=RuntimeError(_SENSITIVE))],
-            )
-
-        @result.setter
-        def result(self, val: StrawberryExecutionResult) -> None:
-            self._result = val
-
-    ctx = _HostileContext()
-    # basedpyright: a context whose ``schema`` read raises is the hostile input under test; no
-    # real ExecutionContext can express it, and the extension types the slot as
-    # ExecutionContext | None
-    extension.execution_context = ctx  # pyright: ignore[reportAttributeAccessIssue]
+    ctx = _HostileContext(
+        query="{ ping }",
+        schema=strawberry.Schema(query=_Query),
+        allowed_operations=frozenset(OperationType),
+    )
+    extension.execution_context = ctx
 
     gen = extension.on_operation()
     next(gen)
     with contextlib.suppress(StopIteration):
         next(gen)
 
-    assert hasattr(ctx, "_result")
-    assert ctx._result.data is None
-    assert ctx._result.errors is not None
-    assert ctx._result.errors[0].message == DEFAULT_ERROR_POLICY.message
+    written = instance_dict(ctx)["result"]
+    assert isinstance(written, StrawberryExecutionResult)
+    assert written.data is None
+    assert written.errors is not None
+    assert written.errors[0].message == DEFAULT_ERROR_POLICY.message
     assert any(
         "The error policy encountered an unhandled exception during teardown" in r.message
         for r in caplog.records
@@ -1216,19 +1230,18 @@ def test_error_policy_extension_on_operation_exploding_execution_context() -> No
 
     ext._policy = _exploding_policy
 
-    class ExplodingExecutionContext:
-        @property
-        def result(self) -> StrawberryExecutionResult | None:
-            return None
+    class ExplodingExecutionContext(ExecutionContext):
+        @override
+        def __setattr__(self, name: str, value: object) -> None:
+            if name == "result" and value is not None:
+                raise RuntimeError("cannot set result")
+            super().__setattr__(name, value)
 
-        @result.setter
-        def result(self, _val: StrawberryExecutionResult | None) -> NoReturn:
-            raise RuntimeError("cannot set result")
-
-    # basedpyright: a context whose ``result`` assignment raises is the hostile input under test;
-    # no real ExecutionContext can express it, and the extension types the slot as
-    # ExecutionContext | None
-    ext.execution_context = ExplodingExecutionContext()  # pyright: ignore[reportAttributeAccessIssue]
+    ext.execution_context = ExplodingExecutionContext(
+        query="{ ping }",
+        schema=strawberry.Schema(query=_Query),
+        allowed_operations=frozenset(OperationType),
+    )
     gen = ext.on_operation()
     next(gen)
     with contextlib.suppress(StopIteration):

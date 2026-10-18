@@ -1022,12 +1022,10 @@ def test_default_get_form_fields_uses_frozen_form_class_snapshot() -> None:
 
     class Submit(DjangoFormMutation):
         class Meta:
-            form_class = FormA
+            form_class: type[forms.Form] = FormA
             permission_classes = []
 
-    # basedpyright: the post-declaration Meta drift is the input under test; the checker reads
-    # form_class as the declared FormA class
-    Submit.Meta.form_class = FormB  # pyright: ignore[reportAttributeAccessIssue]
+    Submit.Meta.form_class = FormB
     finalize_django_types()
 
     assert Submit._mutation_meta.form_class is FormA

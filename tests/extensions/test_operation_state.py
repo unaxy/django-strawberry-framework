@@ -47,6 +47,7 @@ import strawberry
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.types import ExecutionContext, ExecutionResult
 from strawberry.types.execution import PreExecutionError
+from strawberry.types.graphql import OperationType
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema
@@ -78,6 +79,7 @@ from django_strawberry_framework.utils.execution_mode import (
     current_operation_mode,
 )
 from django_strawberry_framework.utils.operation_lease import OperationLease
+from django_strawberry_framework.utils.typing import object_result
 from tests._execution import make_execution_context
 
 if TYPE_CHECKING:
@@ -626,18 +628,21 @@ def test_a_plain_strawberry_schema_gets_operation_local_state_from_the_instance(
 def test_a_context_that_refuses_to_say_which_schema_it_belongs_to_takes_the_local_path() -> None:
     """An unreadable ``schema`` is not a claim that a package runner is coming."""
 
-    class _Hostile:
-        @property
-        def schema(self) -> NoReturn:
-            raise RuntimeError("no")
+    class _Hostile(ExecutionContext):
+        @override
+        def __getattribute__(self, name: str) -> object:
+            if name == "schema":
+                raise RuntimeError("no")
+            return object_result(super().__getattribute__, name)
 
     extension = _Probe()
-    context = _Hostile()
+    context = _Hostile(
+        query="{ hello }",
+        schema=strawberry.Schema(query=_Query),
+        allowed_operations=frozenset(OperationType),
+    )
 
-    # basedpyright: a context whose ``schema`` read raises is the hostile input under test; no
-    # real ExecutionContext can express it, and the extension types the slot as
-    # ExecutionContext | None
-    extension.execution_context = context  # pyright: ignore[reportAttributeAccessIssue]
+    extension.execution_context = context
 
     assert extension.execution_context is context
 

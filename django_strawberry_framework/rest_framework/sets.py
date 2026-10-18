@@ -58,7 +58,7 @@ through ``_merged_serializer_kwargs`` (spec-039).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from rest_framework import serializers
 from typing_extensions import override
@@ -90,7 +90,7 @@ from django_strawberry_framework.mutations.sets import (
 from django_strawberry_framework.mutations.sets import (
     _validate_permission_classes as _validate_mutation_permission_classes,
 )
-from django_strawberry_framework.utils._narrowing import is_mapping
+from django_strawberry_framework.utils._narrowing import is_mapping, read_attr
 from django_strawberry_framework.utils.inputs import normalize_field_name_sequence
 
 from .inputs import (
@@ -540,8 +540,7 @@ class SerializerMutation(DjangoMutation):
 
     # The consumer's nested ``Meta`` (declared on every concrete subclass; the metaclass
     # validates it before the snapshot exists).
-    # basedpyright: the consumer's own ``Meta``, read by attribute before any validated snapshot
-    Meta: ClassVar[type[Any]]  # pyright: ignore[reportExplicitAny]
+    Meta: ClassVar[type[object]]
 
     @classmethod
     @override
@@ -829,7 +828,7 @@ class SerializerMutation(DjangoMutation):
         # Both windows read the serializer class ``_validate_meta`` gated before this hook runs.
         serializer_class = cast(
             "type[DRFSerializer]",
-            meta.serializer_class if meta is not None else cls.Meta.serializer_class,
+            meta.serializer_class if meta is not None else read_attr(cls.Meta, "serializer_class"),
         )
         return _default_serializer_schema_fields(serializer_class)
 

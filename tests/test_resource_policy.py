@@ -1298,15 +1298,11 @@ async def test_the_exported_raw_list_bound_takes_no_client_window(
     arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
     if color == "sync":
         with pytest.raises(TypeError):
-            # basedpyright: deliberately passes a window coordinate the signature omits; the test
-            # proves the TypeError (the splat is also checked against trusted: bool)
-            bounded_rows(list(range(10)), info, **{coordinate: 10})  # pyright: ignore[reportCallIssue, reportArgumentType]
+            bounded_rows(list(range(10)), info, **{coordinate: True})
         assert bounded_rows(list(range(10)), info) == [0, 1]
         return
     with pytest.raises(TypeError):
-        # basedpyright: deliberately passes a window coordinate the signature omits; the test
-        # proves the TypeError (the splat is also checked against trusted: bool)
-        await bounded_rows_async(list(range(10)), info, **{coordinate: 10})  # pyright: ignore[reportCallIssue, reportArgumentType]
+        await bounded_rows_async(list(range(10)), info, **{coordinate: True})
     assert await bounded_rows_async(list(range(10)), info) == [0, 1]
 
 
@@ -4212,12 +4208,16 @@ def test_a_measurable_upload_is_charged_its_bytes() -> None:
     assert caught.value.charged == 10
 
 
+class _TaggedResourceLimitExceeded(ResourceLimitExceeded):
+    """A ``ResourceLimitExceeded`` carrying the extra instance state a roundtrip must keep."""
+
+    custom_tag: str
+
+
 def test_resource_limit_exceeded_pickle_and_copy_fidelity() -> None:
     """ResourceLimitExceeded roundtrips through pickle, copy, and deepcopy preserving attributes."""
-    exc = ResourceLimitExceeded("max_depth", 10, 15, "query depth 15 exceeds 10")
-    # basedpyright: the undeclared attribute is the extra instance state the roundtrip must carry;
-    # ResourceLimitExceeded declares no such attribute
-    exc.custom_tag = "tagged"  # pyright: ignore[reportAttributeAccessIssue]
+    exc = _TaggedResourceLimitExceeded("max_depth", 10, 15, "query depth 15 exceeds 10")
+    exc.custom_tag = "tagged"
 
     # Pickle serialization roundtrip
     restored = pickle_roundtrip(exc)

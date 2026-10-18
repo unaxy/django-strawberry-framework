@@ -221,6 +221,12 @@ class _ClassReadRaises(ClassReadRaises):
         super().__init__(escape, "hostile __class__ boom")
 
 
+class _CityRequest(HttpRequest):
+    """A request carrying the visibility probe the ``get_queryset`` hook reads."""
+
+    visibility_city: str
+
+
 class _ReprRaises:
     """A value whose ``__repr__`` raises (a key or a return the rejection must still render)."""
 
@@ -284,10 +290,8 @@ class _ErrorEnvelope(Protocol):
 
 def _related_queryset(relation: object) -> QuerySet[Model, object]:
     """The ``QuerySet`` a ``RelatedField`` holds (the scope pass never leaves a manager)."""
+    queryset = read_attr(relation, "queryset")
     assert isinstance(relation, serializers.RelatedField)
-    # basedpyright: drf-stubs types the attribute as a ``Manager``, whose ``__get__`` it binds, so
-    # the read is an access error of Unknown type
-    queryset = relation.queryset  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
     assert isinstance(queryset, QuerySet)
     return queryset
 
@@ -1543,14 +1547,12 @@ async def test_async_entry_rejects_data_rewriting_hook_too() -> None:
     @strawberry.input
     class _Data:
         name: str
-        category_id: strawberry.ID = strawberry.field(name="categoryId")
+        category_id: relay.GlobalID = strawberry.field(name="categoryId")
 
     request = HttpRequest()
     request.user = User(username="async-u")
     info = make_info(context=SimpleNamespace(request=request))
-    # basedpyright: the decoded GlobalID is the relay relation value under test; the _Data input
-    # types category_id as strawberry.ID
-    data = _Data(name="AsyncRewriteItem", category_id=gid)  # pyright: ignore[reportArgumentType]
+    data = _Data(name="AsyncRewriteItem", category_id=gid)
 
     with managed_write_transaction("default"):
         pending = CreateItemRewriting.resolve_async(info, data=data, id=None)
@@ -2652,6 +2654,50 @@ def test_relation_queryset_scope_cross_alias_author_queryset_fails_closed() -> N
         )
 
 
+def test_relation_queryset_scope_rejects_a_queryset_that_is_neither_queryset_nor_manager() -> None:
+    """A relation whose ``queryset`` reads rows without being a QuerySet or Manager fails loud."""
+
+    class BranchSer(serializers.Serializer[object]):
+        branch: _PkRelation[library_models.Branch] = serializers.PrimaryKeyRelatedField(
+            queryset=library_models.Branch.objects.all(),
+        )
+
+    class RowSourceStandIn:
+        model = library_models.Branch
+
+    serializer = BranchSer()
+    object.__setattr__(bound_fields(serializer)["branch"], "queryset", RowSourceStandIn())
+    fake = type(
+        "StandInMut",
+        (),
+        {
+            "_injected_field_specs": [],
+            "_input_field_specs": [
+                InputFieldSpec(
+                    input_attr="branch",
+                    graphql_name="branch",
+                    target_name="branch",
+                    kind=RELATION_SINGLE,
+                    related_model=library_models.Branch,
+                ),
+            ],
+        },
+    )
+    with (
+        write_pipeline("default", lock=False),
+        pytest.raises(
+            ConfigurationError,
+            match=r"BranchSer\.branch relation queryset must be a QuerySet or a Manager, "
+            r"got 'RowSourceStandIn'",
+        ),
+    ):
+        serializer_resolvers._scope_relation_querysets_to_visibility(
+            _as_serializer_mutation(fake),
+            serializer,
+            info=unread_info(),
+        )
+
+
 def test_relation_queryset_scope_handles_many_related_field() -> None:
     """Many relation fields scope their child relation queryset through target visibility (#3)."""
 
@@ -2771,10 +2817,8 @@ def test_relation_queryset_scope_is_isolated_between_concurrent_serializer_insta
     )
 
     def _scope_for(visibility_city: str) -> BranchSer:
-        request = HttpRequest()
-        # basedpyright: the test hangs the visibility probe on the request the get_queryset hook
-        # reads; HttpRequest declares no such attribute
-        request.visibility_city = visibility_city  # pyright: ignore[reportAttributeAccessIssue]
+        request = _CityRequest()
+        request.visibility_city = visibility_city
         info = make_info(context=SimpleNamespace(request=request))
         serializer = BranchSer()
         # The pipeline context is a ContextVar - set it INSIDE this worker thread.

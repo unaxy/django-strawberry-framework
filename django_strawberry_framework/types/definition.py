@@ -16,6 +16,7 @@ from django_strawberry_framework.exceptions import (
     _safe_attr,
     _safe_type_name,
 )
+from django_strawberry_framework.utils._narrowing import read_attr
 
 from .relay import _resolve_id_default
 
@@ -268,13 +269,13 @@ class DjangoTypeDefinition:
         which would silently diverge across renames.
         """
         try:
-            name = self.name if self.name is not None else self.origin.__name__
+            name = self.name if self.name is not None else read_attr(self.origin, "__name__")
         except BaseException as exc:
             raise ConfigurationError(
                 f"Could not inspect the GraphQL type name for {_safe_type_name(self.origin)}.",
             ) from exc
-        # basedpyright: trust boundary: a consumer metaclass can answer ``__name__`` with any object
-        if not isinstance(name, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+        # A consumer metaclass can answer ``__name__`` with any object.
+        if not isinstance(name, str):
             raise ConfigurationError(
                 f"GraphQL type name for {_safe_type_name(self.origin)} must be a non-empty string; "
                 f"got {_safe_arg_repr(name)}.",
