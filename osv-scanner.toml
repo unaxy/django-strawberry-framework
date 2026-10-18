@@ -9,3 +9,11 @@ reason = """autobahn reaches the lock only through the dev group's `daphne` extr
 through the package's own dependencies. The Python >= 3.11 resolution carries the fix \
 (26.7.1); the Python 3.10 resolution stays on 24.4.2 because 26.7.1 requires Python \
 >= 3.11, so no fixed release exists for that marker while 3.10 is the supported floor."""
+
+[[IgnoredVulns]]
+id = "GHSA-8pqf-f4m5-798g"
+ignoreUntil = 2026-12-31
+reason = """twisted reaches the lock only through the dev group's `channels[daphne]` \
+(daphne[tls]), never through the package's own dependencies. The advisory is a ReDoS in \
+`twisted.mail.imap4.wildcardToRegexp`, an IMAP server path nothing here imports, and its \
+last affected release (26.4.0) is the latest published, so no fixed release exists."""
