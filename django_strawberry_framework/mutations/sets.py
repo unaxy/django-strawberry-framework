@@ -93,7 +93,7 @@ from .operations import (
 from .permissions import DjangoModelPermission, is_permission_class, run_permission_classes
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from typing import Protocol, TypeAlias
 
     from django.db import models
@@ -181,14 +181,11 @@ def reject_unknown_meta_keys(name: str, meta: object, allowed: frozenset[str]) -
     if not isinstance(meta, type):
         raise ConfigurationError(f"{name}.Meta must be a class; got {_safe_arg_repr(meta)}.")
     # A metaclass can inject non-string keys into the consumer's ``Meta`` namespace.
-    meta_keys: Iterable[object] = vars(meta)
-    # basedpyright: trust boundary: typeshed types ``vars`` as string-keyed, which that
-    # metaclass injection breaks
-    declared = {key for key in meta_keys if not (isinstance(key, str) and key.startswith("_"))}  # pyright: ignore[reportUnnecessaryIsInstance]
+    meta_keys = list_of(vars(meta))
+    declared = {key for key in meta_keys if not (isinstance(key, str) and key.startswith("_"))}
     unknown = sorted(
         declared - allowed,
-        # basedpyright: trust boundary: the same injected keys
-        key=lambda k: (not isinstance(k, str), str(k)),  # pyright: ignore[reportUnnecessaryIsInstance]
+        key=lambda k: (not isinstance(k, str), str(k)),
     )
     if unknown:
         raise ConfigurationError(f"{name}.Meta has unknown keys: {unknown}.")

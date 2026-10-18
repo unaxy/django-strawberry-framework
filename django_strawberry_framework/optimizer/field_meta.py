@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
 from django_strawberry_framework.exceptions import OptimizerError, _safe_type_name
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.relations import (
     RelationLink,
     has_composite_pk,
@@ -235,7 +236,7 @@ class FieldMeta:
 
         """
         try:
-            field_name = field.name
+            field_name = read_attr(field, "name")
             # Inside the guard: reading ``is_relation`` and asking it for its
             # truth value are one operation from the caller's side, and a
             # descriptor whose ``__bool__`` raises is as malformed as one whose
@@ -246,9 +247,8 @@ class FieldMeta:
                 f"FieldMeta.from_django_field expected a Django field descriptor "
                 f"exposing 'name' and 'is_relation'; got {_safe_type_name(field)}.",
             ) from exc
-        # basedpyright: trust boundary: ``field`` is a public parameter, and a descriptor can
-        # answer ``name`` with any object
-        if not isinstance(field_name, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+        # ``field`` is a public parameter, and a descriptor can answer ``name`` with any object
+        if not isinstance(field_name, str):
             raise OptimizerError(
                 f"FieldMeta.from_django_field expected a string field name; "
                 f"got {_safe_type_name(field_name)}.",

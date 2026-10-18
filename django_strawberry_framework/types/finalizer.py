@@ -154,15 +154,13 @@ def _annotation_names(type_cls: type[DjangoType]) -> tuple[str, ...]:
     try:
         annotations = type_cls.__annotations__
         # A metaclass can inject non-string keys into a consumer class's annotations.
-        names: tuple[object, ...] = tuple(annotations)
+        names = tuple(list_of(annotations))
     except BaseException as exc:
         raise ConfigurationError(
             f"Cannot finalize {_safe_class_name(type_cls)}: its annotations could not be read. "
             f"{_safe_type_name(exc)}.",
         ) from exc
-    # basedpyright: trust boundary: typeshed types ``__annotations__`` as string-keyed, which the
-    # metaclass injection above breaks
-    invalid = next((name for name in names if not isinstance(name, str)), None)  # pyright: ignore[reportUnnecessaryIsInstance]
+    invalid = next((name for name in names if not isinstance(name, str)), None)
     if invalid is not None:
         raise ConfigurationError(
             f"Cannot finalize {_safe_class_name(type_cls)}: annotation keys must be field-name "

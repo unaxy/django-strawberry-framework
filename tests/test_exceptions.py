@@ -173,6 +173,18 @@ class _PicklableDummyTerminal:
     name = "created_at"
 
 
+class _TaggedPathResolutionError(PathResolutionError):
+    """A ``PathResolutionError`` carrying the extra instance state a roundtrip must keep."""
+
+    custom_tag: str
+
+
+class _TaggedLookupValidationError(LookupValidationError):
+    """A ``LookupValidationError`` carrying the extra instance state a roundtrip must keep."""
+
+    custom_tag: str
+
+
 def _execute_raising(exc_factory: Callable[[], BaseException]) -> ExecutionResult:
     @strawberry.type
     class Query:
@@ -373,10 +385,8 @@ def test_path_resolution_error_roundtrip_preserves_attributes(
     roundtrip: Callable[[object], object],
 ) -> None:
     """PathResolutionError keeps constructor args and extra state across a roundtrip."""
-    err = PathResolutionError(_PicklableDummyModel, "groups.permissions", "permissions")
-    # basedpyright: the undeclared attribute is the extra instance state the roundtrip must
-    # carry; PathResolutionError declares no such attribute
-    err.custom_tag = "custom_value"  # pyright: ignore[reportAttributeAccessIssue]
+    err = _TaggedPathResolutionError(_PicklableDummyModel, "groups.permissions", "permissions")
+    err.custom_tag = "custom_value"
 
     restored = roundtrip(err)
 
@@ -399,10 +409,8 @@ def test_lookup_validation_error_roundtrip_preserves_attributes(
 ) -> None:
     """LookupValidationError keeps constructor args and extra state across a roundtrip."""
     term = _PicklableDummyTerminal()
-    err = LookupValidationError(term, "created_at__year__invalid", "invalid")
-    # basedpyright: the undeclared attribute is the extra instance state the roundtrip must
-    # carry; LookupValidationError declares no such attribute
-    err.custom_tag = "custom_value"  # pyright: ignore[reportAttributeAccessIssue]
+    err = _TaggedLookupValidationError(term, "created_at__year__invalid", "invalid")
+    err.custom_tag = "custom_value"
 
     restored = roundtrip(err)
 

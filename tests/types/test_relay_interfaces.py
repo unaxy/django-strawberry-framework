@@ -365,26 +365,23 @@ def test_consumer_declared_is_type_of_is_preserved() -> None:
     ``is_type_of``, we do not overwrite it." The discriminator is
     ``cls.__dict__`` membership, matching
     ``strawberry_django/type.py::_process_type #"if "is_type_of" not in cls.__dict__"``.
-    The sentinel return value proves the consumer's callable is the one
-    that survives - not merely that some callable named ``is_type_of``
-    is attached to the class.
+    The ``False`` the consumer's callable returns for a ``Category`` (the framework's own
+    answer is ``True``) proves the consumer's callable is the one that survives - not merely
+    that some callable named ``is_type_of`` is attached to the class.
     """
-    sentinel = object()
 
-    def consumer_is_type_of(_obj: object, _info: object) -> object:
-        return sentinel
+    def consumer_is_type_of(_obj: object, _info: object) -> bool:
+        return False
 
     class CustomNode(DjangoType):
-        # basedpyright: the consumer callable returns a sentinel, not a bool, so the identity
-        # assert below proves this callable is the one that survives
-        is_type_of = consumer_is_type_of  # pyright: ignore[reportAssignmentType]
+        is_type_of = consumer_is_type_of
 
         class Meta:
             model = Category
             fields = ("id", "name")
 
     assert CustomNode.__dict__["is_type_of"] is consumer_is_type_of
-    assert CustomNode.__dict__["is_type_of"](Category(), None) is sentinel
+    assert CustomNode.__dict__["is_type_of"](Category(), None) is False
 
 
 def test_is_type_of_hostile_hint_descriptor_falls_back_to_instance_check() -> None:

@@ -7,10 +7,10 @@ A split suite run on a tree other sessions are editing can drop modules from eve
 Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit and the CI lint job) refuses a
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any count off `[tool.type-suppressions]`: the ignore
-comments per unlocked rule and the `typing.cast` calls (432) may only fall, and the budget falls with them. A rule
+comments per unlocked rule and the `typing.cast` calls (410) may only fall, and the budget falls with them. A rule
 whose last ignore is cleared leaves the budget and gains the marker.
 
-Progress: 27 done, 7 to do. Ignore comments: 845 lines (1897 at the start of 0.0.15's ignore sweep).
+Progress: 27 done, 7 to do. Ignore comments: 782 lines (1897 at the start of 0.0.15's ignore sweep).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -185,6 +185,12 @@ Survey verdicts recorded so nothing is re-tried blind:
   with their real reasons (typeshed deprecates `asyncio.iscoroutinefunction` from 3.11; asgiref picks its check by
   `hasattr`)
 
+- Kept after the ignore-refactor survey's fixes landed: `middleware/request_body.py`'s `setup` read (routing it
+  through `require` replaces Django's "not callable" error a test pins); `list_field.py`'s model check and
+  `utils/querysets.py`'s manager `all()` check (an `object` read narrows to `type[Unknown]` / `QuerySet[Model, object]`,
+  a new diagnostic or cast); the two `query.annotations` plants in `tests/utils/test_querysets.py` (`.annotate()`
+  refuses the hostile inner query, so the plant is the input)
+
 - Item 34, kept budgeted (each at its floor): `reportMissingSuperCall` 3 (the `TYPE_CHECKING` router and consumer
   declarations, and a test form whose `__init__` forwards through `call_forwarded`; a forwarding `super().__init__` body trades it for four ruff `ARG002` or six `reportArgumentType`);
   `reportPropertyTypeMismatch` 5 (setters that take a lazy target or the stop-aware schema wrapper and getters
@@ -229,7 +235,7 @@ strawberry_django does?
 
 ## Ignore breakdown
 
-Lines carrying `# pyright: ignore[...]`: 845 (922 rule hits): tests 625, package 141, examples 78,
+Lines carrying a `# pyright: ignore[...]` comment: 782 (851 rule hits): tests 572, package 131, examples 78,
 scripts 1. The tables below were measured at 881 lines.
 
 ### By cause

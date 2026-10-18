@@ -106,6 +106,7 @@ from tests._idioms import (
     ModelSerializerBase,
     comparing_metaclass,
     definition_raises,
+    is_object_dict,
     module_binding,
 )
 from tests._info import unread_info
@@ -3200,8 +3201,9 @@ def test_mutual_nested_fields_cycle_raises_configuration_error_at_class_creation
         def create(self, validated_data: dict[str, object]) -> product_models.Item:
             return product_models.Item.objects.create(**validated_data)
 
-    # basedpyright: drf-stubs type _declared_fields as dict[str, Field] over the bare generic Field
-    MutCategorySerializer._declared_fields["item"] = MutItemSerializer()  # pyright: ignore[reportUnknownMemberType]
+    declared = read_attr(MutCategorySerializer, "_declared_fields")
+    assert is_object_dict(declared)
+    declared["item"] = MutItemSerializer()
 
     cycle_cat: dict[str, NestedSerializerConfig] = {}
     config_item = NestedSerializerConfig(nested_fields=cycle_cat)

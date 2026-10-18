@@ -36,6 +36,7 @@ import functools
 import hashlib
 import inspect
 import textwrap
+from collections.abc import MutableSequence
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, cast
 
@@ -74,7 +75,7 @@ from .field_meta import FieldMeta
 from .predicates import visible_value_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, MutableSequence, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from typing import Protocol, TypeAlias
 
     from django.db import models
@@ -209,8 +210,8 @@ class OptimizationPlan:
     plan cache), it must not be mutated in place.  Use
     ``dataclasses.replace`` to derive a modified plan.  The stored fields
     are typed as ``Sequence`` because they are lists during construction
-    and tuples after ``finalize()``; mutator helpers retain
-    ``MutableSequence`` parameters for the walker-only construction path.
+    and tuples after ``finalize()``; the ``append_unique`` helpers take that
+    same ``Sequence`` and append only to a mutable one.
 
     Scope of the post-``finalize()`` immutability enforcement: the
     five directive fields (``select_related``, ``prefetch_related``,
@@ -417,15 +418,10 @@ class OptimizationPlan:
         """
         self._assert_under_construction()
         other._assert_under_construction()
-        # ``_assert_under_construction`` just proved both plans' directive
-        # fields are still the mutable construction-time lists.
-        append_unique_many(cast("MutableSequence[str]", self.select_related), other.select_related)
+        append_unique_many(self.select_related, other.select_related)
         for prefetch in other.prefetch_related:
-            append_prefetch_unique(
-                cast("MutableSequence[PrefetchLookup]", self.prefetch_related),
-                prefetch,
-            )
-        append_unique_many(cast("MutableSequence[str]", self.only_fields), other.only_fields)
+            append_prefetch_unique(self.prefetch_related, prefetch)
+        append_unique_many(self.only_fields, other.only_fields)
         self.merge_metadata_from(other)
         for path, resolver_keys in other.select_path_resolver_keys.items():
             merged = list(self.select_path_resolver_keys.get(path, ()))
@@ -450,11 +446,8 @@ class OptimizationPlan:
         """
         self._assert_merge_field_inventory()
         self._assert_under_construction()
-        append_unique_many(cast("MutableSequence[str]", self.fk_id_elisions), other.fk_id_elisions)
-        append_unique_many(
-            cast("MutableSequence[str]", self.planned_resolver_keys),
-            other.planned_resolver_keys,
-        )
+        append_unique_many(self.fk_id_elisions, other.fk_id_elisions)
+        append_unique_many(self.planned_resolver_keys, other.planned_resolver_keys)
         self.window_cursor_states.update(other.window_cursor_states)
         if not other.cacheable:
             self.cacheable = False
@@ -625,30 +618,38 @@ def _flatten_select_related(sr: object) -> set[str]:
     return paths
 
 
-def append_unique(values: MutableSequence[_T], value: _T) -> None:
+def _append_to_mutable(values: Sequence[_T], value: _T) -> None:
+    """Append to a plain mutable sequence; a finalized (tuple) field has no ``append``."""
+    if isinstance(values, MutableSequence):
+        values.append(value)
+        return
+    message = f"{type(values).__name__!r} object has no attribute 'append'"
+    raise AttributeError(message)
+
+
+def append_unique(values: Sequence[_T], value: _T) -> None:
     """Append ``value`` to ``values`` if it is not already present.
 
     Plan-shape mutator: lives next to ``OptimizationPlan`` so the dedupe
     discipline is a property of the plan list shape rather than a
-    walker-local convention.
+    walker-local convention. ``values`` is the ``Sequence`` a plan stores:
+    a list under construction, a tuple once finalized, where an append of a
+    missing value raises ``AttributeError``.
     """
     if isinstance(values, _IndexedList):
         values.append_unique(value)
         return
     if value not in values:
-        values.append(value)
+        _append_to_mutable(values, value)
 
 
-def append_unique_many(values: MutableSequence[_T], new_values: Iterable[_T]) -> None:
+def append_unique_many(values: Sequence[_T], new_values: Iterable[_T]) -> None:
     """Append each value in ``new_values`` if it is not already present."""
     for value in new_values:
         append_unique(values, value)
 
 
-def append_prefetch_unique(
-    values: MutableSequence[PrefetchLookup],
-    prefetch: PrefetchLookup,
-) -> None:
+def append_prefetch_unique(values: Sequence[PrefetchLookup], prefetch: PrefetchLookup) -> None:
     """Append ``prefetch`` unless a lookup for the same path already exists.
 
     Compares lookup paths via ``_lookup_path`` so a hint-supplied
@@ -664,7 +665,7 @@ def append_prefetch_unique(
     lookup_path = _lookup_path(prefetch)
     if any(_lookup_path(value) == lookup_path for value in values):
         return
-    values.append(prefetch)
+    _append_to_mutable(values, prefetch)
 
 
 def _consumer_prefetch_lookups(queryset: object) -> list[PrefetchLookup]:

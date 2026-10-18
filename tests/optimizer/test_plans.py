@@ -358,6 +358,24 @@ class TestPlanHelperRelocations:
         )
         assert values == ["a", "b"]
 
+    def test_append_unique_on_finalized_tuple_raises_for_a_missing_value(self) -> None:
+        plan = OptimizationPlan(only_fields=["a"]).finalize()
+        assert isinstance(plan.only_fields, tuple)
+        append_unique(plan.only_fields, "a")
+        assert plan.only_fields == ("a",)
+        with pytest.raises(AttributeError, match="'tuple' object has no attribute 'append'"):
+            append_unique(plan.only_fields, "b")
+        assert plan.only_fields == ("a",)
+
+    def test_append_prefetch_unique_on_finalized_tuple_raises_for_a_missing_path(self) -> None:
+        plan = OptimizationPlan(prefetch_related=["items"]).finalize()
+        assert isinstance(plan.prefetch_related, tuple)
+        append_prefetch_unique(plan.prefetch_related, Prefetch("items"))
+        assert plan.prefetch_related == ("items",)
+        with pytest.raises(AttributeError, match="'tuple' object has no attribute 'append'"):
+            append_prefetch_unique(plan.prefetch_related, Prefetch("other"))
+        assert plan.prefetch_related == ("items",)
+
     def test_append_prefetch_unique_dedupes_by_lookup_path(self) -> None:
         first = Prefetch("items", queryset=Item.objects.all())
         second = Prefetch("items", queryset=Item.objects.filter(pk__gt=0))

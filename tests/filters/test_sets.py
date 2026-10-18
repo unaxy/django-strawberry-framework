@@ -11340,11 +11340,10 @@ def test_public_filter_defaults_matches_upstream_django_filter_table() -> None:
         ManyToManyRel: _first_field(lambda f: isinstance(f, ManyToManyRel)),
         OneToOneRel: _first_field(lambda f: isinstance(f, OneToOneRel)),
     }
+    upstream_by_type: dict[type, dict[str, object]] = dict(UPSTREAM.items())
     for field_type, sample in relation_samples.items():
         assert sample is not None, f"no live sample field for {field_type.__name__}"
-        # basedpyright: types-django-filter types FILTER_FOR_DBFIELD_DEFAULTS keys as type[Field];
-        # the runtime table also keys the reverse-relation classes
-        upstream_entry: dict[str, object] = UPSTREAM[field_type]  # pyright: ignore[reportArgumentType]
+        upstream_entry = upstream_by_type[field_type]
         up_provider = upstream_entry["extra"]
         assert callable(up_provider), field_type.__name__
         up_extra = up_provider(sample)

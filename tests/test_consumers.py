@@ -937,16 +937,15 @@ async def test_send_json_hostile_message_with_failing_delegate_is_contained() ->
 @pytest.mark.asyncio
 async def test_send_json_control_frame_unreadable_revoked_flag_suppresses_the_frame() -> None:
     """A control frame reads an unreadable revocation flag as REVOKED and sends nothing."""
-    _, adapter = _build_consumer_and_adapter()
+    consumer, adapter = _build_consumer_and_adapter()
 
-    class HostileRevocation:
+    class HostileRevocation(cmod._ConnectionRevocation):
         @property
+        @override
         def revoked(self) -> NoReturn:
             raise ValueError("hostile revoked")
 
-    # basedpyright: the hostile revocation is the input under test, and it is not a
-    # _ConnectionRevocation
-    adapter.ws_consumer._revocation = HostileRevocation()  # pyright: ignore[reportAttributeAccessIssue]
+    consumer._revocation = HostileRevocation()
 
     with patch.object(
         adapter.__class__.__bases__[0],
@@ -960,16 +959,15 @@ async def test_send_json_control_frame_unreadable_revoked_flag_suppresses_the_fr
 @pytest.mark.asyncio
 async def test_send_json_control_frame_cancellation_reading_revoked_is_re_raised() -> None:
     """``CancelledError`` reading the flag for a control frame propagates."""
-    _, adapter = _build_consumer_and_adapter()
+    consumer, adapter = _build_consumer_and_adapter()
 
-    class CancellingRevocation:
+    class CancellingRevocation(cmod._ConnectionRevocation):
         @property
+        @override
         def revoked(self) -> NoReturn:
             raise asyncio.CancelledError
 
-    # basedpyright: the cancelling revocation is the input under test, and it is not a
-    # _ConnectionRevocation
-    adapter.ws_consumer._revocation = CancellingRevocation()  # pyright: ignore[reportAttributeAccessIssue]
+    consumer._revocation = CancellingRevocation()
 
     with pytest.raises(asyncio.CancelledError):
         await adapter.send_json({"type": "ping"})

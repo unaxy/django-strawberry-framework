@@ -1164,8 +1164,10 @@ def _connection_actor(consumer: AsyncConsumer) -> AbstractBaseUser | AnonymousUs
 
 def _message_loop_task(consumer: "GraphQLWSConsumer") -> asyncio.Task[object] | None:
     """The consumer's message-loop task, which ``websocket_connect`` creates and never clears."""
-    # basedpyright: Strawberry declares GraphQLWSConsumer.run_task as a bare asyncio.Task
-    task: asyncio.Task[object] | None = consumer.run_task  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    task = read_attr(consumer, "run_task")
+    if task is None:
+        return None
+    assert isinstance(task, asyncio.Task)
     return task
 
 

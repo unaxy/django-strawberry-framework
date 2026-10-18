@@ -101,14 +101,14 @@ from ._context import active_nested_strategy
 from .plans import OptimizationPlan, append_prefetch_unique, apply_window_pagination
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, MutableSequence
+    from collections.abc import Callable, Mapping
 
     from django_strawberry_framework.keyset import KeysetSeek
     from django_strawberry_framework.utils.typing import ModelField
 
     from .join_taxonomy import RelationJoinDescriptor
     from .lateral_fetch import WindowSignature
-    from .plans import OrderEntry, PrefetchLookup
+    from .plans import OrderEntry
 
 
 def unwindowable_child_queryset_reason(queryset: object) -> str | None:
@@ -366,7 +366,7 @@ def attach_windowed_prefetch(
     if wrap is not None:
         windowed_queryset = wrap(windowed_queryset)
     append_prefetch_unique(
-        cast("MutableSequence[PrefetchLookup]", plan.prefetch_related),
+        plan.prefetch_related,
         Prefetch(
             request.lookup,
             queryset=windowed_queryset,

@@ -149,7 +149,7 @@ def test_validate_orderset_class_uses_local_import() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_phase_2_5_binds_all_owners_before_expansion() -> None:
+def test_phase_2_5_binds_all_owners_before_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every owner binds before any ``get_fields()`` runs (subpass 1 before subpass 2)."""
 
     class ShelfOrder(OrderSet):
@@ -172,36 +172,31 @@ def test_phase_2_5_binds_all_owners_before_expansion() -> None:
         # The inherited ``OrderSet.get_fields`` the spy shadows on ``ShelfOrder``.
         return super(ShelfOrder, cls).get_fields()
 
-    # basedpyright: the classmethod spy installed on the class is the probe under test; the
-    # checker compares the descriptor against the bound hook signature
-    ShelfOrder.get_fields = instrumented_get_fields  # pyright: ignore[reportAttributeAccessIssue]
-    try:
+    monkeypatch.setattr(ShelfOrder, "get_fields", instrumented_get_fields)
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title", "shelf")
-                orderset_class = BookOrder
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title", "shelf")
+            orderset_class = BookOrder
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class ShelfType(DjangoType):
-            class Meta:
-                model = Shelf
-                fields = ("id", "code")
-                orderset_class = ShelfOrder
+    class ShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+            orderset_class = ShelfOrder
 
-        assert registry.get(Shelf) is ShelfType
+    assert registry.get(Shelf) is ShelfType
 
-        finalize_django_types()
+    finalize_django_types()
 
-        assert observations, "ShelfOrder.get_fields was never called"
-        assert all(observations), (
-            "ShelfOrder._owner_definition was unset during get_fields; "
-            "subpass 1 did not complete across all owners before subpass 2 ran."
-        )
-    finally:
-        del ShelfOrder.get_fields
+    assert observations, "ShelfOrder.get_fields was never called"
+    assert all(observations), (
+        "ShelfOrder._owner_definition was unset during get_fields; "
+        "subpass 1 did not complete across all owners before subpass 2 ran."
+    )
 
 
 # ---------------------------------------------------------------------------

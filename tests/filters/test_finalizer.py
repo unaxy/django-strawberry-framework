@@ -116,7 +116,7 @@ def _isolate_registry() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def test_phase_2_5_binds_all_owners_before_expansion() -> None:
+def test_phase_2_5_binds_all_owners_before_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
     """Subpass 1 must complete across both owners before any ``get_filters`` runs.
 
     Pre-declares ``GenreFilter`` so ``BookFilter`` can reference it as a
@@ -155,49 +155,44 @@ def test_phase_2_5_binds_all_owners_before_expansion() -> None:
         observations.append(cls._owner_definition is not None)
         return require(object_result(original_get_filters, cls), _is_filter_map)
 
-    # basedpyright: the classmethod spy installed on the class is the probe under test; the
-    # checker compares the descriptor against the bound hook signature
-    GenreFilter.get_filters = instrumented_get_filters  # pyright: ignore[reportAttributeAccessIssue]
-    try:
+    monkeypatch.setattr(GenreFilter, "get_filters", instrumented_get_filters)
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = (
-                    "id",
-                    "title",
-                    "shelf",
-                    "genres",
-                )
-                filterset_class = BookFilter
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = (
+                "id",
+                "title",
+                "shelf",
+                "genres",
+            )
+            filterset_class = BookFilter
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name")
-                filterset_class = GenreFilter
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name")
+            filterset_class = GenreFilter
 
-        assert registry.get(Genre) is GenreType
+    assert registry.get(Genre) is GenreType
 
-        class ShelfType(DjangoType):
-            class Meta:
-                model = Shelf
-                fields = ("id", "code")
-                filterset_class = ShelfFilter
+    class ShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+            filterset_class = ShelfFilter
 
-        assert registry.get(Shelf) is ShelfType
+    assert registry.get(Shelf) is ShelfType
 
-        finalize_django_types()
+    finalize_django_types()
 
-        assert observations, "GenreFilter.get_filters was never called"
-        assert all(observations), (
-            "GenreFilter._owner_definition was unset during get_filters; "
-            "subpass 1 did not complete across all owners before subpass 2 ran."
-        )
-    finally:
-        del GenreFilter.get_filters
+    assert observations, "GenreFilter.get_filters was never called"
+    assert all(observations), (
+        "GenreFilter._owner_definition was unset during get_filters; "
+        "subpass 1 did not complete across all owners before subpass 2 ran."
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -132,6 +132,7 @@ from typing import TYPE_CHECKING, Final, Literal, TypeGuard, TypeVar, cast, over
 from django.core.exceptions import FieldDoesNotExist
 from django.core.files import File
 from django.db import transaction
+from django.db.models import QuerySet
 from django.db.models.signals import post_save, pre_save
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -230,7 +231,6 @@ if TYPE_CHECKING:
     from typing import Protocol, TypeAlias
 
     from django.db import models
-    from django.db.models import Manager, QuerySet
     from strawberry.types import Info
     from typing_extensions import TypeIs
 
@@ -1647,10 +1647,14 @@ def _scope_specs_over_serializer(
         # the pin fails closed on a cross-alias author queryset BEFORE any validation runs.
         # The schema/runtime agreement guard already rejected a relation whose queryset
         # names no model, so the author queryset is set here.
-        # basedpyright: drf-stubs types the attribute as a ``Manager``, whose ``__get__`` it binds
-        author_queryset = relation.queryset  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        author_queryset = read_attr(relation, "queryset")
+        if not (is_manager(author_queryset) or isinstance(author_queryset, QuerySet)):
+            raise ConfigurationError(
+                f"{type(serializer).__name__}.{spec.target_name} relation queryset must be a "
+                f"QuerySet or a Manager, got {type(author_queryset).__name__!r}.",
+            )
         scoped = pin_write_queryset(
-            cast("QuerySet[models.Model] | Manager[models.Model]", author_queryset).all(),
+            author_queryset.all(),
             pipeline.alias,
             owner=(f"{type(serializer).__name__}.{spec.target_name} relation queryset"),
         )
@@ -1675,7 +1679,9 @@ def _scope_specs_over_serializer(
                 pipeline.alias,
                 scoped,
             )
-        relation.queryset = scoped
+        # basedpyright: drf-stubs types the slot's rows as the model; isinstance proves a QuerySet,
+        # not its row type (a ``.values()`` queryset passes it)
+        relation.queryset = scoped  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def _assert_save_kwargs_no_shadow(

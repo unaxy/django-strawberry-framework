@@ -25,6 +25,7 @@ from django_strawberry_framework.rest_framework.accessors import (
     validated_data_of,
 )
 from django_strawberry_framework.utils._narrowing import is_dict
+from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
     from django_strawberry_framework.rest_framework.serializer_converter import DRFField
@@ -33,9 +34,7 @@ if TYPE_CHECKING:
 class _NoteSerializer(serializers.Serializer[object]):
     title = serializers.CharField()
     tags = serializers.ListField(child=serializers.IntegerField())
-    # basedpyright: drf-stubs' ``RelatedField.__new__`` overloads cannot bind the field's model
-    # parameter, so the ``many=True`` construction reads as partially Unknown
-    ids = serializers.PrimaryKeyRelatedField(many=True, read_only=True)  # pyright: ignore[reportUnknownVariableType]
+    ids = object_result(serializers.PrimaryKeyRelatedField, many=True, read_only=True)
 
 
 def test_bound_fields_are_the_serializer_fields() -> None:

@@ -29,7 +29,7 @@ import inspect
 import itertools
 import sys
 import types
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import NoReturn
 
 import pytest
@@ -2853,6 +2853,7 @@ def _make_path_optin_type(
     *,
     namespace: dict[str, object] | None = None,
     fields: Sequence[str] | None = None,
+    extra_meta: Mapping[str, object] | None = None,
     **meta_attrs: object,
 ) -> type[DjangoType]:
     """Build a ``PathOptInType`` over ``model`` with the given Meta attrs."""
@@ -2869,6 +2870,7 @@ def _make_path_optin_type(
                 "label",
             ),
             **meta_attrs,
+            **(extra_meta or {}),
         },
     )
     return type("PathOptInType", (DjangoType,), {"Meta": meta_cls, **(namespace or {})})
@@ -2987,9 +2989,7 @@ def test_the_collection_guard_names_the_key_it_rejected(key: str) -> None:
     """
     model = _make_path_optin_model()
     with pytest.raises(ConfigurationError, match=f"Meta.{key} must be a non-string"):
-        # basedpyright: a dict splat is checked against every keyword of _make_path_optin_type; the
-        # parametrized key only ever names a Meta attribute, which **meta_attrs takes as object
-        _make_path_optin_type(model, **{key: "attachment"})  # pyright: ignore[reportArgumentType]
+        _make_path_optin_type(model, extra_meta={key: "attachment"})
 
 
 def test_the_collection_guard_still_names_exclude_for_exclude() -> None:
@@ -3014,9 +3014,7 @@ def test_the_collection_guard_still_names_exclude_for_exclude() -> None:
 def test_the_sibling_collection_keys_accept_a_frozenset_too(key: str) -> None:
     """The sibling keys share the widened guard, so the four cannot drift apart."""
     model = _make_path_optin_model()
-    # basedpyright: a dict splat is checked against every keyword of _make_path_optin_type; the
-    # parametrized key only ever names a Meta attribute, which **meta_attrs takes as object
-    _make_path_optin_type(model, **{key: frozenset({"label"})})  # pyright: ignore[reportArgumentType]
+    _make_path_optin_type(model, extra_meta={key: frozenset({"label"})})
     finalize_django_types()
 
 

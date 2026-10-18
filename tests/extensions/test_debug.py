@@ -57,7 +57,7 @@ import logging
 import threading
 import warnings
 from collections import deque
-from collections.abc import AsyncGenerator, Generator, Iterator
+from collections.abc import AsyncIterator, Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from types import SimpleNamespace
@@ -93,7 +93,12 @@ from django_strawberry_framework.extensions.debug import (
     _serialize_sql_row,
     _terminal_original_error,
 )
-from django_strawberry_framework.utils._narrowing import call_method, require_instance
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_awaitable,
+    require,
+    require_instance,
+)
 from tests._execution import execution_result, make_execution_context
 from tests._idioms import json_at, json_list, json_object
 
@@ -117,11 +122,11 @@ def _as_connection(stand_in: object) -> BaseDatabaseWrapper:
     return stand_in  # pyright: ignore[reportReturnType]
 
 
-async def _open_stream(schema: strawberry.Schema, query: str) -> AsyncGenerator[object, None]:
+async def _open_stream(schema: strawberry.Schema, query: str) -> AsyncIterator[object]:
     """``schema.stream(query)``, its frames typed ``object`` for each row to narrow."""
-    # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result
-    # aliases in an ImportError fallback, so StreamResult carries Unknown under the <3.3 pin
-    stream: AsyncGenerator[object, None] = await schema.stream(query)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    opening = require(call_method(schema, "stream", query), is_awaitable)
+    stream = await opening
+    assert isinstance(stream, AsyncIterator)
     return stream
 
 

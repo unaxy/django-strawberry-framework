@@ -148,11 +148,12 @@ upstream base and to `strawberry_django.test.client.TestClient`, but neither has
 graphene's mixin. On a factual claim about upstream source the source wins, so the package ships
 no `mutate()`.
 
-**Derivation — the `response` default.** The `response` field takes a `None` default. The
-engine's `Response` declares three fields with no defaults, so a defaultless child field would
-construct fine too; the default stays because `Response` is re-exported public surface and
-removing a default narrows a constructor consumers may already call. Both in-repo construction
-sites pass `response=` explicitly, so the default is never observed in practice.
+**Derivation — the `response` default.** The `response` field takes no default. `Response` is
+generic in the raw response it carries (`Response[_MonkeyPatchedWSGIResponse]` from `TestClient`,
+`Response[_MonkeyPatchedASGIResponse]` from `AsyncTestClient`), and a `None` default cannot satisfy
+a type variable bound to `HttpResponseBase`. The engine's `Response` declares its three fields with
+no defaults, so a defaultless child field constructs fine; a consumer that builds a `Response`
+itself passes `response=`, as both in-repo construction sites do.
 
 ### Decision 7 — Endpoint resolution: the settings key is `TESTING_ENDPOINT`
 

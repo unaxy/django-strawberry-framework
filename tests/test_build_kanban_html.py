@@ -15,6 +15,7 @@ import pytest
 
 from scripts._kanban_lib import (
     CARD_NESTED_LISTS,
+    CardLink,
     CardRow,
     DashboardData,
     assert_nothing_truncated,
@@ -46,24 +47,74 @@ def test_version_tuple_stops_at_an_oversized_decimal_segment() -> None:
 
 
 def _card(text: str, *, orders: tuple[int, ...] = ()) -> CardRow:
-    """A minimal card carrying one scope item and the reference orders it may cite."""
-    # basedpyright: a stand-in card row carrying only the slots the code under test reads; the
-    # placeholder checks type their cards as CardRow
-    return {  # pyright: ignore[reportReturnType]
+    """A card carrying one scope item and the reference orders it may cite."""
+    target: CardLink = {
+        "id": "0",
+        "cardId": "TODO-ALPHA-001-0.0.1",
+        "number": 1,
+        "title": "target",
+        "slug": "target",
+    }
+    return {
+        "id": "52",
         "cardId": "TODO-ALPHA-052-0.0.16",
+        "number": 52,
+        "title": "card",
+        "slug": "card",
         "planningNote": "",
-        "outgoingReferences": [
-            {"order": order, "rawText": "", "targetCard": {}} for order in orders
+        "updatedDate": "2026-01-01",
+        "status": {"key": "todo", "label": "Todo"},
+        "milestone": None,
+        "targetVersion": None,
+        "priority": None,
+        "relativeSize": None,
+        "spec": None,
+        "labels": [],
+        "items": [
+            {
+                "id": "1",
+                "order": 59,
+                "text": text,
+                "isComplete": False,
+                "section": {"key": "scope", "label": "Scope", "order": 0},
+            },
         ],
-        "items": [{"order": 59, "section": {"key": "scope"}, "text": text}],
+        "outgoingReferences": [
+            {
+                "id": str(order),
+                "order": order,
+                "rawText": "",
+                "kind": {"key": "mention", "label": "Mention"},
+                "targetCard": target,
+            }
+            for order in orders
+        ],
+        "pathLinks": [],
+        "parityClaims": [],
+        "dependencies": [],
     }
 
 
 def _snapshot(cards: list[CardRow]) -> DashboardData:
-    """A board snapshot holding ``cards`` and no board docs."""
-    # basedpyright: a stand-in snapshot carrying only the slots the code under test reads;
-    # assert_placeholders_resolve types the parameter as DashboardData
-    return {"cards": cards, "boardDocs": []}  # pyright: ignore[reportReturnType]
+    """A board snapshot holding ``cards``, no board docs and empty lookup tables."""
+    return {
+        "cards": cards,
+        "boardDocs": [],
+        "lookups": {
+            "statuses": [],
+            "milestones": [],
+            "targetVersions": [],
+            "priorities": [],
+            "relativeSizes": [],
+            "upstreams": [],
+            "parityLevels": [],
+            "sections": [],
+            "referenceKinds": [],
+            "boardDocKinds": [],
+            "trackedPaths": [],
+        },
+        "blockingReferenceKindKeys": [],
+    }
 
 
 def test_a_numeric_card_ref_backed_by_a_reference_row_resolves() -> None:

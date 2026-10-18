@@ -98,6 +98,7 @@ from .utils._narrowing import (
     is_str,
     is_tuple,
     list_of,
+    read_attr,
 )
 from .utils.directives import validated_field_directives
 from .utils.execution_mode import async_execution, operation_is_async
@@ -899,12 +900,6 @@ def _is_deterministic_order_name(
     return _is_deterministic_order_field_path(query, col, opts, seen, prefix)
 
 
-def _f_reference_name(reference: models.F) -> str:
-    """Return the field path an ``F`` names (the ``name`` its ``__init__`` stores)."""
-    # basedpyright: django-stubs omits ``F.name``, so the read is an unknown attribute
-    return reference.name  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-
-
 def _is_deterministic_order_term(
     query: Query,
     term: object,
@@ -975,7 +970,10 @@ def _is_deterministic_order_term(
     if hasattr(term, "resolve_expression"):
         node = type(term)
         if type(term) is models.F:
-            return _is_deterministic_order_reference(query, _f_reference_name(term), prefix)
+            # ``F.name`` is the path ``F.__init__`` stored; a non-``str`` one is a term this
+            # classifier cannot read, so it is refused like any other unreadable term.
+            name = read_attr(term, "name")
+            return is_str(name) and _is_deterministic_order_reference(query, name, prefix)
         if type(term) is models.Q:
             return _is_deterministic_order_condition(query, term, opts, seen, prefix)
         if node in _READABLE_ORDER_LEAVES:

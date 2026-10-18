@@ -73,10 +73,7 @@ from .selections import (
 )
 
 if TYPE_CHECKING:
-    # The ``MutableSequence`` casts below restate that a plan under walker
-    # construction still holds its mutable directive lists; ``OptimizationPlan``
-    # types them as the ``Sequence`` a finalized plan's tuples also satisfy.
-    from collections.abc import Iterable, Mapping, MutableSequence, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from django.db.models import QuerySet
     from graphql.type.definition import GraphQLResolveInfo
@@ -89,7 +86,6 @@ if TYPE_CHECKING:
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
 
-    from .plans import PrefetchLookup
     from .selections import ConvertedSelection, FieldSelection
 
 
@@ -914,7 +910,7 @@ def _walk_selections(
                     # back via ``.only("user")``.
                     column = db_field.attname or id_attr
                     append_unique(
-                        cast("MutableSequence[str]", plan.only_fields),
+                        plan.only_fields,
                         f"{prefix}{column}",
                     )
             continue
@@ -929,7 +925,7 @@ def _walk_selections(
             # accounted for whether or not it is projected.
             if enable_only:
                 append_unique(
-                    cast("MutableSequence[str]", plan.only_fields),
+                    plan.only_fields,
                     f"{prefix}{django_name}",
                 )
             continue
@@ -1114,9 +1110,9 @@ def _plan_select_relation(
         and _selected_scalar_names(sel.selections, django_field.related_model, info=info)
         == {target_pk_name}
     ):
-        append_unique_many(cast("MutableSequence[str]", plan.fk_id_elisions), resolver_identities)
+        append_unique_many(plan.fk_id_elisions, resolver_identities)
         return
-    append_unique(cast("MutableSequence[str]", plan.select_related), full_path)
+    append_unique(plan.select_related, full_path)
     # Couple the directive to the resolver metadata it satisfies: if
     # reconciliation later drops this path because a consumer projection
     # cannot traverse it (``plans.py::prune_unsupportable_select_related``),
@@ -1146,7 +1142,7 @@ def _plan_select_relation(
             and not any(f.startswith(child_prefix) for f in plan.only_fields)
         ):
             append_unique(
-                cast("MutableSequence[str]", plan.only_fields),
+                plan.only_fields,
                 f"{child_prefix}{django_field.related_model._meta.pk.attname}",
             )
 
@@ -1194,7 +1190,7 @@ def _plan_prefetch_relation(
         plan.cacheable = False
     if django_field.related_model is None:
         _record_prefetch_path_keys(plan, lookup_path, resolver_identities)
-        append_unique(cast("MutableSequence[PrefetchLookup]", plan.prefetch_related), lookup_path)
+        append_unique(plan.prefetch_related, lookup_path)
         return
 
     # Snapshot before the child absorb so nested PLANNED keys that land on
@@ -1220,7 +1216,7 @@ def _plan_prefetch_relation(
     nested_keys = tuple(k for k in plan.planned_resolver_keys if k not in prior_planned)
     _record_prefetch_path_keys(plan, lookup_path, (*resolver_identities, *nested_keys))
     append_prefetch_unique(
-        cast("MutableSequence[PrefetchLookup]", plan.prefetch_related),
+        plan.prefetch_related,
         Prefetch(lookup_path, queryset=child_queryset),
     )
 
@@ -1261,7 +1257,7 @@ def _record_relation_access(
     """
     _record_relation_carriers(plan, django_field, prefix, enable_only=enable_only)
     append_unique_many(
-        cast("MutableSequence[str]", plan.planned_resolver_keys),
+        plan.planned_resolver_keys,
         resolver_identities,
     )
 
@@ -1287,7 +1283,7 @@ def _record_relation_carriers(
     """
     if enable_only:
         append_unique_many(
-            cast("MutableSequence[str]", plan.only_fields),
+            plan.only_fields,
             [f"{prefix}{attname}" for attname in django_field.source_link_attnames],
         )
 
@@ -1490,7 +1486,7 @@ def _apply_hint(
         )
         _record_prefetch_path_keys(plan, hinted_lookup, resolver_identities)
         append_prefetch_unique(
-            cast("MutableSequence[PrefetchLookup]", plan.prefetch_related),
+            plan.prefetch_related,
             rebased_prefetch,
         )
         return True
@@ -1778,7 +1774,7 @@ def _ensure_connector_only_fields(
         )
         return
     for attname in columns:
-        append_unique(cast("MutableSequence[str]", plan.only_fields), attname)
+        append_unique(plan.only_fields, attname)
 
 
 def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[FieldSelection]:

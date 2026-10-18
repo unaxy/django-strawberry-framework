@@ -145,7 +145,12 @@ from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
-from django_strawberry_framework.utils._narrowing import instance_dict, is_awaitable, pk_of
+from django_strawberry_framework.utils._narrowing import (
+    instance_dict,
+    is_awaitable,
+    pk_of,
+    read_attr,
+)
 from django_strawberry_framework.utils.querysets import model_for
 from django_strawberry_framework.utils.typing import object_result
 
@@ -271,11 +276,9 @@ def str_subclass_name(kind: str, text: str, calls: list[str]) -> str:
 
 def resolver_function(field: "StrawberryField") -> FunctionType:
     """The plain function ``field``'s resolver wraps (``base_resolver.wrapped_func``)."""
-    # basedpyright: Strawberry annotates StrawberryField.base_resolver as the bare generic
-    # StrawberryResolver, so the resolver and its wrapped function read as partially Unknown
-    resolver = field.base_resolver  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    resolver = read_attr(field, "base_resolver")
     assert resolver is not None
-    wrapped: object = resolver.wrapped_func  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    wrapped = read_attr(resolver, "wrapped_func")
     assert isinstance(wrapped, FunctionType)
     return wrapped
 

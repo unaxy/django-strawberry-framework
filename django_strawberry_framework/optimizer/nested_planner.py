@@ -88,7 +88,7 @@ from .selections import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, MutableSequence, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from typing import TypeAlias
 
     from django.contrib.postgres.indexes import BTreeIndex
@@ -1218,7 +1218,7 @@ def _record_accounted_keys(
     if not response_keys:
         return
     append_unique_many(
-        cast("MutableSequence[str]", plan.planned_resolver_keys),
+        plan.planned_resolver_keys,
         _identities_for_response_keys(runtime_paths, resolver_identities, response_keys)
         if divergent
         else resolver_identities,
@@ -1309,7 +1309,7 @@ def plan_connection_relation(
     # carry leaves them unloaded.
     if enable_only:
         append_unique_many(
-            cast("MutableSequence[str]", plan.only_fields),
+            plan.only_fields,
             [f"{prefix}{attname}" for attname in django_field.source_link_attnames],
         )
     hints_map = resolve_optimizer_hints(definition)
@@ -1761,12 +1761,12 @@ def plan_connection_relation(
     # strictness-visible as a real per-parent access).
     if divergent:
         append_unique_many(
-            cast("MutableSequence[str]", plan.planned_resolver_keys),
+            plan.planned_resolver_keys,
             _identities_for_response_keys(runtime_paths, resolver_identities, planned_keys),
         )
     else:
         append_unique_many(
-            cast("MutableSequence[str]", plan.planned_resolver_keys),
+            plan.planned_resolver_keys,
             resolver_identities,
         )
     return NestedConnectionPlanResult(

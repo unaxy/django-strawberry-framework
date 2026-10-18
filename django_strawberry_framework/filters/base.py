@@ -44,6 +44,7 @@ from django.forms import (
     MultiWidget,
     SelectMultiple,
     TextInput,
+    Widget,
 )
 from django_filters import (
     CharFilter,
@@ -130,7 +131,6 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from django.core.files.uploadedfile import UploadedFile
-    from django.forms.fields import _ClassLevelWidgetT
     from django.utils.datastructures import MultiValueDict
     from django_filters.filterset import BaseFilterSet, FilterSetOptions
     from strawberry.schema import Schema
@@ -649,9 +649,8 @@ class RangeField(Field):
         ["", ""],
         ("", ""),
     ]
-    # basedpyright: django-stubs types a field's class-level ``widget`` as Any: a widget class
-    # here, the instance ``Field.__init__`` builds from it afterwards
-    widget: _ClassLevelWidgetT = _RangeWidget  # pyright: ignore[reportExplicitAny]
+    # A widget class here; ``Field.__init__`` replaces it with an instance of that class.
+    widget: type[Widget] | Widget = _RangeWidget
 
     @override
     def to_python(self, value: object) -> object:
