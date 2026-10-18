@@ -96,10 +96,13 @@ def test_unoptimized_relation_hides_private_child_over_http() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
-        def categories(self) -> QuerySet[Category]:
+        def _categories(self) -> QuerySet[Category]:
             return Category.objects.filter(pk=category.pk)
+
+        categories: QuerySet[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
 
     _CURRENT["schema"] = strawberry.Schema(query=Query)
     try:
@@ -127,12 +130,15 @@ def _build_async_visibility_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
-        async def categories(self) -> list[Category]:
+        async def _categories(self) -> list[Category]:
             return await sync_to_async(list)(
                 Category.objects.filter(pk=category.pk),
             )
+
+        categories: list[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
 
     return strawberry.Schema(query=Query)
 
@@ -207,10 +213,13 @@ def test_consumer_prefetch_cache_is_rescoped_with_the_optimizer_installed() -> N
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
-        def categories(self) -> list[Category]:
+        def _categories(self) -> list[Category]:
             return list(Category.objects.filter(pk=category.pk).prefetch_related("items"))
+
+        categories: list[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
 
     query = "{ categories { items { name isPrivate } } }"
     optimizer = DjangoOptimizerExtension()
@@ -240,10 +249,13 @@ def test_forward_fk_target_visibility_holds_with_the_optimizer_installed() -> No
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
-        def items(self) -> list[Item]:
+        def _items(self) -> list[Item]:
             return list(Item.objects.filter(pk=item.pk))
+
+        items: list[Item] = strawberry.field(
+            resolver=_items,
+            graphql_type=list[products_schema.ItemType],
+        )
 
     query = "{ items { name category { name } } }"
     optimizer = DjangoOptimizerExtension()
@@ -273,12 +285,15 @@ def _build_async_forward_fk_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
-        async def items(self) -> list[Item]:
+        async def _items(self) -> list[Item]:
             return await sync_to_async(list)(
                 Item.objects.filter(pk=item.pk).select_related("category"),
             )
+
+        items: list[Item] = strawberry.field(
+            resolver=_items,
+            graphql_type=list[products_schema.ItemType],
+        )
 
     return strawberry.Schema(query=Query)
 
@@ -341,10 +356,13 @@ def _strictness_armed_loaded_fk_schema(item_pk: int) -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
-        def items(self) -> list[Item]:
+        def _items(self) -> list[Item]:
             return list(Item.objects.filter(pk=item_pk).select_related("category"))
+
+        items: list[Item] = strawberry.field(
+            resolver=_items,
+            graphql_type=list[products_schema.ItemType],
+        )
 
     optimizer = DjangoOptimizerExtension(strictness="raise")
     return strawberry.Schema(query=Query, extensions=[lambda: optimizer])
@@ -453,12 +471,15 @@ def _strictness_armed_nullable_fk_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[profile_type])  # pyright: ignore[reportAny]
-        def profiles(self) -> list[PatronProfile]:
+        def _profiles(self) -> list[PatronProfile]:
             return list(
                 PatronProfile.objects.select_related("favorite_genre").order_by("postal_code"),
             )
+
+        profiles: list[PatronProfile] = strawberry.field(
+            resolver=_profiles,
+            graphql_type=list[profile_type],
+        )
 
     optimizer = DjangoOptimizerExtension(strictness="raise")
     return strawberry.Schema(query=Query, extensions=[lambda: optimizer])
@@ -520,10 +541,13 @@ def _nested_connection_item_queries(parent_count: int) -> list[str]:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
-        def categories(self) -> list[Category]:
+        def _categories(self) -> list[Category]:
             return list(Category.objects.filter(pk__in=parent_pks).order_by("pk"))
+
+        categories: list[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
 
     with CaptureQueriesContext(connection) as captured:
         payload = _post_visibility_query(strawberry.Schema(query=Query), _NESTED_CONNECTION_QUERY)
@@ -568,10 +592,13 @@ def _nested_connection_item_queries_with_optimizer_on_a_list(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
-        def categories(self) -> list[Category]:
+        def _categories(self) -> list[Category]:
             return list(Category.objects.filter(pk__in=parent_pks).order_by("pk"))
+
+        categories: list[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
 
     optimizer = DjangoOptimizerExtension()
     schema = strawberry.Schema(
@@ -631,10 +658,13 @@ def _list_relation_item_queries(parent_count: int) -> list[str]:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
-        def categories(self) -> QuerySet[Category]:
+        def _categories(self) -> QuerySet[Category]:
             return Category.objects.filter(pk__in=parent_pks).order_by("pk")
+
+        categories: QuerySet[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
 
     with CaptureQueriesContext(connection) as captured:
         payload = _post_visibility_query(
@@ -703,11 +733,14 @@ def _holder_patron_card_schema(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[HolderPatronType])  # pyright: ignore[reportAny]
-        def patrons(self) -> QuerySet[Patron] | list[Patron]:
+        def _patrons(self) -> QuerySet[Patron] | list[Patron]:
             patrons = Patron.objects.filter(name__endswith="Holder").order_by("name")
             return patrons if root == "queryset" else list(patrons)
+
+        patrons: QuerySet[Patron] | list[Patron] = strawberry.field(
+            resolver=_patrons,
+            graphql_type=list[HolderPatronType],
+        )
 
     extensions = []
     if optimizer:
@@ -802,12 +835,15 @@ async def test_async_reverse_one_to_one_custom_visibility_over_http() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[HolderPatronType])  # pyright: ignore[reportAny]
-        async def patrons(self) -> list[Patron]:
+        async def _patrons(self) -> list[Patron]:
             return await sync_to_async(list)(
                 Patron.objects.filter(pk__in=[hidden.pk, visible.pk]).order_by("pk"),
             )
+
+        patrons: list[Patron] = strawberry.field(
+            resolver=_patrons,
+            graphql_type=list[HolderPatronType],
+        )
 
     schema = strawberry.Schema(query=Query)
     _CURRENT["schema"] = schema
@@ -886,10 +922,13 @@ def test_relay_id_and_name_selection_is_clean_under_strictness_raise_over_http()
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
-        def categories(self) -> QuerySet[Category]:
+        def _categories(self) -> QuerySet[Category]:
             return Category.objects.order_by("pk")
+
+        categories: QuerySet[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
 
     optimizer = DjangoOptimizerExtension(strictness="raise")
     payload = _post_visibility_query(
@@ -1128,10 +1167,13 @@ def _child_routing_schema(child_hook: _ItemGetQueryset) -> strawberry.Schema:
 
     @strawberry.type
     class RoutingQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[category_type])  # pyright: ignore[reportAny]
-        def categories(self) -> QuerySet[Category]:
+        def _categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        categories: QuerySet[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[category_type],
+        )
 
     optimizer = DjangoOptimizerExtension()
     return strawberry.Schema(

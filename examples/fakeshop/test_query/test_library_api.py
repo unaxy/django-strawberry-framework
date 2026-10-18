@@ -7394,9 +7394,7 @@ def _relay_relation_isnull_holder_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[HolderRelayIsnullBookType])  # pyright: ignore[reportAny]
-        def books(
+        def _books(
             self,
             info: Info,
             filter: FilterInput[HolderBookIsnullFilter] | None = None,  # noqa: A002
@@ -7405,6 +7403,11 @@ def _relay_relation_isnull_holder_schema() -> strawberry.Schema:
             if filter is not None:
                 queryset = HolderBookIsnullFilter.apply_sync(filter, queryset, info)
             return queryset
+
+        books: QuerySet[models.Book] = strawberry.field(
+            resolver=_books,
+            graphql_type=list[HolderRelayIsnullBookType],
+        )
 
     finalize_django_types()
     return strawberry.Schema(query=Query, config=strawberry_config())
@@ -7456,9 +7459,7 @@ def _relation_pk_global_id_holder_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[HolderRelationPkProfileType])  # pyright: ignore[reportAny]
-        def profiles(
+        def _profiles(
             self,
             info: Info,
             filter: FilterInput[HolderRelationPkProfileFilter] | None = None,  # noqa: A002
@@ -7467,6 +7468,11 @@ def _relation_pk_global_id_holder_schema() -> strawberry.Schema:
             if filter is not None:
                 queryset = HolderRelationPkProfileFilter.apply_sync(filter, queryset, info)
             return queryset
+
+        profiles: QuerySet[models.PatronProfile] = strawberry.field(
+            resolver=_profiles,
+            graphql_type=list[HolderRelationPkProfileType],
+        )
 
     finalize_django_types()
     return strawberry.Schema(query=Query, config=strawberry_config())
@@ -8036,12 +8042,15 @@ def test_generic_relation_tags_resolve_over_http_with_optimizer() -> None:
 
         @strawberry.type
         class Query:
-            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-            @strawberry.field(graphql_type=list[HolderTaggedBranchType])  # pyright: ignore[reportAny]
-            def branches(self) -> QuerySet[models.Branch]:
+            def _branches(self) -> QuerySet[models.Branch]:
                 return models.Branch.objects.filter(
                     pk__in=[branch.pk, other_branch.pk],
                 ).order_by("pk")
+
+            branches: QuerySet[models.Branch] = strawberry.field(
+                resolver=_branches,
+                graphql_type=list[HolderTaggedBranchType],
+            )
 
         finalize_django_types()
         ext = DjangoOptimizerExtension()

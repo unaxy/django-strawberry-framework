@@ -81,10 +81,13 @@ def _build_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[BranchNode])  # pyright: ignore[reportAny]
-        def branches(self) -> QuerySet[Branch]:
+        def _branches(self) -> QuerySet[Branch]:
             return Branch.objects.using("shard_b").order_by("id")
+
+        branches: QuerySet[Branch] = strawberry.field(
+            resolver=_branches,
+            graphql_type=list[BranchNode],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()

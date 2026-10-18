@@ -10,7 +10,7 @@ suppression left), every file-level `# pyright:` directive, and any count off `[
 comments per unlocked rule and the `typing.cast` calls (432) may only fall, and the budget falls with them. A rule
 whose last ignore is cleared leaves the budget and gains the marker.
 
-Progress: 27 done, 7 to do. Ignore comments: 1031 lines (1897 at the start of 0.0.15's ignore sweep).
+Progress: 27 done, 7 to do. Ignore comments: 845 lines (1897 at the start of 0.0.15's ignore sweep).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -111,7 +111,7 @@ Progress: 27 done, 7 to do. Ignore comments: 1031 lines (1897 at the start of 0.
   `AdvancedFieldSet` through it), `DjangoType.get_queryset`'s `info` (item 24), the async view's `run` (Strawberry
   overloads `run(HttpRequest)` to two response types) and the runner's `operation` / `on_stream_result` (they wrap
   upstream's scopes rather than subclass them). On for the example project outside its test folders too (650 sites,
-  380 of them in migrations, to 75 suppressions): a data migration binds each `apps.get_model(...)` (`type[Any]`) to
+  380 of them in migrations, to 13 suppressions): a data migration binds each `apps.get_model(...)` (`type[Any]`) to
   a declared `type[...]`, `models.Model` when only the manager is used and otherwise a `TYPE_CHECKING`-only shape
   class naming the historical columns that migration reads (ruff `DJ008` off for migrations); an `aggregate()` or
   `values_list()` result is bound to a declared `dict[str, int | None]` / `QuerySet[M, <row>]`; a `cleaned_data` read
@@ -119,20 +119,26 @@ Progress: 27 done, 7 to do. Ignore comments: 1031 lines (1897 at the start of 0.
   `getattr` chain on an `Info[object, object]`, narrowed by `isinstance(user, AbstractUser)`; JSON goes through a
   `Callable[..., object]` alias; `pk` is declared `int | None` on every concrete example model (`Edition.pk: str`, its
   ISBN); the ModelForm / ModelSerializer forwards take `*args: object,
-  **kwargs: object` with a `reportArgumentType` ignore on the forward (11 `reportExplicitAny` ignores gone). The 75:
-  63 `@strawberry.field(graphql_type=...)` decorators and 6 resolver-less `strawberry.field(...)` attributes
+  **kwargs: object` with a `reportArgumentType` ignore on the forward (11 `reportExplicitAny` ignores gone); a resolver
+  field is the call form `name: <return type> = strawberry.field(resolver=_name, graphql_type=...)`, whose
+  `resolver=` overload is typed where the decorator factory returns `Any`, listed after a class's annotated fields
+  (where Strawberry puts an unannotated decorator field). The 13: `BranchType.shelves`'s
+  `@staticmethod`-stacked `@strawberry.field(graphql_type=...)` decorator on a `DjangoType` and 6 resolver-less
+  `strawberry.field(...)` attributes
   (Strawberry's no-resolver overload returns `Any`), the dormant `apps/products/fields.py`'s 4 `AdvancedFieldSet`
   bases, `seed_shards`' read
   of `settings.DATABASES` (django-stubs types every setting `Any`) and typeshed's `inspect.Parameter.default`. On
-  for tests/ too (2852 sites to 101 suppressions): a saved row's `pk` is `tests/_idioms.py::saved_pk` (`pk_of`
+  for tests/ too (2852 sites to 14 suppressions): a saved row's `pk` is `tests/_idioms.py::saved_pk` (`pk_of`
   narrowed to `int`, failing on an unsaved row); JSON and `result.data` walks go through `json_loads` / `json_at` /
   `json_object` / `json_list` there (or a file's private copy); `typing.get_args` is `type_args`; a hostile double's
   `super().__getattribute__` returns through `object_result`; an `Info` whose `context` is read is `Info[object,
-  object]`. The 101: 91 `@strawberry.field` / `@strawberry.mutation(graphql_type=...)` decorators and resolver-less
-  `strawberry.field(...)` attributes, `strawberry.UNSET` as an input default or omitted argument under its
+  object]`. The 14: the `name=` decorator on a `DjangoType` column
+  (`tests/types/test_definition_order.py`) and 3 resolver-less `strawberry.field(...)` attributes, `strawberry.UNSET` as an input default or omitted argument under its
   declared annotation (7 `@strawberry.input` defaults and two module `_OMITTED` bindings), and the
   `TestClient` probe through the package root's PEP 562 `__getattr__`. On for the example
-  project's test folders too (3579 sites to 38 suppressions, all `@strawberry.field(graphql_type=...)` decorators):
+  project's test folders too (3579 sites to 2 suppressions, decorators the call form cannot replace: a
+  `@staticmethod`-stacked one on a `DjangoType`, and `test_library_shapes_api.py`'s `parents`, whose class lists an
+  unannotated `DjangoConnectionField` over a run-time type first):
   `graphql_client.py`'s `JSONObject` is `dict[str, object]`, and a response is read through its `response_json` /
   `json_at` / `json_object` / `json_list` / `json_str` / `json_int` / `json_bool`, each asserting the container or
   value kind; `saved_pk` narrows a saved row's `pk`; settings and other `Any` attributes go through its `read_attr`
@@ -223,7 +229,7 @@ strawberry_django does?
 
 ## Ignore breakdown
 
-Lines carrying `# pyright: ignore[...]`: 1031 (1108 rule hits): tests 713, package 141, examples 176,
+Lines carrying `# pyright: ignore[...]`: 845 (922 rule hits): tests 625, package 141, examples 78,
 scripts 1. The tables below were measured at 881 lines.
 
 ### By cause

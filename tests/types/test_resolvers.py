@@ -1767,19 +1767,19 @@ def _mti_tag_schema(
 
     @strawberry.type(name="Query")
     class AsyncQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[MtiShopType])  # pyright: ignore[reportAny]
-        async def shops(self) -> list[Model]:
+        async def _shops(self) -> list[Model]:
             return await sync_to_async(_shops_reached_through_prefetched_places)(
                 place_model,
             )
 
+        shops: list[Model] = strawberry.field(resolver=_shops, graphql_type=list[MtiShopType])
+
     @strawberry.type(name="Query")
     class SyncQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[MtiShopType])  # pyright: ignore[reportAny]
-        def shops(self) -> list[Model]:
+        def _shops(self) -> list[Model]:
             return _shops_reached_through_prefetched_places(place_model)
+
+        shops: list[Model] = strawberry.field(resolver=_shops, graphql_type=list[MtiShopType])
 
     return DjangoSchema(query=AsyncQuery if run_async else SyncQuery, config=strawberry_config())
 

@@ -4514,19 +4514,25 @@ def test_consumer_prefetched_many_to_many_stays_silent_under_strictness_raise() 
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[library_schema.VenueType])  # pyright: ignore[reportAny]
-        def venues(self) -> list[library_models.Venue]:
+        def _venues(self) -> list[library_models.Venue]:
             return list(
                 library_models.Venue.objects.prefetch_related("venuesponsor_set").order_by("name"),
             )
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[library_schema.VenueSponsorType])  # pyright: ignore[reportAny]
-        def sponsors(self) -> list[library_models.VenueSponsor]:
+        venues: list[library_models.Venue] = strawberry.field(
+            resolver=_venues,
+            graphql_type=list[library_schema.VenueType],
+        )
+
+        def _sponsors(self) -> list[library_models.VenueSponsor]:
             return list(
                 library_models.VenueSponsor.objects.prefetch_related("venues").order_by("name"),
             )
+
+        sponsors: list[library_models.VenueSponsor] = strawberry.field(
+            resolver=_sponsors,
+            graphql_type=list[library_schema.VenueSponsorType],
+        )
 
     optimizer = DjangoOptimizerExtension(strictness="raise")
     schema = DjangoSchema(

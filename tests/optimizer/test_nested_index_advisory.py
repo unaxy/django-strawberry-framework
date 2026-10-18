@@ -1899,10 +1899,13 @@ class TestAdvisoryDeferredUntilWindowAccepted:
 
         @strawberry.type
         class Query:
-            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-            @strawberry.field(graphql_type=list[ShelfNode])  # pyright: ignore[reportAny]
-            def shelves(self) -> QuerySet[Shelf]:
+            def _shelves(self) -> QuerySet[Shelf]:
                 return Shelf.objects.order_by("id")
+
+            shelves: QuerySet[Shelf] = strawberry.field(
+                resolver=_shelves,
+                graphql_type=list[ShelfNode],
+            )
 
         finalize_django_types()
         ext = DjangoOptimizerExtension(nested_connection_strategy=strategy)

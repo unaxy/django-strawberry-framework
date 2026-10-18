@@ -1320,10 +1320,13 @@ def test_an_abstract_model_type_serves_concrete_rows_and_its_default_seed_names_
     class Query:
         entries: list[TitledEntryType] = DjangoListField(TitledEntryType)
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[TitledEntryType])  # pyright: ignore[reportAny]
-        def reading_lists(self) -> list[library_models.TitledEntry]:
+        def _reading_lists(self) -> list[library_models.TitledEntry]:
             return list(library_models.ReadingList.objects.all())
+
+        reading_lists: list[library_models.TitledEntry] = strawberry.field(
+            resolver=_reading_lists,
+            graphql_type=list[TitledEntryType],
+        )
 
     schema = strawberry.Schema(query=Query)
     context = {"request": RequestFactory().get("/")}

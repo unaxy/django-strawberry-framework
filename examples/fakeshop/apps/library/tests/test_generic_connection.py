@@ -87,10 +87,13 @@ def _build_schema(*, strategy: str | None = None, total_count: bool = False) -> 
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[BranchNode])  # pyright: ignore[reportAny]
-        def branches(self) -> QuerySet[Branch]:
+        def _branches(self) -> QuerySet[Branch]:
             return Branch.objects.order_by("id")
+
+        branches: QuerySet[Branch] = strawberry.field(
+            resolver=_branches,
+            graphql_type=list[BranchNode],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension(nested_connection_strategy=strategy)
@@ -344,10 +347,13 @@ def _build_proxy_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ProxyBranchNode])  # pyright: ignore[reportAny]
-        def proxy_branches(self) -> QuerySet[ProxyBranch]:
+        def _proxy_branches(self) -> QuerySet[ProxyBranch]:
             return ProxyBranch.objects.order_by("id")
+
+        proxy_branches: QuerySet[ProxyBranch] = strawberry.field(
+            resolver=_proxy_branches,
+            graphql_type=list[ProxyBranchNode],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()

@@ -1079,15 +1079,21 @@ def test_annotation_override_does_not_populate_shared_enum_cache_for_co_resident
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=OverrideType)  # pyright: ignore[reportAny]
-        def override(self) -> CoResidentChoiceOwner:
+        def _override(self) -> CoResidentChoiceOwner:
             return CoResidentChoiceOwner(status="a")
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=NonOverrideType)  # pyright: ignore[reportAny]
-        def non_override(self) -> CoResidentChoiceOwner:
+        override: CoResidentChoiceOwner = strawberry.field(
+            resolver=_override,
+            graphql_type=OverrideType,
+        )
+
+        def _non_override(self) -> CoResidentChoiceOwner:
             return CoResidentChoiceOwner(status="a")
+
+        non_override: CoResidentChoiceOwner = strawberry.field(
+            resolver=_non_override,
+            graphql_type=NonOverrideType,
+        )
 
     schema = strawberry.Schema(query=Query)
     query = (
@@ -1240,10 +1246,10 @@ def test_consumer_id_relay_nodeid_annotation_on_relay_node_type_is_accepted() ->
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=CategoryNode)  # pyright: ignore[reportAny]
-        def category(self) -> Category:
+        def _category(self) -> Category:
             return Category(id=1, name="x")
+
+        category: Category = strawberry.field(resolver=_category, graphql_type=CategoryNode)
 
     strawberry.Schema(query=Query)
 
@@ -1265,10 +1271,10 @@ def test_consumer_id_resolved_string_relay_nodeid_annotation_on_relay_node_type_
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=CategoryNode)  # pyright: ignore[reportAny]
-        def category(self) -> Category:
+        def _category(self) -> Category:
             return Category(id=1, name="x")
+
+        category: Category = strawberry.field(resolver=_category, graphql_type=CategoryNode)
 
     schema = strawberry.Schema(query=Query)
     query = '{ __type(name: "CategoryNode") { fields { name type { kind name ofType { kind name } } } } }'
@@ -1361,10 +1367,10 @@ def test_inherited_id_annotation_on_relay_node_subclass_is_handled_by_pk_suppres
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=ChildRelayType)  # pyright: ignore[reportAny]
-        def category(self) -> Category:
+        def _category(self) -> Category:
             return Category(id=1, name="x")
+
+        category: Category = strawberry.field(resolver=_category, graphql_type=ChildRelayType)
 
     schema = strawberry.Schema(query=Query, types=[ChildRelayType])
     query = '{ __type(name: "ChildRelayType") { fields { name type { kind name ofType { kind name } } } } }'
