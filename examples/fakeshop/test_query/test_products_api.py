@@ -985,7 +985,7 @@ def test_create_item_login_bracket_via_test_client() -> None:
     assert denied.response.status_code == 200  # GraphQL denials still ride HTTP 200
     assert denied.data is None
     assert denied.errors is not None
-    assert "message" in json_str(denied.errors, 0)
+    assert "message" in json_object(denied.errors, 0)
     assert "Not authorized" in json_str(denied.errors, 0, "message")
     assert not models.Item.objects.filter(name="BracketWidget").exists()
 
@@ -1000,7 +1000,7 @@ def test_create_item_login_bracket_via_test_client() -> None:
     denied_again = client.query(_CREATE_ITEM, variables=variables, assert_no_errors=False)
     assert denied_again.data is None
     assert denied_again.errors is not None
-    assert "message" in json_str(denied_again.errors, 0)
+    assert "message" in json_object(denied_again.errors, 0)
     assert "Not authorized" in json_str(denied_again.errors, 0, "message")
 
 

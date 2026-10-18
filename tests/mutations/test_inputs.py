@@ -406,11 +406,11 @@ def test_a_db_default_column_is_an_optional_create_input(name: str) -> None:
     """
 
     class DbDefaultRow(models.Model):
-        key: models.IntegerField[int | Combinable, int] = models.IntegerField(
+        key: models.IntegerField[float | int | str | Combinable, int] = models.IntegerField(
             primary_key=True,
             db_default=Value(7),
         )
-        stamp: models.IntegerField[int | Combinable, int] = models.IntegerField(
+        stamp: models.IntegerField[float | int | str | Combinable, int] = models.IntegerField(
             db_default=Value(0),
         )
         name: models.TextField[str | Combinable, str] = models.TextField()
