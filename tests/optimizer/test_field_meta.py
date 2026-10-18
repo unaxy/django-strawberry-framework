@@ -730,10 +730,13 @@ def test_walker_produces_same_plan_with_cached_map() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()

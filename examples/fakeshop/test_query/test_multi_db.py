@@ -742,12 +742,15 @@ def _build_test_schema(_reload_project_schema_for_acceptance_tests: None) -> Ite
     # The dependency ensures the read runs after that reload.
     @strawberry.type
     class _MultiDbTestQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[library_schema.BookType])  # pyright: ignore[reportAny]
-        def books_on_shard_b(self) -> QuerySet[models.Book]:
+        def _books_on_shard_b(self) -> QuerySet[models.Book]:
             return models.Book.objects.using("shard_b").select_related(
                 "shelf__branch",
             )
+
+        books_on_shard_b: QuerySet[models.Book] = strawberry.field(
+            resolver=_books_on_shard_b,
+            graphql_type=list[library_schema.BookType],
+        )
 
     optimizer = DjangoOptimizerExtension()
     _current["schema"] = strawberry.Schema(
@@ -779,12 +782,15 @@ def _build_debug_test_schema(_reload_project_schema_for_acceptance_tests: None) 
 
     @strawberry.type
     class _MultiDbDebugTestQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[library_schema.BookType])  # pyright: ignore[reportAny]
-        def books_on_shard_b(self) -> QuerySet[models.Book]:
+        def _books_on_shard_b(self) -> QuerySet[models.Book]:
             return models.Book.objects.using("shard_b").select_related(
                 "shelf__branch",
             )
+
+        books_on_shard_b: QuerySet[models.Book] = strawberry.field(
+            resolver=_books_on_shard_b,
+            graphql_type=list[library_schema.BookType],
+        )
 
     optimizer = DjangoOptimizerExtension()
     _current["schema"] = strawberry.Schema(
@@ -814,9 +820,7 @@ def _build_loan_filter_test_schema(
 
     @strawberry.type
     class _LoanFilterShardQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[library_schema.LoanType])  # pyright: ignore[reportAny]
-        def loans_on_shard_b(
+        def _loans_on_shard_b(
             self,
             info: Info[object, object],
             filter: FilterInput[library_filters.LoanFilter] | None = None,  # noqa: A002
@@ -825,6 +829,11 @@ def _build_loan_filter_test_schema(
             if filter is not None:
                 queryset = library_filters.LoanFilter.apply_sync(filter, queryset, info)
             return queryset
+
+        loans_on_shard_b: QuerySet[models.Loan] = strawberry.field(
+            resolver=_loans_on_shard_b,
+            graphql_type=list[library_schema.LoanType],
+        )
 
     optimizer = DjangoOptimizerExtension()
     _current["schema"] = strawberry.Schema(
@@ -1587,13 +1596,16 @@ def _prefetch_alias_schema(
 
     @strawberry.type
     class _PrefetchAliasQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[shelf_type])  # pyright: ignore[reportAny]
-        def shelves(self) -> QuerySet[models.Shelf]:
+        def _shelves(self) -> QuerySet[models.Shelf]:
             queryset = models.Shelf.objects.all()
             if root_alias is not None:
                 queryset = queryset.using(root_alias)
             return queryset
+
+        shelves: QuerySet[models.Shelf] = strawberry.field(
+            resolver=_shelves,
+            graphql_type=list[shelf_type],
+        )
 
     optimizer = DjangoOptimizerExtension()
     return strawberry.Schema(

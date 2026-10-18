@@ -89,24 +89,33 @@ def _joined_schema(item_pk: int, entry_pk: int) -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
-        def items(self) -> QuerySet[Item]:
+        def _items(self) -> QuerySet[Item]:
             return Item.objects.filter(pk=item_pk).select_related("category")
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
-        def items_wildcard(self) -> QuerySet[Item]:
+        items: QuerySet[Item] = strawberry.field(
+            resolver=_items,
+            graphql_type=list[products_schema.ItemType],
+        )
+
+        def _items_wildcard(self) -> QuerySet[Item]:
             # The wildcard query state is set directly: that state, not the call
             # spelling Django now deprecates, is what a consumer queryset can carry.
             queryset = Item.objects.filter(pk=item_pk)
             queryset.query.select_related = True
             return queryset
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[products_schema.EntryType])  # pyright: ignore[reportAny]
-        def entries(self) -> QuerySet[Entry]:
+        items_wildcard: QuerySet[Item] = strawberry.field(
+            resolver=_items_wildcard,
+            graphql_type=list[products_schema.ItemType],
+        )
+
+        def _entries(self) -> QuerySet[Entry]:
             return Entry.objects.filter(pk=entry_pk).select_related("item__category")
+
+        entries: QuerySet[Entry] = strawberry.field(
+            resolver=_entries,
+            graphql_type=list[products_schema.EntryType],
+        )
 
     optimizer = DjangoOptimizerExtension()
     return strawberry.Schema(query=Query, extensions=[lambda: optimizer])

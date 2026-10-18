@@ -283,11 +283,14 @@ def test_optimize_coerces_manager_through_all_records_cache_miss() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> Manager[Item]:
+        def _all_items(self) -> Manager[Item]:
             # Return the Manager itself, not ``Manager.all()``.
             return Item.objects
+
+        all_items: Manager[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -325,10 +328,13 @@ def test_optimizer_plans_merged_duplicate_root_field_nodes_plan_shape() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -373,10 +379,13 @@ def test_optimizer_elides_forward_fk_id_only_selection_plan_shape() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -426,10 +435,13 @@ def test_optimizer_elides_forward_fk_id_only_selection_for_each_alias_plan_shape
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -482,10 +494,13 @@ def test_optimizer_does_not_elide_forward_fk_when_extra_scalar_selected_plan_sha
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -551,10 +566,13 @@ def test_optimizer_does_not_elide_forward_fk_when_target_has_custom_get_queryset
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -587,10 +605,13 @@ def test_optimizer_passes_through_unregistered_return_type(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -646,12 +667,15 @@ def test_evaluated_root_queryset_does_not_record_a_plan_cache_miss() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             qs = Item.objects.select_related("category").all()
             len(qs)
             return qs
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -935,10 +959,13 @@ def test_optimize_handles_empty_field_nodes() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -973,10 +1000,13 @@ def test_optimize_returns_original_queryset_for_empty_plan(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -1036,10 +1066,13 @@ def test_cache_differentiates_queries() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -1071,10 +1104,13 @@ def test_cache_differentiates_reachable_named_fragment_bodies() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -1123,15 +1159,21 @@ def test_cache_differentiates_same_model_root_fields(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def featured_categories(self) -> QuerySet[Category]:
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
+
+        def _featured_categories(self) -> QuerySet[Category]:
             return Category.objects.filter(is_private=False)
+
+        featured_categories: QuerySet[Category] = strawberry.field(
+            resolver=_featured_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -1233,17 +1275,20 @@ def test_mutation_real_execution_suppresses_only_keeps_select_related() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     @strawberry.type
     class Mutation:
-        # basedpyright: strawberry.mutation's no-resolver overload (the decorator factory) returns Any
-        @strawberry.mutation(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def touch_items(self) -> QuerySet[Item]:
+        def _touch_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        touch_items = strawberry.mutation(_touch_items, graphql_type=list[ItemType])
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -1350,10 +1395,13 @@ def test_cache_clear_makes_the_next_request_build_its_plan_again() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -1465,10 +1513,13 @@ def test_filter_vars_do_not_affect_cache() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self, limit: int = 10) -> QuerySet[Item]:
+        def _all_items(self, limit: int = 10) -> QuerySet[Item]:
             return Item.objects.all()[:limit]
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -1502,10 +1553,13 @@ def test_cache_separates_operation_names_in_same_document() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -2136,10 +2190,13 @@ def test_root_pagination_variable_one_plan_through_schema() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self, first: int = 10) -> QuerySet[Category]:
+        def _all_categories(self, first: int = 10) -> QuerySet[Category]:
             return Category.objects.all()[:first]
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -2414,10 +2471,13 @@ def test_str_subclass_strictness_arms_the_guard_as_its_text(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def projected_items(self) -> QuerySet[Item]:
+        def _projected_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id").only("name")
+
+        projected_items: QuerySet[Item] = strawberry.field(
+            resolver=_projected_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     calls: list[str] = []
@@ -2522,10 +2582,10 @@ def test_strictness_warn_logs_unplanned_relation(caplog: pytest.LogCaptureFixtur
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> list[Item]:
+        def _all_items(self) -> list[Item]:
             return list(Item.objects.all()[:1])
+
+        all_items: list[Item] = strawberry.field(resolver=_all_items, graphql_type=list[ItemType])
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query)
@@ -2555,10 +2615,13 @@ def test_strictness_off_does_not_stash_sentinel() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     ext = DjangoOptimizerExtension(strictness="off")
     finalize_django_types()
@@ -2589,10 +2652,13 @@ def test_strictness_warn_stashes_sentinel() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     ext = DjangoOptimizerExtension(strictness="warn")
     finalize_django_types()
@@ -2635,10 +2701,13 @@ def test_strictness_with_empty_plan_does_not_raise_or_warn(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     ext = DjangoOptimizerExtension(strictness=mode)
     finalize_django_types()
@@ -2680,10 +2749,13 @@ def test_strictness_includes_fk_id_elision_in_planned_paths(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     ext = DjangoOptimizerExtension(strictness="warn")
     finalize_django_types()
@@ -2773,10 +2845,10 @@ def test_strictness_raise_accepts_unplanned_cached_forward_fk() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> list[Item]:
+        def _all_items(self) -> list[Item]:
             return list(Item.objects.select_related("category").all()[:1])
+
+        all_items: list[Item] = strawberry.field(resolver=_all_items, graphql_type=list[ItemType])
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query)
@@ -2814,10 +2886,13 @@ def test_strictness_raise_accepts_unplanned_cached_reverse_one_to_one() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[PatronType])  # pyright: ignore[reportAny]
-        def all_patrons(self) -> list[Patron]:
+        def _all_patrons(self) -> list[Patron]:
             return list(Patron.objects.select_related("card").all())
+
+        all_patrons: list[Patron] = strawberry.field(
+            resolver=_all_patrons,
+            graphql_type=list[PatronType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query)
@@ -2857,10 +2932,13 @@ def test_strictness_warn_planned_alias_no_warning(caplog: pytest.LogCaptureFixtu
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     ext = DjangoOptimizerExtension(strictness="warn")
     finalize_django_types()
@@ -2905,10 +2983,13 @@ def test_optimizer_strictness_accepts_nested_planned_relation() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     ext = DjangoOptimizerExtension(strictness="raise")
     finalize_django_types()
@@ -2965,10 +3046,13 @@ def test_optimizer_nested_prefetch_with_custom_get_queryset_marks_uncacheable() 
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -3322,10 +3406,13 @@ def test_plan_stashed_with_select_related() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -3367,10 +3454,13 @@ def test_plan_stashed_with_prefetch_related() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -3984,10 +4074,13 @@ def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state()
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
         @strawberry.field
         def nest(self, info: strawberry.Info[object, object]) -> str:
@@ -4077,10 +4170,13 @@ def test_an_operation_started_from_a_consumer_teardown_leaves_the_request_its_pl
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     seen: dict[str, list[dict[str, object]]] = {}
 
@@ -4150,10 +4246,13 @@ def test_on_execute_clears_reused_context_fk_elisions_before_full_selection() ->
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -4203,10 +4302,13 @@ def test_on_execute_clears_reused_context_planned_keys_across_executions() -> No
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension(strictness="raise")
@@ -4241,10 +4343,13 @@ def test_empty_plan_still_stashed() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -4280,10 +4385,13 @@ def test_optimizer_applies_only_for_selected_scalars() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -4344,10 +4452,13 @@ def test_optimizer_downgrades_select_related_for_custom_get_queryset() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -4403,10 +4514,13 @@ def test_optimizer_does_not_cache_custom_get_queryset_prefetch_plans() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -4471,10 +4585,13 @@ def test_b8_consumer_select_related_does_not_mutate_cached_plan() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.select_related("category")
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -4539,10 +4656,13 @@ def test_b8_consumer_prefetch_object_suppresses_optimizer_entry() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.prefetch_related(consumer_pf)
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     capture_ext = _CaptureExt()
@@ -4612,10 +4732,13 @@ def test_b8_consumer_plain_string_upgraded_to_optimizer_prefetch() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def all_categories(self) -> QuerySet[Category]:
+        def _all_categories(self) -> QuerySet[Category]:
             return Category.objects.prefetch_related("items")
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     capture_ext = _CaptureExt()
@@ -4741,15 +4864,21 @@ def test_plan_cache_keys_distinguish_primary_and_secondary_returns_for_same_mode
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[AdminItemType])  # pyright: ignore[reportAny]
-        def all_admin_items(self) -> QuerySet[Item]:
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
+
+        def _all_admin_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_admin_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_admin_items,
+            graphql_type=list[AdminItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -4993,10 +5122,13 @@ def test_optimizer_helper_extraction_no_regression() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -5040,9 +5172,7 @@ def test_apply_connection_optimization_uses_active_optimizer_cache() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self, info: strawberry.Info[object, object]) -> QuerySet[Item]:
+        def _all_items(self, info: strawberry.Info[object, object]) -> QuerySet[Item]:
             # Inside a resolver the ``on_execute`` lifecycle has published the
             # active extension; the helper must discover it (not build a
             # throwaway). Apply twice so the second call is a cache hit on the
@@ -5051,6 +5181,11 @@ def test_apply_connection_optimization_uses_active_optimizer_cache() -> None:
             apply_connection_optimization(ItemType, qs, info)
             captured["active"] = _active_optimizer()
             return qs
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -5257,10 +5392,13 @@ def test_cascading_target_downgrades_join_to_prefetch() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     # One public category whose name matches the request user, one item under it.
@@ -5343,10 +5481,13 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 
     @strawberry.type
     class CascadingQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CascadingItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[CascadingItemType],
+        )
 
     finalize_django_types()
     cascading_schema = strawberry.Schema(
@@ -5383,10 +5524,13 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 
     @strawberry.type
     class PlainQuery:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[PlainItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[PlainItemType],
+        )
 
     finalize_django_types()
     plain_schema = strawberry.Schema(query=PlainQuery, extensions=[lambda: plain_ext])
@@ -5437,15 +5581,21 @@ def test_consumer_projection_widens_to_the_selection_and_keeps_the_join() -> Non
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def projected_items(self) -> QuerySet[Item]:
+        def _projected_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id").only("name")
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def planned_items(self) -> QuerySet[Item]:
+        projected_items: QuerySet[Item] = strawberry.field(
+            resolver=_projected_items,
+            graphql_type=list[ItemType],
+        )
+
+        def _planned_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id")
+
+        planned_items: QuerySet[Item] = strawberry.field(
+            resolver=_planned_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension(strictness="raise")
@@ -5503,10 +5653,10 @@ def test_mutation_over_a_consumer_projection_prunes_the_join_it_cannot_traverse(
 
     @strawberry.type
     class Mutation:
-        # basedpyright: strawberry.mutation's no-resolver overload (the decorator factory) returns Any
-        @strawberry.mutation(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def touch_items(self) -> QuerySet[Item]:
+        def _touch_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id").only("name")
+
+        touch_items = strawberry.mutation(_touch_items, graphql_type=list[ItemType])
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -5563,17 +5713,23 @@ def test_b8_consumer_wins_prefetch_nested_keys_stay_strictness_visible() -> None
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def objs(self) -> QuerySet[Category]:
+        def _objs(self) -> QuerySet[Category]:
             return Category.objects.all().prefetch_related(
                 Prefetch("items", queryset=Item.objects.filter(is_private=False)),
             )
 
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def planned_objs(self) -> QuerySet[Category]:
+        objs: QuerySet[Category] = strawberry.field(
+            resolver=_objs,
+            graphql_type=list[CategoryType],
+        )
+
+        def _planned_objs(self) -> QuerySet[Category]:
             return Category.objects.all()
+
+        planned_objs: QuerySet[Category] = strawberry.field(
+            resolver=_planned_objs,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension(strictness="raise")
@@ -5624,12 +5780,15 @@ def test_b8_consumer_wins_prefetch_preserves_nested_fk_id_elision() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def objs(self) -> QuerySet[Category]:
+        def _objs(self) -> QuerySet[Category]:
             return Category.objects.all().prefetch_related(
                 Prefetch("items", queryset=Item.objects.filter(is_private=False)),
             )
+
+        objs: QuerySet[Category] = strawberry.field(
+            resolver=_objs,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension(strictness="raise")
@@ -5684,10 +5843,13 @@ def test_strictness_reaches_an_execution_with_no_stashable_context() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def projected_items(self) -> QuerySet[Item]:
+        def _projected_items(self) -> QuerySet[Item]:
             return Item.objects.order_by("id").only("name")
+
+        projected_items: QuerySet[Item] = strawberry.field(
+            resolver=_projected_items,
+            graphql_type=list[ItemType],
+        )
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension(strictness="raise")
@@ -5736,10 +5898,13 @@ def test_strictness_flags_a_relation_under_an_unplannable_root() -> None:
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        def categories(self) -> list[Category]:
+        def _categories(self) -> list[Category]:
             return list(Category.objects.order_by("id"))
+
+        categories: list[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     query = "{ categories { name items { name } } }"
@@ -5790,10 +5955,13 @@ async def test_strictness_flags_an_unplanned_relation_before_the_async_sync_gate
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[CategoryType])  # pyright: ignore[reportAny]
-        async def categories(self) -> list[Category]:
+        async def _categories(self) -> list[Category]:
             return [obj async for obj in Category.objects.order_by("id")]
+
+        categories: list[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[CategoryType],
+        )
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension(strictness="raise")
@@ -6012,12 +6180,15 @@ def test_an_operation_in_a_context_that_outlived_a_request_publishes_as_its_own(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[ItemType])  # pyright: ignore[reportAny]
-        def all_items(self) -> QuerySet[Item]:
+        def _all_items(self) -> QuerySet[Item]:
             """Copy this operation's context, as a resolver starting a task does."""
             seen.setdefault("copied", contextvars.copy_context())
             return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
 
     def _second_operation() -> None:
         """Run a whole operation from the copied context, after the first has ended."""

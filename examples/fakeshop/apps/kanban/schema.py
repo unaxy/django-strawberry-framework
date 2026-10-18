@@ -651,9 +651,7 @@ class BoardDocCardReferenceType(DjangoType):
 class Query:
     """Kanban board root fields."""
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[CardType])  # pyright: ignore[reportAny]
-    def all_cards(
+    def _all_cards(
         self,
         info: Info,
         filter: FilterInput[filters.CardFilter] | None = None,  # noqa: A002
@@ -667,9 +665,12 @@ class Query:
             queryset = orders.CardOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[CardType])  # pyright: ignore[reportAny]
-    def ready_cards(
+    all_cards: QuerySet[models.Card] = strawberry.field(
+        resolver=_all_cards,
+        graphql_type=list[CardType],
+    )
+
+    def _ready_cards(
         self,
         info: Info,
         filter: FilterInput[filters.CardFilter] | None = None,  # noqa: A002
@@ -697,9 +698,12 @@ class Query:
             queryset = orders.CardOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[CardItemType])  # pyright: ignore[reportAny]
-    def all_kanban_card_items(
+    ready_cards: QuerySet[models.Card] = strawberry.field(
+        resolver=_ready_cards,
+        graphql_type=list[CardType],
+    )
+
+    def _all_kanban_card_items(
         self,
         info: Info,
         filter: FilterInput[filters.CardItemFilter] | None = None,  # noqa: A002
@@ -713,9 +717,12 @@ class Query:
             queryset = orders.CardItemOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[CardGlossaryTermType])  # pyright: ignore[reportAny]
-    def all_kanban_card_glossary_terms(
+    all_kanban_card_items: QuerySet[models.CardItem] = strawberry.field(
+        resolver=_all_kanban_card_items,
+        graphql_type=list[CardItemType],
+    )
+
+    def _all_kanban_card_glossary_terms(
         self,
         info: Info,
         filter: FilterInput[filters.CardGlossaryTermFilter] | None = None,  # noqa: A002
@@ -729,9 +736,12 @@ class Query:
             queryset = orders.CardGlossaryTermOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[StatusType])  # pyright: ignore[reportAny]
-    def all_kanban_statuses(
+    all_kanban_card_glossary_terms: QuerySet[models.CardGlossaryTerm] = strawberry.field(
+        resolver=_all_kanban_card_glossary_terms,
+        graphql_type=list[CardGlossaryTermType],
+    )
+
+    def _all_kanban_statuses(
         self,
         info: Info,
         filter: FilterInput[filters.StatusFilter] | None = None,  # noqa: A002
@@ -745,9 +755,12 @@ class Query:
             queryset = orders.StatusOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[PriorityType])  # pyright: ignore[reportAny]
-    def all_kanban_priorities(
+    all_kanban_statuses: QuerySet[models.Status] = strawberry.field(
+        resolver=_all_kanban_statuses,
+        graphql_type=list[StatusType],
+    )
+
+    def _all_kanban_priorities(
         self,
         info: Info,
         filter: FilterInput[filters.PriorityFilter] | None = None,  # noqa: A002
@@ -761,9 +774,12 @@ class Query:
             queryset = orders.PriorityOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[MilestoneType])  # pyright: ignore[reportAny]
-    def all_kanban_milestones(
+    all_kanban_priorities: QuerySet[models.Priority] = strawberry.field(
+        resolver=_all_kanban_priorities,
+        graphql_type=list[PriorityType],
+    )
+
+    def _all_kanban_milestones(
         self,
         info: Info,
         filter: FilterInput[filters.MilestoneFilter] | None = None,  # noqa: A002
@@ -777,9 +793,12 @@ class Query:
             queryset = orders.MilestoneOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[UpstreamType])  # pyright: ignore[reportAny]
-    def all_kanban_upstreams(
+    all_kanban_milestones: QuerySet[models.Milestone] = strawberry.field(
+        resolver=_all_kanban_milestones,
+        graphql_type=list[MilestoneType],
+    )
+
+    def _all_kanban_upstreams(
         self,
         info: Info,
         filter: FilterInput[filters.UpstreamFilter] | None = None,  # noqa: A002
@@ -793,9 +812,12 @@ class Query:
             queryset = orders.UpstreamOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[ParityLevelType])  # pyright: ignore[reportAny]
-    def all_kanban_parity_levels(
+    all_kanban_upstreams: QuerySet[models.Upstream] = strawberry.field(
+        resolver=_all_kanban_upstreams,
+        graphql_type=list[UpstreamType],
+    )
+
+    def _all_kanban_parity_levels(
         self,
         info: Info,
         filter: FilterInput[filters.ParityLevelFilter] | None = None,  # noqa: A002
@@ -809,9 +831,12 @@ class Query:
             queryset = orders.ParityLevelOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[SectionType])  # pyright: ignore[reportAny]
-    def all_kanban_sections(
+    all_kanban_parity_levels: QuerySet[models.ParityLevel] = strawberry.field(
+        resolver=_all_kanban_parity_levels,
+        graphql_type=list[ParityLevelType],
+    )
+
+    def _all_kanban_sections(
         self,
         info: Info,
         filter: FilterInput[filters.SectionFilter] | None = None,  # noqa: A002
@@ -825,9 +850,12 @@ class Query:
             queryset = orders.SectionOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[CardReferenceKindType])  # pyright: ignore[reportAny]
-    def all_kanban_reference_kinds(
+    all_kanban_sections: QuerySet[models.Section] = strawberry.field(
+        resolver=_all_kanban_sections,
+        graphql_type=list[SectionType],
+    )
+
+    def _all_kanban_reference_kinds(
         self,
         info: Info,
         filter: FilterInput[filters.CardReferenceKindFilter] | None = None,  # noqa: A002
@@ -841,9 +869,12 @@ class Query:
             queryset = orders.CardReferenceKindOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[BoardDocKindType])  # pyright: ignore[reportAny]
-    def all_kanban_board_doc_kinds(
+    all_kanban_reference_kinds: QuerySet[models.CardReferenceKind] = strawberry.field(
+        resolver=_all_kanban_reference_kinds,
+        graphql_type=list[CardReferenceKindType],
+    )
+
+    def _all_kanban_board_doc_kinds(
         self,
         info: Info,
         filter: FilterInput[filters.BoardDocKindFilter] | None = None,  # noqa: A002
@@ -858,9 +889,12 @@ class Query:
             queryset = orders.BoardDocKindOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[TargetVersionType])  # pyright: ignore[reportAny]
-    def all_kanban_target_versions(
+    all_kanban_board_doc_kinds: QuerySet[models.BoardDocKind] = strawberry.field(
+        resolver=_all_kanban_board_doc_kinds,
+        graphql_type=list[BoardDocKindType],
+    )
+
+    def _all_kanban_target_versions(
         self,
         info: Info,
         filter: FilterInput[filters.TargetVersionFilter] | None = None,  # noqa: A002
@@ -874,9 +908,12 @@ class Query:
             queryset = orders.TargetVersionOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[LabelType])  # pyright: ignore[reportAny]
-    def all_kanban_labels(
+    all_kanban_target_versions: QuerySet[models.TargetVersion] = strawberry.field(
+        resolver=_all_kanban_target_versions,
+        graphql_type=list[TargetVersionType],
+    )
+
+    def _all_kanban_labels(
         self,
         info: Info,
         filter: FilterInput[filters.LabelFilter] | None = None,  # noqa: A002
@@ -890,9 +927,12 @@ class Query:
             queryset = orders.LabelOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[TrackedPathType])  # pyright: ignore[reportAny]
-    def all_kanban_tracked_paths(
+    all_kanban_labels: QuerySet[models.Label] = strawberry.field(
+        resolver=_all_kanban_labels,
+        graphql_type=list[LabelType],
+    )
+
+    def _all_kanban_tracked_paths(
         self,
         info: Info,
         filter: FilterInput[filters.TrackedPathFilter] | None = None,  # noqa: A002
@@ -906,9 +946,12 @@ class Query:
             queryset = orders.TrackedPathOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[RelativeSizeType])  # pyright: ignore[reportAny]
-    def all_kanban_relative_sizes(
+    all_kanban_tracked_paths: QuerySet[models.TrackedPath] = strawberry.field(
+        resolver=_all_kanban_tracked_paths,
+        graphql_type=list[TrackedPathType],
+    )
+
+    def _all_kanban_relative_sizes(
         self,
         info: Info,
         filter: FilterInput[filters.RelativeSizeFilter] | None = None,  # noqa: A002
@@ -922,9 +965,12 @@ class Query:
             queryset = orders.RelativeSizeOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[BoardDocType])  # pyright: ignore[reportAny]
-    def all_kanban_board_docs(
+    all_kanban_relative_sizes: QuerySet[models.RelativeSize] = strawberry.field(
+        resolver=_all_kanban_relative_sizes,
+        graphql_type=list[RelativeSizeType],
+    )
+
+    def _all_kanban_board_docs(
         self,
         info: Info,
         filter: FilterInput[filters.BoardDocFilter] | None = None,  # noqa: A002
@@ -938,9 +984,12 @@ class Query:
             queryset = orders.BoardDocOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[ActorType])  # pyright: ignore[reportAny]
-    def all_kanban_actors(
+    all_kanban_board_docs: QuerySet[models.BoardDoc] = strawberry.field(
+        resolver=_all_kanban_board_docs,
+        graphql_type=list[BoardDocType],
+    )
+
+    def _all_kanban_actors(
         self,
         info: Info,
         filter: FilterInput[filters.ActorFilter] | None = None,  # noqa: A002
@@ -954,9 +1003,12 @@ class Query:
             queryset = orders.ActorOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[AttemptOutcomeType])  # pyright: ignore[reportAny]
-    def all_kanban_attempt_outcomes(
+    all_kanban_actors: QuerySet[models.Actor] = strawberry.field(
+        resolver=_all_kanban_actors,
+        graphql_type=list[ActorType],
+    )
+
+    def _all_kanban_attempt_outcomes(
         self,
         info: Info,
         filter: FilterInput[filters.AttemptOutcomeFilter] | None = None,  # noqa: A002
@@ -970,9 +1022,12 @@ class Query:
             queryset = orders.AttemptOutcomeOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[VerificationKindType])  # pyright: ignore[reportAny]
-    def all_kanban_verification_kinds(
+    all_kanban_attempt_outcomes: QuerySet[models.AttemptOutcome] = strawberry.field(
+        resolver=_all_kanban_attempt_outcomes,
+        graphql_type=list[AttemptOutcomeType],
+    )
+
+    def _all_kanban_verification_kinds(
         self,
         info: Info,
         filter: FilterInput[filters.VerificationKindFilter] | None = None,  # noqa: A002
@@ -986,9 +1041,12 @@ class Query:
             queryset = orders.VerificationKindOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[CardTransitionType])  # pyright: ignore[reportAny]
-    def all_kanban_card_transitions(
+    all_kanban_verification_kinds: QuerySet[models.VerificationKind] = strawberry.field(
+        resolver=_all_kanban_verification_kinds,
+        graphql_type=list[VerificationKindType],
+    )
+
+    def _all_kanban_card_transitions(
         self,
         info: Info,
         filter: FilterInput[filters.CardTransitionFilter] | None = None,  # noqa: A002
@@ -1002,9 +1060,12 @@ class Query:
             queryset = orders.CardTransitionOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[WorkAttemptType])  # pyright: ignore[reportAny]
-    def all_kanban_work_attempts(
+    all_kanban_card_transitions: QuerySet[models.CardTransition] = strawberry.field(
+        resolver=_all_kanban_card_transitions,
+        graphql_type=list[CardTransitionType],
+    )
+
+    def _all_kanban_work_attempts(
         self,
         info: Info,
         filter: FilterInput[filters.WorkAttemptFilter] | None = None,  # noqa: A002
@@ -1018,9 +1079,12 @@ class Query:
             queryset = orders.WorkAttemptOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-    @strawberry.field(graphql_type=list[DecisionType])  # pyright: ignore[reportAny]
-    def all_kanban_decisions(
+    all_kanban_work_attempts: QuerySet[models.WorkAttempt] = strawberry.field(
+        resolver=_all_kanban_work_attempts,
+        graphql_type=list[WorkAttemptType],
+    )
+
+    def _all_kanban_decisions(
         self,
         info: Info,
         filter: FilterInput[filters.DecisionFilter] | None = None,  # noqa: A002
@@ -1033,6 +1097,11 @@ class Query:
         if order_by is not None:
             queryset = orders.DecisionOrder.apply_sync(order_by, queryset, info)
         return queryset
+
+    all_kanban_decisions: QuerySet[models.Decision] = strawberry.field(
+        resolver=_all_kanban_decisions,
+        graphql_type=list[DecisionType],
+    )
 
 
 # ---------------------------------------------------------------------------

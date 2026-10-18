@@ -2671,10 +2671,13 @@ async def test_async_iterable_with_awaitable_children_completes_over_http() -> N
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[_AwaitableChild])  # pyright: ignore[reportAny]
-        def children(self) -> _ClosableAsyncIterator:
+        def _children(self) -> _ClosableAsyncIterator:
             return _ClosableAsyncIterator([_AwaitableChild()])
+
+        children: _ClosableAsyncIterator = strawberry.field(
+            resolver=_children,
+            graphql_type=list[_AwaitableChild],
+        )
 
     payload = await _post_async(strawberry.Schema(query=Query), "{ children { name } }")
 

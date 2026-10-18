@@ -64,10 +64,13 @@ def test_relay_id_with_custom_pk_attname_avoids_lazy_load(
 
     @strawberry.type
     class Query:
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(graphql_type=list[PatronProfileNode])  # pyright: ignore[reportAny]
-        def all_profiles(self) -> QuerySet[PatronProfile]:
+        def _all_profiles(self) -> QuerySet[PatronProfile]:
             return PatronProfile.objects.all()
+
+        all_profiles: QuerySet[PatronProfile] = strawberry.field(
+            resolver=_all_profiles,
+            graphql_type=list[PatronProfileNode],
+        )
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
