@@ -72,7 +72,6 @@ from django_strawberry_framework.forms.inputs import (
     _form_basis_content_identity,
     _model_column_for,
     build_form_input_class,
-    build_form_inputs,
     clear_form_input_namespace,
     form_input_type_name,
     get_form_fields,
@@ -218,7 +217,7 @@ def test_corrupted_base_fields_raises_typed_on_default_path() -> None:
     ``get_form_fields``) is guarded alongside the hook mapping: a consumer having
     clobbered ``base_fields`` to a non-mapping raises ``ConfigurationError``
     naming the form instead of a raw ``TypeError`` propagating out of
-    ``build_form_inputs`` (the bind's default path).
+    ``build_form_input_class`` (the bind's build path).
     """
 
     class Corrupt(forms.Form):
@@ -228,7 +227,7 @@ def test_corrupted_base_fields_raises_typed_on_default_path() -> None:
     # types the slot as a field mapping
     Corrupt.base_fields = 123  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(ConfigurationError, match="Corrupt"):
-        build_form_inputs(Corrupt)
+        build_form_input_class(Corrupt, operation_kind=FORM)
 
 
 _HOSTILE_CLASS_ERRORS = [RuntimeError, TypeError, KeyboardInterrupt]
@@ -241,7 +240,7 @@ def test_hostile_class_base_fields_value_raises_typed_on_default_path(
     """A ``base_fields`` value whose ``__class__`` raises is typed on the default path.
 
     The default hook copies a clobbered ``base_fields`` mapping into the basis, so
-    the per-value check guards it like a hook return: ``build_form_inputs`` raises
+    the per-value check guards it like a hook return: ``build_form_input_class`` raises
     ``ConfigurationError`` naming the form and the entry, never the raw exception.
     """
 
@@ -252,7 +251,7 @@ def test_hostile_class_base_fields_value_raises_typed_on_default_path(
     # types the slot as a field mapping
     Corrupt.base_fields = {"x": ClassReadRaises(raised)}  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(ConfigurationError) as exc:
-        build_form_inputs(Corrupt)
+        build_form_input_class(Corrupt, operation_kind=FORM)
     assert str(exc.value) == (
         "DjangoFormMutation for Corrupt get_form_fields() must return a mapping of string "
         "names to forms.Field instances; invalid names [], invalid fields ['x']."
@@ -324,7 +323,7 @@ def test_weird_field_names_fail_loud_through_build() -> None:
 
     weird = {"": forms.CharField(), "with space": forms.CharField(), "good": forms.CharField()}
     with pytest.raises(ConfigurationError, match="invalid names"):
-        build_form_inputs(ProbeForm, form_fields=weird)
+        build_form_input_class(ProbeForm, form_fields=weird, operation_kind=FORM)
 
 
 def test_normalize_form_field_basis_valid_mapping() -> None:
@@ -339,14 +338,15 @@ def test_normalize_form_field_basis_valid_mapping() -> None:
     assert normalized is not custom
 
 
-def test_build_form_inputs_with_custom_form_fields_basis() -> None:
-    """``build_form_inputs`` honors an explicit ``form_fields`` basis mapping."""
+def test_build_form_input_class_with_custom_form_fields_basis() -> None:
+    """``build_form_input_class`` honors an explicit ``form_fields`` basis mapping."""
 
     class DynamicForm(forms.Form):
         pass
 
     custom = {"title": forms.CharField(required=True), "notes": forms.CharField(required=False)}
-    cre, specs, par, _ = build_form_inputs(DynamicForm, form_fields=custom)
+    cre, specs = build_form_input_class(DynamicForm, operation_kind=FORM, form_fields=custom)
+    par, _ = build_form_input_class(DynamicForm, operation_kind=PARTIAL, form_fields=custom)
     assert set(_field_map(cre)) == {"title", "notes"}
     assert set(_field_map(par)) == {"title", "notes"}
     assert len(specs) == 2
@@ -394,7 +394,7 @@ def _item_model_form() -> type[forms.ModelForm[product_models.Item]]:
 
 def test_create_input_required_and_optional_shapes() -> None:
     """``<FormClass>Input``: required fields non-optional, optional fields ``| None`` + UNSET."""
-    cre, _, _, _ = build_form_inputs(_item_model_form(), operation_kind=CREATE)
+    cre, _ = build_form_input_class(_item_model_form(), operation_kind=CREATE)
     assert cre.__name__ == "ItemModelFormInput"
     fields = _field_map(cre)
 
@@ -414,9 +414,73 @@ def test_create_input_required_and_optional_shapes() -> None:
     assert fields["is_private"].default_value is UNSET
 
 
+@pytest.mark.parametrize(
+    ("model", "key", "input_key"),
+    [
+        (library_models.PatronProfile, "patron", "patron_id"),
+        (library_models.Edition, "isbn_13", "isbn_13"),
+    ],
+    ids=["one-to-one-key", "text-key"],
+)
+def test_partial_input_leaves_out_the_primary_key_the_create_input_carries(
+    model: type[models.Model],
+    key: str,
+    input_key: str,
+) -> None:
+    """A form field over the model's primary key is a create input and never an update input.
+
+    The create names its row by the client-assigned key; the partial input leaves it out
+    (the mutation's ``id`` argument names the row) and keeps its canonical name, since
+    the key is not part of any update shape.
+    """
+    other = "address_2" if model is library_models.PatronProfile else "imprint"
+    form_cls = forms.modelform_factory(model, fields=(key, other))
+
+    cre, _ = build_form_input_class(form_cls, operation_kind=CREATE)
+    par, _ = build_form_input_class(form_cls, operation_kind=PARTIAL)
+
+    assert set(_field_map(cre)) == {input_key, other}
+    assert set(_field_map(par)) == {other}
+    assert par.__name__ == f"{form_cls.__name__}PartialInput"
+
+
+class _FrozenKeyRow(models.Model):
+    """An unmanaged owner of an ``editable=False`` text primary key ``code``."""
+
+    code: models.TextField[str | Combinable, str] = models.TextField(
+        primary_key=True,
+        editable=False,
+    )
+    name: models.TextField[str | Combinable, str] = models.TextField()
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_frozen_key"
+
+
+def test_partial_input_keeps_a_form_field_named_like_a_non_editable_key() -> None:
+    """A declared form field named like an ``editable=False`` key stays an update input.
+
+    ``construct_instance`` never writes a non-editable column, so the field cannot re-key
+    the located row: it is an ordinary input (a value a custom ``save()`` may read), not
+    the row identity an update leaves out.
+    """
+
+    class FrozenKeyForm(forms.ModelForm[_FrozenKeyRow]):
+        code = forms.CharField()
+
+        class Meta:
+            model = _FrozenKeyRow
+            fields = ("name",)
+
+    par, _ = build_form_input_class(FrozenKeyForm, operation_kind=PARTIAL)
+
+    assert set(_field_map(par)) == {"name", "code"}
+
+
 def test_partial_input_model_backed_optional_extra_field_still_required() -> None:
     """``<FormClass>PartialInput``: model-backed fields optional, a required extra stays required."""
-    _, _, par, _ = build_form_inputs(_item_model_form(), operation_kind=CREATE)
+    par, _ = build_form_input_class(_item_model_form(), operation_kind=PARTIAL)
     assert par.__name__ == "ItemModelFormPartialInput"
     fields = _field_map(par)
 
@@ -437,7 +501,7 @@ def test_plain_form_only_field_included_in_input() -> None:
         name = forms.CharField()
         captcha = forms.CharField(required=False)
 
-    cre, _, _, _ = build_form_inputs(ContactForm, operation_kind=FORM)
+    cre, _ = build_form_input_class(ContactForm, operation_kind=FORM)
     fields = _field_map(cre)
     assert set(fields) == {"name", "captcha"}
     assert not _is_optional(fields["name"])
@@ -456,7 +520,7 @@ def test_null_boolean_field_is_optional_even_when_django_required() -> None:
         flag = forms.NullBooleanField()  # Django default required=True
         name = forms.CharField()
 
-    cre, _, _, _ = build_form_inputs(FlagForm, operation_kind=FORM)
+    cre, _ = build_form_input_class(FlagForm, operation_kind=FORM)
     fields = _field_map(cre)
     assert _is_optional(fields["flag"])
     assert fields["flag"].default_value is UNSET
@@ -476,15 +540,11 @@ def test_non_null_column_backed_null_boolean_stays_required() -> None:
             model = library_models.Issue
             fields = ("embargoed", "title")
 
-    cre, _, _, _ = build_form_inputs(IssueForm, operation_kind=CREATE)
+    cre, _ = build_form_input_class(IssueForm, operation_kind=CREATE)
     fields = _field_map(cre)
     assert not _is_optional(fields["embargoed"])
     with pytest.raises(ConfigurationError, match=r"drops required form field.*embargoed"):
-        build_form_inputs(
-            IssueForm,
-            operation_kind=CREATE,
-            fields=("title",),
-        )
+        guard_create_required_fields(IssueForm, ("title",))
 
 
 def test_column_backed_null_boolean_is_optional() -> None:
@@ -506,7 +566,7 @@ def test_column_backed_null_boolean_is_optional() -> None:
             model = scalar_models.NullableScalarSpecimen
             fields = ("flag",)
 
-    cre, _, _, _ = build_form_inputs(NullableSpecimenForm, operation_kind=CREATE)
+    cre, _ = build_form_input_class(NullableSpecimenForm, operation_kind=CREATE)
     fields = _field_map(cre)
     assert _is_optional(fields["flag"])
     assert fields["flag"].default_value is UNSET
@@ -523,7 +583,7 @@ def test_create_guard_ignores_django_required_null_boolean() -> None:
         flag = forms.NullBooleanField()  # Django default required=True
         name = forms.CharField()
 
-    cre, _, _, _ = build_form_inputs(FlagForm, operation_kind=FORM, fields=("name",))
+    cre, _ = build_form_input_class(FlagForm, operation_kind=FORM, fields=("name",))
     assert set(_field_map(cre)) == {"name"}
 
 
@@ -533,7 +593,7 @@ def test_json_field_maps_to_json_scalar_in_input() -> None:
     class PayloadForm(forms.Form):
         payload = forms.JSONField()
 
-    cre, specs, _, _ = build_form_inputs(PayloadForm, operation_kind=FORM)
+    cre, specs = build_form_input_class(PayloadForm, operation_kind=FORM)
     fields = _field_map(cre)
     assert _inner_type(fields["payload"]) is strawberry.scalars.JSON
     assert next(s for s in specs if s.target_name == "payload").kind == SCALAR
@@ -546,7 +606,7 @@ def test_json_field_maps_to_json_scalar_in_input() -> None:
 
 def test_fk_to_non_relay_products_target_uses_raw_pk_id() -> None:
     """The products ``Item.category`` FK (non-Relay ``CategoryType``) becomes a raw pk id."""
-    cre, specs, _, _ = build_form_inputs(_item_model_form(), operation_kind=CREATE)
+    cre, specs = build_form_input_class(_item_model_form(), operation_kind=CREATE)
     fields = _field_map(cre)
     # CategoryType is non-Relay, so the id is the raw pk scalar (int), not GlobalID.
     assert _inner_type(fields["category_id"]) is int
@@ -567,7 +627,7 @@ def test_model_choice_field_to_relay_target_uses_globalid() -> None:
     class PickForm(forms.Form):
         target = forms.ModelChoiceField(queryset=relay_target.objects.all())
 
-    cre, specs, _, _ = build_form_inputs(PickForm, operation_kind=FORM)
+    cre, specs = build_form_input_class(PickForm, operation_kind=FORM)
     fields = _field_map(cre)
     assert _inner_type(fields["target_id"]) is relay.GlobalID
     spec = next(s for s in specs if s.target_name == "target")
@@ -583,7 +643,7 @@ def test_model_choice_field_to_non_relay_target_uses_raw_pk() -> None:
     class PickForm(forms.Form):
         target = forms.ModelChoiceField(queryset=plain_target.objects.all())
 
-    cre, _, _, _ = build_form_inputs(PickForm, operation_kind=FORM)
+    cre, _ = build_form_input_class(PickForm, operation_kind=FORM)
     fields = _field_map(cre)
     assert _inner_type(fields["target_id"]) is int
 
@@ -595,7 +655,7 @@ def test_model_multiple_choice_field_to_relay_target_is_list_of_globalid() -> No
     class PickManyForm(forms.Form):
         targets = forms.ModelMultipleChoiceField(queryset=relay_target.objects.all())
 
-    cre, specs, _, _ = build_form_inputs(PickManyForm, operation_kind=FORM)
+    cre, specs = build_form_input_class(PickManyForm, operation_kind=FORM)
     fields = _field_map(cre)
     inner = _inner_type(fields["targets"])
     assert inner == list[relay.GlobalID]
@@ -611,7 +671,7 @@ def test_model_multiple_choice_field_to_non_relay_target_is_list_of_raw_pk() -> 
     class PickManyForm(forms.Form):
         targets = forms.ModelMultipleChoiceField(queryset=plain_target.objects.all())
 
-    cre, _, _, _ = build_form_inputs(PickManyForm, operation_kind=FORM)
+    cre, _ = build_form_input_class(PickManyForm, operation_kind=FORM)
     fields = _field_map(cre)
     assert _inner_type(fields["targets"]) == list[int]
 
@@ -627,7 +687,7 @@ def test_file_field_maps_to_upload() -> None:
     class AvatarForm(forms.Form):
         avatar = forms.FileField()
 
-    cre, specs, _, _ = build_form_inputs(AvatarForm, operation_kind=FORM)
+    cre, specs = build_form_input_class(AvatarForm, operation_kind=FORM)
     fields = _field_map(cre)
     assert _inner_type(fields["avatar"]) is Upload
     spec = next(s for s in specs if s.target_name == "avatar")
@@ -659,7 +719,7 @@ def test_choices_modelform_field_resolves_to_read_side_enum() -> None:
             model = Book
             fields = ("circulation_status",)
 
-    cre, _, _, _ = build_form_inputs(BookStatusForm, operation_kind=CREATE)
+    cre, _ = build_form_input_class(BookStatusForm, operation_kind=CREATE)
     fields = _field_map(cre)
     circulation_status = Book._meta.get_field("circulation_status")
     assert isinstance(circulation_status, models.Field)
@@ -749,7 +809,8 @@ def test_choice_field_narrower_than_column_publishes_admitted_values(
     assert isinstance(column, models.Field)
     read_enum = convert_choices_to_enum(column, "BookType")
     form_class = _book_status_form(status_field())
-    cre, _, par, _ = build_form_inputs(form_class, operation_kind=CREATE)
+    cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
+    par, _ = build_form_input_class(form_class, operation_kind=PARTIAL)
     for input_cls, enum_name in (
         (cre, "BookStatusFormInputCirculationStatusEnum"),
         (par, "BookStatusFormPartialInputCirculationStatusEnum"),
@@ -787,7 +848,7 @@ def test_choice_field_admitting_every_column_value_keeps_read_enum(
     column = library_models.Book._meta.get_field("circulation_status")
     assert isinstance(column, models.Field)
     read_enum = convert_choices_to_enum(column, "BookType")
-    cre, _, _, _ = build_form_inputs(_book_status_form(status_field()), operation_kind=CREATE)
+    cre, _ = build_form_input_class(_book_status_form(status_field()), operation_kind=CREATE)
     assert _enum_of(_field_map(cre)["circulation_status"]) is read_enum
 
 
@@ -813,7 +874,9 @@ def test_model_choice_field_over_scalar_choice_column_keeps_read_enum(stored: li
     assert isinstance(column, models.Field)
     read_enum = convert_choices_to_enum(column, "BookType")
     status_field = forms.ModelChoiceField(queryset=Genre.objects.all(), to_field_name="name")
-    cre, _, par, _ = build_form_inputs(_book_status_form(status_field), operation_kind=CREATE)
+    form_class = _book_status_form(status_field)
+    cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
+    par, _ = build_form_input_class(form_class, operation_kind=PARTIAL)
     assert _enum_of(_field_map(cre)["circulation_status"]) is read_enum
     assert _enum_of(_field_map(par)["circulation_status"]) is read_enum
 
@@ -837,7 +900,7 @@ def test_choice_field_narrowing_keeps_blank_only_when_the_form_admits_it(
         "condition",
         forms.ChoiceField(choices=[("good", "G"), ("worn", "W")], required=required),
     )
-    cre, _, _, _ = build_form_inputs(form_class, operation_kind=CREATE)
+    cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
     assert list(_members(_enum_of(_field_map(cre)["condition"]))) == members
 
 
@@ -852,7 +915,7 @@ def test_typed_choice_field_narrowing_over_integer_column_keeps_column_values() 
         "tier",
         forms.TypedChoiceField(choices=[("1", "Low"), ("2", "Mid")], coerce=int),
     )
-    cre, _, _, _ = build_form_inputs(form_class, operation_kind=CREATE)
+    cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
     assert _members(_enum_of(_field_map(cre)["tier"])) == {"MEMBER_1": 1, "MEMBER_2": 2}
 
 
@@ -863,14 +926,14 @@ def test_choice_field_admitting_no_column_value_is_refused() -> None:
         ConfigurationError,
         match="admits none of the non-empty values the choice column",
     ):
-        build_form_inputs(form_class, operation_kind=CREATE)
+        build_form_input_class(form_class, operation_kind=CREATE)
 
 
 def test_multiple_choice_field_over_single_value_choice_column_is_refused() -> None:
     """A ``MultipleChoiceField`` writes a list, which no single-value choice column lists."""
     form_class = _book_status_form(forms.MultipleChoiceField(choices=_DESK_CHOICES))
     with pytest.raises(ConfigurationError, match="over the single-value choice column"):
-        build_form_inputs(form_class, operation_kind=CREATE)
+        build_form_input_class(form_class, operation_kind=CREATE)
 
 
 def test_choice_field_whose_valid_value_raises_is_refused_typed() -> None:
@@ -883,7 +946,7 @@ def test_choice_field_whose_valid_value_raises_is_refused_typed() -> None:
 
     form_class = _book_status_form(BrokenChoiceField(choices=_DESK_CHOICES))
     with pytest.raises(ConfigurationError, match="valid_value raised RuntimeError: broken"):
-        build_form_inputs(form_class, operation_kind=CREATE)
+        build_form_input_class(form_class, operation_kind=CREATE)
 
 
 class _FakeArrayField(models.Field[object, object]):
@@ -962,7 +1025,7 @@ def test_choice_field_over_non_choice_column_keeps_column_type() -> None:
             "Meta": type("Meta", (), {"model": library_models.Book, "fields": ("title",)}),
         },
     )
-    cre, _, _, _ = build_form_inputs(form_class, operation_kind=CREATE)
+    cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
     assert _inner_type(_field_map(cre)["title"]) is str
 
 
@@ -976,7 +1039,7 @@ def test_choice_field_over_relation_column_with_choices_keeps_relation_input() -
     meta = type("Meta", (), {"model": _PickedShelfNote, "fields": ("shelf",)})
     shelf_field = forms.TypedChoiceField(choices=[(1, "First")], coerce=int)
     form_class = type("ShelfPickForm", (forms.ModelForm,), {"shelf": shelf_field, "Meta": meta})
-    cre, specs, _, _ = build_form_inputs(form_class, operation_kind=CREATE)
+    cre, specs = build_form_input_class(form_class, operation_kind=CREATE)
     assert list(_field_map(cre)) == ["shelf_id"]
     assert [spec.kind for spec in specs] == [RELATION_SINGLE]
 
@@ -1033,7 +1096,7 @@ def test_array_choice_column_narrows_its_elements(
     assert isinstance(column, _FakeArrayField)
     meta = type("Meta", (), {"model": _TaggedBook, "fields": ("tags",)})
     form_class = type("TagsForm", (forms.ModelForm,), {"tags": tags_field(), "Meta": meta})
-    cre, _, _, _ = build_form_inputs(form_class, operation_kind=CREATE)
+    cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
     enum_cls = _list_enum_of(_field_map(cre)["tags"])
     assert _members(enum_cls) == members
     read_enum = converters.convert_choices_to_enum(column.base_field, "TaggedBookType")
@@ -1065,9 +1128,9 @@ def test_choice_field_over_grouped_column_binds_only_when_narrowed(
     form_class = type("GroupedForm", (forms.ModelForm,), {"status": status_field, "Meta": meta})
     if members is None:
         with pytest.raises(ConfigurationError, match="grouped-choices form"):
-            build_form_inputs(form_class, operation_kind=CREATE)
+            build_form_input_class(form_class, operation_kind=CREATE)
         return
-    cre, _, _, _ = build_form_inputs(form_class, operation_kind=CREATE)
+    cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
     assert _members(_enum_of(_field_map(cre)["status"])) == members
 
 
@@ -1078,7 +1141,7 @@ def test_choice_field_over_grouped_column_binds_only_when_narrowed(
 
 def test_fields_narrowing_omits_dropped_field() -> None:
     """``Meta.fields`` narrows the input to the named fields."""
-    cre, _, _, _ = build_form_inputs(
+    cre, _ = build_form_input_class(
         _item_model_form(),
         operation_kind=CREATE,
         fields=(
@@ -1087,35 +1150,41 @@ def test_fields_narrowing_omits_dropped_field() -> None:
             "is_private",
             "confirm",
         ),
-        guard_required=False,
     )
     fields = _field_map(cre)
     assert "is_private" in fields
-    cre2, _, _, _ = build_form_inputs(
+    cre2, _ = build_form_input_class(
         _item_model_form(),
         operation_kind=CREATE,
         exclude=("is_private",),
-        guard_required=False,
     )
     assert "is_private" not in _field_map(cre2)
 
 
-def test_build_form_inputs_freezes_one_shot_narrowing_iterables() -> None:
-    """Both generated shapes honor one-shot ``fields`` and ``exclude`` iterables."""
+def test_build_form_input_class_consumes_a_one_shot_narrowing_iterable_once() -> None:
+    """Each build reads a one-shot ``fields`` / ``exclude`` iterable once, in full.
+
+    Every call gets its own generator, and the create and partial shapes each narrow
+    to exactly what that generator yielded: a second read inside one build would see
+    an exhausted iterator and silently narrow to nothing (``fields``) or widen to the
+    whole form (``exclude``).
+    """
     form_cls = _item_model_form()
-    create, _, partial, _ = build_form_inputs(
+    names = (
+        "name",
+        "category",
+        "is_private",
+        "confirm",
+    )
+    create, _ = build_form_input_class(
         form_cls,
         operation_kind=CREATE,
-        fields=(
-            name
-            for name in (
-                "name",
-                "category",
-                "is_private",
-                "confirm",
-            )
-        ),
-        guard_required=False,
+        fields=(name for name in names),
+    )
+    partial, _ = build_form_input_class(
+        form_cls,
+        operation_kind=PARTIAL,
+        fields=(name for name in names),
     )
     assert set(_field_map(create)) == {
         "name",
@@ -1130,11 +1199,15 @@ def test_build_form_inputs_freezes_one_shot_narrowing_iterables() -> None:
         "confirm",
     }
 
-    create, _, partial, _ = build_form_inputs(
+    create, _ = build_form_input_class(
         form_cls,
         operation_kind=CREATE,
         exclude=(name for name in ("is_private",)),
-        guard_required=False,
+    )
+    partial, _ = build_form_input_class(
+        form_cls,
+        operation_kind=PARTIAL,
+        exclude=(name for name in ("is_private",)),
     )
     expected = {"name", "category_id", "confirm"}
     assert set(_field_map(create)) == expected
@@ -1208,22 +1281,22 @@ def test_create_guard_rejects_dropping_required_field_via_fields() -> None:
     """A create ``Meta.fields`` dropping a required form field raises naming it."""
     with pytest.raises(ConfigurationError, match="confirm"):
         # ``confirm`` is required; narrowing to only ``name`` drops it.
-        build_form_inputs(_item_model_form(), operation_kind=CREATE, fields=("name", "category"))
+        guard_create_required_fields(_item_model_form(), ("name", "category"))
 
 
 def test_create_guard_rejects_dropping_required_field_via_exclude() -> None:
     """A create ``Meta.exclude`` dropping a required form field raises naming it."""
+    effective = resolve_effective_form_fields(_item_model_form(), exclude=("confirm",))
     with pytest.raises(ConfigurationError, match="confirm"):
-        build_form_inputs(_item_model_form(), operation_kind=CREATE, exclude=("confirm",))
+        guard_create_required_fields(_item_model_form(), tuple(effective))
 
 
-def test_create_guard_waiver_does_not_raise() -> None:
-    """``guard_required=False`` (the get_form_kwargs-override waiver) builds without raising."""
-    cre, _, _, _ = build_form_inputs(
+def test_create_input_builds_without_the_guard() -> None:
+    """The builder never runs the create guard: a waiving bind builds the narrowed input."""
+    cre, _ = build_form_input_class(
         _item_model_form(),
         operation_kind=CREATE,
         fields=("name", "category"),
-        guard_required=False,
     )
     assert "confirm" not in _field_map(cre)
 
@@ -1257,7 +1330,7 @@ def test_partial_guard_allows_dropping_model_backed_required_field() -> None:
 def test_exclude_naming_unknown_field_raises() -> None:
     """``Meta.exclude`` naming a field not on the form raises the narrowing fail-loud."""
     with pytest.raises(ConfigurationError, match="unknown form field"):
-        build_form_inputs(
+        build_form_input_class(
             _item_model_form(),
             operation_kind=CREATE,
             exclude=("definitely_not_a_field",),
@@ -1281,7 +1354,7 @@ def test_excluded_unsupported_field_is_never_converted() -> None:
         name = forms.CharField()
         weird = Unsupported(required=False)
 
-    cre, _, _, _ = build_form_inputs(WeirdForm, operation_kind=FORM, fields=("name",))
+    cre, _ = build_form_input_class(WeirdForm, operation_kind=FORM, fields=("name",))
     assert set(_field_map(cre)) == {"name"}
 
 
@@ -1315,26 +1388,6 @@ def test_canonical_name_for_full_shape() -> None:
     )
 
 
-def test_build_form_inputs_rejects_out_of_vocabulary_operation_kind() -> None:
-    """``build_form_inputs`` takes a create-shaped kind; ``PARTIAL`` / garbage raise typed.
-
-    A ``PARTIAL`` create-side kind would silently build a degenerate pair (both
-    halves partial-shaped and partial-named, colliding at materialization); any
-    other out-of-vocabulary kind would silently resolve create-shaped. Both fail
-    loud instead.
-    """
-
-    class ProbeForm(forms.Form):
-        x = forms.CharField(required=False)
-
-    with pytest.raises(ConfigurationError, match="out-of-vocabulary operation_kind 'partial'"):
-        build_form_inputs(ProbeForm, operation_kind=PARTIAL)
-    with pytest.raises(ConfigurationError, match="out-of-vocabulary operation_kind 42"):
-        # basedpyright: the non-str operation kind is the hostile input under test;
-        # build_form_inputs types the parameter as str
-        build_form_inputs(ProbeForm, operation_kind=42)  # pyright: ignore[reportArgumentType]
-
-
 def test_build_form_input_class_rejects_out_of_vocabulary_operation_kind() -> None:
     """``build_form_input_class`` rejects anything but CREATE / FORM / PARTIAL."""
 
@@ -1351,7 +1404,7 @@ def test_build_form_input_class_rejects_out_of_vocabulary_operation_kind() -> No
 
 def test_identical_shape_dedupes_via_ledger() -> None:
     """Materializing the same class twice under one name is a no-op (identical shapes dedupe)."""
-    cre, _, _, _ = build_form_inputs(_item_model_form(), operation_kind=CREATE)
+    cre, _ = build_form_input_class(_item_model_form(), operation_kind=CREATE)
     materialize_form_input_class("ItemModelFormInput", cre)
     materialize_form_input_class("ItemModelFormInput", cre)  # idempotent, no raise
     assert module_binding(sys.modules[INPUTS_MODULE_PATH], "ItemModelFormInput") is cre
@@ -1403,7 +1456,7 @@ def test_two_forms_sharing_name_always_collide() -> None:
 
 def test_materialized_input_is_module_global() -> None:
     """A materialized input class is a real global of ``forms.inputs`` (the lazy-ref contract)."""
-    cre, _, _, _ = build_form_inputs(_item_model_form(), operation_kind=CREATE)
+    cre, _ = build_form_input_class(_item_model_form(), operation_kind=CREATE)
     materialize_form_input_class("ItemModelFormInput", cre)
     assert module_binding(sys.modules[INPUTS_MODULE_PATH], "ItemModelFormInput") is cre
 
@@ -1415,7 +1468,7 @@ def test_materialized_input_is_module_global() -> None:
 
 def test_scalar_reverse_map_is_identity() -> None:
     """A plain scalar field's reverse map is identity (``name`` -> ``name``, kind scalar)."""
-    _, specs, _, _ = build_form_inputs(_item_model_form(), operation_kind=CREATE)
+    _, specs = build_form_input_class(_item_model_form(), operation_kind=CREATE)
     name_spec = next(s for s in specs if s.target_name == "name")
     assert name_spec.input_attr == "name"
     assert name_spec.graphql_name == "name"
@@ -1444,7 +1497,7 @@ def test_relation_id_attr_collision_is_fail_loud() -> None:
         target_id = forms.CharField()
 
     with pytest.raises(ConfigurationError) as exc:
-        build_form_inputs(CollidingForm, operation_kind=FORM)
+        build_form_input_class(CollidingForm, operation_kind=FORM)
     message = str(exc.value)
     assert "target_id" in message
     assert "'target'" in message
@@ -1467,7 +1520,7 @@ def test_camel_case_graphql_name_collision_is_fail_loud() -> None:
         fooBar = forms.IntegerField()  # noqa: N815 - intentional collision fixture
 
     with pytest.raises(ConfigurationError) as exc:
-        build_form_inputs(CamelCollideForm, operation_kind=FORM)
+        build_form_input_class(CamelCollideForm, operation_kind=FORM)
     message = str(exc.value)
     assert "fooBar" in message
     assert "collide" in message
@@ -1626,7 +1679,7 @@ def test_model_choice_field_with_none_queryset_is_fail_loud() -> None:
         target: forms.ModelChoiceField[Model] = forms.ModelChoiceField(queryset=None)
 
     with pytest.raises(ConfigurationError) as exc:
-        build_form_inputs(LateQuerysetForm, operation_kind=FORM)
+        build_form_input_class(LateQuerysetForm, operation_kind=FORM)
     message = str(exc.value)
     assert "LateQuerysetForm" in message
     assert "'target'" in message
@@ -1656,7 +1709,7 @@ def test_honest_str_subclass_basis_name_still_builds() -> None:
     form_cls = _make_empty_form()
     normalized = normalize_form_field_basis(form_cls, {PlainSub("good"): forms.CharField()})
     assert list(normalized) == ["good"]
-    cre, _, _, _ = build_form_inputs(form_cls, form_fields=normalized)
+    cre, _ = build_form_input_class(form_cls, form_fields=normalized, operation_kind=FORM)
     field_names = {f.python_name for f in get_object_definition(cre, strict=True).fields}
     assert field_names == {"good"}
 

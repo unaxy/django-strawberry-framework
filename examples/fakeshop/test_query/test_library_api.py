@@ -48,6 +48,8 @@ from graphql_client import (
     saved_pk,
 )
 from graphql_client import assert_graphql_data as _assert_graphql_data
+from graphql_client import assert_graphql_success as _assert_graphql_success
+from graphql_client import graphql_payload as _graphql_payload
 from graphql_client import post_graphql as _post_graphql
 from strawberry import relay
 from strawberry.types import Info
@@ -14577,7 +14579,7 @@ def test_serializer_to_field_relation_update_stores_the_target_key_over_http(
         data["favoriteGenreId"] = None
 
     response = _post_graphql(
-        "mutation($id: ID!, $d: PatronProfileDetailsSerializerPartialInput!) { "
+        "mutation($id: ID!, $d: PatronProfileSerializerPartialInput!) { "
         f"updatePatronProfileViaSerializer(id: $id, data: $d) {{ {_PROFILE_SELECTION} }} }}",
         variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
     )
@@ -14881,6 +14883,225 @@ def test_form_to_field_relation_update_refuses_an_omitted_dangling_genre_over_ht
         }
         assert (column, address) == ([gone_name], ["Suite 1"])
         assert updates == []
+
+
+#: The write flavor -> (update field, update input type) over ``PatronProfile``, whose
+#: primary key is the one-to-one key ``patron``: the model, form and serializer updates
+#: over a model, a form and a serializer that each carry ``patron`` on create.
+_PROFILE_UPDATES = {
+    "model": ("updatePatronProfile", "PatronProfilePartialInput"),
+    "form": ("updatePatronProfileViaForm", "PatronProfileGenreFormPartialInput"),
+    "serializer": ("updatePatronProfileViaSerializer", "PatronProfileSerializerPartialInput"),
+}
+
+
+def _post_profile_update(
+    flavor: str,
+    patron: models.Patron,
+    data: Mapping[str, object],
+) -> JSONObject:
+    """Post one ``PatronProfile`` update in ``flavor`` located by ``patron``; answer the payload."""
+    field, input_type = _PROFILE_UPDATES[flavor]
+    return _graphql_payload(
+        f"mutation($id: ID!, $d: {input_type}!) {{ "
+        f"{field}(id: $id, data: $d) {{ {_PROFILE_SELECTION} }} }}",
+        variables={
+            "id": global_id_for(library_schema.PatronProfileType, patron.pk),
+            "d": dict(data),
+        },
+    )
+
+
+def _profiles() -> list[tuple[int, str]]:
+    """Every stored ``PatronProfile`` as ``(patron key, address_2)``, by key."""
+    return list(
+        models.PatronProfile.objects.order_by("patron_id").values_list("patron_id", "address_2"),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("flavor", list(_PROFILE_UPDATES))
+def test_update_input_never_carries_the_primary_key_over_http(flavor: str) -> None:
+    """No update input over ``PatronProfile`` publishes its primary-key relation ``patronId``.
+
+    The form names ``patron`` in its ``Meta.fields`` and the serializer lists it, and both
+    publish it on create; the update input leaves it out in every flavor, since the
+    mutation's ``id`` argument names the row and a write re-keying it would update or
+    insert a different row.
+    """
+    _field, input_type = _PROFILE_UPDATES[flavor]
+    names = _input_field_names(input_type)
+    assert "patronId" not in names
+    assert "address_2" in names
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("flavor", list(_PROFILE_UPDATES))
+@pytest.mark.parametrize("target", ["free", "taken"])
+def test_update_sending_the_primary_key_is_a_validation_error_over_http(
+    flavor: str,
+    target: str,
+) -> None:
+    """An update sending ``patronId`` is refused by GraphQL validation, and nothing is written.
+
+    The update input has no ``patronId``, so a client naming another patron's key, one with
+    no profile yet (``free``) or one whose profile exists (``taken``), fails variable
+    coercion before any resolver runs: neither profile changes and no profile is added.
+    """
+    patron = models.Patron.objects.create(name="KeyedProfileOwner")
+    other = models.Patron.objects.create(name="KeyedProfileOther")
+    models.PatronProfile.objects.create(patron=patron, address_2="Suite 1")
+    if target == "taken":
+        models.PatronProfile.objects.create(patron=other, address_2="Suite 9")
+    before = _profiles()
+
+    payload = _post_profile_update(flavor, patron, {"address_2": "Suite 2", "patronId": other.pk})
+
+    assert payload["data"] is None
+    message = json_str(payload, "errors", 0, "message")
+    assert "Field 'patronId' is not defined by type" in message, message
+    assert _profiles() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("flavor", list(_PROFILE_UPDATES))
+def test_update_keeps_the_primary_key_and_writes_only_its_row_over_http(flavor: str) -> None:
+    """An update writes the located profile under its own key and leaves every other row.
+
+    The bound form and serializer still hold ``patron``: the form rebinds it from the
+    located row and the partial serializer skips it, so the save updates the located
+    profile in place, never another patron's.
+    """
+    patron = models.Patron.objects.create(name="KeptKeyOwner")
+    other = models.Patron.objects.create(name="KeptKeyOther")
+    models.PatronProfile.objects.create(patron=patron, address_2="Suite 1")
+    models.PatronProfile.objects.create(patron=other, address_2="Suite 9")
+
+    payload = _post_profile_update(flavor, patron, {"address_2": "Suite 2"})
+
+    assert "errors" not in payload, payload
+    field, _input_type = _PROFILE_UPDATES[flavor]
+    assert json_object(payload, "data", field) == {
+        "node": {"secondaryAddress": "Suite 2", "favoriteGenre": None},
+        "errors": [],
+    }
+    assert _profiles() == sorted([(patron.pk, "Suite 2"), (other.pk, "Suite 9")])
+
+
+_KEYED_CREATE_SELECTION = "errors { field messages codes path }"
+
+#: The in-band error a model create over a client-assigned key answers per refused key.
+_KEYED_CREATE_ERRORS: dict[str, list[JSONObject]] = {
+    "taken": [
+        {
+            "field": "patronId",
+            "messages": ["Patron profile with this Patron already exists."],
+            "codes": ["unique"],
+            "path": ["patronId"],
+        },
+    ],
+    "missing": [
+        {
+            "field": "patronId",
+            "messages": ["Invalid id for relation 'patronId'."],
+            "codes": ["invalid"],
+            "path": ["patronId"],
+        },
+    ],
+    "taken_isbn": [
+        {
+            "field": "isbn_13",
+            "messages": ["Edition with this Isbn 13 already exists."],
+            "codes": ["unique"],
+            "path": ["isbn_13"],
+        },
+    ],
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("input_type", "key"),
+    [("PatronProfileInput", "patronId"), ("EditionInput", "isbn_13")],
+)
+def test_model_create_requires_a_client_assigned_primary_key_over_http(
+    input_type: str,
+    key: str,
+) -> None:
+    """A model create over a key Django never assigns and with no default requires the key.
+
+    ``PatronProfile`` is keyed by its one-to-one ``patron`` and ``Edition`` by its ISBN
+    text, neither with a default, so the create input carries the key as a non-null input.
+    """
+    assert _input_field_type(input_type, key)["kind"] == "NON_NULL"
+
+
+def _post_keyed_create(mutation: str, input_type: str, data: Mapping[str, object]) -> JSONObject:
+    """Post one model-flavor create over a client-assigned primary key; answer its ``data``."""
+    return _assert_graphql_success(
+        f"mutation($d: {input_type}!) {{ {mutation}(data: $d) {{ {_KEYED_CREATE_SELECTION} }} }}",
+        variables={"d": dict(data)},
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("key", ["free", "taken", "missing"])
+def test_model_create_patron_profile_names_its_patron_by_the_key_over_http(key: str) -> None:
+    """``createPatronProfile`` creates the profile of a free patron and refuses any other key.
+
+    A patron with no profile gets one; a patron whose profile exists is the ``unique``
+    error on ``patronId`` and that profile is untouched; a key naming no patron is the
+    relation's ``invalid`` error. Only the free key writes a row.
+    """
+    owner = models.Patron.objects.create(name="CreateProfileOwner")
+    models.PatronProfile.objects.create(patron=owner, address_2="Suite 1")
+    free = models.Patron.objects.create(name="CreateProfileFree")
+    free_pk = saved_pk(free.pk)
+    patron_key = {"free": free_pk, "taken": saved_pk(owner.pk), "missing": free_pk + 1000}[key]
+
+    result = _post_keyed_create(
+        "createPatronProfile",
+        "PatronProfileInput",
+        {"patronId": patron_key, "address_2": "Suite 2"},
+    )
+
+    if key == "free":
+        assert result == {"createPatronProfile": {"errors": []}}
+        assert _profiles() == [(owner.pk, "Suite 1"), (free.pk, "Suite 2")]
+        return
+    assert result == {"createPatronProfile": {"errors": _KEYED_CREATE_ERRORS[key]}}
+    assert _profiles() == [(owner.pk, "Suite 1")]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("key", ["free", "taken"])
+def test_model_create_edition_takes_its_isbn_key_from_the_client_over_http(key: str) -> None:
+    """``createEdition`` creates an edition under a free ISBN and never overwrites a taken one.
+
+    The ISBN text is the primary key and has no default: a free ISBN creates the edition,
+    and a taken one is the ``unique`` error on ``isbn_13`` with the stored edition intact.
+    """
+    publisher = models.Publisher.objects.create(name="KeyedPress", house_code="KP")
+    models.Edition.objects.create(isbn_13="9780000000001", publisher=publisher, imprint="Kept")
+    isbn = {"free": "9780000000002", "taken": "9780000000001"}[key]
+
+    result = _post_keyed_create(
+        "createEdition",
+        "EditionInput",
+        {
+            "isbn_13": isbn,
+            "imprint": "New",
+            "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
+        },
+    )
+
+    stored = list(models.Edition.objects.order_by("isbn_13").values_list("isbn_13", "imprint"))
+    if key == "free":
+        assert result == {"createEdition": {"errors": []}}
+        assert stored == [("9780000000001", "Kept"), ("9780000000002", "New")]
+        return
+    assert result == {"createEdition": {"errors": _KEYED_CREATE_ERRORS["taken_isbn"]}}
+    assert stored == [("9780000000001", "Kept")]
 
 
 _FORM_PROFILE_NAME_UPDATE = (

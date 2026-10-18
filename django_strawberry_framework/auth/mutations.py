@@ -1266,7 +1266,7 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
         )
     # Delegate unknown / non-editable / reverse-name rejection to the standard
     # narrowing validation (single-sited message naming field + model).
-    _ = editable_input_fields(user_model, fields=deduped)
+    _ = editable_input_fields(user_model, fields=deduped, operation_kind=CREATE)
     return deduped
 
 

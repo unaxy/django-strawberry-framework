@@ -277,6 +277,45 @@ def test_meta_unknown_fields_raises_at_class_creation() -> None:
                 fields = ("not_a_real_field",)
 
 
+def test_update_meta_fields_naming_the_primary_key_raises_at_class_creation() -> None:
+    """An update ``Meta.fields`` naming the row's primary key is refused at class creation.
+
+    ``PatronProfile`` is keyed by its one-to-one ``patron``, which the create input
+    carries; the update input never does, since its ``id`` argument names the row. The
+    same ``Meta.fields`` builds a create, and an update ``Meta.exclude`` naming the key
+    builds too, because it states what the update input already does.
+    """
+
+    class CreateProfile(DjangoMutation):
+        class Meta:
+            model = library_models.PatronProfile
+            operation = "create"
+            fields = ("patron", "address_2")
+
+    class UpdateProfileExcludingKey(DjangoMutation):
+        class Meta:
+            model = library_models.PatronProfile
+            operation = "update"
+            exclude = ("patron",)
+
+    assert CreateProfile._mutation_meta.fields == ("patron", "address_2")
+    assert UpdateProfileExcludingKey._mutation_meta.exclude == ("patron",)
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "DjangoMutation for PatronProfile declares `fields` naming ['patron'], which "
+            "write(s) the row's primary key.",
+        ),
+    ):
+
+        @definition_raises
+        class UpdateProfile(DjangoMutation):
+            class Meta:
+                model = library_models.PatronProfile
+                operation = "update"
+                fields = ("patron", "address_2")
+
+
 def test_meta_fields_naming_a_foreign_object_raises_at_class_creation() -> None:
     """``Meta.fields`` naming a forward ``ForeignObject`` raises naming its link columns.
 
@@ -394,6 +433,36 @@ def test_meta_input_class_diverging_field_names_raises() -> None:
                 model = product_models.Item
                 operation = "create"
                 input_class = BadItemInput
+
+
+def test_custom_inputs_follow_the_primary_key_rule_of_their_operation() -> None:
+    """A custom create input may carry a client-assigned key; a custom update input may not.
+
+    ``Edition`` is keyed by its ISBN text: the generated create input carries
+    ``isbn_13``, so an ``input_class`` naming it follows the scheme, while the update
+    input never does, so a ``partial_input_class`` naming it diverges.
+    """
+
+    @strawberry.input
+    class EditionKeyInput:
+        isbn_13: str
+        imprint: str
+
+    class CreateEdition(DjangoMutation):
+        class Meta:
+            model = library_models.Edition
+            operation = "create"
+            input_class = EditionKeyInput
+
+    assert CreateEdition._mutation_meta.input_class is EditionKeyInput
+    with pytest.raises(ConfigurationError, match="diverge from the generated naming scheme"):
+
+        @definition_raises
+        class UpdateEdition(DjangoMutation):
+            class Meta:
+                model = library_models.Edition
+                operation = "update"
+                partial_input_class = EditionKeyInput
 
 
 def test_meta_input_class_following_scheme_validates_clean() -> None:
@@ -1613,7 +1682,7 @@ def test_model_flavor_input_seams_produce_today_defaults() -> None:
     # The input carries the model's editable columns (name + category_id), proving
     # it is the model-column input, not a form-derived one.
     field_names = {f.python_name for f in get_object_definition(materialized, strict=True).fields}
-    editable = {f.name for f in editable_input_fields(product_models.Item)}
+    editable = {f.name for f in editable_input_fields(product_models.Item, operation_kind=PARTIAL)}
     assert "name" in field_names
     assert "category_id" in field_names  # FK -> <field>_id scheme
     assert "name" in editable

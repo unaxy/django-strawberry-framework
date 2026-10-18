@@ -423,6 +423,7 @@ def resolve_effective_form_fields(
     fields: object = None,
     exclude: object = None,
     form_fields: Mapping[str, forms.Field] | None = None,
+    operation_kind: str | None = None,
 ) -> dict[str, forms.Field]:
     """Return the effective ``{name: forms.Field}`` dict after ``fields`` / ``exclude``.
 
@@ -441,6 +442,12 @@ def resolve_effective_form_fields(
     Preserves ``base_fields`` declaration order for the non-narrowed and the
     ``exclude`` cases; honors the caller's order for ``fields``.
 
+    For the ``PARTIAL`` (update) ``operation_kind`` the basis leaves out every field
+    that writes the row's primary key (``_form_row_identity``): an omitted field is
+    rebound from the located row by the partial reconstruction, so the bound form
+    still validates it, at its stored value. ``None`` (and every create-shaped kind)
+    keeps the full basis.
+
     The narrowing spine + the pinned error wording are single-sited in
     ``utils/inputs.py::resolve_effective_fields``, shared with the
     serializer flavor; this thin wrapper supplies the form basis (``base_fields``)
@@ -458,6 +465,40 @@ def resolve_effective_form_fields(
             "Meta.fields / Meta.exclude narrowed the form field set to empty (or the "
             "form declares no fields). A form input must define at least one field."
         ),
+        row_identity=_form_row_identity(
+            form_class,
+            form_fields,
+            operation_kind=operation_kind,
+        ),
+    )
+
+
+def _form_row_identity(
+    form_class: FormClass,
+    form_fields: Mapping[str, forms.Field] | None = None,
+    *,
+    operation_kind: str | None,
+) -> frozenset[str]:
+    """Return the form fields an ``operation_kind`` input leaves out as the row's identity.
+
+    Only the ``PARTIAL`` (update) input has any: the declared fields whose backing
+    model column (``_model_column_for``) is an editable primary key - a
+    ``OneToOneField(primary_key=True)``, a client-assigned text key, or an inherited parent
+    key. ``construct_instance`` would assign a provided value to the located instance and
+    ``save()`` would then update or insert a different row, so the update input never
+    carries it (the model flavor's ``mutations/inputs.py::editable_input_fields`` rule). An
+    ``editable=False`` key is no such field: ``construct_instance`` never writes a
+    non-editable column, so a declared form field named like one is an ordinary input. A
+    create input keeps every field: a client-assigned key is how a create names its row.
+    """
+    if operation_kind != PARTIAL:
+        return frozenset()
+    return frozenset(
+        name
+        for name in _form_field_basis(form_class, form_fields)
+        if (column := _model_column_for(form_class, name)) is not None
+        and column.primary_key
+        and column.editable
     )
 
 
@@ -946,8 +987,17 @@ def build_form_input_class(
         fields=fields,
         exclude=exclude,
         form_fields=form_fields,
+        operation_kind=operation_kind,
     )
-    full_field_names = tuple(_form_field_basis(form_class, form_fields))
+    # The un-narrowed shape of the same operation: the canonical-name comparison basis,
+    # so an update input that drops only the row identity keeps the canonical name.
+    full_field_names = tuple(
+        resolve_effective_form_fields(
+            form_class,
+            form_fields=form_fields,
+            operation_kind=operation_kind,
+        ),
+    )
     type_name = form_input_type_name(
         form_class,
         operation_kind,
@@ -1021,9 +1071,9 @@ def guard_create_required_fields(
     ``ConfigurationError`` naming the dropped required field(s), covering both
     ``Meta.fields`` and ``Meta.exclude``.
 
-    Factored out of ``build_form_inputs`` so the bind's per-shape build cache
-    (``forms/sets.py::_cached_build_form_input``) can run it PER mutation
-    DECLARATION rather than only on the first build of a given shape: the cache key
+    It is separate from the input builder (``build_form_input_class``) so the bind's
+    per-shape build cache (``forms/sets.py::_cached_build_form_input``) can run it PER
+    mutation DECLARATION rather than only on the first build of a given shape: the cache key
     excludes ``guard_required``, so a waiving mutation (``guard_required=False``,
     having overridden ``get_form_kwargs`` / ``get_form``) that materializes a
     narrowed shape FIRST must not suppress the guard for a later non-waiving
@@ -1089,77 +1139,3 @@ def guard_partial_required_column_less_fields(
             "waives this guard).",
         ),
     )
-
-
-def build_form_inputs(
-    form_class: FormClass,
-    *,
-    operation_kind: str = FORM,
-    fields: object = None,
-    exclude: object = None,
-    guard_required: bool = True,
-    form_fields: Mapping[str, forms.Field] | None = None,
-) -> tuple[type[object], list[InputFieldSpec], type[object], list[InputFieldSpec]]:
-    """Build BOTH the create + partial inputs for a form, with the create-required guard.
-
-    Single entry point producing ``(<FormClass>Input, create_specs,
-    <FormClass>PartialInput, partial_specs)``. The create input's
-    ``operation_kind`` is the caller's (``CREATE`` for a ``DjangoModelFormMutation``
-    create, or the ``FORM`` sentinel for a plain ``DjangoFormMutation``); the
-    partial input is always ``PARTIAL``.
-
-    **The create-required-narrowing guard (spec-038 Decision 7).** A bound
-    form fails required-validation for any ``field.required`` field absent from
-    its bound ``data=``, so a create whose effective field set (after
-    ``Meta.fields`` / ``Meta.exclude``) omits a still-declared required form field
-    would compile to a schema that looks valid but can never succeed. When
-    ``guard_required`` is True this raises ``ConfigurationError`` naming the
-    dropped required field(s), covering both ``Meta.fields`` and ``Meta.exclude``.
-    The waiver (``guard_required=False``) is the ``get_form_kwargs`` /
-    ``get_form`` override escape hatch: when the consumer overrides
-    that hook the guard cannot know which fields the override injects, so it
-    trusts the explicit override - surfaced here as an explicit parameter so the
-    bind can pass ``guard_required=False``, never hard-coded always-on.
-
-    The create-side ``operation_kind`` is guarded to the create-shaped
-    vocabulary (``CREATE`` / ``FORM``): a ``PARTIAL`` or out-of-vocabulary kind
-    here would silently build a degenerate pair (both halves partial-shaped and
-    partial-named, colliding at materialization), so it fails loud naming the
-    form and the received value - the partial is built by passing
-    ``operation_kind=PARTIAL`` to ``build_form_input_class``.
-    """
-    if operation_kind not in CREATE_SHAPED_KINDS:
-        raise ConfigurationError(
-            f"DjangoFormMutation create input for {form_class.__name__} received "
-            f"out-of-vocabulary operation_kind {operation_kind!r}; the create/partial pair "
-            "builder takes a create-shaped kind (CREATE or FORM) and always builds the "
-            "partial side itself (build_form_input_class with operation_kind=PARTIAL).",
-        )
-    effective = resolve_effective_form_fields(
-        form_class,
-        fields=fields,
-        exclude=exclude,
-        form_fields=form_fields,
-    )
-    # ``fields`` / ``exclude`` may be one-shot iterables when this public builder
-    # is called directly.  The effective mapping is the validated, stable shape;
-    # pass its names to both child builds so the second resolution cannot consume
-    # an iterator again (or silently widen an exhausted ``exclude`` to the full
-    # form).
-    effective_names = tuple(effective)
-    if guard_required:
-        guard_create_required_fields(form_class, effective_names, form_fields)
-
-    create_cls, create_specs = build_form_input_class(
-        form_class,
-        operation_kind=operation_kind,
-        fields=effective_names,
-        form_fields=form_fields,
-    )
-    partial_cls, partial_specs = build_form_input_class(
-        form_class,
-        operation_kind=PARTIAL,
-        fields=effective_names,
-        form_fields=form_fields,
-    )
-    return create_cls, create_specs, partial_cls, partial_specs

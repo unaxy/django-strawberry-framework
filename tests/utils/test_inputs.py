@@ -6,6 +6,7 @@ Shipped filter/order input names live in
 ``examples/fakeshop/test_query/test_connection_pagination_api.py``.
 """
 
+import re
 import sys
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
@@ -65,6 +66,7 @@ from django_strawberry_framework.utils.inputs import (
     plain_set_meta_fields,
     promote_set_meta_fields,
     read_set_meta_fields,
+    resolve_effective_fields,
     resolve_set_meta_fields,
     set_input_type_name,
 )
@@ -1271,3 +1273,52 @@ def test_emit_stages_field_specs_atomically_across_a_clean_walk_then_collision()
     triples = _emit([("a_b", object()), ("b", object())], clean)
     assert [triple[0] for triple in triples] == ["a_b", "b"]
     assert set(clean) == {(_ProbeSet, "a_b"), (_ProbeSet, "b")}
+
+
+def _narrow_probe_basis(
+    basis: dict[str, int],
+    *,
+    fields: tuple[str, ...] | None = None,
+    exclude: tuple[str, ...] | None = None,
+    row_identity: Collection[str] = (),
+) -> list[str]:
+    """Narrow ``basis`` through the shared spine under the probe flavor's message knobs."""
+    return list(
+        resolve_effective_fields(
+            basis,
+            fields=fields,
+            exclude=exclude,
+            subject="Probe for Row",
+            seq_flavor="Probe",
+            unknown_noun="unknown field(s)",
+            empty_message="Probe input for Row has no fields",
+            row_identity=row_identity,
+        ),
+    )
+
+
+def test_resolve_effective_fields_leaves_the_row_identity_out_of_the_basis() -> None:
+    """The row identity is no member of the basis an update input narrows.
+
+    The un-narrowed set drops it; ``exclude`` naming it is accepted as the no-op it
+    states; ``fields`` naming it is the targeted refusal; a basis holding only the
+    identity is the empty-input error. With no identity the same name is an ordinary
+    basis member.
+    """
+    basis = {"key": 1, "name": 2, "note": 3}
+    identity = frozenset({"key"})
+
+    assert _narrow_probe_basis(basis, row_identity=identity) == ["name", "note"]
+    assert _narrow_probe_basis(basis, exclude=("key", "note"), row_identity=identity) == ["name"]
+    assert _narrow_probe_basis(basis, fields=("key",)) == ["key"]
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "Probe for Row declares `fields` naming ['key'], which write(s) the row's primary "
+            "key. An update input never carries the primary key: the mutation's `id` argument "
+            "names the row it writes. Remove it from `fields`.",
+        ),
+    ):
+        _narrow_probe_basis(basis, fields=("name", "key"), row_identity=identity)
+    with pytest.raises(ConfigurationError, match="Probe input for Row has no fields"):
+        _narrow_probe_basis({"key": 1}, row_identity=identity)

@@ -615,7 +615,7 @@ reportUnusedCallResult = "error"
 cast = 432
 
 [tool.type-suppressions.ignores]
-reportArgumentType = 315
+reportArgumentType = 314
 reportAssignmentType = 33
 reportAttributeAccessIssue = 142
 reportCallIssue = 15

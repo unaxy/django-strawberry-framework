@@ -1478,13 +1478,30 @@ class UpdatePatronProfile(DjangoMutation):
     ``favoriteGenreId`` names the genre by ``GenreType`` ``GlobalID`` (its id) and is
     visibility-checked by that id; the saved ``favorite_genre_id`` column holds the
     genre's ``name``, the key the relation stores. ``PatronProfileType`` is Relay-Node,
-    so the update ``id`` is a ``GlobalID``. Update only: the primary key is the
-    non-editable ``patron`` one-to-one key, so no model create can name the patron.
+    so the update ``id`` is a ``GlobalID``. The primary key is the one-to-one key
+    ``patron``: the update input leaves it out (an update never carries the row's
+    primary key), while ``CreatePatronProfile`` takes it as a required input.
     """
 
     class Meta:
         model = models.PatronProfile
         operation = "update"
+        permission_classes = []
+
+
+class CreatePatronProfile(DjangoMutation):
+    """Create a ``PatronProfile`` via the model pipeline, naming its patron by the key input.
+
+    The primary key is the one-to-one key ``patron``, which Django never assigns itself
+    and which has no default, so the create input carries it as the required
+    ``patronId``: a patron with no profile yet creates one, a patron that has one is
+    the ``unique`` error on ``patronId``, and a patron that does not exist is the
+    relation's ``invalid`` error.
+    """
+
+    class Meta:
+        model = models.PatronProfile
+        operation = "create"
         permission_classes = []
 
 
@@ -2336,10 +2353,14 @@ class CreatePatronProfileViaSerializer(SerializerMutation):
 
 
 class UpdatePatronProfileViaSerializer(SerializerMutation):
-    """Update a ``PatronProfile``'s mailing details and ``to_field`` ``favorite_genre`` key."""
+    """Update a ``PatronProfile``'s mailing details and ``to_field`` ``favorite_genre`` key.
+
+    The same ``PatronProfileSerializer`` as the create: its primary-key relation ``patron``
+    is left out of the update input, so the update keeps the profile's key.
+    """
 
     class Meta:
-        serializer_class = serializers.PatronProfileDetailsSerializer
+        serializer_class = serializers.PatronProfileSerializer
         operation = "update"
         permission_classes = []
 
@@ -2457,6 +2478,20 @@ class UpdatePrintingViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class CreateEdition(DjangoMutation):
+    """Create an ``Edition`` via the model pipeline; the client assigns the ISBN key.
+
+    The primary key is the text column ``isbn_13``, which has no default, so the create
+    input carries it as the required ``isbn_13``: a free ISBN creates the edition and a
+    taken one is the ``unique`` error on ``isbn_13``, never an overwrite of that edition.
+    """
+
+    class Meta:
+        model = models.Edition
+        operation = "create"
+        permission_classes = []
+
+
 class UpdateEdition(DjangoMutation):
     """Update an ``Edition``'s ``imprint`` via the model pipeline; the ``id`` is the raw ISBN."""
 
@@ -2525,7 +2560,10 @@ class Mutation:
     validated genre, own-name and renamed) and ``createPatronProfileRepointingGenre``
     (a field validator renaming the validated genre in place) are refused.
     ``updatePatronProfile`` is the model-flavor write of the same key: the genre id it is
-    sent is resolved to the genre name the column stores.
+    sent is resolved to the genre name the column stores. ``createPatronProfile`` and
+    ``createEdition`` are model-flavor creates over a client-assigned primary key (the
+    one-to-one ``patron`` and the ISBN text): the key is a required create input, while
+    every update input leaves it out.
     ``updatePatronProfileViaForm`` is the ``ModelForm`` write of the same key through a
     genre-id-keyed form field: an omitted genre is rebound by its id, never by the stored name.
     ``updatePatronProfileByGenreNameViaForm`` writes it through the generated name-keyed field,
@@ -2543,6 +2581,7 @@ class Mutation:
     create_shelf = DjangoMutationField(CreateShelf)
     update_shelf_condition = DjangoMutationField(UpdateShelfCondition)
     update_patron_profile = DjangoMutationField(UpdatePatronProfile)
+    create_patron_profile = DjangoMutationField(CreatePatronProfile)
     update_book_via_form = DjangoMutationField(UpdateBookViaForm)
     update_book_at_repair_desk_via_form = DjangoMutationField(UpdateBookAtRepairDeskViaForm)
     update_patron_profile_via_form = DjangoMutationField(UpdatePatronProfileViaForm)
@@ -2636,6 +2675,7 @@ class Mutation:
     update_printing_via_form = DjangoMutationField(UpdatePrintingViaForm)
     create_printing_via_serializer = DjangoMutationField(CreatePrintingViaSerializer)
     update_printing_via_serializer = DjangoMutationField(UpdatePrintingViaSerializer)
+    create_edition = DjangoMutationField(CreateEdition)
     update_edition = DjangoMutationField(UpdateEdition)
     delete_edition = DjangoMutationField(DeleteEdition)
     update_edition_via_form = DjangoMutationField(UpdateEditionViaForm)

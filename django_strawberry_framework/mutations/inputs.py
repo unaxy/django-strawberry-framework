@@ -283,6 +283,7 @@ def editable_input_fields(
     *,
     fields: Iterable[str] | None = None,
     exclude: Iterable[str] | None = None,
+    operation_kind: str,
 ) -> list[ConcreteField]:
     """Return the model's editable, settable input columns (spec-036 Decision 6).
 
@@ -297,10 +298,18 @@ def editable_input_fields(
     idiom) where the order side requires a real database column.
 
     Kept (in declaration order): concrete editable columns whose ``editable``
-    flag is ``True`` and that are not the primary key, plus forward M2M fields.
-    Dropped: the primary key (Django's auto ``AutoField`` reports
-    ``editable=True``, so the ``primary_key`` flag - not ``editable`` - is what
-    drops it; a write never sets the pk, FK targets come via ``<field>_id``),
+    flag is ``True`` and that are not the primary key, plus forward M2M fields,
+    plus - on the ``CREATE`` ``operation_kind`` only - a client-assigned primary
+    key (``_client_assigned_primary_key``: a ``OneToOneField(primary_key=True)`` or a
+    text / integer key Django does not assign itself), the one way a create names its
+    row; it is required exactly when ``input_field_required`` says so (a key with a
+    ``default`` or a ``db_default`` is optional). Dropped: a primary key Django assigns itself (the auto
+    ``AutoField`` reports ``editable=True``, so the ``primary_key`` flag - not
+    ``editable`` - is what drops it; FK targets come via ``<field>_id``), every
+    primary key on the ``PARTIAL`` (update) input (the ``id`` argument names the
+    row and an update never writes its key; naming it in ``fields`` raises the
+    shared row-identity error of ``utils/inputs.py::resolve_effective_fields``, and
+    naming it in ``exclude`` is accepted),
     every ``editable=False`` column (the ``auto_now`` / ``auto_now_add``
     timestamps and any consumer ``editable=False`` column), reverse
     relations (no ``column`` attribute and not ``many_to_many``), and a forward
@@ -340,19 +349,25 @@ def editable_input_fields(
                 selected.append(field)
             continue
         # Concrete column-backed fields only (``hasattr(f, "column")`` is the
-        # cookbook idiom); reverse FKs have no ``column``. Drop the pk
-        # (``primary_key`` - the auto ``AutoField`` is ``editable=True``) and
-        # every ``editable=False`` column (the ``auto_now`` / ``auto_now_add``
-        # timestamps among them).
-        if (
-            hasattr(field, "column")
-            and getattr(field, "editable", False)
-            and not getattr(field, "primary_key", False)
-        ):
-            # Only a concrete ``Field`` carries a ``column``; a reverse ``*Rel`` has none.
-            selected.append(cast("ConcreteField", field))
+        # cookbook idiom); reverse FKs have no ``column``. Drop every
+        # ``editable=False`` column (the ``auto_now`` / ``auto_now_add`` timestamps
+        # among them) and a pk Django assigns itself (``primary_key`` - the auto
+        # ``AutoField`` is ``editable=True``); a client-assigned pk stays in the
+        # basis for the row-identity rule below to keep (create) or drop (update).
+        if not hasattr(field, "column") or not getattr(field, "editable", False):
+            continue
+        # Only a concrete ``Field`` carries a ``column``; a reverse ``*Rel`` has none.
+        column = cast("ConcreteField", field)
+        if not column.primary_key or _client_assigned_primary_key(column):
+            selected.append(column)
 
     by_name = {field.name: field for field in selected}
+    # A create keeps a client-assigned key; any other input never carries one.
+    row_identity: frozenset[str] = (
+        frozenset()
+        if operation_kind == CREATE
+        else frozenset(name for name, column in by_name.items() if column.primary_key)
+    )
     fields = normalize_field_name_sequence(fields, label="fields", flavor="DjangoMutation")
     exclude = normalize_field_name_sequence(exclude, label="exclude", flavor="DjangoMutation")
     if fields is None or exclude is None:
@@ -364,7 +379,7 @@ def editable_input_fields(
                         name,
                         carrier_links[name],
                         key,
-                        input_names=by_name.keys(),
+                        input_names=[name for name in by_name if name not in row_identity],
                     )
 
     # No ``empty_message``: the model flavor's empty-input rejection is
@@ -377,8 +392,27 @@ def editable_input_fields(
         subject=f"DjangoMutation for {model.__name__}",
         seq_flavor="DjangoMutation",
         unknown_noun="non-editable or unknown field(s)",
+        row_identity=row_identity,
     )
     return list(effective.values())
+
+
+def _client_assigned_primary_key(field: ConcreteField) -> bool:
+    """Return whether a create must take ``field``, the primary key, from the client.
+
+    Django assigns the other primary keys itself: an ``AutoField`` (``BigAutoField`` and
+    ``SmallAutoField`` included) takes the database sequence, and a multi-table child's
+    parent link takes the parent row's key in ``Model._save_parents``. Every other editable
+    key - a ``OneToOneField(primary_key=True)``, a text or integer key - takes the value the
+    client supplies, falling back only to its own ``default`` / ``db_default`` (which make it
+    optional, ``input_field_required``), the reason Django's ``ModelForm`` and DRF's
+    ``ModelSerializer`` publish it on create. Mirrors the two arms where ``AutoFieldMixin.formfield`` and
+    ``OneToOneField.formfield`` return ``None``.
+    """
+    if isinstance(field, models.AutoField):
+        return False
+    remote = getattr(field, "remote_field", None)
+    return not getattr(remote, "parent_link", False)
 
 
 def _carrier_backed_link_error(
@@ -428,17 +462,21 @@ def input_field_required(field: ConcreteField) -> bool:
     """Return whether a create-input field is required (spec-036 rule).
 
     A field is required **only when it has no usable default**: no Django
-    ``default`` (``field.has_default()`` is ``False``), ``null=False``, and -
-    where ``blank`` is a meaningful "may be omitted" signal - ``blank=False``.
-    So ``description`` (``blank=True, default=""``) and ``is_private``
-    (``default=False``) are OPTIONAL even in the create input, matching DRF's
-    "required is derived from ``default`` / ``blank`` / ``null``" rule, while
-    ``name`` / ``category_id`` stay required.
+    ``default`` (``field.has_default()`` is ``False``), no database default
+    (``field.has_db_default()`` is ``False``: an omitted ``db_default`` column is
+    filled by the database on insert), ``null=False``, and - where ``blank`` is a
+    meaningful "may be omitted" signal - ``blank=False``. So ``description``
+    (``blank=True, default=""``) and ``is_private`` (``default=False``) are OPTIONAL
+    even in the create input, matching DRF's "required is derived from ``default`` /
+    ``blank`` / ``null``" rule, while ``name`` / ``category_id`` stay required. The
+    ``db_default`` arm is this package's own extension: DRF never reads ``db_default``. A
+    client-assigned primary key follows the same rule, so a key with a ``default`` or
+    a ``db_default`` is an optional create input.
 
     The ``update`` / partial input forces every field optional regardless, so
     this predicate is consulted only by the create-input generator.
     """
-    if field.has_default() or field.null:
+    if field.has_default() or field.has_db_default() or field.null:
         return False
     return not field.blank
 
@@ -848,8 +886,17 @@ def mutation_input_shape(
     every later value derives from that walk's result, so a one-shot iterator
     narrows the shape the same way as the equivalent tuple.
     """
-    selected = tuple(editable_input_fields(model, fields=fields, exclude=exclude))
-    full_field_names = tuple(field.name for field in editable_input_fields(model))
+    selected = tuple(
+        editable_input_fields(
+            model,
+            fields=fields,
+            exclude=exclude,
+            operation_kind=operation_kind,
+        ),
+    )
+    full_field_names = tuple(
+        field.name for field in editable_input_fields(model, operation_kind=operation_kind)
+    )
     effective_field_names = frozenset(field.name for field in selected)
     type_name = mutation_input_type_name(
         model,

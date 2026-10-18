@@ -1027,6 +1027,7 @@ def resolve_effective_fields(
     seq_flavor: str,
     unknown_noun: str,
     empty_message: str | None = None,
+    row_identity: Collection[str] = (),
 ) -> dict[str, _FieldT]:
     """Return the effective ``{name: field}`` dict after ``fields`` / ``exclude`` narrowing.
 
@@ -1053,6 +1054,19 @@ def resolve_effective_fields(
     is still a valid input once the override half is inherited. That flavor omits
     the message and keeps its own override-aware guard downstream; every other
     flavor supplies one and fails at the narrowing.
+
+    ``row_identity`` names the basis members whose write lands on the row's primary
+    key, which an update input never carries: the mutation's ``id`` argument names
+    the row, and a write that re-keys it would update or insert a different row
+    (Django Trac #2259 is the admin's form of the same hazard). Each flavor resolves
+    the members through its own write-target rule and passes them only for the
+    partial (update) input; a create keeps them, since a client-assigned key is how
+    a create names its row. They leave the basis before the narrowing, so the
+    un-narrowed update input drops them and the full update shape is the basis
+    without them. Naming one in ``fields`` raises the targeted error below (the
+    update input cannot carry it); naming one in ``exclude`` states what the update
+    input already does, so it is accepted, which keeps the declaration a consumer
+    wrote to leave the key out valid.
     """
     fields = normalize_field_name_sequence(fields, label="fields", flavor=seq_flavor)
     exclude = normalize_field_name_sequence(exclude, label="exclude", flavor=seq_flavor)
@@ -1060,6 +1074,18 @@ def resolve_effective_fields(
         raise ConfigurationError(
             f"{subject} declares both `fields` and `exclude`; supply at most one.",
         )
+    if row_identity:
+        named = sorted({name for name in fields or () if name in row_identity})
+        if named:
+            raise ConfigurationError(
+                f"{subject} declares `fields` naming {named!r}, which write(s) the row's "
+                "primary key. An update input never carries the primary key: the "
+                "mutation's `id` argument names the row it writes. Remove it from `fields`.",
+            )
+        # Excluding one states what the update input already does, so it stays valid.
+        if exclude is not None:
+            exclude = tuple(name for name in exclude if name not in row_identity)
+        basis = {name: field for name, field in basis.items() if name not in row_identity}
 
     def _reject_unknown(seq: tuple[str, ...], key: str) -> None:
         # The identical unknown-name check both branches spelled separately; the

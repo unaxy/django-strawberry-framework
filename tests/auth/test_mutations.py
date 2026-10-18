@@ -1345,6 +1345,25 @@ def test_derive_register_fields_custom_username_and_required_fields() -> None:
     assert derive_register_fields(CustomLoginUser) == ("email", "nickname", "password")
 
 
+def test_derive_register_fields_accepts_a_username_that_is_the_primary_key() -> None:
+    """A user model keyed by its ``USERNAME_FIELD`` registers with that key as input.
+
+    Registration is a create, and a create names its row by a client-assigned primary
+    key, so the ``email`` key is a register field, never refused as non-editable.
+    """
+
+    class KeyedLoginUser(AbstractBaseUser):
+        email: _Email = djmodels.EmailField(primary_key=True)
+
+        USERNAME_FIELD = "email"
+        REQUIRED_FIELDS = []
+
+        class Meta(AbstractBaseUser.Meta):
+            app_label = _unique_app_label()
+
+    assert derive_register_fields(KeyedLoginUser) == ("email", "password")
+
+
 def test_derive_register_fields_rejects_privilege_fields() -> None:
     """A custom model cannot turn ``is_staff`` into public registration input."""
     model = _privilege_required_user()

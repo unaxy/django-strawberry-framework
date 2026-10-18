@@ -61,6 +61,7 @@ from apps.scalars.models import MediaSpecimen
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
+from django.db.models import Value
 from strawberry import relay
 from strawberry.types.base import (
     StrawberryList,
@@ -200,6 +201,14 @@ def test_non_field_error_key_is_django_all_sentinel() -> None:
     assert NON_FIELD_ERROR_KEY == "__all__"
 
 
+def _narrow(model: type[models.Model], key: str, names: Iterable[str]) -> None:
+    """Walk ``model``'s editable inputs narrowed by ``names`` under ``Meta.<key>``."""
+    if key == "fields":
+        _ = editable_input_fields(model, fields=names, operation_kind=PARTIAL)
+    else:
+        _ = editable_input_fields(model, exclude=names, operation_kind=PARTIAL)
+
+
 # ---------------------------------------------------------------------------
 # editable_input_fields - selection
 # ---------------------------------------------------------------------------
@@ -207,7 +216,7 @@ def test_non_field_error_key_is_django_all_sentinel() -> None:
 
 def test_editable_fields_exclude_pk_auto_timestamps_and_reverse_relations() -> None:
     """pk, ``auto_now`` / ``auto_now_add`` (``editable=False``), and reverse FKs are dropped."""
-    names = [f.name for f in editable_input_fields(product_models.Item)]
+    names = [f.name for f in editable_input_fields(product_models.Item, operation_kind=PARTIAL)]
     # Kept: editable columns + the forward FK.
     assert names == [
         "name",
@@ -226,7 +235,12 @@ def test_editable_fields_exclude_pk_auto_timestamps_and_reverse_relations() -> N
 def test_editable_fields_narrow_by_fields() -> None:
     """``fields`` narrows to the named columns in the given order."""
     names = [
-        f.name for f in editable_input_fields(product_models.Item, fields=("name", "category"))
+        f.name
+        for f in editable_input_fields(
+            product_models.Item,
+            fields=("name", "category"),
+            operation_kind=PARTIAL,
+        )
     ]
     assert names == ["name", "category"]
 
@@ -236,10 +250,12 @@ def test_editable_fields_freezes_one_shot_sequences() -> None:
     selected = editable_input_fields(
         product_models.Item,
         fields=iter(("name", "category")),
+        operation_kind=PARTIAL,
     )
     excluded = editable_input_fields(
         product_models.Item,
         exclude=iter(("description", "is_private")),
+        operation_kind=PARTIAL,
     )
     assert [field.name for field in selected] == ["name", "category"]
     assert [field.name for field in excluded] == ["name", "category", "attachment"]
@@ -249,7 +265,11 @@ def test_editable_fields_narrow_by_exclude() -> None:
     """``exclude`` drops the named columns, preserving declaration order."""
     names = [
         f.name
-        for f in editable_input_fields(product_models.Item, exclude=("description", "is_private"))
+        for f in editable_input_fields(
+            product_models.Item,
+            exclude=("description", "is_private"),
+            operation_kind=PARTIAL,
+        )
     ]
     assert names == ["name", "category", "attachment"]
 
@@ -257,19 +277,28 @@ def test_editable_fields_narrow_by_exclude() -> None:
 def test_editable_fields_rejects_fields_and_exclude_together() -> None:
     """Declaring both ``fields`` and ``exclude`` raises ``ConfigurationError``."""
     with pytest.raises(ConfigurationError, match="both `fields` and `exclude`"):
-        editable_input_fields(product_models.Item, fields=("name",), exclude=("description",))
+        editable_input_fields(
+            product_models.Item,
+            fields=("name",),
+            exclude=("description",),
+            operation_kind=PARTIAL,
+        )
 
 
 def test_editable_fields_rejects_unknown_fields_name() -> None:
     """An unknown / non-editable name in ``fields`` raises ``ConfigurationError``."""
     with pytest.raises(ConfigurationError, match="unknown field"):
-        editable_input_fields(product_models.Item, fields=("name", "created_date"))
+        editable_input_fields(
+            product_models.Item,
+            fields=("name", "created_date"),
+            operation_kind=PARTIAL,
+        )
 
 
 def test_editable_fields_rejects_unknown_exclude_name() -> None:
     """An unknown / non-editable name in ``exclude`` raises ``ConfigurationError``."""
     with pytest.raises(ConfigurationError, match="unknown field"):
-        editable_input_fields(product_models.Item, exclude=("nope",))
+        editable_input_fields(product_models.Item, exclude=("nope",), operation_kind=PARTIAL)
 
 
 def test_editable_fields_reject_naming_a_non_editable_many_to_many() -> None:
@@ -280,10 +309,76 @@ def test_editable_fields_reject_naming_a_non_editable_many_to_many() -> None:
     cannot observe the class-creation refusal of a narrowing that names it.
     """
     with pytest.raises(ConfigurationError, match="non-editable or unknown field"):
-        editable_input_fields(library_models.Book, fields=("title", "archive_genres"))
+        editable_input_fields(
+            library_models.Book,
+            fields=("title", "archive_genres"),
+            operation_kind=PARTIAL,
+        )
 
     with pytest.raises(ConfigurationError, match="non-editable or unknown field"):
-        editable_input_fields(library_models.Book, exclude=("archive_genres",))
+        editable_input_fields(
+            library_models.Book,
+            exclude=("archive_genres",),
+            operation_kind=PARTIAL,
+        )
+
+
+#: The targeted refusal an update narrowing naming the row's primary key raises.
+_ROW_IDENTITY_FIELDS_ERROR = (
+    "DjangoMutation for {model} declares `fields` naming {names!r}, which write(s) the row's "
+    "primary key. An update input never carries the primary key: the mutation's `id` "
+    "argument names the row it writes. Remove it from `fields`."
+)
+
+
+@pytest.mark.parametrize(
+    ("model", "key"),
+    [(library_models.PatronProfile, "patron"), (library_models.Edition, "isbn_13")],
+    ids=["one-to-one-key", "text-key"],
+)
+def test_editable_fields_carry_a_client_assigned_primary_key_on_create_only(
+    model: type[models.Model],
+    key: str,
+) -> None:
+    """A primary key Django never assigns itself is a create input and never an update input.
+
+    ``PatronProfile`` is keyed by its one-to-one ``patron`` and ``Edition`` by its ISBN
+    text: a create names its row by that key, while the update input leaves it out (the
+    ``id`` argument names the row). On update, ``exclude`` naming the key states what the
+    input already does and is accepted; ``fields`` naming it is refused.
+    """
+    create = [field.name for field in editable_input_fields(model, operation_kind=CREATE)]
+    update = [field.name for field in editable_input_fields(model, operation_kind=PARTIAL)]
+
+    assert create == [key, *update]
+    assert [
+        field.name
+        for field in editable_input_fields(model, exclude=(key,), operation_kind=PARTIAL)
+    ] == update
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(_ROW_IDENTITY_FIELDS_ERROR.format(model=model.__name__, names=[key])),
+    ):
+        editable_input_fields(model, fields=(key, *update), operation_kind=PARTIAL)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [product_models.Item, library_models.LendingDesk],
+    ids=["auto-field", "multi-table-parent-link"],
+)
+def test_editable_fields_never_carry_a_primary_key_django_assigns(
+    model: type[models.Model],
+) -> None:
+    """An ``AutoField`` key and a multi-table child's parent link are no create input.
+
+    Django assigns both itself (the database sequence; the parent row's key), so the
+    create input carries neither, and naming either is the unknown-field error.
+    """
+    key = model._meta.pk.name
+    assert key not in [field.name for field in editable_input_fields(model, operation_kind=CREATE)]
+    with pytest.raises(ConfigurationError, match="non-editable or unknown field"):
+        editable_input_fields(model, fields=(key,), operation_kind=CREATE)
 
 
 # ---------------------------------------------------------------------------
@@ -293,10 +388,42 @@ def test_editable_fields_reject_naming_a_non_editable_many_to_many() -> None:
 
 def test_input_field_required_rule() -> None:
     """Required only with no usable default: no ``default`` / ``blank`` / ``null``."""
-    by_name = {f.name: f for f in editable_input_fields(product_models.Item)}
+    by_name = {
+        f.name: f for f in editable_input_fields(product_models.Item, operation_kind=PARTIAL)
+    }
     assert input_field_required(by_name["name"]) is True  # TextField, no default
     assert input_field_required(by_name["description"]) is False  # blank=True, default=""
     assert input_field_required(by_name["is_private"]) is False  # default=False
+
+
+@pytest.mark.parametrize("name", ["key", "stamp"], ids=["primary-key", "column"])
+def test_a_db_default_column_is_an_optional_create_input(name: str) -> None:
+    """A column with a ``db_default`` is optional on create: the database fills an omitted one.
+
+    That holds for a client-assigned primary key carrying one (a create may name its row
+    or leave the key to the database) and for an ordinary column; ``name``, with no
+    default of either kind, stays required.
+    """
+
+    class DbDefaultRow(models.Model):
+        key: models.IntegerField[int | Combinable, int] = models.IntegerField(
+            primary_key=True,
+            db_default=Value(7),
+        )
+        stamp: models.IntegerField[int | Combinable, int] = models.IntegerField(
+            db_default=Value(0),
+        )
+        name: models.TextField[str | Combinable, str] = models.TextField()
+
+        class Meta:
+            app_label = _unique_app_label()
+
+    by_name = {
+        field.name: field for field in editable_input_fields(DbDefaultRow, operation_kind=CREATE)
+    }
+
+    assert input_field_required(by_name[name]) is False
+    assert input_field_required(by_name["name"]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -844,7 +971,9 @@ def test_digit_boundary_columns_do_not_silently_collide_in_generated_input() -> 
 
 def test_type_name_full_shape_is_canonical() -> None:
     """The full editable shape resolves to ``<Model>Input`` / ``<Model>PartialInput``."""
-    full = tuple(f.name for f in editable_input_fields(product_models.Item))
+    full = tuple(
+        f.name for f in editable_input_fields(product_models.Item, operation_kind=PARTIAL)
+    )
     assert (
         mutation_input_type_name(product_models.Item, CREATE, full, full_field_names=full)
         == "ItemInput"
@@ -857,7 +986,9 @@ def test_type_name_full_shape_is_canonical() -> None:
 
 def test_type_name_narrowed_shape_is_deterministic_and_distinct() -> None:
     """A narrowed shape gets a deterministic, non-canonical, set-derived name."""
-    full = tuple(f.name for f in editable_input_fields(product_models.Item))
+    full = tuple(
+        f.name for f in editable_input_fields(product_models.Item, operation_kind=PARTIAL)
+    )
     narrowed = ("name", "category")
     name_a = mutation_input_type_name(product_models.Item, CREATE, narrowed, full_field_names=full)
     # Deterministic across calls; order-independent (set identity).
@@ -1290,7 +1421,7 @@ def test_editable_fields_keep_foreign_object_carriers_not_the_relation(
     its ``<field>_id`` input whatever column it targets.
     """
     model = _link_model(child_name)
-    assert [field.name for field in editable_input_fields(model)] == names
+    assert [field.name for field in editable_input_fields(model, operation_kind=PARTIAL)] == names
 
 
 def _link_model(name: str) -> type[models.Model]:
@@ -1343,7 +1474,7 @@ def test_editable_fields_reject_naming_a_foreign_object(
         ConfigurationError,
         match=_carrier_backed_link_message(child_name, key, targets, carriers, remedy),
     ):
-        editable_input_fields(model, **{key: iter(("name", "parent"))})
+        _narrow(model, key, iter(("name", "parent")))
 
 
 @pytest.mark.parametrize(
@@ -1420,15 +1551,23 @@ def test_editable_fields_offer_only_carriers_that_are_inputs(
         ConfigurationError,
         match=_carrier_backed_link_message("LnkCarrierProbe", "fields", targets, carriers, remedy),
     ):
-        editable_input_fields(model, fields=("parent",))
+        editable_input_fields(model, fields=("parent",), operation_kind=PARTIAL)
     offered = [name for name in ("owner", "p_code") if f"({name})" in remedy]
-    assert [field.name for field in editable_input_fields(model, fields=tuple(offered))] == offered
+    assert [
+        field.name
+        for field in editable_input_fields(model, fields=tuple(offered), operation_kind=PARTIAL)
+    ] == offered
 
 
 def test_editable_fields_report_fields_and_exclude_together_before_a_foreign_object() -> None:
     """``fields`` beside ``exclude`` is the mutual-exclusion error, whichever names the link."""
     with pytest.raises(ConfigurationError, match="both `fields` and `exclude`"):
-        editable_input_fields(_link_models.LnkPairChild, fields=("parent",), exclude=("name",))
+        editable_input_fields(
+            _link_models.LnkPairChild,
+            fields=("parent",),
+            exclude=("name",),
+            operation_kind=PARTIAL,
+        )
 
 
 @pytest.mark.parametrize("key", ["fields", "exclude"])
@@ -1469,7 +1608,7 @@ def test_editable_fields_reject_a_reverse_generic_relation_as_an_unknown_name(ke
         },
     )
 
-    assert [field.name for field in editable_input_fields(tag)] == [
+    assert [field.name for field in editable_input_fields(tag, operation_kind=PARTIAL)] == [
         "name",
         "content_type",
         "object_id",
@@ -1481,7 +1620,7 @@ def test_editable_fields_reject_a_reverse_generic_relation_as_an_unknown_name(ke
             "unknown field(s): ['holder'].",
         ),
     ):
-        editable_input_fields(tag, **{key: ("name", "holder")})
+        _narrow(tag, key, ("name", "holder"))
 
 
 def test_generated_input_over_a_foreign_object_model_binds_its_carriers() -> None:
@@ -1620,9 +1759,9 @@ def test_editable_input_fields_normalizes_its_declared_sequences() -> None:
     the form and serializer flavors.
     """
     with pytest.raises(ConfigurationError, match="not a bare string"):
-        editable_input_fields(product_models.Item, fields="name")
+        editable_input_fields(product_models.Item, fields="name", operation_kind=PARTIAL)
     with pytest.raises(ConfigurationError, match="duplicate field name"):
-        editable_input_fields(product_models.Item, fields=("name", "name"))
+        editable_input_fields(product_models.Item, fields=("name", "name"), operation_kind=PARTIAL)
 
 
 # ---------------------------------------------------------------------------

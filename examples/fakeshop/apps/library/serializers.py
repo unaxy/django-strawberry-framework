@@ -12,8 +12,7 @@ consumer-visible behaviors end to end:
 * ``ShelfSerializer`` / ``RenamedShelfSerializer`` back a parent serializer mutation and a
   SUBCLASS that redefines ``Meta.serializer_class`` (the subclass-validation live matrix - a
   subclass must validate against its OWN serializer, not an inherited parent snapshot);
-* ``PatronProfileSerializer`` / ``PatronProfileDetailsSerializer`` /
-  ``RenamedPatronProfileSerializer`` write the ``to_field`` key
+* ``PatronProfileSerializer`` / ``RenamedPatronProfileSerializer`` write the ``to_field`` key
   ``PatronProfile.favorite_genre`` through a declared ``PrimaryKeyRelatedField`` under its
   own name or renamed (the column stores the genre name), while
   ``GenreReplacingPatronProfileSerializer`` / ``GenreReplacingRenamedPatronProfileSerializer``
@@ -762,7 +761,9 @@ class PatronProfileSerializer(serializers.ModelSerializer[PatronProfile]):
     ``SlugRelatedField(slug_field="name")``, which ``SerializerMutation`` refuses (a relation
     input decodes to a primary key), so the field is declared under the relation's own name
     as a ``PrimaryKeyRelatedField``: the input names the genre by id, and the saved column
-    holds that genre's name.
+    holds that genre's name. One serializer backs the create and the update: the create
+    input takes the primary-key relation ``patron``, and the update input leaves it out,
+    since an update never carries the row's primary key.
     """
 
     # DRF's stubs type the constructor as returning either a single or a many relation.
@@ -778,13 +779,6 @@ class PatronProfileSerializer(serializers.ModelSerializer[PatronProfile]):
     class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
         model = PatronProfile
         fields: tuple[str, ...] = ("patron", "address_2", "favorite_genre")
-
-
-class PatronProfileDetailsSerializer(PatronProfileSerializer):
-    """``PatronProfileSerializer`` without the primary-key relation ``patron`` (the update surface)."""
-
-    class Meta(PatronProfileSerializer.Meta):
-        fields: tuple[str, ...] = ("address_2", "favorite_genre")
 
 
 class RenamedPatronProfileSerializer(serializers.ModelSerializer[PatronProfile]):
