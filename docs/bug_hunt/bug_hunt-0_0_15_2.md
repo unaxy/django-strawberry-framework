@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 151 done, 117 to do.
+Progress: 152 done, 119 to do.
 
 ## Done
 
@@ -479,6 +479,12 @@ Progress: 151 done, 117 to do.
   relation whose target orders at random, since the guard read the relation's own `attname`, not the join field the
   compiler expands on: fixed, `utils/querysets.py::resolve_order_name` is the one reading of a relation order name for
   the offset guard, the connection window and `optimizer/plans.py::ends_in_unique_column`; a many-to-many loop is refused
+- [x] 181. A `get_queryset` hook or manager `extra(order_by=[...])` ordering was dropped by every connection (root,
+  keyset, nested window, per-parent), forward and reversed, since the order ladder read `applied_order` (blind to the
+  extra ordering the compiler selects first) and rewrote it with `order_by()`, which empties it: fixed,
+  `optimizer/plans.py::normalize_order_direction` first moves the extra ordering into `order_by` terms that compile the
+  same SQL (a raw `table.column` term only under an audited `SQLCompiler._order_by_pairs` body), and
+  `utils/querysets.py::selected_order` is the one reading of the compiler's order precedence
 
 ## Outside review of the fixes
 
@@ -593,8 +599,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 174. BACKLOG `stable_cursor_field` describes the shipped `Meta.cursor_field` keyset cursors as future work
 - [ ] 178. `review_plan.py scope` "Folders touched" (`ScopeReport.folders`) omits a rename's old folder and still names a
   deleted package's integration item, while `--changed` covers both; REVIEW.md says `scope` lists the same changes
-- [ ] 181. `utils/querysets.py::applied_order` ignores `extra_order_by`, so a reversed queryset ordered by `extra(order_by=)`
-  compiles flipped
 - [ ] 183. `ruff format` on an explicit `.md` path rewrites its fenced blocks: pyproject's `exclude` does not stop explicit
   paths
 - [ ] 185. WebSocket residual after `1b6a09b1`: the Postgres steady-ping lost-write test has never run (Not defects: a
@@ -637,6 +641,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   names it: `_bound_terminal` copies the filter and rebinds `field_name`, but the bound method still points at the
   pre-copy object (`books__title`), so the query raises `FieldError: Cannot resolve keyword 'books'`; `_owner_bound_child`
   should treat any filter holding its own `filter` as owner-bound, as it does a `method=` filter
+- [ ] 271. A `get_queryset` hook returning `qs.extra(where=[...])` written without `params=` (Django's documented
+  spelling) is refused by the visibility seal: `Query.add_extra` stores `ExtraWhere(where, None)` and
+  `utils/querysets.py::_raw_sql_params_defect` admits only an exact list or tuple, so every query over the type raises a
+  `ConfigurationError` ("where clause params is a NoneType") Django itself would serve
+- [ ] 272. A `get_queryset` hook returning `qs.extra(order_by=[<TextChoices or StrEnum member>])` is refused by the
+  visibility seal (`utils/querysets.py::_raw_sql_sequence_defect` admits only exact `str` terms) with a
+  `ConfigurationError`, while Django compiles the member as the field name it equals
 ## To do: holes found re-checking the fixes
 
 
@@ -868,6 +879,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 270. CHANGELOG entry for item 257: a nonzero list-field `offset` over a `Meta.ordering` path ending on a
   many-to-many or generic relation is refused when the target's `Meta.ordering` is random or loops back (0.0.14 served
   the page over a random or erroring order), and served as before when that ordering is stable
+- [ ] 273. CHANGELOG entry for item 181: a connection over a `get_queryset` hook or manager `extra(order_by=[...])`
+  ordering serves that ordering (made total by the pk tiebreaker, reversed by `.reverse()` and `last:`) on root, keyset
+  and nested connections alike (0.0.14 served the pk or `Meta.ordering` order instead, and a keyset hook that also
+  called `order_by()` could repeat and skip rows); a keyset target whose extra ordering names no anchorable field gets
+  the keyset order error
 - [ ] 108. A serializer-only source over the default `create()` / `update()` (`gs = PrimaryKeyRelatedField(many=True,
   source="genres_id")`) builds; create raises a masked TypeError and update is a silent no-op. Refuse a column-less
   writable source at class creation, as item 103 does for an `attname` source, or leave it to DRF's default `create()` /

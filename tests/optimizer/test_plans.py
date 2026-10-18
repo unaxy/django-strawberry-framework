@@ -6,7 +6,9 @@ not GraphQL fields. Consumer-visible SQL is
 ``examples/fakeshop/test_query/test_single_parent_fastpath_api.py``.
 """
 
+import inspect
 import sys
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import pytest
@@ -16,15 +18,18 @@ from apps.products.models import Category, Entry, Item, Property
 from apps.scalars.models import NullableScalarSpecimen
 from django.db.models import F, FilteredRelation, Model, OrderBy, Prefetch, Q, QuerySet
 from django.db.models.functions import Lower
+from django.db.models.sql.compiler import SQLCompiler
 
 from django_strawberry_framework.connection import _ends_in_unique_column
-from django_strawberry_framework.exceptions import OptimizerError
+from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.keyset import (
     CursorState,
     declared_cursor_state_for_definition,
     order_fingerprint,
 )
+from django_strawberry_framework.optimizer import plans
 from django_strawberry_framework.optimizer.plans import (
+    _AUDITED_ORDER_BY_PAIRS_QUOTERS,
     _MAX_PATH_DEPTH,
     WINDOW_ROW_NUMBER,
     WINDOW_ROW_NUMBER_REVERSED,
@@ -33,6 +38,7 @@ from django_strawberry_framework.optimizer.plans import (
     _consumer_projection,
     _flatten_select_related,
     _IndexedList,
+    _order_by_pairs_digest,
     _projection_aliases,
     _reverse_order_by,
     _select_path_missing_connectors,
@@ -1218,6 +1224,20 @@ class TestNormalizeOrderDirection:
         compiled = Item.objects.order_by(F("name").asc(nulls_first=True), "id").reverse()
         assert str(normalized.query) == str(compiled.query)
 
+    def test_extra_ordering_expression_moves_into_order_by_as_is(self) -> None:
+        """An expression in ``extra(order_by=...)`` becomes the explicit order unchanged.
+
+        The compiler runs it through the same per-term loop from either
+        collection, so the moved order compiles the SQL the ``extra`` ordering
+        compiled. Only a queryset no visibility seal ran on carries one: the seal
+        admits ``extra`` order terms that are strings.
+        """
+        term = Lower("name").desc()
+        queryset = Item.objects.all().extra(order_by=[term])
+        normalized = normalize_order_direction(queryset, None, Item)
+        assert (normalized.query.extra_order_by, normalized.query.order_by) == ((), (term,))
+        assert str(normalized.query) == str(queryset.query)
+
     def test_no_order_anywhere_reverses_the_cursor_field_else_the_pk(self) -> None:
         """With no order on the queryset or model, the declared cursor order (or pk) flips."""
         assert normalize_order_direction(
@@ -1227,6 +1247,72 @@ class TestNormalizeOrderDirection:
         ).query.order_by == ("name", "-id")
         normalized = normalize_order_direction(Item.objects.reverse(), None, Item)
         assert (normalized.query.standard_ordering, normalized.query.order_by) == (True, ("-id",))
+
+
+@pytest.fixture
+def fresh_order_by_pairs_digest() -> Iterator[None]:
+    """Read the compiler body afresh in the test, and again after it."""
+    _order_by_pairs_digest.cache_clear()
+    yield
+    _order_by_pairs_digest.cache_clear()
+
+
+#: A raw ``table.column`` term ``_ExtraOrderColumn`` moves, beside terms that move as field paths.
+_RAW_EXTRA_TERM = '"products_item".name'
+
+
+@pytest.mark.usefixtures("fresh_order_by_pairs_digest")
+class TestExtraOrderTableQuoter:
+    """A raw ``extra`` term is moved only under an audited ``_order_by_pairs`` body.
+
+    No live query can run under another Django, so the unaudited and unreadable
+    bodies are stood in here; the running Django's own body (the main
+    environment's and the floor's) is the audited-table row.
+    """
+
+    def test_running_body_is_audited_under_the_method_it_calls(self) -> None:
+        """The running body's digest is in the table, mapped to the quote its dotted arm calls."""
+        digest = _order_by_pairs_digest()
+        assert digest is not None
+        quoter = _AUDITED_ORDER_BY_PAIRS_QUOTERS[digest]
+        source = inspect.getsource(SQLCompiler._order_by_pairs)
+        called = {
+            method
+            for method in _AUDITED_ORDER_BY_PAIRS_QUOTERS.values()
+            if f"self.{method}(table)" in source
+        }
+        assert called == {quoter}
+
+    def test_unaudited_body_refuses_only_a_raw_term(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unseen body fails closed for a raw term; field and own-column terms still move."""
+        monkeypatch.setattr(plans, "_order_by_pairs_digest", lambda: "0" * 64)
+        moved = normalize_order_direction(
+            Item.objects.all().extra(order_by=["products_item.name", "-id"]),
+            None,
+            Item,
+        )
+        assert moved.query.order_by == ("name", "-id")
+        with pytest.raises(ConfigurationError, match=r"_order_by_pairs body is not one"):
+            _ = normalize_order_direction(
+                Item.objects.all().extra(order_by=[_RAW_EXTRA_TERM]),
+                None,
+                Item,
+            )
+
+    def test_unreadable_body_refuses_a_raw_term(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A body whose source cannot be read is no audited body."""
+
+        def unreadable(_obj: object) -> str:
+            raise OSError("could not get source code")
+
+        monkeypatch.setattr(inspect, "getsource", unreadable)
+        assert _order_by_pairs_digest() is None
+        with pytest.raises(ConfigurationError, match=r"_order_by_pairs body is not one"):
+            _ = normalize_order_direction(
+                Item.objects.all().extra(order_by=[_RAW_EXTRA_TERM]),
+                None,
+                Item,
+            )
 
 
 def _issue_cursor_state() -> CursorState:

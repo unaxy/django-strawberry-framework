@@ -37,7 +37,16 @@ newest-first mixed-direction shape) and ``PeriodicalType.issuesConnection``
   ``strictness="raise"`` included, while on an offset relation a random hook
   order is an unplanned per-parent access ``strictness="raise"`` reports, and a
   malformed ``after:`` on a relation the planner refuses stays the cursor error
-  under ``strictness="raise"``.
+  under ``strictness="raise"``;
+- a target ``get_queryset`` ``extra(order_by=...)`` ordering, which Django
+  compiles in place of every other ordering, is the connection's order too: a
+  field, a descending field, the child's own ``table.column``, a foreign key's
+  raw column, a joined table's column and a quoted table name, each as written
+  and ``.reverse()``'d, page every row once forward and backward at the root
+  (offset and keyset), the planned window serves the per-parent page, a raw
+  ``table.column`` term reaches every statement as Django compiles it, a random
+  ``extra`` order keeps the pk tiebreaker, and a foreign-key or raw term is the
+  keyset refusal at the root and nested (sync and async).
 
 Resolver-contract refusals (a list source, an already-sliced QuerySet) and the
 async slicer colour (``acount``, async iteration, deferred cursor columns) ride
@@ -1294,6 +1303,12 @@ _UNANCHORABLE_ORDER = (
 )
 
 
+#: A hook step ordering the child queryset some other way than ``order_by``.
+_ChildOrder = Callable[
+    [QuerySet[models.Issue | models.Book]],
+    QuerySet[models.Issue | models.Book],
+]
+
 #: The strictness error for each shape's nested connection left to the per-parent pipeline.
 _RANDOM_ORDER_N_PLUS_ONE = {
     shape: f"Unplanned N+1: {relation} (not window-planned; resolving per-parent)"
@@ -1311,15 +1326,16 @@ def _hook_order_schema(
     reverse: bool = False,
     keyset: bool = True,
     orderable: bool = False,
+    order_hook: _ChildOrder | None = None,
 ) -> strawberry.Schema:
     """Holder schema: ``parents`` (a planned list root) plus a root ``children`` connection.
 
     The child type declares ``cursor_field = ("id",)`` (an offset connection
     when not ``keyset``) and a ``get_queryset`` ordering by ``hook_order``
-    (left unordered when ``None``), then ``.reverse()``'d when ``reverse``
-    (``.distinct()`` too when ``distinct``, which the planner refuses to
-    window). ``orderable`` adds an ``orderBy:`` argument over the child's
-    columns.
+    (left unordered when ``None``) or through ``order_hook`` when one is given,
+    then ``.reverse()``'d when ``reverse`` (``.distinct()`` too when
+    ``distinct``, which the planner refuses to window). ``orderable`` adds an
+    ``orderBy:`` argument over the child's columns.
     """
     child_model, parent_model, relation, label = _HOOK_SHAPES[shape]
 
@@ -1328,7 +1344,12 @@ def _hook_order_schema(
         queryset: QuerySet[models.Issue | models.Book],
         _info: strawberry.Info[object, object],
     ) -> QuerySet[models.Issue | models.Book]:
-        ordered = queryset if hook_order is None else queryset.order_by(*hook_order)
+        if order_hook is not None:
+            ordered = order_hook(queryset)
+        elif hook_order is None:
+            ordered = queryset
+        else:
+            ordered = queryset.order_by(*hook_order)
         if reverse:
             ordered = ordered.reverse()
         return ordered.distinct() if distinct else ordered
@@ -2112,6 +2133,406 @@ def test_order_by_beside_a_reversed_hook_pages_every_row_once() -> None:
         ["B1", "A1"],
     ]
     assert _root_flags(first, second) == [[False, True], [True, False]]
+
+
+# A target ``get_queryset`` that orders through ``extra(order_by=...)`` hands the
+# connection an ordering Django compiles in place of every other one and that any
+# ``order_by(...)`` empties. The connection keeps it: the root slicer, the planned
+# nested window and the per-parent pipeline page, seek and mint under it (its
+# ``.reverse()`` included), extended by the pk tiebreaker rather than replaced.
+# Rows below reuse the hook-order seed: ``A1`` ``y``, ``A2`` ``x``, ``A3`` ``x``,
+# ``B1`` ``a``, created in that order (the ``m2m`` books each on their own shelf,
+# shelf codes ``A-1`` .. ``B-1`` in that order too).
+
+#: Per relation shape and spelling, the hook's ``extra`` ordering: a field, a descending
+#: field, the child's own ``table.column``, its foreign key's raw column, a column of the
+#: table the hook joins through a filter, and a quoted table name.
+_EXTRA_HOOK_ORDERS: dict[str, dict[str, _ChildOrder]] = {
+    "fk": {
+        "field": lambda issues: issues.extra(order_by=["title"]),
+        "descending-field": lambda issues: issues.extra(order_by=["-number"]),
+        "table-column": lambda issues: issues.extra(order_by=["library_issue.title"]),
+        "foreign-key": lambda issues: issues.extra(
+            order_by=["library_issue.periodical_id", "-library_issue.number"],
+        ),
+        "joined-table": lambda issues: issues.filter(periodical__name__gte="").extra(
+            order_by=["-library_periodical.name", "-number"],
+        ),
+        "quoted-table": lambda issues: issues.extra(order_by=['"library_issue".title']),
+    },
+    "m2m": {
+        "field": lambda books: books.extra(order_by=["title"]),
+        "descending-field": lambda books: books.extra(order_by=["-id"]),
+        "table-column": lambda books: books.extra(order_by=["library_book.title"]),
+        "foreign-key": lambda books: books.extra(order_by=["-library_book.shelf_id"]),
+        "joined-table": lambda books: books.filter(shelf__code__gte="").extra(
+            order_by=["-library_shelf.code"],
+        ),
+        "quoted-table": lambda books: books.extra(order_by=['"library_book".title']),
+    },
+}
+
+#: The spellings a value cursor can anchor: each names a non-relation column of the child.
+_ANCHORED_EXTRA_SPELLINGS = ("field", "descending-field", "table-column")
+
+#: The spellings no value cursor can anchor: a foreign key's raw column (as
+#: ``order_by("periodical_id")`` is not), and the raw ``table.column`` SQL below.
+_UNANCHORED_EXTRA_SPELLINGS = ("foreign-key", "joined-table", "quoted-table")
+
+#: The spellings Django passes through as raw ``table.column`` SQL.
+_RAW_EXTRA_SPELLINGS = ("joined-table", "quoted-table")
+
+#: The full root order per ``fk`` spelling, forward and ``.reverse()``'d (the reverse of
+#: the forward order made total by the pk), one label per row.
+_EXTRA_ROOT_ORDERS: dict[str, tuple[str, str]] = {
+    "field": ("B1 A2 A3 A1", "A1 A3 A2 B1"),
+    "descending-field": ("A3 A2 A1 B1", "B1 A1 A2 A3"),
+    "table-column": ("B1 A2 A3 A1", "A1 A3 A2 B1"),
+    "foreign-key": ("A3 A2 A1 B1", "B1 A1 A2 A3"),
+    "joined-table": ("B1 A3 A2 A1", "A1 A2 A3 B1"),
+    "quoted-table": ("B1 A2 A3 A1", "A1 A3 A2 B1"),
+}
+
+#: Parent ``A``'s ``first: 2`` page per spelling, forward and reversed, on either shape.
+_EXTRA_NESTED_PAGES: dict[str, tuple[str, str]] = {
+    "field": ("2 3", "1 3"),
+    "descending-field": ("3 2", "1 2"),
+    "table-column": ("2 3", "1 3"),
+    "foreign-key": ("3 2", "1 2"),
+    "joined-table": ("3 2", "1 2"),
+    "quoted-table": ("2 3", "1 3"),
+}
+
+#: Every root and nested row: each spelling forward and reversed on an offset
+#: connection, and each anchorable one on a keyset connection.
+_EXTRA_PAGING_CASES = [
+    pytest.param(
+        spelling,
+        reverse,
+        keyset,
+        id=f"{spelling}-{'reversed' if reverse else 'forward'}-{'keyset' if keyset else 'offset'}",
+    )
+    for spelling in _EXTRA_ROOT_ORDERS
+    for reverse in (False, True)
+    for keyset in (False, True)
+    if not keyset or spelling in _ANCHORED_EXTRA_SPELLINGS
+]
+
+
+def _extra_hook_schema(
+    shape: str,
+    spelling: str,
+    *,
+    reverse: bool = False,
+    keyset: bool = False,
+    optimizer: bool = True,
+    strictness: str = "off",
+) -> strawberry.Schema:
+    return _hook_order_schema(
+        shape,
+        None,
+        order_hook=_EXTRA_HOOK_ORDERS[shape][spelling],
+        reverse=reverse,
+        keyset=keyset,
+        optimizer=optimizer,
+        strictness=strictness,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("spelling", "reverse", "keyset"), _EXTRA_PAGING_CASES)
+def test_extra_hook_root_pages_forward_every_row_once(
+    spelling: str,
+    *,
+    reverse: bool,
+    keyset: bool,
+) -> None:
+    """``first`` then ``after: endCursor`` serves every row once in the ``extra`` order.
+
+    Each page is one statement; page 2 resumes past page 1's last row under
+    the hook's order, so no row repeats and none is lost.
+    """
+    _seed_hook_order_rows("fk")
+    schema = _extra_hook_schema("fk", spelling, reverse=reverse, keyset=keyset)
+    with CaptureQueriesContext(connection) as first_captured:
+        first = _root_children_page(schema, first=2)
+    with CaptureQueriesContext(connection) as second_captured:
+        second = _root_children_page(
+            schema,
+            first=2,
+            after=json_at(first, "pageInfo", "endCursor"),
+        )
+    expected = _EXTRA_ROOT_ORDERS[spelling][reverse].split()
+    assert [_issue_labels(first), _issue_labels(second)] == [expected[:2], expected[2:]]
+    assert _root_flags(first, second) == [[False, True], [True, False]]
+    assert [len(first_captured), len(second_captured)] == [1, 1]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("spelling", "reverse", "keyset"), _EXTRA_PAGING_CASES)
+def test_extra_hook_root_pages_backward_every_row_once(
+    spelling: str,
+    *,
+    reverse: bool,
+    keyset: bool,
+) -> None:
+    """``last`` then ``before: startCursor`` walks the same ``extra`` order from its end."""
+    _seed_hook_order_rows("fk")
+    schema = _extra_hook_schema("fk", spelling, reverse=reverse, keyset=keyset)
+    with CaptureQueriesContext(connection) as tail_captured:
+        tail = _root_children_page(schema, last=2)
+    with CaptureQueriesContext(connection) as head_captured:
+        head = _root_children_page(schema, last=2, before=json_at(tail, "pageInfo", "startCursor"))
+    expected = _EXTRA_ROOT_ORDERS[spelling][reverse].split()
+    assert [_issue_labels(head), _issue_labels(tail)] == [expected[:2], expected[2:]]
+    assert _root_flags(head, tail) == [[False, True], [True, False]]
+    assert [len(tail_captured), len(head_captured)] == [1, 1]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("reverse", "order"),
+    [
+        (False, 'ORDER BY RAND() ASC, "library_issue"."id" ASC'),
+        (True, 'ORDER BY RAND() ASC, "library_issue"."id" DESC'),
+    ],
+    ids=["forward", "reversed"],
+)
+def test_random_extra_hook_order_keeps_the_pk_tiebreaker_at_the_root(
+    *,
+    reverse: bool,
+    order: str,
+) -> None:
+    """An ``extra(order_by=["?"])`` hook order serves a random page tie-broken by the pk.
+
+    The random term stays the page order, so the offset connection draws its
+    rows at random instead of serving them by the pk alone; the pk joins it
+    (descending under ``.reverse()``, which leaves the random term as it is).
+    """
+    _seed_hook_order_rows("fk")
+    schema = _hook_order_schema(
+        "fk",
+        None,
+        order_hook=lambda issues: issues.extra(order_by=["?"]),
+        reverse=reverse,
+        keyset=False,
+    )
+    with CaptureQueriesContext(connection) as captured:
+        page = _root_children_page(schema, first=4)
+    assert sorted(_issue_labels(page)) == [
+        "A1",
+        "A2",
+        "A3",
+        "B1",
+    ]
+    assert len(captured) == 1, captured.captured_queries
+    assert order in captured[0]["sql"], captured[0]["sql"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", ["fk", "m2m"])
+@pytest.mark.parametrize(("spelling", "reverse", "keyset"), _EXTRA_PAGING_CASES)
+def test_extra_hook_nested_window_serves_the_per_parent_page(
+    shape: str,
+    spelling: str,
+    *,
+    reverse: bool,
+    keyset: bool,
+) -> None:
+    """The planned window serves the per-parent pipeline's page under the ``extra`` order.
+
+    One batched child statement for both parents where the pipeline issues one
+    per parent; both serve ``A``'s first two rows in the hook's order and
+    ``B``'s one row.
+    """
+    _seed_hook_order_rows(shape)
+    query = _nested_hook_query(shape)
+    pages: list[list[list[str]]] = []
+    child_statements: list[int] = []
+    for optimizer in (True, False):
+        schema = _extra_hook_schema(
+            shape,
+            spelling,
+            reverse=reverse,
+            keyset=keyset,
+            optimizer=optimizer,
+        )
+        with CaptureQueriesContext(connection) as captured:
+            page = _nested_hook_pages(shape, _post_holder(schema, query, variables={"first": 2}))
+        pages.append([_labels(shape, json_at(page, "A")), _labels(shape, json_at(page, "B"))])
+        child_statements.append(len(_table_statements(captured, _child_table(shape))))
+    a_page = _EXTRA_NESTED_PAGES[spelling][reverse].split()
+    assert pages == [[a_page, ["1"]], [a_page, ["1"]]]
+    assert child_statements == [1, 2]
+
+
+def _order_by_clause(queryset: QuerySet[models.Issue | models.Book]) -> str:
+    """The ``ORDER BY`` terms Django itself compiles for ``queryset``."""
+    return str(queryset.query).split(" ORDER BY ", maxsplit=1)[1]
+
+
+#: The column each shape's planned window partitions its rows by.
+_WINDOW_PARTITIONS = {
+    "fk": '"library_issue"."periodical_id"',
+    "m2m": '"library_book_genres"."genre_id"',
+}
+
+
+def _ordered_statements(captured: CaptureQueriesContext, shape: str) -> list[str]:
+    """The child-table statements that order their rows (a ``last:`` page's count does not)."""
+    return [sql for sql in _table_statements(captured, _child_table(shape)) if " ORDER BY " in sql]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", ["fk", "m2m"])
+@pytest.mark.parametrize("spelling", _RAW_EXTRA_SPELLINGS)
+def test_raw_extra_hook_term_compiles_as_django_compiles_it(shape: str, spelling: str) -> None:
+    """A raw ``table.column`` term reaches every statement as the SQL Django emits for it.
+
+    Django's own compile of the hook queryset, forward and ``.reverse()``'d, is
+    the order each statement opens with, the pk tiebreaker after it: the root
+    ``first:`` and ``last:`` pages, the root page under the reversed hook, each
+    per-parent page, and the planned window's ``ROW_NUMBER`` orders (a ``last:``
+    window numbering from the partition end under the reversed order too).
+    """
+    _seed_hook_order_rows(shape)
+    child_model, _parent_model, relation, label = _HOOK_SHAPES[shape]
+    order_hook = _EXTRA_HOOK_ORDERS[shape][spelling]
+    forward = _order_by_clause(order_hook(child_model.objects.all()))
+    backward = _order_by_clause(order_hook(child_model.objects.all()).reverse())
+    pk = f'"{_child_table(shape)}"."id"'
+    partition = _WINDOW_PARTITIONS[shape]
+    edges = f"edges {{ node {{ {label} }} }}"
+    last_query = f"{{ parents {{ name {relation}Connection(last: 2) {{ {edges} }} }} }}"
+    # Each build re-registers the child type, so each schema is used up before the next.
+    per_parent = _extra_hook_schema(shape, spelling, optimizer=False)
+    with CaptureQueriesContext(connection) as first_captured:
+        _ = _root_children_page(per_parent, first=2)
+    with CaptureQueriesContext(connection) as last_captured:
+        _ = _root_children_page(per_parent, last=2)
+    with CaptureQueriesContext(connection) as unplanned_captured:
+        _ = _nested_hook_pages(
+            shape,
+            _post_holder(per_parent, _nested_hook_query(shape), variables={"first": 2}),
+        )
+    reversed_hook = _extra_hook_schema(shape, spelling, reverse=True, optimizer=False)
+    with CaptureQueriesContext(connection) as reversed_captured:
+        _ = _root_children_page(reversed_hook, first=2)
+    planned = _extra_hook_schema(shape, spelling)
+    with CaptureQueriesContext(connection) as window_captured:
+        _ = _nested_hook_pages(
+            shape,
+            _post_holder(planned, _nested_hook_query(shape), variables={"first": 2}),
+        )
+    with CaptureQueriesContext(connection) as last_window_captured:
+        _ = _nested_hook_pages(shape, _post_holder(planned, last_query))
+    forward_page = f"ORDER BY {forward}, {pk} ASC"
+    for statement in [
+        *_ordered_statements(first_captured, shape),
+        *_ordered_statements(last_captured, shape),
+        *_ordered_statements(unplanned_captured, shape),
+    ]:
+        assert f"{forward_page} LIMIT" in statement, statement
+    [reversed_page] = _ordered_statements(reversed_captured, shape)
+    assert f"ORDER BY {backward}, {pk} DESC LIMIT" in reversed_page, reversed_page
+    # A ``Window`` spells an ascending column term without ``ASC``, so the window
+    # orders are read at the raw term itself, which opens each of them.
+    forward_term, backward_term = forward.split(", ")[0], backward.split(", ")[0]
+    [window] = _ordered_statements(window_captured, shape)
+    [last_window] = _ordered_statements(last_window_captured, shape)
+    over = f"OVER (PARTITION BY {partition} ORDER BY"
+    assert [
+        window.count(f"{over} {forward_term}"),
+        last_window.count(f"{over} {forward_term}"),
+        last_window.count(f"{over} {backward_term}"),
+    ] == [1, 1, 1], (window, last_window)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("optimizer", "strictness"),
+    [(True, "off"), (False, "off"), (True, "raise")],
+    ids=["planned", "unplanned", "strict"],
+)
+@pytest.mark.parametrize("shape", ["fk", "m2m"])
+@pytest.mark.parametrize("spelling", _UNANCHORED_EXTRA_SPELLINGS)
+def test_unanchorable_extra_hook_order_raises_the_root_keyset_error_nested(
+    shape: str,
+    spelling: str,
+    *,
+    optimizer: bool,
+    strictness: str,
+) -> None:
+    """A foreign key or raw ``table.column`` term is no cursor column: the keyset error, everywhere.
+
+    The root and the nested connection, planned or not, raise the error an
+    ``orderBy:`` / ``get_queryset`` order no cursor can anchor raises, at the field.
+    """
+    _seed_hook_order_rows(shape, with_b=False)
+    schema = _extra_hook_schema(
+        shape,
+        spelling,
+        keyset=True,
+        optimizer=optimizer,
+        strictness=strictness,
+    )
+    root = _post_holder(schema, "{ children(first: 1) { edges { cursor } } }")
+    nested = _post_holder(schema, _nested_hook_query(shape), variables={"first": 1})
+    relation = _HOOK_SHAPES[shape][2]
+    assert [
+        (json_at(error, "message"), json_at(error, "path")) for error in json_list(root, "errors")
+    ] == [(_UNANCHORABLE_ORDER, ["children"])]
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(nested, "errors")
+    ] == [(_UNANCHORABLE_ORDER, ["parents", 0, f"{relation}Connection"])]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reversed"])
+async def test_async_extra_hook_keyset_pages_under_the_extra_order(*, reverse: bool) -> None:
+    """The async twin: the root slicer and the planned window page under the ``extra`` order.
+
+    Page 1's ``endCursor`` of each connection serves the rest of its rows on page 2.
+    """
+    await sync_to_async(_seed_hook_order_rows)("fk")
+    schema = await sync_to_async(_extra_hook_schema)(
+        "fk",
+        "table-column",
+        reverse=reverse,
+        keyset=True,
+    )
+    query = (
+        "query ($rootAfter: String, $nestedAfter: String) { "
+        "children(first: 2, after: $rootAfter) { pageInfo { endCursor } edges { node { id } } } "
+        "parentsConnection { edges { node { name "
+        "issuesConnection(first: 2, after: $nestedAfter) { pageInfo { endCursor } "
+        "edges { node { number } } } } } } }"
+    )
+
+    async def pages(variables: dict[str, object]) -> tuple[JSONObject, dict[str, JSONObject]]:
+        payload = await _post_async_holder(schema, query, variables=variables)
+        assert payload.get("errors") is None, payload
+        return json_object(payload, "data", "children"), {
+            json_str(edge, "node", "name"): json_object(edge, "node", "issuesConnection")
+            for edge in json_list(payload, "data", "parentsConnection", "edges")
+        }
+
+    first_root, first_nested = await pages({})
+    second_root, second_nested = await pages(
+        {
+            "rootAfter": json_at(first_root, "pageInfo", "endCursor"),
+            "nestedAfter": json_at(first_nested, "A", "pageInfo", "endCursor"),
+        },
+    )
+    expected = _EXTRA_ROOT_ORDERS["table-column"][reverse].split()
+    labels = sync_to_async(_issue_labels)
+    assert [await labels(first_root), await labels(second_root)] == [expected[:2], expected[2:]]
+    a_rows = [label.removeprefix("A") for label in expected if label.startswith("A")]
+    assert [
+        _labels("fk", json_at(first_nested, "A")),
+        _labels("fk", json_at(second_nested, "A")),
+    ] == [a_rows[:2], a_rows[2:]]
 
 
 def _reversed_reading_list_schema(

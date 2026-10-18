@@ -1512,8 +1512,9 @@ def plan_connection_relation(
     # invariant). ``QuerySet.order_by`` admits only a field-name string or an
     # expression (Django requires ``resolve_expression`` of anything else), which
     # django-stubs spells ``str | Combinable``; the window takes it as ``OrderEntry``.
-    # A target ``get_queryset`` / manager ``.reverse()`` is first materialized as
-    # the reverse of the forward total order under the forward flag
+    # A target ``get_queryset`` / manager ``extra(order_by=...)`` ordering is first
+    # rewritten as the ``order_by`` terms it compiles as, and a ``.reverse()``
+    # materialized as the reverse of the forward total order under the forward flag
     # (``plans.py::normalize_order_direction``), so the order read below is the
     # order the window's ``RowNumber`` and its ``ORDER BY`` both compile.
     window_cursor_field = keyset_context.cursor_field if keyset_context is not None else None

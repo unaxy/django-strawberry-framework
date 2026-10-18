@@ -950,9 +950,10 @@ def _keyset_order_state(
 
     The resolve-time caller of ``plans.py::effective_cursor_state`` - the one
     derivation the plan-time nested window also runs - over the order
-    ``_finalize_queryset`` left on the queryset (a hook's ``.reverse()``
-    already materialized there as explicit terms under the forward flag, so
-    the raw ``query.order_by`` read below is the compiled order): the declared
+    ``_finalize_queryset`` left on the queryset (a hook's ``extra(order_by=...)``
+    ordering and ``.reverse()`` already materialized there as explicit terms
+    under the forward flag, so the raw ``query.order_by`` read below is the
+    compiled order): the declared
     ``Meta.cursor_field`` when no ``orderBy:`` / ``get_queryset`` order won
     (also the defensive no-order shape, which is ordered by it here), else the
     per-order columns and fingerprint of THAT order. An order a value cursor
@@ -1734,12 +1735,14 @@ def _finalize_queryset(
         order cannot drift from the planned window's (the cursor-parity
         invariant, spec-033 Decision 4). This covers all three cases - fully
         unordered, a supplied ``orderBy``, and a model ``Meta.ordering``. A
-        target hook / manager ``.reverse()`` is first materialized as the
-        reverse of that forward total order under the forward flag
-        (``optimizer/plans.py::normalize_order_direction``), after the
-        sidecars, so an ``orderBy:`` beside it is inverted the way Django's
-        ``order_by()`` inverts it, and the order applied, sought and minted
-        is the one compiled.
+        target hook / manager ``extra(order_by=...)`` ordering is first
+        rewritten as the ``order_by`` terms it compiles as, and a ``.reverse()``
+        is materialized as the reverse of that forward total order under the
+        forward flag (``optimizer/plans.py::normalize_order_direction``), after
+        the sidecars, so an ``orderBy:`` beside it is inverted the way Django's
+        ``order_by()`` inverts it, the tiebreaker extends the extra ordering
+        rather than replacing it, and the order applied, sought and minted is
+        the one compiled.
      6. Optimizer plan - ``apply_connection_optimization`` applies
         ``select_related`` / ``prefetch_related`` / ``only()`` using the node
         type / model explicitly (the connection field's own cooperation
@@ -1760,8 +1763,9 @@ def _finalize_queryset(
     """
     target_model = definition.model
     cursor_field = definition.cursor_field
-    # A hook / manager ``.reverse()`` becomes the reverse of the forward total order
-    # under the forward flag before any order is read or written here.
+    # A hook / manager ``extra(order_by=...)`` ordering becomes ``order_by`` terms, and a
+    # ``.reverse()`` the reverse of the forward total order under the forward flag, before
+    # any order is read or written here.
     qs = normalize_order_direction(qs, cursor_field, target_model)
     applied = applied_order(qs.query, target_model)
     ordered = effective_connection_order(cursor_field, qs.query, target_model)

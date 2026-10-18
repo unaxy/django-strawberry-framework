@@ -1075,7 +1075,9 @@ field does not inspect hostile consumer queryset internals or create another sou
 classifier.
 
 Both branches read ONE classification of the sealed queryset, and it is the classification
-Django's own compiler makes. `SQLCompiler._order_by_pairs` selects a single collection by
+Django's own compiler makes (`django_strawberry_framework/utils/querysets.py::selected_order`,
+the one spelling of it, which the connection order ladder reads too).
+`SQLCompiler._order_by_pairs` selects a single collection by
 precedence - `query.extra_order_by`, else `query.order_by`, else the model's `Meta.ordering`
 while `query.default_ordering` still stands - and ignores the others entirely. They are
 alternatives, never a union. A term sitting in a collection the compiler did not select is
@@ -1862,10 +1864,12 @@ been here, so the close weakens no obligation, it only names which card carries 
   allowed. The seam's single deadline read stays single; a rejection is routed through the
   utility rather than met by a second clock check or a caller-local catch, which would leave
   every other caller of the shared seam uncovered.
-- `django_strawberry_framework/list_field.py::_selected_ordering` is the only place the
-  effective-ordering precedence is spelled. Both offset-guard predicates - the
-  term-determinism check and the model-default eligibility rule - read its answer; neither
-  scans
+- `django_strawberry_framework/utils/querysets.py::selected_order` is the only place the
+  effective-ordering precedence is spelled; the list field reads it through
+  `django_strawberry_framework/list_field.py::_selected_ordering` and the connection order
+  ladder through `django_strawberry_framework/utils/querysets.py::applied_order`. Both
+  offset-guard predicates - the term-determinism check and the model-default eligibility
+  rule - read its answer; neither scans
   `query.order_by`, `query.extra_order_by` or `Meta.ordering` on its own. A second scan is
   what let the two predicates disagree with each other and with
   `SQLCompiler._order_by_pairs`. The guard does not reuse
