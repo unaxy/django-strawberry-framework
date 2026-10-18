@@ -32,18 +32,23 @@ in a single pass once the walk completes.
 from __future__ import annotations
 
 import contextlib
+import functools
+import hashlib
+import inspect
+import textwrap
 from dataclasses import dataclass, field, fields, replace
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, cast
 
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db.models import Count, F, OrderBy, Prefetch, Q, Value, Window, sql
 from django.db.models.constants import LOOKUP_SEP
-from django.db.models.expressions import BaseExpression
+from django.db.models.expressions import BaseExpression, RawSQL
 from django.db.models.functions import Random, RowNumber
+from django.db.models.sql.compiler import SQLCompiler
 from django.utils.tree import Node
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import OptimizerError
+from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.keyset import (
     CursorColumn,
     CursorState,
@@ -70,9 +75,10 @@ from .predicates import visible_value_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, MutableSequence, Sequence
-    from typing import TypeAlias
+    from typing import Protocol, TypeAlias
 
     from django.db import models
+    from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.models import QuerySet
     from django.db.models.expressions import Combinable, Expression
     from django.db.models.options import Options
@@ -88,6 +94,12 @@ if TYPE_CHECKING:
     #: ``order_by`` accept: a string ref, an ``F``, or an expression (``OrderBy``,
     #: ``Lower(...)``, ...).
     OrderEntry: TypeAlias = str | F | Expression
+
+    class _AliasQuotingCompiler(Protocol):
+        """A compiler below Django 6.1, whose ``quote_name_unless_alias`` quotes a table."""
+
+        def quote_name_unless_alias(self, name: str) -> str: ...
+
 
 _T = TypeVar("_T")
 _M = TypeVar("_M", bound="models.Model")
@@ -1218,10 +1230,12 @@ def effective_connection_order(
     the key column, expands it the same way first
     (``utils/querysets.py::expand_relation_order``).
 
-    Every read here ignores ``query.standard_ordering``: both callers run
-    ``normalize_order_direction`` on the queryset first, so a hook / manager
-    ``.reverse()`` reaches this read as explicit terms under the forward flag
-    (already total, returned unchanged) rather than as a flag the terms do not
+    Every read here ignores ``query.standard_ordering`` and
+    ``query.extra_order_by``: both callers run ``normalize_order_direction`` on
+    the queryset first, so a hook / manager ``extra(order_by=...)`` ordering
+    reaches this read as the ``order_by`` terms it compiles as, and a
+    ``.reverse()`` as explicit terms under the forward flag (already total,
+    returned unchanged), rather than as a collection or a flag the terms do not
     show.
     """
     if cursor_field is not None and not query.order_by:
@@ -1229,12 +1243,189 @@ def effective_connection_order(
     return deterministic_order(applied_order(query, model), model)
 
 
+# ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` emits a dotted
+# ``extra(order_by=...)`` term as ``RawSQL("%s.%s" % (<quote>(table), col), [])`` under
+# ``OrderBy``, ``<quote>`` being one of the compiler's own methods. ``_ExtraOrderColumn``
+# reproduces that arm, so it serves only a body audited here: the sha256 of the dedented
+# ``inspect.getsource(SQLCompiler._order_by_pairs)`` -> the method that body quotes the
+# table with. Audited in every published release from the floor up:
+#
+# * ``21667f94...`` - 5.2.16, 5.2.17, 5.2.18, 6.0.2 - 6.0.7: ``quote_name_unless_alias``
+#   (a name the query knows as a join alias, an ``extra(select=)`` key or an outer
+#   query's alias stays unquoted);
+# * ``06c53c51...`` - 6.0, 6.0.1: ``quote_name_unless_alias``;
+# * ``3a73414c...`` - 6.0.8, 6.0.9: ``quote_name_unless_alias``;
+# * ``666184a1...`` - 6.1: ``quote_name``, which always quotes (6.1 deprecates the old
+#   name with ``RemovedInDjango2028Warning``);
+# * ``7de78d5b...`` - 6.1.1, 6.1.2: ``quote_name``.
+#
+# Widening it is an audit: a new body joins only once its dotted-term arm is read and
+# the method it calls is named beside its digest. The digest covers the raw source, so
+# any change to the body, a comment included, needs that re-audit, and
+# ``test_running_body_is_audited_under_the_method_it_calls`` fails in CI first.
+#: The two compiler methods an audited body quotes a dotted term's table with.
+_TableQuoter = Literal["quote_name", "quote_name_unless_alias"]
+
+_AUDITED_ORDER_BY_PAIRS_QUOTERS: dict[str, _TableQuoter] = {
+    "21667f94e31d9fb8201d159194a9813a8d111672dcb92a26c3bd5913c1d51135": "quote_name_unless_alias",
+    "06c53c51fb3aee96992d5e4dae022826a89ba65c6d6396daf927ce8d4b0ca9aa": "quote_name_unless_alias",
+    "3a73414cba3f8f4adbeb3394e73ad8388176921ca65b626874571d065d6025d8": "quote_name_unless_alias",
+    "666184a13d657932ac5054e02a697c2e820747cd45282fe4adb0fbcbcce7e51b": "quote_name",
+    "7de78d5b9b9fcb336d042b79826d1dd118ec870810bb532d1dee789b1bcb10ef": "quote_name",
+}
+
+
+@functools.cache
+def _order_by_pairs_digest() -> str | None:
+    """Return the running ``SQLCompiler._order_by_pairs`` body's digest, or ``None`` if unreadable.
+
+    Read once per process, on the first term that moves as ``_ExtraOrderColumn``.
+    """
+    try:
+        source = inspect.getsource(SQLCompiler._order_by_pairs)
+    except (OSError, TypeError):
+        return None
+    return hashlib.sha256(textwrap.dedent(source).encode()).hexdigest()
+
+
+def _extra_order_table_quoter(term: str) -> _TableQuoter:
+    """Return the compiler method the running Django quotes ``term``'s table with.
+
+    Fails closed: a body outside ``_AUDITED_ORDER_BY_PAIRS_QUOTERS``, or one whose
+    source cannot be read, raises ``ConfigurationError``, since the SQL it emits for
+    ``term`` is not known.
+    """
+    digest = _order_by_pairs_digest()
+    quoter = _AUDITED_ORDER_BY_PAIRS_QUOTERS.get(digest) if digest is not None else None
+    if quoter is None:
+        raise ConfigurationError(
+            f"A connection cannot paginate the extra(order_by=...) term {term!r}: the "
+            "running Django's SQLCompiler._order_by_pairs body is not one "
+            "django-strawberry-framework has audited, so the raw SQL it emits for a "
+            "'table.column' term is not known. Order the queryset with order_by() "
+            "(a field path or an expression) instead.",
+        )
+    return quoter
+
+
+def _alias_quoting(compiler: _AliasQuotingCompiler) -> _AliasQuotingCompiler:
+    """Return ``compiler`` read through ``_AliasQuotingCompiler``.
+
+    django-stubs types ``SQLCompiler`` as of 6.1, which deprecates
+    ``quote_name_unless_alias``; the protocol is the compiler of the releases
+    below 6.1 that quote with it.
+    """
+    return compiler
+
+
+class _ExtraOrderColumn(RawSQL):
+    """The ``table.column`` raw SQL a dotted ``extra(order_by=...)`` term compiles to.
+
+    ``SQLCompiler._order_by_pairs`` passes such a term through as
+    ``RawSQL("%s.%s" % (<quote>(table), col), [])``, quoting the table with the
+    compiling query's own compiler (``quoter``, the method the running body calls:
+    ``_extra_order_table_quoter``), and only
+    while the term sits in ``query.extra_order_by``. Moved into ``order_by``,
+    the term would be read as a field path instead, so it moves as this
+    expression, which renders the same text with the compiler that compiles it
+    and resolves as that ``RawSQL`` does.
+    """
+
+    def __init__(
+        self,
+        table: str,
+        column: str,
+        quoter: _TableQuoter,
+    ) -> None:
+        super().__init__(f"{table}.{column}", [])
+        self.table: str = table
+        self.column: str = column
+        self.quoter: _TableQuoter = quoter
+
+    @override
+    def as_sql(
+        self,
+        compiler: SQLCompiler,
+        connection: BaseDatabaseWrapper,
+    ) -> tuple[str, tuple[str, ...]]:
+        aliasing = _alias_quoting(compiler)
+        table = (
+            compiler.quote_name(self.table)
+            if self.quoter == "quote_name"
+            else aliasing.quote_name_unless_alias(self.table)
+        )
+        return f"({table}.{self.column})", ()
+
+
+def _extra_order_term(
+    term: str | Combinable,
+    query: Query,
+    model: type[models.Model],
+) -> str | Combinable:
+    """Return the ``order_by`` term that compiles as ``extra(order_by=...)`` term ``term`` does.
+
+    ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` runs an
+    ``extra`` ordering through the same per-term loop as an explicit one, so an
+    expression (only a queryset no visibility seal walked carries one), ``"?"``, a
+    selected alias (an annotation or an ``extra(select=)`` key) and a field path
+    compile identically from either collection and move verbatim.
+    The one arm only an ``extra`` term reaches is a dotted ``table.column``
+    string the loop has not already resolved as an alias. When that names a
+    concrete column of ``model`` (its own table or an MTI parent's, spelled
+    exactly as ``db_table`` and ``Field.column``) it becomes the field's
+    ``attname``, the raw column (a foreign key's never expands into the related
+    model's ``Meta.ordering`` as its ``name`` would). Any other dotted term
+    (another table, a quoted or case-variant table name, text after the dot that
+    is no column) becomes ``_ExtraOrderColumn``, the raw SQL Django emits for it,
+    once the running compiler's body is an audited one (``_extra_order_table_quoter``).
+    ``-`` is kept either way.
+    """
+    if not isinstance(term, str):
+        return term
+    name = term.removeprefix("-")
+    if (
+        "." not in name
+        or name in query.extra_select
+        or name in query.annotations
+        or name.split(LOOKUP_SEP, maxsplit=1)[0] in query.annotations
+    ):
+        return term
+    table, column = name.split(".", maxsplit=1)
+    descending = term.startswith("-")
+    for own in model._meta.concrete_fields:
+        if own.model._meta.db_table == table and own.column == column:
+            return f"-{own.attname}" if descending else own.attname
+    quoter = _extra_order_table_quoter(term)
+    return OrderBy(_ExtraOrderColumn(table, column, quoter), descending=descending)
+
+
+def _materialize_extra_order(queryset: QuerySet[_M], model: type[models.Model]) -> QuerySet[_M]:
+    """Return ``queryset`` with an ``extra(order_by=...)`` ordering rewritten as ``order_by`` terms.
+
+    The compiler selects a non-empty ``query.extra_order_by`` over every other
+    ordering, and ``QuerySet.order_by`` empties it, so the connection ladder's
+    first ``order_by(...)`` write (the pk tiebreaker, the window order, the
+    keyset seek order) would replace the order the queryset was handed instead
+    of extending it. Each term is moved as the ``order_by`` term that compiles
+    identically (``_extra_order_term``); the flags ``order_by`` keeps
+    (``standard_ordering``, ``default_ordering``) are unchanged, so a
+    ``.reverse()`` still flips the moved terms. A queryset without an ``extra``
+    ordering is returned as is.
+    """
+    query = queryset.query
+    if not query.extra_order_by:
+        return queryset
+    return queryset.order_by(
+        *(_extra_order_term(term, query, model) for term in query.extra_order_by),
+    )
+
+
 def normalize_order_direction(
     queryset: QuerySet[_M],
     cursor_field: tuple[str, ...] | None,
     model: type[models.Model],
 ) -> QuerySet[_M]:
-    """Return ``queryset`` with a ``.reverse()`` materialized as explicit forward-flag terms.
+    """Return ``queryset`` with an ``extra`` ordering and a ``.reverse()`` as explicit forward terms.
 
     ``QuerySet.reverse()`` only sets ``query.standard_ordering = False``; Django's
     compiler then flips every term it compiles (``query.order_by``, else
@@ -1257,9 +1448,17 @@ def normalize_order_direction(
     (``order_by("title").reverse()`` serves ``title DESC, id DESC``), so the
     page-1 ``ORDER BY`` is unchanged and every read and write after this is
     truthful for it. The result is already total, so
-    ``effective_connection_order`` returns it unchanged. A queryset ordered
-    forward is returned as is.
+    ``effective_connection_order`` returns it unchanged.
+
+    An ``extra(order_by=...)`` ordering is handled before the flag: Django
+    compiles it in place of every other ordering and ``QuerySet.order_by``
+    empties it, so each of those writes would replace it rather than extend it.
+    It is rewritten as the ``order_by`` terms that compile the same SQL
+    (``_materialize_extra_order``), and a ``.reverse()`` over it then reverses
+    those terms like any explicit order. A queryset ordered forward without an
+    ``extra`` ordering is returned as is.
     """
+    queryset = _materialize_extra_order(queryset, model)
     query = queryset.query
     if query.standard_ordering:
         return queryset

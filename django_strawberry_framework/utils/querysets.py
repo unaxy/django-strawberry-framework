@@ -422,17 +422,50 @@ def default_order(query: sql.Query, model: type[models.Model]) -> tuple[str | Co
     return tuple(model._meta.ordering or ())
 
 
-def applied_order(query: sql.Query, model: type[models.Model]) -> tuple[str | Combinable, ...]:
-    """Return the ORDER BY terms Django compiles for ``query``: its explicit order, else ``default_order``.
+#: Which collection ``SQLCompiler._order_by_pairs`` selects as the ordering it emits.
+ORDER_FROM_EXTRA = "extra"
+ORDER_FROM_EXPLICIT = "explicit"
+ORDER_FROM_MODEL_DEFAULT = "model_default"
+ORDER_FROM_NOTHING = "nothing"
+
+
+def selected_order(
+    query: sql.Query,
+    model: type[models.Model],
+) -> tuple[str, tuple[str | Combinable, ...]]:
+    """Return the ordering collection Django compiles for ``query``, as ``(source, terms)``.
+
+    ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` picks ONE
+    collection and ignores the rest: an ``extra(order_by=...)`` ordering wins
+    outright, an explicit ``order_by`` comes next, and the model's
+    ``Meta.ordering`` (``default_order``) is reached only when nothing explicit
+    was set. They are alternatives, never a union, so a term left in a
+    collection Django did not pick is dormant and reaches no SQL. ``source`` is
+    one of the ``ORDER_FROM_*`` names.
 
     Read under the forward flag: a ``.reverse()``'d query (``standard_ordering``
-    False) compiles each of these terms flipped; the connection order ladder
-    runs ``optimizer/plans.py::normalize_order_direction`` first, so the terms
-    it reads here are the ones Django compiles. An
-    ``extra(order_by=...)`` ordering is outside this read; only the list
-    field's offset guard classifies it (``list_field.py::_selected_ordering``).
+    False) compiles each of these terms flipped.
     """
-    return tuple(query.order_by) or default_order(query, model)
+    if query.extra_order_by:
+        return ORDER_FROM_EXTRA, tuple(query.extra_order_by)
+    if query.order_by:
+        return ORDER_FROM_EXPLICIT, tuple(query.order_by)
+    ordering = default_order(query, model)
+    if ordering:
+        return ORDER_FROM_MODEL_DEFAULT, ordering
+    return ORDER_FROM_NOTHING, ()
+
+
+def applied_order(query: sql.Query, model: type[models.Model]) -> tuple[str | Combinable, ...]:
+    """Return the ORDER BY terms Django compiles for ``query`` (``selected_order``'s terms).
+
+    The connection order ladder reads this only after
+    ``optimizer/plans.py::normalize_order_direction`` has rewritten an
+    ``extra(order_by=...)`` ordering and a ``.reverse()`` into explicit
+    ``order_by`` terms under the forward flag, so the terms it reads here are
+    the ones Django compiles and the ones a later ``order_by(...)`` keeps.
+    """
+    return selected_order(query, model)[1]
 
 
 class _UnexpandableOrderError(Exception):

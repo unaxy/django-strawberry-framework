@@ -103,19 +103,20 @@ from .utils.directives import validated_field_directives
 from .utils.execution_mode import async_execution, operation_is_async
 from .utils.input_values import UNSET
 from .utils.querysets import (
+    ORDER_FROM_MODEL_DEFAULT,
     VisibleRowExists,
     apply_orderset_async,
     apply_orderset_sync,
     apply_type_visibility_async,
     apply_type_visibility_sync,
     base_queryset,
-    default_order,
     is_async_only_iterable,
     prepared_resolver_source,
     reject_async_iterable_in_sync_context,
     reject_awaitable_sync_source,
     reject_residual_async_source,
     resolve_order_name,
+    selected_order,
     wrap_async_queryset_adapter,
 )
 from .utils.typing import graphql_fields, is_async_callable
@@ -633,12 +634,6 @@ def _synthesized_list_signature(
 
     return inspect.Signature(params, return_annotation=inspect.Signature.empty), annotations
 
-
-#: Which collection Django's compiler selects as the ordering it will emit.
-_ORDER_FROM_EXTRA = "extra"
-_ORDER_FROM_EXPLICIT = "explicit"
-_ORDER_FROM_MODEL_DEFAULT = "model_default"
-_ORDER_FROM_NOTHING = "nothing"
 
 #: The expression leaves this package can read: a column, the ``*`` of a row count,
 #: a literal value, and the framework's own visibility test. Matched by EXACT type,
@@ -1173,28 +1168,15 @@ def _is_deterministic_order_condition(
 def _selected_ordering(queryset: models.QuerySet[models.Model]) -> tuple[str, tuple[object, ...]]:
     """Return the ordering Django will compile for ``queryset``, as ``(source, terms)``.
 
-    ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` picks ONE
-    collection and ignores the rest: an ``extra`` ordering wins outright, an
-    explicit ``order_by`` comes next, and the model's ``Meta.ordering`` is
-    reached only when nothing explicit was set and ``default_ordering`` still
-    stands. They are alternatives, never a union, so a term left in a collection
-    Django did not pick is dormant and reaches no SQL.
-
-    Both questions the offset guard asks - is the order this request will run
-    under deterministic, and is the model's own ordering that order -
-    are this one selection read two ways, so they come from one classification
-    of the already-sealed queryset rather than from separate collection scans
-    that can disagree with each other and with the compiler.
+    The compiler's own one-collection selection
+    (``utils/querysets.py::selected_order``, the read the connection order
+    ladder shares). Both questions the offset guard asks - is the order this
+    request will run under deterministic, and is the model's own ordering that
+    order - are this one selection read two ways, so they come from one
+    classification of the already-sealed queryset rather than from separate
+    collection scans that can disagree with each other and with the compiler.
     """
-    query = queryset.query
-    if query.extra_order_by:
-        return _ORDER_FROM_EXTRA, tuple(query.extra_order_by)
-    if query.order_by:
-        return _ORDER_FROM_EXPLICIT, tuple(query.order_by)
-    ordering = default_order(query, queryset.model)
-    if ordering:
-        return _ORDER_FROM_MODEL_DEFAULT, ordering
-    return _ORDER_FROM_NOTHING, ()
+    return selected_order(queryset.query, queryset.model)
 
 
 def _has_deterministic_ordering(queryset: models.QuerySet[models.Model]) -> bool:
@@ -1224,7 +1206,7 @@ def _is_model_default_ordering_active(queryset: models.QuerySet[models.Model]) -
     """
     query = queryset.query
     source, terms = _selected_ordering(queryset)
-    if source != _ORDER_FROM_MODEL_DEFAULT:
+    if source != ORDER_FROM_MODEL_DEFAULT:
         return False
     if query.default_ordering is not True or query.group_by:
         return False

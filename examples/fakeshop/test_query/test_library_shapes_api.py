@@ -44,6 +44,12 @@ One shape per planner rule, each read off the wire and off the SQL the request e
   page from one ``ROW_NUMBER`` statement exactly as the library schema pages
   them with no optimizer. A related ``"?"``, an ordering loop and a
   condition item raise Django's own error with and without the optimizer.
+- A ``Book`` hook order through ``extra(order_by=...)``, which Django compiles
+  in place of every other ordering - a descending field, the book's own
+  ``table.column``, its foreign key's raw column, a joined shelf column and a
+  quoted table name, each as written and reversed: the window pages it from
+  one ``ROW_NUMBER`` statement exactly as the library schema pages it with no
+  optimizer and as Django orders the hook queryset itself.
 - Mixed-case Django names, whose published spelling reverses to a name the model
   lacks: ``Distributor.displayName`` projects its own column, the forward key
   ``Consignment.distributorRef`` plans one ``JOIN``, and its reverse
@@ -1151,6 +1157,81 @@ def test_relation_name_book_order_pages_genre_books_connection_like_the_pipeline
     assert len(optimized_sql) == 2, optimized_sql
     assert ["ROW_NUMBER" in sql.upper() for sql in optimized_sql] == [False, True], optimized_sql
     assert optimized == unoptimized
+
+
+#: A book order through the hook's ``extra(order_by=...)``, each total by itself so
+#: Django's own compile of the hook queryset is the order every page is cut from: a
+#: descending field, the book's own ``table.column``, its foreign key's raw column, a
+#: column of the shelf table the hook joins through a filter, and a quoted table name.
+_EXTRA_BOOK_HOOK_ORDERS: dict[str, _BookShuffle] = {
+    "field": lambda books: books.extra(order_by=["-title"]),
+    "table-column": lambda books: books.extra(order_by=["-library_book.title"]),
+    "foreign-key": lambda books: books.extra(order_by=["library_book.shelf_id", "-title"]),
+    "joined-table": lambda books: books.filter(shelf__code__gte="").extra(
+        order_by=["library_shelf.code", "-title"],
+    ),
+    "quoted-table": lambda books: books.extra(order_by=['-"library_book".title']),
+}
+
+
+def _reversed_book_order(order: _BookShuffle) -> _BookShuffle:
+    """``order`` with the hook's ``.reverse()`` after it."""
+    return lambda books: order(books).reverse()
+
+
+#: Each ``extra`` book order as written and ``.reverse()``'d.
+_EXTRA_BOOK_ORDERS: dict[str, _BookShuffle] = {
+    **_EXTRA_BOOK_HOOK_ORDERS,
+    **{
+        f"{name}-reversed": _reversed_book_order(order)
+        for name, order in _EXTRA_BOOK_HOOK_ORDERS.items()
+    },
+}
+
+#: The rows of a genre's whole order each window shape serves.
+_SHUFFLED_BOOKS_SLICES = {
+    "first": slice(0, 2),
+    "last": slice(-2, None),
+    "first-after": slice(1, 3),
+    "last-before": slice(1, 3),
+}
+
+
+@pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
+@pytest.mark.parametrize("source", list(_EXTRA_BOOK_ORDERS))
+@pytest.mark.django_db
+def test_extra_book_order_pages_genre_books_connection_like_the_pipeline(
+    source: str,
+    window: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hook's ``extra`` book order pages through the window as the pipeline and Django order it.
+
+    Django compiles an ``extra(order_by=...)`` ordering in place of every other
+    one. Under every spelling, reversed or not, and every page window, the
+    optimized request plans ``booksConnection`` as one ``ROW_NUMBER`` statement
+    beside the genre page, serves each genre the page the library schema serves
+    with no optimizer, and that page is cut from the order Django compiles for
+    the hook queryset itself.
+    """
+    _seed_shelved_genres()
+    order = _EXTRA_BOOK_ORDERS[source]
+    _order_books_by(monkeypatch, order)
+
+    optimized, optimized_sql = _genre_books_pages(window)
+    unoptimized, _ = _genre_books_pages(window, schema=_unoptimized_library_schema())
+
+    assert len(optimized_sql) == 2, optimized_sql
+    assert ["ROW_NUMBER" in sql.upper() for sql in optimized_sql] == [False, True], optimized_sql
+    assert optimized == unoptimized
+    rows = _SHUFFLED_BOOKS_SLICES[window]
+    assert {
+        name: [json_str(edge, "node", "title") for edge in json_list(page, "edges")]
+        for name, page in optimized.items()
+    } == {
+        genre.name: [book.title for book in order(genre.books.all())][rows]
+        for genre in models.Genre.objects.all()
+    }
 
 
 #: A ``Shelf.Meta.ordering`` (and the ``Branch.Meta.ordering`` it reaches) that Django
