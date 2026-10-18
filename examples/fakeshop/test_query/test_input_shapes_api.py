@@ -15,9 +15,23 @@ model's primary ``DjangoType``:
   ``errors: [FieldError!]!`` list either way.
 """
 
-from graphql_client import assert_graphql_success
+from graphql_client import (
+    JSONObject,
+    assert_graphql_success,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+)
 
 _TYPE_REF = "kind name ofType { kind name ofType { kind name ofType { kind name } } }"
+
+
+def _named_type(type_ref: JSONObject) -> str:
+    """Return a type reference's own name, else (a wrapper's ``null`` name) its ``ofType`` name."""
+    name = json_at(type_ref, "name") or json_at(type_ref, "ofType", "name")
+    assert isinstance(name, str), type_ref
+    return name
 
 
 def _input_fields(type_name: str) -> dict[str, dict[str, object]]:
@@ -25,7 +39,10 @@ def _input_fields(type_name: str) -> dict[str, dict[str, object]]:
     data = assert_graphql_success(
         f'{{ __type(name: "{type_name}") {{ inputFields {{ name type {{ {_TYPE_REF} }} }} }} }}',
     )
-    return {field["name"]: field["type"] for field in data["__type"]["inputFields"]}
+    return {
+        json_str(field, "name"): json_object(field, "type")
+        for field in json_list(data, "__type", "inputFields")
+    }
 
 
 def _mutation_data_input_name(field_name: str) -> str:
@@ -34,9 +51,11 @@ def _mutation_data_input_name(field_name: str) -> str:
         '{ __type(name: "Mutation") { fields { name args { name type { kind name '
         "ofType { kind name } } } } } }",
     )
-    field = next(f for f in data["__type"]["fields"] if f["name"] == field_name)
-    arg_type = next(arg for arg in field["args"] if arg["name"] == "data")["type"]
-    return arg_type["name"] or arg_type["ofType"]["name"]
+    field = next(
+        f for f in json_list(data, "__type", "fields") if json_at(f, "name") == field_name
+    )
+    arg = next(arg for arg in json_list(field, "args") if json_at(arg, "name") == "data")
+    return _named_type(json_object(arg, "type"))
 
 
 def _non_null(inner: dict[str, object]) -> dict[str, object]:
@@ -101,7 +120,10 @@ def _payload_fields(type_name: str) -> dict[str, dict[str, object]]:
     data = assert_graphql_success(
         f'{{ __type(name: "{type_name}") {{ fields {{ name type {{ {_TYPE_REF} }} }} }} }}',
     )
-    return {field["name"]: field["type"] for field in data["__type"]["fields"]}
+    return {
+        json_str(field, "name"): json_object(field, "type")
+        for field in json_list(data, "__type", "fields")
+    }
 
 
 def _mutation_payload_name(field_name: str) -> str:
@@ -109,8 +131,10 @@ def _mutation_payload_name(field_name: str) -> str:
     data = assert_graphql_success(
         '{ __type(name: "Mutation") { fields { name type { kind name ofType { kind name } } } } }',
     )
-    field_type = next(f for f in data["__type"]["fields"] if f["name"] == field_name)["type"]
-    return field_type["name"] or field_type["ofType"]["name"]
+    field = next(
+        f for f in json_list(data, "__type", "fields") if json_at(f, "name") == field_name
+    )
+    return _named_type(json_object(field, "type"))
 
 
 _FIELD_ERRORS = _non_null(

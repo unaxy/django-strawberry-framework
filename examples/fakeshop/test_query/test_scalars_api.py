@@ -15,11 +15,18 @@ from uuid import UUID
 
 import pytest
 from apps.scalars import models
-from django.conf import settings
 from django.db import connection
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    response_json,
+)
 from graphql_client import post_graphql as _post_graphql
 
 # The production error policy masks any error carrying an originating
@@ -27,10 +34,7 @@ from graphql_client import post_graphql as _post_graphql
 # way. A row asserting on the rejection REASON opens the policy's pass-through
 # gate with ``DEBUG=True``, dropping the toolbar middleware in the same
 # override because fakeshop wires debug-toolbar behind ``DEBUG``.
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 # Sentinel values chosen so each wire format is unambiguous in the response.
 # BigInt boundary values intentionally exceed ``2**53 - 1`` so the
@@ -139,11 +143,11 @@ def _query_one_specimen() -> JSONObject:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = body["data"]["allScalarSpecimens"]
+    rows = json_list(body, "data", "allScalarSpecimens")
     assert len(rows) == 1, rows
-    return rows[0]
+    return json_object(rows[0])
 
 
 @pytest.mark.django_db
@@ -213,9 +217,9 @@ def test_filter_specimens_by_bigint_in_accepts_64bit_values() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    assert body["data"]["allScalarSpecimens"] == [{"label": "big"}]
+    assert json_at(body, "data", "allScalarSpecimens") == [{"label": "big"}]
 
 
 @pytest.mark.django_db
@@ -246,9 +250,9 @@ def test_filter_specimens_by_bigint_in_drops_past_64bit_members_no_overflow() ->
         """,
     )
     assert mixed.status_code == 200
-    mixed_body = mixed.json()
+    mixed_body = response_json(mixed)
     assert "errors" not in mixed_body, mixed_body
-    assert mixed_body["data"]["allScalarSpecimens"] == [{"label": "keep"}]
+    assert json_at(mixed_body, "data", "allScalarSpecimens") == [{"label": "keep"}]
 
     # A NON-empty ``in`` whose only member is out of range identifies no row, so the
     # correct result is ``[]`` (match nothing) - NOT every visible row. ``IntegerInFilter``
@@ -265,9 +269,9 @@ def test_filter_specimens_by_bigint_in_drops_past_64bit_members_no_overflow() ->
         """,
     )
     assert only_bad.status_code == 200
-    only_bad_body = only_bad.json()
+    only_bad_body = response_json(only_bad)
     assert "errors" not in only_bad_body, only_bad_body
-    assert only_bad_body["data"]["allScalarSpecimens"] == []
+    assert json_at(only_bad_body, "data", "allScalarSpecimens") == []
 
 
 @pytest.mark.django_db
@@ -302,9 +306,9 @@ def test_filter_specimens_explicit_empty_in_is_the_empty_set_on_every_column(
 
     def rows(doc: str) -> set[str]:
         response = _post_graphql(f"query {{ allScalarSpecimens(filter: {doc}) {{ label }} }}")
-        body = response.json()
+        body = response_json(response)
         assert "errors" not in body, body
-        return {row["label"] for row in body["data"]["allScalarSpecimens"]}
+        return {json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens")}
 
     assert rows(f"{{ {leaf}: {{ in: {valid} }} }}") == {"keep"}
     assert rows(f"{{ {leaf}: {{ in: [] }} }}") == set()
@@ -347,9 +351,9 @@ def test_filter_specimens_by_unsigned_bigint_in_drops_below_zero_members() -> No
         """,
     )
     assert mixed.status_code == 200
-    mixed_body = mixed.json()
+    mixed_body = response_json(mixed)
     assert "errors" not in mixed_body, mixed_body
-    assert mixed_body["data"]["allScalarSpecimens"] == [{"label": "keep"}]
+    assert json_at(mixed_body, "data", "allScalarSpecimens") == [{"label": "keep"}]
 
     # A NON-empty ``in`` whose only member is below the minimum identifies no row, so
     # the result is ``[]`` (match nothing) - the lower-bound twin of the all-out-of-
@@ -364,9 +368,9 @@ def test_filter_specimens_by_unsigned_bigint_in_drops_below_zero_members() -> No
         """,
     )
     assert only_bad.status_code == 200
-    only_bad_body = only_bad.json()
+    only_bad_body = response_json(only_bad)
     assert "errors" not in only_bad_body, only_bad_body
-    assert only_bad_body["data"]["allScalarSpecimens"] == []
+    assert json_at(only_bad_body, "data", "allScalarSpecimens") == []
 
 
 @pytest.mark.django_db
@@ -399,9 +403,11 @@ def test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow() -> No
             f"query {{ allScalarSpecimens(filter: {{ {filter_body} }}) {{ label }} }}",
         )
         assert response.status_code == 200
-        body = response.json()
+        body = response_json(response)
         assert "errors" not in body, body
-        return sorted(row["label"] for row in body["data"]["allScalarSpecimens"])
+        return sorted(
+            json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens")
+        )
 
     # Upper bound past 2**63: BETWEEN 1 AND 2**63 == col >= 1 (the impossible
     # upper bound imposes no constraint). Both seeded rows are >= 1.
@@ -471,10 +477,10 @@ def test_filter_specimens_by_bigint_exact_rejects_non_integer_literal(
     )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert body.get("errors"), body
     assert body["data"] is None, body
-    assert reason in body["errors"][0]["message"], body
+    assert reason in json_str(body, "errors", 0, "message"), body
 
 
 @pytest.mark.django_db
@@ -501,9 +507,9 @@ def test_filter_specimens_by_bigint_exact_accepts_decimal_string_literal(field: 
     )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    assert body["data"]["allScalarSpecimens"] == [{"label": "keep"}]
+    assert json_at(body, "data", "allScalarSpecimens") == [{"label": "keep"}]
 
 
 @pytest.mark.django_db
@@ -532,10 +538,10 @@ def test_filter_specimens_by_bigint_exact_rejects_malformed_decimal_string(
     )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert body.get("errors"), body
     assert body["data"] is None, body
-    assert _BIGINT_STRING_REJECTION_REASON in body["errors"][0]["message"], body
+    assert _BIGINT_STRING_REJECTION_REASON in json_str(body, "errors", 0, "message"), body
 
 
 @pytest.mark.django_db
@@ -570,9 +576,12 @@ def test_scalar_specimen_by_signed_big_accepts_canonical_literals(
     )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    assert body["data"]["scalarSpecimenBySignedBig"] == {"label": "keep", "signedBig": wire}
+    assert json_at(body, "data", "scalarSpecimenBySignedBig") == {
+        "label": "keep",
+        "signedBig": wire,
+    }
 
 
 @pytest.mark.django_db
@@ -600,18 +609,18 @@ def test_scalar_specimen_self_referential_parent_children_over_http() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = {row["label"]: row for row in body["data"]["allScalarSpecimens"]}
+    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
 
-    assert rows["root"]["parent"] is None
-    assert [child["label"] for child in rows["root"]["children"]] == ["middle"]
+    assert json_at(rows, "root", "parent") is None
+    assert [json_at(child, "label") for child in json_list(rows, "root", "children")] == ["middle"]
 
-    assert rows["middle"]["parent"] == {"label": "root"}
-    assert [child["label"] for child in rows["middle"]["children"]] == ["leaf"]
+    assert json_at(rows, "middle", "parent") == {"label": "root"}
+    assert [json_at(child, "label") for child in json_list(rows, "middle", "children")] == ["leaf"]
 
-    assert rows["leaf"]["parent"] == {"label": "middle"}
-    assert rows["leaf"]["children"] == []
+    assert json_at(rows, "leaf", "parent") == {"label": "middle"}
+    assert json_at(rows, "leaf", "children") == []
 
 
 def _introspect_field_types(type_name: str) -> dict[str, JSONObject]:
@@ -629,9 +638,12 @@ def _introspect_field_types(type_name: str) -> dict[str, JSONObject]:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    return {field["name"]: field["type"] for field in body["data"]["__type"]["fields"]}
+    return {
+        json_str(field, "name"): json_object(field, "type")
+        for field in json_list(body, "data", "__type", "fields")
+    }
 
 
 @pytest.mark.django_db
@@ -729,13 +741,13 @@ def test_nullable_scalar_specimen_all_null_wire_format_over_http() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = body["data"]["allNullableScalarSpecimens"]
+    rows = json_list(body, "data", "allNullableScalarSpecimens")
     assert len(rows) == 1
     row = rows[0]
 
-    assert row["label"] == "empty"  # the one non-null field we set
+    assert json_at(row, "label") == "empty"  # the one non-null field we set
     for field_name in (
         "flag",
         "score",
@@ -749,7 +761,7 @@ def test_nullable_scalar_specimen_all_null_wire_format_over_http() -> None:
         "unsignedBig",
         "partner",
     ):
-        assert row[field_name] is None, field_name
+        assert json_at(row, field_name) is None, field_name
 
 
 @pytest.mark.django_db
@@ -775,9 +787,9 @@ def test_nullable_scalar_specimen_partner_fk_linkage_over_http() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = body["data"]["allNullableScalarSpecimens"]
+    rows = json_list(body, "data", "allNullableScalarSpecimens")
     assert len(rows) == 1
     assert rows[0] == {
         "label": "linked",
@@ -813,10 +825,10 @@ def test_scalar_specimen_nullable_partners_reverse_relation_over_http() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = {row["label"]: row for row in body["data"]["allScalarSpecimens"]}
-    spoke_labels = sorted(p["label"] for p in rows["hub"]["nullablePartners"])
+    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
+    spoke_labels = sorted(json_str(p, "label") for p in json_list(rows, "hub", "nullablePartners"))
     assert spoke_labels == ["spoke_a", "spoke_b"]
 
 
@@ -855,9 +867,9 @@ def test_scalars_set_null_ondelete_detaches_partner_in_http_query() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    assert body["data"]["allNullableScalarSpecimens"] == [
+    assert json_at(body, "data", "allNullableScalarSpecimens") == [
         {"label": "linked", "partner": {"label": "target"}},
     ]
 
@@ -878,9 +890,9 @@ def test_scalars_set_null_ondelete_detaches_partner_in_http_query() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    assert body["data"]["allNullableScalarSpecimens"] == [
+    assert json_at(body, "data", "allNullableScalarSpecimens") == [
         {"label": "linked", "partner": None},
     ]
 
@@ -919,11 +931,13 @@ def test_nullable_self_fk_dangling_parent_resolves_to_null_over_http() -> None:
                 """,
             )
             assert response.status_code == 200
-            body = response.json()
+            body = response_json(response)
             assert "errors" not in body, body
-            rows = {row["label"]: row for row in body["data"]["allScalarSpecimens"]}
+            rows = {
+                json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")
+            }
             assert "dangling-fk-parent" not in rows
-            assert rows["dangling-fk-child"]["parent"] is None
+            assert json_at(rows, "dangling-fk-child", "parent") is None
             dangling = models.ScalarSpecimen.objects.get(pk=child.pk)
             assert dangling.parent_id == parent.pk
         finally:
@@ -954,9 +968,9 @@ def test_scalar_specimen_bigint_input_decimal_string_argument_over_http() -> Non
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    assert body["data"]["scalarSpecimenBySignedBig"] == {
+    assert json_at(body, "data", "scalarSpecimenBySignedBig") == {
         "label": "target",
         "signedBig": "9223372036854775000",
     }
@@ -988,13 +1002,16 @@ def test_scalar_specimen_bigint_input_int_literal_argument_over_http() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
     # The outbound wire format is still the decimal string - even for
     # small values that JSON could represent as a bare number. That's
     # the BigInt scalar's contract: consumers must always parse the
     # response as a string. Anything else would be a wire-format leak.
-    assert body["data"]["scalarSpecimenBySignedBig"] == {"label": "target", "signedBig": "42"}
+    assert json_at(body, "data", "scalarSpecimenBySignedBig") == {
+        "label": "target",
+        "signedBig": "42",
+    }
 
 
 @pytest.mark.django_db
@@ -1025,7 +1042,7 @@ def test_scalars_optimizer_select_related_on_self_fk_in_http_query() -> None:
         )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
     # 1 query: SELECT scalars_scalarspecimen ... LEFT OUTER JOIN
     # scalars_scalarspecimen T2 ON parent_id. Without the optimizer the
@@ -1065,7 +1082,7 @@ def test_scalars_optimizer_prefetch_related_on_reverse_self_fk_in_http_query() -
         )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
     # 2 queries: SELECT scalars_scalarspecimen ... + a single prefetched
     # SELECT for the ``children`` reverse relation. Without the optimizer
@@ -1106,14 +1123,14 @@ def test_scalars_optimizer_fk_id_elision_for_self_fk_in_http_query() -> None:
         )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = {row["label"]: row for row in body["data"]["allScalarSpecimens"]}
-    assert rows["root"]["parent"] is None
+    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
+    assert json_at(rows, "root", "parent") is None
     # Child's ``parent { id }`` should equal the root row's id without a JOIN.
     # ``id`` resolves to ``Int`` (via ``BigAutoField -> int``), so JSON
     # serializes it as a number.
-    assert rows["child"]["parent"] == {"id": root.pk}
+    assert json_at(rows, "child", "parent") == {"id": root.pk}
     # 1 query: SELECT scalars_scalarspecimen ... (no JOIN). Without the
     # elision the ``parent { id }`` selection would either JOIN or issue
     # a follow-up SELECT per non-null child row.
@@ -1166,11 +1183,11 @@ def test_scalars_optimizer_fk_id_elision_query_count_is_flat_across_row_counts()
         small_response = _post_graphql(document)
 
     assert small_response.status_code == 200
-    small_body = small_response.json()
+    small_body = response_json(small_response)
     assert "errors" not in small_body, small_body
-    small_rows = small_body["data"]["allScalarSpecimens"]
+    small_rows = json_list(small_body, "data", "allScalarSpecimens")
     assert len(small_rows) == 3
-    assert [row["parent"] for row in small_rows if row["label"] != "root"] == [
+    assert [json_at(row, "parent") for row in small_rows if json_at(row, "label") != "root"] == [
         {"id": root.pk},
         {"id": root.pk},
     ]
@@ -1183,11 +1200,11 @@ def test_scalars_optimizer_fk_id_elision_query_count_is_flat_across_row_counts()
         large_response = _post_graphql(document)
 
     assert large_response.status_code == 200
-    large_body = large_response.json()
+    large_body = response_json(large_response)
     assert "errors" not in large_body, large_body
-    large_rows = large_body["data"]["allScalarSpecimens"]
+    large_rows = json_list(large_body, "data", "allScalarSpecimens")
     assert len(large_rows) == 7
-    assert [row["parent"] for row in large_rows if row["label"] != "root"] == [
+    assert [json_at(row, "parent") for row in large_rows if json_at(row, "label") != "root"] == [
         {"id": root.pk},
     ] * 6
 
@@ -1235,14 +1252,14 @@ def test_scalars_optimizer_no_fk_id_elision_when_extra_scalar_selected_in_http_q
         )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = {row["label"]: row for row in body["data"]["allScalarSpecimens"]}
-    assert rows["root"]["parent"] is None
+    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
+    assert json_at(rows, "root", "parent") is None
     # Both ``id`` AND ``label`` must populate from the JOINed row - proving
     # the optimizer did NOT elide and that the ``parent`` stub is the real
     # joined row, not the fk-id-only stub.
-    assert rows["child"]["parent"] == {"id": root.pk, "label": "root"}
+    assert json_at(rows, "child", "parent") == {"id": root.pk, "label": "root"}
     # Still 1 query - but via JOIN, not via the elision shortcut.
     assert len(captured) == 1, [q["sql"] for q in captured]
     sql = captured[0]["sql"]
@@ -1279,15 +1296,15 @@ def test_scalars_optimizer_fk_id_elision_for_each_alias_in_http_query() -> None:
         )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = {row["label"]: row for row in body["data"]["allScalarSpecimens"]}
+    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
     # Root has no parent; both aliases must collapse to ``None``.
-    assert rows["root"]["first"] is None
-    assert rows["root"]["second"] is None
+    assert json_at(rows, "root", "first") is None
+    assert json_at(rows, "root", "second") is None
     # Child's two aliases must report the same id (==> the source FK column).
-    assert rows["child"]["first"] == {"id": root.pk}
-    assert rows["child"]["second"] == {"id": root.pk}
+    assert json_at(rows, "child", "first") == {"id": root.pk}
+    assert json_at(rows, "child", "second") == {"id": root.pk}
     # 1 query, no JOIN.
     assert len(captured) == 1, [q["sql"] for q in captured]
     sql = captured[0]["sql"]
@@ -1328,13 +1345,17 @@ def test_scalars_optimizer_fk_id_elision_does_not_leak_to_sibling_root_in_http_q
         )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    specimens = {row["label"]: row for row in body["data"]["allScalarSpecimens"]}
-    nullable = {row["label"]: row for row in body["data"]["allNullableScalarSpecimens"]}
-    assert specimens["root"]["parent"] is None
-    assert specimens["child"]["parent"] == {"id": root.pk}
-    assert nullable["linked"]["partner"] == {"label": "root"}
+    specimens = {
+        json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")
+    }
+    nullable = {
+        json_at(row, "label"): row for row in json_list(body, "data", "allNullableScalarSpecimens")
+    }
+    assert json_at(specimens, "root", "parent") is None
+    assert json_at(specimens, "child", "parent") == {"id": root.pk}
+    assert json_at(nullable, "linked", "partner") == {"label": "root"}
 
     assert len(captured) == 2, [q["sql"] for q in captured]
     specimen_sql = captured[0]["sql"]
@@ -1379,7 +1400,7 @@ def test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_h
         )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
     # 2 queries: SELECT scalars_scalarspecimen + a prefetched SELECT for
     # scalars_scalarspecimentag (filtered to ``active=True`` by the custom
@@ -1424,16 +1445,16 @@ def test_scalars_custom_get_queryset_filters_inactive_tag_to_null_in_http_query(
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = {row["label"]: row for row in body["data"]["allScalarSpecimens"]}
+    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
 
-    assert rows["with-active"]["tag"] == {"label": "active-tag", "active": True}
+    assert json_at(rows, "with-active", "tag") == {"label": "active-tag", "active": True}
     # The inactive tag isn't in the Prefetch result, so the source-side
     # ``tag`` resolves to None even though the FK column is set.
-    assert rows["with-inactive"]["tag"] is None
+    assert json_at(rows, "with-inactive", "tag") is None
     # And the untagged specimen also resolves None (FK column is NULL).
-    assert rows["untagged"]["tag"] is None
+    assert json_at(rows, "untagged", "tag") is None
 
 
 @pytest.mark.django_db
@@ -1464,11 +1485,16 @@ def test_scalars_tagged_specimens_reverse_fk_in_http_query() -> None:
         """,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = {row["label"]: row for row in body["data"]["allScalarSpecimenTags"]}
-    assert sorted(s["label"] for s in rows["tag-a"]["taggedSpecimens"]) == ["a1", "a2"]
-    assert sorted(s["label"] for s in rows["tag-b"]["taggedSpecimens"]) == ["b1"]
+    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimenTags")}
+    assert sorted(json_str(s, "label") for s in json_list(rows, "tag-a", "taggedSpecimens")) == [
+        "a1",
+        "a2",
+    ]
+    assert sorted(json_str(s, "label") for s in json_list(rows, "tag-b", "taggedSpecimens")) == [
+        "b1",
+    ]
 
 
 @pytest.mark.django_db
@@ -1511,7 +1537,7 @@ def test_scalars_optimizer_coerces_manager_to_queryset_in_http_query() -> None:
         )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
     # 1 query: SELECT scalarspecimen ... LEFT OUTER JOIN scalarspecimen
     # via select_related("parent"). Without the optimizer's Manager
@@ -1559,22 +1585,22 @@ def test_override_specimen_consumer_field_overrides_resolve_over_http() -> None:
     )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response_json(response)
     assert "errors" not in body, body
-    rows = body["data"]["allOverrideSpecimens"]
+    rows = json_list(body, "data", "allOverrideSpecimens")
     assert len(rows) == 1, rows
     row = rows[0]
     # Assigned ``@strawberry.field`` resolver ran (upper-cased), not the raw column.
-    assert row["label"] == "ALPHA"
+    assert json_at(row, "label") == "ALPHA"
     # Annotation-only override: ``IntegerField`` value surfaced through the
     # consumer's nullable ``Float`` annotation (JSON number, coerced to float).
-    assert row["quantity"] == 7.0
+    assert json_at(row, "quantity") == 7.0
     # Overlap idiom: the assigned resolver returns the column value as ``Int``.
-    assert row["score"] == 42
+    assert json_at(row, "score") == 42
     # Unsupported ``Base36Field`` surfaced via the consumer ``str`` annotation.
-    assert row["token"] == "zz9"
+    assert json_at(row, "token") == "zz9"
     # ``note: auto`` - inferred ``String!`` resolved straight from the column.
-    assert row["note"] == "inferred"
+    assert json_at(row, "note") == "inferred"
 
     sdl = _introspect_field_types("OverriddenScalarSpecimenType")
     quantity_type = sdl["quantity"]

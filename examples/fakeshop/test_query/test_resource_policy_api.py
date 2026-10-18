@@ -78,7 +78,7 @@ import warnings
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from functools import _lru_cache_wrapper, cache, partial
-from typing import TYPE_CHECKING, NewType
+from typing import TYPE_CHECKING, NewType, TypeAlias
 
 import pytest
 import strawberry
@@ -98,7 +98,18 @@ from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
 from django.urls import include, path
 from django.views.decorators.csrf import csrf_exempt
-from graphql_client import JSONObject, graphql_payload
+from graphql import get_named_type
+from graphql_client import (
+    JSONObject,
+    graphql_payload,
+    is_json_object,
+    json_at,
+    json_int,
+    json_list,
+    json_object,
+    json_str,
+    response_json,
+)
 from strawberry import relay
 from strawberry.extensions import ValidationCache
 from strawberry.extensions.base_extension import SchemaExtension
@@ -128,11 +139,13 @@ from django_strawberry_framework.testing import AsyncTestClient, Response, TestC
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
+from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.db.models.fields.related_descriptors import RelatedManager
-    from typing_extensions import TypeIs
+    from django.test.client import _MonkeyPatchedASGIResponse
+
 
 pytestmark = pytest.mark.urls(__name__)
 
@@ -573,9 +586,15 @@ def _record_parse(value: object) -> object:
 #: is the observable marker for the boundary the budget sits on.
 OpaqueValue = NewType("OpaqueValue", object)
 
+
+def _serialize_opaque(value: object) -> object:
+    """Serialize an opaque value as itself."""
+    return value
+
+
 _OPAQUE_SCALAR = strawberry.scalar(
     name="OpaqueValue",
-    serialize=lambda value: value,
+    serialize=_serialize_opaque,
     parse_value=_record_parse,
 )
 
@@ -614,7 +633,8 @@ class _AuthorityQuery:
         count.
         """
         found: list[str] = []
-        for name, value in vars(info.schema).items():
+        attributes: dict[str, object] = vars(info.schema)
+        for name, value in attributes.items():
             for kind, attribute in (
                 (ResourcePolicy, "resource_policy"),
                 (ErrorPolicy, "error_policy"),
@@ -634,7 +654,8 @@ class _AuthorityQuery:
     def unmask(self, info: strawberry.Info) -> list[str]:
         """Turn masking off through every name on the schema that could carry it."""
         turned_off: list[str] = []
-        for name, value in list(vars(info.schema).items()):
+        attributes: dict[str, object] = vars(info.schema)
+        for name, value in list(attributes.items()):
             policy = (
                 value if isinstance(value, ErrorPolicy) else getattr(value, "error_policy", None)
             )
@@ -800,8 +821,9 @@ class _AcceptedInstanceQuery:
         entry = _accepted_resource_entry(info)
         if entry is None:
             return []
+        attributes: dict[str, object] = vars(entry)
         return sorted(
-            name for name, value in vars(entry).items() if isinstance(value, ResourcePolicy)
+            name for name, value in attributes.items() if isinstance(value, ResourcePolicy)
         )
 
     @strawberry.field
@@ -958,10 +980,12 @@ class _MembershipQuery:
         name or the shape behind it changes.
         """
         written: list[str] = []
-        for name, value in sorted(vars(info.schema).items()):
-            held = getattr(value, "__dict__", None)
+        attributes: dict[str, object] = vars(info.schema)
+        for name, value in sorted(attributes.items()):
+            held: object = getattr(value, "__dict__", None)
             if not name.startswith("_django") or held is None:
                 continue
+            assert is_json_object(held), held
             for field in sorted(held):
                 held[field] = ()
                 written.append(f"{name}.{field}")
@@ -1517,28 +1541,18 @@ def _rejection(payload: JSONObject) -> JSONObject:
     or a resolver crash.
     """
     assert payload["data"] is None, payload
-    errors = payload["errors"]
+    errors = json_list(payload, "errors")
     assert len(errors) == 1, errors
-    extensions = errors[0]["extensions"]
+    extensions = json_object(errors, 0, "extensions")
     assert extensions["code"] == RESOURCE_LIMIT_ERROR_CODE, extensions
     return extensions
 
 
-def _is_dict(value: object) -> TypeIs[dict[object, object]]:
-    """Whether a parsed payload value is a JSON object, its members still unchecked."""
-    return isinstance(value, dict)
-
-
 def _error_extension(error: object, key: str) -> object:
     """One wire error's ``extensions[key]``, ``None`` when either level is absent."""
-    assert _is_dict(error), error
+    assert is_json_object(error), error
     extensions = error.get("extensions")
-    return extensions.get(key) if _is_dict(extensions) else None
-
-
-def _is_json_object(value: object) -> TypeIs[JSONObject]:
-    """Whether a parsed body is a JSON object (a ``dict`` whose keys are all strings)."""
-    return _is_dict(value) and all(isinstance(key, str) for key in value)
+    return extensions.get(key) if is_json_object(extensions) else None
 
 
 def _no_rejection(payload: JSONObject) -> None:
@@ -1549,7 +1563,7 @@ def _no_rejection(payload: JSONObject) -> None:
     answer with a permission or validation error, and a row about a resource
     bound must not silently start asserting the auth contract instead.
     """
-    for error in payload.get("errors") or ():
+    for error in json_list(payload.get("errors") or []):
         assert _error_extension(error, "code") != RESOURCE_LIMIT_ERROR_CODE, payload
 
 
@@ -1561,7 +1575,7 @@ def _no_rejection(payload: JSONObject) -> None:
 def test_document_under_the_token_bound_executes() -> None:
     payload = _post("/rp-tokens/", "{ __typename }")
     _no_rejection(payload)
-    assert payload["data"]["__typename"] == "Query"
+    assert json_at(payload, "data", "__typename") == "Query"
 
 
 def test_document_over_the_token_bound_is_rejected() -> None:
@@ -1585,7 +1599,7 @@ def _post_named(mount: str, query: str, operation_name: str) -> JSONObject:
         content_type="application/json",
     )
     assert response.status_code == 200
-    return response.json()
+    return response_json(response)
 
 
 #: One persisted document carrying a small operation and an oversized one. The
@@ -1627,8 +1641,8 @@ def test_a_malformed_document_keeps_the_parsers_own_syntax_diagnostic() -> None:
 
     _no_rejection(payload)
     assert payload["data"] is None, payload
-    assert len(payload["errors"]) == 1, payload
-    assert "Syntax Error" in payload["errors"][0]["message"], payload
+    assert len(json_list(payload, "errors")) == 1, payload
+    assert "Syntax Error" in json_str(payload, "errors", 0, "message"), payload
 
 
 def test_a_malformed_document_over_the_token_bound_is_rejected_on_size() -> None:
@@ -1677,9 +1691,9 @@ def test_a_name_at_the_name_bound_reaches_validation_once_per_operation() -> Non
     name = "v" * MAX_NAME_BYTES
     payload = _post("/rp-names/", _UNDEFINED_VARIABLE_IN_A_SHARED_FRAGMENT % name)
     _no_rejection(payload)
-    errors = payload["errors"]
+    errors = json_list(payload, "errors")
     assert len(errors) == 2, errors
-    assert all(f"${name}'" in error["message"] for error in errors), errors
+    assert all(f"${name}'" in json_str(error, "message") for error in errors), errors
 
 
 def test_a_name_over_the_name_bound_is_rejected_before_the_parse() -> None:
@@ -1864,8 +1878,8 @@ def test_an_unnamed_multi_operation_document_is_charged_in_full(
     assert extensions["code"] == RESOURCE_LIMIT_ERROR_CODE
     assert extensions["bound"] == bound
     assert extensions["charged"] == charged
-    errors = payload["errors"]
-    assert all("Must provide operation name" not in err.get("message", "") for err in errors)
+    errors = json_list(payload, "errors")
+    assert all("Must provide operation name" not in json_str(err, "message") for err in errors)
 
 
 def test_nested_collections_are_charged_multiplicatively() -> None:
@@ -1879,7 +1893,7 @@ def test_nested_collections_are_charged_multiplicatively() -> None:
     """
     extensions = _rejection(_post("/rp-cost/", query))
     assert extensions["bound"] == "max_collection_cost"
-    assert extensions["charged"] > MAX_COST
+    assert json_int(extensions, "charged") > MAX_COST
 
 
 def test_an_introspection_document_is_charged_like_any_other() -> None:
@@ -1894,7 +1908,7 @@ def test_an_introspection_document_is_charged_like_any_other() -> None:
     """
     extensions = _rejection(_post("/rp-cost/", "{ __schema { types { fields { name } } } }"))
     assert extensions["bound"] == "max_collection_cost"
-    assert extensions["charged"] > MAX_COST
+    assert json_int(extensions, "charged") > MAX_COST
 
 
 def test_an_explicit_small_page_narrows_the_collection_cost() -> None:
@@ -1920,7 +1934,7 @@ def test_a_page_argument_other_than_first_or_last_does_not_narrow_the_collection
     """
     extensions = _rejection(_post("/rp-cost/", query))
     assert extensions["bound"] == "max_collection_cost"
-    assert extensions["charged"] > MAX_COST
+    assert json_int(extensions, "charged") > MAX_COST
 
 
 # ---------------------------------------------------------------------------
@@ -2186,11 +2200,9 @@ def _data_input_type(field: str) -> str:
     """
     mutation_type = _probe_schema(())._schema.mutation_type
     assert mutation_type is not None
-    mutation_field = mutation_type.fields[field]
-    argument_type = mutation_field.args["data"].type
-    while hasattr(argument_type, "of_type"):
-        argument_type = argument_type.of_type
-    return argument_type.name
+    named_type = get_named_type(graphql_type_of(graphql_fields(mutation_type)[field].args["data"]))
+    assert named_type is not None
+    return named_type.name
 
 
 @pytest.mark.django_db
@@ -2296,7 +2308,7 @@ def test_raw_pk_relation_lists_at_the_bound_execute() -> None:
         {"d": {"code": "RP-OK", "branchId": home.pk, "altBranches": [alt1.pk, alt2.pk]}},
     )
     _no_rejection(payload)
-    assert payload["data"]["createShelf"]["result"]["code"] == "RP-OK"
+    assert json_at(payload, "data", "createShelf", "result", "code") == "RP-OK"
     shelf = library_models.Shelf.objects.get(code="RP-OK")
     assert set(shelf.alt_branches.values_list("pk", flat=True)) == {alt1.pk, alt2.pk}
 
@@ -2538,7 +2550,9 @@ def test_argument_less_directives_charge_nothing_however_often_their_fragment_ex
     assert _MIXED_DIRECTIVE_SPREADS * _MIXED_DIRECTIVE_VALUES == MAX_INPUT_NODES
     payload = _post("/rp-values/", _mixed_directive_spreads(_MIXED_DIRECTIVE_SPREADS))
     _no_rejection(payload)
-    assert any("'@nope'" in error["message"] for error in payload["errors"]), payload
+    assert any(
+        "'@nope'" in json_str(error, "message") for error in json_list(payload, "errors")
+    ), payload
 
 
 def test_every_directive_value_among_argument_less_directives_is_charged_per_expansion() -> None:
@@ -2603,7 +2617,7 @@ def test_a_fragment_spread_below_an_unknown_field_is_charged_once() -> None:
     )
     payload = _post("/rp-values/", query)
     _no_rejection(payload)
-    assert "nope" in payload["errors"][0]["message"]
+    assert "nope" in json_str(payload, "errors", 0, "message")
 
 
 def test_an_unknown_field_subtree_in_a_fragment_is_walked_once_however_often_it_expands() -> None:
@@ -2618,7 +2632,7 @@ def test_an_unknown_field_subtree_in_a_fragment_is_walked_once_however_often_it_
     query = "{ ...F ...F ...F } fragment F on Query { nope { %s } }" % arguments
     payload = _post("/rp-values/", query)
     _no_rejection(payload)
-    assert "nope" in payload["errors"][0]["message"]
+    assert "nope" in json_str(payload, "errors", 0, "message")
 
 
 def test_a_directive_value_on_a_spread_of_an_unknown_fragment_is_charged() -> None:
@@ -2808,7 +2822,7 @@ def test_an_oversized_upload_is_rejected_by_the_policy_not_by_the_body_cap() -> 
         url="/rp-uploads/",
     )
     assert res.response.status_code == 200, res.response.content
-    extensions = _rejection(res.response.json())
+    extensions = _rejection(response_json(res.response))
     assert extensions["bound"] in {
         "max_upload_count",
         "max_upload_file_bytes",
@@ -2831,7 +2845,7 @@ def test_list_argument_smaller_limit_serializes_subset_and_charges_full_collecti
     # 1. On /rp-rows/ (max_list_rows=3), client limit: 2 serializes exactly 2 rows
     payload = _post("/rp-rows/", "{ allLibraryBranchesViaListField(limit: 2) { name } }")
     _no_rejection(payload)
-    assert len(payload["data"]["allLibraryBranchesViaListField"]) == 2
+    assert len(json_list(payload, "data", "allLibraryBranchesViaListField")) == 2
 
     # 2. On /rp-list-cost/ (max_list_rows=3, max_collection_cost=2), client limit: 1
     # is rejected because pre-execution collection cost charges max_list_rows (3),
@@ -2868,7 +2882,7 @@ def test_list_argument_limit_at_and_over_narrowed_policy_ceiling() -> None:
         f"{{ allLibraryBranchesViaListField(limit: {MAX_LIST_ROWS}) {{ name }} }}",
     )
     _no_rejection(payload_at)
-    assert len(payload_at["data"]["allLibraryBranchesViaListField"]) == MAX_LIST_ROWS
+    assert len(json_list(payload_at, "data", "allLibraryBranchesViaListField")) == MAX_LIST_ROWS
 
     # limit == MAX_LIST_ROWS + 1 (4) rejects with LIST_ARGUMENT_INVALID naming ceiling 3
     payload_over = _post(
@@ -2877,12 +2891,12 @@ def test_list_argument_limit_at_and_over_narrowed_policy_ceiling() -> None:
     )
     assert payload_over["data"] is None
     assert "errors" in payload_over
-    err = payload_over["errors"][0]
-    assert err["extensions"]["code"] == "LIST_ARGUMENT_INVALID"
-    assert err["extensions"]["reason"] == "over_ceiling"
-    assert err["extensions"]["argument"] == "limit"
-    assert err["extensions"]["value"] == MAX_LIST_ROWS + 1
-    assert err["extensions"]["ceiling"] == MAX_LIST_ROWS
+    err = json_object(payload_over, "errors", 0)
+    assert json_at(err, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+    assert json_at(err, "extensions", "reason") == "over_ceiling"
+    assert json_at(err, "extensions", "argument") == "limit"
+    assert json_at(err, "extensions", "value") == MAX_LIST_ROWS + 1
+    assert json_at(err, "extensions", "ceiling") == MAX_LIST_ROWS
 
 
 @pytest.mark.django_db
@@ -2911,7 +2925,7 @@ def test_list_argument_offset_at_and_over_narrowed_policy_ceiling() -> None:
     )
     _no_rejection(payload_at)
     # 5 branches total, offset 3 leaves 2
-    assert len(payload_at["data"]["allLibraryBranchesViaListField"]) == 2
+    assert len(json_list(payload_at, "data", "allLibraryBranchesViaListField")) == 2
 
     # offset == MAX_LIST_ROWS + 1 (4) rejects with LIST_ARGUMENT_INVALID naming ceiling 3
     payload_over = _post(
@@ -2930,12 +2944,12 @@ def test_list_argument_offset_at_and_over_narrowed_policy_ceiling() -> None:
     )
     assert payload_over["data"] is None
     assert "errors" in payload_over
-    err = payload_over["errors"][0]
-    assert err["extensions"]["code"] == "LIST_ARGUMENT_INVALID"
-    assert err["extensions"]["reason"] == "over_ceiling"
-    assert err["extensions"]["argument"] == "offset"
-    assert err["extensions"]["value"] == MAX_LIST_ROWS + 1
-    assert err["extensions"]["ceiling"] == MAX_LIST_ROWS
+    err = json_object(payload_over, "errors", 0)
+    assert json_at(err, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+    assert json_at(err, "extensions", "reason") == "over_ceiling"
+    assert json_at(err, "extensions", "argument") == "offset"
+    assert json_at(err, "extensions", "value") == MAX_LIST_ROWS + 1
+    assert json_at(err, "extensions", "ceiling") == MAX_LIST_ROWS
 
 
 @pytest.mark.django_db
@@ -2961,7 +2975,7 @@ def test_list_argument_rejections_and_limit_zero_perform_no_sql() -> None:
             "{ allLibraryBranchesViaListField(limit: 0) { name } }",
         )
     assert "errors" not in payload_zero, payload_zero
-    assert payload_zero["data"]["allLibraryBranchesViaListField"] == []
+    assert json_at(payload_zero, "data", "allLibraryBranchesViaListField") == []
     assert len(ctx.captured_queries) == 0
 
 
@@ -2971,7 +2985,7 @@ def test_a_raw_root_list_stops_at_the_configured_maximum() -> None:
     seed_data(2)
     payload = _post("/rp-rows/", "{ allLibraryBranchesViaListField { name } }")
     _no_rejection(payload)
-    assert len(payload["data"]["allLibraryBranchesViaListField"]) <= MAX_LIST_ROWS
+    assert len(json_list(payload, "data", "allLibraryBranchesViaListField")) <= MAX_LIST_ROWS
 
 
 @pytest.mark.django_db
@@ -2988,8 +3002,8 @@ def test_the_list_sibling_cannot_bypass_the_connection_page_cap() -> None:
         "{ allCategories(first: 2) { edges { node { items { name } } } } }",
     )
     _no_rejection(payload)
-    for edge in payload["data"]["allCategories"]["edges"]:
-        assert len(edge["node"]["items"]) <= MAX_LIST_ROWS
+    for edge in json_list(payload, "data", "allCategories", "edges"):
+        assert len(json_list(edge, "node", "items")) <= MAX_LIST_ROWS
 
 
 @pytest.mark.django_db
@@ -3008,7 +3022,7 @@ def test_a_connection_page_larger_than_the_policy_is_refused() -> None:
         "{ allCategories(first: %d) { edges { node { name } } } }" % (MAX_PAGE_SIZE + 1),
     )
     assert payload["data"] is None
-    assert "cannot be higher than %d" % MAX_PAGE_SIZE in payload["errors"][0]["message"]
+    assert "cannot be higher than %d" % MAX_PAGE_SIZE in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -3023,7 +3037,7 @@ def test_the_connection_only_default_leaves_no_raw_list_sibling() -> None:
         "{ allCategories(first: 1) { edges { node { properties { id } } } } }",
     )
     assert payload["data"] is None
-    assert "Cannot query field 'properties'" in payload["errors"][0]["message"]
+    assert "Cannot query field 'properties'" in json_str(payload, "errors", 0, "message")
 
 
 # ---------------------------------------------------------------------------
@@ -3039,9 +3053,9 @@ def _deadline_rejection(payload: JSONObject) -> JSONObject:
     resolver-error shape: the typed error rides in ``errors`` and ``data`` is
     nulled by the non-null field it propagated through.
     """
-    errors = payload["errors"]
+    errors = json_list(payload, "errors")
     assert len(errors) == 1, errors
-    extensions = errors[0]["extensions"]
+    extensions = json_object(errors, 0, "extensions")
     assert extensions["code"] == RESOURCE_LIMIT_ERROR_CODE, extensions
     assert extensions["bound"] == "execution_deadline_seconds", extensions
     return extensions
@@ -3148,7 +3162,7 @@ def test_a_passed_deadline_stops_a_native_node_field_on_the_async_transport(fiel
             url="/rp-deadline-native-node-async/",
         ),
     )
-    payload = json.loads(response.response.content)
+    payload = response_json(response.response)
     _deadline_rejection(payload)
     assert _error_paths(payload) == [[field]]
 
@@ -3195,11 +3209,11 @@ def _seed_relation_deadline_rows() -> None:
 
 def _error_paths(payload: JSONObject) -> list[list[object]]:
     """Every error's path, after asserting each is the typed deadline rejection."""
-    errors = payload["errors"]
+    errors = json_list(payload, "errors")
     for error in errors:
-        assert error["extensions"]["code"] == RESOURCE_LIMIT_ERROR_CODE, errors
-        assert error["extensions"]["bound"] == "execution_deadline_seconds", errors
-    return [error["path"] for error in errors]
+        assert json_at(error, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE, errors
+        assert json_at(error, "extensions", "bound") == "execution_deadline_seconds", errors
+    return [json_list(error, "path") for error in errors]
 
 
 @pytest.mark.django_db
@@ -3418,7 +3432,7 @@ def test_a_passed_deadline_stops_a_nested_relation_on_the_async_transport(
             url="/rp-deadline-relation-async/",
         ),
     )
-    payload = json.loads(response.response.content)
+    payload = response_json(response.response)
     _deadline_rejection(payload)
     assert _error_paths(payload) == [error_path]
     assert payload["data"] == data
@@ -3450,7 +3464,7 @@ def _session_user(client: Client) -> object:
     """Who the client's session belongs to, read through ``me`` on the unarmed mount."""
     payload = _post("/rp-deadline-unarmed/", _AUTH_ME, client=client)
     assert payload.get("errors") is None, payload
-    return payload["data"]["me"]
+    return json_at(payload, "data", "me")
 
 
 def _last_login() -> object:
@@ -3575,7 +3589,7 @@ def test_a_passed_deadline_stops_the_auth_fields_on_the_async_transport(
             url="/rp-deadline-async/",
         ),
     )
-    payload = json.loads(response.response.content)
+    payload = response_json(response.response)
     _deadline_rejection(payload)
     assert _error_paths(payload) == [error_path]
     assert payload["data"] == data
@@ -3625,7 +3639,7 @@ def test_a_resolver_cannot_widen_the_next_request_through_the_schema() -> None:
 
     second = _post("/rp-authority/", "{ rows }")
     _no_rejection(second)
-    assert second["data"]["rows"] == ["a"]
+    assert json_at(second, "data", "rows") == ["a"]
 
     third = _post(
         "/rp-authority/",
@@ -3649,7 +3663,7 @@ def test_a_resolver_cannot_nominate_a_new_policy_authority_over_the_wire() -> No
 
     second = _post("/rp-authority/", "{ rows }")
     _no_rejection(second)
-    assert second["data"]["rows"] == ["a"]
+    assert json_at(second, "data", "rows") == ["a"]
 
 
 def test_two_schemas_that_compare_equal_bound_their_own_requests() -> None:
@@ -3662,13 +3676,13 @@ def test_two_schemas_that_compare_equal_bound_their_own_requests() -> None:
     """
     narrow = _post("/rp-equal-narrow/", "{ rows }")
     _no_rejection(narrow)
-    assert narrow["data"]["rows"] == ["a"]
+    assert json_at(narrow, "data", "rows") == ["a"]
 
     wide = _post("/rp-equal-wide/", "{ rows }")
     _no_rejection(wide)
-    assert wide["data"]["rows"] == ["a", "b", "c"]
+    assert json_at(wide, "data", "rows") == ["a", "b", "c"]
 
-    assert _post("/rp-equal-narrow/", "{ rows }")["data"]["rows"] == ["a"]
+    assert json_at(_post("/rp-equal-narrow/", "{ rows }"), "data", "rows") == ["a"]
 
 
 def test_a_policy_the_deployment_still_holds_cannot_widen_a_later_request() -> None:
@@ -3681,7 +3695,7 @@ def test_a_policy_the_deployment_still_holds_cannot_widen_a_later_request() -> N
     """
     first = _post("/rp-retained/", "{ rows }")
     _no_rejection(first)
-    assert first["data"]["rows"] == ["a"]
+    assert json_at(first, "data", "rows") == ["a"]
 
     RETAINED_POLICY.__dict__["max_list_rows"] = 999
     try:
@@ -3689,7 +3703,7 @@ def test_a_policy_the_deployment_still_holds_cannot_widen_a_later_request() -> N
     finally:
         RETAINED_POLICY.__dict__["max_list_rows"] = 1
     _no_rejection(second)
-    assert second["data"]["rows"] == ["a"]
+    assert json_at(second, "data", "rows") == ["a"]
 
 
 def test_a_written_exported_default_cannot_widen_an_unconfigured_schema() -> None:
@@ -3712,11 +3726,11 @@ def test_a_written_exported_default_cannot_widen_an_unconfigured_schema() -> Non
         DEFAULT_RESOURCE_POLICY.__dict__.update(declared)
     _no_rejection(widened)
     assert len(_UNCONFIGURED_SOURCE_ROWS) > declared["max_list_rows"]
-    assert len(widened["data"]["manyRows"]) == declared["max_list_rows"]
+    assert len(json_list(widened, "data", "manyRows")) == declared["max_list_rows"]
 
     control = _post("/rp-unconfigured/", "{ manyRows }")
     _no_rejection(control)
-    assert control["data"]["manyRows"] == widened["data"]["manyRows"]
+    assert json_at(control, "data", "manyRows") == json_at(widened, "data", "manyRows")
 
 
 def _opaque_request(source: str, width: int) -> tuple[str, dict[str, list[int]] | None, list[int]]:
@@ -3812,10 +3826,10 @@ def test_a_resolver_cannot_put_raw_exception_text_on_the_wire(attempt: str) -> N
 
     payload = _post("/rp-authority/", "{ boom }")
     assert payload["data"] is None
-    error = payload["errors"][0]
+    error = json_object(payload, "errors", 0)
     assert UNMASKED_SENTINEL not in json.dumps(payload)
     assert error["message"] == DEFAULT_ERROR_POLICY.message
-    assert error["extensions"][DEFAULT_ERROR_POLICY.correlation_extension_key]
+    assert json_at(error, "extensions", DEFAULT_ERROR_POLICY.correlation_extension_key)
 
 
 @pytest.mark.parametrize(
@@ -3864,14 +3878,14 @@ def test_rerunning_a_constructor_over_the_wire_does_not_widen_a_later_request(
     """
     first = _post(mount, "{ rows }")
     _no_rejection(first)
-    assert first["data"]["rows"] == ["a"]
+    assert json_at(first, "data", "rows") == ["a"]
 
     attacked = _post(mount, "{ %s }" % field)
     assert attacked["data"] == {field: reported}, attacked
 
     second = _post(mount, "{ rows }")
     _no_rejection(second)
-    assert second["data"]["rows"] == ["a"]
+    assert json_at(second, "data", "rows") == ["a"]
 
 
 @pytest.mark.parametrize(
@@ -3900,20 +3914,26 @@ def test_writing_the_accepted_extensions_does_not_choose_what_runs_the_next_requ
     """
     first = _post(mount, "{ rows }")
     _no_rejection(first)
-    assert first["data"]["rows"] == ["a"]
+    assert json_at(first, "data", "rows") == ["a"]
 
     attacked = _post(mount, "{ %s }" % field)
     assert attacked["data"] == {field: written}, attacked
 
     second = _post(mount, "{ rows }")
     _no_rejection(second)
-    assert second["data"]["rows"] == ["a"]
+    assert json_at(second, "data", "rows") == ["a"]
 
     masked = _post(mount, "{ boom }")
     assert masked["data"] is None
     assert UNMASKED_SENTINEL not in json.dumps(masked)
-    assert masked["errors"][0]["message"] == DEFAULT_ERROR_POLICY.message
-    assert masked["errors"][0]["extensions"][DEFAULT_ERROR_POLICY.correlation_extension_key]
+    assert json_at(masked, "errors", 0, "message") == DEFAULT_ERROR_POLICY.message
+    assert json_at(
+        masked,
+        "errors",
+        0,
+        "extensions",
+        DEFAULT_ERROR_POLICY.correlation_extension_key,
+    )
 
 
 def test_an_extension_factory_still_builds_one_per_operation() -> None:
@@ -3928,11 +3948,11 @@ def test_an_extension_factory_still_builds_one_per_operation() -> None:
 
     bounded = _post("/rp-factory-entry/", "{ rows }")
     _no_rejection(bounded)
-    assert bounded["data"]["rows"] == ["a"]
+    assert json_at(bounded, "data", "rows") == ["a"]
 
     after = _post("/rp-factory-entry/", "{ builds }")
     _no_rejection(after)
-    assert after["data"]["builds"] > before["data"]["builds"]
+    assert json_int(after, "data", "builds") > json_int(before, "data", "builds")
 
 
 @pytest.mark.parametrize(
@@ -3956,14 +3976,14 @@ def test_losing_the_accepted_extensions_does_not_widen_the_next_request(
     """
     first = _post(mount, "{ rows }")
     _no_rejection(first)
-    assert first["data"]["rows"] == ["a"]
+    assert json_at(first, "data", "rows") == ["a"]
 
     attacked = _post(mount, f"{{ {field} }}")
     assert attacked["data"] == {field: ["_django_extensions"]}, attacked
 
     second = _post(mount, "{ rows }")
     _no_rejection(second)
-    assert second["data"]["rows"] == ["a"]
+    assert json_at(second, "data", "rows") == ["a"]
 
 
 @pytest.mark.parametrize(
@@ -3986,14 +4006,14 @@ def test_an_accepted_extension_instance_cannot_widen_a_later_request(
     """
     first = _post("/rp-accepted-instance/", "{ rows }")
     _no_rejection(first)
-    assert first["data"]["rows"] == ["a"]
+    assert json_at(first, "data", "rows") == ["a"]
 
     attacked = _post("/rp-accepted-instance/", "{ %s }" % field)
     assert attacked["data"] == {field: reported}, attacked
 
     second = _post("/rp-accepted-instance/", "{ rows }")
     _no_rejection(second)
-    assert second["data"]["rows"] == ["a"]
+    assert json_at(second, "data", "rows") == ["a"]
 
 
 # ---------------------------------------------------------------------------
@@ -4127,7 +4147,7 @@ def test_a_rejected_operation_never_enters_the_executing_stage(mount: str, verdi
         response = _await_response(
             AsyncTestClient().query(query, assert_no_errors=False, url=mount),
         )
-        payload = json.loads(response.response.content)
+        payload = response_json(response.response)
     else:
         payload = _post(mount, query)
 
@@ -4151,7 +4171,7 @@ def test_ordinary_validation_still_answers_beside_the_admission_stage(order: str
     payload = _post(CACHE_MOUNTS[order], "{ nosuchfield }")
     _no_rejection(payload)
     assert payload["data"] is None
-    assert "nosuchfield" in payload["errors"][0]["message"]
+    assert "nosuchfield" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.parametrize(
@@ -4177,7 +4197,7 @@ def test_the_composed_admission_stage_answers_the_same_on_the_async_transport(
             url=mount,
         ),
     )
-    assert _rejection(json.loads(response.response.content)) == sync_extensions
+    assert _rejection(response_json(response.response)) == sync_extensions
     assert _scalar_parses == []
 
 
@@ -4213,7 +4233,7 @@ def test_a_relation_manager_cannot_widen_the_raw_list_bound_with_its_own_slice()
             {"name": "hostile-patron", "loans": [{"note": "loan-0"}]},
         ],
     }
-    assert len(payload["data"]["patrons"][0]["loans"]) == HOSTILE_RELATION_ROWS
+    assert len(json_list(payload, "data", "patrons", 0, "loans")) == HOSTILE_RELATION_ROWS
 
 
 @pytest.mark.django_db
@@ -4250,14 +4270,14 @@ def test_a_relation_manager_cannot_widen_the_raw_list_bound_on_the_async_transpo
                 url="/rp-hostile-relation-async/",
             ),
         )
-    payload = json.loads(response.response.content)
+    payload = response_json(response.response)
     _no_rejection(payload)
     assert payload["data"] == {
         "patrons": [
             {"name": "hostile-patron", "loans": [{"note": "loan-0"}]},
         ],
     }
-    assert len(payload["data"]["patrons"][0]["loans"]) == HOSTILE_RELATION_ROWS
+    assert len(json_list(payload, "data", "patrons", 0, "loans")) == HOSTILE_RELATION_ROWS
 
 
 def _seed_carry_relation(patrons: int, loans_each: int) -> None:
@@ -4334,7 +4354,7 @@ def test_a_project_queryset_class_relation_answers_the_same_rows_when_awaited() 
             url="/rp-carry-relation-async/",
         ),
     )
-    payload = json.loads(response.response.content)
+    payload = response_json(response.response)
     _no_rejection(payload)
     assert payload["data"] == _carry_relation_payload(2)
 
@@ -4356,7 +4376,7 @@ def test_a_bound_at_the_representable_maximum_reaches_the_database() -> None:
     seed_data(2)
     payload = _post("/rp-max-bound/", "{ allLibraryBranchesViaListField { name } }")
     _no_rejection(payload)
-    assert payload["data"]["allLibraryBranchesViaListField"] is not None
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -4383,16 +4403,19 @@ def test_sync_and_async_transports_share_one_typed_error_code() -> None:
             url="/rp-values-async/",
         ),
     )
-    async_payload = json.loads(async_response.response.content)
+    async_payload = response_json(async_response.response)
     assert _rejection(async_payload) == sync_extensions
 
 
-def _await_response(coroutine: Coroutine[object, object, Response]) -> Response:
+_AsyncResponse: TypeAlias = "Response[_MonkeyPatchedASGIResponse]"
+
+
+def _await_response(coroutine: Coroutine[object, object, _AsyncResponse]) -> _AsyncResponse:
     """Run one ``AsyncTestClient.query`` coroutine to completion on a fresh event loop."""
     return asyncio.run(_resolve(coroutine))
 
 
-async def _resolve(coroutine: Coroutine[object, object, Response]) -> Response:
+async def _resolve(coroutine: Coroutine[object, object, _AsyncResponse]) -> _AsyncResponse:
     return await coroutine
 
 
@@ -4410,9 +4433,7 @@ def _entry_request(entry: tuple[str, str], query: str) -> JSONObject:
         response = _await_response(
             AsyncTestClient().query(query, assert_no_errors=False, url=mount),
         )
-        parsed: object = json.loads(response.response.content)
-        assert _is_json_object(parsed), parsed
-        return parsed
+        return response_json(response.response)
     return _post(mount, query)
 
 

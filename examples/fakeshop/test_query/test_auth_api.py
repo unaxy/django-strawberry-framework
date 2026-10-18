@@ -31,7 +31,6 @@ from apps.accounts import schema as accounts_schema
 from apps.products.services import TEST_USER_PASSWORD, create_users
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
-from django.conf import settings
 from django.contrib.auth import BACKEND_SESSION_KEY, SESSION_KEY
 from django.contrib.auth import signals as auth_signals
 from django.contrib.auth.models import Group, User
@@ -42,7 +41,17 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.urls import clear_url_caches, path
-from graphql_client import JSONObject, graphql_payload
+from graphql_client import (
+    JSONObject,
+    graphql_payload,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware,
+    middleware_without_debug_toolbar,
+    response_json,
+)
 from graphql_client import assert_graphql_success as _graphql_data
 from graphql_client import post_graphql as _post_graphql
 from strawberry import relay
@@ -57,6 +66,7 @@ from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGrap
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse
+
 
 # A password that passes all four fakeshop ``AUTH_PASSWORD_VALIDATORS`` and is
 # unrelated to any seeded username (the similarity validator must not bite).
@@ -87,7 +97,7 @@ _SESSIONLESS_PASS_THROUGH = {
     "DEBUG": True,
     "MIDDLEWARE": [
         entry
-        for entry in settings.MIDDLEWARE
+        for entry in middleware()
         if not any(
             dropped in entry
             for dropped in (
@@ -102,17 +112,12 @@ _SESSIONLESS_PASS_THROUGH = {
 
 #: DEBUG pass-through so a resolver exception's message reaches the wire; toolbar
 #: middleware is dropped because fakeshop wires it behind ``DEBUG``.
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 #: Session stack intact, ``AuthenticationMiddleware`` removed: ``request.user`` is
 #: absent rather than ``AnonymousUser``.
 _NO_AUTHENTICATION_MIDDLEWARE = {
-    "MIDDLEWARE": [
-        entry for entry in settings.MIDDLEWARE if "AuthenticationMiddleware" not in entry
-    ],
+    "MIDDLEWARE": [entry for entry in middleware() if "AuthenticationMiddleware" not in entry],
 }
 
 _MODEL_BACKEND = "django.contrib.auth.backends.ModelBackend"
@@ -125,7 +130,10 @@ class _CsrfHeader(TypedDict, total=False):
 
 
 def _login(client: Client, username: str, password: str) -> JSONObject:
-    return _graphql_data(_LOGIN, client=client, variables={"u": username, "p": password})["login"]
+    return json_object(
+        _graphql_data(_LOGIN, client=client, variables={"u": username, "p": password}),
+        "login",
+    )
 
 
 @pytest.mark.django_db
@@ -135,7 +143,7 @@ def test_login_happy_path_sets_session_and_me_sees_the_user() -> None:
     client = Client()
     payload = _login(client, "staff_1", TEST_USER_PASSWORD)
     assert payload["errors"] == []
-    assert payload["node"]["username"] == "staff_1"
+    assert json_at(payload, "node", "username") == "staff_1"
     # The session was established on THIS client (the cookie round trip).
     assert "sessionid" in client.cookies
     assert _graphql_data(_ME, client=client)["me"] == {"username": "staff_1"}
@@ -231,8 +239,8 @@ def test_inactive_user_gets_the_same_envelope() -> None:
     user.save()
     payload = _login(Client(), "regular_1", TEST_USER_PASSWORD)
     assert payload["node"] is None
-    assert [error["field"] for error in payload["errors"]] == ["__all__"]
-    assert payload["errors"][0]["messages"] == ["Incorrect username/password"]
+    assert [json_at(error, "field") for error in json_list(payload, "errors")] == ["__all__"]
+    assert json_at(payload, "errors", 0, "messages") == ["Incorrect username/password"]
     # Byte-identical to the wrong-password class: the enumeration guard collapses
     # "no such account state" and "wrong credentials" into one answer.
     assert payload == _login(Client(), "staff_1", "not-the-password")
@@ -348,7 +356,7 @@ def test_backend_order_first_success_wins_model_backend_first() -> None:
         payload = _login(client, "staff_1", TEST_USER_PASSWORD)
 
     assert payload["errors"] == []
-    assert payload["node"]["username"] == "staff_1"
+    assert json_at(payload, "node", "username") == "staff_1"
     assert client.session[BACKEND_SESSION_KEY] == _MODEL_BACKEND
 
 
@@ -383,7 +391,7 @@ def test_custom_backend_authenticating_inactive_user_is_honored() -> None:
         client = Client()
         payload = _login(client, "staff_1", TEST_USER_PASSWORD)
         assert payload["errors"] == []
-        assert payload["node"]["username"] == "staff_1"
+        assert json_at(payload, "node", "username") == "staff_1"
         assert _graphql_data(_ME, client=client)["me"] == {"username": "staff_1"}
 
 
@@ -402,7 +410,7 @@ def test_login_backend_crash_propagates_and_leaves_session_untouched() -> None:
         )
 
     assert payload.get("data") is None, payload
-    assert "backend boom" in payload["errors"][0]["message"], payload
+    assert "backend boom" in json_str(payload, "errors", 0, "message"), payload
     assert "sessionid" not in client.cookies
     assert Session.objects.count() == 0
     assert SESSION_KEY not in client.session
@@ -483,17 +491,20 @@ def test_register_login_me_logout_round_trip_and_hashed_storage() -> None:
     """The full fresh-account flow; the stored password is hashed, never the raw string."""
     create_users(1)
     client = Client()
-    payload = _graphql_data(
-        _REGISTER,
-        client=client,
-        variables={
-            "d": {
-                "username": "fresh_reg_user",
-                "email": "fresh@example.com",
-                "password": _STRONG_PASSWORD,
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            client=client,
+            variables={
+                "d": {
+                    "username": "fresh_reg_user",
+                    "email": "fresh@example.com",
+                    "password": _STRONG_PASSWORD,
+                },
             },
-        },
-    )["register"]
+        ),
+        "register",
+    )
     assert payload["errors"] == []
     assert payload["node"] == {"username": "fresh_reg_user", "email": "fresh@example.com"}
 
@@ -502,9 +513,9 @@ def test_register_login_me_logout_round_trip_and_hashed_storage() -> None:
     assert _STRONG_PASSWORD not in stored.password  # hashed column, no plaintext residue
 
     login_payload = _login(client, "fresh_reg_user", _STRONG_PASSWORD)
-    assert login_payload["node"]["username"] == "fresh_reg_user"
+    assert json_at(login_payload, "node", "username") == "fresh_reg_user"
     assert _graphql_data(_ME, client=client)["me"] == {"username": "fresh_reg_user"}
-    assert _graphql_data(_LOGOUT, client=client)["logout"]["ok"] is True
+    assert json_at(_graphql_data(_LOGOUT, client=client), "logout", "ok") is True
     assert _graphql_data(_ME, client=client)["me"] is None
 
 
@@ -519,12 +530,15 @@ def test_register_hashes_before_full_clean_so_a_long_password_persists() -> None
     create_users(1)
     long_password = "x9-" + "long-strong-" * 12
     assert len(long_password) > 128
-    payload = _graphql_data(
-        _REGISTER,
-        variables={"d": {"username": "long_pw_user", "password": long_password}},
-    )["register"]
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            variables={"d": {"username": "long_pw_user", "password": long_password}},
+        ),
+        "register",
+    )
     assert payload["errors"] == []
-    assert payload["node"]["username"] == "long_pw_user"
+    assert json_at(payload, "node", "username") == "long_pw_user"
     stored = User.objects.get(username="long_pw_user")
     assert long_password not in stored.password
     assert stored.check_password(long_password)
@@ -534,13 +548,18 @@ def test_register_hashes_before_full_clean_so_a_long_password_persists() -> None
 def test_duplicate_username_register_envelope_keys_to_username() -> None:
     """The model ``full_clean()`` unique check surfaces on the ``USERNAME_FIELD`` key."""
     create_users(1)
-    payload = _graphql_data(
-        _REGISTER,
-        variables={"d": {"username": "staff_1", "password": _STRONG_PASSWORD}},
-    )["register"]
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            variables={"d": {"username": "staff_1", "password": _STRONG_PASSWORD}},
+        ),
+        "register",
+    )
     assert payload["node"] is None
-    assert [error["field"] for error in payload["errors"]] == ["username"]
-    assert payload["errors"][0]["messages"] == ["A user with that username already exists."]
+    assert [json_at(error, "field") for error in json_list(payload, "errors")] == ["username"]
+    assert json_at(payload, "errors", 0, "messages") == [
+        "A user with that username already exists.",
+    ]
     # The failed register wrote nothing (one seeded staff_1 remains).
     assert User.objects.filter(username="staff_1").count() == 1
 
@@ -555,15 +574,21 @@ def test_weak_password_register_envelope_keys_to_password_not_all() -> None:
     against two of fakeshop's configured validators (common + entirely-numeric).
     """
     create_users(1)
-    payload = _graphql_data(
-        _REGISTER,
-        variables={"d": {"username": "weak_pw_user", "password": "12345678"}},
-    )["register"]
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            variables={"d": {"username": "weak_pw_user", "password": "12345678"}},
+        ),
+        "register",
+    )
     assert payload["node"] is None
-    assert [error["field"] for error in payload["errors"]] == ["password"]
-    messages = payload["errors"][0]["messages"]
+    assert [json_at(error, "field") for error in json_list(payload, "errors")] == ["password"]
+    messages = json_at(payload, "errors", 0, "messages")
     assert messages == ["This password is too common.", "This password is entirely numeric."]
-    assert payload["errors"][0]["codes"] == ["password_too_common", "password_entirely_numeric"]
+    assert json_at(payload, "errors", 0, "codes") == [
+        "password_too_common",
+        "password_entirely_numeric",
+    ]
     assert not User.objects.filter(username="weak_pw_user").exists()
 
 
@@ -595,14 +620,17 @@ def test_dict_form_validator_error_still_keys_to_password_not_a_crash() -> None:
     carries none), never a raw ``AttributeError`` (a 500).
     """
     create_users(1)
-    payload = _graphql_data(
-        _REGISTER,
-        variables={"d": {"username": "dict_form_user", "password": _STRONG_PASSWORD}},
-    )["register"]
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            variables={"d": {"username": "dict_form_user", "password": _STRONG_PASSWORD}},
+        ),
+        "register",
+    )
     assert payload["node"] is None
-    assert [error["field"] for error in payload["errors"]] == ["password"]
-    assert payload["errors"][0]["messages"] == ["Password policy violated."]
-    assert payload["errors"][0]["codes"] == []
+    assert [json_at(error, "field") for error in json_list(payload, "errors")] == ["password"]
+    assert json_at(payload, "errors", 0, "messages") == ["Password policy violated."]
+    assert json_at(payload, "errors", 0, "codes") == []
     assert not User.objects.filter(username="dict_form_user").exists()
 
 
@@ -616,13 +644,16 @@ def test_register_decode_failure_returns_the_field_keyed_envelope() -> None:
     the shared skeleton's envelope short-circuits are reused, not re-spelled).
     """
     create_users(1)
-    payload = _graphql_data(
-        _REGISTER,
-        variables={"d": {"username": "bad\ud800name", "password": _STRONG_PASSWORD}},
-    )["register"]
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            variables={"d": {"username": "bad\ud800name", "password": _STRONG_PASSWORD}},
+        ),
+        "register",
+    )
     assert payload["node"] is None
-    assert [error["field"] for error in payload["errors"]] == ["username"]
-    assert payload["errors"][0]["messages"] == [
+    assert [json_at(error, "field") for error in json_list(payload, "errors")] == ["username"]
+    assert json_at(payload, "errors", 0, "messages") == [
         "Text contains invalid Unicode (unpaired surrogate code points).",
     ]
 
@@ -637,13 +668,18 @@ def test_password_similar_to_username_is_rejected_with_user_context() -> None:
     passes the constructed (unsaved) user as the second argument.
     """
     create_users(1)
-    payload = _graphql_data(
-        _REGISTER,
-        variables={"d": {"username": "verdant-orchard", "password": "verdant-orchard"}},
-    )["register"]
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            variables={"d": {"username": "verdant-orchard", "password": "verdant-orchard"}},
+        ),
+        "register",
+    )
     assert payload["node"] is None
-    assert [error["field"] for error in payload["errors"]] == ["password"]
-    assert payload["errors"][0]["messages"] == ["The password is too similar to the username."]
+    assert [json_at(error, "field") for error in json_list(payload, "errors")] == ["password"]
+    assert json_at(payload, "errors", 0, "messages") == [
+        "The password is too similar to the username.",
+    ]
 
 
 # A GraphQL ``String`` can carry a lone UTF-16 surrogate code point (a JSON
@@ -696,13 +732,16 @@ def test_register_surrogate_password_keys_to_password_not_a_crash() -> None:
     # surrogate can reject it, so the failure is the storability preflight (not a
     # password-strength validator).
     surrogate_pw = "correct-horse-9\ud800battery-staple"
-    payload = _graphql_data(
-        _REGISTER,
-        variables={"d": {"username": "surrogate_reg_user", "password": surrogate_pw}},
-    )["register"]
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            variables={"d": {"username": "surrogate_reg_user", "password": surrogate_pw}},
+        ),
+        "register",
+    )
     assert payload["node"] is None
-    assert [error["field"] for error in payload["errors"]] == ["password"]
-    assert payload["errors"][0]["messages"] == [
+    assert [json_at(error, "field") for error in json_list(payload, "errors")] == ["password"]
+    assert json_at(payload, "errors", 0, "messages") == [
         "Text contains invalid Unicode (unpaired surrogate code points).",
     ]
     assert not User.objects.filter(username="surrogate_reg_user").exists()
@@ -725,7 +764,7 @@ def test_non_string_login_username_fails_validation_before_the_resolver() -> Non
         client=client,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
     assert payload.get("data") is None
     assert "sessionid" not in client.cookies
@@ -753,10 +792,10 @@ def test_sessionless_login_refuses_with_the_error_naming_both_middleware_stacks(
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert "SessionMiddleware" in message
     assert "AuthMiddlewareStack" in message
     assert "session" in message.lower()
@@ -776,10 +815,10 @@ def test_sessionless_logout_refuses_with_the_error_naming_both_middleware_stacks
         response = _post_graphql(_LOGOUT, client=Client())
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert "SessionMiddleware" in message
     assert "AuthMiddlewareStack" in message
     assert "session" in message.lower()
@@ -808,9 +847,9 @@ def test_complete_reload_preserves_the_auth_surface(
     reload_all_project_app_schemas()
     client = Client()
     payload = _login(client, "staff_1", TEST_USER_PASSWORD)
-    assert payload["node"]["username"] == "staff_1"
+    assert json_at(payload, "node", "username") == "staff_1"
     assert _graphql_data(_ME, client=client)["me"] == {"username": "staff_1"}
-    assert _graphql_data(_LOGOUT, client=client)["logout"]["ok"] is True
+    assert json_at(_graphql_data(_LOGOUT, client=client), "logout", "ok") is True
 
 
 def _introspect_type(name: str) -> JSONObject:
@@ -820,7 +859,7 @@ def _introspect_type(name: str) -> JSONObject:
         "type { kind ofType { kind name } name } } "
         "inputFields { name type { kind ofType { kind name } name } } } }"
     )
-    return _graphql_data(query)["__type"]
+    return json_object(_graphql_data(query), "__type")
 
 
 @pytest.mark.django_db
@@ -834,53 +873,72 @@ def test_generated_auth_type_shapes() -> None:
     """
     create_users(1)
     login_payload = _introspect_type("LoginPayload")
-    login_fields = {f["name"]: f["type"] for f in login_payload["fields"]}
-    assert login_fields["node"]["name"] == "UserType"  # nullable object slot
-    assert login_fields["errors"]["kind"] == "NON_NULL"
+    login_fields = {
+        json_at(f, "name"): json_at(f, "type") for f in json_list(login_payload, "fields")
+    }
+    assert json_at(login_fields, "node", "name") == "UserType"  # nullable object slot
+    assert json_at(login_fields, "errors", "kind") == "NON_NULL"
 
     logout_payload = _introspect_type("LogoutPayload")
-    logout_fields = {f["name"]: f["type"] for f in logout_payload["fields"]}
+    logout_fields = {
+        json_at(f, "name"): json_at(f, "type") for f in json_list(logout_payload, "fields")
+    }
     assert logout_fields["ok"] == {
         "kind": "NON_NULL",
         "ofType": {"kind": "SCALAR", "name": "Boolean"},
         "name": None,
     }
-    assert logout_fields["errors"]["kind"] == "NON_NULL"
+    assert json_at(logout_fields, "errors", "kind") == "NON_NULL"
     assert "node" not in logout_fields  # model-less payload: no object slot at all
 
     register_input = _introspect_type("RegisterInput")
-    input_fields = {f["name"]: f["type"] for f in register_input["inputFields"]}
+    input_fields = {
+        json_at(f, "name"): json_at(f, "type") for f in json_list(register_input, "inputFields")
+    }
     # username / password non-null; email optional (``EmailField(blank=True)`` -
     # the standard ``input_field_required`` rule, spec-040 Decision 6).
-    assert input_fields["username"]["kind"] == "NON_NULL"
-    assert input_fields["password"]["kind"] == "NON_NULL"
+    assert json_at(input_fields, "username", "kind") == "NON_NULL"
+    assert json_at(input_fields, "password", "kind") == "NON_NULL"
     assert input_fields["email"] == {"kind": "SCALAR", "ofType": None, "name": "String"}
 
     register_payload = _introspect_type("RegisterPayload")
-    register_fields = {f["name"]: f["type"] for f in register_payload["fields"]}
-    assert register_fields["node"]["name"] == "UserType"
-    assert register_fields["errors"]["kind"] == "NON_NULL"
+    register_fields = {
+        json_at(f, "name"): json_at(f, "type") for f in json_list(register_payload, "fields")
+    }
+    assert json_at(register_fields, "node", "name") == "UserType"
+    assert json_at(register_fields, "errors", "kind") == "NON_NULL"
 
-    query_fields = {f["name"]: f for f in _introspect_type("Query")["fields"]}
+    query_fields = {
+        json_str(f, "name"): json_object(f) for f in json_list(_introspect_type("Query"), "fields")
+    }
     me = query_fields["me"]
-    assert me["type"]["name"] == "UserType"
-    assert me["type"]["kind"] != "NON_NULL"
+    assert json_at(me, "type", "name") == "UserType"
+    assert json_at(me, "type", "kind") != "NON_NULL"
 
-    mutation_fields = {f["name"]: f for f in _introspect_type("Mutation")["fields"]}
-    login_args = {arg["name"]: arg["type"] for arg in mutation_fields["login"]["args"]}
-    assert login_args["username"]["kind"] == "NON_NULL"
-    assert login_args["username"]["ofType"]["name"] == "String"
-    assert login_args["password"]["kind"] == "NON_NULL"
-    assert login_args["password"]["ofType"]["name"] == "String"
-    assert mutation_fields["login"]["type"]["kind"] == "NON_NULL"
-    assert mutation_fields["login"]["type"]["ofType"]["name"] == "LoginPayload"
-    assert mutation_fields["logout"]["type"]["kind"] == "NON_NULL"
-    assert mutation_fields["logout"]["type"]["ofType"]["name"] == "LogoutPayload"
-    register_args = {arg["name"]: arg["type"] for arg in mutation_fields["register"]["args"]}
-    assert register_args["data"]["kind"] == "NON_NULL"
-    assert register_args["data"]["ofType"]["name"] == "RegisterInput"
-    assert mutation_fields["register"]["type"]["kind"] == "NON_NULL"
-    assert mutation_fields["register"]["type"]["ofType"]["name"] == "RegisterPayload"
+    mutation_fields = {
+        json_str(f, "name"): json_object(f)
+        for f in json_list(_introspect_type("Mutation"), "fields")
+    }
+    login_args = {
+        json_at(arg, "name"): json_at(arg, "type")
+        for arg in json_list(mutation_fields, "login", "args")
+    }
+    assert json_at(login_args, "username", "kind") == "NON_NULL"
+    assert json_at(login_args, "username", "ofType", "name") == "String"
+    assert json_at(login_args, "password", "kind") == "NON_NULL"
+    assert json_at(login_args, "password", "ofType", "name") == "String"
+    assert json_at(mutation_fields, "login", "type", "kind") == "NON_NULL"
+    assert json_at(mutation_fields, "login", "type", "ofType", "name") == "LoginPayload"
+    assert json_at(mutation_fields, "logout", "type", "kind") == "NON_NULL"
+    assert json_at(mutation_fields, "logout", "type", "ofType", "name") == "LogoutPayload"
+    register_args = {
+        json_at(arg, "name"): json_at(arg, "type")
+        for arg in json_list(mutation_fields, "register", "args")
+    }
+    assert json_at(register_args, "data", "kind") == "NON_NULL"
+    assert json_at(register_args, "data", "ofType", "name") == "RegisterInput"
+    assert json_at(mutation_fields, "register", "type", "kind") == "NON_NULL"
+    assert json_at(mutation_fields, "register", "type", "ofType", "name") == "RegisterPayload"
     # The deterministic shape-derived name never leaks into the schema.
     assert (
         _graphql_data('{ __type(name: "UserEmailPasswordUsernameInput") { name } }')["__type"]
@@ -983,7 +1041,7 @@ async def _post_async_shipped(
             url="/graphql-async/",
         )
     assert result.response.status_code == 200
-    return result.response.json()
+    return response_json(result.response)
 
 
 @pytest.mark.django_db
@@ -992,7 +1050,10 @@ def test_user_type_omits_last_login_by_default() -> None:
     create_users(1)
     payload = graphql_payload("{ me { lastLogin } }")
     assert payload.get("data") is None, payload
-    assert any("Cannot query field 'lastLogin'" in error["message"] for error in payload["errors"])
+    assert any(
+        "Cannot query field 'lastLogin'" in json_str(error, "message")
+        for error in json_list(payload, "errors")
+    )
 
 
 @pytest.mark.django_db
@@ -1010,15 +1071,18 @@ def test_login_payload_exposes_the_post_login_last_login(
     with override_settings(FAKESHOP_TEST_USER_LAST_LOGIN=True):
         project_schema_override()
         client = Client()
-        payload = _graphql_data(
-            "mutation($u: String!, $p: String!){ login(username: $u, password: $p){ "
-            "node{ username lastLogin } errors{ field } } }",
-            client=client,
-            variables={"u": "staff_1", "p": TEST_USER_PASSWORD},
-        )["login"]
+        payload = json_object(
+            _graphql_data(
+                "mutation($u: String!, $p: String!){ login(username: $u, password: $p){ "
+                "node{ username lastLogin } errors{ field } } }",
+                client=client,
+                variables={"u": "staff_1", "p": TEST_USER_PASSWORD},
+            ),
+            "login",
+        )
     assert payload["errors"] == []
-    assert payload["node"]["username"] == "staff_1"
-    assert payload["node"]["lastLogin"] is not None
+    assert json_at(payload, "node", "username") == "staff_1"
+    assert json_at(payload, "node", "lastLogin") is not None
 
 
 @pytest.mark.django_db
@@ -1060,7 +1124,7 @@ def test_login_and_me_skip_user_type_visibility(monkeypatch: pytest.MonkeyPatch)
     client = Client()
     payload = _login(client, "staff_1", TEST_USER_PASSWORD)
     assert payload["errors"] == []
-    assert payload["node"]["username"] == "staff_1"
+    assert json_at(payload, "node", "username") == "staff_1"
     assert _graphql_data(_ME, client=client)["me"] == {"username": "staff_1"}
 
 
@@ -1085,7 +1149,7 @@ def test_login_signal_failure_compensates_and_leaves_the_caller_anonymous() -> N
         auth_signals.user_logged_in.disconnect(_boom)
 
     assert payload.get("data") is None, payload
-    assert "login-signal boom" in payload["errors"][0]["message"], payload
+    assert "login-signal boom" in json_str(payload, "errors", 0, "message"), payload
     assert "sessionid" not in client.cookies
     assert not Session.objects.exists()
     assert _graphql_data(_ME, client=client)["me"] is None
@@ -1116,7 +1180,7 @@ def test_logout_signal_failure_is_an_error_and_keeps_the_durable_session() -> No
         auth_signals.user_logged_out.disconnect(_boom)
 
     assert payload.get("data") is None, payload
-    assert "logout-signal boom" in payload["errors"][0]["message"], payload
+    assert "logout-signal boom" in json_str(payload, "errors", 0, "message"), payload
     assert Session.objects.filter(session_key=key).exists()
     assert _graphql_data(_ME, client=client)["me"] == {"username": "staff_1"}
 
@@ -1132,16 +1196,16 @@ async def test_async_login_and_logout_round_trip_the_session() -> None:
         variables={"u": "staff_1", "p": TEST_USER_PASSWORD},
     )
     assert "errors" not in login_payload, login_payload
-    assert login_payload["data"]["login"]["node"]["username"] == "staff_1"
+    assert json_at(login_payload, "data", "login", "node", "username") == "staff_1"
     me_payload = await _post_async_shipped(_ME, client=client)
     assert "errors" not in me_payload, me_payload
-    assert me_payload["data"]["me"] == {"username": "staff_1"}
+    assert json_at(me_payload, "data", "me") == {"username": "staff_1"}
     logout_payload = await _post_async_shipped(_LOGOUT, client=client)
     assert "errors" not in logout_payload, logout_payload
-    assert logout_payload["data"]["logout"] == {"ok": True, "errors": []}
+    assert json_at(logout_payload, "data", "logout") == {"ok": True, "errors": []}
     after_logout = await _post_async_shipped(_ME, client=client)
     assert "errors" not in after_logout, after_logout
-    assert after_logout["data"]["me"] is None
+    assert json_at(after_logout, "data", "me") is None
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1159,9 +1223,9 @@ async def test_async_register_stores_only_the_hashed_password() -> None:
         },
     )
     assert "errors" not in payload, payload
-    result = payload["data"]["register"]
+    result = json_object(payload, "data", "register")
     assert result["errors"] == []
-    assert result["node"]["username"] == "async_reg_user"
+    assert json_at(result, "node", "username") == "async_reg_user"
     stored = await User.objects.aget(username="async_reg_user")
     assert _STRONG_PASSWORD not in stored.password
     assert stored.check_password(_STRONG_PASSWORD)
@@ -1186,7 +1250,7 @@ async def test_async_login_payload_exposes_the_post_login_last_login(
             variables={"u": "staff_1", "p": TEST_USER_PASSWORD},
         )
     assert "errors" not in payload, payload
-    node = payload["data"]["login"]["node"]
+    node = json_object(payload, "data", "login", "node")
     assert node["username"] == "staff_1"
     assert node["lastLogin"] is not None
 
@@ -1292,8 +1356,8 @@ def test_an_unplanned_relation_under_me_is_strictness_visible_over_http() -> Non
         client=client,
     )
     assert payload.get("errors"), payload
-    assert "Unplanned N+1: groups" in payload["errors"][0]["message"], payload
-    assert payload["errors"][0].get("path") == ["me", "groupsConnection"], payload
+    assert "Unplanned N+1: groups" in json_str(payload, "errors", 0, "message"), payload
+    assert json_object(payload, "errors", 0).get("path") == ["me", "groupsConnection"], payload
 
 
 @pytest.mark.django_db
@@ -1311,5 +1375,9 @@ def test_an_unplanned_relation_under_login_node_is_strictness_visible_over_http(
         variables={"u": "staff_1", "p": TEST_USER_PASSWORD},
     )
     assert payload.get("errors"), payload
-    assert "Unplanned N+1: groups" in payload["errors"][0]["message"], payload
-    assert payload["errors"][0].get("path") == ["login", "node", "groupsConnection"], payload
+    assert "Unplanned N+1: groups" in json_str(payload, "errors", 0, "message"), payload
+    assert json_object(payload, "errors", 0).get("path") == [
+        "login",
+        "node",
+        "groupsConnection",
+    ], payload

@@ -5,11 +5,20 @@ from io import StringIO
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.management import CommandError, call_command
+from graphql_client import is_json_object, read_attr
 from pytest_django import Settings
 
 from apps.products.management.commands import seed_shards as seed_shards_module
 from apps.products.models import Category, Item
 from apps.products.services import create_users, seed_data
+
+
+def _databases(settings: Settings) -> dict[str, object]:
+    """The ``DATABASES`` setting, checked to be a dict keyed by alias."""
+    databases = read_attr(settings, "DATABASES")
+    assert is_json_object(databases), databases
+    return databases
+
 
 User = get_user_model()
 
@@ -171,7 +180,7 @@ def test_seed_shards_command_raises_when_shard_alias_missing(settings: Settings)
     pytest-django's database-access guard would then reject for an
     undeclared `@pytest.mark.django_db(databases=...)`).
     """
-    settings.DATABASES = {"default": settings.DATABASES["default"]}
+    settings.DATABASES = {"default": _databases(settings)["default"]}
 
     out = StringIO()
     with pytest.raises(CommandError, match="shard_b"):
@@ -185,9 +194,10 @@ def test_seed_shards_command_runs_when_shard_alias_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When ``shard_b`` is present in DATABASES, the command runs end-to-end against ``default`` only."""
+    databases = _databases(settings)
     settings.DATABASES = {
-        **settings.DATABASES,
-        "shard_b": settings.DATABASES["default"],  # alias both to the same test DB
+        **databases,
+        "shard_b": databases["default"],  # alias both to the same test DB
     }
 
     # Patch SHARD_ALIASES so we only operate against ``default`` - pytest's transactional DB

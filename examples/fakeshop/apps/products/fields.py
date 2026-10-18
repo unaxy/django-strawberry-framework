@@ -69,8 +69,7 @@ class CategoryFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny
         """Computed field: '{id} - {name}'. Visible to all signed-in users."""
         user = _user(info)
         if user and user.is_authenticated:
-            # basedpyright: django-stubs types ``Model.pk`` as ``Any``
-            return f"{root.pk} - {root.name}"  # pyright: ignore[reportAny]
+            return f"{root.pk} - {root.name}"
         return None
 
     def resolve_created_date(
@@ -131,8 +130,7 @@ class ItemFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny]
         """Computed field: '{id} - {name}'. Visible to all signed-in users."""
         user = _user(info)
         if user and user.is_authenticated:
-            # basedpyright: django-stubs types ``Model.pk`` as ``Any``
-            return f"{root.pk} - {root.name}"  # pyright: ignore[reportAny]
+            return f"{root.pk} - {root.name}"
         return None
 
     def resolve_created_date(
@@ -182,8 +180,7 @@ class PropertyFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny
         """Computed field: '{id} - {name}'. Visible to all signed-in users."""
         user = _user(info)
         if user and user.is_authenticated:
-            # basedpyright: django-stubs types ``Model.pk`` as ``Any``
-            return f"{root.pk} - {root.name}"  # pyright: ignore[reportAny]
+            return f"{root.pk} - {root.name}"
         return None
 
     def resolve_created_date(
@@ -233,8 +230,7 @@ class EntryFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny]
         """Computed field: '{id} - {value}'. Visible to all signed-in users."""
         user = _user(info)
         if user and user.is_authenticated:
-            # basedpyright: django-stubs types ``Model.pk`` as ``Any``
-            return f"{root.pk} - {root.value}"  # pyright: ignore[reportAny]
+            return f"{root.pk} - {root.value}"
         return None
 
     def resolve_created_date(

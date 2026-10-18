@@ -52,19 +52,27 @@ from apps.products.serializers import (
 from apps.products.services import create_users, delete_data, seed_cascade_split, seed_data
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
-from django.conf import settings
 from django.contrib.auth.models import Permission, User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, transaction
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.signals import connection_created
 from django.db.models import QuerySet
+from django.db.models.fields.files import FieldFile
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    response_json,
+)
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _graphql_data
 from graphql_client import post_graphql as _post_graphql
@@ -84,10 +92,12 @@ from django_strawberry_framework.views import AsyncDjangoGraphQLView
 #: that has nothing to do with the row. Dropping the middleware is the deterministic
 #: form of that - the toolbar's own show-gate is memoized per process, so overriding
 #: its callback would not reliably take effect.
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
+
+
+def _read_all(handle: FieldFile) -> bytes:
+    """Every byte of an opened stored file, joined from its chunks."""
+    return b"".join(handle.chunks())
 
 
 def _staff_client() -> Client:
@@ -98,7 +108,8 @@ def _staff_client() -> Client:
     return client
 
 
-def _global_id(type_name: str, pk: int) -> str:
+def _global_id(type_name: str, pk: int | None) -> str:
+    assert pk is not None, "a GlobalID names a saved row"
     return str(relay.GlobalID(type_name=type_name, node_id=str(pk)))
 
 
@@ -119,7 +130,7 @@ def _login_with_perm(username: str, *codenames: str) -> Client:
     for codename in codenames:
         perm = Permission.objects.get(codename=codename, content_type__app_label="products")
         user.user_permissions.add(perm)
-    user = User.objects.get(pk=user.pk)  # drop the stale perm cache
+    user = User.objects.get(username=user.username)  # drop the stale perm cache
     client = Client()
     client.force_login(user)
     return client
@@ -198,9 +209,9 @@ def test_create_item_happy_path() -> None:
             },
         },
     )
-    result = data["createItem"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "LiveWidget", "category": {"name": category.name}}
+    result = json_at(data, "createItem")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "LiveWidget", "category": {"name": category.name}}
     created = models.Item.objects.get(name="LiveWidget", category=category)
     assert created.description == ""
     assert created.is_private is False
@@ -234,9 +245,12 @@ def test_create_item_private_row_is_refetched_for_its_author_but_stays_hidden_fr
             },
         },
     )
-    result = data["createItem"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "PrivateLiveWidget", "category": {"name": category.name}}
+    result = json_at(data, "createItem")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
+        "name": "PrivateLiveWidget",
+        "category": {"name": category.name},
+    }
     created = models.Item.objects.get(name="PrivateLiveWidget")
     assert created.is_private is True
 
@@ -245,7 +259,7 @@ def test_create_item_private_row_is_refetched_for_its_author_but_stays_hidden_fr
         "{ allItems { edges { node { name } } } }",
         client=client,
     )
-    names = [edge["node"]["name"] for edge in read["allItems"]["edges"]]
+    names = [json_at(edge, "node", "name") for edge in json_list(read, "allItems", "edges")]
     assert names, read
     assert "PrivateLiveWidget" not in names
 
@@ -278,9 +292,9 @@ def test_update_item_non_colliding_partial_update() -> None:
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "After"}},
     )
-    result = data["updateItem"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "After"}
+    result = json_at(data, "updateItem")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "After"}
     item.refresh_from_db()
     assert item.name == "After"
     # Unprovided fields untouched.
@@ -322,13 +336,13 @@ def test_update_item_omitting_attachment_leaves_stored_file_unchanged(tmp_path: 
                 "d": {"description": "kept-file-update"},
             },
         )
-        result = data["updateItem"]
-        assert result["errors"] == []
+        result = json_at(data, "updateItem")
+        assert json_at(result, "errors") == []
         item.refresh_from_db()
         assert item.description == "kept-file-update"
         assert item.attachment.name == stored_name
         with item.attachment.open("rb") as handle:
-            assert handle.read() == b"bytes that must survive"
+            assert _read_all(handle) == b"bytes that must survive"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -346,7 +360,7 @@ def test_update_item_with_new_upload_replaces_attachment(tmp_path: Path) -> None
     user.user_permissions.add(
         Permission.objects.get(codename="change_item", content_type__app_label="products"),
     )
-    user = User.objects.get(pk=user.pk)
+    user = User.objects.get(username=user.username)
 
     mutation = (
         "mutation($id: ID!, $d: ItemPartialInput!) { updateItem(id: $id, data: $d) { "
@@ -373,13 +387,13 @@ def test_update_item_with_new_upload_replaces_attachment(tmp_path: Path) -> None
             )
         assert res.response.status_code == 200
         assert res.data is not None
-        payload = res.data["updateItem"]
-        assert payload["errors"] == []
+        payload = json_at(res.data, "updateItem")
+        assert json_at(payload, "errors") == []
         item.refresh_from_db()
         assert item.attachment.name is not None
         assert item.attachment.name.endswith("replacement.txt")
         with item.attachment.open("rb") as handle:
-            assert handle.read() == b"replaced bytes"
+            assert _read_all(handle) == b"replaced bytes"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -399,14 +413,14 @@ def test_delete_item_happy_path() -> None:
     client = _login_with_perm("staff_1", "delete_item")
 
     data = _graphql_data(_DELETE_ITEM, client=client, variables={"id": gid})
-    result = data["deleteItem"]
-    assert result["errors"] == []
-    assert result["node"]["name"] == "Doomed"
-    assert result["node"]["category"] == {"name": category.name}
+    result = json_at(data, "deleteItem")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node", "name") == "Doomed"
+    assert json_at(result, "node", "category") == {"name": category.name}
     # The id is preserved for cache eviction: it decodes to the
     # ORIGINAL pk even though the row is gone - the deletion runs against the
     # located instance, so Django's delete()-nulls-pk never touches this snapshot.
-    assert relay.GlobalID.from_id(result["node"]["id"]).node_id == str(item.pk)
+    assert relay.GlobalID.from_id(json_str(result, "node", "id")).node_id == str(item.pk)
     assert not models.Item.objects.filter(pk=item.pk).exists()
 
 
@@ -448,9 +462,9 @@ def test_delete_item_refused_by_a_hold_returns_the_protected_envelope(reference:
         client=client,
         variables={"id": _global_id("products.item", held.pk)},
     )
-    result = data["deleteItem"]
-    assert result["node"] is None, result
-    assert result["errors"] == [
+    result = json_at(data, "deleteItem")
+    assert json_at(result, "node") is None, result
+    assert json_at(result, "errors") == [
         {
             "field": "__all__",
             "messages": ["Cannot delete: other rows reference this one and are protected."],
@@ -478,9 +492,11 @@ def test_create_item_hold_explicit_null_item_is_a_field_error() -> None:
         client=client,
         variables={"d": {"reason": "reserved", "itemId": None}},
     )
-    result = data["createItemHold"]
-    assert result["node"] is None, result
-    assert [(error["field"], error["codes"]) for error in result["errors"]] == [
+    result = json_at(data, "createItemHold")
+    assert json_at(result, "node") is None, result
+    assert [
+        (json_at(error, "field"), json_at(error, "codes")) for error in json_list(result, "errors")
+    ] == [
         ("itemId", ["null"]),
     ]
     assert not models.ItemHold.objects.exists()
@@ -526,13 +542,13 @@ def test_delete_item_snapshot_carries_connection_child_edges() -> None:
         client=client,
         variables={"id": _global_id("products.item", item.pk)},
     )
-    result = data["deleteItem"]
-    assert result["errors"] == []
-    assert result["node"]["name"] == "DoomedWithEntries"
-    assert [edge["node"]["value"] for edge in result["node"]["entriesConnection"]["edges"]] == [
-        "live-entry-0",
-        "live-entry-1",
-    ]
+    result = json_at(data, "deleteItem")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node", "name") == "DoomedWithEntries"
+    assert [
+        json_at(edge, "node", "value")
+        for edge in json_list(result, "node", "entriesConnection", "edges")
+    ] == ["live-entry-0", "live-entry-1"]
     # The row and its cascaded children are both gone: the edges above are the
     # pre-delete snapshot, not a post-delete read.
     assert not models.Item.objects.filter(pk=item.pk).exists()
@@ -558,9 +574,9 @@ def test_create_category_happy_path() -> None:
         client=client,
         variables={"d": {"name": "zzz_live_cat"}},
     )
-    result = data["createCategory"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "zzz_live_cat"}
+    result = json_at(data, "createCategory")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "zzz_live_cat"}
     assert models.Category.objects.filter(name="zzz_live_cat").exists()
 
 
@@ -592,11 +608,11 @@ def test_create_category_surrogate_in_unique_name_is_field_error_no_crash() -> N
         variables={"d": {"name": f"surrogate-{_LONE_SURROGATE}", "description": _LONE_SURROGATE}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createCategory"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["name"]
+    result = json_at(payload, "data", "createCategory")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     assert models.Category.objects.count() == before
 
 
@@ -617,11 +633,11 @@ def test_create_category_surrogate_in_nonunique_description_is_field_error_no_cr
         variables={"d": {"name": "surrogate-description-only", "description": _LONE_SURROGATE}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createCategory"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["description"]
+    result = json_at(payload, "data", "createCategory")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["description"]
     assert not models.Category.objects.filter(name="surrogate-description-only").exists()
 
 
@@ -646,11 +662,11 @@ def test_create_category_explicit_null_on_nonnullable_description_is_field_error
         variables={"d": {"name": "zzz_live_null_desc", "description": None}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createCategory"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["description"]
+    result = json_at(payload, "data", "createCategory")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["description"]
     assert models.Category.objects.count() == before
 
 
@@ -681,12 +697,12 @@ def test_create_item_unique_constraint_envelope_uses_all_sentinel() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["node"] is None
-    assert len(result["errors"]) == 1
-    assert result["errors"][0]["field"] == "__all__"
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "node") is None
+    assert len(json_list(result, "errors")) == 1
+    assert json_at(result, "errors", 0, "field") == "__all__"
     # No second row was written.
     assert models.Item.objects.filter(name="Dup", category=category).count() == 1
 
@@ -713,11 +729,11 @@ def test_create_item_empty_name_is_field_error_no_write() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["name"]
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     assert models.Item.objects.count() == before
 
 
@@ -740,23 +756,32 @@ def test_create_update_delete_item_argument_signatures_over_http() -> None:
         }
         """,
     )
-    by_name = {field["name"]: field["args"] for field in data["__type"]["fields"]}
+    by_name = {
+        json_at(field, "name"): json_at(field, "args")
+        for field in json_list(data, "__type", "fields")
+    }
 
-    create_args = {arg["name"]: arg["type"] for arg in by_name["createItem"]}
-    assert create_args["data"]["kind"] == "NON_NULL"
-    assert create_args["data"]["ofType"]["name"] == "ItemInput"
+    create_args = {
+        json_at(arg, "name"): json_at(arg, "type") for arg in json_list(by_name, "createItem")
+    }
+    assert json_at(create_args, "data", "kind") == "NON_NULL"
+    assert json_at(create_args, "data", "ofType", "name") == "ItemInput"
     assert set(create_args) == {"data"}
 
-    update_args = {arg["name"]: arg["type"] for arg in by_name["updateItem"]}
-    assert update_args["id"]["kind"] == "NON_NULL"
-    assert update_args["id"]["ofType"]["name"] == "ID"
-    assert update_args["data"]["kind"] == "NON_NULL"
-    assert update_args["data"]["ofType"]["name"] == "ItemPartialInput"
+    update_args = {
+        json_at(arg, "name"): json_at(arg, "type") for arg in json_list(by_name, "updateItem")
+    }
+    assert json_at(update_args, "id", "kind") == "NON_NULL"
+    assert json_at(update_args, "id", "ofType", "name") == "ID"
+    assert json_at(update_args, "data", "kind") == "NON_NULL"
+    assert json_at(update_args, "data", "ofType", "name") == "ItemPartialInput"
     assert set(update_args) == {"id", "data"}
 
-    delete_args = {arg["name"]: arg["type"] for arg in by_name["deleteItem"]}
-    assert delete_args["id"]["kind"] == "NON_NULL"
-    assert delete_args["id"]["ofType"]["name"] == "ID"
+    delete_args = {
+        json_at(arg, "name"): json_at(arg, "type") for arg in json_list(by_name, "deleteItem")
+    }
+    assert json_at(delete_args, "id", "kind") == "NON_NULL"
+    assert json_at(delete_args, "id", "ofType", "name") == "ID"
     assert set(delete_args) == {"id"}
 
 
@@ -784,12 +809,12 @@ def test_update_item_partial_collision_on_unique_constraint_changing_only_name()
         variables={"id": _global_id("products.item", item_a.pk), "d": {"name": "B"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["node"] is None
-    assert len(result["errors"]) == 1
-    assert result["errors"][0]["field"] == "__all__"
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert len(json_list(result, "errors")) == 1
+    assert json_at(result, "errors", 0, "field") == "__all__"
     item_a.refresh_from_db()
     assert item_a.name == "A"
 
@@ -818,13 +843,13 @@ def test_create_item_anonymous_is_denied_top_level_error_no_write() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
     # The denial RAISES on a non-null ``createItem(...): CreateItemPayload!`` field,
     # so GraphQL nulls the whole ``data`` - the authorization-failure surface, NOT a
     # ``FieldError`` envelope entry on a present payload.
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="AnonWidget").exists()
 
@@ -856,10 +881,10 @@ def test_create_item_missing_model_perm_is_denied_no_write() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="NoPermWidget").exists()
 
@@ -890,10 +915,10 @@ def test_update_item_missing_change_perm_is_denied_no_write() -> None:
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "Renamed"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
     item.refresh_from_db()
     assert item.name == "KeepMyName"
     assert item.description == "keep me"
@@ -922,10 +947,10 @@ def test_delete_item_missing_delete_perm_is_denied_no_write() -> None:
         variables={"id": _global_id("products.item", item.pk)},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
     assert models.Item.objects.filter(pk=item.pk, name="Undoomed").exists()
 
 
@@ -952,7 +977,7 @@ def test_create_item_login_bracket_via_test_client() -> None:
     user.user_permissions.add(
         Permission.objects.get(codename="add_item", content_type__app_label="products"),
     )
-    user = User.objects.get(pk=user.pk)  # drop the stale perm cache
+    user = User.objects.get(username=user.username)  # drop the stale perm cache
 
     client = TestClient()
 
@@ -960,23 +985,23 @@ def test_create_item_login_bracket_via_test_client() -> None:
     assert denied.response.status_code == 200  # GraphQL denials still ride HTTP 200
     assert denied.data is None
     assert denied.errors is not None
-    assert "message" in denied.errors[0]
-    assert "Not authorized" in denied.errors[0]["message"]
+    assert "message" in json_str(denied.errors, 0)
+    assert "Not authorized" in json_str(denied.errors, 0, "message")
     assert not models.Item.objects.filter(name="BracketWidget").exists()
 
     with client.login(user):
         granted = client.query(_CREATE_ITEM, variables=variables)
         assert granted.errors is None
         assert granted.data is not None
-        assert granted.data["createItem"]["errors"] == []
-        assert granted.data["createItem"]["node"]["name"] == "BracketWidget"
+        assert json_at(granted.data, "createItem", "errors") == []
+        assert json_at(granted.data, "createItem", "node", "name") == "BracketWidget"
     assert models.Item.objects.filter(name="BracketWidget", category=category).exists()
 
     denied_again = client.query(_CREATE_ITEM, variables=variables, assert_no_errors=False)
     assert denied_again.data is None
     assert denied_again.errors is not None
-    assert "message" in denied_again.errors[0]
-    assert "Not authorized" in denied_again.errors[0]["message"]
+    assert "message" in json_str(denied_again.errors, 0)
+    assert "Not authorized" in json_str(denied_again.errors, 0, "message")
 
 
 @pytest.mark.django_db
@@ -1006,7 +1031,7 @@ def test_operation_name_dispatch_via_test_client() -> None:
     assert res.response["Content-Type"].startswith("application/json")
     assert res.data is not None
     assert list(res.data.keys()) == ["allItems"]  # the named second op; the first never ran
-    assert len(res.data["allItems"]["edges"]) == 1
+    assert len(json_list(res.data, "allItems", "edges")) == 1
 
     unnamed = client.query(document, variables={"first": 1})
     assert unnamed.data is not None
@@ -1041,21 +1066,21 @@ def test_visibility_scoped_update_delete_hidden_private_row_is_not_found() -> No
         client=client,
         variables={"id": private_gid, "d": {"name": "Renamed"}},
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["id"]
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     chain["item_under_private"].refresh_from_db()
     assert chain["item_under_private"].name == seeded_name
 
     # Hidden private row: delete -> not-found FieldError on `id`, row still present.
     response = _post_graphql(_DELETE_ITEM, client=client, variables={"id": private_gid})
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["deleteItem"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["id"]
+    result = json_at(payload, "data", "deleteItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     assert models.Item.objects.filter(pk=chain["item_under_private"].pk).exists()
 
     # Contrast: the SAME write succeeds for the visible public row.
@@ -1064,11 +1089,11 @@ def test_visibility_scoped_update_delete_hidden_private_row_is_not_found() -> No
         client=client,
         variables={"id": public_gid, "d": {"name": "PublicRenamed"}},
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "PublicRenamed"}
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "PublicRenamed"}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1093,11 +1118,11 @@ def test_update_item_anonymous_on_hidden_private_row_is_not_found_before_any_aut
         variables={"id": _global_id("products.item", hidden.pk), "d": {"name": "Leaked"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["id"]
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     hidden.refresh_from_db()
     assert hidden.name == "SecretRow"
 
@@ -1125,12 +1150,12 @@ def test_create_item_wrong_type_global_id_on_category_id_is_field_error() -> Non
         variables={"d": {"name": "WrongTypeWidget", "categoryId": wrong_gid}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["node"] is None
-    assert len(result["errors"]) == 1
-    assert result["errors"][0]["field"] == "categoryId"
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "node") is None
+    assert len(json_list(result, "errors")) == 1
+    assert json_at(result, "errors", 0, "field") == "categoryId"
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="WrongTypeWidget").exists()
 
@@ -1155,11 +1180,11 @@ def test_create_item_unresolvable_type_category_id_is_field_error() -> None:
         variables={"d": {"name": "UnresolvableRel", "categoryId": bogus}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["node"] is None
-    assert result["errors"] == [
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors") == [
         {"field": "categoryId", "messages": ["Invalid id for relation 'categoryId'."]},
     ]
     assert models.Item.objects.count() == before
@@ -1192,12 +1217,12 @@ def test_update_item_wrong_type_global_id_on_id_is_field_error() -> None:
         variables={"id": wrong_gid, "d": {"name": "Renamed"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["node"] is None
-    assert len(result["errors"]) == 1
-    assert result["errors"][0]["field"] == "id"
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert len(json_list(result, "errors")) == 1
+    assert json_at(result, "errors", 0, "field") == "id"
     item.refresh_from_db()
     assert item.name == "Untouched"
 
@@ -1208,9 +1233,9 @@ def test_update_item_wrong_type_global_id_on_id_is_field_error() -> None:
         client=client,
         variables={"id": unresolvable_gid, "d": {"name": "Renamed"}},
     )
-    result = response.json()["data"]["updateItem"]
-    assert result["node"] is None
-    assert result["errors"][0]["field"] == "id"
+    result = json_at(response_json(response), "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors", 0, "field") == "id"
     item.refresh_from_db()
     assert item.name == "Untouched"
 
@@ -1233,12 +1258,12 @@ def test_delete_item_wrong_type_global_id_on_id_is_field_error() -> None:
     wrong_gid = _global_id("products.category", item.pk)
     response = _post_graphql(_DELETE_ITEM, client=client, variables={"id": wrong_gid})
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["deleteItem"]
-    assert result["node"] is None
-    assert len(result["errors"]) == 1
-    assert result["errors"][0]["field"] == "id"
+    result = json_at(payload, "data", "deleteItem")
+    assert json_at(result, "node") is None
+    assert len(json_list(result, "errors")) == 1
+    assert json_at(result, "errors", 0, "field") == "id"
     assert models.Item.objects.filter(pk=item.pk).exists()
 
 
@@ -1273,16 +1298,18 @@ def test_create_item_relation_id_for_hidden_category_is_field_error() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["node"] is None
-    hidden_errors = result["errors"]
-    assert [e["field"] for e in hidden_errors] == ["categoryId"]
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "node") is None
+    hidden_errors = json_list(result, "errors")
+    assert [json_at(e, "field") for e in hidden_errors] == ["categoryId"]
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="AttachHidden").exists()
 
-    missing_pk = (models.Category.objects.latest("pk").pk) + 10_000
+    latest_pk = models.Category.objects.latest("pk").pk
+    assert latest_pk is not None
+    missing_pk = latest_pk + 10_000
     missing = _post_graphql(
         _CREATE_ITEM,
         client=client,
@@ -1293,11 +1320,11 @@ def test_create_item_relation_id_for_hidden_category_is_field_error() -> None:
             },
         },
     )
-    missing_payload = missing.json()
+    missing_payload = response_json(missing)
     assert "errors" not in missing_payload, missing_payload
-    missing_result = missing_payload["data"]["createItem"]
-    assert missing_result["node"] is None
-    assert missing_result["errors"] == hidden_errors
+    missing_result = json_at(missing_payload, "data", "createItem")
+    assert json_at(missing_result, "node") is None
+    assert json_at(missing_result, "errors") == hidden_errors
     assert not models.Item.objects.filter(name="AttachMissing").exists()
 
     # Visible public category: the same caller's same create succeeds.
@@ -1311,11 +1338,11 @@ def test_create_item_relation_id_for_hidden_category_is_field_error() -> None:
             },
         },
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["errors"] == []
-    assert result["node"] == {
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
         "name": "AttachVisible",
         "category": {"name": chain["public_cat"].name},
     }
@@ -1342,11 +1369,11 @@ def test_update_item_explicit_null_category_id_is_field_error() -> None:
         variables={"id": _global_id("products.item", item.pk), "d": {"categoryId": None}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["node"] is None
-    assert result["errors"] == [
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors") == [
         {"field": "categoryId", "messages": ["This field cannot be null."], "codes": ["null"]},
     ]
     item.refresh_from_db()
@@ -1373,11 +1400,11 @@ def test_update_item_explicit_null_scalar_name_is_field_error() -> None:
         variables={"id": _global_id("products.item", item.pk), "d": {"name": None}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["node"] is None
-    assert result["errors"] == [
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors") == [
         {"field": "name", "messages": ["This field cannot be null."], "codes": ["null"]},
     ]
     item.refresh_from_db()
@@ -1406,11 +1433,11 @@ def test_update_item_malformed_id_is_field_error_no_coercion_crash() -> None:
             variables={"id": bad_id, "d": {"name": "Renamed"}},
         )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        result = payload["data"]["updateItem"]
-        assert result["node"] is None
-        assert [e["field"] for e in result["errors"]] == ["id"]
+        result = json_at(payload, "data", "updateItem")
+        assert json_at(result, "node") is None
+        assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
     assert item.name == "Untouched"
 
@@ -1435,10 +1462,10 @@ def test_create_item_malformed_category_id_is_top_level_coercion_error() -> None
         variables={"d": {"name": "Malformed", "categoryId": "not-a-valid-global-id"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     # Top-level GraphQL error (variable coercion), NOT an in-band FieldError envelope.
     assert payload.get("errors"), payload
-    assert payload["data"] is None
+    assert json_at(payload, "data") is None
     assert not models.Item.objects.filter(name="Malformed").exists()
 
 
@@ -1469,11 +1496,11 @@ def test_update_item_wellformed_id_uncoercible_node_id_is_not_found_no_crash() -
         variables={"id": bad_id, "d": {"name": "Renamed"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["id"]
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
     assert item.name == "Untouched"
 
@@ -1502,11 +1529,11 @@ def test_create_item_wellformed_relation_id_uncoercible_node_id_is_field_error_n
         variables={"d": {"name": "UncoercibleRel", "categoryId": bad_cat}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["categoryId"]
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryId"]
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="UncoercibleRel").exists()
 
@@ -1544,11 +1571,11 @@ def test_create_item_relation_id_absurd_huge_pk_is_field_error_no_overflow() -> 
         variables={"d": {"name": "HugePk", "categoryId": huge_cat}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["categoryId"]
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryId"]
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="HugePk").exists()
 
@@ -1576,11 +1603,11 @@ def test_update_item_id_absurd_huge_pk_is_not_found_no_overflow() -> None:
         variables={"id": huge_id, "d": {"name": "Renamed"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItem"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["id"]
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
     assert item.name == "Untouched"
 
@@ -1622,12 +1649,12 @@ def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
             },
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["errors"] == []
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "errors") == []
     # The relation renders WITHOUT an error (planned, not a broken / lazy FK).
-    assert result["node"] == {"name": "G2Widget", "category": {"name": category.name}}
+    assert json_at(result, "node") == {"name": "G2Widget", "category": {"name": category.name}}
 
     # Bounded count = 14, derived from a real run (stable across runs):
     #   BEGIN + COMMIT                                    = 2 (the DjangoSchema
@@ -1689,11 +1716,11 @@ def test_emitted_globalid_is_model_anchored() -> None:
         client=client,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    nodes = [edge["node"] for edge in payload["data"]["allItems"]["edges"]]
-    emitted = next(node for node in nodes if node["name"] == item.name)
-    parsed = relay.GlobalID.from_id(emitted["id"])
+    nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allItems", "edges")]
+    emitted = next(node for node in nodes if json_at(node, "name") == item.name)
+    parsed = relay.GlobalID.from_id(json_str(emitted, "id"))
     assert parsed.type_name == models.Item._meta.label_lower
     assert parsed.node_id == str(item.pk)
 
@@ -1720,11 +1747,13 @@ def test_globalid_filter_round_trip() -> None:
         client=client,
     )
     assert emit_response.status_code == 200
-    emit_payload = emit_response.json()
+    emit_payload = response_json(emit_response)
     assert "errors" not in emit_payload, emit_payload
-    emitted_nodes = [edge["node"] for edge in emit_payload["data"]["allItems"]["edges"]]
-    emitted = next(node for node in emitted_nodes if node["name"] == target.name)
-    emitted_id = emitted["id"]
+    emitted_nodes = [
+        json_at(edge, "node") for edge in json_list(emit_payload, "data", "allItems", "edges")
+    ]
+    emitted = next(node for node in emitted_nodes if json_at(node, "name") == target.name)
+    emitted_id = json_str(emitted, "id")
 
     _assert_graphql_data(
         f'query {{ allItems(filter: {{ id: {{ exact: "{emitted_id}" }} }}) '
@@ -1764,11 +1793,11 @@ def test_type_strategy_opt_out_reproduces_type_name(
             client=client,
         )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        nodes = [edge["node"] for edge in payload["data"]["allItems"]["edges"]]
-        emitted = next(node for node in nodes if node["name"] == item.name)
-        parsed = relay.GlobalID.from_id(emitted["id"])
+        nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allItems", "edges")]
+        emitted = next(node for node in nodes if json_at(node, "name") == item.name)
+        parsed = relay.GlobalID.from_id(json_str(emitted, "id"))
         assert parsed.type_name == "ItemType"
         assert parsed.node_id == str(item.pk)
 
@@ -1815,9 +1844,9 @@ def test_products_optimizer_merges_duplicate_root_field_nodes_over_http() -> Non
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"] == {"allItems": {"edges": expected}}
+    assert json_at(payload, "data") == {"allItems": {"edges": expected}}
     # One allItems slice (the merge) + one category Prefetch (the hook downgrade),
     # no COUNT, no inter-products JOIN.
     assert len(captured) == 2, [query["sql"] for query in captured]
@@ -1888,11 +1917,13 @@ def test_products_optimizer_prefetches_nested_reverse_fk_depth_2_over_http() -> 
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    categories = [edge["node"] for edge in payload["data"]["allCategories"]["edges"]]
-    items = [item for category in categories for item in category["items"]]
-    entries = [entry for item in items for entry in item["entries"]]
+    categories = [
+        json_at(edge, "node") for edge in json_list(payload, "data", "allCategories", "edges")
+    ]
+    items = [item for category in categories for item in json_list(category, "items")]
+    entries = [entry for item in items for entry in json_list(item, "entries")]
     assert len(categories) == visible_categories.count()
     assert len(items) == visible_items.count()
     assert len(entries) == visible_entries.count()
@@ -1992,9 +2023,9 @@ def test_products_optimizer_selects_nested_forward_fk_depth_2_over_http() -> Non
         )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"] == {"allEntries": {"edges": expected}}
+    assert json_at(payload, "data") == {"allEntries": {"edges": expected}}
     # Prefetch chain: entry slice + item prefetch + category prefetch, no COUNT.
     assert len(captured) == 3, [query["sql"] for query in captured]
     assert "products_entry" in captured[0]["sql"]
@@ -2044,13 +2075,13 @@ def test_all_items_dangling_forward_fk_is_the_non_null_completion_error_only() -
                     client=client,
                 )
             assert response.status_code == 200
-            payload = response.json()
-            assert len(payload["errors"]) == 1, payload
-            message = payload["errors"][0]["message"]
+            payload = response_json(response)
+            assert len(json_list(payload, "errors")) == 1, payload
+            message = json_str(payload, "errors", 0, "message")
             assert message == "Cannot return null for non-nullable field ItemType.category."
             assert "DoesNotExist" not in message
             assert "AttributeError" not in message
-            assert payload["data"] is None
+            assert json_at(payload, "data") is None
         finally:
             # Remove every row whose FK now dangles off the deleted category, children
             # before parents, BEFORE constraint checks come back on so the fixture
@@ -2083,10 +2114,10 @@ def test_products_categories_filter_by_name_denied_for_anonymous() -> None:
         f"query {{ allCategories(filter: {{ name: {{ exact: {json.dumps(category.name)} }} }}) "
         "{ edges { node { name } } } }",
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert payload["data"] is None, payload
-    assert "staff user" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None, payload
+    assert "staff user" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -2105,10 +2136,10 @@ def test_products_categories_name_permission_fires_for_non_exact_lookup() -> Non
         f"query {{ allCategories(filter: {{ name: {{ iContains: {json.dumps(category.name[:2])} }} }}) "
         "{ edges { node { name } } } }",
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert payload["data"] is None, payload
-    assert "staff user" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None, payload
+    assert "staff user" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -2120,10 +2151,10 @@ def test_products_items_related_category_name_permission_fires_for_anonymous() -
         f"query {{ allItems(filter: {{ category: {{ name: {{ exact: {json.dumps(category.name)} }} }} }}) "
         "{ edges { node { name } } } }",
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert payload["data"] is None, payload
-    assert "staff user" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None, payload
+    assert "staff user" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -2143,10 +2174,10 @@ def test_products_items_flat_category_name_permission_fires_for_anonymous() -> N
         f"query {{ allItems(filter: {{ categoryName: {{ exact: {json.dumps(category.name)} }} }}) "
         "{ edges { node { name } } } }",
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert payload["data"] is None, payload
-    assert "staff user" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None, payload
+    assert "staff user" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -2168,10 +2199,10 @@ def test_products_items_deep_flat_category_name_permission_fires_for_anonymous()
         f"{{ exact: {json.dumps(category.name)} }} }}) "
         "{ edges { node { name } } } }",
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert payload["data"] is None, payload
-    assert "staff user" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None, payload
+    assert "staff user" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -2299,23 +2330,21 @@ def test_products_entries_flat_property_leaf_stays_inside_the_explicit_queryset(
         f"query {{ allEntries(filter: {filter_input}) {{ edges {{ node {{ id }} }} }} }}",
         client=_staff_client() if staff else None,
     )
-    payload = response.json()
+    payload = response_json(response)
 
     if row.staff_only and not staff:
-        assert payload["data"] is None, payload
-        assert "staff user" in payload["errors"][0]["message"]
+        assert json_at(payload, "data") is None, payload
+        assert "staff user" in json_str(payload, "errors", 0, "message")
         return
     visible = models.Entry.objects.all() if staff else _entries_visible_to_anonymous()
     reached_by_path = visible.filter(**{row.path: value})
     assert reached_by_path.filter(property__name=_SECRET_PROPERTY_NAME).exists()
     expected = [
-        {"node": {"id": _global_id("products.entry", pk)}}
-        for pk in reached_by_path.exclude(property__name=_SECRET_PROPERTY_NAME)
-        .order_by("pk")
-        .values_list("pk", flat=True)
+        {"node": {"id": _global_id("products.entry", entry.pk)}}
+        for entry in reached_by_path.exclude(property__name=_SECRET_PROPERTY_NAME).order_by("pk")
     ]
     assert "errors" not in payload, payload
-    assert payload["data"]["allEntries"]["edges"] == expected
+    assert json_at(payload, "data", "allEntries", "edges") == expected
 
 
 def _items_visible_to_anonymous() -> QuerySet[models.Item]:
@@ -2365,9 +2394,11 @@ def _item_ids(filter_input: str, *, staff: bool) -> list[str]:
         f"query {{ allItems(filter: {filter_input}) {{ edges {{ node {{ id }} }} }} }}",
         client=_staff_client() if staff else None,
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    return [edge["node"]["id"] for edge in payload["data"]["allItems"]["edges"]]
+    return [
+        json_str(edge, "node", "id") for edge in json_list(payload, "data", "allItems", "edges")
+    ]
 
 
 @pytest.mark.django_db
@@ -2396,10 +2427,7 @@ def test_products_items_entries_key_isnull_answers_over_the_entries_the_viewer_s
 
     ids = _item_ids(f"{{ entriesId: {{ isNull: {json.dumps(is_null)} }} }}", staff=staff)
 
-    assert ids == [
-        _global_id("products.item", pk)
-        for pk in expected.order_by("pk").values_list("pk", flat=True)
-    ]
+    assert ids == [_global_id("products.item", item.pk) for item in expected.order_by("pk")]
     no_entries = _global_id("products.item", graph.no_entries.pk)
     hidden_entries = _global_id("products.item", graph.hidden_entries.pk)
     assert (no_entries in ids) is is_null
@@ -2480,9 +2508,9 @@ def test_products_entries_property_key_reads_the_explicit_queryset(
         client=_staff_client() if viewer == "staff" else None,
     )
 
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["allEntries"]["edges"] == [
+    assert json_at(payload, "data", "allEntries", "edges") == [
         {"node": {"id": _global_id("products.entry", entries[name].pk)}} for name in names
     ]
 
@@ -2618,9 +2646,9 @@ def _category_filter_input_field_names() -> set[str]:
         }
         """,
     )
-    published = data["__type"]
+    published = json_at(data, "__type")
     assert published is not None
-    return {field["name"] for field in published["inputFields"]}
+    return {json_str(field, "name") for field in json_list(published, "inputFields")}
 
 
 def test_hide_flat_filters_keeps_explicit_non_relatedfilter_flat_on_category_input(
@@ -2651,10 +2679,8 @@ def test_products_categories_filter_by_starts_with_via_all_lookups() -> None:
     seed_data(1)
     prefix = models.Category.objects.earliest("id").name[:2]
     expected = [
-        {"node": {"name": name}}
-        for name in models.Category.objects.filter(name__startswith=prefix)
-        .order_by("id")
-        .values_list("name", flat=True)
+        {"node": {"name": row.name}}
+        for row in models.Category.objects.filter(name__startswith=prefix).order_by("id")
     ]
     _assert_graphql_data(
         f'query {{ allCategories(filter: {{ name: {{ startsWith: "{prefix}" }} }}) '
@@ -2680,10 +2706,8 @@ def test_products_items_filter_by_related_category_global_id() -> None:
         relay.GlobalID(type_name=models.Category._meta.label_lower, node_id=str(category.pk)),
     )
     expected = [
-        {"node": {"name": name}}
-        for name in models.Item.objects.filter(category=category, is_private=False)
-        .order_by("id")
-        .values_list("name", flat=True)
+        {"node": {"name": row.name}}
+        for row in models.Item.objects.filter(category=category, is_private=False).order_by("id")
     ]
     _assert_graphql_data(
         f'query {{ allItems(filter: {{ category: {{ id: {{ exact: "{gid}" }} }} }}) '
@@ -2712,10 +2736,11 @@ def test_products_items_order_by_name_asc() -> None:
     """
     seed_data(1)
     expected = [
-        {"node": {"name": name}}
-        for name in models.Item.objects.filter(is_private=False, category__is_private=False)
-        .order_by("name")
-        .values_list("name", flat=True)
+        {"node": {"name": row.name}}
+        for row in models.Item.objects.filter(
+            is_private=False,
+            category__is_private=False,
+        ).order_by("name")
     ]
     _assert_graphql_data(
         "query { allItems(orderBy: [{ name: ASC }]) { edges { node { name } } } }",
@@ -2733,10 +2758,11 @@ def test_products_items_order_by_name_desc() -> None:
     """
     seed_data(1)
     expected = [
-        {"node": {"name": name}}
-        for name in models.Item.objects.filter(is_private=False, category__is_private=False)
-        .order_by("-name")
-        .values_list("name", flat=True)
+        {"node": {"name": row.name}}
+        for row in models.Item.objects.filter(
+            is_private=False,
+            category__is_private=False,
+        ).order_by("-name")
     ]
     _assert_graphql_data(
         "query { allItems(orderBy: [{ name: DESC }]) { edges { node { name } } } }",
@@ -2756,10 +2782,10 @@ def test_products_categories_order_by_name_denied_for_anonymous() -> None:
     response = _post_graphql(
         "query { allCategories(orderBy: [{ name: ASC }]) { edges { node { name } } } }",
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert payload["data"] is None, payload
-    assert "staff user" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None, payload
+    assert "staff user" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -2767,8 +2793,7 @@ def test_products_categories_order_by_name_as_staff() -> None:
     """A staff user clears the order-by-name gate and gets categories sorted by name."""
     seed_data(1)
     expected = [
-        {"node": {"name": name}}
-        for name in models.Category.objects.order_by("name").values_list("name", flat=True)
+        {"node": {"name": category.name}} for category in models.Category.objects.order_by("name")
     ]
     _assert_graphql_data(
         "query { allCategories(orderBy: [{ name: ASC }]) { edges { node { name } } } }",
@@ -2790,10 +2815,10 @@ def test_products_items_order_by_related_category_name_denied_for_anonymous() ->
         }
         """,
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert payload["data"] is None, payload
-    assert "staff user" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None, payload
+    assert "staff user" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -2843,10 +2868,8 @@ def test_products_items_filter_and_order_compose() -> None:
         relay.GlobalID(type_name=models.Category._meta.label_lower, node_id=str(category.pk)),
     )
     expected = [
-        {"node": {"name": name}}
-        for name in models.Item.objects.filter(category=category, is_private=False)
-        .order_by("name")
-        .values_list("name", flat=True)
+        {"node": {"name": row.name}}
+        for row in models.Item.objects.filter(category=category, is_private=False).order_by("name")
     ]
     _assert_graphql_data(
         f'query {{ allItems(filter: {{ category: {{ id: {{ exact: "{gid}" }} }} }}, '
@@ -2923,15 +2946,17 @@ def test_products_categories_items_connection_fixed_query_count() -> None:
         with CaptureQueriesContext(connection) as captured:
             response = _post_graphql(_CATEGORIES_ITEMS_CONNECTION_QUERY)
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        edges = payload["data"]["allCategories"]["edges"]
+        edges = json_list(payload, "data", "allCategories", "edges")
         # Each category node's itemsConnection is its OWN windowed page: every
         # returned item belongs to that category and the page honours first: 2.
         for edge in edges:
-            node = edge["node"]
-            category = models.Category.objects.get(name=node["name"])
-            item_names = {ie["node"]["name"] for ie in node["itemsConnection"]["edges"]}
+            node = json_at(edge, "node")
+            category = models.Category.objects.get(name=json_at(node, "name"))
+            item_names = {
+                json_at(ie, "node", "name") for ie in json_list(node, "itemsConnection", "edges")
+            }
             assert len(item_names) <= 2
             assert item_names <= set(
                 category.items.values_list("name", flat=True),
@@ -2977,8 +3002,12 @@ query($after: String, $before: String, $first: Int, $last: Int) {
 def _items_connection_page(category_name: str, variables: dict[str, object]) -> JSONObject:
     """Return one seeded category's ``itemsConnection`` page over live /graphql."""
     data = _graphql_data(_ITEMS_CONNECTION_WINDOW_QUERY, variables=variables)
-    nodes = [edge["node"] for edge in data["allCategories"]["edges"]]
-    return next(node["itemsConnection"] for node in nodes if node["name"] == category_name)
+    nodes = [json_at(edge, "node") for edge in json_list(data, "allCategories", "edges")]
+    return next(
+        json_object(node, "itemsConnection")
+        for node in nodes
+        if json_at(node, "name") == category_name
+    )
 
 
 @pytest.mark.django_db
@@ -3004,7 +3033,7 @@ def test_products_items_connection_inverted_after_before_window_is_empty() -> No
 
     # Capture the REAL positional cursors (index -> cursor) from a full page.
     full = _items_connection_page(category.name, {"first": 100})
-    cursors = [edge["cursor"] for edge in full["edges"]]
+    cursors = [json_at(edge, "cursor") for edge in json_list(full, "edges")]
     assert len(cursors) == 6, full
 
     # Inverted range: ``after`` the 4th row (index 3), ``before`` the 3rd (index 2).
@@ -3012,8 +3041,8 @@ def test_products_items_connection_inverted_after_before_window_is_empty() -> No
         category.name,
         {"after": cursors[3], "before": cursors[2]},
     )
-    assert inverted["edges"] == []
-    assert inverted["pageInfo"] == {
+    assert json_at(inverted, "edges") == []
+    assert json_at(inverted, "pageInfo") == {
         "hasNextPage": False,
         "hasPreviousPage": True,  # start (=4) > 0
         "startCursor": None,
@@ -3025,9 +3054,9 @@ def test_products_items_connection_inverted_after_before_window_is_empty() -> No
         category.name,
         {"after": cursors[3], "before": cursors[2], "last": 2},
     )
-    assert inverted_last["edges"] == []
-    assert inverted_last["pageInfo"]["hasNextPage"] is False
-    assert inverted_last["pageInfo"]["hasPreviousPage"] is True
+    assert json_at(inverted_last, "edges") == []
+    assert json_at(inverted_last, "pageInfo", "hasNextPage") is False
+    assert json_at(inverted_last, "pageInfo", "hasPreviousPage") is True
 
     # A NON-inverted ``before``-capped window still windows correctly (guards the
     # fix against over-rejecting): ``after`` index 1, ``before`` index 4 -> the
@@ -3036,9 +3065,11 @@ def test_products_items_connection_inverted_after_before_window_is_empty() -> No
         category.name,
         {"after": cursors[1], "before": cursors[4]},
     )
-    assert [edge["node"]["name"] for edge in middle["edges"]] == expected_names[2:4]
-    assert middle["pageInfo"]["hasPreviousPage"] is True
-    assert middle["pageInfo"]["hasNextPage"] is True
+    assert [
+        json_at(edge, "node", "name") for edge in json_list(middle, "edges")
+    ] == expected_names[2:4]
+    assert json_at(middle, "pageInfo", "hasPreviousPage") is True
+    assert json_at(middle, "pageInfo", "hasNextPage") is True
 
 
 @pytest.mark.django_db
@@ -3066,9 +3097,9 @@ def test_products_items_connection_negative_cursor_is_a_cursor_error(
         _ITEMS_CONNECTION_WINDOW_QUERY,
         variables=variables,
     )
-    payload = response.json()
+    payload = response_json(response)
     assert response.status_code == 200
-    assert {error["message"] for error in payload["errors"]} == {
+    assert {json_at(error, "message") for error in json_list(payload, "errors")} == {
         f"Argument '{argument}' contains a non-existing value.",
     }
 
@@ -3127,11 +3158,11 @@ def test_cascade_anonymous_sees_no_entries_under_private_categories() -> None:
         """,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    nodes = [edge["node"] for edge in payload["data"]["allEntries"]["edges"]]
-    category_names = {node["item"]["category"]["name"] for node in nodes}
-    values = {node["value"] for node in nodes}
+    nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allEntries", "edges")]
+    category_names = {json_at(node, "item", "category", "name") for node in nodes}
+    values = {json_at(node, "value") for node in nodes}
     # The cascade hides the entry whose item's category is private...
     assert chain["private_cat"].name not in category_names
     assert chain["entry_under_private"].value not in values
@@ -3165,12 +3196,12 @@ def test_cascade_view_item_user_respects_category_visibility() -> None:
         client=client,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     # No RelatedObjectDoesNotExist on the non-null `category` selection.
     assert "errors" not in payload, payload
-    nodes = [edge["node"] for edge in payload["data"]["allItems"]["edges"]]
-    item_names = {node["name"] for node in nodes}
-    category_names = {node["category"]["name"] for node in nodes}
+    nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allItems", "edges")]
+    item_names = {json_at(node, "name") for node in nodes}
+    category_names = {json_at(node, "category", "name") for node in nodes}
     # The Item under the private category is dropped (not surfaced with a broken FK)...
     assert chain["item_under_private"].name not in item_names
     assert chain["private_cat"].name not in category_names
@@ -3204,12 +3235,12 @@ def test_cascade_view_entry_user_nested_selection_drops_hidden_targets() -> None
         client=client,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     # The nested non-null FK selection does not error.
     assert "errors" not in payload, payload
-    nodes = [edge["node"] for edge in payload["data"]["allEntries"]["edges"]]
-    values = {node["value"] for node in nodes}
-    category_names = {node["item"]["category"]["name"] for node in nodes}
+    nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allEntries", "edges")]
+    values = {json_at(node, "value") for node in nodes}
+    category_names = {json_at(node, "item", "category", "name") for node in nodes}
     # Entry under the private category is dropped...
     assert chain["entry_under_private"].value not in values
     assert chain["private_cat"].name not in category_names
@@ -3261,8 +3292,8 @@ def _cascade_page_gids(model: _CascadeModel) -> list[str]:
     coupling lives -- rather than in the callers.
     """
     return [
-        _global_id(model._meta.label_lower, pk)
-        for pk in model.objects.order_by("pk").values_list("pk", flat=True)[:_RELAY_MAX_RESULTS]
+        _global_id(model._meta.label_lower, row.pk)
+        for row in model.objects.order_by("pk")[:_RELAY_MAX_RESULTS]
     ]
 
 
@@ -3294,13 +3325,13 @@ def test_cascade_staff_sees_everything(
         client=client,
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
 
     # There must BE rows the cascade would hide, or the equality below is
     # satisfied by a queryset the cascade never had anything to narrow.
     assert model.objects.filter(is_private=True).exists(), field
-    returned = [edge["node"]["id"] for edge in payload["data"][field]["edges"]]
+    returned = [json_at(edge, "node", "id") for edge in json_list(payload, "data", field, "edges")]
     expected = _cascade_page_gids(model)
     assert returned == expected, (field, len(returned), len(expected))
 
@@ -3340,9 +3371,11 @@ def test_cascade_staff_sees_private_rows_hidden_from_non_staff(
             client=client,
         )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        return [edge["node"]["id"] for edge in payload["data"][field]["edges"]]
+        return [
+            json_str(edge, "node", "id") for edge in json_list(payload, "data", field, "edges")
+        ]
 
     staff_ids = node_ids(_login("staff_1"))
     anonymous_ids = node_ids(None)
@@ -3379,7 +3412,7 @@ def test_cascade_query_count_fixed() -> None:
             "query { allEntries { edges { node { value item { name category { name } } } } } }",
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
 
     # One SELECT per products table: entry slice + item prefetch + category
@@ -3431,10 +3464,10 @@ def test_cascade_composes_with_filter_and_order_live() -> None:
     gated = _post_graphql(
         "query { allCategories(orderBy: [{ name: ASC }]) { edges { node { name } } } }",
     )
-    gated_payload = gated.json()
+    gated_payload = response_json(gated)
     assert "errors" in gated_payload, gated_payload
-    assert gated_payload["data"] is None, gated_payload
-    assert "staff user" in gated_payload["errors"][0]["message"]
+    assert json_at(gated_payload, "data") is None, gated_payload
+    assert "staff user" in json_str(gated_payload, "errors", 0, "message")
 
     # (b) anonymous filter (no gate on `id`) + order (no gate on Item.name) on top
     # of the cascade-narrowed set: the public category's non-private items, ordered
@@ -3444,10 +3477,8 @@ def test_cascade_composes_with_filter_and_order_live() -> None:
         relay.GlobalID(type_name=models.Category._meta.label_lower, node_id=str(category.pk)),
     )
     expected = [
-        {"node": {"name": name}}
-        for name in models.Item.objects.filter(category=category, is_private=False)
-        .order_by("name")
-        .values_list("name", flat=True)
+        {"node": {"name": row.name}}
+        for row in models.Item.objects.filter(category=category, is_private=False).order_by("name")
     ]
     _assert_graphql_data(
         f'query {{ allItems(filter: {{ category: {{ id: {{ exact: "{gid}" }} }} }}, '
@@ -3630,7 +3661,7 @@ def test_post_multibyte_utf8_json_body_round_trips_the_non_ascii_value() -> None
     response = _post_graphql_raw(body, client=client)
 
     assert response.status_code == 200
-    assert response.json()["data"]["createCategory"] == {
+    assert json_at(response_json(response), "data", "createCategory") == {
         "node": {"name": _MULTIBYTE_CATEGORY_NAME},
         "errors": [],
     }
@@ -3709,9 +3740,9 @@ def test_get_query_with_null_param_executes_like_upstream(param: str) -> None:
     response = client.get("/graphql/", {"query": "{ __typename }", param: "null"})
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"] == {"__typename": "Query"}
+    assert json_at(payload, "data") == {"__typename": "Query"}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -3730,9 +3761,9 @@ def test_get_query_with_object_variables_executes_like_upstream() -> None:
     response = client.get("/graphql/", {"query": "{ __typename }", "variables": '{"n": 1}'})
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"] == {"__typename": "Query"}
+    assert json_at(payload, "data") == {"__typename": "Query"}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -3879,11 +3910,11 @@ def test_create_item_via_form_happy_path() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "FormWidget", "category": {"name": category.name}}
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "FormWidget", "category": {"name": category.name}}
     created = models.Item.objects.get(name="FormWidget", category=category)
     assert created.description == ""
 
@@ -3913,10 +3944,10 @@ def test_create_item_via_form_category_id_writes_through_form_category_field() -
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["errors"] == []
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "errors") == []
     created = models.Item.objects.get(name="ReverseMapWidget")
     # The FK was written through the form's `category` field from the `categoryId` arg.
     assert created.category_id == category.pk
@@ -3951,11 +3982,11 @@ def test_create_item_via_form_surrogate_in_constraint_name_is_field_error_no_cra
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["name"]
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     assert models.Item.objects.count() == before
 
 
@@ -3985,11 +4016,11 @@ def test_create_item_via_form_surrogate_in_description_is_field_error_no_crash()
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["description"]
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["description"]
     assert models.Item.objects.count() == before
 
 
@@ -4031,11 +4062,11 @@ def test_update_item_via_form_non_colliding_partial_update() -> None:
     ]
     assert len([s for s in category_selects if "select 1" not in s.lower()]) == 1, sql
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "AfterForm"}
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "AfterForm"}
     item.refresh_from_db()
     assert item.name == "AfterForm"
     assert item.description == "keep me"
@@ -4069,10 +4100,10 @@ def test_update_item_via_form_partial_update_preserves_category_and_description(
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "PreserveAfter"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["errors"] == []
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "errors") == []
     item.refresh_from_db()
     assert item.name == "PreserveAfter"
     # The unprovided FK + scalar are reconstructed (not dropped) - the partial-update preservation.
@@ -4123,9 +4154,9 @@ def test_update_item_via_form_refuses_an_omitted_dangling_category() -> None:
             models.Property.objects.filter(category_id=category.pk).delete()
             models.Item.objects.filter(category_id=category.pk).delete()
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    assert payload["data"]["updateItemViaForm"] == {
+    assert json_at(payload, "data", "updateItemViaForm") == {
         "node": None,
         "errors": [
             {
@@ -4169,14 +4200,14 @@ def test_update_item_via_form_revalidates_an_untouched_stale_name() -> None:
         variables={"id": gid, "d": {"description": "Blocked"}},
     )
     assert blocked.status_code == 200
-    payload = blocked.json()
+    payload = response_json(blocked)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["name"]
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     # `clean_name`'s own rejection, not a "this field is required" from an empty
     # bound field: the stored value really was put back and run through the form.
-    assert result["errors"][0]["messages"] == ["This name is not allowed."]
+    assert json_at(result, "errors", 0, "messages") == ["This name is not allowed."]
     item.refresh_from_db()
     assert item.name == REJECTED_ITEM_NAME
     assert item.description == "Before"
@@ -4186,11 +4217,11 @@ def test_update_item_via_form_revalidates_an_untouched_stale_name() -> None:
         client=client,
         variables={"id": gid, "d": {"name": "RepairedName", "description": "After"}},
     )
-    payload = repaired.json()
+    payload = response_json(repaired)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "RepairedName"}
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "RepairedName"}
     item.refresh_from_db()
     assert item.name == "RepairedName"
     assert item.description == "After"
@@ -4221,11 +4252,11 @@ def test_update_item_via_form_explicit_null_category_id_is_the_form_required_err
         variables={"id": _global_id("products.item", item.pk), "d": {"categoryId": None}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["node"] is None
-    assert result["errors"] == [
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors") == [
         {
             "field": "categoryId",
             "path": ["categoryId"],
@@ -4262,12 +4293,12 @@ def test_update_item_via_form_partial_collision_fires_unique_constraint_on_name_
         variables={"id": _global_id("products.item", item_a.pk), "d": {"name": "FormB"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["node"] is None
-    assert len(result["errors"]) == 1
-    assert result["errors"][0]["field"] == "__all__"
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "node") is None
+    assert len(json_list(result, "errors")) == 1
+    assert json_at(result, "errors", 0, "field") == "__all__"
     item_a.refresh_from_db()
     assert item_a.name == "FormA"
 
@@ -4297,12 +4328,12 @@ def test_create_item_via_form_clean_field_error_is_field_keyed() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["name"]
-    assert result["errors"][0]["messages"]
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
+    assert json_at(result, "errors", 0, "messages")
     assert models.Item.objects.count() == before
 
 
@@ -4328,9 +4359,9 @@ def test_create_item_via_form_omitted_required_name_is_a_coercion_error_no_write
         variables={"d": {"categoryId": _global_id("products.category", category.pk)}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
-    assert "name" in payload["errors"][0]["message"]
+    assert "name" in json_str(payload, "errors", 0, "message")
     assert payload.get("data") is None
     assert models.Item.objects.count() == before
 
@@ -4362,12 +4393,12 @@ def test_create_item_via_form_unique_constraint_envelope_uses_all_sentinel() -> 
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["node"] is None
-    assert len(result["errors"]) == 1
-    assert result["errors"][0]["field"] == "__all__"
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "node") is None
+    assert len(json_list(result, "errors")) == 1
+    assert json_at(result, "errors", 0, "field") == "__all__"
     assert models.Item.objects.filter(name="FormDup", category=category).count() == 1
 
 
@@ -4396,10 +4427,10 @@ def test_create_item_via_form_anonymous_is_denied_top_level_error_no_write() -> 
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="AnonFormWidget").exists()
 
@@ -4430,10 +4461,10 @@ def test_create_item_via_form_missing_model_perm_is_denied_no_write() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="NoPermFormWidget").exists()
 
@@ -4464,11 +4495,11 @@ def test_update_item_via_form_visibility_scoped_hidden_private_row_is_not_found(
         client=client,
         variables={"id": private_gid, "d": {"name": "RenamedHidden"}},
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["id"]
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     chain["item_under_private"].refresh_from_db()
     assert chain["item_under_private"].name == seeded_name
 
@@ -4478,11 +4509,11 @@ def test_update_item_via_form_visibility_scoped_hidden_private_row_is_not_found(
         client=client,
         variables={"id": public_gid, "d": {"name": "RenamedPublicForm"}},
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "RenamedPublicForm"}
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "RenamedPublicForm"}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4518,11 +4549,11 @@ def test_create_item_via_form_relation_id_for_hidden_category_is_field_error() -
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["categoryId"]
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryId"]
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="AttachHiddenForm").exists()
 
@@ -4537,11 +4568,11 @@ def test_create_item_via_form_relation_id_for_hidden_category_is_field_error() -
             },
         },
     )
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["errors"] == []
-    assert result["node"] == {
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
         "name": "AttachVisibleForm",
         "category": {"name": chain["public_cat"].name},
     }
@@ -4574,12 +4605,14 @@ def test_create_item_via_form_authorize_before_decode_anonymous_gets_auth_denial
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
     # No in-band relation FieldError leaked alongside the denial.
-    assert all("categoryId" not in error["message"] for error in payload["errors"])
+    assert all(
+        "categoryId" not in json_str(error, "message") for error in json_list(payload, "errors")
+    )
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="AnonProbeForm").exists()
 
@@ -4606,7 +4639,7 @@ def test_create_item_with_file_via_form_multipart_upload_over_http(tmp_path: Pat
     user.user_permissions.add(
         Permission.objects.get(codename="add_item", content_type__app_label="products"),
     )
-    user = User.objects.get(pk=user.pk)  # drop the stale perm cache
+    user = User.objects.get(username=user.username)  # drop the stale perm cache
 
     mutation = (
         "mutation($d: ItemFileModelFormInput!) { createItemWithFileViaForm(data: $d) { "
@@ -4645,11 +4678,11 @@ def test_create_item_with_file_via_form_multipart_upload_over_http(tmp_path: Pat
             },
         )
         assert response.status_code == 200
-        body = response.json()
+        body = response_json(response)
         assert "errors" not in body, body
-        result = body["data"]["createItemWithFileViaForm"]
-        assert result["errors"] == []
-        assert result["node"] == {"name": "UploadedFormWidget"}
+        result = json_at(body, "data", "createItemWithFileViaForm")
+        assert json_at(result, "errors") == []
+        assert json_at(result, "node") == {"name": "UploadedFormWidget"}
 
         # The row landed with the file routed into `files=` (the data=/files= split).
         created = models.Item.objects.get(name="UploadedFormWidget")
@@ -4658,7 +4691,7 @@ def test_create_item_with_file_via_form_multipart_upload_over_http(tmp_path: Pat
         # Read + close the handle so the suite's `-W error` does not catch a leaked
         # file finalizer (the FieldFile leaves the underlying file open after read()).
         with created.attachment.open("rb") as handle:
-            assert handle.read() == b"form upload bytes"
+            assert _read_all(handle) == b"form upload bytes"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4709,10 +4742,10 @@ def test_update_item_with_file_via_form_omitting_the_file_preserves_it(tmp_path:
             },
         )
         assert response.status_code == 200
-        created_payload = response.json()
+        created_payload = response_json(response)
         assert "errors" not in created_payload, created_payload
-        created_result = created_payload["data"]["createItemWithFileViaForm"]
-        assert created_result["errors"] == []
+        created_result = json_at(created_payload, "data", "createItemWithFileViaForm")
+        assert json_at(created_result, "errors") == []
         created = models.Item.objects.get(name="PreservedFormWidget")
         stored_name = created.attachment.name
         assert stored_name is not None
@@ -4724,16 +4757,16 @@ def test_update_item_with_file_via_form_omitting_the_file_preserves_it(tmp_path:
             "node { name } errors { field messages } } }",
             client=client,
             variables={
-                "id": created_result["node"]["id"],
+                "id": json_at(created_result, "node", "id"),
                 "d": {"name": "PreservedFormWidgetRenamed"},
             },
         )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert "errors" not in payload, payload
-        result = payload["data"]["updateItemWithFileViaForm"]
-        assert result["errors"] == []
-        assert result["node"] == {"name": "PreservedFormWidgetRenamed"}
+        result = json_at(payload, "data", "updateItemWithFileViaForm")
+        assert json_at(result, "errors") == []
+        assert json_at(result, "node") == {"name": "PreservedFormWidgetRenamed"}
 
         created.refresh_from_db()
         assert created.name == "PreservedFormWidgetRenamed"
@@ -4741,7 +4774,7 @@ def test_update_item_with_file_via_form_omitting_the_file_preserves_it(tmp_path:
         # Read + close the handle so the suite's `-W error` does not catch a leaked
         # file finalizer (the FieldFile leaves the underlying file open after read()).
         with created.attachment.open("rb") as handle:
-            assert handle.read() == b"bytes that must survive"
+            assert _read_all(handle) == b"bytes that must survive"
 
 
 _CREATE_DEFAULT_CATEGORY_ITEM_VIA_FORM = (
@@ -4779,11 +4812,11 @@ def test_create_default_category_item_via_form_injects_the_default_category() ->
         variables={"d": {"name": "RaceFormFresh"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createDefaultCategoryItemViaForm"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "RaceFormFresh"}
+    result = json_at(payload, "data", "createDefaultCategoryItemViaForm")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "RaceFormFresh"}
 
     created = models.Item.objects.get(name="RaceFormFresh")
     assert created.category_id == default_category.pk
@@ -4817,17 +4850,17 @@ def test_create_default_category_item_via_form_write_time_integrity_error_uses_e
         variables={"d": {"name": existing.name}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createDefaultCategoryItemViaForm"]
-    assert result["node"] is None
-    assert len(result["errors"]) == 1
+    result = json_at(payload, "data", "createDefaultCategoryItemViaForm")
+    assert json_at(result, "node") is None
+    assert len(json_list(result, "errors")) == 1
     # The whole save-time envelope, over the wire: the `"__all__"` sentinel sits in
     # `field` while `path` stays EMPTY (a model-wide error names no field position),
     # the wording proves the row passed validation and failed at the write rather
     # than being caught by `validate_constraints`, and `codes` is the machine-readable
     # `"constraint"` a client branches on.
-    assert result["errors"][0] == {
+    assert json_at(result, "errors", 0) == {
         "field": "__all__",
         "path": [],
         "messages": ["A database constraint was violated."],
@@ -4864,11 +4897,14 @@ def test_create_stamped_item_via_form_get_form_kwargs_injects_user() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createStampedItemViaForm"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "StampedWidget", "description": "stamped by view_item_1"}
+    result = json_at(payload, "data", "createStampedItemViaForm")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
+        "name": "StampedWidget",
+        "description": "stamped by view_item_1",
+    }
     created = models.Item.objects.get(name="StampedWidget")
     assert created.description == "stamped by view_item_1"
 
@@ -4889,11 +4925,11 @@ def test_submit_contact_plain_form_success_shape() -> None:
         variables={"d": {"subject": "Hello there", "email": "user@example.com"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["submitContact"]
-    assert result["ok"] is True
-    assert result["errors"] == []
+    result = json_at(payload, "data", "submitContact")
+    assert json_at(result, "ok") is True
+    assert json_at(result, "errors") == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4911,12 +4947,12 @@ def test_submit_contact_plain_form_validation_failure_shape() -> None:
         variables={"d": {"subject": "   ", "email": "user@example.com"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["submitContact"]
-    assert result["ok"] is False
-    assert [e["field"] for e in result["errors"]] == ["subject"]
-    assert result["errors"][0]["messages"]
+    result = json_at(payload, "data", "submitContact")
+    assert json_at(result, "ok") is False
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["subject"]
+    assert json_at(result, "errors", 0, "messages")
 
 
 @pytest.mark.django_db
@@ -4933,11 +4969,11 @@ def test_submit_ping_plain_form_denied_by_default_top_level_error() -> None:
         variables={"d": {"message": "hi"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload  # top-level authorization error
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
-    assert "SubmitPing" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
+    assert "SubmitPing" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4960,11 +4996,11 @@ def test_create_item_via_form_wrong_type_global_id_on_category_id_is_field_error
         variables={"d": {"name": "WrongTypeFormWidget", "categoryId": wrong_gid}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["categoryId"]
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryId"]
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="WrongTypeFormWidget").exists()
 
@@ -4993,11 +5029,11 @@ def test_update_item_via_form_malformed_id_is_field_error_no_coercion_crash(bad_
         variables={"id": lookup_id, "d": {"name": "RenamedForm"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaForm"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["id"]
+    result = json_at(payload, "data", "updateItemViaForm")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
     assert item.name == "FormUntouched"
 
@@ -5025,7 +5061,7 @@ async def _post_async_shipped(
             url="/graphql-async/",
         )
     assert result.response.status_code == 200
-    return result.response.json()
+    return response_json(result.response)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5038,7 +5074,7 @@ async def test_create_item_over_graphql_async() -> None:
         user = User.objects.get(username="view_item_1")
         perm = Permission.objects.get(codename="add_item", content_type__app_label="products")
         user.user_permissions.add(perm)
-        user = User.objects.get(pk=user.pk)
+        user = User.objects.get(username=user.username)
         return user, models.Category.objects.earliest("pk")
 
     user, category = await sync_to_async(_user_and_category)()
@@ -5056,9 +5092,12 @@ async def test_create_item_over_graphql_async() -> None:
         },
     )
     assert "errors" not in payload, payload
-    result = payload["data"]["createItem"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "AsyncModelWidget", "category": {"name": category.name}}
+    result = json_at(payload, "data", "createItem")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
+        "name": "AsyncModelWidget",
+        "category": {"name": category.name},
+    }
     created = await models.Item.objects.aget(name="AsyncModelWidget")
     assert created.category_id == category.pk
 
@@ -5073,7 +5112,7 @@ async def test_create_item_via_form_over_graphql_async() -> None:
         user = User.objects.get(username="view_item_1")
         perm = Permission.objects.get(codename="add_item", content_type__app_label="products")
         user.user_permissions.add(perm)
-        user = User.objects.get(pk=user.pk)
+        user = User.objects.get(username=user.username)
         return user, models.Category.objects.earliest("pk")
 
     user, category = await sync_to_async(_user_and_category)()
@@ -5091,9 +5130,12 @@ async def test_create_item_via_form_over_graphql_async() -> None:
         },
     )
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaForm"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "AsyncFormWidget", "category": {"name": category.name}}
+    result = json_at(payload, "data", "createItemViaForm")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
+        "name": "AsyncFormWidget",
+        "category": {"name": category.name},
+    }
     created = await models.Item.objects.aget(name="AsyncFormWidget")
     assert created.category_id == category.pk
 
@@ -5108,7 +5150,7 @@ async def test_create_item_via_serializer_over_graphql_async() -> None:
         user = User.objects.get(username="view_item_1")
         perm = Permission.objects.get(codename="add_item", content_type__app_label="products")
         user.user_permissions.add(perm)
-        user = User.objects.get(pk=user.pk)
+        user = User.objects.get(username=user.username)
         return user, models.Category.objects.earliest("pk")
 
     user, category = await sync_to_async(_user_and_category)()
@@ -5126,9 +5168,12 @@ async def test_create_item_via_serializer_over_graphql_async() -> None:
         },
     )
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "AsyncSerializerWidget", "category": {"name": category.name}}
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
+        "name": "AsyncSerializerWidget",
+        "category": {"name": category.name},
+    }
     created = await models.Item.objects.aget(name="AsyncSerializerWidget")
     assert created.category_id == category.pk
 
@@ -5142,9 +5187,9 @@ async def test_submit_contact_plain_form_over_graphql_async() -> None:
         variables={"d": {"subject": "Async hello", "email": "async@example.com"}},
     )
     assert "errors" not in payload, payload
-    result = payload["data"]["submitContact"]
-    assert result["ok"] is True
-    assert result["errors"] == []
+    result = json_at(payload, "data", "submitContact")
+    assert json_at(result, "ok") is True
+    assert json_at(result, "errors") == []
 
 
 # ===========================================================================
@@ -5310,9 +5355,9 @@ def test_item_save_time_validation_error_returns_the_name_keyed_envelope(mutatio
             variables=_save_rejected_variables(row.operation, item),
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"][mutation]
+    result = json_at(payload, "data", mutation)
     assert result == {"node": None, "errors": _SAVE_REJECTED_ERRORS}
     assert len(captured.captured_queries) == row.queries, [
         query["sql"] for query in captured.captured_queries
@@ -5389,7 +5434,7 @@ async def test_item_save_time_validation_error_returns_the_envelope_over_graphql
         user = User.objects.get(username="staff_1")
         perm = Permission.objects.get(codename=row.codename, content_type__app_label="products")
         user.user_permissions.add(perm)
-        return User.objects.get(pk=user.pk), _save_rejected_target(row.operation)
+        return User.objects.get(username=user.username), _save_rejected_target(row.operation)
 
     user, item = await sync_to_async(_user_and_item)()
     before = item.name
@@ -5403,7 +5448,7 @@ async def test_item_save_time_validation_error_returns_the_envelope_over_graphql
             variables=_save_rejected_variables(row.operation, item),
         )
     assert "errors" not in payload, payload
-    assert payload["data"][mutation] == {"node": None, "errors": _SAVE_REJECTED_ERRORS}
+    assert json_at(payload, "data", mutation) == {"node": None, "errors": _SAVE_REJECTED_ERRORS}
     statements = [sql for sql in recorded if sql != "BEGIN"]
     assert len(statements) == _ASYNC_SAVE_REJECTED_QUERIES[mutation], statements
     await sync_to_async(_assert_save_rejected_rolled_back)(row.operation, item, before)
@@ -5445,11 +5490,14 @@ def test_create_item_via_serializer_happy_path() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "SerializerWidget", "category": {"name": category.name}}
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
+        "name": "SerializerWidget",
+        "category": {"name": category.name},
+    }
     created = models.Item.objects.get(name="SerializerWidget", category=category)
     assert created.description == ""
 
@@ -5469,11 +5517,11 @@ def test_update_item_via_serializer_happy_path() -> None:
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "SerAfter"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaSerializer"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "SerAfter"}
+    result = json_at(payload, "data", "updateItemViaSerializer")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "SerAfter"}
     item.refresh_from_db()
     assert item.name == "SerAfter"
 
@@ -5502,10 +5550,10 @@ def test_create_item_via_serializer_category_id_reverse_map_writes() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["errors"] == []
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "errors") == []
     created = models.Item.objects.get(name="SerReverseMapWidget")
     assert created.category_id == category.pk
 
@@ -5529,11 +5577,11 @@ def test_create_item_via_serializer_validate_field_error_is_field_keyed() -> Non
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload  # in-band envelope, NOT a top-level error
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["node"] is None
-    assert result["errors"] == [
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors") == [
         {"field": "name", "messages": ["This serializer name is not allowed."]},
     ]
     assert not models.Item.objects.filter(name=REJECTED_SERIALIZER_ITEM_NAME).exists()
@@ -5559,11 +5607,11 @@ def test_create_item_via_serializer_unencodable_scalar_is_field_error_no_crash()
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["node"] is None
-    assert [error["field"] for error in result["errors"]] == ["name"]
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "node") is None
+    assert [json_at(error, "field") for error in json_list(result, "errors")] == ["name"]
     assert models.Item.objects.count() == before
 
 
@@ -5593,11 +5641,11 @@ def test_create_item_via_serializer_object_validate_all_sentinel_and_request_con
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["node"] is None
-    assert result["errors"] == [
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors") == [
         {"field": "__all__", "messages": ["Item name must not equal the requesting username."]},
     ]
     # The injected request context reached the validator (no row written).
@@ -5629,12 +5677,12 @@ def test_create_item_via_serializer_unique_together_error_uses_all_sentinel() ->
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["node"] is None
-    fields = {err["field"] for err in result["errors"]}
-    assert fields == {"__all__"}, result["errors"]
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "node") is None
+    fields = {json_at(err, "field") for err in json_list(result, "errors")}
+    assert fields == {"__all__"}, json_at(result, "errors")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5656,10 +5704,10 @@ def test_update_item_via_serializer_partial_update_preserves_other_fields() -> N
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "SerPreserveAfter"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaSerializer"]
-    assert result["errors"] == []
+    result = json_at(payload, "data", "updateItemViaSerializer")
+    assert json_at(result, "errors") == []
     item.refresh_from_db()
     assert item.name == "SerPreserveAfter"
     assert item.description == "keep this"
@@ -5688,14 +5736,14 @@ def test_update_item_via_serializer_partial_unique_together_fires_on_name_only_c
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "SerTakenName"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaSerializer"]
-    assert result["node"] is None
+    result = json_at(payload, "data", "updateItemViaSerializer")
+    assert json_at(result, "node") is None
     # DRF backfills the unchanged `category` from `serializer.instance` under
     # `partial=True` and surfaces the unique-together violation under `"__all__"`.
-    fields = {err["field"] for err in result["errors"]}
-    assert fields == {"__all__"}, result["errors"]
+    fields = {json_at(err, "field") for err in json_list(result, "errors")}
+    assert fields == {"__all__"}, json_at(result, "errors")
     item.refresh_from_db()
     assert item.name == "SerOriginal"  # unchanged - the write rolled back
 
@@ -5717,11 +5765,11 @@ def test_update_item_via_serializer_visibility_scoped_hidden_row_is_not_found() 
         variables={"id": private_gid, "d": {"name": "SerHiddenAttempt"}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["updateItemViaSerializer"]
-    assert result["node"] is None
-    assert result["errors"] == [{"field": "id", "messages": ["No matching row found."]}]
+    result = json_at(payload, "data", "updateItemViaSerializer")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors") == [{"field": "id", "messages": ["No matching row found."]}]
 
     # A visible (public) row updates normally for the same caller.
     response = _post_graphql(
@@ -5729,8 +5777,8 @@ def test_update_item_via_serializer_visibility_scoped_hidden_row_is_not_found() 
         client=client,
         variables={"id": public_gid, "d": {"name": "SerVisibleUpdated"}},
     )
-    payload = response.json()
-    assert payload["data"]["updateItemViaSerializer"]["errors"] == []
+    payload = response_json(response)
+    assert json_at(payload, "data", "updateItemViaSerializer", "errors") == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5750,12 +5798,12 @@ def test_create_item_via_serializer_anonymous_is_denied_top_level_error_no_write
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
     # The denial RAISES on the non-null payload field, so GraphQL nulls the whole
     # `data` - the authorization-failure surface, not a present-payload FieldError.
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
     assert not models.Item.objects.filter(name="SerAnonWidget").exists()
 
 
@@ -5779,9 +5827,9 @@ def test_create_item_via_serializer_missing_model_perm_is_denied_no_write() -> N
             },
         },
     )
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors"), payload
-    assert payload["data"] is None
+    assert json_at(payload, "data") is None
     assert not models.Item.objects.filter(name="SerNoPermWidget").exists()
 
     # A permitted caller succeeds (the codename path).
@@ -5796,8 +5844,8 @@ def test_create_item_via_serializer_missing_model_perm_is_denied_no_write() -> N
             },
         },
     )
-    payload = response.json()
-    assert payload["data"]["createItemViaSerializer"]["errors"] == []
+    payload = response_json(response)
+    assert json_at(payload, "data", "createItemViaSerializer", "errors") == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5819,11 +5867,11 @@ def test_create_item_via_serializer_hidden_category_id_is_field_keyed_relation_e
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["node"] is None
-    assert result["errors"] == [
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "node") is None
+    assert json_at(result, "errors") == [
         {"field": "categoryId", "messages": ["Invalid id for relation 'categoryId'."]},
     ]
     assert not models.Item.objects.filter(name="SerHiddenCatWidget").exists()
@@ -5839,8 +5887,8 @@ def test_create_item_via_serializer_hidden_category_id_is_field_keyed_relation_e
             },
         },
     )
-    payload = response.json()
-    assert payload["data"]["createItemViaSerializer"]["errors"] == []
+    payload = response_json(response)
+    assert json_at(payload, "data", "createItemViaSerializer", "errors") == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5870,12 +5918,12 @@ def test_create_item_via_serializer_authorize_before_decode_unpermitted_gets_aut
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     # The AUTH denial (top-level, nulling the whole `data`), NOT the in-band
     # relation FieldError - the security-ordering proof.
     assert payload.get("errors"), payload
-    assert payload["data"] is None
-    assert "Not authorized" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None
+    assert "Not authorized" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5896,7 +5944,7 @@ def test_create_item_via_serializer_multipart_upload_to_attachment(tmp_path: Pat
     user.user_permissions.add(
         Permission.objects.get(codename="add_item", content_type__app_label="products"),
     )
-    user = User.objects.get(pk=user.pk)  # drop the stale perm cache
+    user = User.objects.get(username=user.username)  # drop the stale perm cache
 
     mutation = (
         "mutation($d: ItemSerializerInput!) { createItemViaSerializer(data: $d) { "
@@ -5935,17 +5983,17 @@ def test_create_item_via_serializer_multipart_upload_to_attachment(tmp_path: Pat
             },
         )
         assert response.status_code == 200
-        body = response.json()
+        body = response_json(response)
         assert "errors" not in body, body
-        result = body["data"]["createItemViaSerializer"]
-        assert result["errors"] == []
-        assert result["node"] == {"name": "SerUploadedWidget"}
+        result = json_at(body, "data", "createItemViaSerializer")
+        assert json_at(result, "errors") == []
+        assert json_at(result, "node") == {"name": "SerUploadedWidget"}
 
         created = models.Item.objects.get(name="SerUploadedWidget")
         assert created.attachment.name is not None
         assert created.attachment.name.endswith("serdoc.txt")
         with created.attachment.open("rb") as handle:
-            assert handle.read() == b"serializer upload bytes"
+            assert _read_all(handle) == b"serializer upload bytes"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5978,11 +6026,11 @@ def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count
             },
         )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaSerializer"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "SerG2Widget", "category": {"name": category.name}}
+    result = json_at(payload, "data", "createItemViaSerializer")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {"name": "SerG2Widget", "category": {"name": category.name}}
 
     # Bounded count = 17, DERIVED from a real run (BUILD.md forbids guessing it;
     # the serializer flavor differs from the model flavor by composition - no
@@ -6093,11 +6141,14 @@ def test_create_item_via_renamed_serializer_happy_path() -> None:
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaRenamedSerializer"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "RenamedWidget", "category": {"name": category.name}}
+    result = json_at(payload, "data", "createItemViaRenamedSerializer")
+    assert json_at(result, "errors") == []
+    assert json_at(result, "node") == {
+        "name": "RenamedWidget",
+        "category": {"name": category.name},
+    }
     assert models.Item.objects.filter(name="RenamedWidget", category=category).exists()
 
 
@@ -6124,11 +6175,11 @@ def test_renamed_serializer_relation_error_keys_to_graphql_wire_name() -> None:
         variables={"d": {"displayName": "BadRelRenamed", "categoryPk": wrong_gid}},
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaRenamedSerializer"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["categoryPk"]
+    result = json_at(payload, "data", "createItemViaRenamedSerializer")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryPk"]
     assert models.Item.objects.count() == before
 
 
@@ -6157,12 +6208,12 @@ def test_renamed_serializer_scalar_validation_error_keys_to_graphql_wire_name() 
         },
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    result = payload["data"]["createItemViaRenamedSerializer"]
-    assert result["node"] is None
-    assert [e["field"] for e in result["errors"]] == ["displayName"]
-    assert "not allowed" in result["errors"][0]["messages"][0]
+    result = json_at(payload, "data", "createItemViaRenamedSerializer")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["displayName"]
+    assert "not allowed" in json_str(result, "errors", 0, "messages", 0)
     assert not models.Item.objects.filter(name=REJECTED_RENAMED_DISPLAY_NAME).exists()
 
 
@@ -6180,11 +6231,11 @@ def test_category_type_items_are_both_and_properties_are_connection_only() -> No
         '{ __type(name: "CategoryType") { fields { name } } }',
     )
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" not in payload, payload
-    published = payload["data"]["__type"]
+    published = json_at(payload, "data", "__type")
     assert published is not None
-    names = {field["name"] for field in published["fields"]}
+    names = {json_at(field, "name") for field in json_list(published, "fields")}
     assert "items" in names
     assert "itemsConnection" in names
     assert "propertiesConnection" in names
@@ -6198,9 +6249,9 @@ def test_category_properties_list_is_not_selectable_over_http() -> None:
         "{ allCategories(first: 1) { edges { node { properties { id } } } } }",
     )
     assert response.status_code == 200
-    payload = response.json()
-    assert payload["data"] is None, payload
+    payload = response_json(response)
+    assert json_at(payload, "data") is None, payload
     assert any(
-        "Cannot query field 'properties'" in error.get("message", "")
-        for error in payload.get("errors", [])
+        "Cannot query field 'properties'" in json_str(error, "message")
+        for error in json_list(payload, "errors")
     ), payload

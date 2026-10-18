@@ -135,13 +135,22 @@ from apps.library.filters_genre import GenreFilter
 from apps.library.orders_genre import GenreOrder
 from apps.products.services import seed_data
 from asgiref.sync import sync_to_async
-from django.conf import settings
 from django.db import connection, models
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import clear_url_caches, path
-from graphql_client import JSONObject, assert_graphql_success, graphql_payload
+from graphql_client import (
+    JSONObject,
+    assert_graphql_success,
+    graphql_payload,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    response_json,
+)
 from strawberry import relay
 from typing_extensions import override
 
@@ -192,10 +201,7 @@ _ResidualHolders: TypeAlias = tuple[
     list[str],
 ]
 
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 
 @pytest.mark.django_db
@@ -205,9 +211,12 @@ def test_live_negative_first_is_graphql_error() -> None:
     payload = graphql_payload("{ allItems(first: -1) { edges { node { id } } } }")
     assert "errors" in payload
     assert payload["data"] is None, payload
-    assert any("non-negative" in str(e.get("message", "")).lower() for e in payload["errors"])
+    assert any(
+        "non-negative" in str(json_object(e).get("message", "")).lower()
+        for e in json_list(payload, "errors")
+    )
     # GraphQLError entries carry a message, never a Python traceback
-    messages = [str(e.get("message", "")) for e in payload["errors"]]
+    messages = [str(json_object(e).get("message", "")) for e in json_list(payload, "errors")]
     assert not any("ValueError" in message for message in messages), messages
     assert not any("Traceback" in message for message in messages), messages
 
@@ -220,7 +229,10 @@ def test_live_over_cap_first_is_graphql_error() -> None:
     payload = graphql_payload("{ allItems(first: 101) { edges { node { id } } } }")
     assert "errors" in payload
     assert payload["data"] is None, payload
-    assert any("cannot be higher than" in str(e.get("message", "")) for e in payload["errors"])
+    assert any(
+        "cannot be higher than" in str(json_object(e).get("message", ""))
+        for e in json_list(payload, "errors")
+    )
 
 
 @pytest.mark.django_db
@@ -233,9 +245,9 @@ def test_live_malformed_after_cursor_is_graphql_error() -> None:
     assert "errors" in payload
     assert payload["data"] is None, payload
     # The error should mention cursor / pagination, not leak Python types
-    assert len(payload["errors"]) >= 1
+    assert len(json_list(payload, "errors")) >= 1
     # The envelope must not leak raw ValueError / TypeError class names
-    messages = [str(e.get("message", "")) for e in payload["errors"]]
+    messages = [str(json_object(e).get("message", "")) for e in json_list(payload, "errors")]
     assert not any("ValueError" in message for message in messages), messages
     assert not any("TypeError" in message for message in messages), messages
 
@@ -249,7 +261,7 @@ def test_live_malformed_before_cursor_is_graphql_error() -> None:
     )
     assert "errors" in payload
     assert payload["data"] is None, payload
-    assert len(payload["errors"]) >= 1
+    assert len(json_list(payload, "errors")) >= 1
 
 
 @pytest.mark.django_db
@@ -259,7 +271,10 @@ def test_live_first_and_last_together_is_graphql_error() -> None:
     payload = graphql_payload("{ allItems(first: 1, last: 1) { edges { node { id } } } }")
     assert "errors" in payload
     assert payload["data"] is None, payload
-    assert any("mutually exclusive" in str(e.get("message", "")) for e in payload["errors"])
+    assert any(
+        "mutually exclusive" in str(json_object(e).get("message", ""))
+        for e in json_list(payload, "errors")
+    )
 
 
 @pytest.mark.django_db
@@ -277,7 +292,7 @@ def test_live_keyset_negative_first_is_graphql_error() -> None:
         "{ allLibraryIssuesConnection(first: -5) { edges { node { id } } } }",
     )
     assert payload["data"] is None, payload
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Argument 'first' must be a non-negative integer.",
     ], payload
 
@@ -293,7 +308,7 @@ def test_live_keyset_over_cap_first_is_graphql_error() -> None:
         "{ allLibraryIssuesConnection(first: 101) { edges { node { id } } } }",
     )
     assert payload["data"] is None, payload
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Argument 'first' cannot be higher than 100.",
     ], payload
 
@@ -316,8 +331,8 @@ def test_total_count_is_a_field_only_on_the_connection_that_opted_in() -> None:
     not_opted = graphql_payload("{ allItems(first: 1) { totalCount } }")
     assert "errors" in not_opted, not_opted
     assert any(
-        "Cannot query field 'totalCount'" in str(error.get("message", ""))
-        for error in not_opted["errors"]
+        "Cannot query field 'totalCount'" in str(json_object(error).get("message", ""))
+        for error in json_list(not_opted, "errors")
     ), not_opted
     assert not_opted["data"] is None, not_opted
 
@@ -325,8 +340,8 @@ def test_total_count_is_a_field_only_on_the_connection_that_opted_in() -> None:
         "{ allLibraryGenresConnection(first: 1) { edges { node { name } } totalCount } }",
     )
     connection = opted["allLibraryGenresConnection"]
-    assert len(connection["edges"]) == 1
-    assert connection["totalCount"] == 2
+    assert len(json_list(connection, "edges")) == 1
+    assert json_at(connection, "totalCount") == 2
 
 
 @pytest.mark.django_db
@@ -341,7 +356,7 @@ def test_the_non_opted_connection_type_keeps_the_inherited_sdl_description() -> 
     """
     data = assert_graphql_success('{ __type(name: "ItemTypeConnection") { description } }')
 
-    assert data["__type"]["description"] == "A connection to a list of items."
+    assert json_at(data, "__type", "description") == "A connection to a list of items."
 
 
 _QUERY_FIELD_ARGS = """
@@ -393,9 +408,9 @@ def test_root_connection_arguments_follow_declared_sidecars(
 ) -> None:
     """``filter:`` / ``orderBy:`` are published exactly when the node type declared those sidecars."""
     data = assert_graphql_success(_QUERY_FIELD_ARGS)
-    fields = {field["name"]: field for field in data["__type"]["fields"]}
+    fields = {json_str(field, "name"): field for field in json_list(data, "__type", "fields")}
     assert field_name in fields, sorted(fields)
-    names = {arg["name"] for arg in fields[field_name]["args"]}
+    names = {json_at(arg, "name") for arg in json_list(fields, field_name, "args")}
     assert set(required) <= names, names
     assert names.isdisjoint(forbidden), names
 
@@ -461,20 +476,24 @@ def test_nested_connection_arguments_follow_declared_sidecars() -> None:
     """
     data = assert_graphql_success(_NESTED_CONNECTION_FIELD_ARGS)
 
-    genre_fields = {f["name"]: f for f in data["genre"]["fields"]}
+    genre_fields = {json_at(f, "name"): f for f in json_list(data, "genre", "fields")}
     assert "booksConnection" in genre_fields
-    books_conn_args = {a["name"]: a for a in genre_fields["booksConnection"]["args"]}
+    books_conn_args = {
+        json_at(a, "name"): a for a in json_list(genre_fields, "booksConnection", "args")
+    }
     assert "first" in books_conn_args
     assert "last" in books_conn_args
     assert "before" in books_conn_args
     assert "after" in books_conn_args
     assert "filter" in books_conn_args
-    assert books_conn_args["filter"]["type"]["name"] == "BookFilterInputType"
+    assert json_at(books_conn_args, "filter", "type", "name") == "BookFilterInputType"
     assert "orderBy" in books_conn_args
 
-    periodical_fields = {f["name"]: f for f in data["periodical"]["fields"]}
+    periodical_fields = {json_at(f, "name"): f for f in json_list(data, "periodical", "fields")}
     assert "issuesConnection" in periodical_fields
-    issues_conn_args = {a["name"]: a for a in periodical_fields["issuesConnection"]["args"]}
+    issues_conn_args = {
+        json_at(a, "name"): a for a in json_list(periodical_fields, "issuesConnection", "args")
+    }
     assert "first" in issues_conn_args
     assert "last" in issues_conn_args
     assert "before" in issues_conn_args
@@ -482,10 +501,10 @@ def test_nested_connection_arguments_follow_declared_sidecars() -> None:
     assert "orderBy" in issues_conn_args
     assert "filter" not in issues_conn_args
 
-    genre_conn_fields = {f["name"] for f in data["genre_conn"]["fields"]}
+    genre_conn_fields = {json_at(f, "name") for f in json_list(data, "genre_conn", "fields")}
     assert "totalCount" in genre_conn_fields
 
-    book_conn_fields = {f["name"] for f in data["book_conn"]["fields"]}
+    book_conn_fields = {json_at(f, "name") for f in json_list(data, "book_conn", "fields")}
     assert "totalCount" not in book_conn_fields
 
 
@@ -748,7 +767,7 @@ def test_connection_branches_a_malformed_apply_sync_result_names_its_own_defect(
         payload = graphql_payload(_GENRE_CONNECTION_ORDER_QUERY)
 
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     _assert_rejection_message(message, message_start, substrings)
     genre_sql = [q["sql"] for q in ctx.captured_queries if "library_genre" in q["sql"].lower()]
     assert len(genre_sql) == genre_queries, genre_sql
@@ -768,7 +787,10 @@ def test_connection_healthy_apply_sync_override_still_returns_ordered_edges(
 
     data = assert_graphql_success(_GENRE_CONNECTION_ORDER_QUERY)
 
-    names = [edge["node"]["name"] for edge in data["allLibraryGenresConnection"]["edges"]]
+    names = [
+        json_at(edge, "node", "name")
+        for edge in json_list(data, "allLibraryGenresConnection", "edges")
+    ]
     assert names == ["A", "B", "C"]
 
 
@@ -850,7 +872,7 @@ async def _post_async_genres(query: str) -> JSONObject:
         _ASYNC_CURRENT["schema"] = None
         clear_url_caches()
     assert result.response.status_code == 200
-    return result.response.json()
+    return response_json(result.response)
 
 
 _GENRE_ASYNC_CONNECTION_ORDER_QUERY = (
@@ -1159,7 +1181,7 @@ async def test_connection_async_branches_a_malformed_apply_async_result_names_it
 
     assert _ASYNC_APPLY_CALLS, payload
     assert payload["data"] is None, payload
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     _assert_async_rejection_message(message, message_start, substrings)
     if residual is not None:
         _assert_residual_awaitable_disposed(*residual)
@@ -1185,7 +1207,9 @@ async def test_connection_async_healthy_apply_async_override_still_returns_order
 
     assert _ASYNC_APPLY_CALLS == ["passthrough"], payload
     assert "errors" not in payload, payload
-    names = [edge["node"]["name"] for edge in payload["data"]["genres"]["edges"]]
+    names = [
+        json_at(edge, "node", "name") for edge in json_list(payload, "data", "genres", "edges")
+    ]
     assert names == ["A", "B", "C"]
 
 
@@ -1213,7 +1237,9 @@ async def test_connection_async_serves_a_combined_apply_async_result_as_its_prim
 
     assert _ASYNC_APPLY_CALLS == ["combined"], payload
     assert "errors" not in payload, payload
-    names = [edge["node"]["name"] for edge in payload["data"]["genres"]["edges"]]
+    names = [
+        json_at(edge, "node", "name") for edge in json_list(payload, "data", "genres", "edges")
+    ]
     assert names == ["C", "A"]
 
 
@@ -1494,7 +1520,7 @@ async def test_connection_async_branches_a_malformed_filter_apply_async_result_n
 
     assert _ASYNC_APPLY_CALLS, payload
     assert payload["data"] is None, payload
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     _assert_async_rejection_message(message, message_start, substrings)
     if residual is not None:
         _assert_residual_awaitable_disposed(*residual)
@@ -1524,7 +1550,9 @@ async def test_connection_async_healthy_filter_apply_async_override_still_filter
 
     assert _ASYNC_APPLY_CALLS == ["filter-passthrough"], payload
     assert "errors" not in payload, payload
-    names = [edge["node"]["name"] for edge in payload["data"]["genres"]["edges"]]
+    names = [
+        json_at(edge, "node", "name") for edge in json_list(payload, "data", "genres", "edges")
+    ]
     assert names == ["Bravo"]
 
 
@@ -1763,7 +1791,7 @@ async def _post_local_async(query: str, variables: JSONObject) -> JSONObject:
         _CURSOR_CURRENT["schema"] = None
         clear_url_caches()
     assert result.response.status_code == 200
-    return result.response.json()
+    return response_json(result.response)
 
 
 def _post_cursor_sync(field: str, variables: JSONObject) -> JSONObject:
@@ -1776,7 +1804,7 @@ async def _post_cursor_async(field: str, variables: JSONObject) -> JSONObject:
 
 def _assert_cursor_rejected(payload: JSONObject, argument: str) -> None:
     assert payload["data"] is None, payload
-    assert {error["message"] for error in payload["errors"]} == {
+    assert {json_at(error, "message") for error in json_list(payload, "errors")} == {
         f"Argument '{argument}' contains a non-existing value.",
     }, payload
 
@@ -1968,8 +1996,11 @@ def test_malformed_offset_cursor_on_a_planned_nested_window_is_the_nested_fields
             variables={argument: _cursor("0" if argument == "after" else "1")},
         )
     assert [
-        [book["node"]["title"] for book in edge["node"]["booksConnection"]["edges"]]
-        for edge in control["allLibraryGenresConnection"]["edges"]
+        [
+            json_at(book, "node", "title")
+            for book in json_list(edge, "node", "booksConnection", "edges")
+        ]
+        for edge in json_list(control, "allLibraryGenresConnection", "edges")
     ] == ([["g00 two"], ["g01 two"]] if argument == "after" else [["g00 one"], ["g01 one"]])
     control_book_reads = [
         query for query in control_queries.captured_queries if '"library_book"' in query["sql"]
@@ -1980,7 +2011,7 @@ def test_malformed_offset_cursor_on_a_planned_nested_window_is_the_nested_fields
         payload = graphql_payload(_NESTED_WINDOW_CURSOR_QUERY, variables={argument: cursor})
 
     _assert_cursor_rejected(payload, argument)
-    assert [error["path"] for error in payload["errors"]] == [
+    assert [json_at(error, "path") for error in json_list(payload, "errors")] == [
         [
             "allLibraryGenresConnection",
             "edges",
@@ -2045,10 +2076,13 @@ def test_offset_cursor_index_below_sys_maxsize_is_an_ordinary_cursor(source: str
 
     assert "errors" not in past_end, past_end
     assert "errors" not in before_end, before_end
-    (past_end_page,) = past_end["data"].values()
-    (before_end_page,) = before_end["data"].values()
-    assert past_end_page["edges"] == []
-    assert [edge["node"]["name"] for edge in before_end_page["edges"]] == ["Alpha", "Bravo"]
+    (past_end_page,) = json_object(past_end, "data").values()
+    (before_end_page,) = json_object(before_end, "data").values()
+    assert json_at(past_end_page, "edges") == []
+    assert [json_at(edge, "node", "name") for edge in json_list(before_end_page, "edges")] == [
+        "Alpha",
+        "Bravo",
+    ]
 
 
 #: ``(id, variables, rows the engine is handed)`` for a page under a ``cap``-row
@@ -2099,8 +2133,8 @@ _PAST_END_SOURCES: dict[str, tuple[int, Callable[[JSONObject], JSONObject]]] = {
 
 def _page_of(payload: JSONObject) -> JSONObject:
     assert "errors" not in payload, payload
-    (page,) = payload["data"].values()
-    return page
+    (page,) = json_object(payload, "data").values()
+    return json_object(page)
 
 
 @pytest.mark.django_db
@@ -2239,8 +2273,8 @@ def test_nested_per_parent_offset_cursor_near_sys_maxsize_serves_the_past_the_en
             {"after": _cursor(str(index)), **variables(3)},
         )
 
-    edges = _page_of(payload)["edges"]
-    assert [edge["node"] for edge in edges] == [
+    edges = json_list(_page_of(payload), "edges")
+    assert [json_at(edge, "node") for edge in edges] == [
         {"name": name, "booksConnection": {"edges": [], "pageInfo": _PAST_END_PAGE_INFO}}
         for name in ("Alpha", "Bravo")
     ]
@@ -2336,7 +2370,7 @@ def test_page_bound_of_sys_maxsize_serves_every_row(field: str, after: str | Non
 def _root_genre_page(variables: JSONObject) -> JSONObject:
     payload = _root_genre_payload(variables)
     assert "errors" not in payload, payload
-    return payload["data"]["allLibraryGenresConnection"]
+    return json_object(payload, "data", "allLibraryGenresConnection")
 
 
 @pytest.mark.django_db
@@ -2357,15 +2391,23 @@ def test_minted_offset_cursors_still_page() -> None:
 
     first_page = _root_genre_page({"first": 2})
     after_zero = _root_genre_page({"after": _cursor("0"), "first": 2})
-    second_page = _root_genre_page({"after": first_page["pageInfo"]["endCursor"], "first": 2})
+    second_page = _root_genre_page(
+        {"after": json_at(first_page, "pageInfo", "endCursor"), "first": 2},
+    )
     empty_after = _root_genre_page({"after": "", "first": 2})
 
-    names = [edge["node"]["name"] for edge in first_page["edges"]]
+    names = [json_at(edge, "node", "name") for edge in json_list(first_page, "edges")]
     assert names == ["Alpha", "Bravo"]
-    assert [edge["node"]["name"] for edge in after_zero["edges"]] == ["Bravo", "Charlie"]
-    assert after_zero["pageInfo"]["hasPreviousPage"] is True
-    assert [edge["node"]["name"] for edge in second_page["edges"]] == ["Charlie", "Delta"]
-    assert second_page["edges"][0]["cursor"] == _cursor("2")
+    assert [json_at(edge, "node", "name") for edge in json_list(after_zero, "edges")] == [
+        "Bravo",
+        "Charlie",
+    ]
+    assert json_at(after_zero, "pageInfo", "hasPreviousPage") is True
+    assert [json_at(edge, "node", "name") for edge in json_list(second_page, "edges")] == [
+        "Charlie",
+        "Delta",
+    ]
+    assert json_at(second_page, "edges", 0, "cursor") == _cursor("2")
     assert empty_after == first_page
 
 
@@ -2381,7 +2423,9 @@ _PAGE_BOUND_ROWS = [
 
 def _assert_rejected_with(payload: JSONObject, message: str) -> None:
     assert payload["data"] is None, payload
-    assert [error["message"] for error in payload["errors"]] == [message], payload
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [message], (
+        payload
+    )
 
 
 @pytest.mark.django_db
@@ -2435,9 +2479,13 @@ def _assert_masked(payload: JSONObject) -> None:
     parent, a non-null one once for the whole list, so the count is not the claim.
     """
     assert payload["errors"], payload
-    for error in payload["errors"]:
-        assert error["message"] == DEFAULT_ERROR_POLICY.message, error
-        correlation_id = error["extensions"][DEFAULT_ERROR_POLICY.correlation_extension_key]
+    for error in json_list(payload, "errors"):
+        assert json_at(error, "message") == DEFAULT_ERROR_POLICY.message, error
+        correlation_id = json_str(
+            error,
+            "extensions",
+            DEFAULT_ERROR_POLICY.correlation_extension_key,
+        )
         assert _CORRELATION_ID.fullmatch(correlation_id), error
     body = json.dumps(payload)
     assert _SOURCE_SECRET not in body, body

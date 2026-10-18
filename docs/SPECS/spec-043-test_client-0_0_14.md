@@ -806,9 +806,9 @@ the pick total:
 ```python
 @dataclass
 # errors / data / extensions
-class Response(strawberry.test.client.Response):
-    # the raw django.http.HttpResponse the operation rode
-    response: Any = None
+class Response(strawberry.test.client.Response, Generic[_ResponseT]):
+    # the raw response the operation rode, as the wrapped Django client returned it
+    response: _ResponseT
 ```
 
 The `response` field is what lets every consumer of the raw flavor use the
@@ -820,7 +820,11 @@ exactly that). The typed shape is a strict superset of both upstream flavors:
 `res.data` / `res.errors` / `res.extensions` for the strawberry-django
 migrant, `res.response.<anything>` for the graphene migrant. The clients
 always populate `response`; assert on fields, never on whole `Response`
-objects.
+objects. The field is typed as the wrapped client returns it (`_ResponseT` is bound to
+`HttpResponseBase`): `TestClient.query()` and the mixin return
+`Response[_MonkeyPatchedWSGIResponse]`, `AsyncTestClient.query()`
+`Response[_MonkeyPatchedASGIResponse]`, django-stubs' names for the test-client responses, which
+carry `.json()` and `.content`. It has no default, so a `Response` is never built without one.
 
 `query()` is defined on `TestClient` (sync) and `AsyncTestClient` (async) with
 two keyword-only extensions **after** the base's positional parameters

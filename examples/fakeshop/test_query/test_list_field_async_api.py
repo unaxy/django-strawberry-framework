@@ -26,7 +26,6 @@ from apps.library import models as library_models
 from apps.library import schema as library_schema
 from apps.library.orders import BranchOrder
 from asgiref.sync import sync_to_async
-from django.conf import settings
 from django.core.exceptions import EmptyResultSet
 from django.db import models
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -39,7 +38,15 @@ from django.test import AsyncClient, override_settings
 from django.test.utils import register_lookup
 from django.urls import clear_url_caches, path
 from django.utils.functional import cached_property
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    response_json,
+)
 from strawberry.django.context import StrawberryDjangoContext
 from strawberry.schema.name_converter import NameConverter
 from strawberry.types.arguments import StrawberryArgument
@@ -53,7 +60,7 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
-from django_strawberry_framework.orders import Ordering, OrderSet
+from django_strawberry_framework.orders import Ordering
 from django_strawberry_framework.resource_policy import (
     DST_RESOURCE_DEADLINE,
     DST_RESOURCE_POLICY,
@@ -81,6 +88,7 @@ if TYPE_CHECKING:
     )
 
     from django.db.models.sql.compiler import _AsSqlType
+
 
 _ListResolver: TypeAlias = Callable[[object, strawberry.Info[object, object]], object]
 # ``BranchOrder.apply_async`` replaced by a classmethod whose result the seal must judge.
@@ -110,10 +118,7 @@ class _CurrentView(TypedDict):
 
 _CURRENT: _CurrentView = {"schema": None, "view_class": None}
 
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 
 def _list_resolver(resolver: _ListResolver) -> _ListResolver:
@@ -157,7 +162,7 @@ async def _post_async(
                 content_type="application/json",
             )
         assert response.status_code == 200
-        return response.json()
+        return response_json(response)
     finally:
         _CURRENT["schema"] = None
         _CURRENT["view_class"] = None
@@ -227,7 +232,7 @@ async def test_async_queryset_completion_default_resolver() -> None:
     """
     payload = await _post_async(schema, query)
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Bravo", "Charlie"]
 
 
@@ -258,7 +263,7 @@ async def test_async_queryset_completion_sync_manager_resolver() -> None:
     """
     payload = await _post_async(schema, query)
     assert "errors" not in payload, payload
-    assert payload["data"]["branches"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -288,7 +293,7 @@ async def test_async_queryset_completion_sync_queryset_resolver() -> None:
     """
     payload = await _post_async(schema, query)
     assert "errors" not in payload, payload
-    assert payload["data"]["branches"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -324,7 +329,7 @@ async def test_async_queryset_completion_async_def_queryset_resolver() -> None:
     """
     payload = await _post_async(schema, query)
     assert "errors" not in payload, payload
-    assert payload["data"]["branches"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -359,7 +364,7 @@ async def test_async_get_queryset_is_awaited(monkeypatch: pytest.MonkeyPatch) ->
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha"]
 
 
@@ -391,7 +396,7 @@ async def test_async_a_query_source_resolver_still_applies_target_visibility(
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha"]
 
 
@@ -421,7 +426,7 @@ async def test_async_a_materialized_list_skips_target_visibility() -> None:
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha", "Hidden"]
 
 
@@ -462,7 +467,7 @@ async def test_async_limit_alone_windows_without_order_by() -> None:
         "{ branches(limit: 1) { name } }",
     )
     assert "errors" not in payload, payload
-    assert len(payload["data"]["branches"]) == 1
+    assert len(json_list(payload, "data", "branches")) == 1
 
 
 @pytest.mark.django_db(transaction=True)
@@ -493,7 +498,7 @@ async def test_async_http_rejects_a_sync_resolver_that_returns_a_coroutine() -> 
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert payload["data"] is None
-    assert "returned an awaitable" in payload["errors"][0]["message"]
+    assert "returned an awaitable" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -526,7 +531,7 @@ async def test_async_http_rejects_a_sync_resolver_that_returns_a_custom_awaitabl
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert payload["data"] is None
-    assert "returned an awaitable" in payload["errors"][0]["message"]
+    assert "returned an awaitable" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -570,7 +575,7 @@ async def test_async_http_rejects_an_async_resolver_that_resolves_to_another_awa
             extra_settings=_ERROR_POLICY_PASS_THROUGH,
         )
         assert payload["data"] is None
-        assert "resolved to another awaitable" in payload["errors"][0]["message"]
+        assert "resolved to another awaitable" in json_str(payload, "errors", 0, "message")
         assert [inspect.getcoroutinestate(c) for c in inner_coroutines] == [inspect.CORO_CLOSED]
         assert inner_body_ran == []
     finally:
@@ -650,7 +655,7 @@ async def test_async_http_classified_resolver_still_applies_visibility(
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha"]
 
 
@@ -683,7 +688,7 @@ async def test_async_http_staticmethod_resolver_still_applies_visibility() -> No
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha"]
 
 
@@ -742,7 +747,7 @@ async def test_async_http_partial_async_generator_resolver_is_bounded() -> None:
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    assert len(payload["data"]["branches"]) == limit
+    assert len(json_list(payload, "data", "branches")) == limit
     assert holder["next_count"] == limit
     assert holder["closed"] is True
 
@@ -795,7 +800,7 @@ async def test_async_queryset_completion_windows_the_same_rows(*, with_optimizer
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["branches"] == [{"name": "Alpha"}, {"name": "Bravo"}]
+    assert json_at(payload, "data", "branches") == [{"name": "Alpha"}, {"name": "Bravo"}]
 
 
 # ---------------------------------------------------------------------------
@@ -830,7 +835,7 @@ async def test_async_pipeline_parity() -> None:
     """
     payload_vis = await _post_async(schema, query_vis)
     assert "errors" not in payload_vis, payload_vis
-    names = [row["name"] for row in payload_vis["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload_vis, "data", "branches")]
     assert names == ["Bravo", "Charlie"]
 
     # Anonymous user ordering by staff-gated 'name' hits permission denial before offset
@@ -847,7 +852,7 @@ async def test_async_pipeline_parity() -> None:
     payload_denied = await _post_async(schema, query_denied)
     assert "errors" in payload_denied
     assert payload_denied["data"] is None, payload_denied
-    assert payload_denied["errors"][0]["extensions"]["code"] == "ORDER_PERMISSION_DENIED"
+    assert json_at(payload_denied, "errors", 0, "extensions", "code") == "ORDER_PERMISSION_DENIED"
 
 
 # ---------------------------------------------------------------------------
@@ -882,7 +887,7 @@ async def test_async_generator_cleanup_and_finally_witness() -> None:
     schema = DjangoSchema(query=_GenQuery, config=strawberry_config())
     payload = await _post_async(schema, "{ branches(limit: 2) { name } }")
     assert "errors" not in payload, payload
-    assert len(payload["data"]["branches"]) == 2
+    assert len(json_list(payload, "data", "branches")) == 2
     # Generator was advanced then stopped by limit ceiling; finally block witnessed
     assert finally_entered is True
 
@@ -913,20 +918,20 @@ async def test_async_iterator_aclose_witness_on_limit_zero_and_rejection() -> No
     # 1. limit: 0 short-circuit invokes aclose with 0 next calls
     p_lim0 = await _post_async(schema, "{ branches(limit: 0) { name } }")
     assert "errors" not in p_lim0, p_lim0
-    assert p_lim0["data"]["branches"] == []
+    assert json_at(p_lim0, "data", "branches") == []
     assert holder["it"] is not None
     assert holder["it"].aclose_called == 1
     assert holder["it"].next_count == 0
 
     # 2. Nonzero offset rejection invokes aclose with 0 next calls
     p_off = await _post_async(schema, "{ branches(offset: 1) { name } }")
-    assert p_off["errors"][0]["extensions"]["reason"] == "order_required"
+    assert json_at(p_off, "errors", 0, "extensions", "reason") == "order_required"
     assert holder["it"].aclose_called == 1
     assert holder["it"].next_count == 0
 
     # 3. Non-null orderBy rejection invokes aclose with 0 next calls
     p_ord = await _post_async(schema, "{ branches(orderBy: [{ city: ASC }]) { name } }")
-    assert p_ord["errors"][0]["extensions"]["reason"] == "queryset_required"
+    assert json_at(p_ord, "errors", 0, "extensions", "reason") == "queryset_required"
     assert holder["it"].aclose_called == 1
     assert holder["it"].next_count == 0
 
@@ -956,7 +961,7 @@ async def test_async_generator_natural_exhaustion_does_not_call_aclose() -> None
     # Request limit: 5 on 2 items -> natural exhaustion
     payload = await _post_async(schema, "{ branches(limit: 5) { name } }")
     assert "errors" not in payload, payload
-    assert len(payload["data"]["branches"]) == 2
+    assert len(json_list(payload, "data", "branches")) == 2
     assert holder["it"] is not None
     # aclose must NOT be called on natural exhaustion
     assert holder["it"].aclose_called == 0
@@ -1034,7 +1039,7 @@ async def test_async_deadline_rejection_closes_the_source_it_never_advanced(
 
     assert holder["awaited"] is True, "the resolver never reached its await"
     assert payload["data"] is None, payload
-    extensions = payload["errors"][0]["extensions"]
+    extensions = json_object(payload, "errors", 0, "extensions")
     assert extensions["code"] == RESOURCE_LIMIT_ERROR_CODE, extensions
     assert extensions["bound"] == "execution_deadline_seconds", extensions
     assert extensions["limit"] == _UNREACHABLE_DEADLINE_SECONDS, extensions
@@ -1092,7 +1097,7 @@ async def test_async_a_resolver_cannot_widen_the_row_bound_through_the_context()
 
     assert holder["awaited"] is True, "the resolver never reached its await"
     assert "errors" not in payload, payload
-    assert [row["name"] for row in payload["data"]["branches"]] == ["B0", "B1"]
+    assert [json_at(row, "name") for row in json_list(payload, "data", "branches")] == ["B0", "B1"]
 
 
 class _NarrowsThenNeverExpires(float):
@@ -1169,7 +1174,7 @@ async def test_async_a_resolver_cannot_buy_more_wall_clock_through_the_context(
 
     assert holder["awaited"] is True, "the resolver never reached its await"
     assert payload["data"] is None, payload
-    extensions = payload["errors"][0]["extensions"]
+    extensions = json_object(payload, "errors", 0, "extensions")
     assert extensions["code"] == RESOURCE_LIMIT_ERROR_CODE, extensions
     assert extensions["bound"] == "execution_deadline_seconds", extensions
     assert extensions["limit"] == 1, extensions
@@ -1195,8 +1200,8 @@ async def test_async_a_rejection_names_the_argument_in_the_schema_spelling() -> 
 
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
-    assert payload["errors"][0]["extensions"]["argument"] == "offset"
-    assert payload["errors"][0]["extensions"]["reason"] == "order_required"
+    assert json_at(payload, "errors", 0, "extensions", "argument") == "offset"
+    assert json_at(payload, "errors", 0, "extensions", "reason") == "order_required"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1227,9 +1232,9 @@ async def test_async_a_failing_aclose_does_not_displace_the_argument_rejection()
 
     assert "errors" in payload
     assert payload["data"] is None, payload
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "LIST_ARGUMENT_INVALID"
-    assert error["extensions"]["reason"] == "order_required"
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+    assert json_at(error, "extensions", "reason") == "order_required"
 
 
 _ASYNC_OFFSET_WITH_ACTIVE_ORDER = (
@@ -1328,9 +1333,9 @@ async def test_async_offset_rejects_a_random_model_default(
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == [], branch_sql
 
 
@@ -1388,9 +1393,9 @@ async def test_async_offset_rejects_a_relation_default_that_expands_to_a_random_
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == [], shelf_sql
 
 
@@ -1407,7 +1412,7 @@ async def test_async_offset_accepts_a_relation_default_that_expands_to_a_stable_
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
     assert _RANDOM_ORDER_SQL not in statement, statement
@@ -1426,7 +1431,7 @@ async def test_async_offset_accepts_a_relation_attname_over_a_random_related_def
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
     assert _RANDOM_ORDER_SQL not in statement, statement
@@ -1455,7 +1460,7 @@ async def test_async_offset_accepts_an_expression_reference_to_a_relation(
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
     assert _RANDOM_ORDER_SQL not in statement, statement
@@ -1510,9 +1515,9 @@ async def test_async_offset_rejects_a_to_many_relation_default_that_expands_to_a
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == [], shelf_sql
 
 
@@ -1538,7 +1543,7 @@ async def test_async_offset_accepts_a_to_many_relation_default_that_expands_to_a
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     assert len(shelf_sql) == 1, shelf_sql
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1559,9 +1564,9 @@ async def test_async_offset_rejects_a_conditional_order_over_a_random_predicate(
 
     payload = await _post_async(schema, _ASYNC_RELATION_DEFAULT_OFFSET)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == [], shelf_sql
 
 
@@ -1580,7 +1585,7 @@ async def test_async_offset_accepts_a_conditional_order_over_a_column_alias_pred
     payload = await _post_async(schema, _ASYNC_RELATION_DEFAULT_OFFSET)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
     assert _RANDOM_ORDER_SQL not in statement, statement
@@ -1650,9 +1655,9 @@ async def test_async_offset_reads_an_expression_by_its_approved_form(
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
     if not served:
-        err = payload["errors"][0]
-        assert err["extensions"]["reason"] == "order_required"
-        assert err["extensions"]["argument"] == "offset"
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
         assert shelf_sql == [], shelf_sql
         return
     assert "errors" not in payload, payload
@@ -1723,13 +1728,13 @@ async def test_async_offset_reads_a_term_by_the_form_it_resolves_into(
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
     if not served:
-        err = payload["errors"][0]
-        assert err["extensions"]["reason"] == "order_required"
-        assert err["extensions"]["argument"] == "offset"
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
         assert shelf_sql == [], shelf_sql
         return
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
     assert _RANDOM_ORDER_SQL not in statement, statement
@@ -1760,13 +1765,13 @@ async def test_async_offset_reads_a_conditional_predicate_by_its_exact_type(
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
     if not served:
-        err = payload["errors"][0]
-        assert err["extensions"]["reason"] == "order_required"
-        assert err["extensions"]["argument"] == "offset"
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
         assert shelf_sql == [], shelf_sql
         return
     assert "errors" not in payload, payload
-    assert payload["data"]["shelves"] == [{"code": "Bravo-1"}]
+    assert json_at(payload, "data", "shelves") == [{"code": "Bravo-1"}]
     statement = shelf_sql[0].upper()
     assert "OFFSET 1" in statement, statement
     assert "CASE WHEN" in statement, statement
@@ -1789,9 +1794,9 @@ async def test_async_offset_rejects_a_predicate_chain_of_project_sql(
     with register_lookup(models.TextField, _ProjectTransform):
         payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert shelf_sql == [], shelf_sql
 
 
@@ -1825,7 +1830,7 @@ async def test_async_offset_accepts_extra_ordering_over_a_dormant_random_order(
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
     assert "errors" not in payload, payload
-    assert payload["data"]["branches"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
     assert len(branch_sql) == 1, branch_sql
     statement = branch_sql[0].upper()
     assert "OFFSET 1" in statement, statement
@@ -1862,9 +1867,9 @@ async def test_async_offset_rejects_extra_random_ordering_over_a_stable_order(
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == [], branch_sql
 
 
@@ -1895,9 +1900,9 @@ async def test_async_offset_rejects_an_annotated_random_order(
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == [], branch_sql
 
 
@@ -1928,9 +1933,9 @@ async def test_async_offset_rejects_an_extra_select_ordering(
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == [], branch_sql
 
 
@@ -1958,9 +1963,9 @@ async def test_async_offset_rejects_a_raw_sql_order(monkeypatch: pytest.MonkeyPa
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
-    err = payload["errors"][0]
-    assert err["extensions"]["reason"] == "order_required"
-    assert err["extensions"]["argument"] == "offset"
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == [], branch_sql
 
 
@@ -2202,7 +2207,7 @@ async def test_async_holder_branches_a_malformed_apply_async_result_names_its_ow
     )
 
     assert payload["data"] is None
-    message = payload["errors"][0]["message"]
+    message = json_str(payload, "errors", 0, "message")
     assert message.startswith(message_start), message
     for substring in substrings:
         assert substring in message, message
@@ -2305,7 +2310,7 @@ async def test_async_mutable_hint_cannot_reroute_the_completed_read(
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["branchesTenant"] == [{"name": "A"}]
+    assert json_at(payload, "data", "branchesTenant") == [{"name": "A"}]
     assert token["alias"] == "no_such_alias"
 
 
@@ -2348,7 +2353,7 @@ async def test_async_rejection_reports_the_published_name_without_extra_converte
 
     before = _CountingConverter.calls
     p_rejected = await _post_async(schema, "{ branches(OFFSET: -1) { name } }")
-    assert p_rejected["errors"][0]["extensions"]["argument"] == "OFFSET"
+    assert json_at(p_rejected, "errors", 0, "extensions", "argument") == "OFFSET"
     assert _CountingConverter.calls - before == per_success
 
 
@@ -2490,7 +2495,7 @@ async def test_async_a_frozen_context_still_returns_the_windowed_rows() -> None:
         view_class=_FrozenAsyncContextView,
     )
 
-    assert payload["data"]["branches"] == [{"name": "Bravo"}]
+    assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
 
 
 # ---------------------------------------------------------------------------
@@ -2516,7 +2521,7 @@ async def _child_delegating_apply_async(
 ) -> models.QuerySet[library_models.Branch]:
     """A supported public override that hands the application to a child task."""
     return await asyncio.create_task(
-        OrderSet.apply_async.__func__(cls, order_input, queryset, info),
+        super(BranchOrder, cls).apply_async(order_input, queryset, info),
     )
 
 
@@ -2542,7 +2547,7 @@ async def test_async_child_delegated_ordering_still_orders_and_pages(
     )
     assert "errors" not in payload, payload
     # city ASC is Austin / Boston / Denver, so offset 1 limit 1 is Bravo.
-    assert payload["data"]["allLibraryBranches"] == [{"name": "Bravo", "city": "Boston"}]
+    assert json_at(payload, "data", "allLibraryBranches") == [{"name": "Bravo", "city": "Boston"}]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2580,7 +2585,7 @@ async def test_async_child_delegated_impure_ordering_is_rejected(
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert payload["data"] is None
-    assert "BranchOrder._normalize_input is not pure" in payload["errors"][0]["message"]
+    assert "BranchOrder._normalize_input is not pure" in json_str(payload, "errors", 0, "message")
     assert calls["n"] == 2
 
 
@@ -2645,7 +2650,7 @@ async def test_async_a_resolver_cannot_widen_the_row_bound_by_writing_a_policy_i
 
     assert holder["awaited"] is True, "the resolver never reached its await"
     assert "errors" not in payload, payload
-    assert [row["name"] for row in payload["data"]["branches"]] == ["B0", "B1"]
+    assert [json_at(row, "name") for row in json_list(payload, "data", "branches")] == ["B0", "B1"]
 
 
 # ---------------------------------------------------------------------------
@@ -2666,7 +2671,8 @@ async def test_async_iterable_with_awaitable_children_completes_over_http() -> N
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[_AwaitableChild])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[_AwaitableChild])  # pyright: ignore[reportAny]
         def children(self) -> _ClosableAsyncIterator:
             return _ClosableAsyncIterator([_AwaitableChild()])
 
@@ -2745,7 +2751,7 @@ async def test_async_hostile_queryset_subclass_cannot_leak_restricted_rows(
         "{ branches { name } }",
     )
     assert "errors" not in payload, payload
-    names = [row["name"] for row in payload["data"]["branches"]]
+    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha"]
 
 
@@ -2772,7 +2778,7 @@ async def test_async_manager_that_degrades_to_a_list_is_rejected() -> None:
         extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
     assert payload["data"] is None
-    assert "must produce a QuerySet" in payload["errors"][0]["message"]
+    assert "must produce a QuerySet" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2818,12 +2824,12 @@ async def test_async_a_nested_synchronous_operation_refuses_a_list_field() -> No
 
     control = await _post_async(schema, "{ branches { name } }")
     assert "errors" not in control, control
-    assert control["data"]["branches"] == [{"name": "Alpha"}]
+    assert json_at(control, "data", "branches") == [{"name": "Alpha"}]
 
     payload = await _post_async(schema, "{ nested }")
 
     assert "errors" not in payload, payload
-    message = payload["data"]["nested"]
+    message = json_str(payload, "data", "nested")
     assert "synchronous GraphQL executor" in message
     assert "await schema.execute" in message
     assert "worker thread" in message

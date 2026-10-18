@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from django.apps import apps
+from graphql_client import read_attr
 
 from apps.kanban import factories as kf
 from apps.kanban import models
@@ -17,7 +18,9 @@ def _remove_other_section() -> None:
         "apps.kanban.migrations.0016_remove_other_section",
     )
     schema_editor = SimpleNamespace(connection=SimpleNamespace(alias="default"))
-    migration._remove(apps, schema_editor)
+    remove = read_attr(migration, "_remove")
+    assert callable(remove)
+    remove(apps, schema_editor)
 
 
 def test_remove_other_section_fails_loudly_while_items_remain() -> None:

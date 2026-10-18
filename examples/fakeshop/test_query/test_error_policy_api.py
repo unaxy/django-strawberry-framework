@@ -64,7 +64,7 @@ import threading
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Iterator, Mapping
 from functools import cache
 from logging import LogRecord
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
 import strawberry
@@ -80,7 +80,18 @@ from django.test import override_settings as _override_settings
 from django.urls import include, path
 from django.views.decorators.csrf import csrf_exempt
 from graphql import GraphQLError
-from graphql_client import JSONObject, post_graphql
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_loads,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    post_graphql,
+    read_attr,
+    response_json,
+)
 from strawberry import relay
 from strawberry.extensions.base_extension import SchemaExtension
 from typing_extensions import TypedDict, Unpack, override
@@ -97,8 +108,15 @@ from django_strawberry_framework.testing import AsyncTestClient, Response
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
-    from django.test.client import _MonkeyPatchedWSGIResponse
-    from typing_extensions import TypeIs
+    from django.test.client import _MonkeyPatchedASGIResponse, _MonkeyPatchedWSGIResponse
+
+
+def _debug_setting() -> bool:
+    """Return ``settings.DEBUG``, failing when it is not a ``bool``."""
+    debug = read_attr(settings, "DEBUG")
+    assert isinstance(debug, bool), debug
+    return debug
+
 
 pytestmark = pytest.mark.urls(__name__)
 
@@ -127,10 +145,7 @@ _CUSTOM_KEY = "supportReference"
 #: inject a panel referencing the ``djdt`` routes that ``config.urls`` computed
 #: under the ambient ``DEBUG=False`` and fail the request for a reason that has
 #: nothing to do with the policy.
-_DEBUG_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_DEBUG_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 
 def _probe_query_type() -> type:
@@ -609,7 +624,7 @@ def _post(
     """POST one GraphQL document to a mount and return ``(response, parsed envelope)``."""
     response = post_graphql(query, client=client, variables=variables, url=mount)
     assert response.status_code == 200, response.content
-    return response, response.json()
+    return response, response_json(response)
 
 
 def _masked_error(
@@ -625,20 +640,23 @@ def _masked_error(
     alongside it. A row that only asserted "the sensitive text is absent" would
     also pass on a response that had dropped the error entirely.
     """
-    assert len(payload["errors"]) == 1, payload
-    error = payload["errors"][0]
+    assert len(json_list(payload, "errors")) == 1, payload
+    error = json_object(payload, "errors", 0)
     assert error["message"] == DEFAULT_ERROR_POLICY.message, error
-    correlation_id = error["extensions"][key]
+    correlation_id = json_str(error, "extensions", key)
     assert _CORRELATION_ID.fullmatch(correlation_id), correlation_id
     return error
 
 
-def _await_response(coroutine: Awaitable[Response]) -> Response:
+_AsyncResponse: TypeAlias = "Response[_MonkeyPatchedASGIResponse]"
+
+
+def _await_response(coroutine: Awaitable[_AsyncResponse]) -> _AsyncResponse:
     """Run one ``AsyncTestClient.query`` coroutine to completion on a fresh event loop."""
     return asyncio.run(_resolve(coroutine))
 
 
-async def _resolve(coroutine: Awaitable[Response]) -> Response:
+async def _resolve(coroutine: Awaitable[_AsyncResponse]) -> _AsyncResponse:
     return await coroutine
 
 
@@ -703,7 +721,7 @@ def test_the_masked_error_retains_the_path_of_the_field_that_failed() -> None:
     """
     _, payload = _post("/ep/", "{ fine boom }")
     assert _masked_error(payload)["path"] == ["boom"]
-    assert payload["data"]["fine"] == "fine"
+    assert json_at(payload, "data", "fine") == "fine"
 
 
 @pytest.mark.django_db
@@ -719,7 +737,7 @@ def test_the_correlation_id_reaches_the_server_log_with_the_original_exception(
     """
     caplog.set_level(logging.ERROR, logger=_PACKAGE_LOGGER)
     _, payload = _post("/ep/", "{ boom }")
-    correlation_id = _masked_error(payload)["extensions"]["correlationId"]
+    correlation_id = json_str(_masked_error(payload), "extensions", "correlationId")
 
     records = [
         record
@@ -755,7 +773,7 @@ def test_a_factory_resolving_to_the_masker_refuses_the_request_instead_of_maskin
     _, payload = _post("/ep-factory/", "{ boom }")
 
     assert payload["data"] is None, payload
-    assert [error["extensions"]["code"] for error in payload["errors"]] == [
+    assert [json_at(error, "extensions", "code") for error in json_list(payload, "errors")] == [
         SCHEMA_CONFIGURATION_ERROR_CODE,
     ]
     assert _SENSITIVE not in json.dumps(payload)
@@ -785,11 +803,15 @@ def test_two_unexpected_errors_in_one_response_carry_two_different_ids(
     caplog.set_level(logging.ERROR, logger=_PACKAGE_LOGGER)
     _, payload = _post("/ep/", "{ boom boomOther }")
 
-    assert len(payload["errors"]) == 2, payload
-    ids = [error["extensions"]["correlationId"] for error in payload["errors"]]
+    assert len(json_list(payload, "errors")) == 2, payload
+    ids = [
+        json_str(error, "extensions", "correlationId") for error in json_list(payload, "errors")
+    ]
     assert all(_CORRELATION_ID.fullmatch(value) for value in ids), ids
     assert ids[0] != ids[1]
-    assert {error["message"] for error in payload["errors"]} == {DEFAULT_ERROR_POLICY.message}
+    assert {json_at(error, "message") for error in json_list(payload, "errors")} == {
+        DEFAULT_ERROR_POLICY.message,
+    }
 
     logged = " ".join(
         record.getMessage() for record in caplog.records if record.name == _PACKAGE_LOGGER
@@ -810,9 +832,9 @@ def test_a_parse_error_keeps_its_own_message_and_carries_no_correlation_id() -> 
     developer "an unexpected error occurred" about their own typo.
     """
     _, payload = _post("/ep/", "{ boom")
-    error = payload["errors"][0]
-    assert "Syntax Error" in error["message"], error
-    assert "correlationId" not in (error.get("extensions") or {})
+    error = json_object(payload, "errors", 0)
+    assert "Syntax Error" in json_str(error, "message"), error
+    assert "correlationId" not in json_object(error.get("extensions") or {})
 
 
 @pytest.mark.django_db
@@ -824,8 +846,8 @@ def test_a_validation_error_keeps_its_own_message_and_carries_no_correlation_id(
     """
     _, payload = _post("/ep/", "{ noSuchFieldAnywhere }")
     assert payload["data"] is None, payload
-    error = payload["errors"][0]
-    assert "Cannot query field 'noSuchFieldAnywhere'" in error["message"], error
+    error = json_object(payload, "errors", 0)
+    assert "Cannot query field 'noSuchFieldAnywhere'" in json_str(error, "message"), error
     assert (error.get("extensions") or {}) == {}, error
 
 
@@ -839,11 +861,11 @@ def test_an_async_validation_error_keeps_its_own_message_and_carries_no_correlat
             url="/ep-async/",
         ),
     )
-    payload = json.loads(async_response.response.content)
+    payload = response_json(async_response.response)
     assert payload["data"] is None, payload
-    assert len(payload["errors"]) == 1, payload
-    error = payload["errors"][0]
-    assert "Cannot query field 'noSuchFieldAnywhere'" in error["message"], error
+    assert len(json_list(payload, "errors")) == 1, payload
+    error = json_object(payload, "errors", 0)
+    assert "Cannot query field 'noSuchFieldAnywhere'" in json_str(error, "message"), error
     assert (error.get("extensions") or {}) == {}, error
 
 
@@ -865,10 +887,10 @@ def test_an_audited_globalid_rejection_keeps_its_message_and_its_code() -> None:
         "/ep/",
         '{ allLibraryGenres(filter: { id: { exact: "not-a-valid-base64!!!" } }) { name } }',
     )
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == "GLOBALID_INVALID", error
-    assert "Invalid GlobalID" in error["message"], error
-    assert "correlationId" not in error["extensions"]
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", error
+    assert "Invalid GlobalID" in json_str(error, "message"), error
+    assert "correlationId" not in json_object(error, "extensions")
 
 
 @pytest.mark.django_db
@@ -881,10 +903,10 @@ def test_an_audited_resource_limit_rejection_keeps_its_message_and_its_code() ->
     ``max_document_tokens`` so the refusal is unambiguous.
     """
     _, payload = _post("/ep-limits/", "{ fine deliberate boomOther }")
-    error = payload["errors"][0]
-    assert error["extensions"]["code"] == RESOURCE_LIMIT_ERROR_CODE, error
-    assert str(_MAX_TOKENS) in error["message"], error
-    assert "correlationId" not in error["extensions"]
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE, error
+    assert str(_MAX_TOKENS) in json_str(error, "message"), error
+    assert "correlationId" not in json_object(error, "extensions")
 
 
 @pytest.mark.django_db
@@ -896,10 +918,10 @@ def test_a_consumer_raised_graphql_error_keeps_its_own_message() -> None:
     site, with no registration step.
     """
     _, payload = _post("/ep/", "{ deliberate }")
-    error = payload["errors"][0]
+    error = json_object(payload, "errors", 0)
     assert error["message"] == "This message was written for the client."
-    assert error["extensions"]["code"] == "CONSUMER_REJECTION"
-    assert "correlationId" not in error["extensions"]
+    assert json_at(error, "extensions", "code") == "CONSUMER_REJECTION"
+    assert "correlationId" not in json_object(error, "extensions")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -927,7 +949,7 @@ def test_a_permission_denial_keeps_its_not_authorized_message() -> None:
         },
     )
     assert payload["data"] is None
-    assert "Not authorized to" in payload["errors"][0]["message"], payload
+    assert "Not authorized to" in json_str(payload, "errors", 0, "message"), payload
     assert not product_models.Item.objects.filter(name="DeniedWidget").exists()
 
 
@@ -950,7 +972,7 @@ def test_a_field_error_envelope_is_untouched_because_it_is_data_not_an_error() -
         Permission.objects.get(codename="add_item", content_type__app_label="products"),
     )
     client = Client()
-    client.force_login(User.objects.get(pk=user.pk))
+    client.force_login(User.objects.get(username=user.username))
 
     _, payload = _post(
         "/graphql/",
@@ -967,11 +989,11 @@ def test_a_field_error_envelope_is_untouched_because_it_is_data_not_an_error() -
         client=client,
     )
     assert "errors" not in payload, payload
-    envelope = payload["data"]["createItem"]
+    envelope = json_object(payload, "data", "createItem")
     assert envelope["node"] is None
-    assert envelope["errors"][0]["field"] == "__all__"
+    assert json_at(envelope, "errors", 0, "field") == "__all__"
     # The validation prose reaches the client unaltered - the envelope is data.
-    assert envelope["errors"][0]["messages"], envelope
+    assert json_at(envelope, "errors", 0, "messages"), envelope
 
 
 # ---------------------------------------------------------------------------
@@ -997,13 +1019,17 @@ def test_the_sync_and_async_transports_produce_the_same_masked_entry() -> None:
             url="/ep-async/",
         ),
     )
-    async_payload = json.loads(async_response.response.content)
+    async_payload = response_json(async_response.response)
     async_error = _masked_error(async_payload)
 
     assert async_payload["data"] == sync_payload["data"]
-    assert sync_error["extensions"]["correlationId"] != async_error["extensions"]["correlationId"]
-    sync_error["extensions"].pop("correlationId")
-    async_error["extensions"].pop("correlationId")
+    assert json_at(sync_error, "extensions", "correlationId") != json_at(
+        async_error,
+        "extensions",
+        "correlationId",
+    )
+    json_object(sync_error, "extensions").pop("correlationId")
+    json_object(async_error, "extensions").pop("correlationId")
     assert async_error == sync_error
 
 
@@ -1018,9 +1044,9 @@ def test_debug_true_restores_the_original_message_end_to_end() -> None:
     """
     with _override_settings(**_DEBUG_PASS_THROUGH):
         _, payload = _post("/ep/", "{ boom }")
-    error = payload["errors"][0]
-    assert _SENSITIVE in error["message"], error
-    assert "correlationId" not in (error.get("extensions") or {})
+    error = json_object(payload, "errors", 0)
+    assert _SENSITIVE in json_str(error, "message"), error
+    assert "correlationId" not in json_object(error.get("extensions") or {})
 
 
 @pytest.mark.django_db
@@ -1038,7 +1064,7 @@ def test_a_malformed_debug_setting_keeps_production_masking_end_to_end(
     """Only an explicit ``DEBUG=True`` opens the development pass-through gate."""
     with _override_settings(
         DEBUG=debug_value,
-        MIDDLEWARE=[entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
+        MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
         _, payload = _post("/ep/", "{ boom }")
     error = _masked_error(payload)
@@ -1071,7 +1097,7 @@ def test_a_written_exported_default_cannot_unmask_a_later_schema() -> None:
     the exported policy at call time and a row that compared the response against
     a tampered template would agree with the tampering.
     """
-    assert settings.DEBUG is False
+    assert _debug_setting() is False
     declared = dict(DEFAULT_ERROR_POLICY.__dict__)
     DEFAULT_ERROR_POLICY.__dict__["enabled"] = False
     DEFAULT_ERROR_POLICY.__dict__["message"] = "Written after startup."
@@ -1095,32 +1121,22 @@ def test_the_explicit_opt_out_returns_the_original_message_under_debug_false() -
     said so explicitly, which is the point - safety is not opt-in, but opting OUT
     is a written choice rather than an omission.
     """
-    assert settings.DEBUG is False
+    assert _debug_setting() is False
     _, payload = _post("/ep-off/", "{ boom }")
-    error = payload["errors"][0]
-    assert _SENSITIVE in error["message"], error
-    assert "correlationId" not in (error.get("extensions") or {})
+    error = json_object(payload, "errors", 0)
+    assert _SENSITIVE in json_str(error, "message"), error
+    assert "correlationId" not in json_object(error.get("extensions") or {})
 
 
 @pytest.mark.django_db
 def test_a_custom_message_and_extension_key_both_reach_the_wire() -> None:
     """Both configurable fields are honored on a real response."""
     _, payload = _post("/ep-custom/", "{ boom }")
-    error = payload["errors"][0]
+    error = json_object(payload, "errors", 0)
     assert error["message"] == _CUSTOM_MESSAGE
-    assert _CORRELATION_ID.fullmatch(error["extensions"][_CUSTOM_KEY])
-    assert "correlationId" not in error["extensions"]
+    assert _CORRELATION_ID.fullmatch(json_str(error, "extensions", _CUSTOM_KEY))
+    assert "correlationId" not in json_object(error, "extensions")
     assert _SENSITIVE not in json.dumps(payload)
-
-
-def _is_dict(value: object) -> TypeIs[dict[object, object]]:
-    """Whether a parsed body is a ``dict``, its keys and values still unchecked."""
-    return isinstance(value, dict)
-
-
-def _is_json_object(value: object) -> TypeIs[JSONObject]:
-    """Whether a parsed body is a JSON object (a ``dict`` whose keys are all strings)."""
-    return _is_dict(value) and all(isinstance(key, str) for key in value)
 
 
 def _entry_request(entry: tuple[str, str], query: str) -> JSONObject:
@@ -1137,9 +1153,7 @@ def _entry_request(entry: tuple[str, str], query: str) -> JSONObject:
         response = _await_response(
             AsyncTestClient().query(query, assert_no_errors=False, url=mount),
         )
-        parsed: object = json.loads(response.response.content)
-        assert _is_json_object(parsed), parsed
-        return parsed
+        return response_json(response.response)
     _, payload = _post(mount, query)
     return payload
 
@@ -1243,7 +1257,7 @@ def _hook_request(
         AsyncTestClient().query(document, assert_no_errors=False, url=target),
     )
     body = response.response.content.decode()
-    return body, json.loads(body)
+    return body, json_object(json_loads(body))
 
 
 def _package_error_records(caplog: pytest.LogCaptureFixture) -> list[LogRecord]:
@@ -1295,7 +1309,7 @@ def test_the_hook_correlation_id_reaches_the_server_log_with_the_original_except
     caplog.set_level(logging.ERROR, logger=_PACKAGE_LOGGER)
     with _failing_hook("operation-teardown"):
         _, payload = _hook_request(color)
-    correlation_id = _masked_error(payload)["extensions"]["correlationId"]
+    correlation_id = json_str(_masked_error(payload), "extensions", "correlationId")
 
     records = _package_error_records(caplog)
     assert len(records) == 1, caplog.records
@@ -1326,10 +1340,10 @@ def test_one_hook_failure_produces_exactly_one_masked_entry_and_one_log_record(
     with _failing_hook(where):
         _, payload = _hook_request(color)
 
-    assert len(payload["errors"]) == 1, payload
+    assert len(json_list(payload, "errors")) == 1, payload
     records = _package_error_records(caplog)
     assert len(records) == 1, caplog.records
-    assert payload["errors"][0]["extensions"]["correlationId"] in records[0].getMessage()
+    assert json_str(payload, "errors", 0, "extensions", "correlationId") in records[0].getMessage()
 
 
 @pytest.mark.django_db
@@ -1338,21 +1352,21 @@ def test_debug_true_restores_the_original_hook_message(color: str) -> None:
     """The development pass-through covers the hook seam as well as the resolver one."""
     with _override_settings(**_DEBUG_PASS_THROUGH), _failing_hook("operation-teardown"):
         _, payload = _hook_request(color)
-    error = payload["errors"][0]
-    assert _SENSITIVE in error["message"], error
-    assert "correlationId" not in (error.get("extensions") or {})
+    error = json_object(payload, "errors", 0)
+    assert _SENSITIVE in json_str(error, "message"), error
+    assert "correlationId" not in json_object(error.get("extensions") or {})
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("color", HOOK_COLORS, ids=HOOK_COLORS)
 def test_the_explicit_opt_out_returns_the_original_hook_message(color: str) -> None:
     """``error_policy={"enabled": False}`` is honored at the hook seam too."""
-    assert settings.DEBUG is False
+    assert _debug_setting() is False
     with _failing_hook("operation-teardown"):
         _, payload = _hook_request(color, mount=HOOK_OFF_MOUNTS[color])
-    error = payload["errors"][0]
-    assert _SENSITIVE in error["message"], error
-    assert "correlationId" not in (error.get("extensions") or {})
+    error = json_object(payload, "errors", 0)
+    assert _SENSITIVE in json_str(error, "message"), error
+    assert "correlationId" not in json_object(error.get("extensions") or {})
 
 
 @pytest.mark.django_db
@@ -1366,8 +1380,8 @@ def test_a_hook_raising_a_graphql_error_keeps_its_own_message(where: str, color:
     """
     with _failing_hook(where, build=_deliberate_hook_exception):
         _, payload = _hook_request(color)
-    assert len(payload["errors"]) == 1, payload
-    error = payload["errors"][0]
+    assert len(json_list(payload, "errors")) == 1, payload
+    error = json_object(payload, "errors", 0)
     assert error["message"] == _DELIBERATE_HOOK_MESSAGE, error
-    assert error["extensions"]["code"] == "CONSUMER_HOOK_REJECTION", error
-    assert "correlationId" not in error["extensions"], error
+    assert json_at(error, "extensions", "code") == "CONSUMER_HOOK_REJECTION", error
+    assert "correlationId" not in json_object(error, "extensions"), error

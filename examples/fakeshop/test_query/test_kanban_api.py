@@ -28,7 +28,6 @@ from apps.glossary import models as glossary_models
 from apps.kanban import factories as kf
 from apps.kanban import models, services
 from apps.kanban.filters import MilestoneFilter
-from django.conf import settings
 from django.db import connection
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -36,7 +35,15 @@ from django.utils import timezone
 from graphql import GraphQLError
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _graphql_data
-from graphql_client import post_graphql
+from graphql_client import (
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+    post_graphql,
+    response_json,
+)
 from strawberry import relay
 from typing_extensions import TypedDict
 
@@ -50,10 +57,7 @@ from typing_extensions import TypedDict
 #: that has nothing to do with the row. Dropping the middleware is the deterministic
 #: form of that - the toolbar's own show-gate is memoized per process, so overriding
 #: its callback would not reliably take effect.
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 
 class _SeededBoard(TypedDict):
@@ -327,9 +331,9 @@ def test_flat_composite_milestone_filter_fires_target_permission_gate(
     )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    assert "milestone key denied" in payload["errors"][0]["message"]
+    assert "milestone key denied" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -596,10 +600,12 @@ def test_deeply_nested_self_referential_dependency_filter_is_capped() -> None:
     # A typed cap error is a normal GraphQL error (HTTP 200 + ``errors``), never a
     # 500 stack overflow.
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     # A top-level resolver error nulls ``data`` and reports under ``errors``.
     assert payload["data"] is None
-    messages = " ".join(error["message"] for error in payload["errors"]).lower()
+    messages = " ".join(
+        json_str(error, "message") for error in json_list(payload, "errors")
+    ).lower()
     assert "recursion" not in messages
     assert "nesting" in messages or "depth" in messages
 
@@ -688,18 +694,18 @@ def test_select_o2o_spec_uuid_side_table_and_timestamps() -> None:
         }
         """,
     )
-    (card,) = data["allCards"]
-    assert card["title"] == "Filtering subsystem"
-    assert card["spec"] == {
+    (card,) = json_list(data, "allCards")
+    assert json_at(card, "title") == "Filtering subsystem"
+    assert json_at(card, "spec") == {
         "name": "spec-027-filters-0_0_8",
         "url": (
             "https://github.com/unaxy/django-strawberry-framework/blob/main/"
             "docs/SPECS/spec-027-filters-0_0_8.md"
         ),
     }
-    assert card["createdDate"] is not None
+    assert json_at(card, "createdDate") is not None
     # The UUID side-table row exists and exposes a UUID scalar (a UUIDField PK).
-    assert len(card["uuid"]["id"]) == 36
+    assert len(json_str(card, "uuid", "id")) == 36
 
 
 @pytest.mark.django_db
@@ -1079,9 +1085,9 @@ def test_select_lookup_uuid_side_table() -> None:
         }
         """,
     )
-    (status,) = data["allKanbanStatuses"]
-    assert status["key"] == "done"
-    assert len(status["uuid"]["id"]) == 36
+    (status,) = json_list(data, "allKanbanStatuses")
+    assert json_at(status, "key") == "done"
+    assert len(json_str(status, "uuid", "id")) == 36
 
 
 @pytest.mark.django_db
@@ -1111,10 +1117,7 @@ def test_select_labels_m2m() -> None:
 def test_order_kanban_statuses_by_key_desc() -> None:
     """``orderBy: [{ key: DESC }]`` reorders the statuses list (DONE-028 order wiring)."""
     _seed_board()
-    expected = [
-        {"key": key}
-        for key in models.Status.objects.order_by("-key").values_list("key", flat=True)
-    ]
+    expected = [{"key": status.key} for status in models.Status.objects.order_by("-key")]
     _assert_graphql_data(
         "query { allKanbanStatuses(orderBy: [{ key: DESC }]) { key } }",
         {"allKanbanStatuses": expected},
@@ -1302,8 +1305,11 @@ def test_nested_decisions_connection_window_orders_by_decided_at_then_pk() -> No
         )
 
     pages = {
-        row["title"]: [edge["node"]["question"] for edge in row["decisionsConnection"]["edges"]]
-        for row in data["allCards"]
+        json_at(row, "title"): [
+            json_at(edge, "node", "question")
+            for edge in json_list(row, "decisionsConnection", "edges")
+        ]
+        for row in json_list(data, "allCards")
     }
     assert pages[seed["conn"].title] == ["conn-first", "conn-second"]
     assert pages[seed["filters"].title] == ["filters-first", "filters-second"]
@@ -1347,7 +1353,10 @@ def test_kanban_card_order_input_type_exposes_only_column_backed_all_fields() ->
         }
         """,
     )
-    fields = {field["name"]: field for field in data["__type"]["inputFields"]}
+    fields = {
+        json_str(field, "name"): json_object(field)
+        for field in json_list(data, "__type", "inputFields")
+    }
 
     for name in (
         "status",
@@ -1355,9 +1364,9 @@ def test_kanban_card_order_input_type_exposes_only_column_backed_all_fields() ->
         "priority",
         "relativeSize",
     ):
-        field_type = fields[name]["type"]
+        field_type = json_object(fields[name], "type")
         while field_type.get("ofType") is not None:
-            field_type = field_type["ofType"]
+            field_type = json_object(field_type, "ofType")
         assert field_type["name"] == "Ordering"
 
     # ``milestone`` is now a derived property (no column), so it is absent from

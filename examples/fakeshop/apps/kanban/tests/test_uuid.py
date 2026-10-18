@@ -115,8 +115,13 @@ def _make_instance(model: type[Model]) -> _UUIDLinked:
     return builders[model]()
 
 
+def _model_id(model: type[Model]) -> str | None:
+    """The parametrize id of one UUID-linked model: its lowercase model name."""
+    return model._meta.model_name
+
+
 @pytest.mark.django_db
-@pytest.mark.parametrize("model", UUID_LINKED_MODELS, ids=lambda m: m._meta.model_name)
+@pytest.mark.parametrize("model", UUID_LINKED_MODELS, ids=_model_id)
 def test_create_uuid_row_materializes_side_row_for_every_linked_model(model: type[Model]) -> None:
     instance = _make_instance(model)
 

@@ -17,7 +17,7 @@ from apps.kanban import models
 from apps.kanban.signals import CARD_STATUS_TRANSITION_ERROR
 from django.contrib.auth.models import User
 from django.test import Client
-from graphql_client import JSONObject
+from graphql_client import JSONObject, json_at, json_list, json_object, json_str, response_json
 from graphql_client import post_graphql as _post_graphql
 from strawberry import relay
 
@@ -62,7 +62,7 @@ def _run(query: str, variables: dict[str, object], *, client: Client) -> JSONObj
     """POST a mutation and return the parsed payload (top-level and envelope both readable)."""
     response = _post_graphql(query, client=client, variables=variables)
     assert response.status_code == 200
-    return response.json()
+    return response_json(response)
 
 
 _SET_STATUS = (
@@ -97,7 +97,7 @@ def test_set_card_status_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["setCardStatus"] == {"ok": True, "errors": []}
+    assert json_at(payload, "data", "setCardStatus") == {"ok": True, "errors": []}
     card.refresh_from_db()
     assert card.status.key == "wip"
     assert card.transitions.filter(to_status__key="wip").exists()
@@ -121,7 +121,7 @@ def test_set_card_status_illegal_transition_returns_envelope() -> None:
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["setCardStatus"]
+    envelope = json_object(payload, "data", "setCardStatus")
     assert envelope == {"ok": False, "errors": _ILLEGAL_TODO_TO_DONE_ERRORS}
     card.refresh_from_db()
     assert card.status.key == "todo"
@@ -155,10 +155,10 @@ def test_set_card_status_unknown_lookup_envelope_uses_all_sentinel() -> None:
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["setCardStatus"]
+    envelope = json_object(payload, "data", "setCardStatus")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["unknown_lookup"]
-    assert envelope["errors"][0]["field"] == "__all__"
+    assert json_at(envelope, "errors", 0, "codes") == ["unknown_lookup"]
+    assert json_at(envelope, "errors", 0, "field") == "__all__"
 
 
 @pytest.mark.django_db
@@ -181,9 +181,9 @@ def test_set_card_status_form_errors_key_to_the_input_fields_sent() -> None:
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["setCardStatus"]
+    envelope = json_object(payload, "data", "setCardStatus")
     assert envelope["ok"] is False
-    assert sorted(envelope["errors"], key=lambda error: error["field"]) == [
+    assert sorted(json_list(envelope, "errors"), key=lambda error: json_str(error, "field")) == [
         {"field": "actorKey", "path": ["actorKey"], "codes": ["required"]},
         {"field": "statusKey", "path": ["statusKey"], "codes": ["required"]},
     ]
@@ -211,7 +211,7 @@ def test_create_card_from_spec_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["createCardFromSpec"] == {"ok": True, "errors": []}
+    assert json_at(payload, "data", "createCardFromSpec") == {"ok": True, "errors": []}
     assert models.Card.objects.filter(title="Live card").exists()
 
 
@@ -231,9 +231,9 @@ def test_create_card_from_spec_duplicate_title_envelope() -> None:
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["createCardFromSpec"]
+    envelope = json_object(payload, "data", "createCardFromSpec")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["duplicate_card_title"]
+    assert json_at(envelope, "errors", 0, "codes") == ["duplicate_card_title"]
 
 
 @pytest.mark.django_db
@@ -251,7 +251,7 @@ def test_move_card_number_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["moveCardNumber"]["ok"] is True
+    assert json_at(payload, "data", "moveCardNumber", "ok") is True
     card.refresh_from_db()
     assert card.number == 1
 
@@ -269,9 +269,9 @@ def test_move_card_number_out_of_range_envelope() -> None:
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["moveCardNumber"]
+    envelope = json_object(payload, "data", "moveCardNumber")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["card_number_out_of_range"]
+    assert json_at(envelope, "errors", 0, "codes") == ["card_number_out_of_range"]
 
 
 @pytest.mark.django_db
@@ -287,7 +287,7 @@ def test_add_dependency_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["addDependency"]["ok"] is True
+    assert json_at(payload, "data", "addDependency", "ok") is True
     assert models.CardReference.objects.filter(
         source_card=dependent,
         target_card=dependency,
@@ -314,9 +314,9 @@ def test_add_dependency_invalid_kind_envelope() -> None:
         client=client,
     )
 
-    envelope = payload["data"]["addDependency"]
+    envelope = json_object(payload, "data", "addDependency")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["invalid_dependency_kind"]
+    assert json_at(envelope, "errors", 0, "codes") == ["invalid_dependency_kind"]
 
 
 @pytest.mark.django_db
@@ -338,7 +338,7 @@ def test_remove_dependency_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["removeDependency"]["ok"] is True
+    assert json_at(payload, "data", "removeDependency", "ok") is True
     assert not models.CardReference.objects.filter(
         source_card=dependent,
         target_card=dependency,
@@ -358,7 +358,7 @@ def test_set_card_item_complete_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["setCardItemComplete"]["ok"] is True
+    assert json_at(payload, "data", "setCardItemComplete", "ok") is True
     item.refresh_from_db()
     assert item.is_complete is True
 
@@ -376,7 +376,7 @@ def test_verify_card_item_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["verifyCardItem"]["ok"] is True
+    assert json_at(payload, "data", "verifyCardItem", "ok") is True
     item.refresh_from_db()
     assert item.is_complete is True
     assert item.verified_at is not None
@@ -397,9 +397,9 @@ def test_verify_card_item_unknown_kind_envelope() -> None:
         client=client,
     )
 
-    envelope = payload["data"]["verifyCardItem"]
+    envelope = json_object(payload, "data", "verifyCardItem")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["unknown_lookup"]
+    assert json_at(envelope, "errors", 0, "codes") == ["unknown_lookup"]
 
 
 @pytest.mark.django_db
@@ -414,7 +414,7 @@ def test_record_and_finish_work_attempt_happy_path() -> None:
         client=client,
     )
     assert "errors" not in opened, opened
-    assert opened["data"]["recordWorkAttempt"]["ok"] is True
+    assert json_at(opened, "data", "recordWorkAttempt", "ok") is True
     attempt = models.WorkAttempt.objects.get(card=card)
     assert attempt.outcome_id is None
 
@@ -425,7 +425,7 @@ def test_record_and_finish_work_attempt_happy_path() -> None:
         client=client,
     )
     assert "errors" not in finished, finished
-    assert finished["data"]["finishWorkAttempt"]["ok"] is True
+    assert json_at(finished, "data", "finishWorkAttempt", "ok") is True
     attempt.refresh_from_db()
     outcome = attempt.outcome
     assert outcome is not None
@@ -445,9 +445,9 @@ def test_finish_work_attempt_unknown_outcome_envelope() -> None:
         client=client,
     )
 
-    envelope = payload["data"]["finishWorkAttempt"]
+    envelope = json_object(payload, "data", "finishWorkAttempt")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["unknown_lookup"]
+    assert json_at(envelope, "errors", 0, "codes") == ["unknown_lookup"]
 
 
 @pytest.mark.django_db
@@ -462,7 +462,7 @@ def test_record_decision_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["recordDecision"]["ok"] is True
+    assert json_at(payload, "data", "recordDecision", "ok") is True
     assert models.Decision.objects.filter(question="Ship?", card__isnull=True).exists()
 
 
@@ -479,7 +479,7 @@ def test_set_card_files_predicted_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["setCardFiles"]["ok"] is True
+    assert json_at(payload, "data", "setCardFiles", "ok") is True
     assert card.path_links.filter(path__path=path, kind="predicted").exists()
 
 
@@ -496,9 +496,9 @@ def test_set_card_files_outside_root_envelope() -> None:
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["setCardFiles"]
+    envelope = json_object(payload, "data", "setCardFiles")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["tracked_path_outside_roots"]
+    assert json_at(envelope, "errors", 0, "codes") == ["tracked_path_outside_roots"]
 
 
 @pytest.mark.django_db
@@ -518,7 +518,7 @@ def test_set_card_files_rejects_a_falsy_non_list_without_clearing_links(bad: obj
         {"d": {"cardId": _card_gid(card), "kind": "predicted", "paths": [path]}},
         client=client,
     )
-    assert seeded["data"]["setCardFiles"]["ok"] is True
+    assert json_at(seeded, "data", "setCardFiles", "ok") is True
 
     payload = _run(
         mutation,
@@ -527,9 +527,9 @@ def test_set_card_files_rejects_a_falsy_non_list_without_clearing_links(bad: obj
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["setCardFiles"]
+    envelope = json_object(payload, "data", "setCardFiles")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["invalid_tracked_path"]
+    assert json_at(envelope, "errors", 0, "codes") == ["invalid_tracked_path"]
     assert card.path_links.filter(path__path=path, kind="predicted").exists()
 
 
@@ -552,7 +552,7 @@ def test_set_card_files_changed_happy_path() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["setCardFiles"]["ok"] is True
+    assert json_at(payload, "data", "setCardFiles", "ok") is True
     assert card.path_links.filter(path__path=_ALLOWLISTED_PATH, kind="changed").exists()
 
 
@@ -581,7 +581,7 @@ def test_set_card_files_unencodable_path_is_field_error_not_a_crash() -> None:
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["setCardFiles"]
+    envelope = json_object(payload, "data", "setCardFiles")
     assert envelope["ok"] is False
     assert envelope["errors"] == [{"field": "paths.1", "codes": ["invalid"]}]
     assert not card.path_links.exists()
@@ -601,9 +601,9 @@ def test_set_card_files_changed_on_undone_card_envelope() -> None:
     )
 
     assert "errors" not in payload, payload
-    envelope = payload["data"]["setCardFiles"]
+    envelope = json_object(payload, "data", "setCardFiles")
     assert envelope["ok"] is False
-    assert envelope["errors"][0]["codes"] == ["changed_files_on_undone_card"]
+    assert json_at(envelope, "errors", 0, "codes") == ["changed_files_on_undone_card"]
     assert not card.path_links.exists()
 
 
@@ -630,7 +630,7 @@ def test_create_card_from_spec_number_branch_places_and_shifts() -> None:
     )
 
     assert "errors" not in payload, payload
-    assert payload["data"]["createCardFromSpec"] == {"ok": True, "errors": []}
+    assert json_at(payload, "data", "createCardFromSpec") == {"ok": True, "errors": []}
     inserted = models.Card.objects.get(title="Inserted card")
     assert inserted.number == 2
     second.refresh_from_db()

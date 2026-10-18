@@ -63,7 +63,6 @@ import pytest
 import strawberry
 from apps.library import models
 from apps.library import schema as library_schema
-from django.conf import settings
 from django.db import connection
 from django.db.models import Case, F, FloatField, Model, Q, QuerySet, Value, When
 from django.db.models.functions import Abs, Lower, Random
@@ -72,7 +71,17 @@ from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext, register_lookup
 from django.urls import clear_url_caches, path
-from graphql_client import JSONObject, assert_graphql_success, graphql_payload
+from graphql_client import (
+    JSONObject,
+    assert_graphql_success,
+    graphql_payload,
+    json_at,
+    json_int,
+    json_list,
+    json_object,
+    json_str,
+    middleware_without_debug_toolbar,
+)
 from strategy_schemas import make_django_type
 from strawberry.relay.utils import to_base64
 
@@ -168,8 +177,8 @@ def test_patron_profile_relay_id_is_built_from_the_relation_primary_key_column()
             "{ allLibraryPatronProfilesConnection { edges { node { id } } } }",
         )
 
-    edges = data["allLibraryPatronProfilesConnection"]["edges"]
-    assert [edge["node"]["id"] for edge in edges] == [
+    edges = json_list(data, "allLibraryPatronProfilesConnection", "edges")
+    assert [json_at(edge, "node", "id") for edge in edges] == [
         global_id_for(library_schema.PatronProfileType, first.patron_id),
         global_id_for(library_schema.PatronProfileType, second.patron_id),
     ], edges
@@ -226,8 +235,8 @@ def test_patron_profile_explicitly_named_fields_each_return_their_own_column() -
         """,
     )
 
-    edges = data["allLibraryPatronProfilesConnection"]["edges"]
-    assert [edge["node"] for edge in edges] == [
+    edges = json_list(data, "allLibraryPatronProfilesConnection", "edges")
+    assert [json_at(edge, "node") for edge in edges] == [
         {"secondaryAddress": "Flat 2", "secondary_address": "02139"},
         {"secondaryAddress": "Suite 7", "secondary_address": "10001"},
     ], edges
@@ -255,8 +264,8 @@ def test_printing_edition_key_only_selection_is_answered_from_the_stored_key_col
             """,
         )
 
-    edges = data["allLibraryPrintingsConnection"]["edges"]
-    assert [edge["node"]["edition"]["isbn13"] for edge in edges] == [
+    edges = json_list(data, "allLibraryPrintingsConnection", "edges")
+    assert [json_at(edge, "node", "edition", "isbn13") for edge in edges] == [
         "9780000000001",
         "9780000000001",
         "9780000000001",
@@ -289,8 +298,8 @@ def test_printing_edition_non_key_selection_reads_the_edition_table() -> None:
             """,
         )
 
-    edges = data["allLibraryPrintingsConnection"]["edges"]
-    assert {edge["node"]["edition"]["imprint"] for edge in edges} == {
+    edges = json_list(data, "allLibraryPrintingsConnection", "edges")
+    assert {json_at(edge, "node", "edition", "imprint") for edge in edges} == {
         "Gollancz SF",
         "Orbit Classics",
     }, edges
@@ -319,8 +328,8 @@ def test_patron_profile_favorite_genre_id_still_reads_the_genre_table() -> None:
             """,
         )
 
-    edges = data["allLibraryPatronProfilesConnection"]["edges"]
-    assert [edge["node"]["favoriteGenre"] for edge in edges] == [
+    edges = json_list(data, "allLibraryPatronProfilesConnection", "edges")
+    assert [json_at(edge, "node", "favoriteGenre") for edge in edges] == [
         {"id": global_id_for(library_schema.GenreType, genre.pk)},
         None,
     ], edges
@@ -341,7 +350,7 @@ def test_edition_publisher_id_still_reads_the_publisher_table_for_its_node_id() 
     with CaptureQueriesContext(connection) as captured:
         data = assert_graphql_success("{ allLibraryEditions { publisher { id } } }")
 
-    ids = [row["publisher"]["id"] for row in data["allLibraryEditions"]]
+    ids = [json_at(row, "publisher", "id") for row in json_list(data, "allLibraryEditions")]
     assert ids[0] == global_id_for(library_schema.PublisherType, first.house_code), ids
     target_type, node_id = decode_global_id(ids[0])
     assert target_type is library_schema.PublisherType, target_type
@@ -382,12 +391,18 @@ def test_publisher_printings_2_connection_pages_from_one_partitioned_window() ->
             """,
         )
 
-    nodes = [edge["node"] for edge in data["allLibraryPublishersConnection"]["edges"]]
+    nodes = [
+        json_object(edge, "node")
+        for edge in json_list(data, "allLibraryPublishersConnection", "edges")
+    ]
     assert [node["name"] for node in nodes] == ["Gollancz", "Orbit"], nodes
     pages = [
         (
-            [edge["node"]["runSize"] for edge in node["printings2Connection"]["edges"]],
-            node["printings2Connection"]["pageInfo"]["hasNextPage"],
+            [
+                json_at(edge, "node", "runSize")
+                for edge in json_list(node, "printings2Connection", "edges")
+            ],
+            json_at(node, "printings2Connection", "pageInfo", "hasNextPage"),
         )
         for node in nodes
     ]
@@ -435,11 +450,17 @@ def test_patron_profile_annotations_connection_is_left_unplanned_and_fetched_per
             """,
         )
 
-    nodes = [edge["node"] for edge in data["allLibraryPatronProfilesConnection"]["edges"]]
+    nodes = [
+        json_object(edge, "node")
+        for edge in json_list(data, "allLibraryPatronProfilesConnection", "edges")
+    ]
     pages = [
         (
-            [edge["node"]["body"] for edge in node["annotationsConnection"]["edges"]],
-            node["annotationsConnection"]["pageInfo"]["hasNextPage"],
+            [
+                json_at(edge, "node", "body")
+                for edge in json_list(node, "annotationsConnection", "edges")
+            ],
+            json_at(node, "annotationsConnection", "pageInfo", "hasNextPage"),
         )
         for node in nodes
     ]
@@ -472,7 +493,10 @@ def test_distributor_mixed_case_scalar_projects_its_own_column() -> None:
     with CaptureQueriesContext(connection) as captured:
         data = assert_graphql_success("{ allLibraryDistributors { id displayName } }")
 
-    assert sorted(data["allLibraryDistributors"], key=lambda row: row["id"]) == [
+    assert sorted(
+        json_list(data, "allLibraryDistributors"),
+        key=lambda row: json_int(row, "id"),
+    ) == [
         {"id": distributor.pk, "displayName": distributor.displayName}
         for distributor in distributors
     ], data
@@ -500,8 +524,8 @@ def test_consignment_mixed_case_forward_key_joins_its_target_in_one_statement(
         )
 
     assert sorted(
-        (row["label"], row["distributorRef"]["displayName"])
-        for row in data["allLibraryConsignments"]
+        (json_str(row, "label"), json_str(row, "distributorRef", "displayName"))
+        for row in json_list(data, "allLibraryConsignments")
     ) == [(f"Consignment {index}", f"Distributor {index}") for index in range(distributor_count)]
     distributor_sql = _sql_touching(captured, "library_distributor")
     assert len(distributor_sql) == 1, captured.captured_queries
@@ -529,8 +553,11 @@ def test_distributor_mixed_case_reverse_relation_loads_through_one_prefetch(
         )
 
     assert sorted(
-        (row["displayName"], [item["label"] for item in row["consignmentItems"]])
-        for row in data["allLibraryDistributors"]
+        (
+            json_str(row, "displayName"),
+            [json_str(item, "label") for item in json_list(row, "consignmentItems")],
+        )
+        for row in json_list(data, "allLibraryDistributors")
     ) == [(f"Distributor {index}", [f"Consignment {index}"]) for index in range(distributor_count)]
     assert len(_sql_from_table(captured, "library_distributor")) == 1, captured.captured_queries
     consignment_sql = _sql_from_table(captured, "library_consignment")
@@ -572,10 +599,12 @@ def test_reading_list_entries_connection_pages_in_primary_key_order_with_orderin
         )
 
     page = data["allLibraryReadingListEntriesConnection"]
-    assert [edge["node"]["title"] for edge in page["edges"]] == ["Solaris", "Dune", "Anathem"], (
-        page
-    )
-    assert page["pageInfo"]["hasNextPage"] is True, page
+    assert [json_at(edge, "node", "title") for edge in json_list(page, "edges")] == [
+        "Solaris",
+        "Dune",
+        "Anathem",
+    ], page
+    assert json_at(page, "pageInfo", "hasNextPage") is True, page
     entry_sql = _sql_from_table(captured, "library_readinglistentry")
     assert len(entry_sql) == 1, captured.captured_queries
     assert 'ORDER BY "library_readinglistentry"."id" ASC' in entry_sql[0], entry_sql[0]
@@ -612,12 +641,18 @@ def test_reading_list_entries_nested_connection_windows_in_primary_key_order() -
             """,
         )
 
-    nodes = [edge["node"] for edge in data["allLibraryReadingListsConnection"]["edges"]]
+    nodes = [
+        json_object(edge, "node")
+        for edge in json_list(data, "allLibraryReadingListsConnection", "edges")
+    ]
     pages = [
         (
             node["title"],
-            [edge["node"]["title"] for edge in node["entriesConnection"]["edges"]],
-            node["entriesConnection"]["pageInfo"]["hasNextPage"],
+            [
+                json_at(edge, "node", "title")
+                for edge in json_list(node, "entriesConnection", "edges")
+            ],
+            json_at(node, "entriesConnection", "pageInfo", "hasNextPage"),
         )
         for node in nodes
     ]
@@ -656,8 +691,8 @@ def test_reading_lists_connection_honors_a_cleared_default_ordering() -> None:
         )
 
     titles = [
-        edge["node"]["title"]
-        for edge in data["allLibraryReadingListsUnorderedConnection"]["edges"]
+        json_at(edge, "node", "title")
+        for edge in json_list(data, "allLibraryReadingListsUnorderedConnection", "edges")
     ]
     assert titles == ["Classics", "Anthology"], titles
     list_sql = _sql_from_table(captured, "library_readinglist")
@@ -784,15 +819,18 @@ def _shuffled_books_pages(window: str) -> tuple[dict[str, JSONObject], list[str]
     with CaptureQueriesContext(connection) as captured:
         data = assert_graphql_success(_SHUFFLED_BOOKS_QUERY % _SHUFFLED_BOOKS_WINDOWS[window])
     pages = {
-        edge["node"]["name"]: edge["node"]["booksConnection"]
-        for edge in data["allLibraryGenresConnection"]["edges"]
+        json_str(edge, "node", "name"): json_object(edge, "node", "booksConnection")
+        for edge in json_list(data, "allLibraryGenresConnection", "edges")
     }
     return pages, _sql_from_table(captured, "library_book")
 
 
 def _page_structure(page: JSONObject) -> tuple[list[str], JSONObject]:
     """The order-independent half of a page: its edge cursors and its ``pageInfo``."""
-    return [edge["cursor"] for edge in page["edges"]], page["pageInfo"]
+    return [json_str(edge, "cursor") for edge in json_list(page, "edges")], json_object(
+        page,
+        "pageInfo",
+    )
 
 
 def _order_books_by(
@@ -853,7 +891,7 @@ def test_random_book_order_leaves_genre_books_connection_to_the_per_parent_pipel
         (False, True),
     ] * len(titles), shuffled_sql
     for name, genre_titles in titles.items():
-        served = [edge["node"]["title"] for edge in shuffled[name]["edges"]]
+        served = [json_at(edge, "node", "title") for edge in json_list(shuffled[name], "edges")]
         assert len(set(served)) == len(served), (name, served)
         assert set(served) <= genre_titles, (name, served)
         assert _page_structure(shuffled[name]) == _page_structure(planned[name]), name
@@ -910,10 +948,7 @@ def test_string_literal_in_a_book_order_condition_keeps_genre_books_connection_w
 #: Opens the error policy's pass-through gate so a refused order's ``FieldError`` reaches
 #: the wire; the toolbar middleware is dropped because ``config.urls`` computed its
 #: ``djdt`` routes under the ambient ``DEBUG=False``.
-_ERROR_POLICY_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [entry for entry in settings.MIDDLEWARE if "debug_toolbar" not in entry],
-}
+_ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
 _MOUNTED: dict[str, strawberry.Schema | None] = {"schema": None}
 
@@ -991,7 +1026,8 @@ def _hold(
     class Query:
         children = DjangoConnectionField(child_type)
 
-        @strawberry.field(graphql_type=list[parent_type])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[parent_type])  # pyright: ignore[reportAny]
         def parents(self) -> QuerySet[Model]:
             return parent_model._default_manager.order_by("name")
 
@@ -1054,8 +1090,8 @@ def _genre_books_pages(
         payload = _post(_SHUFFLED_BOOKS_QUERY % _SHUFFLED_BOOKS_WINDOWS[window], schema=schema)
     assert "errors" not in payload, payload
     pages = {
-        edge["node"]["name"]: edge["node"]["booksConnection"]
-        for edge in payload["data"]["allLibraryGenresConnection"]["edges"]
+        json_str(edge, "node", "name"): json_object(edge, "node", "booksConnection")
+        for edge in json_list(payload, "data", "allLibraryGenresConnection", "edges")
     }
     return pages, [entry["sql"] for entry in captured.captured_queries]
 
@@ -1160,7 +1196,10 @@ def test_unexpandable_relation_name_book_order_raises_djangos_error_with_and_wit
     unoptimized = _post(query, schema=_unoptimized_library_schema())
 
     raised = [
-        {error["message"].split(" Choices are:")[0] for error in payload["errors"]}
+        {
+            json_str(error, "message").split(" Choices are:")[0]
+            for error in json_list(payload, "errors")
+        }
         for payload in (optimized, unoptimized)
     ]
     assert raised[0] == raised[1], raised
@@ -1193,7 +1232,10 @@ def _held_pages(
     with CaptureQueriesContext(connection) as captured:
         payload = _post(query, schema=schema)
     assert "errors" not in payload, payload
-    pages = {parent["name"]: parent[relation] for parent in payload["data"]["parents"]}
+    pages = {
+        json_str(parent, "name"): json_object(parent, relation)
+        for parent in json_list(payload, "data", "parents")
+    }
     return pages, [entry["sql"] for entry in captured.captured_queries]
 
 
@@ -1267,7 +1309,10 @@ def test_one_to_one_key_name_order_is_made_total_and_pages_like_the_pipeline(
         "postalCode",
     )
 
-    assert [edge["node"]["postalCode"] for edge in root["data"]["children"]["edges"]] == [
+    assert [
+        json_at(edge, "node", "postalCode")
+        for edge in json_list(root, "data", "children", "edges")
+    ] == [
         "00001",
         "00002",
         "00005",
@@ -1356,8 +1401,8 @@ def _printings_pages(
         payload = _post(_PRINTINGS_QUERY % _SHUFFLED_BOOKS_WINDOWS[window], schema=schema)
     assert "errors" not in payload, payload
     pages = {
-        edge["node"]["name"]: edge["node"]["printings2Connection"]
-        for edge in payload["data"]["allLibraryPublishersConnection"]["edges"]
+        json_str(edge, "node", "name"): json_object(edge, "node", "printings2Connection")
+        for edge in json_list(payload, "data", "allLibraryPublishersConnection", "edges")
     }
     return pages, [entry["sql"] for entry in captured.captured_queries]
 

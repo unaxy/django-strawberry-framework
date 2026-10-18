@@ -35,6 +35,7 @@ if os.environ.get("FAKESHOP_SHARDED") != "1":
 import strawberry
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import QuerySet
+from graphql_client import json_at, json_list, json_object
 from strawberry import relay
 
 from apps.library.models import Branch, TaggedItem
@@ -80,7 +81,8 @@ def _build_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[BranchNode])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[BranchNode])  # pyright: ignore[reportAny]
         def branches(self) -> QuerySet[Branch]:
             return Branch.objects.using("shard_b").order_by("id")
 
@@ -111,7 +113,7 @@ def test_generic_connection_uses_shard_b_content_type_pk_not_default() -> None:
     # (post_migrate) pre-create a ``library.branch`` row on each alias with a
     # matching pk, so delete it and recreate at an explicit, distinct pk. The
     # FK cascade only touches TaggedItems, which are seeded afterwards.
-    shard_branch_ct_pk = default_branch_ct.pk + 500
+    shard_branch_ct_pk = default_branch_ct.id + 500
     ContentType.objects.using("shard_b").filter(
         app_label="library",
         model="branch",
@@ -122,7 +124,7 @@ def test_generic_connection_uses_shard_b_content_type_pk_not_default() -> None:
         model="branch",
     )
     ContentType.objects.clear_cache()
-    assert shard_branch_ct_pk != default_branch_ct.pk
+    assert shard_branch_ct_pk != default_branch_ct.id
 
     # Seed the branch and its tags on ``shard_b`` under ``shard_b``'s ct pk.
     branch = Branch.objects.using("shard_b").create(name="Central")
@@ -150,9 +152,9 @@ def test_generic_connection_uses_shard_b_content_type_pk_not_default() -> None:
 
     assert result.errors is None, result.errors
     assert result.data is not None
-    conn = result.data["branches"][0]["tagsConnection"]
+    conn = json_object(result.data, "branches", 0, "tagsConnection")
     # Non-empty rows prove the fetch used ``shard_b``'s ct pk, not the baked
     # default pk (which would have matched zero rows on ``shard_b``).
-    assert [edge["node"]["tag"] for edge in conn["edges"]] == ["a1", "a2"]
+    assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["a1", "a2"]
     assert conn["totalCount"] == 3
-    assert conn["pageInfo"]["hasNextPage"] is True
+    assert json_at(conn, "pageInfo", "hasNextPage") is True

@@ -4,6 +4,7 @@ import pytest
 from apps.glossary import models
 from apps.kanban import models as kanban_models
 from graphql_client import assert_graphql_success as _graphql_data
+from graphql_client import json_list, json_str
 
 
 def _seed_glossary() -> None:
@@ -192,13 +193,7 @@ def test_glossary_documents_are_shared_board_docs_scoped_to_glossary_namespace()
 def test_order_glossary_terms_by_title_desc() -> None:
     """``orderBy: [{ title: DESC }]`` reorders the glossary terms list (DONE-028 order wiring)."""
     _seed_glossary()
-    expected = [
-        {"title": title}
-        for title in models.GlossaryTerm.objects.order_by("-title").values_list(
-            "title",
-            flat=True,
-        )
-    ]
+    expected = [{"title": term.title} for term in models.GlossaryTerm.objects.order_by("-title")]
     assert _graphql_data(
         "query { allGlossaryTerms(orderBy: [{ title: DESC }]) { title } }",
     ) == {"allGlossaryTerms": expected}
@@ -228,4 +223,7 @@ def test_anonymous_inline_fragment_under_list_field_resolves() -> None:
     data = _graphql_data(
         "query { allGlossaryTerms { ... { title } } }",
     )
-    assert sorted(term["title"] for term in data["allGlossaryTerms"]) == expected_titles
+    assert (
+        sorted(json_str(term, "title") for term in json_list(data, "allGlossaryTerms"))
+        == expected_titles
+    )

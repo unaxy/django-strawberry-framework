@@ -20,40 +20,138 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias
 
+from django.conf import settings
 from django.test import Client
+from typing_extensions import TypeIs
 
 from django_strawberry_framework.testing import TestClient
 
 if TYPE_CHECKING:
-    from django.test.client import _MonkeyPatchedWSGIResponse
+    from django.test.client import _MonkeyPatchedASGIResponse, _MonkeyPatchedWSGIResponse
 
-#: A parsed GraphQL JSON object (response envelope, ``data``, or variables).
-# basedpyright: live suites chain subscripts into a parsed response (``data["a"]["b"][0]``);
-# a recursive JSON alias would turn every hop of every chain into a narrowing site
-JSONObject: TypeAlias = dict[str, Any]  # pyright: ignore[reportExplicitAny]
+#: A parsed GraphQL JSON object (response envelope, ``data``, or variables). Its members are
+#: ``object``: read a nested member through :func:`json_at` / :func:`json_object` /
+#: :func:`json_list`, which check each step's container kind.
+JSONObject: TypeAlias = dict[str, object]
 #: A JSON value a test writes as an expected literal (what a response decodes to). The
 #: container arms are the read-only ``Sequence`` / ``Mapping`` so an expected value a test
 #: builds first (``list[dict[str, str]]``) still matches: ``list`` / ``dict`` are invariant.
 JSONValue: TypeAlias = (
     "str | int | float | bool | Sequence[JSONValue] | Mapping[str, JSONValue] | None"
 )
-#: ``json.loads`` typed as the ``object`` a decode returns; ``_json_object`` narrows it.
-_loads: Callable[[bytes], object] = json.loads
+#: ``json.loads`` typed as the ``object`` a decode returns; :func:`json_object` narrows it.
+json_loads: Callable[[str | bytes], object] = json.loads
 
 
-def _json_object(value: object) -> JSONObject:
-    """Return a decoded JSON value as a ``JSONObject``, failing the test when it is not one."""
-    assert isinstance(value, dict), value
-    # A decoded JSON object has string keys; its values stay the open ``JSONObject`` chain
-    # the live suites subscript, which no check short of a full schema walk can type.
-    return cast("JSONObject", value)
+def _is_object_dict(value: object) -> TypeIs[dict[object, object]]:
+    """Whether ``value`` is a ``dict``, its items typed ``object``."""
+    return isinstance(value, dict)
 
 
-def _response_json(response: _MonkeyPatchedWSGIResponse) -> JSONObject:
+def is_json_object(value: object) -> TypeIs[JSONObject]:
+    """Whether ``value`` is a ``dict`` whose keys are all strings, as a decoded JSON object's are."""
+    return _is_object_dict(value) and all(isinstance(key, str) for key in value)
+
+
+def is_json_list(value: object) -> TypeIs[list[object]]:
+    """Whether ``value`` is a ``list``, its items typed ``object``."""
+    return isinstance(value, list)
+
+
+def json_at(value: object, *path: str | int) -> object:
+    """Return ``value[path[0]][path[1]]...``, failing the test when a step meets the wrong kind.
+
+    A ``str`` step reads a JSON object member, an ``int`` step a JSON array item.
+    """
+    for key in path:
+        if isinstance(key, str):
+            assert is_json_object(value), (
+                f"expected a JSON object to read {key!r} from, got {value!r}"
+            )
+            value = value[key]
+        else:
+            assert is_json_list(value), (
+                f"expected a JSON array to read [{key}] from, got {value!r}"
+            )
+            value = value[key]
+    return value
+
+
+def json_object(value: object, *path: str | int) -> JSONObject:
+    """Return the JSON object ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    assert is_json_object(found), f"expected a JSON object at {path!r}, got {found!r}"
+    return found
+
+
+def json_list(value: object, *path: str | int) -> list[object]:
+    """Return the JSON array ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    assert is_json_list(found), f"expected a JSON array at {path!r}, got {found!r}"
+    return found
+
+
+def json_str(value: object, *path: str | int) -> str:
+    """Return the JSON string ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    assert isinstance(found, str), f"expected a JSON string at {path!r}, got {found!r}"
+    return found
+
+
+def json_optional_str(value: object, *path: str | int) -> str | None:
+    """Return the JSON string or ``null`` ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    assert found is None or isinstance(found, str), (
+        f"expected a JSON string or null at {path!r}, got {found!r}"
+    )
+    return found
+
+
+def json_int(value: object, *path: str | int) -> int:
+    """Return the JSON integer ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    assert isinstance(found, int), f"expected a JSON integer at {path!r}, got {found!r}"
+    assert not isinstance(found, bool), f"expected a JSON integer at {path!r}, got {found!r}"
+    return found
+
+
+def json_bool(value: object, *path: str | int) -> bool:
+    """Return the JSON boolean ``json_at(value, *path)`` reaches, failing on any other kind."""
+    found = json_at(value, *path)
+    assert isinstance(found, bool), f"expected a JSON boolean at {path!r}, got {found!r}"
+    return found
+
+
+def saved_pk(pk: int | None) -> int:
+    """Return a saved row's integer primary key (``Model.pk`` is ``None`` only before the first save)."""
+    assert pk is not None, "expected a saved row"
+    return pk
+
+
+#: ``getattr`` typed ``-> object``: reads a setting (django-stubs types every ``LazySettings``
+#: attribute ``Any``), ``User.pk`` or a module attribute as a value the caller then checks.
+read_attr: Callable[[object, str], object] = getattr
+
+
+def middleware() -> list[str]:
+    """Return the configured ``settings.MIDDLEWARE``, checked to be a list of dotted paths."""
+    configured = read_attr(settings, "MIDDLEWARE")
+    assert is_json_list(configured), configured
+    entries = [entry for entry in configured if isinstance(entry, str)]
+    assert len(entries) == len(configured), configured
+    return entries
+
+
+def middleware_without_debug_toolbar() -> list[str]:
+    """Return ``settings.MIDDLEWARE`` minus its debug-toolbar entries."""
+    return [entry for entry in middleware() if "debug_toolbar" not in entry]
+
+
+def response_json(response: _MonkeyPatchedWSGIResponse | _MonkeyPatchedASGIResponse) -> JSONObject:
     """Decode a live ``/graphql/`` response body as a JSON object."""
-    return _json_object(_loads(response.content))
+    return json_object(json_loads(response.content))
 
 
 def post_graphql(
@@ -78,9 +176,7 @@ def post_graphql(
         assert_no_errors=False,
         url=url,
     )
-    # basedpyright: the package's public ``testing.Response.response`` is typed ``Any`` (it
-    # carries whichever ``HttpResponse`` subclass the Django client returned)
-    return result.response  # pyright: ignore[reportAny]
+    return result.response
 
 
 def post_graphql_raw(
@@ -113,7 +209,7 @@ def graphql_payload(
     """POST ``query`` to the configured or one-call ``url`` and return parsed JSON."""
     response = post_graphql(query, client=client, variables=variables, url=url)
     assert response.status_code == 200
-    return _response_json(response)
+    return response_json(response)
 
 
 def assert_graphql_success(
@@ -126,7 +222,7 @@ def assert_graphql_success(
     """POST ``query``, assert HTTP 200 and no GraphQL errors, then return ``data``."""
     payload = graphql_payload(query, client=client, variables=variables, url=url)
     assert "errors" not in payload, payload
-    return _json_object(payload.get("data"))
+    return json_object(payload, "data")
 
 
 def assert_graphql_data(
@@ -144,7 +240,7 @@ def assert_graphql_data(
     """
     response = post_graphql(query, client=client, variables=variables, url=url)
     assert response.status_code == 200
-    payload = _response_json(response)
+    payload = response_json(response)
     assert "errors" not in payload, payload
     assert payload.get("data") == expected
     return response

@@ -11,6 +11,7 @@ import pytest
 from django.contrib.auth.models import User
 from django.db import IntegrityError
 from faker import Faker
+from graphql_client import read_attr
 
 from apps.products import services
 from apps.products.models import Category, Entry, Item, Property
@@ -325,11 +326,14 @@ def _named_fixture_helpers() -> dict[str, Callable[..., object]]:
     for name in dir(services):
         if not name.startswith("seed_"):
             continue
-        helper = getattr(services, name)
+        helper = read_attr(services, name)
         if not callable(helper):
             continue
         parameters = inspect.signature(helper).parameters.values()
-        if all(parameter.default is not inspect.Parameter.empty for parameter in parameters):
+        if all(
+            read_attr(parameter, "default") is not inspect.Parameter.empty
+            for parameter in parameters
+        ):
             found[name] = helper
     return found
 

@@ -48,6 +48,7 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.urls import include, path, resolve
+from graphql_client import json_at, json_list, json_object, read_attr
 from PIL import Image
 from strawberry import relay
 from typing_extensions import override
@@ -84,8 +85,9 @@ def _alt_graphql_view(request: HttpRequest, *args: object, **kwargs: object) -> 
     the probe marker header so a request that routed here is distinguishable
     from one that reached the same view at ``/graphql/``.
     """
-    match = resolve("/graphql/")
-    response = match.func(request, *args, **kwargs)
+    view: Callable[..., object] = resolve("/graphql/").func
+    response = view(request, *args, **kwargs)
+    assert isinstance(response, HttpResponseBase)
     response[_PROBE_MARKER_HEADER] = _PROBE_MARKER_VALUE
     return response
 
@@ -184,9 +186,9 @@ def test_query_sends_a_non_dict_variables_mapping(
 
     assert res.errors is None
     assert res.data is not None
-    edges = res.data["allItems"]["edges"]
+    edges = json_list(res.data, "allItems", "edges")
     assert len(edges) == 1
-    assert Item.objects.filter(name=edges[0]["node"]["name"]).exists()
+    assert Item.objects.filter(name=json_at(edges, 0, "node", "name")).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +221,7 @@ def permitted_writer() -> tuple[User, str]:
     user.user_permissions.add(
         Permission.objects.get(codename="add_item", content_type__app_label="products"),
     )
-    user = User.objects.get(pk=user.pk)  # drop the stale perm cache
+    user = User.objects.get(pk=read_attr(user, "pk"))  # drop the stale perm cache
     category = Category.objects.earliest("pk")
     category_gid = str(relay.GlobalID(type_name="products.category", node_id=str(category.pk)))
     return user, category_gid
@@ -239,7 +241,7 @@ async def test_async_query_happy_path_and_raise_direction() -> None:
 
     assert res.errors is None
     assert res.data is not None
-    assert len(res.data["allItems"]["edges"]) == 1
+    assert len(json_list(res.data, "allItems", "edges")) == 1
     assert res.response.status_code == 200
     assert res.response["Content-Type"].startswith("application/json")
 
@@ -305,7 +307,7 @@ def test_sync_login_bracket_logs_out_when_the_block_raises() -> None:
     user.user_permissions.add(
         Permission.objects.get(codename="add_item", content_type__app_label="products"),
     )
-    user = User.objects.get(pk=user.pk)
+    user = User.objects.get(pk=read_attr(user, "pk"))
     category = Category.objects.earliest("pk")
     category_gid = str(relay.GlobalID(type_name="products.category", node_id=str(category.pk)))
     variables = {"d": {"name": "SyncRaiseLogoutWidget", "categoryId": category_gid}}
@@ -424,15 +426,19 @@ async def test_async_multipart_upload_creates_media_specimen(
 
     assert res.response.status_code == 200
     assert res.data is not None
-    payload = res.data["createMediaSpecimen"]
+    payload = json_object(res.data, "createMediaSpecimen")
     assert payload["errors"] == []
-    result = payload["result"]
+    result = json_object(payload, "result")
     assert result["label"] == "async-uploaded"
-    assert result["attachment"]["name"].endswith("async.txt")
-    assert result["attachment"]["size"] == len(b"async multipart bytes")
-    assert result["image"]["name"].endswith("async.png")
-    assert result["image"]["width"] == _IMAGE_WIDTH
-    assert result["image"]["height"] == _IMAGE_HEIGHT
+    attachment_name = json_at(result, "attachment", "name")
+    assert isinstance(attachment_name, str)
+    assert attachment_name.endswith("async.txt")
+    assert json_at(result, "attachment", "size") == len(b"async multipart bytes")
+    image_name = json_at(result, "image", "name")
+    assert isinstance(image_name, str)
+    assert image_name.endswith("async.png")
+    assert json_at(result, "image", "width") == _IMAGE_WIDTH
+    assert json_at(result, "image", "height") == _IMAGE_HEIGHT
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +462,7 @@ class GraphQLTestCaseEndToEndTests(GraphQLTestCase):
         )
         self.assertResponseNoErrors(res)
         assert res.data is not None
-        assert len(res.data["allItems"]["edges"]) == 1
+        assert len(json_list(res.data, "allItems", "edges")) == 1
 
     def test_invalid_query_returns_instead_of_raising_then_has_errors(self) -> None:
         # The mixin's flipped ``assert_no_errors=False`` default (graphene

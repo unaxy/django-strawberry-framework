@@ -24,6 +24,7 @@ import pytest
 from apps.scalars import models
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _assert_graphql_success
+from graphql_client import json_at, json_list, json_object
 
 _DATE = datetime.date(2021, 6, 15)
 _DATETIME = datetime.datetime(2021, 6, 15, 9, 30, tzinfo=datetime.timezone.utc)
@@ -133,11 +134,7 @@ def test_scalars_order_by_label_desc() -> None:
     _seed_specimen("gamma")
     _seed_specimen("beta")
     expected = [
-        {"label": label}
-        for label in models.ScalarSpecimen.objects.order_by("-label").values_list(
-            "label",
-            flat=True,
-        )
+        {"label": specimen.label} for specimen in models.ScalarSpecimen.objects.order_by("-label")
     ]
     _assert_graphql_data(
         "query { allScalarSpecimens(orderBy: [{ label: DESC }]) { label } }",
@@ -171,15 +168,19 @@ def test_range_input_types_are_scoped_per_filterset() -> None:
     """
     data = _assert_graphql_success(_RANGE_TYPE_QUERY)
 
-    scalar = data["scalar"]
-    nullable = data["nullable"]
-    assert scalar is not None
-    assert nullable is not None
+    scalar = json_object(data, "scalar")
+    nullable = json_object(data, "nullable")
     assert scalar["name"] == "ScalarSpecimenFilterPriceRangeInputType"
     assert nullable["name"] == "NullableScalarSpecimenFilterPriceRangeInputType"
     assert scalar["name"] != nullable["name"]
-    assert {field["name"] for field in scalar["inputFields"]} == {"start", "end"}
-    assert {field["name"] for field in nullable["inputFields"]} == {"start", "end"}
+    assert {json_at(field, "name") for field in json_list(scalar, "inputFields")} == {
+        "start",
+        "end",
+    }
+    assert {json_at(field, "name") for field in json_list(nullable, "inputFields")} == {
+        "start",
+        "end",
+    }
 
 
 @pytest.mark.django_db
@@ -240,12 +241,14 @@ def test_scalars_forward_fk_primary_key_follows_the_membership_rules() -> None:
     """
     root = _seed_specimen("root")
     _seed_specimen("child", parent=root)
-    missing = root.pk + 1000
+    root_pk = root.pk
+    assert root_pk is not None
+    missing = root_pk + 1000
 
     cases: tuple[tuple[dict[str, dict[str, int | list[int]]], list[str]], ...] = (
         ({"parent": {"exact": missing}}, []),
         ({"parent": {"in": [missing]}}, []),
-        ({"parent": {"in": [missing, root.pk]}}, ["child"]),
+        ({"parent": {"in": [missing, root_pk]}}, ["child"]),
         ({"parent": {"in": []}}, []),
     )
     for filter_input, labels in cases:

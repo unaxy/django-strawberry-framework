@@ -159,11 +159,17 @@ def install_hashable_scalar_cache_schema(
         def __eq__(self, _other: object) -> bool:
             raise RuntimeError("custom scalar equality must not run in cache lookup")
 
+    def _serialize_bomb(_value: object) -> str:
+        return "ok"
+
+    def _parse_bomb(_value: object) -> EqualityBomb:
+        return EqualityBomb()
+
     BombValue = NewType("BombValue", object)
     bomb_scalar = strawberry.scalar(
         name="BombValue",
-        serialize=lambda _value: "ok",
-        parse_value=lambda _value: EqualityBomb(),
+        serialize=_serialize_bomb,
+        parse_value=_parse_bomb,
     )
 
     @strawberry.type

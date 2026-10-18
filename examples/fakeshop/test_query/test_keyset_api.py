@@ -76,7 +76,16 @@ from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import clear_url_caches, path
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_bool,
+    json_list,
+    json_object,
+    json_str,
+    read_attr,
+    response_json,
+)
 from graphql_client import assert_graphql_success as _assert_graphql_success
 from graphql_client import graphql_payload as _graphql_payload
 from graphql_client import post_graphql as _post_graphql
@@ -155,7 +164,7 @@ async def _post_async_holder(
                 url="/graphql-async/",
             )
         assert result.response.status_code == 200, result.response.content
-        return result.response.json()
+        return response_json(result.response)
     finally:
         _CURRENT["schema"] = None
         clear_url_caches()
@@ -202,11 +211,11 @@ query ($first: Int, $last: Int, $after: String, $before: String) {
 
 def _root_page(**variables: object) -> JSONObject:
     data = _assert_graphql_success(ROOT_PAGE_QUERY, variables=variables)
-    return data["allLibraryIssuesConnection"]
+    return json_object(data, "allLibraryIssuesConnection")
 
 
-def _titles(connection_payload: JSONObject) -> list[str]:
-    return [edge["node"]["title"] for edge in connection_payload["edges"]]
+def _titles(connection_payload: object) -> list[str]:
+    return [json_str(edge, "node", "title") for edge in json_list(connection_payload, "edges")]
 
 
 @pytest.mark.django_db
@@ -215,12 +224,12 @@ def test_root_keyset_first_page_orders_by_cursor_field() -> None:
     _seed_periodicals()
     page = _root_page(first=3)
     assert _titles(page) == ["Astro #5", "Astro #4", "Astro #3"]
-    assert page["totalCount"] == 8
-    assert page["pageInfo"]["hasNextPage"] is True
-    assert page["pageInfo"]["hasPreviousPage"] is False
-    assert page["pageInfo"]["startCursor"] == page["edges"][0]["cursor"]
-    assert page["pageInfo"]["endCursor"] == page["edges"][-1]["cursor"]
-    prefix, _payload = from_base64(page["edges"][0]["cursor"])
+    assert json_at(page, "totalCount") == 8
+    assert json_at(page, "pageInfo", "hasNextPage") is True
+    assert json_at(page, "pageInfo", "hasPreviousPage") is False
+    assert json_at(page, "pageInfo", "startCursor") == json_at(page, "edges", 0, "cursor")
+    assert json_at(page, "pageInfo", "endCursor") == json_at(page, "edges", -1, "cursor")
+    prefix, _payload = from_base64(json_str(page, "edges", 0, "cursor"))
     assert prefix == "dstcursor"
 
 
@@ -230,7 +239,7 @@ def test_root_keyset_total_count_only_does_not_fetch_edges() -> None:
     _seed_periodicals()
     with CaptureQueriesContext(connection) as ctx:
         data = _assert_graphql_success("{ allLibraryIssuesConnection { totalCount } }")
-    assert data["allLibraryIssuesConnection"] == {"totalCount": 8}
+    assert json_at(data, "allLibraryIssuesConnection") == {"totalCount": 8}
     issue_sql = [
         entry["sql"] for entry in ctx.captured_queries if 'FROM "library_issue"' in entry["sql"]
     ]
@@ -245,12 +254,12 @@ def test_root_keyset_cursors_are_deterministic() -> None:
     _seed_periodicals()
     first = _root_page(first=1)
     second = _root_page(first=1)
-    first_cursors = [edge["cursor"] for edge in first["edges"]]
-    second_cursors = [edge["cursor"] for edge in second["edges"]]
+    first_cursors = [json_at(edge, "cursor") for edge in json_list(first, "edges")]
+    second_cursors = [json_at(edge, "cursor") for edge in json_list(second, "edges")]
     assert len(first_cursors) == 1
     assert all(cursor for cursor in first_cursors)
     assert first_cursors == second_cursors
-    assert first["pageInfo"]["endCursor"] == second["pageInfo"]["endCursor"]
+    assert json_at(first, "pageInfo", "endCursor") == json_at(second, "pageInfo", "endCursor")
 
 
 @pytest.mark.django_db
@@ -258,21 +267,23 @@ def test_root_keyset_round_trip_and_pre_seek_total_count() -> None:
     """``endCursor`` -> ``after:`` continues exactly; ``totalCount`` stays pre-seek."""
     _seed_periodicals()
     first_page = _root_page(first=3)
-    second_page = _root_page(first=3, after=first_page["pageInfo"]["endCursor"])
+    second_page = _root_page(first=3, after=json_at(first_page, "pageInfo", "endCursor"))
     assert _titles(second_page) == ["Bot #3", "Astro #2", "Bot #2"]
-    assert second_page["totalCount"] == 8  # the pre-pagination set, not the post-seek tail
-    assert second_page["pageInfo"]["hasPreviousPage"] is True
-    assert second_page["pageInfo"]["hasNextPage"] is True
-    third_page = _root_page(first=3, after=second_page["pageInfo"]["endCursor"])
+    assert (
+        json_at(second_page, "totalCount") == 8
+    )  # the pre-pagination set, not the post-seek tail
+    assert json_at(second_page, "pageInfo", "hasPreviousPage") is True
+    assert json_at(second_page, "pageInfo", "hasNextPage") is True
+    third_page = _root_page(first=3, after=json_at(second_page, "pageInfo", "endCursor"))
     assert _titles(third_page) == ["Astro #1", "Bot #1"]
-    assert third_page["pageInfo"]["hasNextPage"] is False
+    assert json_at(third_page, "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
 def test_root_keyset_page_survives_inserts_and_deletes_before_cursor() -> None:
     """The motivating stability pin: mutations before the cursor cannot drift the page."""
     astronomy, _botany, _empty = _seed_periodicals()
-    cursor = _root_page(first=3)["pageInfo"]["endCursor"]
+    cursor = json_at(_root_page(first=3), "pageInfo", "endCursor")
     baseline = _titles(_root_page(first=3, after=cursor))
 
     # Insert a row that sorts BEFORE the cursor position (number 9 > 5 sorts
@@ -288,17 +299,17 @@ def test_root_keyset_page_survives_inserts_and_deletes_before_cursor() -> None:
 def test_root_keyset_rejects_tampered_and_offset_cursors(kind: str) -> None:
     """Tampered bytes and offset-vocabulary cursors both get the uniform rejection."""
     _seed_periodicals()
-    minted = _root_page(first=1)["pageInfo"]["endCursor"]
+    minted = json_str(_root_page(first=1), "pageInfo", "endCursor")
     bad_cursor = {
         "tampered": minted[:-8] + "AAAAAAAA",
         "offset": to_base64("arrayconnection", 2),
     }[kind]
     response = _post_graphql(ROOT_PAGE_QUERY, variables={"first": 1, "after": bad_cursor})
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert "invalid cursor" in payload["errors"][0]["message"]
-    assert payload["data"] is None, payload
+    assert "invalid cursor" in json_str(payload, "errors", 0, "message")
+    assert json_at(payload, "data") is None, payload
 
 
 @pytest.mark.django_db
@@ -314,8 +325,9 @@ def test_root_keyset_cursor_survives_a_secret_key_rotation_that_keeps_the_fallba
     weakening of the authentication.
     """
     _seed_periodicals()
-    original_key = settings.SECRET_KEY
-    cursor = _root_page(first=3)["pageInfo"]["endCursor"]
+    original_key = read_attr(settings, "SECRET_KEY")
+    assert isinstance(original_key, str), original_key
+    cursor = json_at(_root_page(first=3), "pageInfo", "endCursor")
 
     with override_settings(SECRET_KEY="rotated-live-key", SECRET_KEY_FALLBACKS=[original_key]):
         rotated = _root_page(first=3, after=cursor)
@@ -325,10 +337,10 @@ def test_root_keyset_cursor_survives_a_secret_key_rotation_that_keeps_the_fallba
         response = _post_graphql(ROOT_PAGE_QUERY, variables={"first": 3, "after": cursor})
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert payload["data"] is None, payload
-    assert "invalid cursor" in payload["errors"][0]["message"], payload
+    assert json_at(payload, "data") is None, payload
+    assert "invalid cursor" in json_str(payload, "errors", 0, "message"), payload
 
 
 @pytest.mark.django_db
@@ -337,18 +349,18 @@ def test_root_keyset_backward_pagination() -> None:
     _seed_periodicals()
     tail = _root_page(last=2)
     assert _titles(tail) == ["Astro #1", "Bot #1"]
-    assert tail["pageInfo"]["hasPreviousPage"] is True
-    assert tail["pageInfo"]["hasNextPage"] is False
-    previous = _root_page(last=2, before=tail["pageInfo"]["startCursor"])
+    assert json_at(tail, "pageInfo", "hasPreviousPage") is True
+    assert json_at(tail, "pageInfo", "hasNextPage") is False
+    previous = _root_page(last=2, before=json_at(tail, "pageInfo", "startCursor"))
     assert _titles(previous) == ["Astro #2", "Bot #2"]
-    assert previous["pageInfo"]["hasPreviousPage"] is True
-    assert previous["pageInfo"]["hasNextPage"] is True
+    assert json_at(previous, "pageInfo", "hasPreviousPage") is True
+    assert json_at(previous, "pageInfo", "hasNextPage") is True
     # Walk all the way back: the head page reports no previous rows.
     head = previous
-    while head["pageInfo"]["hasPreviousPage"]:
-        head = _root_page(last=2, before=head["pageInfo"]["startCursor"])
+    while json_at(head, "pageInfo", "hasPreviousPage"):
+        head = _root_page(last=2, before=json_at(head, "pageInfo", "startCursor"))
     assert _titles(head) == ["Astro #5"] or _titles(head) == ["Astro #5", "Astro #4"]
-    assert head["pageInfo"]["hasPreviousPage"] is False
+    assert json_at(head, "pageInfo", "hasPreviousPage") is False
 
 
 #: ``first: 0``'s empty-page ``pageInfo`` when rows exist past the page.
@@ -373,9 +385,9 @@ def test_root_keyset_last_zero_serves_the_first_zero_page() -> None:
         ],
     )
     page = _root_page(last=0)
-    assert page["totalCount"] == 101
-    assert page["edges"] == []
-    assert page["pageInfo"] == {**_ZERO_PAGE_INFO, "hasPreviousPage": False}
+    assert json_at(page, "totalCount") == 101
+    assert json_at(page, "edges") == []
+    assert json_at(page, "pageInfo") == {**_ZERO_PAGE_INFO, "hasPreviousPage": False}
     assert page == _root_page(first=0)
 
 
@@ -387,11 +399,11 @@ def test_root_keyset_last_zero_with_after_serves_the_first_zero_page() -> None:
     serves: the supplied cursor is the previous-page signal and rows past it exist.
     """
     _seed_periodicals()
-    after = _root_page(first=2)["pageInfo"]["endCursor"]
+    after = json_at(_root_page(first=2), "pageInfo", "endCursor")
     page = _root_page(last=0, after=after)
-    assert page["edges"] == []
-    assert page["totalCount"] == 8
-    assert page["pageInfo"] == {**_ZERO_PAGE_INFO, "hasPreviousPage": True}
+    assert json_at(page, "edges") == []
+    assert json_at(page, "totalCount") == 8
+    assert json_at(page, "pageInfo") == {**_ZERO_PAGE_INFO, "hasPreviousPage": True}
     assert page == _root_page(first=0, after=after)
 
 
@@ -425,15 +437,15 @@ def test_nested_keyset_last_zero_serves_the_first_zero_window(*, with_after: boo
     cursor = {}
     if with_after:
         first_page = _nested_by_periodical(first=2)[astronomy.name]
-        cursor = {"after": first_page["pageInfo"]["endCursor"]}
+        cursor = {"after": json_at(first_page, "pageInfo", "endCursor")}
     with CaptureQueriesContext(connection) as ctx:
         data = _assert_graphql_success(NESTED_ZERO_PAGE, variables={"last": 0, **cursor})
     issue_queries = [q["sql"] for q in ctx.captured_queries if "library_issue" in q["sql"]]
     assert len(issue_queries) == 1, issue_queries
     page = next(
-        e["node"]["issuesConnection"]
-        for e in data["allLibraryPeriodicalsConnection"]["edges"]
-        if e["node"]["name"] == astronomy.name
+        json_at(e, "node", "issuesConnection")
+        for e in json_list(data, "allLibraryPeriodicalsConnection", "edges")
+        if json_at(e, "node", "name") == astronomy.name
     )
     assert page == {
         "totalCount": 5,
@@ -451,10 +463,10 @@ def test_root_keyset_first_and_last_guard_still_applies() -> None:
     """The package's first+last mutual-exclusivity guard precedes any slicing."""
     _seed_periodicals()
     response = _post_graphql(ROOT_PAGE_QUERY, variables={"first": 1, "last": 1})
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload
-    assert payload["data"] is None, payload
-    assert "mutually exclusive" in payload["errors"][0]["message"]
+    assert json_at(payload, "data") is None, payload
+    assert "mutually exclusive" in json_str(payload, "errors", 0, "message")
 
 
 ROOT_ORDERED_QUERY = """
@@ -472,26 +484,28 @@ def test_root_keyset_order_by_mints_order_fingerprinted_cursors() -> None:
     """An ``orderBy:`` page mints cursors bound to THAT order; replay elsewhere is rejected."""
     _seed_periodicals()
     data = _assert_graphql_success(ROOT_ORDERED_QUERY, variables={"first": 2})
-    ordered = data["allLibraryIssuesConnection"]
-    assert [e["node"]["title"] for e in ordered["edges"]] == ["Astro #1", "Astro #2"]
-    ordered_cursor = ordered["pageInfo"]["endCursor"]
+    ordered = json_at(data, "allLibraryIssuesConnection")
+    assert [json_at(e, "node", "title") for e in json_list(ordered, "edges")] == [
+        "Astro #1",
+        "Astro #2",
+    ]
+    ordered_cursor = json_at(ordered, "pageInfo", "endCursor")
 
     # Same order: the cursor seeks the next title page.
     data = _assert_graphql_success(
         ROOT_ORDERED_QUERY,
         variables={"first": 2, "after": ordered_cursor},
     )
-    assert [e["node"]["title"] for e in data["allLibraryIssuesConnection"]["edges"]] == [
-        "Astro #3",
-        "Astro #4",
-    ]
+    assert [
+        json_at(e, "node", "title") for e in json_list(data, "allLibraryIssuesConnection", "edges")
+    ] == ["Astro #3", "Astro #4"]
 
     # Default order: the fingerprint mismatch rejects the replay.
     response = _post_graphql(ROOT_PAGE_QUERY, variables={"first": 2, "after": ordered_cursor})
-    payload = response.json()
+    payload = response_json(response)
     assert "errors" in payload, payload
-    assert "invalid cursor" in payload["errors"][0]["message"]
-    assert payload["data"] is None, payload
+    assert "invalid cursor" in json_str(payload, "errors", 0, "message")
+    assert json_at(payload, "data") is None, payload
 
 
 @pytest.mark.django_db
@@ -510,13 +524,16 @@ def test_root_keyset_order_by_literal_string_none_title_round_trips() -> None:
     }
     """
     data = _assert_graphql_success(query, variables={"first": 20})
-    edges = data["allLibraryIssuesConnection"]["edges"]
-    none_edge = next(e for e in edges if e["node"]["title"] == "None")
+    edges = json_list(data, "allLibraryIssuesConnection", "edges")
+    none_edge = next(e for e in edges if json_at(e, "node", "title") == "None")
     data2 = _assert_graphql_success(
         query,
-        variables={"first": 5, "after": none_edge["cursor"]},
+        variables={"first": 5, "after": json_at(none_edge, "cursor")},
     )
-    titles = [e["node"]["title"] for e in data2["allLibraryIssuesConnection"]["edges"]]
+    titles = [
+        json_at(e, "node", "title")
+        for e in json_list(data2, "allLibraryIssuesConnection", "edges")
+    ]
     assert "None" not in titles
     assert "None2" in titles
 
@@ -537,9 +554,11 @@ def test_root_keyset_cursors_do_not_disclose_ordering_values() -> None:
         """,
     )
     edge = next(
-        e for e in data["allLibraryIssuesConnection"]["edges"] if e["node"]["title"] == sentinel
+        e
+        for e in json_list(data, "allLibraryIssuesConnection", "edges")
+        if json_at(e, "node", "title") == sentinel
     )
-    prefix, encrypted = from_base64(edge["cursor"])
+    prefix, encrypted = from_base64(json_str(edge, "cursor"))
     assert prefix == "dstcursor"
     assert sentinel not in encrypted
     assert sentinel.encode() not in base64.urlsafe_b64decode(encrypted)
@@ -561,8 +580,8 @@ query ($first: Int, $after: String) {
 def _nested_by_periodical(**variables: object) -> dict[str, JSONObject]:
     data = _assert_graphql_success(NESTED_QUERY, variables=variables)
     return {
-        edge["node"]["name"]: edge["node"]["issuesConnection"]
-        for edge in data["allLibraryPeriodicalsConnection"]["edges"]
+        json_str(edge, "node", "name"): json_object(edge, "node", "issuesConnection")
+        for edge in json_list(data, "allLibraryPeriodicalsConnection", "edges")
     }
 
 
@@ -576,11 +595,11 @@ def test_nested_keyset_window_is_one_batched_query() -> None:
     # pin the exact absence of per-parent issue queries instead of a raw count).
     issue_queries = [q["sql"] for q in ctx.captured_queries if "library_issue" in q["sql"]]
     assert len(issue_queries) == 1, issue_queries
-    assert by_name["Astronomy Weekly"]["totalCount"] == 5
-    assert _titles(by_name["Astronomy Weekly"]) == ["Astro #5", "Astro #4"]
-    assert by_name["Botany Monthly"]["totalCount"] == 3
-    assert by_name["Empty Gazette"]["totalCount"] == 0
-    assert by_name["Empty Gazette"]["edges"] == []
+    assert json_at(by_name, "Astronomy Weekly", "totalCount") == 5
+    assert _titles(json_at(by_name, "Astronomy Weekly")) == ["Astro #5", "Astro #4"]
+    assert json_at(by_name, "Botany Monthly", "totalCount") == 3
+    assert json_at(by_name, "Empty Gazette", "totalCount") == 0
+    assert json_at(by_name, "Empty Gazette", "edges") == []
 
 
 @pytest.mark.django_db
@@ -600,7 +619,7 @@ def test_nested_keyset_window_pages_the_cursor_field_under_a_random_model_orderi
     shipped_first = _nested_by_periodical(first=2)
     shipped_after = _nested_by_periodical(
         first=2,
-        after=shipped_first["Astronomy Weekly"]["pageInfo"]["endCursor"],
+        after=json_at(shipped_first, "Astronomy Weekly", "pageInfo", "endCursor"),
     )
     monkeypatch.setattr(models.Issue._meta, "ordering", ordering)
     with CaptureQueriesContext(connection) as first_captured:
@@ -608,7 +627,7 @@ def test_nested_keyset_window_pages_the_cursor_field_under_a_random_model_orderi
     with CaptureQueriesContext(connection) as after_captured:
         after = _nested_by_periodical(
             first=2,
-            after=first["Astronomy Weekly"]["pageInfo"]["endCursor"],
+            after=json_at(first, "Astronomy Weekly", "pageInfo", "endCursor"),
         )
     issue_sql = [
         q["sql"]
@@ -627,7 +646,12 @@ def test_nested_keyset_window_pages_the_cursor_field_under_a_random_model_orderi
 def test_nested_keyset_after_uniform_value_position_and_pre_seek_totals() -> None:
     """One ``after:`` cursor re-positions EVERY partition by value; totals stay pre-seek."""
     _seed_periodicals()
-    astro_cursor = _nested_by_periodical(first=2)["Astronomy Weekly"]["pageInfo"]["endCursor"]
+    astro_cursor = json_at(
+        _nested_by_periodical(first=2),
+        "Astronomy Weekly",
+        "pageInfo",
+        "endCursor",
+    )
     with CaptureQueriesContext(connection) as ctx:
         by_name = _nested_by_periodical(first=2, after=astro_cursor)
     issue_queries = [q["sql"] for q in ctx.captured_queries if "library_issue" in q["sql"]]
@@ -635,20 +659,20 @@ def test_nested_keyset_after_uniform_value_position_and_pre_seek_totals() -> Non
 
     # Cursor sits at astro#4: astronomy continues #3, #2; botany's rows past
     # the VALUE position (number < 4) are #3, #2 - the uniform semantics.
-    astronomy = by_name["Astronomy Weekly"]
+    astronomy = json_at(by_name, "Astronomy Weekly")
     assert _titles(astronomy) == ["Astro #3", "Astro #2"]
-    assert astronomy["totalCount"] == 5  # PRE-seek partition count
-    assert astronomy["pageInfo"]["hasPreviousPage"] is True
-    assert astronomy["pageInfo"]["hasNextPage"] is True
-    botany = by_name["Botany Monthly"]
+    assert json_at(astronomy, "totalCount") == 5  # PRE-seek partition count
+    assert json_at(astronomy, "pageInfo", "hasPreviousPage") is True
+    assert json_at(astronomy, "pageInfo", "hasNextPage") is True
+    botany = json_at(by_name, "Botany Monthly")
     assert _titles(botany) == ["Bot #3", "Bot #2"]
-    assert botany["totalCount"] == 3
+    assert json_at(botany, "totalCount") == 3
     # Childless parent with a cursor: empty page, hasPrev from the cursor.
-    empty = by_name["Empty Gazette"]
-    assert empty["edges"] == []
-    assert empty["totalCount"] == 0
-    assert empty["pageInfo"]["hasPreviousPage"] is True
-    assert empty["pageInfo"]["hasNextPage"] is False
+    empty = json_at(by_name, "Empty Gazette")
+    assert json_at(empty, "edges") == []
+    assert json_at(empty, "totalCount") == 0
+    assert json_at(empty, "pageInfo", "hasPreviousPage") is True
+    assert json_at(empty, "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -660,20 +684,25 @@ def test_nested_keyset_marker_distinguishes_pre_cursor_only_parents() -> None:
     # cursor at astro#1 (the last astronomy row): the only rows past it are
     # bot#1 (number 1, larger pk). Botany keeps a page; give botany a cursor
     # past ALL its rows instead by cursoring at the global tail.
-    tail_cursor = _root_page(last=1)["pageInfo"]["startCursor"]  # bot#1, the final row
+    tail_cursor = json_at(_root_page(last=1), "pageInfo", "startCursor")  # bot#1, the final row
     by_name = _nested_by_periodical(first=2, after=tail_cursor)
-    astronomy = by_name["Astronomy Weekly"]
-    assert astronomy["edges"] == []
-    assert astronomy["totalCount"] == 5  # the abs-first marker row carried it
-    assert astronomy["pageInfo"]["hasNextPage"] is False
-    assert astronomy["pageInfo"]["hasPreviousPage"] is True
+    astronomy = json_at(by_name, "Astronomy Weekly")
+    assert json_at(astronomy, "edges") == []
+    assert json_at(astronomy, "totalCount") == 5  # the abs-first marker row carried it
+    assert json_at(astronomy, "pageInfo", "hasNextPage") is False
+    assert json_at(astronomy, "pageInfo", "hasPreviousPage") is True
 
 
 @pytest.mark.django_db
 def test_nested_keyset_count_free_page_uses_probe_not_partition_count() -> None:
     """A ``hasNextPage``-only nested page runs count-free (seek in WHERE + n+1 probe)."""
     _seed_periodicals()
-    astro_cursor = _nested_by_periodical(first=2)["Astronomy Weekly"]["pageInfo"]["endCursor"]
+    astro_cursor = json_at(
+        _nested_by_periodical(first=2),
+        "Astronomy Weekly",
+        "pageInfo",
+        "endCursor",
+    )
     query = """
     query ($after: String) {
       allLibraryPeriodicalsConnection(first: 10) {
@@ -693,14 +722,14 @@ def test_nested_keyset_count_free_page_uses_probe_not_partition_count() -> None:
     assert "FILTER" not in issue_queries[0]
     assert "COUNT" not in issue_queries[0].upper().replace("ROW_NUMBER", "")
     by_name = {
-        e["node"]["name"]: e["node"]["issuesConnection"]
-        for e in data["allLibraryPeriodicalsConnection"]["edges"]
+        json_str(e, "node", "name"): json_object(e, "node", "issuesConnection")
+        for e in json_list(data, "allLibraryPeriodicalsConnection", "edges")
     }
-    assert _titles(by_name["Astronomy Weekly"]) == ["Astro #3", "Astro #2"]
-    assert by_name["Astronomy Weekly"]["pageInfo"]["hasNextPage"] is True
+    assert _titles(json_at(by_name, "Astronomy Weekly")) == ["Astro #3", "Astro #2"]
+    assert json_at(by_name, "Astronomy Weekly", "pageInfo", "hasNextPage") is True
     # Botany's post-seek set (numbers < 4) is three rows; the page of two
     # leaves Bot #1 past the sentinel.
-    assert by_name["Botany Monthly"]["pageInfo"]["hasNextPage"] is True
+    assert json_at(by_name, "Botany Monthly", "pageInfo", "hasNextPage") is True
 
 
 @pytest.mark.django_db
@@ -735,28 +764,37 @@ def test_nested_keyset_unselected_cursor_column_is_not_lazy_loaded_per_edge() ->
     # Cursors still mint correctly for every edge (the projection carried the
     # cursor columns despite ``number`` not being selected).
     by_name = {
-        e["node"]["name"]: e["node"]["issuesConnection"]
-        for e in data["allLibraryPeriodicalsConnection"]["edges"]
+        json_str(e, "node", "name"): json_object(e, "node", "issuesConnection")
+        for e in json_list(data, "allLibraryPeriodicalsConnection", "edges")
     }
-    astronomy_edges = by_name["Astronomy Weekly"]["edges"]
-    assert [e["node"]["title"] for e in astronomy_edges] == ["Astro #5", "Astro #4", "Astro #3"]
-    assert all(edge["cursor"] for edge in astronomy_edges)
+    astronomy_edges = json_list(by_name, "Astronomy Weekly", "edges")
+    assert [json_at(e, "node", "title") for e in astronomy_edges] == [
+        "Astro #5",
+        "Astro #4",
+        "Astro #3",
+    ]
+    assert all(json_at(edge, "cursor") for edge in astronomy_edges)
 
 
 @pytest.mark.django_db
 def test_nested_keyset_first_zero_serves_flags_from_markers() -> None:
     """``first: 0`` with a cursor: empty edges, true pre-seek count, value-domain flags."""
     _seed_periodicals()
-    astro_cursor = _nested_by_periodical(first=2)["Astronomy Weekly"]["pageInfo"]["endCursor"]
+    astro_cursor = json_at(
+        _nested_by_periodical(first=2),
+        "Astronomy Weekly",
+        "pageInfo",
+        "endCursor",
+    )
     by_name = _nested_by_periodical(first=0, after=astro_cursor)
-    astronomy = by_name["Astronomy Weekly"]
-    assert astronomy["edges"] == []
-    assert astronomy["totalCount"] == 5
-    assert astronomy["pageInfo"]["hasNextPage"] is True  # rows past the cursor exist
-    assert astronomy["pageInfo"]["hasPreviousPage"] is True
-    empty = by_name["Empty Gazette"]
-    assert empty["totalCount"] == 0
-    assert empty["pageInfo"]["hasNextPage"] is False
+    astronomy = json_at(by_name, "Astronomy Weekly")
+    assert json_at(astronomy, "edges") == []
+    assert json_at(astronomy, "totalCount") == 5
+    assert json_at(astronomy, "pageInfo", "hasNextPage") is True  # rows past the cursor exist
+    assert json_at(astronomy, "pageInfo", "hasPreviousPage") is True
+    empty = json_at(by_name, "Empty Gazette")
+    assert json_at(empty, "totalCount") == 0
+    assert json_at(empty, "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -775,17 +813,17 @@ def test_nested_keyset_backward_falls_back_per_parent_with_same_cursors() -> Non
     """
     data = _assert_graphql_success(query)
     by_name = {
-        e["node"]["name"]: e["node"]["issuesConnection"]
-        for e in data["allLibraryPeriodicalsConnection"]["edges"]
+        json_str(e, "node", "name"): json_object(e, "node", "issuesConnection")
+        for e in json_list(data, "allLibraryPeriodicalsConnection", "edges")
     }
-    astronomy = by_name["Astronomy Weekly"]
+    astronomy = json_at(by_name, "Astronomy Weekly")
     assert _titles(astronomy) == ["Astro #2", "Astro #1"]
-    assert astronomy["pageInfo"]["hasPreviousPage"] is True
-    assert astronomy["pageInfo"]["hasNextPage"] is False
+    assert json_at(astronomy, "pageInfo", "hasPreviousPage") is True
+    assert json_at(astronomy, "pageInfo", "hasNextPage") is False
     # Cross-path parity: a cursor minted by the per-parent fallback replays
     # against the WINDOWED forward path (same codec, same bytes).
-    forward = _nested_by_periodical(first=2, after=astronomy["edges"][0]["cursor"])
-    assert _titles(forward["Astronomy Weekly"]) == ["Astro #1"]
+    forward = _nested_by_periodical(first=2, after=json_at(astronomy, "edges", 0, "cursor"))
+    assert _titles(json_at(forward, "Astronomy Weekly")) == ["Astro #1"]
 
 
 NESTED_BACKWARD_QUERY = """
@@ -810,7 +848,7 @@ def test_nested_keyset_before_pages_backward_per_parent() -> None:
     """
     _seed_periodicals()
     # Mint cursors from a full forward page: order is newest-first, #5..#1.
-    forward = _nested_by_periodical(first=5)["Astronomy Weekly"]
+    forward = json_at(_nested_by_periodical(first=5), "Astronomy Weekly")
     assert _titles(forward) == [
         "Astro #5",
         "Astro #4",
@@ -818,27 +856,30 @@ def test_nested_keyset_before_pages_backward_per_parent() -> None:
         "Astro #2",
         "Astro #1",
     ]
-    cursors = {edge["node"]["title"]: edge["cursor"] for edge in forward["edges"]}
+    cursors = {
+        json_at(edge, "node", "title"): json_at(edge, "cursor")
+        for edge in json_list(forward, "edges")
+    }
 
     def _astro(**variables: object) -> JSONObject:
         data = _assert_graphql_success(NESTED_BACKWARD_QUERY, variables=variables)
         return next(
-            edge["node"]["issuesConnection"]
-            for edge in data["allLibraryPeriodicalsConnection"]["edges"]
-            if edge["node"]["name"] == "Astronomy Weekly"
+            json_object(edge, "node", "issuesConnection")
+            for edge in json_list(data, "allLibraryPeriodicalsConnection", "edges")
+            if json_at(edge, "node", "name") == "Astronomy Weekly"
         )
 
     # Interior cursor: the two rows before #2 are #4, #3 (both flags True).
-    interior = _astro(last=2, before=cursors["Astro #2"])
+    interior = _astro(last=2, before=json_at(cursors, "Astro #2"))
     assert _titles(interior) == ["Astro #4", "Astro #3"]
-    assert interior["pageInfo"]["hasPreviousPage"] is True
-    assert interior["pageInfo"]["hasNextPage"] is True
+    assert json_at(interior, "pageInfo", "hasPreviousPage") is True
+    assert json_at(interior, "pageInfo", "hasNextPage") is True
 
     # Head cursor: only #5 precedes #4, so the head page reports no previous rows.
-    head = _astro(last=2, before=cursors["Astro #4"])
+    head = _astro(last=2, before=json_at(cursors, "Astro #4"))
     assert _titles(head) == ["Astro #5"]
-    assert head["pageInfo"]["hasPreviousPage"] is False
-    assert head["pageInfo"]["hasNextPage"] is True
+    assert json_at(head, "pageInfo", "hasPreviousPage") is False
+    assert json_at(head, "pageInfo", "hasNextPage") is True
 
 
 @pytest.mark.django_db
@@ -846,7 +887,7 @@ def test_nested_keyset_divergent_aliases_each_decode_their_own_cursor() -> None:
     """Divergent aliased ``after:`` payloads window independently (per-key scheme)."""
     _seed_periodicals()
     first_pages = _nested_by_periodical(first=2)
-    astro_cursor = first_pages["Astronomy Weekly"]["pageInfo"]["endCursor"]
+    astro_cursor = json_at(first_pages, "Astronomy Weekly", "pageInfo", "endCursor")
     query = """
     query ($c: String!) {
       allLibraryPeriodicalsConnection(first: 10) {
@@ -859,12 +900,18 @@ def test_nested_keyset_divergent_aliases_each_decode_their_own_cursor() -> None:
     """
     data = _assert_graphql_success(query, variables={"c": astro_cursor})
     astronomy = next(
-        e["node"]
-        for e in data["allLibraryPeriodicalsConnection"]["edges"]
-        if e["node"]["name"] == "Astronomy Weekly"
+        json_at(e, "node")
+        for e in json_list(data, "allLibraryPeriodicalsConnection", "edges")
+        if json_at(e, "node", "name") == "Astronomy Weekly"
     )
-    assert [e["node"]["title"] for e in astronomy["head"]["edges"]] == ["Astro #5", "Astro #4"]
-    assert [e["node"]["title"] for e in astronomy["tail"]["edges"]] == ["Astro #3", "Astro #2"]
+    assert [json_at(e, "node", "title") for e in json_list(astronomy, "head", "edges")] == [
+        "Astro #5",
+        "Astro #4",
+    ]
+    assert [json_at(e, "node", "title") for e in json_list(astronomy, "tail", "edges")] == [
+        "Astro #3",
+        "Astro #2",
+    ]
 
 
 @pytest.mark.django_db
@@ -882,17 +929,17 @@ def test_keyset_cursor_decode_is_permission_aware() -> None:
     client = TestClient()
     with client.login(staff):
         staff_result = client.query(ROOT_PAGE_QUERY, variables={"first": 2}).response
-    staff_page = staff_result.json()["data"]["allLibraryIssuesConnection"]
+    staff_page = json_at(response_json(staff_result), "data", "allLibraryIssuesConnection")
     # Staff sees the embargoed issue first (number 6 sorts before 5).
     assert _titles(staff_page) == ["Embargoed #6", "Astro #5"]
-    assert staff_page["totalCount"] == 9
-    staff_cursor = staff_page["pageInfo"]["startCursor"]  # points AT the embargoed row
+    assert json_at(staff_page, "totalCount") == 9
+    staff_cursor = json_at(staff_page, "pageInfo", "startCursor")  # points AT the embargoed row
 
     # Anonymous replay: the seek applies to the anonymous-visibility queryset -
     # no embargoed row leaks, the count is the viewer's, pagination proceeds.
     anon_page = _root_page(first=3, after=staff_cursor)
     assert _titles(anon_page) == ["Astro #5", "Astro #4", "Astro #3"]
-    assert anon_page["totalCount"] == 8
+    assert json_at(anon_page, "totalCount") == 8
     assert all("Embargoed" not in title for title in _titles(anon_page))
 
 
@@ -913,23 +960,34 @@ def test_root_keyset_order_by_related_path_seeks_via_annotation() -> None:
     }
     """
     data = _assert_graphql_success(query)
-    page = data["allLibraryIssuesConnection"]
-    assert [e["node"]["title"] for e in page["edges"]] == ["Astro #1", "Astro #2", "Astro #3"]
-    data = _assert_graphql_success(query, variables={"after": page["pageInfo"]["endCursor"]})
-    page2 = data["allLibraryIssuesConnection"]
-    assert [e["node"]["title"] for e in page2["edges"]] == ["Astro #4", "Astro #5", "Bot #1"]
+    page = json_at(data, "allLibraryIssuesConnection")
+    assert [json_at(e, "node", "title") for e in json_list(page, "edges")] == [
+        "Astro #1",
+        "Astro #2",
+        "Astro #3",
+    ]
+    data = _assert_graphql_success(
+        query,
+        variables={"after": json_at(page, "pageInfo", "endCursor")},
+    )
+    page2 = json_at(data, "allLibraryIssuesConnection")
+    assert [json_at(e, "node", "title") for e in json_list(page2, "edges")] == [
+        "Astro #4",
+        "Astro #5",
+        "Bot #1",
+    ]
 
 
 @pytest.mark.django_db
 def test_root_keyset_unbounded_after_caps_at_relay_max_results() -> None:
     """``after:`` with no ``first`` mirrors ``ListConnection``'s max-results cap."""
     _seed_periodicals()
-    cursor = _root_page(first=1)["pageInfo"]["endCursor"]
+    cursor = json_at(_root_page(first=1), "pageInfo", "endCursor")
     page = _root_page(after=cursor)
     # relay_max_results (100) far exceeds the seven remaining rows.
-    assert len(page["edges"]) == 7
-    assert page["pageInfo"]["hasNextPage"] is False
-    assert page["pageInfo"]["hasPreviousPage"] is True
+    assert len(json_list(page, "edges")) == 7
+    assert json_at(page, "pageInfo", "hasNextPage") is False
+    assert json_at(page, "pageInfo", "hasPreviousPage") is True
 
 
 @pytest.mark.django_db
@@ -946,7 +1004,7 @@ def test_root_keyset_omitted_pagination_returns_the_full_set_under_the_cap() -> 
         }
         """,
     )
-    page = data["allLibraryIssuesConnection"]
+    page = json_at(data, "allLibraryIssuesConnection")
     assert _titles(page) == [
         "Astro #5",
         "Astro #4",
@@ -957,7 +1015,7 @@ def test_root_keyset_omitted_pagination_returns_the_full_set_under_the_cap() -> 
         "Astro #1",
         "Bot #1",
     ]
-    assert page["pageInfo"] == {"hasNextPage": False, "hasPreviousPage": False}
+    assert json_at(page, "pageInfo") == {"hasNextPage": False, "hasPreviousPage": False}
 
 
 @pytest.mark.django_db
@@ -971,15 +1029,15 @@ def test_nested_keyset_omitted_first_caps_at_relay_max_results() -> None:
             title=f"Issue #{number}",
         )
 
-    first_page = _nested_by_periodical()["Large Periodical"]
-    assert len(first_page["edges"]) == 100
-    assert first_page["pageInfo"]["hasNextPage"] is True
+    first_page = json_at(_nested_by_periodical(), "Large Periodical")
+    assert len(json_list(first_page, "edges")) == 100
+    assert json_at(first_page, "pageInfo", "hasNextPage") is True
 
-    cursor = _nested_by_periodical(first=1)["Large Periodical"]["pageInfo"]["endCursor"]
-    after_page = _nested_by_periodical(after=cursor)["Large Periodical"]
-    assert len(after_page["edges"]) == 100
-    assert after_page["pageInfo"]["hasNextPage"] is True
-    assert after_page["pageInfo"]["hasPreviousPage"] is True
+    cursor = json_at(_nested_by_periodical(first=1), "Large Periodical", "pageInfo", "endCursor")
+    after_page = json_at(_nested_by_periodical(after=cursor), "Large Periodical")
+    assert len(json_list(after_page, "edges")) == 100
+    assert json_at(after_page, "pageInfo", "hasNextPage") is True
+    assert json_at(after_page, "pageInfo", "hasPreviousPage") is True
 
 
 @pytest.mark.django_db
@@ -1013,10 +1071,10 @@ def test_nested_keyset_window_hides_embargoed_rows_and_counts_them_out() -> None
     issue_queries = [q["sql"] for q in ctx.captured_queries if 'FROM "library_issue"' in q["sql"]]
     assert len(issue_queries) == 1, issue_queries
 
-    astro = by_name["Astronomy Weekly"]
+    astro = json_at(by_name, "Astronomy Weekly")
     assert _titles(astro) == ["Astro #5", "Astro #4"]
-    assert astro["totalCount"] == 5
-    assert by_name["Botany Monthly"]["totalCount"] == 3
+    assert json_at(astro, "totalCount") == 5
+    assert json_at(by_name, "Botany Monthly", "totalCount") == 3
 
 
 @pytest.mark.django_db
@@ -1038,18 +1096,18 @@ def test_nested_keyset_window_keeps_embargoed_rows_for_staff() -> None:
     staff = User.objects.create_user(username="nested-staff", password="pw", is_staff=True)
     client = TestClient()
     with client.login(staff), CaptureQueriesContext(connection) as ctx:
-        payload = client.query(NESTED_QUERY, variables={"first": 2}).response.json()
+        payload = response_json(client.query(NESTED_QUERY, variables={"first": 2}).response)
     assert payload.get("errors") is None, payload
     by_name = {
-        edge["node"]["name"]: edge["node"]["issuesConnection"]
-        for edge in payload["data"]["allLibraryPeriodicalsConnection"]["edges"]
+        json_str(edge, "node", "name"): json_object(edge, "node", "issuesConnection")
+        for edge in json_list(payload, "data", "allLibraryPeriodicalsConnection", "edges")
     }
     issue_queries = [q["sql"] for q in ctx.captured_queries if 'FROM "library_issue"' in q["sql"]]
     assert len(issue_queries) == 1, issue_queries
 
-    astro = by_name["Astronomy Weekly"]
+    astro = json_at(by_name, "Astronomy Weekly")
     assert _titles(astro) == ["Embargoed #6", "Astro #5"]
-    assert astro["totalCount"] == 6
+    assert json_at(astro, "totalCount") == 6
 
 
 _HOLDER_PAGE_QUERY = """
@@ -1078,9 +1136,9 @@ def test_keyset_list_source_is_rejected_over_http() -> None:
         _issue_holder_schema(_list_resolver),
         "{ issues(first: 1) { edges { cursor } } }",
     )
-    assert payload["data"] is None, payload
+    assert json_at(payload, "data") is None, payload
     assert "errors" in payload, payload
-    assert "must return a QuerySet" in payload["errors"][0]["message"]
+    assert "must return a QuerySet" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db
@@ -1097,9 +1155,9 @@ def test_keyset_pre_sliced_source_is_rejected_over_http() -> None:
         _issue_holder_schema(_sliced_resolver),
         "{ issues(first: 1) { edges { cursor } } }",
     )
-    assert payload["data"] is None, payload
+    assert json_at(payload, "data") is None, payload
     assert "errors" in payload, payload
-    assert "already-sliced" in payload["errors"][0]["message"]
+    assert "already-sliced" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1119,10 +1177,10 @@ async def test_async_keyset_first_page_slices_and_counts() -> None:
         variables={"first": 2},
     )
     assert payload.get("errors") is None, payload
-    page = payload["data"]["issues"]
-    assert page["totalCount"] == 3
-    assert page["pageInfo"]["hasNextPage"] is True
-    assert [edge["node"]["title"] for edge in page["edges"]] == ["i3", "i2"]
+    page = json_at(payload, "data", "issues")
+    assert json_at(page, "totalCount") == 3
+    assert json_at(page, "pageInfo", "hasNextPage") is True
+    assert [json_at(edge, "node", "title") for edge in json_list(page, "edges")] == ["i3", "i2"]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1139,14 +1197,16 @@ async def test_async_keyset_after_cursor_continues_the_page() -> None:
     schema = _issue_holder_schema(_async_resolver)
     first = await _post_async_holder(schema, _HOLDER_PAGE_QUERY, variables={"first": 2})
     assert first.get("errors") is None, first
-    cursor = first["data"]["issues"]["pageInfo"]["endCursor"]
+    cursor = json_at(first, "data", "issues", "pageInfo", "endCursor")
     second = await _post_async_holder(
         schema,
         _HOLDER_PAGE_QUERY,
         variables={"first": 2, "after": cursor},
     )
     assert second.get("errors") is None, second
-    assert [edge["node"]["title"] for edge in second["data"]["issues"]["edges"]] == ["i1"]
+    assert [
+        json_at(edge, "node", "title") for edge in json_list(second, "data", "issues", "edges")
+    ] == ["i1"]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1165,7 +1225,7 @@ async def test_async_keyset_total_count_only() -> None:
         "{ issues { totalCount } }",
     )
     assert payload.get("errors") is None, payload
-    assert payload["data"]["issues"] == {"totalCount": 3}
+    assert json_at(payload, "data", "issues") == {"totalCount": 3}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1184,8 +1244,8 @@ async def test_async_keyset_deferred_cursor_column_is_loaded() -> None:
         "{ issues(first: 1) { edges { cursor } } }",
     )
     assert payload.get("errors") is None, payload
-    assert len(payload["data"]["issues"]["edges"]) == 1
-    assert payload["data"]["issues"]["edges"][0]["cursor"]
+    assert len(json_list(payload, "data", "issues", "edges")) == 1
+    assert json_at(payload, "data", "issues", "edges", 0, "cursor")
 
 
 # A target ``get_queryset`` that orders the child queryset makes THAT order the
@@ -1304,16 +1364,19 @@ def _hook_order_schema(
     ) -> QuerySet[models.Periodical | models.Genre]:
         return parent_model.objects.order_by("name")
 
+    def resolve_parents() -> QuerySet[models.Periodical | models.Genre]:
+        return parent_model.objects.order_by("name")
+
     @strawberry.type
     class Query:
         children = DjangoConnectionField(child_type)
         # The async engine's planned root: a connection over an ``async def``
         # resolver (the async rows read ``parentsConnection``).
         parents_connection = DjangoConnectionField(parent_type, resolver=async_parents)
-
-        @strawberry.field(graphql_type=list[parent_type])
-        def parents(self) -> QuerySet[models.Periodical | models.Genre]:
-            return parent_model.objects.order_by("name")
+        parents: QuerySet[models.Periodical | models.Genre] = strawberry.field(
+            resolver=resolve_parents,
+            graphql_type=list[parent_type],
+        )
 
     optimizer_extension = DjangoOptimizerExtension(strictness=strictness) if optimizer else None
     extensions = [lambda: optimizer_extension] if optimizer_extension is not None else []
@@ -1360,13 +1423,14 @@ def _nested_hook_pages(shape: str, payload: JSONObject) -> dict[str, JSONObject]
     assert payload.get("errors") is None, payload
     relation = _HOOK_SHAPES[shape][2]
     return {
-        parent["name"]: parent[f"{relation}Connection"] for parent in payload["data"]["parents"]
+        json_str(parent, "name"): json_object(parent, f"{relation}Connection")
+        for parent in json_list(payload, "data", "parents")
     }
 
 
-def _labels(shape: str, connection_payload: JSONObject) -> list[str]:
+def _labels(shape: str, connection_payload: object) -> list[str]:
     label = _HOOK_SHAPES[shape][3]
-    return [str(edge["node"][label]) for edge in connection_payload["edges"]]
+    return [str(json_at(edge, "node", label)) for edge in json_list(connection_payload, "edges")]
 
 
 def _table_statements(captured: CaptureQueriesContext, table: str) -> list[str]:
@@ -1412,16 +1476,22 @@ def test_nested_keyset_window_pages_under_the_hook_order(
             _post_holder(
                 schema,
                 query,
-                variables={"first": 2, "after": first["A"]["pageInfo"]["endCursor"]},
+                variables={"first": 2, "after": json_at(first, "A", "pageInfo", "endCursor")},
             ),
         )
 
-    assert [_labels(shape, first["A"]), _labels(shape, first["B"])] == [page_one, ["1"]]
-    assert [_labels(shape, second["A"]), _labels(shape, second["B"])] == [page_two, []]
-    assert [first["A"]["pageInfo"]["hasNextPage"], second["A"]["pageInfo"]["hasNextPage"]] == [
-        True,
-        False,
+    assert [_labels(shape, json_at(first, "A")), _labels(shape, json_at(first, "B"))] == [
+        page_one,
+        ["1"],
     ]
+    assert [_labels(shape, json_at(second, "A")), _labels(shape, json_at(second, "B"))] == [
+        page_two,
+        [],
+    ]
+    assert [
+        json_at(first, "A", "pageInfo", "hasNextPage"),
+        json_at(second, "A", "pageInfo", "hasNextPage"),
+    ] == [True, False]
     for captured in (first_captured, second_captured):
         assert len(_table_statements(captured, _parent_table(shape))) == 1, (
             captured.captured_queries
@@ -1475,11 +1545,11 @@ def test_hook_ordered_cursor_bytes_match_across_root_window_and_per_parent_paths
 
     def cursors(payload: JSONObject) -> tuple[dict[str, str], dict[str, str]]:
         assert payload.get("errors") is None, payload
-        root = payload["data"]["children"]["edges"]
-        nested = payload["data"]["parents"][0][f"{relation}Connection"]["edges"]
+        root = json_list(payload, "data", "children", "edges")
+        nested = json_list(payload, "data", "parents", 0, f"{relation}Connection", "edges")
         return (
-            {str(edge["node"][label]): edge["cursor"] for edge in root},
-            {str(edge["node"][label]): edge["cursor"] for edge in nested},
+            {str(json_at(edge, "node", label)): json_str(edge, "cursor") for edge in root},
+            {str(json_at(edge, "node", label)): json_str(edge, "cursor") for edge in nested},
         )
 
     # Each build re-registers the child type, so the per-parent schema is used
@@ -1507,7 +1577,7 @@ def test_hook_ordered_cursor_bytes_match_across_root_window_and_per_parent_paths
                 variables={"first": 3, "after": root[first_label]},
             ),
         )
-    assert _labels(shape, replayed["A"]) == [key for key in root if key != first_label]
+    assert _labels(shape, json_at(replayed, "A")) == [key for key in root if key != first_label]
     assert len(_table_statements(captured, _child_table(shape))) == 1, captured.captured_queries
 
 
@@ -1524,13 +1594,12 @@ def test_hook_ordered_nested_total_count_stays_pre_seek_on_page_two() -> None:
             _post_holder(
                 schema,
                 query,
-                variables={"first": 2, "after": first["A"]["pageInfo"]["endCursor"]},
+                variables={"first": 2, "after": json_at(first, "A", "pageInfo", "endCursor")},
             ),
         )
-    assert [(_labels("fk", second[name]), second[name]["totalCount"]) for name in ("A", "B")] == [
-        (["1"], 3),
-        ([], 1),
-    ]
+    assert [
+        (_labels("fk", second[name]), json_at(second[name], "totalCount")) for name in ("A", "B")
+    ] == [(["1"], 3), ([], 1)]
     assert len(_table_statements(captured, "library_issue")) == 1, captured.captured_queries
 
 
@@ -1548,12 +1617,15 @@ def test_hook_ordered_single_parent_fast_path_pages_on() -> None:
             _post_holder(
                 schema,
                 query,
-                variables={"first": 2, "after": first["A"]["pageInfo"]["endCursor"]},
+                variables={"first": 2, "after": json_at(first, "A", "pageInfo", "endCursor")},
             ),
         )
     first_sql = _table_statements(first_captured, "library_issue")
     second_sql = _table_statements(second_captured, "library_issue")
-    assert [_labels("fk", first["A"]), _labels("fk", second["A"])] == [["3", "2"], ["1"]]
+    assert [_labels("fk", json_at(first, "A")), _labels("fk", json_at(second, "A"))] == [
+        ["3", "2"],
+        ["1"],
+    ]
     assert [len(first_sql), len(second_sql)] == [1, 1]
     # The fast path is the plain ``LIMIT`` re-query; the seek page keeps the window.
     assert ["OVER (" in first_sql[0], "OVER (" in second_sql[0]] == [False, True]
@@ -1595,8 +1667,12 @@ def test_unanchorable_hook_order_raises_the_root_keyset_error_nested(
     )
     root = _post_holder(schema, "{ children(first: 1) { edges { cursor } } }")
     nested = _post_holder(schema, _nested_hook_query(shape), variables={"first": 1})
-    assert [error["message"] for error in root["errors"]] == [_UNANCHORABLE_ORDER]
-    assert [error["message"] for error in nested["errors"]] == [_UNANCHORABLE_ORDER]
+    assert [json_at(error, "message") for error in json_list(root, "errors")] == [
+        _UNANCHORABLE_ORDER,
+    ]
+    assert [json_at(error, "message") for error in json_list(nested, "errors")] == [
+        _UNANCHORABLE_ORDER,
+    ]
 
 
 #: Per hook shape, the relation the child orders by and the ``Meta.ordering`` its model
@@ -1638,8 +1714,12 @@ def test_relation_name_hook_order_stays_unanchorable_under_a_related_ordering(
     )
     root = _post_holder(schema, "{ children(first: 1) { edges { cursor } } }")
     nested = _post_holder(schema, _nested_hook_query(shape), variables={"first": 1})
-    assert [error["message"] for error in root["errors"]] == [_UNANCHORABLE_ORDER]
-    assert [error["message"] for error in nested["errors"]] == [_UNANCHORABLE_ORDER]
+    assert [json_at(error, "message") for error in json_list(root, "errors")] == [
+        _UNANCHORABLE_ORDER,
+    ]
+    assert [json_at(error, "message") for error in json_list(nested, "errors")] == [
+        _UNANCHORABLE_ORDER,
+    ]
 
 
 @pytest.mark.django_db
@@ -1665,7 +1745,9 @@ def test_random_hook_order_on_an_offset_relation_is_an_unplanned_access_under_st
     root = _post_holder(schema, "{ children(first: 1) { edges { cursor } } }")
     nested = _post_holder(schema, _nested_hook_query(shape), variables={"first": 1})
     assert root.get("errors") is None, root
-    assert [error["message"] for error in nested["errors"]] == [_RANDOM_ORDER_N_PLUS_ONE[shape]]
+    assert [json_at(error, "message") for error in json_list(nested, "errors")] == [
+        _RANDOM_ORDER_N_PLUS_ONE[shape],
+    ]
 
 
 @pytest.mark.django_db
@@ -1688,14 +1770,16 @@ def test_malformed_cursor_on_a_refused_keyset_relation_is_the_cursor_error_under
     after = {
         "garbage": "not-a-valid-cursor",
         "offset": to_base64("arrayconnection", 0),
-        "tampered": minted["data"]["children"]["edges"][0]["cursor"][:-8] + "AAAAAAAA",
+        "tampered": json_str(minted, "data", "children", "edges", 0, "cursor")[:-8] + "AAAAAAAA",
     }[kind]
     payload = _post_holder(
         schema,
         _nested_hook_query(shape),
         variables={"first": 1, "after": after},
     )
-    assert [error["message"] for error in payload["errors"]] == [_INVALID_AFTER]
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
+        _INVALID_AFTER,
+    ]
 
 
 @pytest.mark.django_db
@@ -1714,12 +1798,12 @@ def test_hook_order_cursor_on_a_refused_keyset_relation_keeps_its_per_parent_pag
     _seed_hook_order_rows(shape, with_b=False)
     schema = _hook_order_schema(shape, _HOOK_ORDERS["-id"], strictness="raise", distinct=True)
     root = _post_holder(schema, "{ children(first: 1) { edges { cursor } } }")
-    after = root["data"]["children"]["edges"][0]["cursor"]
+    after = json_at(root, "data", "children", "edges", 0, "cursor")
     page = _nested_hook_pages(
         shape,
         _post_holder(schema, _nested_hook_query(shape), variables={"first": 2, "after": after}),
     )
-    assert _labels(shape, page["A"]) == ["2", "1"]
+    assert _labels(shape, json_at(page, "A")) == ["2", "1"]
 
 
 @pytest.mark.django_db
@@ -1734,13 +1818,15 @@ def test_cursor_of_another_order_is_the_cursor_error_nested(shape: str) -> None:
     _seed_hook_order_rows(shape, with_b=False)
     titled = _hook_order_schema(shape, _HOOK_ORDERS["title"])
     minted = _post_holder(titled, "{ children(first: 1) { edges { cursor } } }")
-    after = minted["data"]["children"]["edges"][0]["cursor"]
+    after = json_at(minted, "data", "children", "edges", 0, "cursor")
     payload = _post_holder(
         _hook_order_schema(shape, _HOOK_ORDERS["-id"]),
         _nested_hook_query(shape),
         variables={"first": 1, "after": after},
     )
-    assert [error["message"] for error in payload["errors"]] == [_INVALID_AFTER]
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
+        _INVALID_AFTER,
+    ]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1758,14 +1844,20 @@ async def test_async_nested_keyset_window_pages_under_the_hook_order() -> None:
         payload = await _post_async_holder(schema, query, variables=variables)
         assert payload.get("errors") is None, payload
         return {
-            edge["node"]["name"]: edge["node"]["issuesConnection"]
-            for edge in payload["data"]["parentsConnection"]["edges"]
+            json_str(edge, "node", "name"): json_object(edge, "node", "issuesConnection")
+            for edge in json_list(payload, "data", "parentsConnection", "edges")
         }
 
     first = await pages({"first": 2})
-    second = await pages({"first": 2, "after": first["A"]["pageInfo"]["endCursor"]})
-    assert [_labels("fk", first["A"]), _labels("fk", first["B"])] == [["3", "2"], ["1"]]
-    assert [_labels("fk", second["A"]), _labels("fk", second["B"])] == [["1"], []]
+    second = await pages({"first": 2, "after": json_at(first, "A", "pageInfo", "endCursor")})
+    assert [_labels("fk", json_at(first, "A")), _labels("fk", json_at(first, "B"))] == [
+        ["3", "2"],
+        ["1"],
+    ]
+    assert [_labels("fk", json_at(second, "A")), _labels("fk", json_at(second, "B"))] == [
+        ["1"],
+        [],
+    ]
 
 
 # A target ``get_queryset`` that ``.reverse()``s its queryset compiles the reverse
@@ -1820,19 +1912,26 @@ def _root_children_page(
     )
     payload = _post_holder(schema, query, variables=variables)
     assert payload.get("errors") is None, payload
-    return payload["data"]["children"]
+    return json_object(payload, "data", "children")
 
 
 def _issue_labels(connection_payload: JSONObject) -> list[str]:
     """``<periodical><number>`` per edge, read back from the node's global id."""
-    pks = [int(from_base64(edge["node"]["id"])[1]) for edge in connection_payload["edges"]]
+    pks = [
+        int(from_base64(json_str(edge, "node", "id"))[1])
+        for edge in json_list(connection_payload, "edges")
+    ]
     issues = models.Issue.objects.select_related("periodical").in_bulk(pks)
     return [f"{issues[pk].periodical.name}{issues[pk].number}" for pk in pks]
 
 
 def _root_flags(*pages: JSONObject) -> list[list[bool]]:
     return [
-        [page["pageInfo"]["hasPreviousPage"], page["pageInfo"]["hasNextPage"]] for page in pages
+        [
+            json_bool(page, "pageInfo", "hasPreviousPage"),
+            json_bool(page, "pageInfo", "hasNextPage"),
+        ]
+        for page in pages
     ]
 
 
@@ -1849,10 +1948,17 @@ def test_reversed_hook_root_pages_forward_every_row_once(hook: str) -> None:
     with CaptureQueriesContext(connection) as first_captured:
         first = _root_children_page(schema, first=2)
     with CaptureQueriesContext(connection) as second_captured:
-        second = _root_children_page(schema, first=2, after=first["pageInfo"]["endCursor"])
+        second = _root_children_page(
+            schema,
+            first=2,
+            after=json_at(first, "pageInfo", "endCursor"),
+        )
     expected = _REVERSED_ROOT_ORDERS[hook]
     assert [_issue_labels(first), _issue_labels(second)] == [expected[:2], expected[2:]]
-    assert [first["pageInfo"]["hasNextPage"], second["pageInfo"]["hasNextPage"]] == [True, False]
+    assert [
+        json_at(first, "pageInfo", "hasNextPage"),
+        json_at(second, "pageInfo", "hasNextPage"),
+    ] == [True, False]
     assert [len(first_captured), len(second_captured)] == [1, 1]
 
 
@@ -1865,13 +1971,13 @@ def test_reversed_hook_root_pages_backward_every_row_once(hook: str) -> None:
     with CaptureQueriesContext(connection) as tail_captured:
         tail = _root_children_page(schema, last=2)
     with CaptureQueriesContext(connection) as head_captured:
-        head = _root_children_page(schema, last=2, before=tail["pageInfo"]["startCursor"])
+        head = _root_children_page(schema, last=2, before=json_at(tail, "pageInfo", "startCursor"))
     expected = _REVERSED_ROOT_ORDERS[hook]
     assert [_issue_labels(head), _issue_labels(tail)] == [expected[:2], expected[2:]]
-    assert [tail["pageInfo"]["hasPreviousPage"], head["pageInfo"]["hasPreviousPage"]] == [
-        True,
-        False,
-    ]
+    assert [
+        json_at(tail, "pageInfo", "hasPreviousPage"),
+        json_at(head, "pageInfo", "hasPreviousPage"),
+    ] == [True, False]
     assert [len(tail_captured), len(head_captured)] == [1, 1]
 
 
@@ -1888,7 +1994,7 @@ def test_reversed_non_unique_hook_order_compiles_the_pk_tiebreak_descending() ->
     with CaptureQueriesContext(connection) as first_captured:
         first = _root_children_page(schema, first=2)
     with CaptureQueriesContext(connection) as second_captured:
-        _root_children_page(schema, first=2, after=first["pageInfo"]["endCursor"])
+        _root_children_page(schema, first=2, after=json_at(first, "pageInfo", "endCursor"))
     order = 'ORDER BY "library_issue"."title" DESC, "library_issue"."id" DESC'
     statements = [first_captured[0]["sql"], second_captured[0]["sql"]]
     assert [order in sql for sql in statements] == [True, True], statements
@@ -1930,11 +2036,15 @@ def test_reversed_hook_nested_window_pages_under_the_reversed_order(
             _post_holder(
                 schema,
                 query,
-                variables={"first": 2, "after": first["A"]["pageInfo"]["endCursor"]},
+                variables={"first": 2, "after": json_at(first, "A", "pageInfo", "endCursor")},
             ),
         )
-    assert [_labels(shape, first["A"]), _labels(shape, second["A"])] == list(a_pages)
-    assert [_labels(shape, first["B"]), _labels(shape, second["B"])] == list(b_pages)
+    assert [_labels(shape, json_at(first, "A")), _labels(shape, json_at(second, "A"))] == list(
+        a_pages,
+    )
+    assert [_labels(shape, json_at(first, "B")), _labels(shape, json_at(second, "B"))] == list(
+        b_pages,
+    )
     for captured in (first_captured, second_captured):
         assert [
             len(_table_statements(captured, _parent_table(shape))),
@@ -1974,7 +2084,7 @@ def test_reversed_hook_nested_offset_window_matches_the_per_parent_page(
         )
         with CaptureQueriesContext(connection) as captured:
             page = _nested_hook_pages(shape, _post_holder(schema, query, variables={"first": 2}))
-        pages.append([_labels(shape, page["A"]), _labels(shape, page["B"])])
+        pages.append([_labels(shape, json_at(page, "A")), _labels(shape, json_at(page, "B"))])
         child_statements.append(len(_table_statements(captured, _child_table(shape))))
     assert pages == [[a_page, b_page], [a_page, b_page]]
     assert child_statements == [1, 2]
@@ -1993,7 +2103,7 @@ def test_order_by_beside_a_reversed_hook_pages_every_row_once() -> None:
     schema = _hook_order_schema("fk", ("id",), reverse=True, orderable=True)
     order_by = "[{ number: ASC }]"
     first = _root_children_page(schema, order_by=order_by, first=2)
-    after = first["pageInfo"]["endCursor"]
+    after = json_at(first, "pageInfo", "endCursor")
     second = _root_children_page(schema, order_by=order_by, first=2, after=after)
     replayed = _root_children_page(schema, order_by=order_by, first=2, after=after)
     assert [_issue_labels(first), _issue_labels(second), _issue_labels(replayed)] == [
@@ -2041,19 +2151,24 @@ def _reversed_reading_list_schema(
 
 def _seed_reading_lists() -> dict[int, str]:
     """``L1`` ``b``, ``L2`` ``a``, ``L3`` ``b``, ``L4`` ``c`` in pk order; returns pk -> label."""
-    return {
-        models.ReadingList.objects.create(title=title).pk: label
-        for label, title in (
-            ("L1", "b"),
-            ("L2", "a"),
-            ("L3", "b"),
-            ("L4", "c"),
-        )
-    }
+    labels: dict[int, str] = {}
+    for label, title in (
+        ("L1", "b"),
+        ("L2", "a"),
+        ("L3", "b"),
+        ("L4", "c"),
+    ):
+        pk = models.ReadingList.objects.create(title=title).pk
+        assert pk is not None
+        labels[pk] = label
+    return labels
 
 
 def _reading_list_labels(labels: dict[int, str], page: JSONObject) -> list[str]:
-    return [labels[int(from_base64(edge["node"]["id"])[1])] for edge in page["edges"]]
+    return [
+        labels[int(from_base64(json_str(edge, "node", "id"))[1])]
+        for edge in json_list(page, "edges")
+    ]
 
 
 @pytest.mark.django_db
@@ -2080,9 +2195,12 @@ def test_bare_reverse_of_a_meta_ordering_pages_every_row_once(
     labels = _seed_reading_lists()
     schema = _reversed_reading_list_schema(cursor_field)
     first = _root_children_page(schema, first=2)
-    second = _root_children_page(schema, first=2, after=first["pageInfo"]["endCursor"])
+    second = _root_children_page(schema, first=2, after=json_at(first, "pageInfo", "endCursor"))
     assert [_reading_list_labels(labels, first), _reading_list_labels(labels, second)] == pages
-    assert [first["pageInfo"]["hasNextPage"], second["pageInfo"]["hasNextPage"]] == [True, False]
+    assert [
+        json_at(first, "pageInfo", "hasNextPage"),
+        json_at(second, "pageInfo", "hasNextPage"),
+    ] == [True, False]
 
 
 @pytest.mark.django_db
@@ -2185,18 +2303,24 @@ def _twin_children_schema(*, optimizer: bool = True) -> strawberry.Schema:
     ) -> QuerySet[ScalarSpecimen]:
         return ScalarSpecimen.objects.filter(parent__isnull=True)
 
+    def resolve_desks() -> QuerySet[models.CirculationDesk]:
+        return models.CirculationDesk.objects.all()
+
+    def resolve_specimens() -> QuerySet[ScalarSpecimen]:
+        return ScalarSpecimen.objects.filter(parent__isnull=True)
+
     @strawberry.type
     class Query:
         desks_connection = DjangoConnectionField(desk_type, resolver=async_desks)
         specimens_connection = DjangoConnectionField(specimen_type, resolver=async_specimens)
-
-        @strawberry.field(graphql_type=list[desk_type])
-        def desks(self) -> QuerySet[models.CirculationDesk]:
-            return models.CirculationDesk.objects.all()
-
-        @strawberry.field(graphql_type=list[specimen_type])
-        def specimens(self) -> QuerySet[ScalarSpecimen]:
-            return ScalarSpecimen.objects.filter(parent__isnull=True)
+        desks: QuerySet[models.CirculationDesk] = strawberry.field(
+            resolver=resolve_desks,
+            graphql_type=list[desk_type],
+        )
+        specimens: QuerySet[ScalarSpecimen] = strawberry.field(
+            resolver=resolve_specimens,
+            graphql_type=list[specimen_type],
+        )
 
     optimizer_extension = DjangoOptimizerExtension() if optimizer else None
     extensions = [lambda: optimizer_extension] if optimizer_extension is not None else []
@@ -2231,14 +2355,19 @@ def _seed_twin_children() -> None:
 
 def _twin_pages(payload: JSONObject) -> tuple[JSONObject, JSONObject]:
     assert payload.get("errors") is None, payload
-    data = payload["data"]
-    return data["desks"][0]["childrenConnection"], data["specimens"][0]["childrenConnection"]
+    data = json_at(payload, "data")
+    return json_object(data, "desks", 0, "childrenConnection"), json_object(
+        data,
+        "specimens",
+        0,
+        "childrenConnection",
+    )
 
 
 def _twin_names(desk_page: JSONObject, specimen_page: JSONObject) -> list[list[str]]:
     return [
-        [edge["node"]["name"] for edge in desk_page["edges"]],
-        [edge["node"]["label"] for edge in specimen_page["edges"]],
+        [json_str(edge, "node", "name") for edge in json_list(desk_page, "edges")],
+        [json_str(edge, "node", "label") for edge in json_list(specimen_page, "edges")],
     ]
 
 
@@ -2269,16 +2398,16 @@ def test_one_relation_name_windowed_twice_keeps_each_windows_cursor_vocabulary()
                 _TWIN_CHILDREN_QUERY,
                 variables={
                     "first": 2,
-                    "desk": first[0]["pageInfo"]["endCursor"],
-                    "specimen": first[1]["pageInfo"]["endCursor"],
+                    "desk": json_at(first[0], "pageInfo", "endCursor"),
+                    "specimen": json_at(first[1], "pageInfo", "endCursor"),
                 },
             ),
         )
 
     assert _twin_names(*first) == [["s3", "s2"], ["c-a", "c-b"]]
     assert _twin_names(*second) == [["s1"], ["c-c"]]
-    assert [[edge["cursor"] for edge in page["edges"]] for page in first] == [
-        [edge["cursor"] for edge in page["edges"]] for page in unplanned
+    assert [[json_at(edge, "cursor") for edge in json_list(page, "edges")] for page in first] == [
+        [json_at(edge, "cursor") for edge in json_list(page, "edges")] for page in unplanned
     ]
     for captured in (first_captured, second_captured):
         statements = [
@@ -2312,18 +2441,18 @@ async def test_async_one_relation_name_windowed_twice_keeps_each_windows_cursor_
     async def pages(variables: dict[str, object]) -> tuple[JSONObject, JSONObject]:
         payload = await _post_async_holder(schema, query, variables=variables)
         assert payload.get("errors") is None, payload
-        data = payload["data"]
+        data = json_at(payload, "data")
         return (
-            data["desksConnection"]["edges"][0]["node"]["childrenConnection"],
-            data["specimensConnection"]["edges"][0]["node"]["childrenConnection"],
+            json_object(data, "desksConnection", "edges", 0, "node", "childrenConnection"),
+            json_object(data, "specimensConnection", "edges", 0, "node", "childrenConnection"),
         )
 
     first = await pages({"first": 2})
     second = await pages(
         {
             "first": 2,
-            "desk": first[0]["pageInfo"]["endCursor"],
-            "specimen": first[1]["pageInfo"]["endCursor"],
+            "desk": json_at(first[0], "pageInfo", "endCursor"),
+            "specimen": json_at(first[1], "pageInfo", "endCursor"),
         },
     )
     assert _twin_names(*first) == [["s3", "s2"], ["c-a", "c-b"]]

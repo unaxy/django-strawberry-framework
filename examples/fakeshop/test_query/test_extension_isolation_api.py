@@ -46,9 +46,18 @@ from django.test import AsyncClient, Client
 from django.urls import include, path
 from django.views.decorators.csrf import csrf_exempt
 from graphql import GraphQLError
-from graphql_client import JSONObject
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_loads,
+    json_object,
+    json_str,
+    read_attr,
+    response_json,
+)
 from strawberry.extensions.base_extension import SchemaExtension
-from typing_extensions import override
+from typing_extensions import TypeIs, override
 
 from django_strawberry_framework import (
     RESOURCE_LIMIT_ERROR_CODE,
@@ -92,7 +101,7 @@ async def _post_async(
         content_type="application/json",
     )
     assert response.status_code == 200, response.content
-    return json.loads(response.content)
+    return response_json(response)
 
 
 def _post_sync(
@@ -111,6 +120,19 @@ def _post_sync(
 
 
 pytestmark = pytest.mark.urls(__name__)
+
+
+def _is_tuple(value: object) -> TypeIs[tuple[object, ...]]:
+    """Whether ``value`` is a ``tuple``, its items typed ``object``."""
+    return isinstance(value, tuple)
+
+
+def _tuple_at(namespace: dict[str, object], key: str) -> tuple[object, ...]:
+    """Return the ``tuple`` stored under ``key``, failing on any other kind."""
+    found = namespace[key]
+    assert _is_tuple(found), f"expected a tuple at {key!r}, got {found!r}"
+    return found
+
 
 #: The exception message an unmasked error policy would put on the wire.
 SENTINEL = "the-resolver-said-this-out-loud"
@@ -259,13 +281,14 @@ def _swap(
     box = next(
         (
             held
-            for held in schema.__dict__["_django_extensions"]
+            for held in _tuple_at(vars(schema), "_django_extensions")
             if isinstance(getattr(held, "__self__", None), accepted_type)
         ),
         None,
     )
     if box is None:
         return "no box"
+    assert isinstance(box, MethodType), box
     try:
         TAMPERS[tamper](box, replacement)
     except AttributeError:
@@ -340,7 +363,7 @@ class _Nester(SchemaExtension):
         if self.ran:
             return
         self.ran = True
-        context = self.execution_context.context
+        context = read_attr(self.execution_context, "context")
         self.published.append(_published(context))
         self.execution_context.schema.execute_sync(
             "{ allItems(first: 2) { edges { node { name category { id } } } } }",
@@ -640,7 +663,7 @@ async def test_a_resolver_cannot_widen_the_next_requests_bound_on_the_async_view
 
     refused = await _post_async(client, "{ a: hello b: hello }", mount="/iso-resource-async/")
     assert refused["data"] is None
-    assert refused["errors"][0]["extensions"]["code"] == RESOURCE_LIMIT_ERROR_CODE
+    assert json_at(refused, "errors", 0, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE
 
 
 @pytest.mark.parametrize("tamper", sorted(TAMPER_OUTCOMES), ids=sorted(TAMPER_OUTCOMES))
@@ -680,8 +703,8 @@ async def test_a_resolver_cannot_unmask_the_next_requests_errors_on_the_async_vi
     assert wrote["data"] == {"unmask": "refused"}
 
     masked = await _post_async(client, "{ boom }", mount="/iso-error-async/")
-    assert SENTINEL not in masked["errors"][0]["message"]
-    assert "correlationId" in masked["errors"][0]["extensions"]
+    assert SENTINEL not in json_str(masked, "errors", 0, "message")
+    assert "correlationId" in json_object(masked, "errors", 0, "extensions")
 
 
 @pytest.mark.django_db
@@ -703,11 +726,11 @@ def test_an_operation_a_consumer_extension_starts_leaves_the_request_its_optimiz
     )
 
     assert response.data is not None
-    edges = response.data["allItems"]["edges"]
+    edges = json_list(response.data, "allItems", "edges")
     assert edges, response.data
-    assert all(edge["node"]["category"]["name"] for edge in edges)
+    assert all(json_at(edge, "node", "category", "name") for edge in edges)
     assert response.extensions is not None
-    nesting = response.extensions["nesting"]
+    nesting = json_object(response.extensions, "nesting")
     assert nesting["planPublished"] is True
     assert nesting["changed"] == []
 
@@ -809,9 +832,9 @@ def _assert_refused_envelope(response: HttpResponseBase, body: bytes) -> JSONObj
     """One JSON envelope carrying the configuration code, and nothing about the request."""
     assert response.status_code == 200, body
     assert response.headers["Content-Type"].startswith("application/json"), response.headers
-    payload = json.loads(body)
+    payload = json_object(json_loads(body))
     assert payload["data"] is None, payload
-    assert [error["extensions"] for error in payload["errors"]] == [
+    assert [json_at(error, "extensions") for error in json_list(payload, "errors")] == [
         {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
     ]
     return payload
@@ -855,8 +878,8 @@ def test_a_refused_schema_still_bounds_a_document_sent_under_any_operation_name(
     )
 
     assert response.status_code == 200, body
-    payload = json.loads(body)
-    assert payload["errors"][0]["extensions"]["code"] == RESOURCE_LIMIT_ERROR_CODE
+    payload = json_object(json_loads(body))
+    assert json_at(payload, "errors", 0, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE
 
 
 @pytest.mark.django_db(transaction=True)
@@ -878,7 +901,7 @@ async def test_a_refused_schema_answers_every_operation_name_asynchronously_too(
     )
 
     assert payload["data"] is None, payload
-    assert [error["extensions"] for error in payload["errors"]] == [
+    assert [json_at(error, "extensions") for error in json_list(payload, "errors")] == [
         {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
     ]
 
@@ -890,14 +913,14 @@ async def test_a_refused_schema_answers_the_async_view_the_same_way() -> None:
 
     refused = await _post_async(client, "{ hello }", mount="/iso-chain-async/")
     assert refused["data"] is None
-    assert refused["errors"][0]["extensions"] == {"code": SCHEMA_CONFIGURATION_ERROR_CODE}
+    assert json_at(refused, "errors", 0, "extensions") == {"code": SCHEMA_CONFIGURATION_ERROR_CODE}
 
     rejected = await _post_async(
         client,
         "{ a: hello b: hello c: hello }",
         mount="/iso-chain-async/",
     )
-    assert rejected["errors"][0]["extensions"]["code"] == RESOURCE_LIMIT_ERROR_CODE
+    assert json_at(rejected, "errors", 0, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE
 
 
 @pytest.mark.django_db(transaction=True)
@@ -922,7 +945,7 @@ async def test_a_worker_that_outlived_a_request_is_bounded_and_published_for_its
         "{ survivorReport { rowsBound planPublished } }",
     )
 
-    assert reported["data"]["survivorReport"] == {
+    assert json_at(reported, "data", "survivorReport") == {
         "rowsBound": DEFAULT_RESOURCE_POLICY.max_list_rows,
         "planPublished": True,
     }

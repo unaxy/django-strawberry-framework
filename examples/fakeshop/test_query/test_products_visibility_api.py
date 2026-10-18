@@ -36,7 +36,17 @@ from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import clear_url_caches, path
-from graphql_client import JSONObject, assert_graphql_success, post_graphql
+from graphql_client import (
+    JSONObject,
+    assert_graphql_success,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    post_graphql,
+    response_json,
+    saved_pk,
+)
 from strategy_schemas import make_django_type
 from strawberry import relay
 from strawberry.django.views import GraphQLView
@@ -86,7 +96,8 @@ def test_unoptimized_relation_hides_private_child_over_http() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
         def categories(self) -> QuerySet[Category]:
             return Category.objects.filter(pk=category.pk)
 
@@ -99,7 +110,7 @@ def test_unoptimized_relation_hides_private_child_over_http() -> None:
                 url="/graphql/",
             )
         assert response.status_code == 200
-        payload = response.json()
+        payload = response_json(response)
         assert payload.get("errors") is None, payload
         assert payload["data"] == {"categories": [{"items": []}]}
     finally:
@@ -116,7 +127,8 @@ def _build_async_visibility_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
         async def categories(self) -> list[Category]:
             return await sync_to_async(list)(
                 Category.objects.filter(pk=category.pk),
@@ -147,7 +159,7 @@ async def test_async_unoptimized_relation_hides_private_child_over_http() -> Non
     await sync_to_async(services.seed_data)(1)
     response = await _post_async_visibility_query()
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors") is None, payload
     assert payload["data"] == {"categories": [{"items": []}]}
 
@@ -169,7 +181,7 @@ def _post_visibility_query(
             clear_url_caches()
             response = post_graphql(query, client=client, url="/graphql/")
         assert response.status_code == 200
-        return response.json()
+        return response_json(response)
     finally:
         _CURRENT["schema"] = None
         clear_url_caches()
@@ -195,7 +207,8 @@ def test_consumer_prefetch_cache_is_rescoped_with_the_optimizer_installed() -> N
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
         def categories(self) -> list[Category]:
             return list(Category.objects.filter(pk=category.pk).prefetch_related("items"))
 
@@ -227,7 +240,8 @@ def test_forward_fk_target_visibility_holds_with_the_optimizer_installed() -> No
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
         def items(self) -> list[Item]:
             return list(Item.objects.filter(pk=item.pk))
 
@@ -239,7 +253,7 @@ def test_forward_fk_target_visibility_holds_with_the_optimizer_installed() -> No
     )
     unoptimized = _post_visibility_query(strawberry.Schema(query=Query), query)
     assert optimized["data"] is None
-    assert [error["message"] for error in optimized["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(optimized, "errors")] == [
         "Cannot return null for non-nullable field ItemType.category.",
     ]
     assert optimized["errors"] == unoptimized["errors"]
@@ -259,7 +273,8 @@ def _build_async_forward_fk_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
         async def items(self) -> list[Item]:
             return await sync_to_async(list)(
                 Item.objects.filter(pk=item.pk).select_related("category"),
@@ -292,9 +307,9 @@ async def test_async_forward_fk_target_visibility_hides_a_private_target_over_ht
         _CURRENT["schema"] = None
         clear_url_caches()
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload["data"] is None
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Cannot return null for non-nullable field ItemType.category.",
     ]
 
@@ -326,7 +341,8 @@ def _strictness_armed_loaded_fk_schema(item_pk: int) -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
         def items(self) -> list[Item]:
             return list(Item.objects.filter(pk=item_pk).select_related("category"))
 
@@ -339,7 +355,7 @@ def _hide_the_seeded_items_category() -> tuple[int, str]:
     item = Item.objects.first()
     assert item is not None
     Category.objects.filter(pk=item.category_id).update(is_private=True)
-    return item.pk, Category.objects.get(pk=item.category_id).name
+    return saved_pk(item.pk), Category.objects.get(pk=item.category_id).name
 
 
 @pytest.mark.django_db
@@ -365,7 +381,7 @@ def test_anonymous_is_refused_a_joined_forward_fk_target_the_hook_hides() -> Non
     )
 
     assert payload["data"] is None
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Cannot return null for non-nullable field ItemType.category.",
     ]
 
@@ -437,7 +453,8 @@ def _strictness_armed_nullable_fk_schema() -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[profile_type])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[profile_type])  # pyright: ignore[reportAny]
         def profiles(self) -> list[PatronProfile]:
             return list(
                 PatronProfile.objects.select_related("favorite_genre").order_by("postal_code"),
@@ -503,14 +520,15 @@ def _nested_connection_item_queries(parent_count: int) -> list[str]:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
         def categories(self) -> list[Category]:
             return list(Category.objects.filter(pk__in=parent_pks).order_by("pk"))
 
     with CaptureQueriesContext(connection) as captured:
         payload = _post_visibility_query(strawberry.Schema(query=Query), _NESTED_CONNECTION_QUERY)
     assert payload.get("errors") is None, payload
-    assert len(payload["data"]["categories"]) == parent_count
+    assert len(json_list(payload, "data", "categories")) == parent_count
     return [entry["sql"] for entry in captured.captured_queries if "products_item" in entry["sql"]]
 
 
@@ -550,7 +568,8 @@ def _nested_connection_item_queries_with_optimizer_on_a_list(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
         def categories(self) -> list[Category]:
             return list(Category.objects.filter(pk__in=parent_pks).order_by("pk"))
 
@@ -563,7 +582,7 @@ def _nested_connection_item_queries_with_optimizer_on_a_list(
     with CaptureQueriesContext(connection) as captured:
         payload = _post_visibility_query(schema, _NESTED_CONNECTION_QUERY)
     assert payload.get("errors") is None, payload
-    assert len(payload["data"]["categories"]) == parent_count
+    assert len(json_list(payload, "data", "categories")) == parent_count
     item_sql = [
         entry["sql"]
         for entry in captured.captured_queries
@@ -612,7 +631,8 @@ def _list_relation_item_queries(parent_count: int) -> list[str]:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
         def categories(self) -> QuerySet[Category]:
             return Category.objects.filter(pk__in=parent_pks).order_by("pk")
 
@@ -622,7 +642,7 @@ def _list_relation_item_queries(parent_count: int) -> list[str]:
             "{ categories { items { name } } }",
         )
     assert payload.get("errors") is None, payload
-    assert len(payload["data"]["categories"]) == parent_count
+    assert len(json_list(payload, "data", "categories")) == parent_count
     return [
         entry["sql"]
         for entry in captured.captured_queries
@@ -683,7 +703,8 @@ def _holder_patron_card_schema(
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[HolderPatronType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[HolderPatronType])  # pyright: ignore[reportAny]
         def patrons(self) -> QuerySet[Patron] | list[Patron]:
             patrons = Patron.objects.filter(name__endswith="Holder").order_by("name")
             return patrons if root == "queryset" else list(patrons)
@@ -781,7 +802,8 @@ async def test_async_reverse_one_to_one_custom_visibility_over_http() -> None:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[HolderPatronType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[HolderPatronType])  # pyright: ignore[reportAny]
         async def patrons(self) -> list[Patron]:
             return await sync_to_async(list)(
                 Patron.objects.filter(pk__in=[hidden.pk, visible.pk]).order_by("pk"),
@@ -802,7 +824,7 @@ async def test_async_reverse_one_to_one_custom_visibility_over_http() -> None:
         _CURRENT["schema"] = None
         clear_url_caches()
     assert response.status_code == 200
-    payload = response.json()
+    payload = response_json(response)
     assert payload.get("errors") is None, payload
     assert payload["data"] == {
         "patrons": [
@@ -838,7 +860,7 @@ def test_relay_id_only_connection_page_costs_one_query_and_emits_decodable_ids()
             client=client,
         )
 
-    emitted = [edge["node"]["id"] for edge in data["allCategories"]["edges"]]
+    emitted = [json_str(edge, "node", "id") for edge in json_list(data, "allCategories", "edges")]
     assert emitted == [
         global_id_for(products_schema.CategoryType, row.pk) for row in expected_rows
     ]
@@ -864,7 +886,8 @@ def test_relay_id_and_name_selection_is_clean_under_strictness_raise_over_http()
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.CategoryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.CategoryType])  # pyright: ignore[reportAny]
         def categories(self) -> QuerySet[Category]:
             return Category.objects.order_by("pk")
 
@@ -879,8 +902,11 @@ def test_relay_id_and_name_selection_is_clean_under_strictness_raise_over_http()
     )
     assert payload.get("errors") is None, payload
     expected = list(Category.objects.order_by("pk").values_list("name", flat=True))
-    assert [row["name"] for row in payload["data"]["categories"]] == expected
-    decoded = [relay.GlobalID.from_id(row["id"]) for row in payload["data"]["categories"]]
+    assert [json_at(row, "name") for row in json_list(payload, "data", "categories")] == expected
+    decoded = [
+        relay.GlobalID.from_id(json_str(row, "id"))
+        for row in json_list(payload, "data", "categories")
+    ]
     assert [int(g.node_id) for g in decoded] == list(
         Category.objects.order_by("pk").values_list("pk", flat=True),
     )
@@ -905,9 +931,9 @@ def test_cascading_target_hook_blocks_fk_id_elision_over_http() -> None:
             "{ allItems { edges { node { category { id } } } } }",
         )
 
-    edges = data["allItems"]["edges"]
+    edges = json_list(data, "allItems", "edges")
     assert edges, data
-    assert all(edge["node"]["category"]["id"] for edge in edges)
+    assert all(json_at(edge, "node", "category", "id") for edge in edges)
     item_queries = [
         entry["sql"] for entry in captured.captured_queries if "products_item" in entry["sql"]
     ]
@@ -989,17 +1015,17 @@ def _planned_item_names(
     ]
     assert len(item_queries) == 1, item_queries
     return {
-        edge["node"]["name"]: sorted(reader(edge["node"]))
-        for edge in data["allCategories"]["edges"]
+        json_str(edge, "node", "name"): sorted(reader(json_object(edge, "node")))
+        for edge in json_list(data, "allCategories", "edges")
     }
 
 
 def _list_page(node: JSONObject) -> list[str]:
-    return [row["name"] for row in node["items"]]
+    return [json_str(row, "name") for row in json_list(node, "items")]
 
 
 def _connection_page(node: JSONObject) -> list[str]:
-    return [edge["node"]["name"] for edge in node["itemsConnection"]["edges"]]
+    return [json_str(edge, "node", "name") for edge in json_list(node, "itemsConnection", "edges")]
 
 
 @pytest.mark.django_db
@@ -1102,7 +1128,8 @@ def _child_routing_schema(child_hook: _ItemGetQueryset) -> strawberry.Schema:
 
     @strawberry.type
     class RoutingQuery:
-        @strawberry.field(graphql_type=list[category_type])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[category_type])  # pyright: ignore[reportAny]
         def categories(self) -> QuerySet[Category]:
             return Category.objects.all()
 
@@ -1136,8 +1163,8 @@ def test_planned_prefetch_child_may_not_pin_its_own_connection() -> None:
     )
 
     assert payload["data"] is None
-    assert len(payload["errors"]) == 1, payload
-    message = payload["errors"][0]["message"]
+    assert len(json_list(payload, "errors")) == 1, payload
+    message = json_str(payload, "errors", 0, "message")
     assert "RoutingItemType.get_queryset" in message
     assert "routed to alias 'default'" in message
 
@@ -1157,7 +1184,11 @@ def test_planned_prefetch_child_still_serves_rows_when_the_hook_only_narrows() -
     )
 
     assert payload.get("errors") is None, payload
-    served = sorted(row["name"] for page in payload["data"]["categories"] for row in page["items"])
+    served = sorted(
+        json_str(row, "name")
+        for page in json_list(payload, "data", "categories")
+        for row in json_list(page, "items")
+    )
     assert served == sorted(
         Item.objects.filter(is_private=False).values_list("name", flat=True),
     )

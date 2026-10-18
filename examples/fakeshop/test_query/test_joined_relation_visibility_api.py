@@ -34,7 +34,7 @@ from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from graphql_client import JSONObject, post_graphql
+from graphql_client import JSONObject, json_at, json_list, post_graphql, response_json, saved_pk
 from strategy_schemas import make_django_type
 from strawberry.django.views import GraphQLView
 
@@ -89,11 +89,13 @@ def _joined_schema(item_pk: int, entry_pk: int) -> strawberry.Schema:
 
     @strawberry.type
     class Query:
-        @strawberry.field(graphql_type=list[products_schema.ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
         def items(self) -> QuerySet[Item]:
             return Item.objects.filter(pk=item_pk).select_related("category")
 
-        @strawberry.field(graphql_type=list[products_schema.ItemType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.ItemType])  # pyright: ignore[reportAny]
         def items_wildcard(self) -> QuerySet[Item]:
             # The wildcard query state is set directly: that state, not the call
             # spelling Django now deprecates, is what a consumer queryset can carry.
@@ -101,7 +103,8 @@ def _joined_schema(item_pk: int, entry_pk: int) -> strawberry.Schema:
             queryset.query.select_related = True
             return queryset
 
-        @strawberry.field(graphql_type=list[products_schema.EntryType])
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(graphql_type=list[products_schema.EntryType])  # pyright: ignore[reportAny]
         def entries(self) -> QuerySet[Entry]:
             return Entry.objects.filter(pk=entry_pk).select_related("item__category")
 
@@ -115,7 +118,7 @@ def _post(schema: strawberry.Schema, query: str, *, client: Client | None = None
         with override_settings(ROOT_URLCONF=__name__):
             response = post_graphql(query, client=client, url="/graphql/")
         assert response.status_code == 200
-        return response.json()
+        return response_json(response)
     finally:
         _CURRENT["schema"] = None
 
@@ -129,7 +132,7 @@ def _staff_client() -> Client:
 
 def _assert_refused(payload: JSONObject, message: str, hidden_name: str) -> None:
     assert payload["data"] is None, payload
-    assert [error["message"] for error in payload["errors"]] == [message]
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [message]
     assert hidden_name not in str(payload)
 
 
@@ -139,7 +142,7 @@ def test_anonymous_depth_one_join_does_not_serve_the_planned_targets_hidden_row(
     services.seed_data(1)
     item, entry = _hide_one_items_category()
 
-    payload = _post(_joined_schema(item.pk, entry.pk), _DEPTH_ONE_QUERY)
+    payload = _post(_joined_schema(saved_pk(item.pk), saved_pk(entry.pk)), _DEPTH_ONE_QUERY)
 
     _assert_refused(
         payload,
@@ -154,7 +157,11 @@ def test_staff_depth_one_join_is_served_the_category() -> None:
     services.seed_data(1)
     item, entry = _hide_one_items_category()
 
-    payload = _post(_joined_schema(item.pk, entry.pk), _DEPTH_ONE_QUERY, client=_staff_client())
+    payload = _post(
+        _joined_schema(saved_pk(item.pk), saved_pk(entry.pk)),
+        _DEPTH_ONE_QUERY,
+        client=_staff_client(),
+    )
 
     assert payload.get("errors") is None, payload
     assert payload["data"] == {
@@ -169,7 +176,7 @@ def test_anonymous_wildcard_join_does_not_serve_the_planned_targets_hidden_row()
     item, entry = _hide_one_items_category()
 
     payload = _post(
-        _joined_schema(item.pk, entry.pk),
+        _joined_schema(saved_pk(item.pk), saved_pk(entry.pk)),
         "{ itemsWildcard { name category { name } } }",
     )
 
@@ -191,7 +198,7 @@ def test_anonymous_depth_two_join_does_not_serve_the_planned_targets_hidden_row(
     services.seed_data(1)
     item, entry = _hide_one_items_category()
 
-    payload = _post(_joined_schema(item.pk, entry.pk), _DEPTH_TWO_QUERY)
+    payload = _post(_joined_schema(saved_pk(item.pk), saved_pk(entry.pk)), _DEPTH_TWO_QUERY)
 
     _assert_refused(
         payload,
@@ -206,7 +213,11 @@ def test_staff_depth_two_join_is_served_the_category() -> None:
     services.seed_data(1)
     item, entry = _hide_one_items_category()
 
-    payload = _post(_joined_schema(item.pk, entry.pk), _DEPTH_TWO_QUERY, client=_staff_client())
+    payload = _post(
+        _joined_schema(saved_pk(item.pk), saved_pk(entry.pk)),
+        _DEPTH_TWO_QUERY,
+        client=_staff_client(),
+    )
 
     assert payload.get("errors") is None, payload
     assert payload["data"] == {
@@ -310,7 +321,7 @@ def test_hook_join_does_not_serve_the_planned_targets_hidden_row(query: str) -> 
     services.seed_data(1)
     item, entry = _hide_one_items_category()
 
-    payload = _post(_holder_schema(item.pk, entry.pk), query)
+    payload = _post(_holder_schema(saved_pk(item.pk), saved_pk(entry.pk)), query)
 
     _assert_refused(payload, _HOLDER_REFUSAL, item.category.name)
 
@@ -321,7 +332,10 @@ def test_hookless_intermediate_join_does_not_serve_the_planned_targets_hidden_ro
     services.seed_data(1)
     item, entry = _hide_one_items_category()
 
-    payload = _post(_holder_schema(item.pk, entry.pk, item_hook=False), _DEPTH_TWO_QUERY)
+    payload = _post(
+        _holder_schema(saved_pk(item.pk), saved_pk(entry.pk), item_hook=False),
+        _DEPTH_TWO_QUERY,
+    )
 
     _assert_refused(payload, _HOLDER_REFUSAL, item.category.name)
 
@@ -336,7 +350,12 @@ def test_join_off_the_planned_prefetch_path_is_kept() -> None:
     """
     services.seed_data(1)
     item, entry = _hide_one_items_category()
-    schema = _holder_schema(item.pk, entry.pk, item_hook=False, entries_join="item")
+    schema = _holder_schema(
+        saved_pk(item.pk),
+        saved_pk(entry.pk),
+        item_hook=False,
+        entries_join="item",
+    )
 
     with CaptureQueriesContext(connection) as captured:
         payload = _post(schema, _DEPTH_TWO_QUERY)
@@ -352,7 +371,7 @@ def test_join_off_the_planned_prefetch_path_is_kept() -> None:
 def _async_holder_schema() -> tuple[strawberry.Schema, str]:
     services.seed_data(1)
     item, entry = _hide_one_items_category()
-    return _holder_schema(item.pk, entry.pk), item.category.name
+    return _holder_schema(saved_pk(item.pk), saved_pk(entry.pk)), item.category.name
 
 
 @pytest.mark.django_db(transaction=True)
@@ -372,7 +391,7 @@ async def test_async_hook_join_does_not_serve_the_planned_targets_hidden_row(que
     finally:
         _CURRENT["schema"] = None
     assert response.status_code == 200
-    _assert_refused(response.json(), _HOLDER_REFUSAL, hidden_name)
+    _assert_refused(response_json(response), _HOLDER_REFUSAL, hidden_name)
 
 
 def _root_rows(item: Item, _entry: Entry) -> JSONObject:
@@ -409,7 +428,7 @@ def test_hook_join_the_selection_never_reads_survives_the_projection(
     item, entry = _hide_one_items_category()
 
     with CaptureQueriesContext(connection) as captured:
-        payload = _post(_holder_schema(item.pk, entry.pk), query)
+        payload = _post(_holder_schema(saved_pk(item.pk), saved_pk(entry.pk)), query)
 
     assert payload == {"data": expected(item, entry)}
     assert len(captured) == statement + 1
@@ -471,7 +490,7 @@ def test_hook_join_survives_a_scalar_only_connection_window() -> None:
 
     with CaptureQueriesContext(connection) as captured:
         payload = _post(
-            _hooked_entries_schema(item.pk),
+            _hooked_entries_schema(saved_pk(item.pk)),
             "{ items { name entriesConnection { pageInfo { hasNextPage } } } }",
         )
 
@@ -489,7 +508,7 @@ def test_hook_join_survives_a_scalar_only_connection_window() -> None:
 def _unread_hook_join_rows() -> tuple[strawberry.Schema, Item, Entry]:
     services.seed_data(1)
     item, entry = _hide_one_items_category()
-    return _holder_schema(item.pk, entry.pk), item, entry
+    return _holder_schema(saved_pk(item.pk), saved_pk(entry.pk)), item, entry
 
 
 @pytest.mark.django_db(transaction=True)

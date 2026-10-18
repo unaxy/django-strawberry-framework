@@ -8,7 +8,9 @@ import datetime
 
 import pytest
 from django.db import IntegrityError, transaction
-from django.db.models import Field, ForeignObjectRel
+from django.db.models import Field, ForeignObjectRel, Manager
+from graphql_client import read_attr
+from typing_extensions import TypeIs
 
 from apps.library.models import (
     Book,
@@ -32,11 +34,17 @@ from apps.library.models import (
     RepairTicket,
     SelfServeDesk,
     Shelf,
+    TaggedItem,
     Venue,
     VenueBadge,
     VenueSponsor,
     VisibleBranch,
 )
+
+
+def _is_tagged_item_manager(value: object) -> "TypeIs[Manager[TaggedItem]]":
+    """Whether ``value`` is a manager over ``TaggedItem`` rows (a generic relation's reverse)."""
+    return isinstance(value, Manager) and read_attr(value, "model") is TaggedItem
 
 
 @pytest.mark.django_db
@@ -176,14 +184,16 @@ def test_circulation_desk_carries_every_relation_kind() -> None:
     desk.save()
     shift = DeskShift.objects.create(name="Morning", desk=desk)
     profile = DeskProfile.objects.create(code="LATE-OPENING", desk=desk)
-    tag = desk.tags.create(tag="accessible")
+    tags = read_attr(desk, "tags")
+    assert _is_tagged_item_manager(tags)
+    tag = tags.create(tag="accessible")
 
     assert (str(desk), str(shift), str(profile)) == ("Front", "Morning", "LATE-OPENING")
     assert CirculationDesk.objects.get(pk=desk.pk).content_object == genre
     assert list(desk.children.all()) == [shift]
     assert desk.profile == profile
     assert list(desk.genres.all()) == [genre]
-    assert list(desk.tags.all()) == [tag]
+    assert list(tags.all()) == [tag]
     assert shelf.circulation_desk == desk
     assert list(branch.circulation_desks.all()) == [desk]
 

@@ -39,7 +39,16 @@ from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from graphql_client import JSONObject, post_graphql
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    post_graphql,
+    read_attr,
+    response_json,
+)
 from strawberry import relay
 from strawberry.schema.name_converter import NameConverter
 from strawberry.types.base import StrawberryObjectDefinition
@@ -96,10 +105,14 @@ def renaming_schema(project_schema_override: Callable[[], None]) -> Iterator[Dja
     with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"RELAY_GLOBALID_STRATEGY": "type"}):
         project_schema_override()
         project = sys.modules["config.schema"]
+        query = read_attr(project, "Query")
+        mutation = read_attr(project, "Mutation")
+        assert isinstance(query, type), query
+        assert isinstance(mutation, type), mutation
         optimizer = DjangoOptimizerExtension()
         schema = DjangoSchema(
-            query=project.Query,
-            mutation=project.Mutation,
+            query=query,
+            mutation=mutation,
             config=strawberry_config(name_converter=_ApiPrefix()),
             extensions=[lambda: optimizer],
         )
@@ -128,8 +141,7 @@ def _payload(
 ) -> JSONObject:
     response = post_graphql(query, variables=variables, client=client, url="/graphql/")
     assert response.status_code == 200
-    payload: JSONObject = response.json()
-    return payload
+    return response_json(response)
 
 
 def _data(
@@ -140,8 +152,7 @@ def _data(
 ) -> JSONObject:
     payload = _payload(query, variables, client=client)
     assert "errors" not in payload, payload
-    data: JSONObject = payload["data"]
-    return data
+    return json_object(payload, "data")
 
 
 def _staff(*codenames: str) -> Client:
@@ -153,7 +164,7 @@ def _staff(*codenames: str) -> Client:
             Permission.objects.get(codename=name, content_type__app_label=app_label),
         )
     client = Client()
-    client.force_login(User.objects.get(pk=user.pk))
+    client.force_login(User.objects.get(pk=read_attr(user, "pk")))
     return client
 
 
@@ -301,7 +312,7 @@ def test_typed_node_field_names_published_types_in_the_mismatch_error() -> None:
     )
 
     assert payload["data"] == {"genre": None}
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Wrong node type: expected a ApiGenreType id, received a ApiItemType id.",
     ]
 
@@ -331,7 +342,10 @@ def test_default_spelling_of_a_renamed_type_is_rejected(
         payload = _payload(query, {"id": _gid("ItemType", item.pk)}, client=client)
 
     assert payload["data"] == expected_data
-    assert [(error["message"], error["extensions"]["code"]) for error in payload["errors"]] == [
+    assert [
+        (json_at(error, "message"), json_at(error, "extensions", "code"))
+        for error in json_list(payload, "errors")
+    ] == [
         (
             (
                 "Invalid GlobalID: No Relay-Node DjangoType is published as GraphQL type "
@@ -583,7 +597,9 @@ def test_globalid_filters_accept_emitted_ids(variable: str, filter_input: str) -
         client=_staff(),
     )
 
-    assert [edge["node"]["name"] for edge in data["allItems"]["edges"]] == expected
+    assert [
+        json_at(edge, "node", "name") for edge in json_list(data, "allItems", "edges")
+    ] == expected
 
 
 @pytest.mark.django_db
@@ -601,9 +617,10 @@ def test_relation_key_exact_filter_accepts_an_emitted_property_id() -> None:
         client=_staff(),
     )
 
-    assert sorted(edge["node"]["id"] for edge in data["allEntries"]["edges"]) == sorted(
-        _gid("ApiEntryType", pk)
-        for pk in models.Entry.objects.filter(property=prop).values_list("pk", flat=True)
+    assert sorted(
+        json_str(edge, "node", "id") for edge in json_list(data, "allEntries", "edges")
+    ) == sorted(
+        _gid("ApiEntryType", entry.pk) for entry in models.Entry.objects.filter(property=prop)
     )
 
 
@@ -623,7 +640,7 @@ def test_globalid_filter_rejects_the_default_spelling_of_a_renamed_type() -> Non
 
     # ``allItems`` is a non-null connection, so its field error nulls ``data`` itself.
     assert payload["data"] is None
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "GlobalID type mismatch: filter expects ApiItemType but received ItemType",
     ]
 
@@ -708,7 +725,7 @@ def test_converted_name_collision_is_a_typed_mismatch_not_a_wrong_row() -> None:
     )
 
     assert payload["data"] == {"item": None}
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Wrong node type: expected a ApiApiCategoryNode id, received a ApiCategoryNode id.",
     ]
 
@@ -727,7 +744,7 @@ def test_typed_nodes_field_names_published_types_in_the_mismatch_error() -> None
 
     # ``items`` is a non-null list, so its field error nulls ``data`` itself.
     assert payload["data"] is None
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Wrong node type: expected a ApiApiCategoryNode id, received a ApiCategoryNode id.",
     ]
 
@@ -750,7 +767,7 @@ def test_typed_mismatch_names_an_unpublished_type_by_its_own_spelling() -> None:
     )
 
     assert payload["data"] == {"item": None}
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Wrong node type: expected a ApiApiCategoryNode id, received a PropertyNode id.",
     ]
 
@@ -844,7 +861,7 @@ def test_relation_filter_refuses_a_slot_this_schema_publishes_for_another_type()
 
     assert refetched == {"node": {"__typename": "CategoryNode", "name": prop.name}}
     assert payload["data"] is None
-    assert [error["message"] for error in payload["errors"]] == [
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         (
             "GlobalID type mismatch: filter expects CategoryNode but received CategoryNode, "
             "which this schema publishes for another type"
@@ -928,9 +945,14 @@ def test_shadowing_type_child_refetches_the_id_it_emitted() -> None:
     """The id the child's connection put on the wire refetches through ``node`` as the child."""
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    emitted = _data("query { children(first: 1) { edges { node { id } } } }")["children"]["edges"][
-        0
-    ]["node"]["id"]
+    emitted = json_at(
+        _data("query { children(first: 1) { edges { node { id } } } }"),
+        "children",
+        "edges",
+        0,
+        "node",
+        "id",
+    )
 
     refetched = _data(
         "query($id: ID!) { node(id: $id) { __typename ... on ApiChildCategoryNode { name } } }",
