@@ -750,6 +750,70 @@ def test_relation_bound_to_its_attname_is_refused(
 
 
 @pytest.mark.parametrize(
+    (
+        "model",
+        "target",
+        "relation",
+        "attname",
+    ),
+    [
+        pytest.param(
+            library_models.PatronProfile,
+            library_models.Patron,
+            "PatronProfile.patron",
+            "patron_id",
+            id="one-to-one-key",
+        ),
+        pytest.param(
+            library_models.LendingDesk,
+            library_models.Venue,
+            "LendingDesk.venue_ptr",
+            "venue_ptr_id",
+            id="mti-parent-link",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("name", "declared"),
+    [
+        pytest.param("pid", {"source": "pk"}, id="renamed"),
+        pytest.param("pk", {}, id="declared-pk"),
+        pytest.param("pids", {"source": "pk", "many": True}, id="many"),
+    ],
+)
+def test_relation_bound_to_the_pk_alias_of_its_key_is_refused(
+    model: type[models.Model],
+    target: type[models.Model],
+    relation: str,
+    attname: str,
+    name: str,
+    declared: dict[str, object],
+) -> None:
+    """A ``PrimaryKeyRelatedField`` over ``pk`` where the primary key is a relation fails loud.
+
+    ``Options.get_field`` has no ``pk``, but Django's ``pk`` alias writes the key relation's
+    column: DRF hands ``pk=<instance>`` to the create, as with the ``attname``. The remedy binds
+    the relation by name, so the declared name (and GraphQL name) stays.
+    """
+    relation_field: _PkRelation[models.Model] = serializers.PrimaryKeyRelatedField(
+        queryset=target._default_manager.all(),
+        **declared,
+    )
+    field = bound_fields(_relation_field_serializer(model, name, relation_field)())[name]
+    relation_name = relation.split(".")[1]
+    message = (
+        f"Serializer relation field {name!r} binds source 'pk', the primary-key alias of the "
+        f"column (attname {attname!r}) of relation {relation}. A PrimaryKeyRelatedField "
+        "validates to the related instance, which DRF writes under the source as spelled: "
+        "Django cannot insert an instance into 'pk' (every create fails) and an update leaves "
+        f"the instance in that attribute. Bind the relation instead: source={relation_name!r} "
+        "(the declared name, and so the GraphQL input name, stays)."
+    )
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        resolve_serializer_field(field, model, "ProbeInput")
+
+
+@pytest.mark.parametrize(
     ("name", "input_attr", "graphql_name"),
     [
         pytest.param("cat", "cat_id", "catId", id="renamed"),

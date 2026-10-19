@@ -296,7 +296,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth)
     **Renamed fields**: omitted / one-segment `source` supported, dotted `source` /
     `source="*"` rejected for a model-column-converting field, a relation bound to its
-    `attname` rejected). The whole module is
+    `attname` or to the `pk` alias of a relation key rejected). The whole module is
     behind the DRF soft-import guard
     ([Decision 12](#decision-12--soft-djangorestframework-dependency-and-the-100-coverage-strategy)).
   - [ ] [`rest_framework/inputs.py`][rf-inputs]: build **two** `@strawberry.input`
@@ -348,7 +348,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     `category` → `categoryId`, `category_id` → `categoryId`, `category_pk` →
     `categoryPk` (no doubled `…IdId` / `…PkId`); a **dotted `source`** / `source="*"` on
     a model-column-converting field, and a relation bound to its forward relation's
-    `attname`, raise
+    `attname` or to the `pk` alias of a relation key, raise
     [`ConfigurationError`][glossary-configurationerror]; the unknown serializer-field
     [`ConfigurationError`][glossary-configurationerror]. And
     [`tests/rest_framework/test_inputs.py`][test-rest-framework] — the serializer-derived
@@ -1440,10 +1440,18 @@ supported `source` scope:
   `source` as spelled: Django cannot insert an instance into `category_id`, so every create
   fails, and an update leaves the instance in the attribute. It is a
   [`ConfigurationError`][glossary-configurationerror] naming the field and the relation
-  ([`rest_framework/serializer_converter.py`][rf-converter]`::_reject_relation_attname_source`),
+  ([`rest_framework/serializer_converter.py`][rf-converter]`::_reject_relation_column_source`),
   for a foreign key, a one-to-one, a `to_field` key, a generic relation's content-type key and
   a multi-table parent link alike, at every opted-in nesting depth; the remedy
-  `source="category"` keeps the declared name, so the GraphQL name does not move. A
+  `source="category"` keeps the declared name, so the GraphQL name does not move. Django's
+  `pk` alias spells the same column when the primary key is a relation: `Options.get_field`
+  has no `pk`, so `pid = PrimaryKeyRelatedField(source="pk")` over `PatronProfile.patron` (or
+  DRF's own auto-built `pk` field there, or one over `LendingDesk`'s parent link) has no
+  backing column, yet DRF hands `pk=<Patron>` to the create and Django's `pk` setter assigns
+  it to `patron_id`. It is refused by the same guard, which resolves the source through
+  [`rest_framework/serializer_converter.py`][rf-converter]`::written_model_field` (the field
+  a source writes, `pk` included); the remedy is `source="patron"`. A scalar over `pk` keeps
+  the model-less scalar path. A
   `read_only` field is dropped before the converter, so a read-only echo of the attname is
   unaffected.
 - A **dotted `source`** (`source="user.email"`) or **`source="*"`** is **rejected** for
@@ -1512,9 +1520,9 @@ located row keeps its key. An update `Meta.fields` naming such a field raises
 [`ConfigurationError`][glossary-configurationerror] at class creation, an update
 `Meta.exclude` naming it is accepted as the no-op it states, and a serializer whose only
 writable field is the key has no update input (the empty-input error). The field leaves the
-basis before it converts, so a key relation bound to its `attname` builds the update input
-while the create still refuses that binding. A nested level is untouched: its rows are
-written by the consumer's own `create()` / `update()`
+basis before it converts, so a key relation bound to its `attname` or the `pk` alias
+builds the update input while the create still refuses that binding. A nested level is
+untouched: its rows are written by the consumer's own `create()` / `update()`
 (`django_strawberry_framework/rest_framework/inputs.py::resolve_effective_serializer_fields`).
 
 **Nullability and defaults — `allow_null` and `required` are two different axes.**
@@ -2796,10 +2804,11 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   `build_strawberry_input_class` collapse the two).
 - **Two writable fields sharing one `source`.** A writable serializer `source`
   must be **unique across the whole write surface** — generated input fields **and**
-  `Meta.injected_fields`. Uniqueness is keyed by the model field a `source` resolves to
-  through `Options.get_field`, not by its spelling: a forward relation's `attname`
-  (`source="category_id"`) is the relation `category`, and `source="pk"` is the primary
-  key field, so `category` beside `cat = PrimaryKeyRelatedField(source="category_id")`,
+  `Meta.injected_fields`. Uniqueness is keyed by the model field a `source` writes
+  (`Options.get_field`, plus Django's `pk` alias), not by its spelling: a forward
+  relation's `attname` (`source="category_id"`) is the relation `category`, and
+  `source="pk"` is the primary key field, so `category` beside
+  `cat = PrimaryKeyRelatedField(source="category_id")`,
   or a primary key `code` beside `ident = CharField(source="pk")`, is two writers of one
   attribute; a `source` naming no concrete model field (a serializer-only key, a reverse
   accessor, a field of a model-less nested serializer) keys by its spelling. Two distinct
@@ -2913,7 +2922,8 @@ same transport, different app.
     — a `source="category"` FK and a `source="name"` scalar derive the GraphQL name from
     the declared field name, resolve the backing column via `source`, and preserve the
     declared name in the reverse map; a **dotted `source`** / `source="*"` on a
-    model-column-converting field, and a relation bound to its `attname`, raise
+    model-column-converting field, and a relation bound to its `attname` or to the `pk`
+    alias of a relation key, raise
     [`ConfigurationError`][glossary-configurationerror]; **the fail-loud dispatch — a
     known field maps, but a custom `class CustomField(serializers.Field)` raises
     [`ConfigurationError`][glossary-configurationerror]** (the catch-all-shadowing
@@ -2990,7 +3000,9 @@ same transport, different app.
     (proving `clear_serializer_input_namespace()` runs in the pre-bind reset block, not
     a per-pass clear); the no-registered-primary-type error; a lone relation bound to its
     `attname` failing the bind for create, update, a `Meta.injected_fields` entry and an
-    opted-in nested child alike; the model-flavor seam defaults unchanged.
+    opted-in nested child alike, and a lone key relation bound to the `pk` alias failing it
+    for create, a `Meta.injected_fields` entry and an opted-in nested child; the model-flavor
+    seam defaults unchanged.
   - `test_resolvers.py` — **genuinely-unreachable internals only** (the create/update
     happy paths, `validate_<field>` / flat `validate()` → `"__all__"` envelopes,
     `categoryId` reverse-map, partial-update, visibility-scoped update, write-auth,
@@ -3139,7 +3151,8 @@ The completion contract.
    (`category`/`category_id` → `categoryId`, `category_pk` → `categoryPk`, no doubled
    suffix), `source` → backing column, declared name preserved as the DRF write-back
    key; dotted `source` / `source="*"` on a model-column-converting field rejected; a
-   relation bound to its `attname` rejected; a choice field admitting a value its choice
+   relation bound to its `attname` or to the `pk` alias of a relation key rejected; a choice
+   field admitting a value its choice
    column's read enum has no member for rejected; a `MultipleChoiceField` or a `ListField`
    choice child over a single-value choice column rejected).
    [`rest_framework/inputs.py`][rf-inputs] builds both the serializer-derived
@@ -3403,7 +3416,7 @@ Earned live by `createShelfViaMetadataSerializer`'s `label` field.
 ### Aggregate schema-time diagnostics
 
 `rest_framework/inputs.py::_walk_serializer_fields` COLLECTS every per-field conversion error
-(unsupported field, non-PK relation, a relation bound to its `attname`, missing
+(unsupported field, non-PK relation, a relation bound to its `attname` or `pk` alias, missing
 relation-primary, dotted / `source="*"`, the type-override conflict) instead of raising on
 the first, folds in the input-attr / GraphQL-name / source collision messages
 (`_collect_input_attr_collision_messages`), and raises ONE `ConfigurationError`

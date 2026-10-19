@@ -1568,6 +1568,98 @@ def test_lone_relation_bound_to_its_attname_fails_the_bind(
         finalize_django_types()
 
 
+def _profile_lone_pk_alias_serializer() -> type[serializers.ModelSerializer[models.Model]]:
+    """``PatronProfile`` writing its key relation ``patron`` only through ``pid`` (``"pk"``)."""
+    pid: _PkRelation[library_models.Patron] = serializers.PrimaryKeyRelatedField(
+        source="pk",
+        queryset=library_models.Patron.objects.all(),
+    )
+    return _alias_serializer(library_models.PatronProfile, {"pid": pid}, ("address_2", "pid"))
+
+
+def _patron_with_profile(
+    child: type[serializers.ModelSerializer[models.Model]],
+) -> type[serializers.ModelSerializer[library_models.Patron]]:
+    """A ``Patron`` serializer nesting ``child`` as writable ``profile`` (create overridden)."""
+
+    class PatronWithProfile(ModelSerializerBase[library_models.Patron]):
+        profile = child()
+
+        class Meta:
+            model = library_models.Patron
+            fields = ("name", "profile")
+
+        @override
+        def create(self, validated_data: dict[str, object]) -> NoReturn:
+            raise AssertionError("the nested-write check reads this override; nothing calls it")
+
+    return PatronWithProfile
+
+
+_LONE_PK_ALIAS_ROWS = [
+    pytest.param(
+        lambda: {"serializer_class": _profile_lone_pk_alias_serializer(), "operation": "create"},
+        id="root-create",
+    ),
+    pytest.param(
+        lambda: {
+            "serializer_class": _profile_lone_pk_alias_serializer(),
+            "operation": "create",
+            "fields": ("address_2",),
+            "injected_fields": ("pid",),
+        },
+        id="injected",
+    ),
+    pytest.param(
+        lambda: {
+            "serializer_class": _patron_with_profile(_profile_lone_pk_alias_serializer()),
+            "operation": "create",
+            "nested_fields": {"profile": NestedSerializerConfig()},
+        },
+        id="nested",
+    ),
+]
+
+
+@pytest.mark.parametrize("meta_factory", _LONE_PK_ALIAS_ROWS)
+def test_lone_relation_bound_to_the_pk_alias_of_its_key_fails_the_bind(
+    meta_factory: Callable[[], dict[str, object]],
+) -> None:
+    """A key relation written only through ``pk`` fails the create bind like its ``attname``.
+
+    ``pk`` is no ``Options.get_field`` name, so the field has no backing column, yet Django's
+    alias writes the key relation's column; the converter refuses it on the root create input,
+    as a ``Meta.injected_fields`` entry and as a child of an opted-in nested serializer.
+    """
+
+    class PatronT(DjangoType):
+        class Meta:
+            model = library_models.Patron
+            fields = ("id",)
+            primary = True
+
+    class ProfileT(DjangoType):
+        class Meta:
+            model = library_models.PatronProfile
+            fields = ("patron", "address_2")
+            primary = True
+
+    assert registry.get(library_models.Patron) is PatronT
+    assert registry.get(library_models.PatronProfile) is ProfileT
+    mutation_meta = type("Meta", (), {"permission_classes": [], **meta_factory()})
+    mutation = type("LonePkAliasMut", (SerializerMutation,), {"Meta": mutation_meta})
+    assert mutation in iter_mutations()
+
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "Serializer relation field 'pid' binds source 'pk', the primary-key alias of the "
+            "column (attname 'patron_id') of relation PatronProfile.patron.",
+        ),
+    ):
+        finalize_django_types()
+
+
 # ---------------------------------------------------------------------------
 # Meta.optional_fields is the MUTATION's key
 # ---------------------------------------------------------------------------

@@ -1192,18 +1192,33 @@ def test_a_field_writing_no_primary_key_column_stays_an_update_input(
     assert serializer_inputs._writes_primary_key(model, field, name) is False
 
 
-def test_attname_bound_key_relation_builds_on_update_and_is_refused_on_create() -> None:
-    """A key relation bound to its ``attname`` builds the update input and is refused on create.
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        pytest.param("patron_id", "binds source 'patron_id', the column (attname)", id="attname"),
+        pytest.param(
+            "pk",
+            "binds source 'pk', the primary-key alias of the column",
+            id="pk-alias",
+        ),
+    ],
+)
+def test_column_bound_key_relation_builds_on_update_and_is_refused_on_create(
+    source: str,
+    message: str,
+) -> None:
+    """A key relation bound to its column builds the update input and is refused on create.
 
-    The update leaves the key out before any field converts, so the update input builds
-    without it; the create converts it and fails loud on the ``attname`` binding.
+    Its ``attname`` and the ``pk`` alias both spell the key's column. The update leaves the
+    key out before any field converts, so the update input builds without it; the create
+    converts it and fails loud on the column binding.
     """
-    serializer_class = _profile_serializer(owner=_patron_key("patron_id"))
+    serializer_class = _profile_serializer(owner=_patron_key(source))
 
     partial_cls, _shape = build_serializer_input_class(serializer_class, operation_kind=PARTIAL)
 
     assert set(_field_map(partial_cls)) == {"address_2"}
-    with pytest.raises(ConfigurationError, match="binds source 'patron_id', the column"):
+    with pytest.raises(ConfigurationError, match=re.escape(message)):
         build_serializer_input_class(serializer_class, operation_kind=CREATE)
 
 

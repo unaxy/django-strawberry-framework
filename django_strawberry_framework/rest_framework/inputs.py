@@ -58,8 +58,6 @@ from dataclasses import dataclass, replace
 from types import GenericAlias
 from typing import TYPE_CHECKING, cast
 
-from django.core.exceptions import FieldDoesNotExist
-from django.db import models
 from rest_framework import serializers
 from rest_framework.fields import empty
 
@@ -97,10 +95,13 @@ from .serializer_converter import (
     resolve_serializer_field,
     serializer_choice_source,
     serializer_field_description,
+    written_model_field,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+
+    from django.db import models
 
     from .serializer_converter import DRFBaseSerializer, DRFField, DRFSerializer
 
@@ -643,21 +644,15 @@ def write_source_key(model: type[models.Model] | None, source: str) -> str:
     """
     if model is None:
         return source
-    if source == "pk":
-        return model._meta.pk.name
-    try:
-        field = model._meta.get_field(source)
-    except FieldDoesNotExist:
-        return source
-    # A reverse relation (``ForeignObjectRel``) is no attribute DRF writes; keep the spelling.
-    return field.name if isinstance(field, models.Field) else source
+    field = written_model_field(model, source)
+    return source if field is None else field.name
 
 
 def _writes_primary_key(model: type[models.Model] | None, field: DRFField, name: str) -> bool:
     """Return whether a writable serializer field's write lands on ``model``'s primary key.
 
-    The write target is the one ``write_source_key`` resolves the field's ``source``
-    (else its declared ``name``) to, so every spelling of the key counts: the key's own
+    The write target is the model field ``written_model_field`` resolves the field's
+    ``source`` (else its declared ``name``) to, so every spelling of the key counts: the key's own
     name (``patron``, ``isbn_13``), its ``attname``, the ``pk`` alias, and a renamed field
     whose ``source`` names any of them. Under multi-table inheritance an inherited parent
     key (``id`` on a child) is a primary key too. A source naming no concrete field, a
@@ -668,12 +663,8 @@ def _writes_primary_key(model: type[models.Model] | None, field: DRFField, name:
     """
     if model is None or is_nested_serializer_field(field):
         return False
-    key = write_source_key(model, field.source or name)
-    try:
-        target = model._meta.get_field(key)
-    except FieldDoesNotExist:
-        return False
-    return isinstance(target, models.Field) and target.primary_key
+    target = written_model_field(model, field.source or name)
+    return target is not None and target.primary_key
 
 
 def writable_serializer_fields(
