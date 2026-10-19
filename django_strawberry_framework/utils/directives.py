@@ -37,17 +37,10 @@ error. ``scripts/check_truthful_reads.py`` enforces the identity and
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
-from ._narrowing import list_of
+from ._narrowing import is_char_wise, list_of
 from .lazy import unwrap_lazy_object
 
 __all__ = ("validated_field_directives",)
-
-_CHAR_WISE_TYPES: tuple[type[object], ...] = (
-    str,
-    bytes,
-    bytearray,
-    memoryview,
-)
 
 
 def validated_field_directives(label: str, directives: object) -> tuple[object, ...]:
@@ -66,8 +59,7 @@ def validated_field_directives(label: str, directives: object) -> tuple[object, 
     # check reads the value's real class, never its ``__class__``; a Django lazy proxy is
     # checked as the object it wraps (``utils/lazy.py::unwrap_lazy_object``), so a lazy
     # ``str`` is text too.
-    wrapped = unwrap_lazy_object(directives)
-    if any(truth.is_instance(wrapped, char_wise) for char_wise in _CHAR_WISE_TYPES):
+    if is_char_wise(unwrap_lazy_object(directives)):
         raise ConfigurationError(
             f"{label} directives must be a sequence of directive instances; "
             f"got {truth.kind(directives)}.",

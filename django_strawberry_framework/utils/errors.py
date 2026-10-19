@@ -41,7 +41,7 @@ from django.db import models
 from django.utils.functional import Promise
 
 from . import truth
-from ._narrowing import is_iterable
+from ._narrowing import is_char_wise, is_iterable
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -81,20 +81,6 @@ __all__ = [
     "save_time_error_key_map",
     "validation_error_to_field_errors",
 ]
-
-# The text atoms: values that ARE a message rather than a container of messages.
-# Spelled once because missing a site when the set grows is not a cosmetic slip -
-# it makes a message iterate character-by-character into per-character
-# ``FieldError`` leaves, the exact failure ``_str_list`` exists to prevent.
-# The write path has its own, deliberately different atom set (it also excludes
-# ``Mapping``): see ``write_values.py::RELATION_ID_ATOM_TYPES``.
-_TEXT_ATOM_TYPES = (
-    str,
-    bytes,
-    bytearray,
-    memoryview,
-    Promise,
-)
 
 # ---------------------------------------------------------------------------
 # ``FieldError.codes`` vocabulary
@@ -198,21 +184,18 @@ def field_error(path: str, messages: object, *, codes: object = None) -> FieldEr
     )
 
 
-def _is_text_atom(value: object) -> bool:
-    """Whether ``value``'s real class is one of the ``_TEXT_ATOM_TYPES``."""
-    return any(truth.is_instance(value, atom) for atom in _TEXT_ATOM_TYPES)
-
-
 def _str_list(value: object) -> list[str]:
     """Coerce a bare string or an iterable into a ``list[str]``.
 
     The one body behind ``field_error``'s ``messages`` AND ``codes`` coercion
-    (the rule the DRF ``ErrorDetail`` flattener depends on): a text atom or any
-    other non-iterable becomes a one-element list (never iterated
-    char-by-char); any other iterable (a DRF ``ErrorDetail`` list, a tuple) is
-    materialized with each element rendered by ``truth.text``.
+    (the rule the DRF ``ErrorDetail`` flattener depends on): a text atom (text,
+    bytes-like, or a lazy translation ``Promise``, each asked of its real class)
+    or any other non-iterable becomes a one-element list (never iterated
+    char-by-char into per-character leaves); any other iterable (a DRF
+    ``ErrorDetail`` list, a tuple) is materialized with each element rendered by
+    ``truth.text``.
     """
-    if _is_text_atom(value) or not is_iterable(value):
+    if is_char_wise(value) or truth.is_instance(value, Promise) or not is_iterable(value):
         return [truth.text(value)]
     return [truth.text(item) for item in value]
 

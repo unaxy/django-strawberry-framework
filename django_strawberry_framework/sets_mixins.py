@@ -55,7 +55,7 @@ from django.utils.module_loading import import_string
 
 from .exceptions import ConfigurationError
 from .utils import truth
-from .utils._narrowing import is_mapping, read_attr, require
+from .utils._narrowing import is_char_wise, is_mapping, read_attr, require
 from .utils.input_values import SetInputTraversal, is_inactive_value
 from .utils.lazy import unwrap_lazy_object
 from .utils.permissions import (
@@ -596,17 +596,6 @@ def should_cache_expansion(cls: type[object], *, related_attr: str, target_slot:
     )
 
 
-# Text atoms are ``Collection``s of CHARACTERS, never of field names, so they
-# are excluded from the re-readable contract even though they satisfy it
-# structurally. ``memoryview`` is included for the same reason: it is sized,
-# iterable and supports ``in``, so ``Collection`` accepts it.
-_TEXT_ATOM_TYPES: tuple[type[str], type[bytes], type[bytearray], type[memoryview]] = (
-    str,
-    bytes,
-    bytearray,
-    memoryview,
-)
-
 # The half of the rejection message that states the CONTRACT rather than the
 # per-family list of legal ``Meta.fields`` spellings. Shared so the two
 # families cannot describe one rule in two vocabularies.
@@ -628,7 +617,10 @@ def is_re_readable_field_declaration(value: object) -> bool:
     (``some_dict.keys()``, ``some_dict.values()``, ``range(...)``, any custom
     ``Collection``), and rejects the one-shot shapes (generators, ``iter(...)``,
     ``map`` / ``filter`` objects) that expand correctly ONCE and silently to
-    nothing afterwards. The check is structural, so the value's ``__iter__`` is
+    nothing afterwards. Text and bytes-like values (``utils/_narrowing.py::is_char_wise``,
+    ``memoryview`` included) are ``Collection``s of characters or bytes, never of
+    field names, so they are refused even though they satisfy the protocol
+    structurally. The check is structural, so the value's ``__iter__`` is
     never entered: an object that only defines ``__iter__`` is not a
     ``Collection``. The protocol is asked of the value's real class, so an
     instance-level ``__class__`` is never consulted (a value whose ``__class__``
@@ -637,10 +629,8 @@ def is_re_readable_field_declaration(value: object) -> bool:
     implements the whole ``Collection`` protocol, so a proxied string would
     otherwise pass as a container.
     """
-    value_type = truth.class_of(unwrap_lazy_object(value))
-    return issubclass(value_type, Collection) and not any(
-        truth.is_subclass(value_type, atom) for atom in _TEXT_ATOM_TYPES
-    )
+    unwrapped = unwrap_lazy_object(value)
+    return issubclass(truth.class_of(unwrapped), Collection) and not is_char_wise(unwrapped)
 
 
 def require_re_readable_field_declaration(
