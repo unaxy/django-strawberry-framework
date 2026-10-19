@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 156 done, 125 to do.
+Progress: 157 done, 125 to do.
 
 ## Done
 
@@ -513,6 +513,12 @@ Progress: 156 done, 125 to do.
   Django would try an UPDATE, so the race is the `__all__` `constraint` envelope; the ModelForm flavor splits such a
   create as Django's admin does (`form.save(commit=False)`, the forced save, `save_m2m()`); auto, default and
   `db_default` keys and every update are unchanged; the serializer flavor already inserted through `objects.create`
+- [x] 120. `prove_failability.py` had no SIGTERM / SIGHUP handler: a terminated run left its mutation in the tree and
+  its `ACTIVE-MUTATION.json` marker, and a signal to the run alone orphaned the pytest scope: fixed, `main` routes
+  SIGINT / SIGTERM / SIGHUP / SIGQUIT (an inherited `SIG_IGN` stays ignored) to a handler that records the stop and
+  forwards it to the scope, now in its own session (a repeat after `STOP_REPEAT_GRACE` kills the group); the run then
+  restores and proves the tree through the existing `finally`, writes no record and exits `128 + N` (a direct script
+  run dies by the signal); only `SIGKILL` or an interpreter crash still leaves the marker and `restore_with`
 
 ## Outside review of the fixes
 
@@ -553,8 +559,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 120. `prove_failability.py` has no SIGTERM / SIGHUP handler: a terminated run leaves its mutation in the tree and
-  its `ACTIVE-MUTATION.json` marker; recovery is by hand from `restore_with`
 - [ ] 121. A crashed `prove_failability.py` run without `--scratch-root` leaves its marker in its own `failability-*`
   directory, so the next default-mode run is not refused and reads the mutated tree; a `pre_image` or `reverse_patch`
   entry would copy the mutated bytes as pristine
@@ -679,6 +683,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `force_update=True` and the serializer witness refuses it; the GLOSSARY `DjangoMutation` concurrency paragraph's
   "never a silent success or a resurrecting insert" names direct model updates only (seen probing item 274, simulated
   with a `pre_save` delete; needs `Meta.select_for_update = False` on PostgreSQL / MySQL)
+- [ ] 284. `workspace.py run` / `prove` (`::stream`) start the command in the wrapper's process group and forward no
+  signal: a SIGTERM / SIGHUP to `workspace.py` alone (`TaskStop`, `timeout`) ends the wrapper and its lease while the
+  prover or pytest keeps running in the copy, so `gc` / `release` can reclaim it underneath (the catchable sibling of 142)
 ## To do: holes found re-checking the fixes
 
 

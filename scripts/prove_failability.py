@@ -28,6 +28,27 @@ Deliberate properties, each one a hand-run failure mode this encodes away:
 * **One mutation live at a time**, restored in a ``finally``, with the restore
   proved by byte comparison before the next entry starts. A restore that cannot
   be proved stops the run loudly instead of continuing.
+* **A stop signal restores before it stops.** ``SIGINT``, ``SIGTERM``,
+  ``SIGHUP`` and ``SIGQUIT`` (Ctrl-C; ``kill``, ``timeout`` or a CI cancel; a
+  closed terminal; Ctrl-backslash) never unwind from wherever they land. The
+  handler records the signal and forwards it to the running scope, which runs in
+  a session of its own, so signalling its process group reaches ``uv``, pytest
+  and every xdist worker together and lets pytest tear down. A stop signal that
+  arrives at least ``STOP_REPEAT_GRACE`` (one second) after the first kills that
+  group outright; one inside that window is the same stop delivered twice
+  (``uv run`` forwards a Ctrl-C the terminal already sent to the whole
+  foreground group) and sends nothing. The run waits for the whole group, so
+  nothing is left reading the tree. The run stops where that scope returns:
+  before anything is mutated when the baseline was cut short, after the
+  ``finally`` has restored and proved every file when the mutant run was. It
+  writes no record, since the cut-short run measured nothing, and ends by that
+  signal, as an unhandled one would, when the interpreter runs this script
+  directly (:func:`main` itself returns ``128 + N``, and so does ``uv run``). A
+  signal that lands during a restore waits for the restore; one that lands after
+  the last scope has nothing left to stop. A signal the run inherited as ignored
+  (``nohup`` for ``SIGHUP``, a background job for ``SIGINT``) stays ignored and
+  stops nothing. Only an end no process can intercept (``SIGKILL``, an
+  interpreter crash) still leaves a mutation live.
 * **A crash leaves evidence.** While a mutation is live, an
   ``ACTIVE-MUTATION.json`` marker in the run's scratch directory names the
   mutated file and the pristine copy that restores it. The run header, the
@@ -195,12 +216,19 @@ unusable, or ``--output`` was asked for without a baseline, or ``--workspace``
 refused the root, or another run holds this tree's lock, or a crashed run's
 marker is unresolved; ``3`` a restore could not be proved (the tree may still
 hold a mutation - read the marker file the run leaves behind; the partial report
-is still written to ``--output`` and ``--json``).
+is still written to ``--output`` and ``--json``); ``128 + N`` the stop signal
+``N`` (``130`` SIGINT, ``143`` SIGTERM, ``129`` SIGHUP, ``131`` SIGQUIT) ended
+the run after every mutation it made was restored and proved, and no record was
+written. When the interpreter runs this script directly, such a run then ends
+by that signal (a shell reports the same ``128 + N``; a ``subprocess`` parent
+sees ``-N``), so a calling loop stops as it would for any process the signal
+ended. Under ``uv run``, uv exits ``128 + N``.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import difflib
 import fcntl
@@ -211,6 +239,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -219,10 +248,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import takewhile
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Generator, Sequence
+    from types import FrameType
 
     from typing_extensions import TypeIs
 
@@ -235,6 +265,18 @@ TREE_NAMESPACE_DIGEST_LENGTH = 16
 PRISTINE_DIRECTORY_NAME = "pristine"
 ACTIVE_MARKER_NAME = "ACTIVE-MUTATION.json"
 RESTORE_FAILED_MARKER_NAME = "RESTORE-FAILED.json"
+# The signals that ask a run to stop: Ctrl-C, ``kill``/``timeout``/a CI cancel, a closed
+# terminal, Ctrl-backslash. Each ends the run where a scope run returns, never mid-restore.
+STOP_SIGNALS = (
+    signal.SIGINT,
+    signal.SIGTERM,
+    signal.SIGHUP,
+    signal.SIGQUIT,
+)
+# A repeat stop signal inside this many seconds of the first is the same stop delivered
+# twice (``uv run`` forwards a Ctrl-C the terminal already sent the whole group), so only a
+# later one escalates to ``SIGKILL``; inside the window pytest's teardown is left to finish.
+STOP_REPEAT_GRACE = 1.0
 # ``--no-cov`` is mandatory: pytest.ini's addopts turn coverage on, and coverage
 # gating belongs to the full-suite run, not to this tool. ``--color=no`` and
 # ``-p no:cacheprovider`` keep the captured output parseable and keep the run
@@ -448,6 +490,22 @@ class ScratchRootError(ManifestError):
 
 class RestoreProofError(Exception):
     """A mutated file could not be restored, or the restore could not be proved."""
+
+
+class RunInterruptedError(Exception):
+    """A stop signal ended the run; raised only where no mutation is half-written or half-restored.
+
+    The signal handler never raises: it records the signal and forwards it to
+    the running scope's process group, and :func:`_run_scope` raises this once
+    its scope has ended. Raised from the mutant run it leaves through
+    :func:`execute_entry`'s ``finally``, so the restore is proved before the
+    run stops.
+    """
+
+    def __init__(self, signum: int) -> None:
+        """Name the stop signal."""
+        super().__init__(signal.Signals(signum).name)
+        self.signum: int = signum
 
 
 class SiteError(Exception):
@@ -1762,12 +1820,94 @@ def _parse_run_output(stdout: str) -> tuple[tuple[str, ...], tuple[str, ...], st
     return tuple(failed), tuple(errored), summary
 
 
+@dataclass
+class _StopRequest:
+    """The first stop signal this run received, when, and the scope process group running now."""
+
+    signum: int | None = None
+    stopped_at: float = 0.0
+    scope: subprocess.Popen[str] | None = None
+
+
+_STOP = _StopRequest()
+
+
+def _request_stop(signum: int, _frame: FrameType | None) -> None:
+    """Signal handler: record the stop and signal the running scope's process group; never raise.
+
+    Raising here would unwind from whatever bytecode the signal lands on,
+    including the middle of a restore. The scope runs in its own session, so
+    the first stop is forwarded to its whole group as received, which lets
+    pytest tear down. A repeat stop at least :data:`STOP_REPEAT_GRACE`
+    seconds after the first sends ``SIGKILL`` for a scope that will not end;
+    one inside that window is the first delivered twice and sends nothing.
+    The run waits for the group either way, so nothing is left reading the
+    tree once it is restored.
+    """
+    now = time.monotonic()
+    if _STOP.signum is None:
+        _STOP.signum = signum
+        _STOP.stopped_at = now
+        _signal_scope(signum)
+    elif now - _STOP.stopped_at >= STOP_REPEAT_GRACE:
+        _signal_scope(signal.SIGKILL)
+
+
+def _signal_scope(signum: int) -> None:
+    """Send ``signum`` to the running scope's whole process group, if a scope is running.
+
+    A group already gone raises ``ProcessLookupError``; one whose members have
+    all exited but whose leader is not yet reaped raises ``PermissionError`` on
+    macOS. Either way nothing is left to signal.
+    """
+    scope = _STOP.scope
+    if scope is not None and scope.returncode is None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(scope.pid, signum)
+
+
+def _raise_if_stopped() -> None:
+    """Raise :class:`RunInterruptedError` when a stop signal has arrived."""
+    if _STOP.signum is not None:
+        raise RunInterruptedError(_STOP.signum)
+
+
+@contextlib.contextmanager
+def _stop_on_signals() -> Generator[None, None, None]:
+    """Route :data:`STOP_SIGNALS` to :func:`_request_stop` for one run, then put back what was there.
+
+    Installed by :func:`main` (never at import, and only from the main thread,
+    which is the only thread ``signal.signal`` accepts). A signal whose
+    disposition is ``SIG_IGN`` is left alone: whoever started the run asked for
+    it to survive that signal. The previous handlers are put back on the way
+    out and the stop request ends with the run, so a later run in the same
+    process starts unstopped.
+    """
+    previous = {
+        signum: signal.signal(signum, _request_stop)
+        for signum in STOP_SIGNALS
+        if signal.getsignal(signum) is not signal.SIG_IGN
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            _ = signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+        _STOP.signum = None
+
+
 def _run_scope(entry: ProofEntry, capture: RunCapture | None = None) -> RunOutcome:
     """Run one entry's focused pytest scope and return what it reported.
 
     With ``capture`` the run loads the probe plugin (``-p`` plus ``PYTHONPATH``)
     and its raw stdout and stderr are kept at ``capture.log_path``, headed by the
     exact argv and the environment additions.
+
+    The scope runs in a session of its own, so a stop signal reaches it only
+    through :func:`_request_stop`, which forwards it to the whole group; a
+    scope started after a stop is sent that signal as soon as it is recorded.
+    Either way this raises :class:`RunInterruptedError` instead of returning:
+    a cut-short run measured nothing.
     """
     command = [*PYTEST_COMMAND, *entry.scope]
     additions: dict[str, str] = {}
@@ -1789,32 +1929,42 @@ def _run_scope(entry: ProofEntry, capture: RunCapture | None = None) -> RunOutco
         }
     environment = None if capture is None else {**os.environ, **additions}
     started = time.monotonic()
-    completed = subprocess.run(
+    with subprocess.Popen(
         command,
         cwd=REPO_ROOT,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
         env=environment,
-    )
+        start_new_session=True,
+    ) as process:
+        _STOP.scope = process
+        try:
+            if _STOP.signum is not None:
+                # The stop came before this scope was recorded, so it reached none.
+                _signal_scope(_STOP.signum)
+            stdout, stderr = process.communicate()
+        finally:
+            _STOP.scope = None
+    _raise_if_stopped()
     wall_seconds = round(time.monotonic() - started, 2)
-    failed, errored, summary = _parse_run_output(completed.stdout)
+    failed, errored, summary = _parse_run_output(stdout)
     if not summary:
-        summary = (completed.stderr.strip().splitlines() or ["<no output>"])[-1]
+        summary = (stderr.strip().splitlines() or ["<no output>"])[-1]
     if capture is None:
         return RunOutcome(
             failed_node_ids=failed,
             error_node_ids=errored,
             summary=summary,
-            return_code=completed.returncode,
+            return_code=process.returncode,
             wall_seconds=wall_seconds,
         )
     header = [f"argv: {json.dumps(command)}", f"cwd: {REPO_ROOT}"]
     header.extend(f"env: {name}={value}" for name, value in additions.items())
     _ = capture.log_path.write_text(
         "\n".join(header)
-        + f"\nexit code: {completed.returncode}\n\n--- stdout ---\n{completed.stdout}"
-        + f"\n--- stderr ---\n{completed.stderr}",
+        + f"\nexit code: {process.returncode}\n\n--- stdout ---\n{stdout}"
+        + f"\n--- stderr ---\n{stderr}",
         encoding="utf-8",
     )
     crash_lines, provenance = _read_probe(capture.probe_output)
@@ -1822,7 +1972,7 @@ def _run_scope(entry: ProofEntry, capture: RunCapture | None = None) -> RunOutco
         failed_node_ids=failed,
         error_node_ids=errored,
         summary=summary,
-        return_code=completed.returncode,
+        return_code=process.returncode,
         crash_lines=crash_lines,
         provenance=provenance,
         wall_seconds=wall_seconds,
@@ -1884,7 +2034,9 @@ def execute_entry(
     pre-image identical to the file aborts the entry with nothing mutated. The
     copies are taken before anything is written and every mutated file is
     restored in a ``finally``, so no return path and no exception leaves a
-    mutation live. A restore that cannot be proved raises
+    mutation live. A stop signal never raises where it lands: it reaches this
+    function only as :class:`RunInterruptedError` from a finished scope run,
+    so the ``finally`` is never cut short. A restore that cannot be proved raises
     :class:`RestoreProofError` rather than being reported as one entry's failure.
     """
     try:
@@ -2710,13 +2862,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             scratch_root=scratch_root,
             scratch_root_given=_given_scratch_root(raw_scratch_root),
         )
-        return _run_selected(
-            arguments,
-            selected,
-            describe_selection(entries, selected, arguments.only),
-            context,
-            capture_baseline=capture_baseline,
+        with _stop_on_signals():
+            return _run_selected(
+                arguments,
+                selected,
+                describe_selection(entries, selected, arguments.only),
+                context,
+                capture_baseline=capture_baseline,
+            )
+    except RunInterruptedError as stop:
+        print(
+            f"stopped by {stop}: every mutation this run made was restored and proved first, "
+            "so no mutation is live; no record was written",
+            file=sys.stderr,
         )
+        return 128 + stop.signum
     finally:
         os.close(lock)
 
@@ -2837,5 +2997,20 @@ def _write_report(report: str, output: Path | None, *, label: str) -> None:
     print(f"{label} written to {output}", file=sys.stderr)
 
 
+def _cli() -> NoReturn:
+    """Run :func:`main` as the script does, ending by the stop signal that stopped the run.
+
+    :func:`main` returns ``128 + N`` for in-process callers. A process that
+    exits with that status still reads as a normal exit to its parent, so a
+    calling shell loop would carry on; dying by ``N`` with its default action
+    is what an unhandled stop signal does, and what the parent expects.
+    """
+    code = main()
+    if code - 128 in STOP_SIGNALS:
+        _ = signal.signal(code - 128, signal.SIG_DFL)
+        os.kill(os.getpid(), code - 128)
+    raise SystemExit(code)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    _cli()
