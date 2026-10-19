@@ -201,10 +201,11 @@ composition `036` proves.
   form-required field on update). Rejected for cross-flavor consistency with the
   model-driven `DjangoMutation.update`: the reconstruction from the located instance
   gives partial semantics while the bound `ModelForm` still validates the whole set.
-- **`form.save(commit=False)` + explicit `instance.save()` + `form.save_m2m()`.**
-  Rejected: for a `ModelForm` with M2M fields, `form.save()` (commit=True) already runs
-  `save_m2m()` internally, so a single `form.save()` inside the one
-  `transaction.atomic()` is complete.
+- **`form.save(commit=False)` + explicit `instance.save()` + `form.save_m2m()` as the
+  general write.** Rejected: for a `ModelForm` with M2M fields, `form.save()`
+  (commit=True) already runs `save_m2m()` internally, so a single `form.save()` inside
+  the one `transaction.atomic()` is complete. The split is used for a create over a
+  client-assigned key alone, whose INSERT must be forced (Decision 8 step 5).
 
 ## Decision 9 — Optimizer composition: the `ModelForm` payload re-fetch rides the `spec-036` G2 path
 

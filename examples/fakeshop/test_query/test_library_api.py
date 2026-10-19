@@ -14,7 +14,7 @@ import json
 import re
 import string
 import sys
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Generator, Mapping
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, cast
 
 import pytest
@@ -30,7 +30,7 @@ from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
 from django.db.models import Model, QuerySet
-from django.db.models.signals import post_init
+from django.db.models.signals import post_init, pre_save
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
@@ -78,6 +78,7 @@ from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import decode_global_id, global_id_for
+from django_strawberry_framework.utils._narrowing import pk_of
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
@@ -15201,71 +15202,211 @@ def test_model_create_requires_a_client_assigned_primary_key_over_http(
 
 
 def _post_keyed_create(mutation: str, input_type: str, data: Mapping[str, object]) -> JSONObject:
-    """Post one model-flavor create over a client-assigned primary key; answer its ``data``."""
+    """Post one create over a client-assigned primary key; answer its ``data``."""
     return _assert_graphql_success(
         f"mutation($d: {input_type}!) {{ {mutation}(data: $d) {{ {_KEYED_CREATE_SELECTION} }} }}",
         variables={"d": dict(data)},
     )
 
 
+#: The envelope a create answers when a row was committed under its key after the
+#: uniqueness check passed and before the save.
+_RACED_CREATE_ERRORS: list[JSONObject] = [
+    {
+        "field": "__all__",
+        "messages": ["A database constraint was violated."],
+        "codes": ["constraint"],
+        "path": [],
+    },
+]
+
+_COMPETING_ROW_DISPATCH_UID = "test_query.library.competing_keyed_row"
+
+
+@contextlib.contextmanager
+def _competing_row_before_save(
+    competitor: Model | None,
+) -> Generator[list[object], None, None]:
+    """Insert ``competitor`` just before the first new row of its model is saved.
+
+    A ``pre_save`` receiver runs after the create's uniqueness check and before its
+    write, so a row it inserts under the same key stands in for one a concurrent
+    transaction committed in between. It inserts through ``_base_manager.bulk_create``
+    (which sends no signal) on the request's own connection, and yields the key of every
+    new row whose save it saw. ``None`` connects nothing.
+    """
+    seen: list[object] = []
+    if competitor is None:
+        yield seen
+        return
+    model = type(competitor)
+
+    def _insert(instance: Model, **_kwargs: object) -> None:
+        if instance._state.adding:
+            seen.append(pk_of(instance))
+            if len(seen) == 1:
+                _ = model._base_manager.bulk_create([competitor])
+
+    pre_save.connect(_insert, sender=model, weak=False, dispatch_uid=_COMPETING_ROW_DISPATCH_UID)
+    try:
+        yield seen
+    finally:
+        _ = pre_save.disconnect(sender=model, dispatch_uid=_COMPETING_ROW_DISPATCH_UID)
+
+
+def _updates_of(queries: CaptureQueriesContext, table: str) -> list[str]:
+    """Every captured ``UPDATE`` of ``table``."""
+    return [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].startswith(f'UPDATE "{table}"')
+    ]
+
+
 @pytest.mark.django_db
-@pytest.mark.parametrize("key", ["free", "taken", "missing"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "free",
+        "taken",
+        "missing",
+        "raced",
+    ],
+)
 def test_model_create_patron_profile_names_its_patron_by_the_key_over_http(key: str) -> None:
     """``createPatronProfile`` creates the profile of a free patron and refuses any other key.
 
-    A patron with no profile gets one; a patron whose profile exists is the ``unique``
-    error on ``patronId`` and that profile is untouched; a key naming no patron is the
-    relation's ``invalid`` error. Only the free key writes a row.
+    A patron with no profile gets one, INSERTed without first trying an UPDATE; a patron
+    whose profile exists is the ``unique`` error on ``patronId`` and that profile is
+    untouched; a key naming no patron is the relation's ``invalid`` error. A patron whose
+    profile a competing writer saves after the uniqueness check is the ``constraint``
+    error, rolled back with the competing profile, never overwritten. Only the free key
+    writes a row.
     """
     owner = models.Patron.objects.create(name="CreateProfileOwner")
     models.PatronProfile.objects.create(patron=owner, address_2="Suite 1")
     free = models.Patron.objects.create(name="CreateProfileFree")
     free_pk = saved_pk(free.pk)
-    patron_key = {"free": free_pk, "taken": saved_pk(owner.pk), "missing": free_pk + 1000}[key]
+    patron_key = {
+        "free": free_pk,
+        "taken": saved_pk(owner.pk),
+        "missing": free_pk + 1000,
+        "raced": free_pk,
+    }[key]
+    competitor = None
+    if key == "raced":
+        competitor = models.PatronProfile(patron=free, address_2="Suite 9")
 
-    result = _post_keyed_create(
-        "createPatronProfile",
-        "PatronProfileInput",
-        {"patronId": patron_key, "address_2": "Suite 2"},
-    )
+    with (
+        _competing_row_before_save(competitor) as seen,
+        CaptureQueriesContext(connection) as queries,
+    ):
+        result = _post_keyed_create(
+            "createPatronProfile",
+            "PatronProfileInput",
+            {"patronId": patron_key, "address_2": "Suite 2"},
+        )
 
     if key == "free":
         assert result == {"createPatronProfile": {"errors": []}}
         assert _profiles() == [(owner.pk, "Suite 1"), (free.pk, "Suite 2")]
+        assert _updates_of(queries, "library_patronprofile") == []
         return
-    assert result == {"createPatronProfile": {"errors": _KEYED_CREATE_ERRORS[key]}}
+    if key == "raced":
+        assert result == {"createPatronProfile": {"errors": _RACED_CREATE_ERRORS}}
+        assert seen == [free_pk]
+    else:
+        assert result == {"createPatronProfile": {"errors": _KEYED_CREATE_ERRORS[key]}}
     assert _profiles() == [(owner.pk, "Suite 1")]
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("key", ["free", "taken"])
+@pytest.mark.parametrize("key", ["free", "taken", "raced"])
 def test_model_create_edition_takes_its_isbn_key_from_the_client_over_http(key: str) -> None:
     """``createEdition`` creates an edition under a free ISBN and never overwrites a taken one.
 
     The ISBN text is the primary key and has no default: a free ISBN creates the edition,
-    and a taken one is the ``unique`` error on ``isbn_13`` with the stored edition intact.
+    INSERTed without first trying an UPDATE, and a taken one is the ``unique`` error on
+    ``isbn_13`` with the stored edition intact. An ISBN a competing writer saves after the
+    uniqueness check is the ``constraint`` error, rolled back with the competing edition,
+    never overwritten.
     """
     publisher = models.Publisher.objects.create(name="KeyedPress", house_code="KP")
     models.Edition.objects.create(isbn_13="9780000000001", publisher=publisher, imprint="Kept")
-    isbn = {"free": "9780000000002", "taken": "9780000000001"}[key]
+    isbn = {"free": "9780000000002", "taken": "9780000000001", "raced": "9780000000002"}[key]
+    competitor = None
+    if key == "raced":
+        competitor = models.Edition(isbn_13=isbn, publisher=publisher, imprint="Competing")
 
-    result = _post_keyed_create(
-        "createEdition",
-        "EditionInput",
-        {
-            "isbn_13": isbn,
-            "imprint": "New",
-            "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
-        },
-    )
+    with (
+        _competing_row_before_save(competitor) as seen,
+        CaptureQueriesContext(connection) as queries,
+    ):
+        result = _post_keyed_create(
+            "createEdition",
+            "EditionInput",
+            {
+                "isbn_13": isbn,
+                "imprint": "New",
+                "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
+            },
+        )
 
     stored = list(models.Edition.objects.order_by("isbn_13").values_list("isbn_13", "imprint"))
     if key == "free":
         assert result == {"createEdition": {"errors": []}}
         assert stored == [("9780000000001", "Kept"), ("9780000000002", "New")]
+        assert _updates_of(queries, "library_edition") == []
         return
-    assert result == {"createEdition": {"errors": _KEYED_CREATE_ERRORS["taken_isbn"]}}
+    if key == "raced":
+        assert result == {"createEdition": {"errors": _RACED_CREATE_ERRORS}}
+        assert seen == [isbn]
+    else:
+        assert result == {"createEdition": {"errors": _KEYED_CREATE_ERRORS["taken_isbn"]}}
     assert stored == [("9780000000001", "Kept")]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("key", ["free", "taken", "raced"])
+def test_form_create_patron_profile_names_its_patron_by_the_key_over_http(key: str) -> None:
+    """``createPatronProfileViaForm`` creates a free patron's profile and refuses any other.
+
+    ``PatronProfileGenreForm`` declares the one-to-one key ``patron``: a patron with no
+    profile gets one, INSERTed without first trying an UPDATE, and a patron whose profile
+    exists is the form's ``unique`` error on ``patronId`` with that profile untouched. A
+    patron whose profile a competing writer saves after ``is_valid()`` is the
+    ``constraint`` error, rolled back with the competing profile, never overwritten.
+    """
+    owner = models.Patron.objects.create(name="FormProfileOwner")
+    models.PatronProfile.objects.create(patron=owner, address_2="Suite 1")
+    free = models.Patron.objects.create(name="FormProfileFree")
+    free_pk = saved_pk(free.pk)
+    patron_key = {"free": free_pk, "taken": saved_pk(owner.pk), "raced": free_pk}[key]
+    competitor = None
+    if key == "raced":
+        competitor = models.PatronProfile(patron=free, address_2="Suite 9")
+
+    with (
+        _competing_row_before_save(competitor) as seen,
+        CaptureQueriesContext(connection) as queries,
+    ):
+        result = _post_keyed_create(
+            "createPatronProfileViaForm",
+            "PatronProfileGenreFormInput",
+            {"patronId": patron_key, "address_2": "Suite 2"},
+        )
+
+    if key == "free":
+        assert result == {"createPatronProfileViaForm": {"errors": []}}
+        assert _profiles() == [(owner.pk, "Suite 1"), (free.pk, "Suite 2")]
+        assert _updates_of(queries, "library_patronprofile") == []
+        return
+    if key == "raced":
+        assert result == {"createPatronProfileViaForm": {"errors": _RACED_CREATE_ERRORS}}
+        assert seen == [free_pk]
+    else:
+        assert result == {"createPatronProfileViaForm": {"errors": _KEYED_CREATE_ERRORS[key]}}
+    assert _profiles() == [(owner.pk, "Suite 1")]
 
 
 _FORM_PROFILE_NAME_UPDATE = (

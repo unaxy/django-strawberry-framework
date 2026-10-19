@@ -16,9 +16,9 @@ required ``genres`` M2M is reconstructed from the located row rather than cleare
 the column, so its generated input publishes only the values the form admits.
 ``PatronProfileGenreForm`` declares a genre-id-keyed ``favorite_genre`` over the ``to_field``
 key ``PatronProfile.favorite_genre``, so a partial update omitting it rebinds the stored
-genre by its id; it also names the primary-key relation ``patron``, which the update input
-leaves out. ``PatronProfileGenreNameForm`` keeps the generated name-keyed field over the
-same key, so the stored name is the form key.
+genre by its id; it also names the primary-key relation ``patron``, which the create input
+carries and the update input leaves out. ``PatronProfileGenreNameForm`` keeps the generated
+name-keyed field over the same key, so the stored name is the form key.
 ``PrintingForm`` relates to the text-keyed ``Edition`` (FK + M2M), so its raw-pk
 inputs carry ISBN text; ``EditionImprintForm`` updates an ``Edition`` located by that text.
 ``BranchWithShelfForm`` and ``BranchPairForm`` add model-less plain-form
@@ -128,9 +128,9 @@ class PatronProfileGenreForm(forms.ModelForm[models.PatronProfile]):
     sets no ``to_field_name``, so it resolves a choice by genre id, not by the name the
     column stores (the generated field passes ``to_field_name="name"``). A partial update
     that omits ``favoriteGenreId`` therefore has to rebind the stored genre by its id.
-    The form also names the primary-key relation ``patron``, which the update input leaves
-    out: an update never carries the row's primary key, so the bound form validates the
-    stored patron.
+    The form also names the primary-key relation ``patron``: a create takes it as the
+    client-assigned key, while the update input leaves it out (an update never carries the
+    row's primary key), so the bound form validates the stored patron.
     """
 
     favorite_genre: forms.ModelChoiceField[models.Genre] = forms.ModelChoiceField(

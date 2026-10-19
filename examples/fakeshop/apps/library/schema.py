@@ -1607,6 +1607,22 @@ class UpdatePatronProfileViaForm(DjangoModelFormMutation):
         permission_classes = []
 
 
+class CreatePatronProfileViaForm(DjangoModelFormMutation):
+    """Create a ``PatronProfile`` via ``PatronProfileGenreForm``, naming its patron by the key.
+
+    The form declares the one-to-one primary key ``patron``, so the create input carries it
+    as ``patronId``: a patron with no profile gets one, and a patron that has one is the
+    form's ``unique`` error on ``patronId``. The key is client-assigned, so the save INSERTs
+    the row the form built: a profile committed under that patron between validation and
+    the save is the ``constraint`` error, never overwritten.
+    """
+
+    class Meta:
+        form_class = forms.PatronProfileGenreForm
+        operation = "create"
+        permission_classes = []
+
+
 class UpdatePatronProfileByGenreNameViaForm(DjangoModelFormMutation):
     """Update a ``PatronProfile`` via ``PatronProfileGenreNameForm`` - a name-keyed ``to_field`` FK.
 
@@ -2648,6 +2664,8 @@ class Mutation:
     every update input leaves it out.
     ``updatePatronProfileViaForm`` is the ``ModelForm`` write of the same key through a
     genre-id-keyed form field: an omitted genre is rebound by its id, never by the stored name.
+    ``createPatronProfileViaForm`` is the ``ModelForm`` create through the same form, naming the
+    client-assigned ``patron`` key.
     ``updatePatronProfileByGenreNameViaForm`` writes it through the generated name-keyed field,
     which refuses a genre named ``""`` (stored or supplied) instead of clearing it.
     ``updateShelfViaForm`` updates a shelf through the name-keyed ``branch`` over the
@@ -2669,6 +2687,7 @@ class Mutation:
     update_book_via_form = DjangoMutationField(UpdateBookViaForm)
     update_book_at_repair_desk_via_form = DjangoMutationField(UpdateBookAtRepairDeskViaForm)
     update_patron_profile_via_form = DjangoMutationField(UpdatePatronProfileViaForm)
+    create_patron_profile_via_form = DjangoMutationField(CreatePatronProfileViaForm)
     update_patron_profile_by_genre_name_via_form = DjangoMutationField(
         UpdatePatronProfileByGenreNameViaForm,
     )

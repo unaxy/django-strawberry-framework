@@ -2014,6 +2014,10 @@ The pipeline steps:
    re-fetch; signal-less bulk persistence fails closed); and on **update**, the same pk as
    the post-locate `authorized_pk` snapshot (a live `instance.pk` comparison would be
    forgeable, since `instance` and the returned object can be the same mutable object).
+   A custom `create()` whose plain `save()` of a client-assigned key UPDATEs a row a
+   concurrent transaction committed under it witnesses no `created=True` write and fails
+   closed the same way; DRF's own `ModelSerializer.create` INSERTs (`QuerySet.create`),
+   so the stock create meets that race as the `IntegrityError` envelope.
 
    **The wrapper is value-preserving — the saved object is captured, not re-derived.**
    Every flavor's save rides `mutations/resolvers.py::save_or_field_errors`, which

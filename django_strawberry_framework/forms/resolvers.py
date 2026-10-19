@@ -93,7 +93,14 @@ and the form-specific invariants this module owns:
   ``blank=True, null=False`` non-text choice column cleaned to ``""``, which
   ``save()`` refuses with a ``ValueError`` / ``ValidationError``, maps to that
   column's field-keyed ``null`` error (``_modelform_save_or_field_errors``); any
-  other ``ValueError`` propagates.
+  other ``ValueError`` propagates. On a ``ModelForm`` create over a
+  client-assigned key the form's ``save()`` is called with ``commit=False`` and
+  the package saves the row it returned (an INSERT through
+  ``mutations/resolvers.py::save_new_row``, whose ``force_insert`` the model's
+  ``save()`` receives) and calls ``form.save_m2m()``, as Django's admin does, so
+  work a ``ModelForm.save()`` override does only when committing does not run
+  there; a row committed under that key between ``is_valid()`` and the save is
+  the ``"__all__"`` ``constraint`` envelope, never overwritten.
 
 - **The ``ModelForm`` re-fetch rides the ``036`` ``refetch_optimized`` G2 path**
   (Decision 9): by pk WITHOUT the visibility filter, routed through
@@ -128,8 +135,10 @@ from django.forms.models import model_to_dict
 
 from django_strawberry_framework.mutations.resolvers import (
     StepFailure,
+    adds_by_update_first,
     make_resolver_entries,
     run_write_pipeline_sync,
+    save_new_row,
     save_or_field_errors,
 )
 from django_strawberry_framework.mutations.sets import backing_model_of
@@ -752,8 +761,21 @@ def _unstorable_blank_fields(
 def _modelform_save_or_field_errors(
     form: _ModelFormAny,
     mutation_cls: type[DjangoModelFormMutation],
+    *,
+    creating: bool,
 ) -> list[FieldError] | None:
     """Run ``form.save()``; map a save-time failure to the envelope else ``None``.
+
+    A create whose row ``Model.save()`` would write UPDATE-then-INSERT
+    (``mutations/resolvers.py::adds_by_update_first``: a client-assigned key) splits the
+    save the way Django's admin does (``ModelAdmin.save_form`` / ``save_model`` /
+    ``save_related``): the form's ``save()`` is called with ``commit=False``, the
+    package saves the row it returned through ``mutations/resolvers.py::save_new_row``
+    (an INSERT, whose ``force_insert`` the model's ``save()`` receives, so a row a
+    concurrent transaction committed under that key is the ``constraint`` envelope,
+    never overwritten), then calls ``form.save_m2m()``. Work a consumer
+    ``ModelForm.save()`` override does only when committing does not run there.
+    Every other save is one ``form.save()``.
 
     The ``IntegrityError`` -> ``"__all__"`` and consumer ``ValidationError`` mappings
     are the shared ``save_or_field_errors``, keyed through
@@ -782,7 +804,11 @@ def _modelform_save_or_field_errors(
 
     def save() -> None:
         try:
-            _ = form.save()
+            if creating and adds_by_update_first(form.instance):
+                save_new_row(form.save(commit=False))
+                form.save_m2m()
+            else:
+                _ = form.save()
         except (ValueError, ValidationError):
             unstorable_fields = _unstorable_blank_fields(form)
             if not unstorable_fields:
@@ -835,7 +861,11 @@ def _modelform_write_step(
     # construction + ``is_valid()`` above are database-read-only under the
     # pipeline's phased alias guard.
     with pipeline_write_phase():
-        write_error = _modelform_save_or_field_errors(form, mutation_cls)
+        write_error = _modelform_save_or_field_errors(
+            form,
+            mutation_cls,
+            creating=instance is None,
+        )
     if write_error is not None:
         return StepFailure(write_error)
     # ``get_form`` returns a ``ModelForm[Any]`` (its model parameter is invariant),

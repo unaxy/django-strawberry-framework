@@ -31,7 +31,9 @@ fakeshop has no column for (omitted with no default, decimal / date, update
 the keying of a save-time Django ``ValidationError`` by a name fakeshop's own
 ``Item.save()`` rule never raises (a relation ``attname``, a name only the form
 declares, a dotted name): the ``ModelForm`` reads it against the backing model, the
-model-less plain form against its own form fields.
+model-less plain form against its own form fields. A ``ModelForm.save()`` override
+doing work only when committing, over a client-assigned key (no fakeshop form
+carries one), pins that such a create saves through ``save(commit=False)``.
 """
 
 from __future__ import annotations
@@ -2694,3 +2696,136 @@ def test_modelform_unrelated_save_value_error_propagates() -> None:
         assert [error.message for error in res.errors] == ["consumer save refused the row"]
         assert res.errors[0].original_error is _CONSUMER_SAVE_ERROR
         assert not FailingPickRow.objects.exists()
+
+
+class CommitNoteRow(models.Model):
+    """A row Django keys, written through ``CommitOnlyNoteForm``."""
+
+    note: _Text = models.TextField(blank=True, default="")
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "tests_forms_commit_note_row"
+
+
+class KeyedCommitNoteRow(models.Model):
+    """``CommitNoteRow`` keyed by the client's ``code`` instead."""
+
+    code: _Text = models.TextField(primary_key=True)
+    note: _Text = models.TextField(blank=True, default="")
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "tests_forms_keyed_commit_note_row"
+
+
+#: The notes every ``commit=True`` save of a commit-only form recorded.
+_COMMITTED_NOTES: list[str] = []
+
+
+class CommitOnlyNoteForm(forms.ModelForm[CommitNoteRow]):
+    """A ``ModelForm`` whose ``save()`` records the note only when it commits."""
+
+    class Meta:
+        model = CommitNoteRow
+        fields = ("note",)
+
+    @override
+    def save(self, commit: bool = True) -> CommitNoteRow:
+        row = super().save(commit=commit)
+        if commit:
+            _COMMITTED_NOTES.append(row.note)
+        return row
+
+
+class KeyedCommitOnlyNoteForm(forms.ModelForm[KeyedCommitNoteRow]):
+    """``CommitOnlyNoteForm`` over the client-keyed ``KeyedCommitNoteRow``."""
+
+    class Meta:
+        model = KeyedCommitNoteRow
+        fields = ("code", "note")
+
+    @override
+    def save(self, commit: bool = True) -> KeyedCommitNoteRow:
+        row = super().save(commit=commit)
+        if commit:
+            _COMMITTED_NOTES.append(row.note)
+        return row
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "form_class",
+        "model_class",
+        "data",
+        "committed",
+    ),
+    [
+        (
+            CommitOnlyNoteForm,
+            CommitNoteRow,
+            {"note": "assigned"},
+            ["assigned"],
+        ),
+        (
+            KeyedCommitOnlyNoteForm,
+            KeyedCommitNoteRow,
+            {"code": "K1", "note": "keyed"},
+            [],
+        ),
+    ],
+    ids=["assigned_key", "client_key"],
+)
+def test_modelform_create_over_a_client_key_saves_through_commit_false(
+    form_class: type[forms.ModelForm[models.Model]],
+    model_class: type[models.Model],
+    data: dict[str, object],
+    committed: list[str],
+) -> None:
+    """A client-key create calls the form's ``save(commit=False)`` and saves the row itself.
+
+    On a key Django assigns the create is one ``form.save()``, so an override's
+    commit-only work runs. On a client-assigned key the package calls the form's
+    ``save()`` with ``commit=False``, INSERTs the returned row and calls
+    ``save_m2m()``, as Django's admin does, so that work does not run while the row
+    is still written.
+    """
+    _COMMITTED_NOTES.clear()
+    type(
+        f"{model_class.__name__}T",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": model_class, "fields": "__all__", "primary": True})},
+    )
+    create = type(
+        "CreateRow",
+        (DjangoModelFormMutation,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"form_class": form_class, "operation": "create", "permission_classes": []},
+            ),
+        },
+    )
+
+    @strawberry.type
+    class Mutation:
+        create_row = DjangoMutationField(create)
+
+    finalize_django_types()
+    assert create._input_class is not None
+    with _blank_choice_table(model_class):
+        res = _schema(Mutation).execute_sync(
+            f"mutation($d: {create._input_class.__name__}!){{ createRow(data: $d){{ "
+            "errors{ field messages codes } } }",
+            variable_values={"d": data},
+        )
+        notes = list(model_class._base_manager.values_list("note", flat=True))
+
+    assert res.errors is None, res.errors
+    assert res.data == {"createRow": {"errors": []}}
+    assert notes == [data["note"]]
+    assert committed == _COMMITTED_NOTES
