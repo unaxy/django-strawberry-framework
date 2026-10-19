@@ -1863,18 +1863,13 @@ def test_fast_path_ambiguous_empty_served_from_marker_row(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_async_fast_path_last_zero_serves_the_first_zero_page(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_async_fast_path_last_zero_serves_the_first_zero_page() -> None:
     """``last: 0`` under ASYNC execution is the ``first: 0`` page served from the window.
 
     Driven by ``await schema.execute(...)``: empty ``edges``, the true
     ``totalCount`` and ``first: 0``'s ``pageInfo`` (a next page exists), the
     same payload ``first: 0`` returns on the same schema.
     """
-    # The optimizer extension runs the parent (genre) prefetch with sync ORM on
-    # the event-loop thread; unblock Django's async-safety guard for it.
-    monkeypatch.setenv("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
     await sync_to_async(_seed_library_books)(["a", "b", "c"])
     schema = await sync_to_async(_genres_list_schema)(optimizer=True, book_total_count=True)
     page = (

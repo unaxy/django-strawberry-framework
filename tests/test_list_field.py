@@ -3,7 +3,7 @@
 These cover the mechanics a live request cannot express.
 
 Specs: ``docs/SPECS/spec-020-list_field-0_0_7.md`` for the field itself and
-``docs/spec-050-list_field_arguments-0_0_15.md`` for its ``offset`` / ``limit`` /
+``docs/SPECS/spec-050-list_field_arguments-0_0_15.md`` for its ``offset`` / ``limit`` /
 ``orderBy`` argument surface.
 
 Package tests; system-under-test is ``django_strawberry_framework``
@@ -1801,6 +1801,27 @@ def test_order_term_classifier_refuses_a_relation_ordering_cycle(
     monkeypatch.setattr(library_models.Branch._meta, "ordering", ("shelves",))
 
     assert _is_model_default_ordering_active(library_models.Shelf.objects.all()) is False
+
+
+def test_order_term_classifier_refuses_a_join_repeated_by_sibling_terms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One top-level term's whole expansion shares the compiler's set of joins already taken.
+
+    ``Book`` orders by its shelf, and the shelf by its branch twice. Neither
+    branch term re-enters its own chain, but the second repeats the join the
+    first already expanded, which Django rejects with ``FieldError("Infinite
+    loop caused by ordering.")``; ordering by a column of the branch beside it
+    expands that join once and compiles.
+    """
+    monkeypatch.setattr(library_models.Book._meta, "ordering", ("shelf",))
+    monkeypatch.setattr(library_models.Branch._meta, "ordering", ("name",))
+
+    monkeypatch.setattr(library_models.Shelf._meta, "ordering", ("branch", "-branch"))
+    assert _is_model_default_ordering_active(library_models.Book.objects.all()) is False
+
+    monkeypatch.setattr(library_models.Shelf._meta, "ordering", ("branch", "-branch__name"))
+    assert _is_model_default_ordering_active(library_models.Book.objects.all()) is True
 
 
 def test_order_term_classifier_refuses_a_piece_that_is_not_a_field(

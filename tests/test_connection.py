@@ -37,7 +37,8 @@ response cannot uniquely show:
 - cascade composed with ``totalCount`` (shipped cascading types declare no
   connection opt-in; visibility+count without cascade is live on issues);
 - hostile containment, sealed-execution, Manager degrade/drift, registry and
-  connection-type cache, captured-definition read counts.
+  connection-type cache, and optimizer planning from the captured definition
+  (a decoy definition over a different model armed after construction).
 """
 
 import asyncio

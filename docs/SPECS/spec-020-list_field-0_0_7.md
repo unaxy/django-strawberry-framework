@@ -594,7 +594,7 @@ The HTTP test files' reload pattern (clear the global registry, reload app schem
 
 <!-- docs/ -->
 [docs-readme]: ../README.md
-[spec-050]: ../spec-050-list_field_arguments-0_0_15.md
+[spec-050]: spec-050-list_field_arguments-0_0_15.md
 [glossary-apply-cascade-permissions]: ../GLOSSARY.md#apply_cascade_permissions
 [glossary-configurationerror]: ../GLOSSARY.md#configurationerror
 [glossary-connection-aware-optimizer-planning]: ../GLOSSARY.md#connection-aware-optimizer-planning

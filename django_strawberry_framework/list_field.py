@@ -1,7 +1,7 @@
 """``DjangoListField`` - non-Relay ``list[T]`` field for root Query fields.
 
 Spec: ``docs/SPECS/spec-020-list_field-0_0_7.md``.
-Extension spec: ``docs/spec-050-list_field_arguments-0_0_15.md``.
+Extension spec: ``docs/SPECS/spec-050-list_field_arguments-0_0_15.md``.
 Target release: ``0.0.7``.
 """
 
@@ -114,6 +114,7 @@ from .utils.querysets import (
     reject_residual_async_source,
     resolve_order_name,
     selected_order,
+    take_order_expansion_step,
     wrap_async_queryset_adapter,
 )
 from .utils.typing import graphql_fields, is_async_callable
@@ -732,7 +733,8 @@ def _is_deterministic_order_field_path(
     query: Query,
     path: str,
     opts: Options[models.Model],
-    seen: frozenset[tuple[type[models.Model], str]],
+    seen: set[tuple[object, ...]] | None,
+    start: object,
     prefix: str,
 ) -> bool:
     """Classify a resolved field path, expanding a relation the way the compiler does.
@@ -749,11 +751,17 @@ def _is_deterministic_order_field_path(
     related model's, and it is that ordering - not the relation name standing in
     front of it - that decides whether the request is repeatable.
 
-    A path Django would reject with ``FieldError("Infinite loop caused by
-    ordering.")`` is refused rather than followed: a term whose compilation
-    raises is not one this package can certify. So is a path with a piece left
-    over once a piece names no field: that is a transform or a lookup, which
-    this package does not read.
+    An expansion Django would reject with ``FieldError("Infinite loop caused by
+    ordering.")`` is refused rather than followed. The compiler threads ONE
+    ``already_seen`` set through the whole expansion of a top-level term,
+    sibling items of every related ordering included, so ``seen`` is that set:
+    None on a top-level term, which creates it here, and shared by everything
+    the expansion reaches below. ``start`` is the key of the join the expansion
+    hangs from, and ``utils/querysets.py::take_order_expansion_step`` keys and
+    records each step exactly as the compiler does, so a join one sibling
+    already expanded refuses the next sibling that repeats it. A path with a
+    piece left over once a piece names no field is refused too: that is a
+    transform or a lookup, which this package does not read.
 
     ``prefix`` is the name the expanded terms hang under. The compiler rewrites
     an expression it lifts out of a related ordering through
@@ -767,13 +775,14 @@ def _is_deterministic_order_field_path(
     related_opts = resolved.related_opts
     if resolved.substitute is None or related_opts is None:
         return True
-    step = (opts.model, path)
-    if step in seen:
+    # A top-level term's expansion owns one set, shared by every sibling below it.
+    taken: set[tuple[object, ...]] = set() if seen is None else seen
+    step = take_order_expansion_step(resolved, start=start, seen=taken)
+    if step is None:
         return False
-    nested = seen | {step}
     nested_prefix = f"{prefix}{path}{LOOKUP_SEP}"
     return all(
-        _is_deterministic_order_term(query, item, related_opts, nested, nested_prefix)
+        _is_deterministic_order_term(query, item, related_opts, taken, step[-1], nested_prefix)
         for item in resolved.substitute
     )
 
@@ -811,15 +820,12 @@ def _is_deterministic_order_reference(query: Query, name: str, prefix: str) -> b
     return resolved is not None and not resolved.lookups
 
 
-# The relation edges an order-determinism probe starts from: none traversed yet.
-_NO_SEEN_EDGES: frozenset[tuple[type[models.Model], str]] = frozenset()
-
-
 def _is_deterministic_order_name(
     query: Query,
     name: str,
     opts: Options[models.Model] | None = None,
-    seen: frozenset[tuple[type[models.Model], str]] = _NO_SEEN_EDGES,
+    seen: set[tuple[object, ...]] | None = None,
+    start: object = None,
     prefix: str = "",
 ) -> bool:
     """Resolve a string ordering term the way the compiler resolves it, then classify it.
@@ -861,14 +867,15 @@ def _is_deterministic_order_name(
         if "." in name and name in query.extra_order_by:
             return False
         opts = query.get_meta()
-    return _is_deterministic_order_field_path(query, col, opts, seen, prefix)
+    return _is_deterministic_order_field_path(query, col, opts, seen, start, prefix)
 
 
 def _is_deterministic_order_term(
     query: Query,
     term: object,
     opts: Options[models.Model] | None = None,
-    seen: frozenset[tuple[type[models.Model], str]] = _NO_SEEN_EDGES,
+    seen: set[tuple[object, ...]] | None = None,
+    start: object = None,
     prefix: str = "",
 ) -> bool:
     """Classify one selected ordering term by the form Django will compile it into.
@@ -885,11 +892,11 @@ def _is_deterministic_order_term(
     ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name``
     replaces it with the related model's ``Meta.ordering``, and every term of
     that ordering is classified against THAT model - which is what ``opts``
-    carries, together with ``seen`` so a relation cycle Django would reject is
-    refused instead of followed, and ``prefix`` so a reference lifted out of the
-    expansion is named the way the outer query will resolve it. An EXPRESSION
-    reference is not that indirection and must not be read as one: only strings
-    reach ``find_ordering_name``, while
+    carries, together with ``seen`` and ``start`` so a relation cycle Django
+    would reject is refused instead of followed, and ``prefix`` so a reference
+    lifted out of the expansion is named the way the outer query will resolve
+    it. An EXPRESSION reference is not that indirection and must not be read as
+    one: only strings reach ``find_ordering_name``, while
     ``django/db/models/sql/query.py::Query.resolve_ref`` resolves an ``F`` to a
     column, so ``F("branch")`` orders by the foreign key and never by the branch
     model's own default.
@@ -910,7 +917,8 @@ def _is_deterministic_order_term(
     it holds is, so an approved wrapper launders nothing:
     ``Coalesce(Random(), Random())`` is refused through its children. A readable
     leaf (``_READABLE_ORDER_LEAVES``) carries all of its own SQL and is named
-    outright: a column reference, the ``*`` of a row count, and a literal value.
+    outright: a column reference, the ``*`` of a row count, a literal value, and
+    the framework's own ``VisibleRowExists`` visibility test.
 
     Every match is by EXACT type, the two reference forms included. A subclass
     of an approved class is a different ``as_sql`` and is refused, which is the
@@ -940,7 +948,7 @@ def _is_deterministic_order_term(
             name = read_attr(term, "name")
             return is_str(name) and _is_deterministic_order_reference(query, name, prefix)
         if type(term) is models.Q:
-            return _is_deterministic_order_condition(query, term, opts, seen, prefix)
+            return _is_deterministic_order_condition(query, term, opts, seen, start, prefix)
         if node in _READABLE_ORDER_LEAVES:
             return True
         # Every approved node is a ``BaseExpression`` subclass, so the instance test only
@@ -948,12 +956,12 @@ def _is_deterministic_order_term(
         if node not in _APPROVED_ORDER_NODES or not isinstance(term, BaseExpression):
             return False
         return all(
-            _is_deterministic_order_term(query, source, opts, seen, prefix)
+            _is_deterministic_order_term(query, source, opts, seen, start, prefix)
             for source in list_of(term.get_source_expressions())
             if source is not None
         )
     if isinstance(term, str):
-        return _is_deterministic_order_name(query, term, opts, seen, prefix)
+        return _is_deterministic_order_name(query, term, opts, seen, start, prefix)
     return False
 
 
@@ -961,7 +969,8 @@ def _is_deterministic_order_value(
     query: Query,
     value: object,
     opts: Options[models.Model] | None = None,
-    seen: frozenset[tuple[type[models.Model], str]] = _NO_SEEN_EDGES,
+    seen: set[tuple[object, ...]] | None = None,
+    start: object = None,
     prefix: str = "",
 ) -> bool:
     """Classify one value a predicate's lookup compares its column against.
@@ -975,12 +984,13 @@ def _is_deterministic_order_value(
     plain literal, which is already as readable as a term gets.
     """
     if hasattr(value, "resolve_expression"):
-        return _is_deterministic_order_term(query, value, opts, seen, prefix)
+        return _is_deterministic_order_term(query, value, opts, seen, start, prefix)
     # The container shapes a predicate's right-hand side arrives in: ``__in`` takes a
     # sequence and ``__range`` a pair, and each member is compiled into the statement.
     if is_list_or_tuple(value) or is_set_or_frozenset(value):
         return all(
-            _is_deterministic_order_value(query, member, opts, seen, prefix) for member in value
+            _is_deterministic_order_value(query, member, opts, seen, start, prefix)
+            for member in value
         )
     return True
 
@@ -1094,7 +1104,8 @@ def _is_deterministic_order_condition(
     query: Query,
     condition: models.Q,
     opts: Options[models.Model] | None = None,
-    seen: frozenset[tuple[type[models.Model], str]] = _NO_SEEN_EDGES,
+    seen: set[tuple[object, ...]] | None = None,
+    start: object = None,
     prefix: str = "",
 ) -> bool:
     """Classify the predicate a conditional ordering term picks its value with.
@@ -1111,7 +1122,7 @@ def _is_deterministic_order_condition(
     """
     for child in condition.children:
         if not is_tuple(child):
-            if not _is_deterministic_order_value(query, child, opts, seen, prefix):
+            if not _is_deterministic_order_value(query, child, opts, seen, start, prefix):
                 return False
             continue
         lookup, value = child
@@ -1123,7 +1134,7 @@ def _is_deterministic_order_condition(
             prefix,
         ):
             return False
-        if not _is_deterministic_order_value(query, value, opts, seen, prefix):
+        if not _is_deterministic_order_value(query, value, opts, seen, start, prefix):
             return False
     return True
 

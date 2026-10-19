@@ -719,11 +719,12 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
 
         Purity obligation:
             This method must be a pure, deterministic function of ``input_value``.
-            An argument-bearing ``DjangoListField`` request normalizes the input once
-            during public apply (``apply_sync`` or ``apply_async``) and once during the
-            active-term check, which compares against the terms the base apply attested
-            into the list field's invocation-scoped ledger - including when the apply
-            ran in a child task or worker thread. An override that does not delegate to
+            A ``DjangoListField`` request carrying ``orderBy`` and a positive
+            ``offset`` normalizes the input once during public apply (``apply_sync``
+            or ``apply_async``) and once during the active-term check, which compares
+            against the terms the base apply attested into the list field's
+            invocation-scoped ledger - including when the apply ran in a child task or
+            worker thread. An override that does not delegate to
             the base apply attests nothing, so the check performs two independent reads
             (three calls total). Any stateful or non-deterministic disagreement raises an
             actionable :class:`ConfigurationError` naming this method.

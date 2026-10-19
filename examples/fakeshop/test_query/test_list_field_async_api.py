@@ -2213,6 +2213,57 @@ async def test_async_holder_branches_a_malformed_apply_async_result_names_its_ow
         assert substring in message, message
 
 
+@pytest.mark.django_db(transaction=True)
+async def test_async_a_sliced_hook_result_is_refused_before_the_ordering_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``get_queryset`` that took its own window is sealed before ``apply_async`` sees it.
+
+    The async coloring runs the visibility seal ahead of public ordering exactly
+    as the sync one does, so a sliced hook result is refused with its own defect
+    and the ``OrderSet`` is never handed a query Django would refuse to reorder.
+    """
+    original_get_queryset = library_schema.BranchType.get_queryset
+
+    def _sliced_get_queryset(
+        _cls: type[library_schema.BranchType],
+        queryset: models.QuerySet[library_models.Branch],
+        info: strawberry.Info[object, object],
+        **kwargs: object,
+    ) -> models.QuerySet[library_models.Branch]:
+        return original_get_queryset(queryset, info, **kwargs)[:1]
+
+    monkeypatch.setattr(
+        library_schema.BranchType,
+        "get_queryset",
+        classmethod(_sliced_get_queryset),
+    )
+
+    apply_async_calls: list[object] = []
+
+    async def _counting_apply_async(
+        cls: type[BranchOrder],
+        order_input: object,
+        queryset: models.QuerySet[library_models.Branch],
+        info: object,
+    ) -> models.QuerySet[library_models.Branch]:
+        apply_async_calls.append(order_input)
+        return await super(BranchOrder, cls).apply_async(order_input, queryset, info)
+
+    monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_counting_apply_async))
+
+    payload = await _post_async(
+        _offset_guard_schema(),
+        "{ branches(orderBy: [{ city: ASC }], offset: 1) { name } }",
+        extra_settings=_ERROR_POLICY_PASS_THROUGH,
+    )
+
+    assert payload["data"] is None
+    message = json_str(payload, "errors", 0, "message")
+    assert "BranchType.get_queryset returned a sliced queryset" in message, message
+    assert apply_async_calls == []
+
+
 def _is_exact_dict(value: object) -> TypeGuard[dict[object, object]]:
     """Whether a router hint is exactly a ``dict`` (a subclass is not a tenant token)."""
     return type(value) is dict

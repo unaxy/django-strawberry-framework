@@ -432,7 +432,7 @@ Two independent instruments for the counts, as before: `grep -cE '^(async )?def 
   against this: the Decision 6 paragraph above; the DRY row
   `#"`bounded_rows` / `bounded_rows_async` are the only raw-list bound"` (true only read through
   the delegation — spec-050 Decision 5 already states that reading,
-  `docs/spec-050-list_field_arguments-0_0_15.md #"is read through this delegation"`); and the
+  `docs/SPECS/spec-050-list_field_arguments-0_0_15.md #"is read through this delegation"`); and the
   test-plan sentence `#"a zero window that never advances it, offset arithmetic"`, whose
   offset rows now exercise `_windowed_rows_async` (every `offset=` call in that test file
   targets the private pair; the exported names appear only in the refusal row).
