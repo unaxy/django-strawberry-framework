@@ -1,6 +1,7 @@
 """DRF serializers for library mutation hooks, input shapes, visibility, locking, and nested writes.
 
-Plain DRF ``ModelSerializer``s declared the standard DRF way (no package imports);
+Plain DRF ``ModelSerializer``s declared the standard DRF way (over ``ModelSerializerBase``,
+which only types the ``Meta`` the DRF stubs declare);
 ``apps/library/schema.py`` wraps them in the shipped ``SerializerMutation`` base so the
 live ``/graphql/`` tests in ``test_query/test_library_api.py`` exercise two
 consumer-visible behaviors end to end:
@@ -29,7 +30,7 @@ model's ``unique_shelf_code_per_branch`` constraint surfaces through DRF's
 """
 
 import json
-from typing import Any, NoReturn, TypeAlias
+from typing import Any, ClassVar, NoReturn, TypeAlias, TypeVar
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Model
@@ -46,15 +47,31 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.rest_framework.accessors import base_fields
 
-from .models import Book, Branch, Edition, Genre, PatronProfile, Printing, Shelf
+from .models import Book, Branch, CirculationDesk, Edition, Genre, PatronProfile, Printing, Shelf
 
 #: A serializer's name-to-field map. The four ``Any``s are DRF ``Field``'s generics, which
 #: no single binding fits across a heterogeneous map.
 # basedpyright: drf-stubs' Field TypeVars are invariant; no other argument takes every field
 FieldMap: TypeAlias = dict[str, serializers.Field[Any, Any, Any, Any]]  # pyright: ignore[reportExplicitAny]
 
+_ModelT = TypeVar("_ModelT", bound=Model)
 
-class TenantShelfSerializer(serializers.ModelSerializer[Shelf]):
+
+class ModelSerializerBase(serializers.ModelSerializer[_ModelT]):
+    """``ModelSerializer`` carrying the ``Meta`` the stubs declare and the runtime class lacks.
+
+    ``djangorestframework-stubs`` types ``ModelSerializer.Meta``, but DRF's class has no such
+    attribute to subclass, so every serializer here that declares ``class Meta:`` derives from
+    this base and the one override of the stub's attribute is declared once. The annotation
+    creates no class attribute, so DRF's metaclass and ``__class_getitem__`` see the same class
+    body and the same ``ModelSerializer`` they see without it.
+    """
+
+    # basedpyright: the DRF stubs declare ModelSerializer.Meta; the runtime class has none
+    Meta: ClassVar[type[object]]  # pyright: ignore[reportIncompatibleVariableOverride]
+
+
+class TenantShelfSerializer(ModelSerializerBase[Shelf]):
     """``Shelf`` serializer requiring a ``tenant`` constructor kwarg (spec-039 Decision-7 schema-hook matrix).
 
     DRF's default schema discovery constructs the serializer with NO args and reads its
@@ -67,8 +84,7 @@ class TenantShelfSerializer(serializers.ModelSerializer[Shelf]):
     field) so the test can pin that the injected runtime tenant reached the serializer.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch")
 
@@ -91,16 +107,15 @@ class TenantShelfSerializer(serializers.ModelSerializer[Shelf]):
         return attrs
 
 
-class ShelfSerializer(serializers.ModelSerializer[Shelf]):
+class ShelfSerializer(ModelSerializerBase[Shelf]):
     """Plain ``Shelf`` serializer: the subclass-mutation PARENT's serializer (spec-039)."""
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch")
 
 
-class SaveKwargsShelfSerializer(serializers.ModelSerializer[Shelf]):
+class SaveKwargsShelfSerializer(ModelSerializerBase[Shelf]):
     """A ``Shelf`` serializer whose ``create()`` consumes a NON-model save kwarg (hardening).
 
     Save kwargs may only carry non-model custom arguments (model-field injection goes
@@ -111,8 +126,7 @@ class SaveKwargsShelfSerializer(serializers.ModelSerializer[Shelf]):
     through the save-kwargs channel.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch")
 
@@ -123,7 +137,7 @@ class SaveKwargsShelfSerializer(serializers.ModelSerializer[Shelf]):
         return super().create(validated_data)
 
 
-class OptionalCodeShelfSerializer(serializers.ModelSerializer[Shelf]):
+class OptionalCodeShelfSerializer(ModelSerializerBase[Shelf]):
     """Plain ``Shelf`` serializer used to prove mutation ``Meta.optional_fields`` over HTTP.
 
     ``code`` is required by DRF. One live mutation leaves that strict shape alone while
@@ -131,13 +145,12 @@ class OptionalCodeShelfSerializer(serializers.ModelSerializer[Shelf]):
     omission and DRF returns the required error in-band.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch")
 
 
-class RenamedShelfSerializer(serializers.ModelSerializer[Shelf]):
+class RenamedShelfSerializer(ModelSerializerBase[Shelf]):
     """``Shelf`` serializer with a RENAMED scalar - the subclass-mutation CHILD's serializer (spec-039).
 
     ``shelf_code = CharField(source="code")`` is a field of THIS serializer that the parent
@@ -150,13 +163,12 @@ class RenamedShelfSerializer(serializers.ModelSerializer[Shelf]):
 
     shelf_code = serializers.CharField(source="code")
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("shelf_code", "branch")
 
 
-class RejectingShelfSerializer(serializers.ModelSerializer[Shelf]):
+class RejectingShelfSerializer(ModelSerializerBase[Shelf]):
     """``Shelf`` serializer whose ``save()`` raises a BARE (non-dict) DRF ``ValidationError`` (spec-039).
 
     A whole-object, SAVE-TIME rejection (a business rule that fires at write, after field
@@ -166,8 +178,7 @@ class RejectingShelfSerializer(serializers.ModelSerializer[Shelf]):
     proves that save-time bare-detail path end to end over HTTP.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch")
 
@@ -176,7 +187,7 @@ class RejectingShelfSerializer(serializers.ModelSerializer[Shelf]):
         raise serializers.ValidationError("Shelf rejected by a whole-object business rule.")
 
 
-class TargetedShelfSerializer(serializers.ModelSerializer[Shelf]):
+class TargetedShelfSerializer(ModelSerializerBase[Shelf]):
     """``Shelf`` serializer whose WRITE-ONLY ``target`` relation points at a RUNTIME-supplied model.
 
     The same-serializer hook-shape collision (spec-039).
@@ -216,8 +227,7 @@ class TargetedShelfSerializer(serializers.ModelSerializer[Shelf]):
         # basedpyright: verbatim forward; ModelSerializer.__init__ checks each argument when it runs
         super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch")
 
@@ -259,7 +269,7 @@ def shelf_collision_schema_field_map(
     return dict(TargetedShelfSerializer(target_model=target_model).fields)
 
 
-class NoteShelfSerializer(serializers.ModelSerializer[Shelf]):
+class NoteShelfSerializer(ModelSerializerBase[Shelf]):
     """``Shelf`` serializer with a serializer-only ``note`` whose ``allow_null`` is RUNTIME-supplied.
 
     ONE serializer class backs TWO ``SerializerMutation`` declarations; each constructs it with
@@ -292,8 +302,7 @@ class NoteShelfSerializer(serializers.ModelSerializer[Shelf]):
         # basedpyright: verbatim forward; ModelSerializer.__init__ checks each argument when it runs
         super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch")
 
@@ -331,7 +340,7 @@ def nullability_schema_field_map(
     return dict(NoteShelfSerializer(note_allow_null=allow_null).fields)
 
 
-class BlankCodeShelfSerializer(serializers.ModelSerializer[Shelf]):
+class BlankCodeShelfSerializer(ModelSerializerBase[Shelf]):
     """``Shelf`` serializer with an ``allow_blank=True`` required ``code``.
 
     On a ``CharField``, ``allow_blank`` does not change the input type (spec-039 Decision 7):
@@ -346,13 +355,12 @@ class BlankCodeShelfSerializer(serializers.ModelSerializer[Shelf]):
 
     code = serializers.CharField(allow_blank=True)
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch")
 
 
-class HookNarrowedShelfSerializer(serializers.ModelSerializer[Shelf]):
+class HookNarrowedShelfSerializer(ModelSerializerBase[Shelf]):
     """``Shelf`` serializer whose default field set carries an UNSUPPORTED field a hook narrows away.
 
     The unsupported-default-field recovery (spec-039).
@@ -382,8 +390,7 @@ class HookNarrowedShelfSerializer(serializers.ModelSerializer[Shelf]):
         )
     )
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch", "alt_branches")
 
@@ -420,7 +427,7 @@ register_serializer_field_converter(
 )
 
 
-class ShelfMetadataSerializer(serializers.ModelSerializer[Shelf]):
+class ShelfMetadataSerializer(ModelSerializerBase[Shelf]):
     """A ``Shelf`` serializer exercising the expanded input type system live.
 
     The serializer-only WRITE-ONLY fields below prove the expanded input type system over
@@ -487,8 +494,7 @@ class ShelfMetadataSerializer(serializers.ModelSerializer[Shelf]):
         write_only=True,
     )
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = (
             "code",
@@ -527,7 +533,7 @@ class ShelfMetadataSerializer(serializers.ModelSerializer[Shelf]):
         return super().create(validated_data)
 
 
-class OwnerStampShelfSerializer(serializers.ModelSerializer[Shelf]):
+class OwnerStampShelfSerializer(ModelSerializerBase[Shelf]):
     """A ``Shelf`` serializer with a REQUIRED ``topic`` a mutation narrows away + INJECTS.
 
     ``topic`` is declared ``required=True`` (the ``Shelf.topic`` column is ``blank=True,
@@ -542,13 +548,12 @@ class OwnerStampShelfSerializer(serializers.ModelSerializer[Shelf]):
 
     topic = serializers.CharField(required=True)
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch", "topic")
 
 
-class AltBranchesShelfSerializer(serializers.ModelSerializer[Shelf]):
+class AltBranchesShelfSerializer(ModelSerializerBase[Shelf]):
     """A ``Shelf`` serializer exposing the raw-pk M2M ``alt_branches``.
 
     ``alt_branches`` is auto-generated by ``ModelSerializer`` as a
@@ -560,13 +565,12 @@ class AltBranchesShelfSerializer(serializers.ModelSerializer[Shelf]):
     and never attached. ``required=False`` (M2M ``blank=True``), so a write may omit it.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "branch", "alt_branches")
 
 
-class BookSerializer(serializers.ModelSerializer[Book]):
+class BookSerializer(ModelSerializerBase[Book]):
     """A ``Book`` (Relay-Node) serializer backing the UPDATE + row-lock live matrix.
 
     ``BookType`` is Relay-Node, so an update mutation's ``id`` is a decodable ``GlobalID`` and its
@@ -576,13 +580,12 @@ class BookSerializer(serializers.ModelSerializer[Book]):
     ``circulation_status``) keep the update partial-input simple.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Book
         fields = ("title", "subtitle", "circulation_status")
 
 
-class StatusStampBookSerializer(serializers.ModelSerializer[Book]):
+class StatusStampBookSerializer(ModelSerializerBase[Book]):
     """A ``Book`` serializer with a REQUIRED serializer-only ``status`` an UPDATE mutation injects.
 
     The mutation narrows ``status`` away and INJECTS it.
@@ -603,8 +606,7 @@ class StatusStampBookSerializer(serializers.ModelSerializer[Book]):
         write_only=True,
     )
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Book
         fields = ("title", "status")
 
@@ -615,7 +617,7 @@ class StatusStampBookSerializer(serializers.ModelSerializer[Book]):
         return super().update(instance, validated_data)
 
 
-class BookGenresSerializer(serializers.ModelSerializer[Book]):
+class BookGenresSerializer(ModelSerializerBase[Book]):
     """A ``Book`` serializer exposing the ``genres`` M2M for the update list-relation matrix (hardening).
 
     Backs the live proofs that a serializer UPDATE's list relation follows the
@@ -641,13 +643,12 @@ class BookGenresSerializer(serializers.ModelSerializer[Book]):
         )
     )
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Book
         fields = ("title", "genres")
 
 
-class AliasValidatedBookSerializer(serializers.ModelSerializer[Book]):
+class AliasValidatedBookSerializer(ModelSerializerBase[Book]):
     """A ``Book`` serializer whose title validator performs a queryset lookup."""
 
     title = serializers.CharField(
@@ -656,13 +657,12 @@ class AliasValidatedBookSerializer(serializers.ModelSerializer[Book]):
         ],
     )
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Book
         fields = ("title",)
 
 
-class NestedShelfSerializer(serializers.ModelSerializer[Shelf]):
+class NestedShelfSerializer(ModelSerializerBase[Shelf]):
     """A nested ``Shelf`` serializer for the opt-in nested-write matrix.
 
     Backs the nested ``shelves`` field of ``BranchWithShelvesSerializer``: scalar ``code`` /
@@ -674,8 +674,7 @@ class NestedShelfSerializer(serializers.ModelSerializer[Shelf]):
     nested DRF validation error flattens to the structured ``shelves.<i>.code`` path.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Shelf
         fields = ("code", "topic", "alt_branches")
 
@@ -704,7 +703,7 @@ class _BranchWithShelvesData(TypedDict):
     shelves: NotRequired[list[_NestedShelfData]]
 
 
-class BranchWithShelvesSerializer(serializers.ModelSerializer[Branch]):
+class BranchWithShelvesSerializer(ModelSerializerBase[Branch]):
     """A ``Branch`` serializer with an EXPLICIT opt-in nested writable ``shelves`` list.
 
     The fail-loud opt-in nested-write demonstration: the mutation declares
@@ -723,8 +722,7 @@ class BranchWithShelvesSerializer(serializers.ModelSerializer[Branch]):
 
     shelves = NestedShelfSerializer(many=True)
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Branch
         fields = ("name", "city", "shelves")
 
@@ -753,7 +751,7 @@ class BranchWithShelvesSerializer(serializers.ModelSerializer[Branch]):
         return branch
 
 
-class PatronProfileSerializer(serializers.ModelSerializer[PatronProfile]):
+class PatronProfileSerializer(ModelSerializerBase[PatronProfile]):
     """A ``PatronProfile`` serializer writing the ``to_field`` key ``favorite_genre``.
 
     ``PatronProfile.favorite_genre`` is ``ForeignKey(Genre, to_field="name")``: its column
@@ -775,13 +773,12 @@ class PatronProfileSerializer(serializers.ModelSerializer[PatronProfile]):
         required=False,
     )
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = PatronProfile
         fields: tuple[str, ...] = ("patron", "address_2", "favorite_genre")
 
 
-class RenamedPatronProfileSerializer(serializers.ModelSerializer[PatronProfile]):
+class RenamedPatronProfileSerializer(ModelSerializerBase[PatronProfile]):
     """``PatronProfileSerializer`` with the ``to_field`` key bound under a RENAMED field.
 
     ``fav = PrimaryKeyRelatedField(source="favorite_genre")`` writes the same relation as
@@ -799,8 +796,7 @@ class RenamedPatronProfileSerializer(serializers.ModelSerializer[PatronProfile])
         )
     )
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = PatronProfile
         fields: tuple[str, ...] = ("patron", "address_2", "fav")
 
@@ -862,7 +858,7 @@ class GenreRepointingPatronProfileSerializer(PatronProfileSerializer):
         return value
 
 
-class PrintingSerializer(serializers.ModelSerializer[Printing]):
+class PrintingSerializer(ModelSerializerBase[Printing]):
     """A ``Printing`` serializer over two relations into the text-keyed ``Edition``.
 
     ``Edition``'s primary key is its ISBN text column and ``EditionType`` is not
@@ -870,19 +866,39 @@ class PrintingSerializer(serializers.ModelSerializer[Printing]):
     name each edition by its ISBN.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Printing
         fields = ("edition", "run_size", "bound_with")
 
 
-class EditionImprintSerializer(serializers.ModelSerializer[Edition]):
+class EditionImprintSerializer(ModelSerializerBase[Edition]):
     """An ``Edition`` serializer over its ``imprint``, for updates by the text pk.
 
     ``EditionType`` is non-Relay, so the update ``id`` is the raw ISBN text.
     """
 
-    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+    class Meta:
         model = Edition
         fields = ("imprint",)
+
+
+class CirculationDeskHoldSerializer(ModelSerializerBase[CirculationDesk]):
+    """A circulation desk's hold, written through its ``GenericForeignKey`` ``content_object``.
+
+    The generic key names no target model, so the field's queryset pins the one model the hold
+    may name: a book. DRF writes the validated book through the descriptor, which stores the
+    book's content type and pk in ``content_type`` / ``object_id``.
+    """
+
+    # DRF's stubs type the constructor as returning either a single or a many relation.
+    content_object: serializers.RelatedField[Book, Book, object] | serializers.ManyRelatedField = (
+        serializers.PrimaryKeyRelatedField(
+            queryset=Book.objects.all(),
+            allow_null=True,
+            required=False,
+        )
+    )
+
+    class Meta:
+        model = CirculationDesk
+        fields: tuple[str, ...] = ("name", "content_object")

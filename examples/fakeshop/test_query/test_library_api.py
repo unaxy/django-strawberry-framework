@@ -14659,6 +14659,64 @@ def test_serializer_to_field_relation_create_stores_the_target_key_over_http(
     assert _profile_genre_column(patron) == [expected]
 
 
+def _desk_hold(desk: models.CirculationDesk) -> list[tuple[int | None, int | None]]:
+    """The desk's stored ``(content_type_id, object_id)`` hold pair, read back from the database."""
+    return list(
+        models.CirculationDesk.objects.filter(pk=desk.pk).values_list("content_type", "object_id"),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", ["visible", "hidden", "null"])
+def test_serializer_generic_foreign_key_hold_update_over_http(value: str) -> None:
+    """A ``PrimaryKeyRelatedField`` over a ``GenericForeignKey`` writes the book its id names.
+
+    The generic key names no target model, so the field's ``Book`` queryset pins it: the id
+    decodes through ``BookType``'s visibility, a book under repair is refused field-keyed with
+    nothing written, and DRF's ``update()`` stores the visible book's content type and pk (or
+    clears both for a null hold).
+    """
+    branch = models.Branch.objects.create(name="Hold Branch")
+    shelf = models.Shelf.objects.create(branch=branch, code="H-1")
+    old = models.Book.objects.create(shelf=shelf, title="Old Hold")
+    book = models.Book.objects.create(
+        shelf=shelf,
+        title="Requested",
+        circulation_status=(
+            models.Book.CirculationStatus.REPAIR
+            if value == "hidden"
+            else models.Book.CirculationStatus.AVAILABLE
+        ),
+    )
+    desk = models.CirculationDesk.objects.create(
+        name="Hold Desk",
+        branch=branch,
+        shelf=shelf,
+        content_object=old,
+    )
+    book_type = ContentType.objects.get_for_model(models.Book).id
+    hold = None if value == "null" else global_id_for(library_schema.BookType, book.pk)
+
+    response = _post_graphql(
+        "mutation($id: ID!, $d: CirculationDeskHoldSerializerPartialInput!) { "
+        "updateCirculationDeskHoldViaSerializer(id: $id, data: $d) { "
+        "result { name } errors { field messages } } }",
+        variables={"id": str(desk.pk), "d": {"contentObjectId": hold}},
+    )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    result = json_object(payload, "data", "updateCirculationDeskHoldViaSerializer")
+    if value == "hidden":
+        assert result["result"] is None
+        assert json_at(result, "errors", 0, "field") == "contentObjectId"
+        assert _desk_hold(desk) == [(book_type, old.pk)]
+    else:
+        assert result == {"result": {"name": "Hold Desk"}, "errors": []}
+        expected = (None, None) if value == "null" else (book_type, book.pk)
+        assert _desk_hold(desk) == [expected]
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("value", "expected"),
