@@ -617,12 +617,14 @@ def _class_repr(cls: type) -> str:
 def _oversized_int(value: int) -> bool:
     """Whether rendering ``value`` in decimal would exceed the interpreter's digit limit.
 
-    CPython 3.11+ refuses to stringify an int with more than
-    ``sys.get_int_max_str_digits()`` decimal digits. The bound is decided from
-    the bit length before any conversion is attempted; the one-digit band the
-    bit length cannot resolve counts as oversized.
+    CPython refuses to stringify an int with more than
+    ``sys.get_int_max_str_digits()`` decimal digits. The limit arrived in a
+    patch release (3.10.7, part of the CVE-2020-10735 fix), so its presence is
+    read from ``sys`` itself, never inferred from the minor version. The bound
+    is decided from the bit length before any conversion is attempted; the
+    one-digit band the bit length cannot resolve counts as oversized.
     """
-    limit = sys.get_int_max_str_digits() if sys.version_info >= (3, 11) else 0
+    limit = sys.get_int_max_str_digits() if hasattr(sys, "get_int_max_str_digits") else 0
     if not limit:
         return False
     return int.bit_length(value) * _LOG10_2 + 1 > limit
