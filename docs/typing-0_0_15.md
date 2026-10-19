@@ -245,6 +245,42 @@ Survey verdicts recorded so nothing is re-tried blind:
   1 and 2 in `examples/fakeshop/test_query/`, and rewrite the `docs/README.md` sentence and its glossary entry. Needs
   its own KANBAN card
 
+### Upstream drafts (the maintainer posts)
+
+drf-stubs, a comment on PR #1069 (item 23):
+
+```text
+#1069 looks like the right fix for #689, and it was closed ten minutes after it opened with the downside question
+unanswered. Under pyright/basedpyright every `class Meta:` on a `ModelSerializer` subclass reports
+`reportIncompatibleVariableOverride` against the stub-only nested `Meta`; we carry 26 suppressions for that alone.
+
+If the author does not return, would a fresh PR with the same change be accepted (drop the stub-only
+`ModelSerializer.Meta` and its stubtest allowlist entry; assert a subclass's own `Meta` attributes keep their
+declared types)? If reading `.Meta` off a bare `type[ModelSerializer]` should keep type-checking, the alternative is
+declaring it on the class as `Meta: ClassVar[type[Any]]`, which pyright accepts any nested `class Meta:` against.
+```
+
+django-stubs, a new issue (item 30), titled "Declare QuerySet's private state attributes (_db, _hints, _fields,
+_prefetch_related_lookups, _clone, _chain)":
+
+```text
+`QuerySet` in the stubs declares `_result_cache` and `_iterable_class`, but not the other private state that
+libraries extending the ORM read and copy: `_db`, `_hints`, `_fields`, `_prefetch_related_lookups`, `_clone()` and
+`_chain()`. Under pyright's strict modes every read is `reportAttributeAccessIssue` plus the three
+`reportUnknown*` rules.
+
+Proposed declarations, from Django's own `QuerySet.__init__` / `values()` / `_clone()`:
+
+    _db: str | None
+    _hints: dict[str, Any]
+    _fields: tuple[str, ...] | None
+    _prefetch_related_lookups: tuple[str | Prefetch, ...]
+    def _clone(self) -> Self: ...
+    def _chain(self) -> Self: ...
+
+Checked against django-stubs 6.1.2 and master. Happy to send a PR if this is welcome.
+```
+
 ## Ignore breakdown
 
 Lines carrying a `# pyright: ignore[...]` comment: 782 (851 rule hits): tests 572, package 131, examples 78,
