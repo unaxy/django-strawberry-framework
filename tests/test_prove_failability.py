@@ -43,8 +43,16 @@ it writes anything, involves no file, and leaves nothing behind when its holder 
 The original single-anchor shape reads and grades exactly as it did.
 
 ``REPO_ROOT`` is monkeypatched to a ``tmp_path`` fake repo (as
-``tests/test_clean_up.py`` does) and ``_run_scope`` is stubbed, so no test here
-mutates a real file or spawns a real pytest.
+``tests/test_clean_up.py`` does) and ``_run_scope`` is stubbed or given a
+stand-in command for ``uv run pytest``, so no test here mutates a real file or
+spawns a real pytest.
+
+A stop signal (SIGINT, SIGTERM, SIGHUP, SIGQUIT) is delivered for real, by the kernel, to
+``main`` running in a child process against the fake repo: the stand-in scope
+blocks with a grandchild of its own, as uv, pytest and an xdist worker do, so a
+row can see the restore, the exit code and every scope process ended. Sending
+the signal to the test process instead would end the worker itself whenever the
+handler under test was missing.
 """
 
 import dataclasses
@@ -55,9 +63,11 @@ import filecmp
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -1848,6 +1858,619 @@ def test_a_failed_restore_still_writes_the_partial_report_to_the_output_path(
     assert "partial report written to" in capsys.readouterr().err
 
 
+# --- stop signals ------------------------------------------------------------------------
+
+
+# Spelled out rather than read from the script, so a signal dropped there fails its rows.
+STOP_SIGNALS = (
+    signal.SIGINT,
+    signal.SIGTERM,
+    signal.SIGHUP,
+    signal.SIGQUIT,
+)
+
+
+# Stands in for ``uv run pytest`` in a stop-signal run (``cwd`` is the fake repo): it
+# appends its phase to ``<P_READY>.started``; in the phase ``P_BLOCK`` names it starts a
+# grandchild, says so in ``P_READY`` and blocks until ``<P_READY>.release`` exists, the
+# shape of uv -> pytest -> xdist worker; in every other phase it passes at once. While it
+# blocks, ``P_ON_STOP=teardown`` makes a stop signal take half a second, write the signal's
+# name to ``<P_READY>.teardown`` and exit, as pytest's teardown does; ``P_ON_STOP=ignore`` makes it
+# and its grandchild ignore every stop signal.
+_SCOPE_STANDIN = """
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+source = Path("package/views.py").read_text(encoding="utf-8")
+phase = "baseline" if "raise ValueError" in source else "mutant"
+with open(os.environ["P_READY"] + ".started", "a", encoding="utf-8") as started:
+    started.write(phase + "\\n")
+if phase == os.environ["P_BLOCK"]:
+    stop_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+
+    def teardown(signum, _frame):
+        time.sleep(0.5)
+        Path(os.environ["P_READY"] + ".teardown").write_text(signal.Signals(signum).name)
+        sys.exit(1)
+
+    for stop_signal in stop_signals:
+        if os.environ["P_ON_STOP"] == "teardown":
+            signal.signal(stop_signal, teardown)
+        if os.environ["P_ON_STOP"] == "ignore":
+            signal.signal(stop_signal, signal.SIG_IGN)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    ready = Path(os.environ["P_READY"])
+    ready.with_suffix(".tmp").write_text(f"{os.getpid()} {child.pid}", encoding="utf-8")
+    os.replace(ready.with_suffix(".tmp"), ready)
+    release = Path(os.environ["P_READY"] + ".release")
+    deadline = time.monotonic() + 30
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+print("1 passed in 0.01s")
+"""
+
+# Runs ``main`` in a process of its own, as the CLI does, against the fake repo and the
+# stand-in scope. ``restore`` signals the process itself twice inside every restore;
+# ``starting`` signals it as each scope process starts, before the run has recorded it;
+# ``cli`` runs it through ``_cli``, the script's entry point, instead of ``main``.
+_SIGNALLED_RUN = """
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from scripts import prove_failability
+
+repo, manifest, scratch, mode = sys.argv[1:5]
+signum = int(os.environ["P_SIGNUM"])
+prove_failability.REPO_ROOT = Path(repo)
+prove_failability.PYTEST_COMMAND = (sys.executable, "-c", os.environ["P_SCOPE"])
+if mode == "restore":
+    restore = prove_failability._restore_and_prove
+
+    def signalled_restore(target, pristine):
+        os.kill(os.getpid(), signum)
+        proof = restore(target, pristine)
+        os.kill(os.getpid(), signum)
+        return proof
+
+    prove_failability._restore_and_prove = signalled_restore
+if mode == "starting":
+
+    class SignalledPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            os.kill(os.getpid(), signum)
+
+    subprocess.Popen = SignalledPopen
+arguments = [manifest, "--scratch-root", scratch]
+if mode == "cli":
+    sys.argv = ["prove_failability.py", *arguments]
+    prove_failability._cli()
+raise SystemExit(prove_failability.main(arguments))
+"""
+
+# Sets ``P_SIGNUM`` to ``SIG_IGN`` and execs the rest of its argv under a fresh interpreter,
+# which inherits the ignored disposition as a process started under ``nohup`` does.
+_IGNORING_EXEC = """
+import os
+import signal
+import sys
+
+signal.signal(int(os.environ["P_SIGNUM"]), signal.SIG_IGN)
+os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+"""
+
+
+def _signalled_run(
+    fake_repo: Path,
+    tmp_path: Path,
+    manifest: Path,
+    signum: int,
+    *,
+    mode: str = "external",
+    block: str = "none",
+    ignored: bool = False,
+    on_stop: str = "",
+) -> "subprocess.Popen[str]":
+    """Start ``main`` in a child process whose scope is ``_SCOPE_STANDIN``.
+
+    ``ignored`` starts it the way ``nohup`` or a background job does: ``signum`` is
+    already ``SIG_IGN`` when the run's interpreter starts, inherited across ``exec``.
+    """
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(Path(prove_failability.__file__).resolve().parents[1]),
+        # ``int`` first: on Python 3.10 ``str`` of a ``Signals`` member is ``Signals.SIGTERM``.
+        "P_SIGNUM": str(int(signum)),
+        "P_SCOPE": _SCOPE_STANDIN,
+        "P_BLOCK": block,
+        "P_ON_STOP": on_stop,
+        "P_READY": str(tmp_path / "ready"),
+    }
+    command = [
+        sys.executable,
+        "-c",
+        _SIGNALLED_RUN,
+        str(fake_repo),
+        str(manifest),
+        str(tmp_path / "outside-scratch"),
+        mode,
+    ]
+    if ignored:
+        command = [
+            sys.executable,
+            "-c",
+            _IGNORING_EXEC,
+            *command[1:],
+        ]
+    return subprocess.Popen(
+        command,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _is_running(pid: int) -> bool:
+    """Return whether ``pid`` is a process that has not exited (a zombie has exited)."""
+    state = subprocess.run(
+        [
+            "ps",
+            "-o",
+            "stat=",
+            "-p",
+            str(pid),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def _poll(predicate: "Callable[[], bool]", seconds: float = 20) -> bool:
+    """Return whether ``predicate`` became true within ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _scope_pids(tmp_path: Path) -> list[int]:
+    """Return the blocking stand-in's pid and its grandchild's, once it has said so."""
+    ready = tmp_path / "ready"
+    return (
+        [int(pid) for pid in ready.read_text(encoding="utf-8").split()] if ready.exists() else []
+    )
+
+
+def _stop_run(driver: "subprocess.Popen[str]", tmp_path: Path) -> None:
+    """Kill whatever a failed row left running, so it cannot outlive the row."""
+    for pid in [driver.pid, *_scope_pids(tmp_path)]:
+        if _is_running(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _scopes_started(tmp_path: Path) -> list[str]:
+    """Return the phase of every scope the run started, in order."""
+    started = tmp_path / "ready.started"
+    return started.read_text(encoding="utf-8").split() if started.exists() else []
+
+
+def _run_logs(tmp_path: Path) -> list[str]:
+    """Return the run logs the run wrote, by ``<position>-<run name>``."""
+    (namespace,) = (tmp_path / "outside-scratch").iterdir()
+    assert not (namespace / prove_failability.ACTIVE_MARKER_NAME).exists()
+    assert not (namespace / prove_failability.RESTORE_FAILED_MARKER_NAME).exists()
+    runs = namespace / prove_failability.RUNS_DIRECTORY_NAME
+    return sorted(f"{path.name[:3]}-{path.stem.rsplit('-', 1)[-1]}" for path in runs.glob("*.log"))
+
+
+@pytest.mark.parametrize("phase", ["baseline", "mutant"])
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_a_stop_signal_to_the_run_alone_restores_the_tree_and_ends_the_whole_scope(
+    fake_repo: Path,
+    tmp_path: Path,
+    signum: signal.Signals,
+    phase: str,
+) -> None:
+    # The signal reaches the run's process and nothing else - ``kill``, ``timeout``, a
+    # harness stopping a background shell - so the scope's processes get no signal of
+    # their own and only the run can end them; left alone they outlive it.
+    with _signalled_run(fake_repo, tmp_path, _manifest(tmp_path), signum, block=phase) as driver:
+        try:
+            assert _poll(lambda: bool(_scope_pids(tmp_path)))
+            os.kill(driver.pid, signum)
+            _, error = driver.communicate(timeout=10)
+            # Read before the ``finally`` kills whatever the run left behind.
+            scope_ended = _poll(
+                lambda: not any(_is_running(pid) for pid in _scope_pids(tmp_path)),
+                seconds=5,
+            )
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert driver.returncode == 128 + signum
+    assert f"stopped by {signum.name}" in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+    # The cut-short run writes no log: it measured nothing. A baseline stop never mutates.
+    assert _run_logs(tmp_path) == ([] if phase == "baseline" else ["001-baseline"])
+    assert _scopes_started(tmp_path) == (
+        ["baseline"] if phase == "baseline" else ["baseline", "mutant"]
+    )
+    assert scope_ended
+
+
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_stop_signals_during_a_restore_let_it_finish_and_stop_the_run_at_the_next_scope(
+    fake_repo: Path,
+    tmp_path: Path,
+    signum: signal.Signals,
+) -> None:
+    # Two signals land inside the restore: one before the copy and one after it, before
+    # the marker is removed. The restore and its proof still complete, and the run stops
+    # before entry 2 starts a scope, so entry 2 mutates nothing.
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _multi_manifest(tmp_path, 2),
+        signum,
+        mode="restore",
+    ) as driver:
+        try:
+            _, error = driver.communicate(timeout=10)
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert driver.returncode == 128 + signum
+    assert f"stopped by {signum.name}" in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+    assert _run_logs(tmp_path) == ["001-baseline", "001-mutant"]
+    assert _scopes_started(tmp_path) == ["baseline", "mutant"]
+
+
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_a_stop_signal_the_run_inherited_as_ignored_stays_ignored(
+    fake_repo: Path,
+    tmp_path: Path,
+    signum: signal.Signals,
+) -> None:
+    # ``nohup`` (SIGHUP) or a background job (SIGINT) asked the run to survive the signal:
+    # it reaches the run mid-mutant, kills nothing, and the run completes with its record.
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _manifest(tmp_path),
+        signum,
+        block="mutant",
+        ignored=True,
+    ) as driver:
+        try:
+            assert _poll(lambda: bool(_scope_pids(tmp_path)))
+            os.kill(driver.pid, signum)
+            # Long enough for a handler that kills the scope to have done so.
+            time.sleep(0.5)
+            scope_alive = all(_is_running(pid) for pid in _scope_pids(tmp_path))
+            (tmp_path / "ready.release").write_text("", encoding="utf-8")
+            record, error = driver.communicate(timeout=10)
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert scope_alive
+    # The stand-in passes under the mutation, so the one entry is weakly pinned.
+    assert driver.returncode == 1
+    assert "stopped by" not in error
+    assert record.startswith("### Failability proofs")
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+    assert _run_logs(tmp_path) == ["001-baseline", "001-mutant"]
+
+
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_the_first_stop_signal_is_forwarded_to_the_scope_so_pytest_can_tear_down(
+    fake_repo: Path,
+    tmp_path: Path,
+    signum: signal.Signals,
+) -> None:
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _manifest(tmp_path),
+        signum,
+        block="mutant",
+        on_stop="teardown",
+    ) as driver:
+        try:
+            assert _poll(lambda: bool(_scope_pids(tmp_path)))
+            os.kill(driver.pid, signum)
+            _, error = driver.communicate(timeout=10)
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert (tmp_path / "ready.teardown").read_text(encoding="utf-8") == signum.name
+    assert driver.returncode == 128 + signum
+    assert f"stopped by {signum.name}" in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+
+
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_a_repeat_stop_signal_inside_the_grace_window_lets_the_teardown_finish(
+    fake_repo: Path,
+    tmp_path: Path,
+    signum: signal.Signals,
+) -> None:
+    # ``uv run`` forwards a Ctrl-C the terminal already sent the whole foreground group, so
+    # one keypress reaches the run twice a fraction of a second apart. The repeat is the
+    # same stop: the scope's teardown, which takes longer than the gap, must still finish.
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _manifest(tmp_path),
+        signum,
+        block="mutant",
+        on_stop="teardown",
+    ) as driver:
+        try:
+            assert _poll(lambda: bool(_scope_pids(tmp_path)))
+            os.kill(driver.pid, signum)
+            time.sleep(prove_failability.STOP_REPEAT_GRACE / 5)
+            os.kill(driver.pid, signum)
+            _, error = driver.communicate(timeout=10)
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert (tmp_path / "ready.teardown").read_text(encoding="utf-8") == signum.name
+    assert driver.returncode == 128 + signum
+    assert f"stopped by {signum.name}" in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+
+
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_a_second_stop_signal_kills_a_scope_that_ignored_the_first(
+    fake_repo: Path,
+    tmp_path: Path,
+    signum: signal.Signals,
+) -> None:
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _manifest(tmp_path),
+        signum,
+        block="mutant",
+        on_stop="ignore",
+    ) as driver:
+        try:
+            assert _poll(lambda: bool(_scope_pids(tmp_path)))
+            os.kill(driver.pid, signum)
+            # Past the window in which a repeat counts as the same stop, and long enough
+            # for a scope that honoured the first signal to have ended.
+            time.sleep(prove_failability.STOP_REPEAT_GRACE + 0.5)
+            waited = driver.poll() is None and all(
+                _is_running(pid) for pid in _scope_pids(tmp_path)
+            )
+            os.kill(driver.pid, signum)
+            _, error = driver.communicate(timeout=10)
+            scope_ended = _poll(
+                lambda: not any(_is_running(pid) for pid in _scope_pids(tmp_path)),
+                seconds=5,
+            )
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert waited
+    assert driver.returncode == 128 + signum
+    assert f"stopped by {signum.name}" in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+    assert scope_ended
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+def test_a_stopped_script_run_ends_by_the_signal_so_its_caller_stops_too(
+    fake_repo: Path,
+    tmp_path: Path,
+    signum: signal.Signals,
+) -> None:
+    # A shell loop runs its next command after an exit of 130, but not after a death by
+    # SIGINT; ``main`` still returns ``128 + N`` to an in-process caller.
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _manifest(tmp_path),
+        signum,
+        mode="cli",
+        block="mutant",
+    ) as driver:
+        try:
+            assert _poll(lambda: bool(_scope_pids(tmp_path)))
+            os.kill(driver.pid, signum)
+            _, error = driver.communicate(timeout=10)
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert driver.returncode == -signum
+    assert f"stopped by {signum.name}" in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+    assert _run_logs(tmp_path) == ["001-baseline"]
+
+
+def test_a_stop_signal_after_the_last_scope_lets_the_run_finish_with_its_own_verdict(
+    fake_repo: Path,
+    tmp_path: Path,
+) -> None:
+    # Both signals land inside the only entry's restore, after its last scope: nothing is
+    # left to stop, so the run completes and grades. The stand-in passes under the
+    # mutation, so the one entry is weakly pinned.
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _manifest(tmp_path),
+        signal.SIGTERM,
+        mode="restore",
+    ) as driver:
+        try:
+            _, error = driver.communicate(timeout=10)
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert driver.returncode == 1
+    assert "stopped by" not in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+    assert _run_logs(tmp_path) == ["001-baseline", "001-mutant"]
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_restore_that_fails_during_a_stop_is_still_exit_3_with_its_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The stop cuts the mutant run short and the restore it unwinds through cannot be
+    # proved: the tree may hold a mutation, which outranks the stop.
+    calls: list[str] = []
+
+    def stopped_run_scope(
+        _entry: prove_failability.ProofEntry,
+        _capture: prove_failability.RunCapture | None = None,
+    ) -> prove_failability.RunOutcome:
+        calls.append("run")
+        if len(calls) == 2:
+            prove_failability._request_stop(signal.SIGTERM, None)
+            prove_failability._raise_if_stopped()
+        return prove_failability.RunOutcome((), (), "baseline: stubbed", 0)
+
+    monkeypatch.setattr(prove_failability, "_run_scope", stopped_run_scope)
+    monkeypatch.setattr(filecmp, "cmp", _never_identical)
+
+    code = prove_failability.main(
+        [str(_manifest(tmp_path)), "--scratch-root", str(tmp_path / "outside-scratch")],
+    )
+
+    assert code == 3
+    error = capsys.readouterr().err
+    assert "RESTORE FAILED" in error
+    assert "stopped by" not in error
+    (namespace,) = (tmp_path / "outside-scratch").iterdir()
+    assert (namespace / prove_failability.RESTORE_FAILED_MARKER_NAME).exists()
+    assert (namespace / prove_failability.ACTIVE_MARKER_NAME).exists()
+    assert prove_failability._STOP.signum is None
+
+
+def test_a_stop_signal_that_lands_while_the_scope_starts_still_ends_the_scope(
+    fake_repo: Path,
+    tmp_path: Path,
+) -> None:
+    # The signal arrives after the run checked for one and before it recorded the scope
+    # it is starting, so the handler finds no scope to signal; the run must forward the
+    # signal to the scope itself rather than wait out a scope that would block for 30 seconds.
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _manifest(tmp_path),
+        signal.SIGTERM,
+        mode="starting",
+        block="baseline",
+    ) as driver:
+        try:
+            _, error = driver.communicate(timeout=10)
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert driver.returncode == 128 + signal.SIGTERM
+    assert "stopped by SIGTERM" in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+    assert _run_logs(tmp_path) == []
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_main_routes_stop_signals_only_while_it_runs_and_puts_the_old_handlers_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _four_failing_rows(monkeypatch)
+    stubbed = prove_failability._run_scope
+    during: list[list[object]] = []
+
+    def observing_run_scope(
+        entry: prove_failability.ProofEntry,
+        capture: prove_failability.RunCapture | None = None,
+    ) -> prove_failability.RunOutcome:
+        during.append([signal.getsignal(signum) for signum in STOP_SIGNALS])
+        return stubbed(entry, capture)
+
+    monkeypatch.setattr(prove_failability, "_run_scope", observing_run_scope)
+    before = [signal.getsignal(signum) for signum in STOP_SIGNALS]
+
+    code = prove_failability.main(
+        [str(_manifest(tmp_path)), "--scratch-root", str(tmp_path / "outside-scratch")],
+    )
+
+    assert code == 0
+    # Importing the script installed nothing; only a run does, and only while it runs.
+    assert prove_failability._request_stop not in before
+    assert during == [[prove_failability._request_stop] * len(STOP_SIGNALS)] * 2
+    assert [signal.getsignal(signum) for signum in STOP_SIGNALS] == before
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_stop_ends_with_its_run_so_the_next_run_in_the_process_is_not_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The handler is called directly here: delivering a real signal to the test process
+    # would end the worker if the handler were missing. The rows above deliver real ones.
+    monkeypatch.setattr(
+        prove_failability,
+        "PYTEST_COMMAND",
+        (sys.executable, "-c", "print('1 passed in 0.01s')"),
+    )
+    restore = prove_failability._restore_and_prove
+    stops = [signal.SIGTERM]
+
+    def stopping_restore(target: Path, pristine: Path) -> str:
+        if stops:
+            prove_failability._request_stop(stops.pop(), None)
+        return restore(target, pristine)
+
+    monkeypatch.setattr(prove_failability, "_restore_and_prove", stopping_restore)
+    arguments = [str(_multi_manifest(tmp_path, 2)), "--scratch-root", str(tmp_path / "outside")]
+
+    stopped = prove_failability.main(arguments)
+    unstopped = prove_failability.main(arguments)
+
+    assert stopped == 128 + signal.SIGTERM
+    # Nothing failed under the mutation, so both entries complete and grade weakly pinned.
+    assert unstopped == 1
+    assert (tmp_path / "repo" / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+
+
+@pytest.mark.parametrize("state", ["exited", "reaped"])
+def test_killing_a_scope_that_already_ended_raises_nothing(state: str) -> None:
+    # A signal can land after the scope exited and before the run reaped it (every
+    # member gone: macOS ``killpg`` says EPERM) or after an outside reap (ESRCH). The
+    # handler runs between any two bytecodes, so raising there would abort a restore.
+    with subprocess.Popen([sys.executable, "-c", ""], start_new_session=True, text=True) as scope:
+        if state == "reaped":
+            _ = os.waitpid(scope.pid, 0)
+        else:
+            assert _poll(lambda: not _is_running(scope.pid))
+        prove_failability._STOP.scope = scope
+        try:
+            prove_failability._signal_scope(signal.SIGKILL)
+        finally:
+            prove_failability._STOP.scope = None
+
+
 @pytest.mark.usefixtures("fake_repo")
 def test_an_only_run_labels_its_report_a_partial_record_at_both_ends_and_in_the_table(
     tmp_path: Path,
@@ -2834,6 +3457,30 @@ def test_an_xdist_worker_reports_provenance_but_leaves_rows_to_the_controller(
     assert provenance[0].role == "worker"
 
 
+# Stands in for ``uv run pytest`` in a real scope run: it reports one failing row on
+# stdout, as ``-rfE`` does, writes the probe records the plugin would, and echoes the
+# argv and ``PYTHONPATH`` it was given on stderr, which the run keeps in its log.
+_REPORTING_SCOPE = f"""
+import json
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["{prove_failability.PROBE_OUTPUT_ENV}"]).write_text(
+    json.dumps({{"kind": "failed", "nodeid": "{COUNT_ROW}", "crash": "t.py:9: assert 6 == 1"}})
+    + "\\n"
+    + json.dumps({{"kind": "provenance", "role": "controller", "package_file": "/x.py"}})
+    + "\\n",
+    encoding="utf-8",
+)
+print("=========================== short test summary info ============================")
+print("FAILED {COUNT_ROW} - assert 6 == 1")
+print("1 failed in 0.1s")
+print(json.dumps({{"argv": sys.argv[1:], "pythonpath": os.environ["PYTHONPATH"]}}), file=sys.stderr)
+sys.exit(1)
+"""
+
+
 @pytest.mark.usefixtures("fake_repo")
 def test_a_scope_run_loads_the_probe_and_keeps_its_raw_output(
     scratch_root: Path,
@@ -2842,48 +3489,26 @@ def test_a_scope_run_loads_the_probe_and_keeps_its_raw_output(
 ) -> None:
     entry = _single_entry(tmp_path)
     capture = prove_failability._new_capture(scratch_root, entry, "mutant")
-    calls: list[tuple[list[str], dict[str, str] | None]] = []
-
-    def fake_subprocess_run(
-        command: list[str],
-        *,
-        env: dict[str, str] | None,
-        **_kwargs: object,
-    ) -> types.SimpleNamespace:
-        calls.append((command, env))
-        capture.probe_output.write_text(
-            json.dumps({"kind": "failed", "nodeid": COUNT_ROW, "crash": "t.py:9: assert 6 == 1"})
-            + "\n"
-            + json.dumps({"kind": "provenance", "role": "controller", "package_file": "/x.py"})
-            + "\n",
-            encoding="utf-8",
-        )
-        return types.SimpleNamespace(
-            stdout=(
-                "=========================== short test summary info ============================\n"
-                f"FAILED {COUNT_ROW} - assert 6 == 1\n1 failed in 0.1s\n"
-            ),
-            stderr="",
-            returncode=1,
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        prove_failability,
+        "PYTEST_COMMAND",
+        (sys.executable, "-c", _REPORTING_SCOPE),
+    )
 
     outcome = prove_failability._run_scope(entry, capture)
 
-    ((command, environment),) = calls
-    assert command[-3:] == ["-p", prove_failability.PROBE_MODULE_NAME, "tests/test_x.py"]
-    assert environment is not None
-    assert environment["PYTHONPATH"].split(os.pathsep)[0] == str(capture.probe_directory)
-    assert environment[prove_failability.PROBE_OUTPUT_ENV] == str(capture.probe_output)
+    log = capture.log_path.read_text(encoding="utf-8")
+    seen = _json_object(log.rsplit("--- stderr ---\n", 1)[1])
+    assert json_at(seen, "argv") == ["-p", prove_failability.PROBE_MODULE_NAME, "tests/test_x.py"]
+    assert _text(seen, "pythonpath").split(os.pathsep)[0] == str(capture.probe_directory)
     assert (capture.probe_directory / "prove_failability_probe.py").read_text(
         encoding="utf-8",
     ) == prove_failability.PROBE_SOURCE
+    assert outcome.return_code == 1
     assert outcome.failed_node_ids == (COUNT_ROW,)
     assert outcome.crash_line(COUNT_ROW) == "t.py:9: assert 6 == 1"
     assert outcome.provenance[0].package_file == "/x.py"
     assert outcome.log_path == str(capture.log_path)
-    log = capture.log_path.read_text(encoding="utf-8")
     assert log.startswith("argv: ")
     assert f"FAILED {COUNT_ROW}" in log
 
