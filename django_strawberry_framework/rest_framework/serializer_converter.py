@@ -924,8 +924,9 @@ def serializer_only_relation_annotation(
 
     The serializer-flavor analog of
     ``forms/inputs.py::_model_less_relation_annotation``: a relation field with no
-    backing model column (a relation on a plain ``Serializer``, or a relation
-    whose ``source`` names no concrete column) resolves its related model from
+    backing model column (a relation on a plain ``Serializer``, a relation
+    whose ``source`` names no concrete column, or one over a ``GenericForeignKey``,
+    which names no target model) resolves its related model from
     ``field.queryset.model`` (the single ``PrimaryKeyRelatedField``) or
     ``field.child_relation.queryset.model`` (a ``ManyRelatedField``). The id type
     rides ``annotate_queryset_relation`` after ``_require_relation_primary`` (spec-039:
@@ -1359,7 +1360,9 @@ def resolve_serializer_field(
     column (resolved via ``source``) routes through the read-side converters
     (keyed on the resolved ``models.Field``): kind via
     ``model_column_write_kind``; a relation / file column's annotation via
-    ``model_column_write_annotation`` (Relay-vs-raw-pk id type / ``Upload``);
+    ``model_column_write_annotation`` (Relay-vs-raw-pk id type / ``Upload``), except
+    that a ``GenericForeignKey`` (a relation naming no target model) takes its target
+    from the field's ``queryset.model`` (``serializer_only_relation_annotation``);
     a scalar via ``_model_backed_scalar_annotation`` (type-override conflict
     policy: a CONSUMER-DECLARED model-backed scalar whose declared type disagrees
     with the column's fails loud rather than silently picking the column). The
@@ -1426,17 +1429,25 @@ def resolve_serializer_field(
             # input must describe the same shape the runtime serializer validates.
             if _relation_cardinality(field):
                 kind = RELATION_MULTI
-            # spec-039: the serializer flavor requires a registered primary DjangoType for
-            # the target (stricter than the model fallback). Resolve + validate it
-            # via ``primary_of`` so the id type is the SAME Relay-vs-raw-pk decision
-            # the read side makes (a non-Relay target still legitimately uses the
-            # raw pk - what is forbidden is a MISSING primary, not a non-Relay one).
-            annotation = model_column_write_annotation(
-                column,
-                type_name,
-                primary_of=lambda model: _require_relation_primary(field_name, model),
-                kind=kind,
-            )
+            if related_model is None:
+                # A ``GenericForeignKey`` names no target model: the field's queryset pins
+                # the one model it writes, as for a serializer-only relation.
+                _attr, annotation, related_model = serializer_only_relation_annotation(
+                    field,
+                    kind,
+                )
+            else:
+                # spec-039: the serializer flavor requires a registered primary DjangoType
+                # for the target (stricter than the model fallback). Resolve + validate it
+                # via ``primary_of`` so the id type is the SAME Relay-vs-raw-pk decision
+                # the read side makes (a non-Relay target still legitimately uses the
+                # raw pk - what is forbidden is a MISSING primary, not a non-Relay one).
+                annotation = model_column_write_annotation(
+                    column,
+                    type_name,
+                    primary_of=lambda model: _require_relation_primary(field_name, model),
+                    kind=kind,
+                )
         elif kind == FILE:
             annotation = model_column_write_annotation(
                 column,

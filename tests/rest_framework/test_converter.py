@@ -947,6 +947,89 @@ def test_many_pk_related_field_over_generic_relation_column_emits_multi() -> Non
     assert get_origin(annotation) is list
 
 
+def _register_relay_branch_primary() -> None:
+    class BranchProbeType(DjangoType, relay.Node):
+        class Meta:
+            model = library_models.Branch
+            fields = ("id", "name")
+            primary = True
+
+    assert registry.get(library_models.Branch) is BranchProbeType
+
+
+def test_generic_foreign_key_target_without_primary_type_is_refused() -> None:
+    """The queryset's model is held to the serializer flavor's registered-primary rule."""
+
+    class GfkSer(ModelSerializerBase[library_models.TaggedItem]):
+        content_object: _PkRelation[library_models.Branch] = serializers.PrimaryKeyRelatedField(
+            queryset=library_models.Branch.objects.all(),
+        )
+
+        class Meta:
+            model = library_models.TaggedItem
+            fields = ("content_object",)
+
+    field = bound_fields(GfkSer())["content_object"]
+    with pytest.raises(ConfigurationError, match="'Branch', which has no registered primary"):
+        resolve_serializer_field(field, library_models.TaggedItem, "ProbeInput")
+
+
+def _many_branch_relation() -> _PkRelation[library_models.Branch]:
+    return serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=library_models.Branch.objects.all(),
+    )
+
+
+def _branch_slug_relation() -> _SlugRelation[library_models.Branch]:
+    return serializers.SlugRelatedField(
+        slug_field="name",
+        queryset=library_models.Branch.objects.all(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("relation_field", "match"),
+    [
+        pytest.param(
+            _many_branch_relation,
+            "TaggedItem.content_object requires a single related object",
+            id="many",
+        ),
+        pytest.param(
+            _branch_slug_relation,
+            "is a SlugRelatedField; only PrimaryKeyRelatedField is supported",
+            id="slug",
+        ),
+        pytest.param(
+            serializers.CharField,
+            "is a CharField; only PrimaryKeyRelatedField is supported",
+            id="scalar",
+        ),
+    ],
+)
+def test_non_single_pk_field_over_generic_foreign_key_is_refused(
+    relation_field: Callable[[], DRFField],
+    match: str,
+) -> None:
+    """A ``GenericForeignKey`` holds one object: only a single ``PrimaryKeyRelatedField`` writes it.
+
+    DRF hands the validated value to the descriptor, which reads a content type and pk off
+    it, so a list, a slug or a scalar would fail every write.
+    """
+    _register_relay_branch_primary()
+    meta = type("Meta", (), {"model": library_models.TaggedItem, "fields": ("content_object",)})
+    serializer_cls = type(
+        "GfkSer",
+        (ModelSerializerBase,),
+        {"content_object": relation_field(), "Meta": meta},
+    )
+
+    field = bound_fields(serializer_cls())["content_object"]
+    with pytest.raises(ConfigurationError, match=match):
+        resolve_serializer_field(field, library_models.TaggedItem, "ProbeInput")
+
+
 def test_single_pk_related_field_over_reverse_o2o_column_emits_single() -> None:
     """A single relation over a reverse OneToOneRel stays a single id input.
 

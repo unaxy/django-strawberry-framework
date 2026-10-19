@@ -2434,6 +2434,19 @@ class UpdatePatronProfileViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class UpdateCirculationDeskHoldViaSerializer(SerializerMutation):
+    """Update a circulation desk's hold, a ``GenericForeignKey`` bound to books by its queryset.
+
+    The hold's id decodes against ``BookType`` (its visibility included), and DRF's own
+    ``update()`` stores the book's content type and pk.
+    """
+
+    class Meta:
+        serializer_class = serializers.CirculationDeskHoldSerializer
+        operation = "update"
+        permission_classes = []
+
+
 class CreatePatronProfileReplacingGenre(SerializerMutation):
     """A DELIBERATELY-misbehaving create whose ``create()`` links a genre the client never chose.
 
@@ -2643,6 +2656,8 @@ class Mutation:
     write relations into the text-keyed ``Edition`` in each flavor; ``updateEdition`` /
     ``deleteEdition`` and the ``ViaForm`` / ``ViaSerializer`` updates locate an ``Edition`` by
     its raw ISBN ``id``.
+    ``updateCirculationDeskHoldViaSerializer`` writes a desk's hold, a ``GenericForeignKey``,
+    through a ``PrimaryKeyRelatedField`` whose ``Book`` queryset names the one model it holds.
     """
 
     create_shelf_via_form = DjangoMutationField(CreateShelfViaForm)
@@ -2726,6 +2741,9 @@ class Mutation:
     )
     create_patron_profile_via_serializer = DjangoMutationField(CreatePatronProfileViaSerializer)
     update_patron_profile_via_serializer = DjangoMutationField(UpdatePatronProfileViaSerializer)
+    update_circulation_desk_hold_via_serializer = DjangoMutationField(
+        UpdateCirculationDeskHoldViaSerializer,
+    )
     create_patron_profile_replacing_genre = DjangoMutationField(
         CreatePatronProfileReplacingGenre,
     )

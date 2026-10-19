@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 154 done, 123 to do.
+Progress: 155 done, 124 to do.
 
 ## Done
 
@@ -499,6 +499,12 @@ Progress: 154 done, 123 to do.
   is now the one source-to-written-field reading (`write_source_key`, `_writes_primary_key`, the column guard), and
   `_reject_relation_column_source` refuses the `pk` alias at schema build like the `attname` (remedy `source="patron"`);
   scalar `source="pk"` fields build and write as before
+- [x] 111. A writable `PrimaryKeyRelatedField(queryset=...)` over a `GenericForeignKey` name or source
+  (`TaggedItem.content_object`, `CirculationDesk.content_object`) failed the schema build (an `AttributeError`, then a
+  `ConfigurationError` naming model `'NoneType'`) because the column branch read the GFK's `related_model`; a column naming
+  no target model now types from the field's `queryset.model` as a serializer-only relation, so the shape plain DRF writes
+  works (visibility applies to the decoded id; `many=True` and non-PK fields stay refused); the fakeshop library
+  serializers share a `ModelSerializerBase` carrying the one `Meta` suppression
 
 ## Outside review of the fixes
 
@@ -539,8 +545,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 111. A GenericForeignKey own-name `PrimaryKeyRelatedField(source="content_object")` raises `AttributeError` in
-  `_require_relation_primary` (`related_model` is None) instead of `ConfigurationError`
 - [ ] 120. `prove_failability.py` has no SIGTERM / SIGHUP handler: a terminated run leaves its mutation in the tree and
   its `ACTIVE-MUTATION.json` marker; recovery is by hand from `restore_with`
 - [ ] 121. A crashed `prove_failability.py` run without `--scratch-root` leaves its marker in its own `failability-*`
@@ -672,6 +676,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 280. CHANGELOG entry for item 111: a `SerializerMutation` field `PrimaryKeyRelatedField(queryset=...)` over a
+  `GenericForeignKey` now builds and writes the queryset's model (0.0.14 failed the schema build)
+- [ ] 281. A `GenericForeignKey` written beside its carriers: a serializer with writable `content_object` and writable
+  `object_id` / `content_type` builds, and a request pairing a visible object's id with another row's `objectId` stores
+  that row (a writable `object_id` alone is already a raw write); post-save attestation covers single-column FK /
+  one-to-one and many-to-many only, so a custom `update()` dropping `content_object` succeeds unattested. Refuse
+  carriers beside their GFK (and a `ForeignObject` beside its carriers, accepted on purpose today), attest the GFK
+  columns, or keep?
 - [ ] 277. CHANGELOG entry for item 109: a `SerializerMutation` relation field bound to the `pk` alias of a relation primary
   key (`PrimaryKeyRelatedField(source="pk")` over a one-to-one or multi-table parent-link key, or DRF's auto-built `pk`
   field there) now raises `ConfigurationError` at schema build for a create input (0.0.14 built it and every create

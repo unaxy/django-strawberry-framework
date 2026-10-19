@@ -555,8 +555,8 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     helper** accepts both a `GlobalID` and a raw pk only because it is reused and package
     tests drive the raw-pk / non-Relay branch by direct call. Each id the decoder sees
     is type-checked against the relation's **target model** — resolved from the backing FK
-    via the serializer field's `source`, **or, for a serializer-only relation, from the DRF
-    field's `queryset.model`** (Decision 7) —
+    via the serializer field's `source`, **or, for a serializer-only relation or one over a
+    `GenericForeignKey`, from the DRF field's `queryset.model`** (Decision 7) —
     resolved to the **visible** object through the related primary
     `DjangoType.get_queryset` — the same per-branch raw-pk visibility check the `036`
     model-path decoder (`utils/write_values.py::decode_visible_relation_ids`) and the
@@ -1478,7 +1478,15 @@ relation field with **neither** a resolvable backing column **nor** a concrete
 field with `queryset=None` outside a `ModelSerializer` mapping) is a
 [`ConfigurationError`][glossary-configurationerror] naming the field — there is no target
 to type or visibility-check. (`PrimaryKeyRelatedField.queryset.model` is a standard DRF
-attribute at the pinned floor, like `ManyRelatedField.child_relation`.)
+attribute at the pinned floor, like `ManyRelatedField.child_relation`.) A relation over a
+`GenericForeignKey` takes its target the same way: the key names no target model
+(`related_model` is `None`), so
+`content_object = PrimaryKeyRelatedField(queryset=Book.objects.all())` decodes its id
+against `Book` and DRF's own `create()` / `update()` writes the validated book through the
+descriptor, which stores its content type and pk. The key holds one object, so `many=True`
+over it is a cardinality mismatch and a slug, URL, custom or scalar field over it is
+refused like one over any relation column
+([`rest_framework/serializer_converter.py`][rf-converter]`::resolve_serializer_field`).
 
 **A relation target with no registered primary `DjangoType` is a build-time
 `ConfigurationError`.** Whether the target model comes from the backing FK (via
@@ -1851,8 +1859,8 @@ The pipeline steps:
    `updatePrintingViaSerializer` `editionId` / `boundWith` into the text-keyed `EditionType`),
    and package tests also drive it by **direct call**. Each id the decoder does see
    is type-checked against the relation's **target model** — resolved from the backing FK
-   via the serializer field's `source`, or, for a serializer-only relation, from the DRF
-   field's `queryset.model`
+   via the serializer field's `source`, or, for a serializer-only relation or one over a
+   `GenericForeignKey`, from the DRF field's `queryset.model`
    ([Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth)) —
    resolved to the **visible** object through the related primary
    `DjangoType.get_queryset` — the same per-branch raw-pk visibility check the `036`
@@ -2656,8 +2664,10 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   `create()` / `update()` — is both serializer-only and a relation. Its relation **target
   comes from `field.queryset.model`** (driving the id annotation and the decode-time
   visibility check), and the declared serializer field name is preserved in
-  `provided_data`. A relation field with **neither** a resolvable backing column **nor** a
-  concrete `queryset.model` is a class-creation
+  `provided_data`. A single `PrimaryKeyRelatedField` over a `GenericForeignKey`, which names
+  no target model, takes its target from `field.queryset.model` the same way. A relation
+  field with **neither** a resolvable backing column **nor** a concrete `queryset.model` is
+  a class-creation
   [`ConfigurationError`][glossary-configurationerror]
   ([Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth)).
 - **Relation target with no registered primary `DjangoType`.** A serializer relation
@@ -2928,9 +2938,10 @@ same transport, different app.
     [`ConfigurationError`][glossary-configurationerror]** (the catch-all-shadowing
     regression test); a `ListField` with a **scalar** child maps to `list[<scalar>]` but a
     `ListField` whose child is a relation / nested serializer raises; a nested serializer
-    field raises; a **serializer-only relation** resolves its target from
-    `field.queryset.model`, while a relation with no backing column **and** no concrete
-    `queryset.model` raises [`ConfigurationError`][glossary-configurationerror]; a
+    field raises; a **serializer-only relation** and a `PrimaryKeyRelatedField` over a
+    `GenericForeignKey` resolve their target from `field.queryset.model`, while a relation
+    with no backing column **and** no concrete `queryset.model` raises
+    [`ConfigurationError`][glossary-configurationerror]; a
     relation whose **target model has no registered primary `DjangoType`** raises a
     class-creation [`ConfigurationError`][glossary-configurationerror] naming the field and
     target model rather than falling back to the default manager.
@@ -3218,8 +3229,8 @@ The completion contract.
    scalar; the shared decoder helper accepts both only for reused / package-only
    branches), each id type-checked against the target model (resolved from the backing FK via the
    serializer field's `source`, **or `field.queryset.model` for a serializer-only
-   relation**), resolved to the **visible** object through the related
-   primary `DjangoType.get_queryset` (the same per-branch raw-pk visibility check
+   relation or one over a `GenericForeignKey`**), resolved to the **visible** object
+   through the related primary `DjangoType.get_queryset` (the same per-branch raw-pk visibility check
    `036`'s model path and `038`'s form path enforce), and reduced to the pk
    before landing under the serializer field name; a hidden target → field-keyed
    `FieldError`; an [`Upload`][glossary-upload-scalar] value lands in `data`;
