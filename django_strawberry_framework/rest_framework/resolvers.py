@@ -1163,6 +1163,19 @@ def _merged_serializer_kwargs(
     return kwargs
 
 
+def _relation_queryset_of(field: DRFField) -> object:
+    """Return the ``queryset`` a runtime relation field decodes against, or ``None``.
+
+    A single ``PrimaryKeyRelatedField`` carries it directly; a ``ManyRelatedField`` carries
+    it on ``field.child_relation``. Read as an ``object``: the schema/runtime agreement guard
+    is what proves its shape.
+    """
+    related = (
+        child_relation_of(field) if isinstance(field, serializers.ManyRelatedField) else field
+    )
+    return read_attr(related, "queryset", None)
+
+
 def _relation_model_of(field: DRFField) -> object:
     """Return the target model a runtime relation field decodes against, or ``None``.
 
@@ -1171,10 +1184,7 @@ def _relation_model_of(field: DRFField) -> object:
     schema/runtime agreement guard to confirm the runtime relation still points at the same
     model the schema-time ``InputFieldSpec.related_model`` recorded.
     """
-    related = (
-        child_relation_of(field) if isinstance(field, serializers.ManyRelatedField) else field
-    )
-    return getattr(getattr(related, "queryset", None), "model", None)
+    return getattr(_relation_queryset_of(field), "model", None)
 
 
 def _assert_schema_runtime_agreement(
@@ -1449,6 +1459,14 @@ def _assert_relation_agreement(
             "map; the decoded id would be validated against a different model. Align the runtime "
             "relation's queryset with get_serializer_for_schema().",
         )
+    runtime_queryset = _relation_queryset_of(runtime)
+    if not (is_manager(runtime_queryset) or isinstance(runtime_queryset, QuerySet)):
+        raise ConfigurationError(
+            f"SerializerMutation {mutation_cls.__name__}: relation field {spec.target_name!r} "
+            f"holds a {type(runtime_queryset).__name__!r} queryset at runtime, but the schema "
+            "types it as a primary-key relation, which looks its id up in a QuerySet or a "
+            "Manager. Align the runtime relation's queryset with get_serializer_for_schema().",
+        )
 
 
 def _assert_nested_agreement(
@@ -1646,13 +1664,10 @@ def _scope_specs_over_serializer(
         # ``.all()`` normalizes a Manager to a QuerySet (preserving an explicit ``.using``);
         # the pin fails closed on a cross-alias author queryset BEFORE any validation runs.
         # The schema/runtime agreement guard already rejected a relation whose queryset
-        # names no model, so the author queryset is set here.
+        # is neither a QuerySet nor a Manager over the recorded model; the assert only
+        # narrows what the guard proved.
         author_queryset = read_attr(relation, "queryset")
-        if not (is_manager(author_queryset) or isinstance(author_queryset, QuerySet)):
-            raise ConfigurationError(
-                f"{type(serializer).__name__}.{spec.target_name} relation queryset must be a "
-                f"QuerySet or a Manager, got {type(author_queryset).__name__!r}.",
-            )
+        assert is_manager(author_queryset) or isinstance(author_queryset, QuerySet)  # noqa: S101 - _assert_relation_agreement already rejected any other queryset
         scoped = pin_write_queryset(
             author_queryset.all(),
             pipeline.alias,

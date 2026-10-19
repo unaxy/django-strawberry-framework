@@ -1719,6 +1719,38 @@ def test_agreement_guard_raises_on_relation_wrong_model() -> None:
         )
 
 
+def test_agreement_guard_rejects_a_relation_queryset_that_is_no_row_source() -> None:
+    """A relation whose ``queryset`` names the right model without being a row source fails loud."""
+
+    class BranchSer(serializers.Serializer[object]):
+        branch: _PkRelation[library_models.Branch] = serializers.PrimaryKeyRelatedField(
+            queryset=library_models.Branch.objects.all(),
+        )
+
+    class RowSourceStandIn:
+        model = library_models.Branch
+
+    serializer = BranchSer()
+    object.__setattr__(bound_fields(serializer)["branch"], "queryset", RowSourceStandIn())
+    fake = _agreement_specs(
+        input_attr="branch",
+        graphql_name="branch",
+        target_name="branch",
+        kind=RELATION_SINGLE,
+        related_model=library_models.Branch,
+    )
+    with pytest.raises(
+        ConfigurationError,
+        match=r"SerializerMutation FakeMut: relation field 'branch' holds a 'RowSourceStandIn' "
+        r"queryset at runtime, but the schema types it as a primary-key relation, which looks "
+        r"its id up in a QuerySet or a Manager\.",
+    ):
+        serializer_resolvers._assert_schema_runtime_agreement(
+            _as_serializer_mutation(fake),
+            serializer,
+        )
+
+
 def test_agreement_guard_raises_when_scalar_became_relation() -> None:
     """A schema scalar that is a relation at runtime fails loud (the kind moved) (#1)."""
     # Schema types "branch" as a SCALAR, but the runtime serializer declares it a relation.
@@ -2646,50 +2678,6 @@ def test_relation_queryset_scope_cross_alias_author_queryset_fails_closed() -> N
     with (
         write_pipeline("default", lock=False),
         pytest.raises(ConfigurationError, match="routed to alias 'other'"),
-    ):
-        serializer_resolvers._scope_relation_querysets_to_visibility(
-            _as_serializer_mutation(fake),
-            serializer,
-            info=unread_info(),
-        )
-
-
-def test_relation_queryset_scope_rejects_a_queryset_that_is_neither_queryset_nor_manager() -> None:
-    """A relation whose ``queryset`` reads rows without being a QuerySet or Manager fails loud."""
-
-    class BranchSer(serializers.Serializer[object]):
-        branch: _PkRelation[library_models.Branch] = serializers.PrimaryKeyRelatedField(
-            queryset=library_models.Branch.objects.all(),
-        )
-
-    class RowSourceStandIn:
-        model = library_models.Branch
-
-    serializer = BranchSer()
-    object.__setattr__(bound_fields(serializer)["branch"], "queryset", RowSourceStandIn())
-    fake = type(
-        "StandInMut",
-        (),
-        {
-            "_injected_field_specs": [],
-            "_input_field_specs": [
-                InputFieldSpec(
-                    input_attr="branch",
-                    graphql_name="branch",
-                    target_name="branch",
-                    kind=RELATION_SINGLE,
-                    related_model=library_models.Branch,
-                ),
-            ],
-        },
-    )
-    with (
-        write_pipeline("default", lock=False),
-        pytest.raises(
-            ConfigurationError,
-            match=r"BranchSer\.branch relation queryset must be a QuerySet or a Manager, "
-            r"got 'RowSourceStandIn'",
-        ),
     ):
         serializer_resolvers._scope_relation_querysets_to_visibility(
             _as_serializer_mutation(fake),
