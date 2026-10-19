@@ -136,11 +136,22 @@ def test_field_error_handles_scalar_integers_booleans_and_floats() -> None:
     assert error_float.codes == []
 
 
-def test_field_error_handles_byte_strings_without_splitting() -> None:
-    error = field_error("token", b"invalid_token", codes=b"invalid")
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        (b"invalid_token", b"invalid"),
+        (bytearray(b"invalid_token"), bytearray(b"invalid")),
+        (memoryview(b"invalid_token"), memoryview(b"invalid")),
+    ],
+    ids=["bytes", "bytearray", "memoryview"],
+)
+def test_field_error_handles_byte_strings_without_splitting(message: object, code: object) -> None:
+    """A bytes-like message or code is one leaf rendered whole, never split per byte."""
+    error = field_error("token", message, codes=code)
+
     assert error.field == "token"
-    assert error.messages == ["b'invalid_token'"]
-    assert error.codes == ["b'invalid'"]
+    assert error.messages == [str(message)]
+    assert error.codes == [str(code)]
 
 
 def test_field_error_handles_lazy_translation_proxy_without_character_iteration() -> None:

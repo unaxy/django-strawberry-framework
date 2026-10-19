@@ -18,13 +18,13 @@ Two families of container check, kept apart because they answer different questi
 * ``is_exact_*`` are ``type(value) is C`` checks (subclasses fail) and
   ``TypeGuard`` predicates, since a negative answer says nothing about a subclass.
 
-``is_class`` and ``is_str`` stand apart from both: ``issubclass(type(value), C)``
-checks (subclasses pass) that ask the value's real type. ``isinstance`` falls back
-to a ``__class__`` read when the real type does not match, and a ``__class__``
-property can raise or claim a class the value is not; the real type can do
-neither, so these are the predicates for a value whose answer gates an operation
-that itself checks the real type (``str.__eq__`` refuses a value that is not really
-a ``str``, ``issubclass`` one that is not really a class).
+``is_class``, ``is_str`` and ``is_char_wise`` stand apart from both:
+``issubclass(type(value), C)`` checks (subclasses pass) that ask the value's real
+type. ``isinstance`` falls back to a ``__class__`` read when the real type does not
+match, and a ``__class__`` property can raise or claim a class the value is not;
+the real type can do neither, so these are the predicates for a value whose answer
+gates an operation that itself checks the real type (``str.__eq__`` refuses a value
+that is not really a ``str``, ``issubclass`` one that is not really a class).
 
 The typed slots (``dict_items``, ``list_iter``, ...) are the builtin base
 methods themselves at runtime, so a subclass override of ``items`` /
@@ -240,6 +240,7 @@ __all__ = (
     "instance_dict",
     "is_abstract_set",
     "is_awaitable",
+    "is_char_wise",
     "is_class",
     "is_dict",
     "is_exact_dict",
@@ -326,6 +327,26 @@ def is_str(value: object) -> TypeIs[str]:
     ``True`` answer is one the base ``str`` slots accept.
     """
     return issubclass(type(value), str)
+
+
+def is_char_wise(value: object) -> TypeIs[str | bytes | bytearray | memoryview]:
+    """Return whether ``value`` is text or bytes-like (subclasses included), asked of its real type.
+
+    The values that iterate character by character (or byte by byte into ``int``),
+    so a caller expecting a container of items refuses them before iterating. A
+    ``__class__`` property on the value can neither claim one of these types nor
+    raise; a Django lazy proxy is judged as itself, so a caller that means the
+    wrapped object unwraps it first (``utils/lazy.py::unwrap_lazy_object``).
+    """
+    return issubclass(
+        type(value),
+        (
+            str,
+            bytes,
+            bytearray,
+            memoryview,
+        ),
+    )
 
 
 def is_exact_dict(value: object) -> TypeGuard[dict[object, object]]:

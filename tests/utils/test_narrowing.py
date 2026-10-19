@@ -13,12 +13,14 @@ import pytest
 from typing_extensions import override
 
 from django_strawberry_framework.utils._narrowing import (
+    is_char_wise,
     is_exact_list_or_tuple,
     is_exact_set_or_frozenset,
     is_str,
     require,
     require_instance,
 )
+from tests._idioms import ClaimsClassBase
 
 
 def test_require_instance_returns_an_instance_of_the_class_unchanged() -> None:
@@ -45,6 +47,49 @@ def test_require_refuses_a_value_the_predicate_rejects() -> None:
     """A value the predicate rejects raises ``TypeError`` naming the value's type."""
     with pytest.raises(TypeError, match=r"^expected the type the source guarantees, got int$"):
         _ = require(1, is_str)
+
+
+class _StrSubclass(str):
+    """A ``str`` subclass, which is still text."""
+
+    __slots__ = ()
+
+
+class _ClaimsStr(ClaimsClassBase):
+    """A value whose ``__class__`` claims ``str``; its real class is not text."""
+
+    __slots__ = ()
+    claimed: type = str
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("text", True),
+        (_StrSubclass("text"), True),
+        (b"bytes", True),
+        (bytearray(b"bytes"), True),
+        (memoryview(b"bytes"), True),
+        (["text"], False),
+        ({"text": 1}, False),
+        (1, False),
+        (_ClaimsStr(), False),
+    ],
+    ids=[
+        "str",
+        "str_subclass",
+        "bytes",
+        "bytearray",
+        "memoryview",
+        "list",
+        "dict",
+        "int",
+        "class_claims_str",
+    ],
+)
+def test_is_char_wise_asks_the_real_class(value: object, expected: bool) -> None:  # noqa: FBT001 - the expected verdict
+    """Text and bytes-like values pass, subclasses included; a ``__class__`` claim does not."""
+    assert is_char_wise(value) is expected
 
 
 class _ClaimsEveryClassMeta(type):

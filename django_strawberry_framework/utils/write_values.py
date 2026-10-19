@@ -340,9 +340,9 @@ def decode_visible_relation(
 
 
 # The relation-id container's text/mapping atoms: values that are iterable but
-# are NEVER a container OF relation ids. Deliberately a different set from
-# ``errors.py::_TEXT_ATOM_TYPES`` (it adds ``Mapping``, which is a container -
-# just never this one) and named separately for that reason.
+# are NEVER a container OF relation ids: the char-wise types of
+# ``_narrowing.py::is_char_wise`` plus ``Mapping``, which is a container - just
+# never this one.
 RELATION_ID_ATOM_TYPES = (
     str,
     bytes,
