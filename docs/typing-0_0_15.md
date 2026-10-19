@@ -10,7 +10,8 @@ suppression left), every file-level `# pyright:` directive, and any count off `[
 comments per unlocked rule and the `typing.cast` calls (410) may only fall, and the budget falls with them. A rule
 whose last ignore is cleared leaves the budget and gains the marker.
 
-Progress: 27 done, 7 to do. Ignore comments: 782 lines (1897 at the start of 0.0.15's ignore sweep).
+Progress: 27 done, 6 closed (survey verdicts), 2 open (one waits on upstream, one is a behavior change outside
+typing). Ignore comments: 782 lines (1897 at the start of 0.0.15's ignore sweep).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -148,19 +149,18 @@ Progress: 27 done, 7 to do. Ignore comments: 782 lines (1897 at the start of 0.0
   and the mixin return `Response[_MonkeyPatchedWSGIResponse]`, `AsyncTestClient.query()`
   `Response[_MonkeyPatchedASGIResponse]` (spec-043 Decision 6)
 
-## To do: rules still off
-
-Counts are the diagnostics each rule reports when switched on (main pass, all four on at once, measured once items
-11-13 were on). "Root" is `conftest.py`, `line_count.py` and `docs/dry/export_dry_review.py`. Migrations account for 455
-of them.
-
-- [ ] 8. `reportUnannotatedClassAttribute`: 8365 (package 0, tests 6684, examples 1681, scripts 0, root 0); on for
-  scripts/, the package and the root files (their execution environments in `pyproject.toml`)
+## Rules off
 
 Off by design (not planned): `reportImplicitStringConcatenation`, `reportPrivateUsage`, `reportUnusedFunction`,
-`reportImportCycles`, `reportUninitializedInstanceVariable`. The reasons are in `pyproject.toml`. Off for tests by
-design: `reportUnusedCallResult` (tests/ and the example project's test folders, about 4300 sites): a test calls for
-side effects (fixture rows, `delete()`, a call inside `pytest.raises`).
+`reportImportCycles`, `reportUninitializedInstanceVariable`. The reasons are in `pyproject.toml`.
+
+Off for tests and the example project by design: `reportUnannotatedClassAttribute` (tests/, the example project and
+its test folders: 9033 sites, 6948 of them in a nested `class Meta`; on for scripts/, the package and the root files):
+the flagged attributes are declarative configuration a framework reads by name at run time (`Meta`, admin options,
+declared filters, migrations, `AppConfig`) on classes nothing subclasses, so no inferred type reaches an override, and
+every satisfier at that scale (`@final` on each `class Meta`, `Final` or `ClassVar[...]` on each attribute) changes the
+bare `class Meta:` the READMEs teach. `reportUnusedCallResult` (tests/ and the example project's test folders, about
+4300 sites): a test calls for side effects (fixture rows, `delete()`, a call inside `pytest.raises`).
 
 Off at the 3.10 floor only: the five `reportUnknown*` rules and `reportUnnecessaryTypeIgnoreComment`. django-stubs needs
 `typing.Self` (3.11), so at 3.10 every `-> Self` reads as unknown.
@@ -201,42 +201,54 @@ Survey verdicts recorded so nothing is re-tried blind:
   refusing a non-set, and `DjangoConnection`'s unbounded `NodeType`); `reportUndefinedVariable` 5 (unresolvable
   annotation strings that are the input under test)
 
-## Waiting on you
+- Item 8, closed (off by design, above): rejected `@final` on every flagged class (a scripted pass leaves a few hundred
+  hand sites and a decorator on the consumer `class Meta:`), `Final` / `ClassVar[...]` on each `Meta` attribute (a bare
+  `ClassVar` does not satisfy the rule), and a basedpyright baseline (a frozen diagnostic list, not a fix)
+- Item 24, closed: the visibility helpers read only `info.context` (`utils/permissions.py::request_from_info` takes any
+  object whose context carries a request and raises `ConfigurationError` otherwise), so `object` is the run-time
+  contract; `DjangoType.get_queryset`'s `info` is `Any`, so a consumer's forward gains no check; typing 6 of the
+  helpers adds 189 `reportArgumentType` sites
+- Item 28, closed: a `QuerySet | Awaitable[QuerySet]` return makes every direct sync call (`docs/README.md`, fakeshop)
+  narrow, to retire 7 `reportIncompatibleMethodOverride` ignores on async overrides
+- Item 29, closed: the `Upload` input delivers non-file values (null, str) that the form's own validation rejects as
+  invalid files; `MultiValueDict[str, UploadedFile]` needs a guard that changes that error, to retire 1 test ignore;
+  Django's `FileInput` reads a plain mapping, so `dict[str, object]` is the run-time contract
+- Item 30, closed: one issue worth filing (the maintainer posts it), django-stubs declaring `QuerySet`'s private
+  `_db`, `_hints`, `_fields`, `_prefetch_related_lookups`, `_clone`, `_chain` (6 lines in
+  `utils/_queryset_private.py`; the stub already declares `_result_cache` and `_iterable_class`). Not filed, reason
+  lines kept: the M2M `_To` default (7 migration lines; django-stubs #1802 is open), `re_path` with an ASGI
+  application (Channels usage), drf-stubs' bare generics, Strawberry's bare generics, django-debug-toolbar, pytest,
+  asgiref. Waits on the graphql-core cap: Strawberry's `_graphql_core.py` alias rebinding (11 lines; 0.336.0 drops the
+  `ImportError` fallback but requires graphql-core >= 3.3 and Python >= 3.11) and graphql-core 3.2's bare
+  `GraphQLWrappingType` / `GraphQLList` (3 lines): re-check both when the cap admits 3.3 and the lock resolves
+  Strawberry 0.336.0 or later. `Prefetch` is generic in django-stubs 6.1.1 and no ignore names it
+- Item 33, closed (off by design, above): 24 package sites; `ClassVar` is the wrong spelling for the metaclass-filled
+  attributes (each is an attribute of the built class, so writes through it become errors), and the `bound_*` slots
+  absent until the bind, the `__weakref__` slots and the `consumers.py` shape classes keep about 14 ignores for nothing
+  the checker proves
+- Trust-boundary guards that read the guarded value through `utils/_narrowing.py` (`read_attr`, `list_of`) instead of
+  an annotated read plus a `reportUnnecessaryIsInstance` ignore: kept (no parameter widened; the value is typed
+  `object`, the guard stays live, and `read_attr` is `getattr`, `list_of` is `list` at run time)
 
-- [ ] 23. Draft a djangorestframework-stubs issue for `ModelSerializer.Meta` (`Meta: ClassVar[type[object]]`)? It would
-  retire the `ModelSerializerBase` ignore and the 23 example-serializer ignores once released
-- [ ] 24. Type `info` as `Info` on the public visibility helpers (`apply_cascade_permissions`, `FilterSet.apply_sync`,
-  ...): 23 functions and about 65 test calls; a public API change
-- [ ] 28. Widen `DjangoType.get_queryset`'s return to a union? It breaks the direct sync calls in `docs/README.md` and
-  fakeshop; stopped
-- [ ] 29. Type the forms `files` argument (`dict[str, object]` today) as `MultiValueDict`? Values reaching it through
-  the `Upload` input are not all files (the attempt met null and str), so it needs a runtime guard first; stopped
-- [ ] 30. File the upstream issues behind the Unknown-rule suppressions? Each would retire suppression lines once
-  released: django-stubs (PEP 696 TypeVar defaults on `Field`, the M2M `_To`, forms; `QuerySet.__init__` binding
-  `_Model`; a generic `Prefetch`; the private attributes it omits; a `re_path` overload taking an ASGI application;
-  reviewers may prefer django-types-style `null: Literal[True]` overloads, since a default cannot see `null=True`),
-  djangorestframework-stubs (with item 23: `get_fields()` / `_declared_fields` / `BindingDict` over bare `Field`,
-  `child_relation`, `ListField.child`, `errors -> ReturnDict`, the validators' `queryset`, `RelatedField.__new__`
-  unable to bind its model), Strawberry (`schema/_graphql_core.py` rebinding its graphql-core 3.3 result aliases in an
-  `ImportError` fallback, confirm on graphql-core 3.3 first; bare `StrawberryResolver`, `StrawberryDirective`,
-  `staticmethod`, `asyncio.Task`), graphql-core 3.2 (bare `GraphQLWrappingType` / `GraphQLList`), django-debug-toolbar
-  (`Panel.title`, `show_toolbar_func_or_path`'s bare `Callable`), typeshed django-filter (`Filter.method` is a
-  property), typeshed channels (the closed `_ChannelScope` scope `TypedDict`; the `login` / `logout` scope arguments in
-  `auth/mutations.py`), pytest (`MonkeyPatch.syspath_prepend`'s `path`) and asgiref (the communicator's unannotated
-  parameters and returns)
+## Open
 
-- [ ] 33. `reportUninitializedInstanceVariable` in the package environment: `ClassVar` on the metaclass-filled
-  attributes clears 16 of 22; the `__weakref__` slots, the unbound `bound_*` markers, `_projection` and `Register`
-  keep about 6 ignores. On with 6 ignores, or off?
-
-Open question from item 6: on the prefetch path the hook's `info.field_name` and `selected_fields` describe the field
-whose plan reached the relation, not the nested relation. Keep (as documented), or build a per-field raw info as
-strawberry_django does?
+- [ ] 23. Waits on upstream: drf-stubs declares a stub-only `ModelSerializer.Meta`
+  (typeddjango/djangorestframework-stubs#689, open; the fix, #1069, closed unmerged; a comment asking whether a fresh
+  PR would be accepted is the maintainer's to post). Once a release drops it: bump the lock, retire
+  `tests/_idioms.py::ModelSerializerBase` and the 25 example-serializer ignores (`library/serializers.py` 23,
+  `products/serializers.py` 2), and lower `reportIncompatibleVariableOverride` 93 to 67
+- [ ] 35. Behavior, not typing (item 6's open question): on the prefetch path a `get_queryset` hook reads the planning
+  resolver's `info.field_name` / `selected_fields`; run by the relation's own resolver it reads the relation's. The
+  optimizer should not change what a hook observes: build a per-relation raw info, as strawberry_django's
+  `optimizer.py::_generate_selection_resolve_info` does (index key only on a list-valued relation), thread it through
+  `optimizer/walker.py::_hook_info`, `_build_child_queryset` and `optimizer/nested_planner.py`, pin both paths at depth
+  1 and 2 in `examples/fakeshop/test_query/`, and rewrite the `docs/README.md` sentence and its glossary entry. Needs
+  its own KANBAN card
 
 ## Ignore breakdown
 
 Lines carrying a `# pyright: ignore[...]` comment: 782 (851 rule hits): tests 572, package 131, examples 78,
-scripts 1. The tables below were measured at 881 lines.
+scripts 1. By rule and by file are measured at 782 lines; by cause at 881 (47 lines carry an Unknown rule at 782).
 
 ### By cause
 
@@ -247,11 +259,11 @@ another rule evaluates to Unknown.
 | Cause | Lines | Unknown too | Plan |
 | --- | --- | --- | --- |
 | Deliberately ill-typed test input (hostile values, forged classes, stand-ins, rejected writes) | 426 | 4 | keep |
-| DRF stubs declare `ModelSerializer.Meta` (the test base plus the example serializers) | 24 | 0 | item 23 |
+| DRF stubs declare `ModelSerializer.Meta` (the test base plus the example serializers) | 26 | 0 | item 23 |
 | Django private QuerySet attributes (seam, `super()._clone()`, hostile writes, planted shapes) | 17 | 8 | keep |
 | Verbatim forwards (schema, consumers, ModelForm, ModelSerializer, field and `strawberry.type` forwards) | 42 | 0 | keep |
 | Django model `Meta` on proxy / MTI children | 10 | 0 | keep |
-| Third-party annotations only the Unknown rules report: Strawberry 16 (11 the `_graphql_core.py` alias rebinding, 5 bare generics), django-stubs 9 (7 migration M2M `_To`, `Prefetch`, a `re_path` route list), drf-stubs 8, graphql-core 3.2 bare generics 3, django-debug-toolbar 3, pytest 3, asgiref 1 | 43 | 43 | item 30 |
+| Third-party annotations only the Unknown rules report: Strawberry 16 (11 the `_graphql_core.py` alias rebinding, 5 bare generics), django-stubs 9 (7 migration M2M `_To`, `Prefetch`, a `re_path` route list), drf-stubs 8, graphql-core 3.2 bare generics 3, django-debug-toolbar 3, pytest 3, asgiref 1 | 43 | 43 | item 30 verdict |
 | Parameters a caller binds by name that the body never reads (keyword-called hooks and callbacks, Strawberry argument probes, upstream-verbatim signatures, fixtures a fixture requests for setup or teardown order, parametrize columns); three more share lines counted elsewhere | 95 | 0 | keep |
 | The rest, reviewed in item 21 or added since, each reason line stating its cause (framework `Meta` reads, mixin `__init__` chains, filter overrides, `Any` forwards, django-stubs / typeshed omissions) | 356 | 21 | keep |
 
@@ -259,55 +271,46 @@ another rule evaluates to Unknown.
 
 | Rule | Hits | Package | Tests | Examples | Scripts | Root |
 | --- | --- | --- | --- | --- | --- | --- |
-| `reportArgumentType` | 285 | 23 | 257 | 5 | 0 | 0 |
-| `reportAttributeAccessIssue` | 142 | 26 | 115 | 1 | 0 | 0 |
-| `reportExplicitAny` | 95 | 59 | 21 | 14 | 1 | 0 |
-| `reportIncompatibleVariableOverride` | 87 | 5 | 55 | 27 | 0 | 0 |
-| `reportIncompatibleMethodOverride` | 76 | 7 | 64 | 5 | 0 | 0 |
-| `reportUnknownMemberType` | 47 | 29 | 16 | 2 | 0 | 0 |
-| `reportUnknownVariableType` | 33 | 22 | 11 | 0 | 0 | 0 |
-| `reportAssignmentType` | 31 | 0 | 30 | 1 | 0 | 0 |
-| `reportReturnType` | 26 | 1 | 24 | 1 | 0 | 0 |
-| `reportUnnecessaryIsInstance` | 17 | 17 | 0 | 0 | 0 | 0 |
-| `reportCallIssue` | 15 | 1 | 13 | 1 | 0 | 0 |
-| `reportUnknownArgumentType` | 14 | 4 | 3 | 7 | 0 | 0 |
-| `reportUnsafeMultipleInheritance` | 13 | 8 | 3 | 2 | 0 | 0 |
+| `reportArgumentType` | 307 | 24 | 271 | 12 | 0 | 0 |
+| `reportAttributeAccessIssue` | 119 | 25 | 93 | 1 | 0 | 0 |
+| `reportIncompatibleVariableOverride` | 93 | 6 | 58 | 29 | 0 | 0 |
+| `reportIncompatibleMethodOverride` | 59 | 7 | 47 | 5 | 0 | 0 |
+| `reportAny` | 39 | 10 | 14 | 15 | 0 | 0 |
+| `reportExplicitAny` | 36 | 27 | 6 | 2 | 1 | 0 |
+| `reportUnknownMemberType` | 33 | 27 | 4 | 2 | 0 | 0 |
+| `reportAssignmentType` | 30 | 0 | 29 | 1 | 0 | 0 |
+| `reportReturnType` | 24 | 1 | 22 | 1 | 0 | 0 |
+| `reportUnknownVariableType` | 21 | 19 | 2 | 0 | 0 | 0 |
+| `reportUnknownArgumentType` | 14 | 5 | 2 | 7 | 0 | 0 |
+| `reportCallIssue` | 13 | 1 | 11 | 1 | 0 | 0 |
+| `reportUnsafeMultipleInheritance` | 12 | 6 | 4 | 2 | 0 | 0 |
 | `reportIndexIssue` | 10 | 0 | 10 | 0 | 0 | 0 |
-| `reportMissingSuperCall` | 7 | 2 | 5 | 0 | 0 | 0 |
-| `reportUnreachable` | 7 | 5 | 2 | 0 | 0 | 0 |
-| `reportUndefinedVariable` | 7 | 0 | 7 | 0 | 0 | 0 |
-| `reportFunctionMemberAccess` | 6 | 4 | 1 | 1 | 0 | 0 |
-| `reportUnnecessaryComparison` | 6 | 5 | 1 | 0 | 0 | 0 |
-| `reportGeneralTypeIssues` | 6 | 0 | 6 | 0 | 0 | 0 |
+| `reportUnnecessaryIsInstance` | 6 | 6 | 0 | 0 | 0 | 0 |
+| `reportGeneralTypeIssues` | 5 | 0 | 5 | 0 | 0 | 0 |
+| `reportInvalidTypeArguments` | 5 | 1 | 4 | 0 | 0 | 0 |
 | `reportPropertyTypeMismatch` | 5 | 5 | 0 | 0 | 0 | 0 |
-| `reportUnknownParameterType` | 4 | 1 | 3 | 0 | 0 | 0 |
-| `reportInvalidTypeArguments` | 3 | 1 | 2 | 0 | 0 | 0 |
+| `reportUndefinedVariable` | 5 | 0 | 5 | 0 | 0 | 0 |
+| `reportFunctionMemberAccess` | 4 | 4 | 0 | 0 | 0 | 0 |
+| `reportMissingSuperCall` | 3 | 2 | 1 | 0 | 0 | 0 |
 | `reportOptionalMemberAccess` | 3 | 3 | 0 | 0 | 0 | 0 |
-| `reportDeprecated` | 3 | 2 | 1 | 0 | 0 | 0 |
-| `reportIncompatibleUnannotatedOverride` | 3 | 1 | 2 | 0 | 0 | 0 |
-| `reportInvalidTypeForm` | 3 | 0 | 3 | 0 | 0 | 0 |
-| `reportInvalidCast` | 3 | 3 | 0 | 0 | 0 | 0 |
+| `reportDeprecated` | 2 | 1 | 1 | 0 | 0 | 0 |
 | `reportUntypedFunctionDecorator` | 2 | 2 | 0 | 0 | 0 | 0 |
-| `reportImplicitOverride` | 1 | 0 | 1 | 0 | 0 | 0 |
-| `reportUntypedBaseClass` | 1 | 0 | 1 | 0 | 0 | 0 |
-| `reportUnusedImport` | 1 | 0 | 1 | 0 | 0 | 0 |
-| `reportMissingTypeArgument` | 1 | 0 | 1 | 0 | 0 | 0 |
+| `reportIncompatibleUnannotatedOverride` | 1 | 1 | 0 | 0 | 0 | 0 |
 
 ### Most ignores per file
 
 | File | Lines |
 | --- | --- |
-| `tests/utils/test_querysets.py` | 58 |
-| `examples/fakeshop/apps/library/serializers.py` | 30 |
-| `tests/rest_framework/test_resolvers.py` | 28 |
-| `tests/test_resource_policy.py` | 26 |
-| `tests/types/test_relay_interfaces.py` | 23 |
-| `tests/test_list_field.py` | 19 |
+| `tests/utils/test_querysets.py` | 52 |
+| `examples/fakeshop/apps/library/serializers.py` | 28 |
+| `tests/test_resource_policy.py` | 21 |
+| `tests/test_list_field.py` | 20 |
+| `tests/optimizer/test_hints.py` | 18 |
 | `tests/utils/test_relations.py` | 18 |
-| `tests/optimizer/test_extension.py` | 17 |
-| `tests/rest_framework/test_sets.py` | 16 |
-| `tests/test_schema.py` | 16 |
-
+| `tests/filters/test_inputs.py` | 16 |
+| `tests/filters/test_sets.py` | 16 |
+| `tests/optimizer/test_extension.py` | 16 |
+| `tests/rest_framework/test_resolvers.py` | 16 |
 
 <!-- LINK DEFINITIONS -->
 
