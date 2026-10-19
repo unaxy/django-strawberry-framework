@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 153 done, 120 to do.
+Progress: 154 done, 123 to do.
 
 ## Done
 
@@ -493,6 +493,12 @@ Progress: 153 done, 120 to do.
   `optimizer/plans.py::normalize_order_direction` first moves the extra ordering into `order_by` terms that compile the
   same SQL (a raw `table.column` term only under an audited `SQLCompiler._order_by_pairs` body), and
   `utils/querysets.py::selected_order` is the one reading of the compiler's order precedence
+- [x] 109. `PrimaryKeyRelatedField(source="pk")` over a relation primary key (`PatronProfile.patron`, the MTI parent
+  link `LendingDesk.venue_ptr`, DRF's auto-built `pk` field) built a create input every create failed with a masked
+  `TypeError` (Django's `pk` writes the key's column, as plain DRF also fails); `serializer_converter.py::written_model_field`
+  is now the one source-to-written-field reading (`write_source_key`, `_writes_primary_key`, the column guard), and
+  `_reject_relation_column_source` refuses the `pk` alias at schema build like the `attname` (remedy `source="patron"`);
+  scalar `source="pk"` fields build and write as before
 
 ## Outside review of the fixes
 
@@ -533,9 +539,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 109. `pid = PrimaryKeyRelatedField(source="pk")` over a relation primary key builds and every create raises a masked
-  TypeError: `backing_model_field` does not resolve `"pk"`, while `write_source_key` does (the update half closed with
-  item 107: an update input no longer carries a field that writes the primary key)
 - [ ] 111. A GenericForeignKey own-name `PrimaryKeyRelatedField(source="content_object")` raises `AttributeError` in
   `_require_relation_primary` (`related_model` is None) instead of `ConfigurationError`
 - [ ] 120. `prove_failability.py` has no SIGTERM / SIGHUP handler: a terminated run leaves its mutation in the tree and
@@ -659,11 +662,30 @@ tracker number are recorded there; open remainders and new defects are filed as 
   key's uniqueness is checked in `full_clean()` / `is_valid()`, then a plain `save()` runs UPDATE-then-INSERT, so a
   second create with the same key landing between the two updates the first row instead of failing;
   `save(force_insert=True)` closes it but reaches consumer `save()` overrides
+- [ ] 276. A `PrimaryKeyRelatedField` sourced on a non-relation column (`cat = PrimaryKeyRelatedField(queryset=Category.objects.all(),
+  source="id")` on `Item`, or `source="name"`) builds as that column's scalar (`cat: Int` / `String`) with no related
+  model, and DRF then writes the related instance into the scalar column (read, not run: a `TypeError` for `id`; for a
+  text column the instance's `str()` or a validation error); the model-backed scalar branch of
+  `serializer_converter.py::resolve_serializer_field` never checks that the serializer field is a relation
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 277. CHANGELOG entry for item 109: a `SerializerMutation` relation field bound to the `pk` alias of a relation primary
+  key (`PrimaryKeyRelatedField(source="pk")` over a one-to-one or multi-table parent-link key, or DRF's auto-built `pk`
+  field there) now raises `ConfigurationError` at schema build for a create input (0.0.14 built it and every create
+  answered a masked error); `source="<relation name>"` keeps the GraphQL name
+- [ ] 278. A `SerializerMutation` create through a declared writable multi-table parent link (`venue_ptr =
+  PrimaryKeyRelatedField(queryset=Venue.objects.all())`, or `source="venue_ptr"`) naming an existing parent row overwrites
+  that row's columns with the child's defaults and answers `errors: []` (plain DRF does the same; DRF never auto-builds a
+  writable parent link). The model flavor leaves a parent link out of create inputs; refuse it on the serializer flavor
+  too, or keep the declared serializer as the input source of truth? The attname / `pk`-alias remedies name
+  `source="venue_ptr"` today
+- [ ] 279. The column-spelled relation refusal (`attname` and `pk` alias) fires at schema build regardless of a consumer
+  `create()` / `update()` that handles the key itself (a nested child `pid = PrimaryKeyRelatedField(source="pk")` under an
+  `update()` that ignores it ran at 0.0.14); make the whole family override-aware, or keep refusing (spec-039: "at every
+  opted-in nesting depth")? Same question as item 108 for column-less sources
 - [ ] 26. A mutation class whose `__name__` raises, is not a `str`, is a format-hostile `str` subclass, or is not a
   GraphQL name: fail at declaration with a typed error, or keep? At HEAD the model and form flavors fail raw at declaration
   (`mutations/sets.py::DjangoMutation._validate_meta`, `forms/sets.py::DjangoModelFormMutation._validate_meta`,

@@ -48,8 +48,9 @@ suffix rule (``category`` / ``category_id`` -> ``categoryId``, ``category_pk`` -
 backing ``models.Field`` is resolved through the field's ``source`` (one-segment
 or equal to the declared name). A dotted ``source`` / ``source="*"`` on a
 model-column-converting field raises ``ConfigurationError``, and so does a relation
-bound to its forward relation's ``attname`` (``source="category_id"``, or a declared
-``category_id`` with no ``source``): the relation is bound by its name
+bound to its forward relation's column: its ``attname`` (``source="category_id"``, or a
+declared ``category_id`` with no ``source``), or the ``pk`` alias of a relation primary
+key (``source="pk"`` over ``PatronProfile.patron``). The relation is bound by its name
 (``category_id = PrimaryKeyRelatedField(source="category")``). The unified
 ``utils/inputs.py::InputFieldSpec`` records the reverse map - ``target_name`` is
 the DECLARED serializer field name (the ``validated_data`` key), with the extra
@@ -67,6 +68,7 @@ from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
+from django.db import models
 from rest_framework import serializers
 
 from django_strawberry_framework.exceptions import (
@@ -125,8 +127,6 @@ from .accessors import (
 if TYPE_CHECKING:
     from enum import Enum
     from typing import TypeAlias
-
-    from django.db import models
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.utils.typing import (
@@ -697,27 +697,35 @@ def _reject_relation_cardinality_mismatch(field: DRFField, column: ModelField) -
     )
 
 
-def _reject_relation_attname_source(field: DRFField, column: ModelField) -> None:
-    """Reject a serializer relation bound to its forward relation's ``attname``, not the relation.
+def _reject_relation_column_source(field: DRFField, column: ModelField) -> None:
+    """Reject a serializer relation bound to its forward relation's column, not the relation.
 
-    ``Options.get_field`` answers to a forward relation's ``attname`` as well as its name, so
-    ``cat = PrimaryKeyRelatedField(source="category_id")`` (or a declared ``category_id =
-    PrimaryKeyRelatedField(...)``, whose ``source`` defaults to its name) resolves the
-    ``category`` relation. But ``PrimaryKeyRelatedField.to_internal_value`` returns the related
-    INSTANCE, and DRF writes it under the source spelled: ``ModelSerializer.create()`` hands
-    ``category_id=<Category>`` to ``Model._default_manager.create()``, which Django's INSERT
-    path cannot convert (a ``TypeError`` on every create), and ``update()`` leaves the instance
-    in the column attribute. The relation input is a contract the runtime serializer can
-    only honor through the relation's name, so the attname spelling fails loud here; binding
-    ``source`` to the relation keeps the declared name, and with it the GraphQL input name.
+    ``written_model_field`` resolves a source to the model field it writes, so two spellings
+    other than the relation's name reach a forward relation: its ``attname``
+    (``cat = PrimaryKeyRelatedField(source="category_id")``, or a declared ``category_id =
+    PrimaryKeyRelatedField(...)``, whose ``source`` defaults to its name) and, for a relation
+    primary key, Django's ``pk`` alias (``Model.pk`` reads and writes ``_meta.pk.attname``).
+    But ``PrimaryKeyRelatedField.to_internal_value`` returns the related INSTANCE, and DRF
+    writes it under the source spelled: ``ModelSerializer.create()`` hands
+    ``category_id=<Category>`` (or ``pk=<Patron>``) to ``Model._default_manager.create()``,
+    which Django's INSERT path cannot convert (a ``TypeError`` on every create), and
+    ``update()`` leaves the instance in the column attribute. The relation input is a contract
+    the runtime serializer can only honor through the relation's name, so either column
+    spelling fails loud here; binding ``source`` to the relation keeps the declared name, and
+    with it the GraphQL input name.
     """
     attname: str | None = getattr(column, "attname", None)
     source = field.source or _bound_field_name(field)
-    if attname is None or attname == column.name or source != attname:
+    if attname is None or column.name in (attname, source):
         return
+    spelling = (
+        "the column (attname)"
+        if source == attname
+        else f"the primary-key alias of the column (attname {attname!r})"
+    )
     raise ConfigurationError(
-        f"Serializer relation field {field.field_name!r} binds source {source!r}, the column "
-        f"(attname) of relation {column.model.__name__}.{column.name}. A "
+        f"Serializer relation field {field.field_name!r} binds source {source!r}, {spelling} "
+        f"of relation {column.model.__name__}.{column.name}. A "
         "PrimaryKeyRelatedField validates to the related instance, which DRF writes under the "
         f"source as spelled: Django cannot insert an instance into {source!r} (every create "
         "fails) and an update leaves the instance in that attribute. Bind the relation "
@@ -825,6 +833,27 @@ def require_one_segment_source(field: DRFField, *, field_label: str, must_map_to
         )
 
 
+def written_model_field(model: type[models.Model], source: str) -> ConcreteField | None:
+    """Return the concrete model field a one-segment ``source`` writes, or ``None``.
+
+    DRF assigns ``validated_data[source]`` onto the instance by ``setattr`` (update) or as a
+    constructor kwarg (create), so every spelling Django accepts there names the field written:
+    the field's name, a forward relation's ``attname`` (``Options.get_field`` answers to both),
+    and ``pk``, the primary-key alias every model answers to (``Model.pk`` reads and writes
+    ``_meta.pk``, the parent link under multi-table inheritance). A source naming no concrete
+    field (a serializer-only key a custom ``create()`` reads, a reverse accessor) writes
+    nothing on the model and yields ``None``.
+    """
+    if source == "pk":
+        return model._meta.pk
+    try:
+        field = model._meta.get_field(source)
+    except FieldDoesNotExist:
+        return None
+    # A reverse relation (``ForeignObjectRel``) is no attribute DRF writes.
+    return field if isinstance(field, models.Field) else None
+
+
 def backing_model_field(model: type[models.Model] | None, field: DRFField) -> ModelField | None:
     """Return the backing ``models.Field`` for a serializer field via its ``source``, or ``None``.
 
@@ -837,7 +866,10 @@ def backing_model_field(model: type[models.Model] | None, field: DRFField) -> Mo
 
     A serializer with no model (a plain ``Serializer``), or a field whose
     one-segment source names no concrete column (a serializer-only extra field),
-    yields ``None`` - the caller routes it through the model-less path.
+    yields ``None`` - the caller routes it through the model-less path. So does the
+    ``pk`` alias, which is no ``Options.get_field`` name: a scalar over it keeps the
+    model-less scalar, and a PK relation over the alias of a relation primary key is
+    refused there (``_reject_relation_column_source`` against ``written_model_field``).
 
     **Dotted ``source`` / ``source="*"`` is rejected** for a model-column-converting
     field (spec-039 Decision 7 - the renamed-fields rule) via
@@ -1373,8 +1405,8 @@ def resolve_serializer_field(
             related_model = column.related_model
             _reject_relation_cardinality_mismatch(field, column)
             # A PK relation bound to the relation's ``attname`` validates to an instance DRF
-            # writes under the attname: refused, the relation is bound by its name.
-            _reject_relation_attname_source(field, column)
+            # writes under the column: refused, the relation is bound by its name.
+            _reject_relation_column_source(field, column)
             # The cardinality guard has aligned the serializer field's cardinality with the
             # model relation's collection shape, so the emitted kind follows the SERIALIZER
             # field's cardinality: a many field over a one_to_many rel (a reverse FK /
@@ -1420,6 +1452,11 @@ def resolve_serializer_field(
             annotation = Upload
             python_attr, graphql_name = serializer_field_graphql_name(field_name, kind)
         elif kind in (RELATION_SINGLE, RELATION_MULTI):
+            # ``pk`` is the one source ``Options.get_field`` misses that still writes a model
+            # field: over a relation primary key it spells the key's column.
+            written = written_model_field(model, field.source or field_name) if model else None
+            if written is not None:
+                _reject_relation_column_source(field, written)
             python_attr, annotation, related_model = serializer_only_relation_annotation(
                 field,
                 kind,

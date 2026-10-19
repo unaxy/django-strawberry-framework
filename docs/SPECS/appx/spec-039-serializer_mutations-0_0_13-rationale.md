@@ -200,10 +200,12 @@ the runtime serializer validates:
   mapping it would accept ids the serializer then misreads. A serializer relation whose
   cardinality disagrees with its model relation (`many=True` over a foreign key, or the
   inverse) is rejected, since the schema would emit one id where DRF validates a list. A
-  relation bound to its `attname` is rejected too: DRF writes the validated instance under
-  the column attribute, where Django's insert cannot convert it, so the input would promise a
-  create that can never succeed; the relation's name is the one spelling DRF writes
-  correctly.
+  relation bound to its `attname` is rejected too, and so is one bound to `pk` where the
+  primary key is a relation (Django's `pk` setter assigns the key's `attname`): DRF writes
+  the validated instance under the column attribute, where Django's insert cannot convert
+  it, so the input would promise a create that can never succeed; the relation's name is
+  the one spelling DRF writes correctly. Plain DRF fails the same way, and so does its own
+  auto-built `pk` field over a one-to-one primary key.
 - **Descriptor identity.** `rest_framework/inputs.py::SerializerInputShape` keys the cache
   on every value that shapes the emitted type (field specs, post-widening annotations,
   descriptions, effective requiredness, `optional_fields`). The `036` / `038` name-only
