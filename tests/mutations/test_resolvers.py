@@ -2,8 +2,9 @@
 
 Internals a live fakeshop request cannot express: custom ``relay.NodeID`` write
 locate (shipped ``CategoryType`` uses pk; changing it would retarget every
-Category GlobalID), ``_unprovided_exclude`` / ``coerce_lookup_id`` helpers,
-mocked ``IntegrityError`` race, ``async def get_queryset`` ``SyncMisuseError``,
+Category GlobalID), ``_unprovided_exclude`` / ``coerce_lookup_id`` helpers, a
+create over a multi-table child of a client-keyed parent and through a ``save()``
+override that saves twice, ``async def get_queryset`` ``SyncMisuseError``,
 async-row leak isolation, Relay M2M hide on a second ``Genre`` primary
 (shipped ``GenreType`` has no hide hook; a second primary cannot coexist in the
 live process), raw-pk M2M *update* (no shipped ``updateShelf``), unregistered
@@ -38,7 +39,7 @@ import inspect
 import itertools
 from collections.abc import Callable, Generator, Iterator
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeAlias, TypeVar
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -51,9 +52,10 @@ from asgiref.sync import sync_to_async
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError, connection, transaction
+from django.db import IntegrityError, connection, models, transaction
 from django.db.models import Model, QuerySet
 from django.db.models.signals import m2m_changed, pre_save
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from strawberry import relay
 from strawberry.types import ExecutionResult
@@ -81,11 +83,11 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework.resolvers import resolve_serializer_sync
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr, require_instance
+from django_strawberry_framework.utils._narrowing import pk_of, read_attr, require_instance
 from django_strawberry_framework.utils.errors import validation_error_to_field_errors
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import SyncMisuseError
-from django_strawberry_framework.utils.typing import object_result
+from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from django_strawberry_framework.utils.write_transaction import (
     managed_write_transaction,
     open_write_pipeline,
@@ -96,7 +98,14 @@ from tests._info import make_info, unread_info
 from tests.optimizer import _link_models
 
 if TYPE_CHECKING:
+    from django.db.models.expressions import Combinable
+
     from django_strawberry_framework.mutations.resolvers import _ModelDecoded
+
+    # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
+    # out because the checker runs without the django-stubs mypy plugin that would infer them.
+    _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
+    _Text: TypeAlias = models.TextField[str | Combinable, str]
 
 
 @pytest.fixture(autouse=True)
@@ -489,30 +498,227 @@ def test_coerce_lookup_id_rejects_non_globalid(raw_id: str | int) -> None:
     assert error.field == "id"
 
 
-@pytest.mark.django_db
-def test_integrity_error_race_fallback_via_mocked_save() -> None:
-    """A save-time ``IntegrityError`` race maps to the envelope, not a 500."""
-    schema, (CategoryT, _ItemT) = _build_item_schema()
-    cat = product_models.Category.objects.create(name=_category_name())
-    with mock.patch.object(
-        product_models.Item,
-        "save",
-        side_effect=IntegrityError("races validate_constraints"),
-    ):
-        res = schema.execute_sync(
-            _CREATE,
-            variable_values={
-                "d": {"name": "Racer", "categoryId": global_id_for(CategoryT, saved_pk(cat))},
-            },
-        )
+class KeyedVenue(models.Model):
+    """A row keyed by the client's ``code``, the multi-table parent of ``KeyedDesk``."""
+
+    code: _Text = models.TextField(primary_key=True)
+    name: _Text = models.TextField(blank=True, default="")
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "tests_mutations_keyed_venue"
+
+
+class KeyedDesk(KeyedVenue):
+    """A multi-table child of the client-keyed ``KeyedVenue``; its key is the parent link."""
+
+    seats: _Int = models.IntegerField(default=0)
+
+    # basedpyright: Django's ModelBase pops a concrete model's Meta (only an abstract model keeps
+    # one), so KeyedVenue has no Meta at run time for this one to subclass
+    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+        app_label = "products"
+        managed = False
+        db_table = "tests_mutations_keyed_desk"
+
+
+class TwiceSavedRow(models.Model):
+    """A row Django keys, whose ``save()`` override saves a second time to fill ``slug``."""
+
+    slug: _Text = models.TextField(blank=True, default="")
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "tests_mutations_twice_saved_row"
+
+    @override
+    def save(self, *args: object, **kwargs: object) -> None:
+        call_forwarded(super().save, args, kwargs)
+        self.slug = f"saved-{pk_of(self)}"
+        call_forwarded(super().save, args, kwargs)
+
+
+class TwiceSavedKeyedRow(models.Model):
+    """``TwiceSavedRow`` keyed by the client's ``code`` instead."""
+
+    code: _Text = models.TextField(primary_key=True)
+    slug: _Text = models.TextField(blank=True, default="")
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "tests_mutations_twice_saved_keyed_row"
+
+    @override
+    def save(self, *args: object, **kwargs: object) -> None:
+        call_forwarded(super().save, args, kwargs)
+        self.slug = f"saved-{pk_of(self)}"
+        call_forwarded(super().save, args, kwargs)
+
+
+@contextlib.contextmanager
+def _tables(*model_classes: type[Model]) -> Generator[None, None, None]:
+    """Give ``managed = False`` synthetic models real tables for the test, then drop them."""
+    with connection.schema_editor() as schema_editor:
+        for model_class in model_classes:
+            schema_editor.create_model(model_class)
+    try:
+        yield
+    finally:
+        with connection.schema_editor() as schema_editor:
+            for model_class in reversed(model_classes):
+                schema_editor.delete_model(model_class)
+
+
+def _create_row(model: type[Model], fields: tuple[str, ...], data: dict[str, object]) -> object:
+    """Run one model-flavor ``createRow`` of ``fields`` over ``model``; answer its ``errors``."""
+    type(
+        f"{model.__name__}T",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": model, "fields": fields, "primary": True})},
+    )
+    create = type(
+        "CreateRow",
+        (DjangoMutation,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": model,
+                    "fields": fields,
+                    "operation": "create",
+                    "permission_classes": [_AllowAll],
+                },
+            ),
+        },
+    )
+
+    @strawberry.type
+    class Mutation:
+        create_row = DjangoMutationField(create)
+
+    finalize_django_types()
+    res = _schema(Mutation).execute_sync(
+        f"mutation($d: {model.__name__}Input!){{ createRow(data: $d){{ "
+        "errors{ field messages codes path } } }",
+        variable_values={"d": data},
+    )
     assert res.errors is None, res.errors
-    assert res.data is not None
-    payload = _json_object(res.data, "createItem")
-    assert payload["node"] is None
-    assert _json_at(payload, "errors", 0, "field") == NON_FIELD_ERROR_KEY
-    # The catch is broad (``except IntegrityError``), so the message is the honest
-    # superset, not an over-claimed "uniqueness".
-    assert _json_at(payload, "errors", 0, "messages") == ["A database constraint was violated."]
+    return _json_at(res.data, "createRow", "errors")
+
+
+#: The envelope a create answers when its row's key is taken at the INSERT.
+_CONSTRAINT_ERRORS = [
+    {
+        "field": NON_FIELD_ERROR_KEY,
+        "messages": ["A database constraint was violated."],
+        "codes": ["constraint"],
+        "path": [],
+    },
+]
+
+_COMPETING_VENUE_DISPATCH_UID = "tests.mutations.competing_keyed_venue"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("key", ["free", "raced"])
+def test_child_create_inserts_its_client_keyed_parent_row(key: str) -> None:
+    """A multi-table child create INSERTs its client-keyed parent row, never UPDATEs one.
+
+    ``KeyedDesk`` inherits ``KeyedVenue``, keyed by the client's ``code``. A free code
+    INSERTs both rows without trying an UPDATE on either table. A venue a competing
+    writer saves under that code after the uniqueness check is the ``constraint``
+    envelope, rolled back with the competing venue, never overwritten and adopted as the
+    desk's parent. No fakeshop model inherits a client-keyed parent.
+    """
+    seen: list[object] = []
+
+    def _insert_competing_venue(instance: Model, **_kwargs: object) -> None:
+        seen.append(read_attr(instance, "code"))
+        _ = KeyedVenue._base_manager.bulk_create([KeyedVenue(code="K1", name="Competing")])
+
+    with _tables(KeyedVenue, KeyedDesk), CaptureQueriesContext(connection) as queries:
+        if key == "raced":
+            pre_save.connect(
+                _insert_competing_venue,
+                sender=KeyedDesk,
+                weak=False,
+                dispatch_uid=_COMPETING_VENUE_DISPATCH_UID,
+            )
+        try:
+            errors = _create_row(
+                KeyedDesk,
+                ("code", "name", "seats"),
+                {"code": "K1", "name": "Desk", "seats": 3},
+            )
+        finally:
+            _ = pre_save.disconnect(sender=KeyedDesk, dispatch_uid=_COMPETING_VENUE_DISPATCH_UID)
+        venues = list(KeyedVenue._base_manager.values_list("code", "name"))
+        desks = list(KeyedDesk._base_manager.values_list("code", "seats"))
+    updates = [
+        query["sql"] for query in queries.captured_queries if query["sql"].startswith("UPDATE")
+    ]
+
+    assert updates == []
+    if key == "raced":
+        assert errors == _CONSTRAINT_ERRORS
+        assert seen == ["K1"]
+        assert (venues, desks) == ([], [])
+    else:
+        assert errors == []
+        assert (venues, desks) == ([("K1", "Desk")], [("K1", 3)])
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "model",
+        "fields",
+        "data",
+        "errors",
+        "rows",
+    ),
+    [
+        (
+            TwiceSavedRow,
+            ("slug",),
+            {"slug": ""},
+            [],
+            [(1, "saved-1")],
+        ),
+        (
+            TwiceSavedKeyedRow,
+            ("code", "slug"),
+            {"code": "K1"},
+            _CONSTRAINT_ERRORS,
+            [],
+        ),
+    ],
+    ids=["assigned_key", "client_key"],
+)
+def test_create_through_a_save_override_that_saves_twice(
+    model: type[Model],
+    fields: tuple[str, ...],
+    data: dict[str, object],
+    errors: list[dict[str, object]],
+    rows: list[tuple[object, str]],
+) -> None:
+    """An override saving twice creates on a key Django assigns, not on a client's key.
+
+    On a key Django assigns the create takes a plain ``save()``, so the override's second
+    save updates the row its first inserted. On a client-assigned key the create INSERTs
+    and the override forwards ``force_insert`` to both saves, so the second is the
+    ``constraint`` envelope with nothing written, as under ``QuerySet.create``.
+    """
+    with _tables(model):
+        answered = _create_row(model, fields, data)
+        stored = list(model._base_manager.values_list("pk", "slug"))
+
+    assert answered == errors
+    assert stored == rows
 
 
 @pytest.mark.django_db

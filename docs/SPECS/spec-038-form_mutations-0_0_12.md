@@ -1456,7 +1456,17 @@ write flavor rides.
    `CAMELCASE_ERRORS` casing, because an input name here is not always the camel-cased
    form field name. Returns a null-object payload.
 5. **Write**: for a `ModelForm`, `form.save()` (commit=True; M2M written via the
-   internal `save_m2m()`) returns the saved instance. For a plain `Form`,
+   internal `save_m2m()`) returns the saved instance. A create whose row Django would
+   write UPDATE-then-INSERT (a client-assigned key,
+   `django_strawberry_framework/mutations/resolvers.py::adds_by_update_first`) splits the
+   save the way Django's admin does: the form's `save()` is called with `commit=False`,
+   and the package saves the row it returned (an INSERT through
+   `django_strawberry_framework/mutations/resolvers.py::save_new_row`, whose
+   `force_insert` the model's `save()` receives, per Django's override contract of
+   passing keyword arguments through) and calls `form.save_m2m()`, so work a
+   `ModelForm.save()` override does only when committing does not run there; a row
+   committed under that key between `is_valid()` and the save is the `IntegrityError`
+   envelope below, never overwritten. For a plain `Form`,
    `perform_mutate(self, form, info)` runs the form's side effect per the pinned
    plain-form contract
    ([Decision 6](#decision-6--base-class-strategy-djangomodelformmutation-rides-the-djangomutation-base-the-plain-form-is-the-model-less-sibling)):
@@ -1554,8 +1564,9 @@ argument. `bind_form_mutations()` is likewise one call to the shared
 [`mutations/operations.py`][mutations-operations] so no flavor re-spells it. A
 `ModelForm`'s
 [`form.save()`][upstream-forms-mutation] with `commit=True` writes its M2M rows
-(`save_m2m()` runs inside `save()`), so step 5 stays a single `form.save()` inside the
-one `transaction.atomic()` — no separate M2M step.
+(`save_m2m()` runs inside `save()`), so step 5 is a single `form.save()` inside the
+one `transaction.atomic()` with no separate M2M step, except the client-assigned-key
+create, whose admin-style split calls `form.save_m2m()` itself inside the same block.
 
 The async path runs the whole sync body in one
 `sync_to_async(thread_sensitive=True)` call, and a sync pipeline meeting an
@@ -1869,6 +1880,11 @@ Rationale companion: [Decision 14][rationale-d14].
   constraint returns the null-object + `FieldError` envelope via the `036`
   `save_or_field_errors` mapper — never a top-level `GraphQLError`
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
+  On a `ModelForm` create over a client-assigned key the form's `save()` is called with
+  `commit=False` and the package saves the row it returned and calls `save_m2m()`, as
+  Django's admin does, so work an override does only when committing does not run
+  there; the model's `save()` receives `force_insert`, and a row committed under that
+  key after `is_valid()` is this envelope, never overwritten.
 - **Write-time blank non-text choice column.** A `ModelForm` over a `blank=True,
   null=False` choice column of any non-text type (e.g. integer, decimal, date) cleans
   an explicit `null` (or an omission with no column default) to `""`, which only
@@ -1964,7 +1980,12 @@ behavior reachable through `/graphql/`, package tests own internals.
   **Write-time `IntegrityError`** — a valid
   `ModelForm.save()` that hits a constraint the form's validation excluded
   (`createDefaultCategoryItemViaForm`) surfaces the **`FieldError` envelope**, not a
-  top-level GraphQL error. **Write-time consumer `ValidationError`** — `Item.save()`
+  top-level GraphQL error. **Client-assigned key create** — `createPatronProfileViaForm`
+  over `PatronProfileGenreForm` creates a free patron's profile with no `UPDATE` of the
+  table, a taken patron is the `unique` error on `patronId`, and a profile a competing
+  writer saves after `is_valid()` (a `pre_save` receiver inserting it) is the `"__all__"`
+  `constraint` envelope with nothing written
+  (`examples/fakeshop/test_query/test_library_api.py::test_form_create_patron_profile_names_its_patron_by_the_key_over_http`). **Write-time consumer `ValidationError`** — `Item.save()`
   refusing `SAVE_REJECTED_ITEM_NAME` on `createItemViaForm` / `updateItemViaForm`
   returns the `name`-keyed envelope with nothing written (the create also over the
   async view), and the kanban `setCardStatus` illegal transition (a `pre_save`

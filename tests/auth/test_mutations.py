@@ -60,10 +60,13 @@ from django.contrib.sessions.backends.base import SessionBase, UpdateError
 from django.contrib.sessions.backends.db import SessionStore as DBSessionStore
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.contrib.sessions.models import Session
+from django.db import connection
 from django.db import models as djmodels
+from django.db.models.signals import pre_save
 from django.dispatch import Signal
 from django.http import HttpRequest, HttpResponse
 from django.test import RequestFactory, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import re_path
 from django.utils.functional import SimpleLazyObject
 from strawberry import relay
@@ -1308,6 +1311,119 @@ def test_derive_register_fields_accepts_a_username_that_is_the_primary_key() -> 
             app_label = _unique_app_label()
 
     assert derive_register_fields(KeyedLoginUser) == ("email", "password")
+
+
+class ClientKeyedUser(AbstractBaseUser):
+    """A user model keyed by its ``USERNAME_FIELD``, so registration names the row's key."""
+
+    username: _Char = djmodels.CharField(max_length=150, primary_key=True)
+
+    USERNAME_FIELD = "username"
+    REQUIRED_FIELDS = []
+
+    class Meta(AbstractBaseUser.Meta):
+        app_label = "products"
+        managed = False
+        db_table = "tests_auth_client_keyed_user"
+
+
+_COMPETING_ACCOUNT_DISPATCH_UID = "tests.auth.competing_client_keyed_account"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("key", ["free", "raced"])
+def test_register_over_a_client_keyed_user_model_never_overwrites_an_account(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    """Registering under a username that keys the user row INSERTs it, never UPDATEs one.
+
+    A free username creates the account without trying an UPDATE. An account a competing
+    writer saves under that username after the uniqueness check is the ``constraint``
+    envelope, rolled back with the competing account, whose password hash is never
+    replaced by the registrant's. Fakeshop's ``AUTH_USER_MODEL`` is Django's ``auth.User``,
+    which Django keys itself.
+    """
+    monkeypatch.setattr(auth_mutations, "get_user_model", lambda: ClientKeyedUser)
+    type(
+        "ClientKeyedUserT",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": ClientKeyedUser, "fields": ("username",), "primary": True},
+            ),
+        },
+    )
+
+    @strawberry.type
+    class Mutation:
+        register = register_mutation()
+
+    schema = _finalize_schema(Mutation)
+    seen: list[object] = []
+
+    def _insert_competing_account(instance: ClientKeyedUser, **_kwargs: object) -> None:
+        seen.append(instance.username)
+        _ = ClientKeyedUser._base_manager.bulk_create(
+            [ClientKeyedUser(username="alice", password="competing-hash")],
+        )
+
+    with connection.schema_editor() as schema_editor:
+        schema_editor.create_model(ClientKeyedUser)
+    try:
+        _ = ClientKeyedUser._base_manager.bulk_create(
+            [ClientKeyedUser(username="bob", password="kept-hash")],
+        )
+        if key == "raced":
+            pre_save.connect(
+                _insert_competing_account,
+                sender=ClientKeyedUser,
+                weak=False,
+                dispatch_uid=_COMPETING_ACCOUNT_DISPATCH_UID,
+            )
+        try:
+            with CaptureQueriesContext(connection) as queries:
+                res = schema.execute_sync(
+                    "mutation($d: RegisterInput!){ register(data: $d){ "
+                    "errors{ field messages codes path } } }",
+                    variable_values={"d": {"username": "alice", "password": "Zx9!kQ7#vLm2pR"}},
+                    context_value=_session_request(),
+                )
+        finally:
+            _ = pre_save.disconnect(
+                sender=ClientKeyedUser,
+                dispatch_uid=_COMPETING_ACCOUNT_DISPATCH_UID,
+            )
+        accounts = dict(ClientKeyedUser._base_manager.values_list("username", "password"))
+    finally:
+        with connection.schema_editor() as schema_editor:
+            schema_editor.delete_model(ClientKeyedUser)
+    updates = [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].startswith('UPDATE "tests_auth_client_keyed_user"')
+    ]
+
+    assert res.errors is None, res.errors
+    assert updates == []
+    if key == "raced":
+        assert json_at(res.data, "register", "errors") == [
+            {
+                "field": "__all__",
+                "messages": ["A database constraint was violated."],
+                "codes": ["constraint"],
+                "path": [],
+            },
+        ]
+        assert seen == ["alice"]
+        assert accounts == {"bob": "kept-hash"}
+    else:
+        assert json_at(res.data, "register", "errors") == []
+        assert sorted(accounts) == ["alice", "bob"]
+        assert accounts["bob"] == "kept-hash"
+        assert ClientKeyedUser(password=accounts["alice"]).check_password("Zx9!kQ7#vLm2pR")
 
 
 def test_derive_register_fields_rejects_privilege_fields() -> None:

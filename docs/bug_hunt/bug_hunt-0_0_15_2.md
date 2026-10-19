@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 155 done, 124 to do.
+Progress: 156 done, 125 to do.
 
 ## Done
 
@@ -505,6 +505,14 @@ Progress: 155 done, 124 to do.
   no target model now types from the field's `queryset.model` as a serializer-only relation, so the shape plain DRF writes
   works (visibility applies to the decoded id; `many=True` and non-PK fields stay refused); the fakeshop library
   serializers share a `ModelSerializerBase` carrying the one `Meta` suppression
+- [x] 274. A create naming a client-assigned primary key with no `default` / `db_default` (model `DjangoMutation`,
+  register over a user model keyed by a client-named pk, `DjangoModelFormMutation`) saved through Django's
+  UPDATE-then-INSERT, so a row committed concurrently under that key was overwritten and reported as created (a
+  competing account's password hash replaced; an MTI parent row overwritten): fixed,
+  `mutations/resolvers.py::save_new_row` saves with `force_insert=(Model,)` exactly when `adds_by_update_first` says
+  Django would try an UPDATE, so the race is the `__all__` `constraint` envelope; the ModelForm flavor splits such a
+  create as Django's admin does (`form.save(commit=False)`, the forced save, `save_m2m()`); auto, default and
+  `db_default` keys and every update are unchanged; the serializer flavor already inserted through `objects.create`
 
 ## Outside review of the fixes
 
@@ -661,21 +669,25 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 272. A `get_queryset` hook returning `qs.extra(order_by=[<TextChoices or StrEnum member>])` is refused by the
   visibility seal (`utils/querysets.py::_raw_sql_sequence_defect` admits only exact `str` terms) with a
   `ConfigurationError`, while Django compiles the member as the field name it equals
-- [ ] 274. A create that takes a client-assigned primary key (a `DjangoMutation` create over `library.Edition` or
-  `PatronProfile`, a `ModelForm` or serializer create naming the key) can overwrite a row inserted concurrently: the
-  key's uniqueness is checked in `full_clean()` / `is_valid()`, then a plain `save()` runs UPDATE-then-INSERT, so a
-  second create with the same key landing between the two updates the first row instead of failing;
-  `save(force_insert=True)` closes it but reaches consumer `save()` overrides
 - [ ] 276. A `PrimaryKeyRelatedField` sourced on a non-relation column (`cat = PrimaryKeyRelatedField(queryset=Category.objects.all(),
   source="id")` on `Item`, or `source="name"`) builds as that column's scalar (`cat: Int` / `String`) with no related
   model, and DRF then writes the related instance into the scalar column (read, not run: a `TypeError` for `id`; for a
   text column the instance's `str()` or a validation error); the model-backed scalar branch of
   `serializer_converter.py::resolve_serializer_field` never checks that the serializer field is a relation
+- [ ] 282. A `DjangoModelFormMutation` update whose located row a concurrent transaction deletes before `form.save()`
+  re-inserts it and reports success (`form.save()` runs UPDATE, 0 rows, then INSERT), while the model flavor saves with
+  `force_update=True` and the serializer witness refuses it; the GLOSSARY `DjangoMutation` concurrency paragraph's
+  "never a silent success or a resurrecting insert" names direct model updates only (seen probing item 274, simulated
+  with a `pre_save` delete; needs `Meta.select_for_update = False` on PostgreSQL / MySQL)
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 283. CHANGELOG entry for item 274: a create naming a client-assigned primary key (model, register, ModelForm)
+  saves with `force_insert`, so a row committed concurrently under that key is the `__all__` `constraint` error instead
+  of being overwritten; a model `save()` override receives `force_insert` there, and a ModelForm `save()` override is
+  called with `commit=False` (work it does only when committing does not run), as under Django's admin
 - [ ] 280. CHANGELOG entry for item 111: a `SerializerMutation` field `PrimaryKeyRelatedField(queryset=...)` over a
   `GenericForeignKey` now builds and writes the queryset's model (0.0.14 failed the schema build)
 - [ ] 281. A `GenericForeignKey` written beside its carriers: a serializer with writable `content_object` and writable

@@ -49,7 +49,9 @@ and the load-bearing invariants this module owns:
   so a ``UniqueConstraint`` duplicate is caught here as a ``ValidationError``
   before ``save()``; a multi-field constraint keys to the ``"__all__"``
   sentinel. A concurrent-race ``IntegrityError`` at ``save()``
-  maps to the same envelope as a documented best-effort fallback.
+  maps to the same envelope as a documented best-effort fallback: a create
+  INSERTs (``save_new_row``), so a row committed under a client-assigned key
+  between the check and the save is that envelope, never overwritten.
 - **A save-time ``ValidationError`` feeds the same envelope**: a consumer
   ``Model.save()`` / ``delete()`` override, a ``pre_save`` / ``post_save`` /
   ``m2m_changed`` / ``pre_delete`` signal receiver, or a plain form's
@@ -84,7 +86,7 @@ from typing import TYPE_CHECKING, cast
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import ProtectedError, RestrictedError
+from django.db.models import Model, ProtectedError, RestrictedError
 from django.utils import timezone
 from graphql import GraphQLError
 
@@ -1083,9 +1085,11 @@ def _model_write_step(
     ``full_clean`` errors are keyed through. Returns the saved instance (the skeleton's
     ``refetch_optimized`` re-fetches it by pk under the G2 plan) or a
     ``StepFailure`` on a validation / write failure. ``instance`` (the located
-    update row, ``None`` for create) selects the save mode: a create saves the
-    ``decoded`` target normally, an update saves it with ``force_update=True``
-    (the 0.0.14 disappearing-row concurrency contract via ``forced_save_or_field_errors``).
+    update row, ``None`` for create) selects the save mode: a create INSERTs the
+    ``decoded`` target (``save_new_row``: a concurrently committed row under a
+    client-assigned key is the ``constraint`` envelope, never overwritten), an update
+    saves it with ``force_update=True`` (the 0.0.14 disappearing-row concurrency
+    contract via ``forced_save_or_field_errors``).
 
     ``decoded`` is the THREE-tuple contract exactly. ``_model_decode_step``
     returns a four-tuple when the mutation's specs carry the spec-040 D6
@@ -1112,7 +1116,10 @@ def _model_write_step(
     # under the pipeline's phased alias guard.
     with pipeline_write_phase():
         if instance is None:
-            write_error = save_or_field_errors(target.save, error_key_map=error_key_map)
+            write_error = save_or_field_errors(
+                lambda: save_new_row(target),
+                error_key_map=error_key_map,
+            )
         else:
             # A direct model UPDATE saves with ``force_update=True``: a
             # located row a concurrent transaction deleted would otherwise be
@@ -1128,6 +1135,58 @@ def _model_write_step(
     if write_error is not None:
         return StepFailure(write_error)
     return target
+
+
+# Every table a create's row spans, its multi-table parents included: the
+# ``Model.save(force_insert=...)`` tuple form (``True`` covers the child table only).
+_NEW_ROW_TABLES = (Model,)
+
+
+def save_new_row(row: models.Model) -> None:
+    """Persist a create's freshly built ``row``, never as an UPDATE of an existing row.
+
+    When ``adds_by_update_first(row)`` holds, a plain ``Model.save()`` runs
+    UPDATE-then-INSERT, so a row a concurrent transaction committed under the same
+    key between the create's uniqueness check and this save would be overwritten
+    and reported as created. That row saves with ``force_insert``, the INSERT a
+    create means (as ``QuerySet.create`` and DRF's ``ModelSerializer.create`` do):
+    the competing row is an ``IntegrityError``, which ``save_or_field_errors`` returns
+    as the ``"__all__"`` ``constraint`` envelope with the write rolled back. The
+    ``(Model,)`` tuple extends the INSERT to every multi-table parent, which
+    ``force_insert=True`` leaves on UPDATE-then-INSERT. A consumer ``save()``
+    override receives the keyword and passes it through, per Django's documented
+    override contract (an update hands it ``force_update=True`` the same way). Any
+    other row takes a plain ``save()``, so an override that saves twice (the second
+    save updating the row the first inserted) keeps working on a key Django assigns
+    or defaults; on a client-assigned key the second save is that same
+    ``constraint`` envelope, as under ``QuerySet.create``.
+    """
+    if adds_by_update_first(row):
+        row.save(force_insert=_NEW_ROW_TABLES)
+    else:
+        row.save()
+
+
+def adds_by_update_first(row: models.Model) -> bool:
+    """Return whether saving the added ``row`` would try an UPDATE on one of its tables.
+
+    ``row`` is a create's freshly built, unsaved row. Django's documented
+    UPDATE-versus-INSERT rule for a row being added, read per table the row spans
+    (its own and every multi-table parent's) the way ``Model._save_table`` applies
+    it: the key is set and not every key column has a ``default`` / ``db_default`` -
+    a client-assigned text key or a ``OneToOneField(primary_key=True)``. A
+    multi-table parent link is skipped: it takes its parent's key in
+    ``Model._save_parents``, so the parent table answers for it.
+    """
+    for model in (type(row), *type(row)._meta.all_parents):
+        pk_fields = model._meta.pk_fields
+        if any(getattr(field.remote_field, "parent_link", False) for field in pk_fields):
+            continue
+        if all(read_attr(row, field.attname) is not None for field in pk_fields) and not all(
+            field.has_default() or field.has_db_default() for field in pk_fields
+        ):
+            return True
+    return False
 
 
 def forced_save_or_field_errors(
@@ -1401,7 +1460,7 @@ def save_or_field_errors(
 
     Wraps a zero-arg callable rather than a fixed ``instance.save()`` so ONE
     save-time catch serves every save path: the ``036`` model pipeline passes
-    ``instance.save`` and its M2M assignment; the form pipeline passes
+    a create's ``save_new_row`` and its M2M assignment; the form pipeline passes
     ``form.save`` (the ``ModelForm`` flavor) / a bound ``perform_mutate`` (the
     plain flavor, spec-038 Decision 8 step 5); the serializer passes its
     savepointed ``serializer.save()`` closure. Two failures map, and nothing
