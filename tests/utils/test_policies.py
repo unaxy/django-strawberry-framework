@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from typing import NoReturn
 
 import pytest
+from django.utils.functional import SimpleLazyObject
 from typing_extensions import override
 
 from django_strawberry_framework.error_policy import resolve_error_policy
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.resource_policy import resolve_resource_policy
+from django_strawberry_framework.resource_policy import ResourcePolicy, resolve_resource_policy
 from django_strawberry_framework.utils.policies import resolve_policy
 from tests._idioms import ClaimsClass, ClassReadRaises
 
@@ -93,6 +94,33 @@ def test_an_instance_through_the_setting_slot_is_taken_on_the_same_terms() -> No
     assert resolved is not policy
 
 
+@pytest.mark.parametrize("slot", ["explicit", "setting"])
+def test_a_django_lazy_instance_is_read_as_the_instance_it_wraps(slot: str) -> None:
+    """A ``SimpleLazyObject`` policy in either slot is canonicalized from the policy it wraps.
+
+    The proxy passes ``isinstance`` only by forwarding ``__class__``; the
+    resolver reads the wrapped object and recognises that by its real class.
+    """
+    policy = _ProbePolicy(width=3)
+    lazy = SimpleLazyObject(lambda: policy)
+    # basedpyright: the lazy proxy is the input under test; _resolve types the explicit
+    # parameter as resolve_policy does: a policy, a mapping or None
+    resolved = _resolve(lazy) if slot == "explicit" else _resolve(None, lazy)  # pyright: ignore[reportArgumentType]
+    assert resolved == policy
+    assert resolved is not policy
+    assert type(resolved) is _ProbePolicy
+
+
+def test_a_lazy_resource_policy_argument_supplies_its_bounds() -> None:
+    """``resolve_resource_policy`` takes the bounds of the ``ResourcePolicy`` a lazy proxy wraps."""
+    lazy = SimpleLazyObject(lambda: ResourcePolicy(max_depth=5))
+    # basedpyright: the lazy proxy is the input under test; resolve_resource_policy types the
+    # parameter as a policy, a mapping or None
+    resolved = resolve_resource_policy(lazy)  # pyright: ignore[reportArgumentType]
+    assert type(resolved) is ResourcePolicy
+    assert resolved.max_depth == 5
+
+
 def test_the_setting_supplies_overrides_when_the_argument_is_absent() -> None:
     assert _resolve(None, {"width": 4}) == _ProbePolicy(width=4)
 
@@ -102,10 +130,14 @@ def test_an_explicit_mapping_outranks_the_setting() -> None:
 
 
 def test_a_non_mapping_override_is_rejected_with_the_derived_article() -> None:
-    with pytest.raises(ConfigurationError, match="must be a _ProbePolicy or a mapping"):
+    with pytest.raises(ConfigurationError) as excinfo:
         # basedpyright: the int policy is the hostile input under test; _resolve types the
         # parameter as resolve_policy does: a policy, a mapping or None
         _resolve(12)  # pyright: ignore[reportArgumentType]
+    assert str(excinfo.value) == (
+        "The probe policy must be a _ProbePolicy or a mapping of bound names to values; "
+        "got int 12."
+    )
 
 
 def test_unknown_keys_are_rejected_naming_the_valid_vocabulary() -> None:
@@ -114,7 +146,7 @@ def test_unknown_keys_are_rejected_naming_the_valid_vocabulary() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Hostile override mappings: one materialization, typed containment (both flavors)
+# Override mappings: one materialization; the mapping's own errors propagate
 # ---------------------------------------------------------------------------
 
 
@@ -137,20 +169,6 @@ class _DivergentMapping(Mapping[str, object]):
     @override
     def __len__(self) -> int:
         return len(self._current)
-
-
-class _UnhashableKeyMapping(Mapping[list[str], object]):
-    @override
-    def __iter__(self) -> Iterator[list[str]]:
-        return iter((["k"],))
-
-    @override
-    def __getitem__(self, key: list[str]) -> int:
-        return 1
-
-    @override
-    def __len__(self) -> int:
-        return 1
 
 
 class _RaisingIterMapping(Mapping[str, object]):
@@ -196,60 +214,12 @@ def test_a_divergent_one_shot_mapping_resolves_from_one_consumed_pass(
     [row.values[0] for row in _FLAVORS],
     ids=["error-policy", "resource-policy"],
 )
-def test_an_unhashable_key_is_typed_rejected_not_a_bare_typeerror(
+def test_a_raising_iterator_propagates_its_own_error(
     resolver: Callable[[Mapping[str, object]], object],
 ) -> None:
-    with pytest.raises(ConfigurationError, match=r"must be strings|iteration failed"):
-        # basedpyright: the mapping with an unhashable key is the hostile input under test; each
-        # resolver types the parameter as Mapping[str, object]
-        resolver(_UnhashableKeyMapping())  # pyright: ignore[reportArgumentType]
-
-
-@pytest.mark.parametrize(
-    "resolver",
-    [row.values[0] for row in _FLAVORS],
-    ids=["error-policy", "resource-policy"],
-)
-def test_a_raising_iterator_is_typed_rejected_not_leaked(
-    resolver: Callable[[Mapping[str, object]], object],
-) -> None:
-    with pytest.raises(ConfigurationError, match="iteration failed"):
+    """The override mapping's iteration is deployment code: its exception propagates."""
+    with pytest.raises(RuntimeError, match="hostile __iter__"):
         resolver(_RaisingIterMapping())
-
-
-class _TypedRaisingMapping(Mapping[str, object]):
-    """A Mapping whose own materialization read fails with the typed error."""
-
-    @override
-    def __iter__(self) -> NoReturn:
-        raise ConfigurationError("hostile keys read")
-
-    @override
-    def __getitem__(self, key: str) -> int:
-        return 1
-
-    @override
-    def __len__(self) -> int:
-        return 1
-
-
-@pytest.mark.parametrize(
-    "resolver",
-    [row.values[0] for row in _FLAVORS],
-    ids=["error-policy", "resource-policy"],
-)
-def test_a_configuration_error_from_materialization_propagates_unchanged(
-    resolver: Callable[[Mapping[str, object]], object],
-) -> None:
-    """A ``ConfigurationError`` escaping ``dict(overrides)`` is re-raised verbatim.
-
-    Materialization is a consumption point like any other: a typed rejection
-    from the mapping's own reads is the honest verdict and must reach the
-    caller as-is, not degraded to the generic "iteration failed" wording that
-    the raw-failure arm reserves for untyped exceptions.
-    """
-    with pytest.raises(ConfigurationError, match="hostile keys read"):
-        resolver(_TypedRaisingMapping())
 
 
 @pytest.mark.parametrize(
@@ -260,12 +230,10 @@ def test_a_configuration_error_from_materialization_propagates_unchanged(
 def test_a_hashable_non_string_key_is_typed_rejected_at_the_key_guard(
     resolver: Callable[[Mapping[str, object]], object],
 ) -> None:
-    """A hashable non-string override key still reaches the key-type guard.
+    """A hashable non-string override key reaches the key-type guard.
 
-    An unhashable key dies inside ``dict()`` materialization (the "iteration
-    failed" arm); a HASHABLE non-string key materializes fine and must reach
-    the ``must be strings`` rejection, not a bare ``TypeError`` from set
-    membership or ``sorted()`` over mixed keys.
+    It materializes fine and must reach the ``must be strings`` rejection, not a
+    bare ``TypeError`` from ``sorted()`` over mixed keys.
     """
     with pytest.raises(ConfigurationError, match="must be strings"):
         # basedpyright: the int-keyed mapping is the hostile input under test; each resolver types
@@ -349,3 +317,18 @@ def test_comparison_hostile_unknown_keys_are_named_in_the_typed_rejection(slot: 
             {_ComparisonHostileKey("bbb"): 1, _ComparisonHostileKey("aaa"): 2},
         )
     assert str(excinfo.value) == "Unknown probe-policy bound(s): aaa, bbb. Valid bounds: width."
+
+
+# ---------------------------------------------------------------------------
+# Key names: read by real class, copied to exact strings
+# ---------------------------------------------------------------------------
+
+
+class _NameStr(str):
+    """A ``str`` subclass bound name (a ``StrEnum``-style key)."""
+
+
+def test_a_str_subclass_key_resolves_by_its_string_value() -> None:
+    """Subclass keys are copied to exact strings, so a valid name names its bound."""
+    resolved = _resolve({_NameStr("width"): 4})
+    assert resolved.width == 4

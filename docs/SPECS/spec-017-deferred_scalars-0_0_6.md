@@ -48,7 +48,7 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
       - [ ] `test_bigint_rejects_python_bool` — both `True` and `False`
       - [ ] `test_bigint_rejects_python_float` — `1.9`, `0.0`, `-1.0` (silent-truncation guard: `int(1.9) == 1` would otherwise slip through)
       - [ ] `test_bigint_rejects_none` — unit-level test. Strawberry strips `null` before calling `parse_value` for nullable input positions, so this code path is reachable only through direct calls. Tested for defense in depth so the parser's `None` rejection is not removed as "unreachable".
-      - [ ] `test_bigint_rejection_messages_survive_hostile_values` — the `ValueError` text is built from `_safe_arg_repr` / `_safe_type_name`, so an unprintable value cannot replace the parser's error
+      - [ ] `test_bigint_rejection_messages_survive_hostile_values` — the rejected value's kind is read through `utils/truth.py::kind`, so a hostile metaclass `__name__` hook never runs and the message names the real class; a hostile `str` subclass parses through its base slot
     - Public-export smoke:
       - [ ] `test_bigint_is_importable_from_top_level` — `from django_strawberry_framework import BigInt`; assert `BigInt is not None`. **Type-shape assertions intentionally avoided**: Strawberry's scalar wrapper types are undocumented internals; the schema-execution tests catch any "BigInt isn't actually usable as a scalar" regression with stronger signal.
     - Warning-free import:
@@ -169,29 +169,36 @@ _BIGINT_STRING_PATTERN = re.compile(r"^(0|-?[1-9][0-9]*)$")
 
 
 def _parse_bigint(value: object) -> int:
-    if isinstance(value, bool):
-        raise ValueError("BigInt does not accept boolean values")
-    if isinstance(value, int):
+    if type(value) is int:
         return int.__int__(value)
-    if isinstance(value, str):
-        plain_value = str.__str__(value)
-        if not _BIGINT_STRING_PATTERN.fullmatch(plain_value):
-            raise ValueError(
-                f"BigInt requires a plain ASCII decimal integer string "
-                f"(optional leading minus for non-zero, no leading zeroes, "
-                f"no underscores, no plus sign, no Unicode digits); got "
-                f"{_safe_arg_repr(value)}",
-            )
-        return int(plain_value)
-    raise ValueError(f"BigInt cannot parse {_safe_type_name(value)}")
+    if truth.is_instance(value, bool):
+        raise ValueError("BigInt does not accept boolean values")
+    if truth.is_instance(value, int):
+        return int.__int__(value)
+    if type(value) is str:
+        plain_value = value
+    elif truth.is_instance(value, str):
+        plain_value = truth.text(value)
+    else:
+        raise ValueError(f"BigInt cannot parse {truth.kind(value)}")
+    if not _BIGINT_STRING_PATTERN.fullmatch(plain_value):
+        raise ValueError(
+            f"BigInt requires a plain ASCII decimal integer string "
+            f"(optional leading minus for non-zero, no leading zeroes, "
+            f"no underscores, no plus sign, no Unicode digits); got "
+            f"{truth.render(value)}",
+        )
+    return int(plain_value)
 
 
 def _serialize_bigint(value: object) -> str:
-    if isinstance(value, bool):
-        raise TypeError(f"BigInt cannot serialize bool value {value!r}")
-    if isinstance(value, int):
+    if type(value) is int:
         return int.__repr__(value)
-    raise TypeError(f"BigInt cannot serialize {_safe_type_name(value)}")
+    if truth.is_instance(value, bool):
+        raise TypeError(f"BigInt cannot serialize bool value {value!r}")
+    if truth.is_instance(value, int):
+        return int.__repr__(value)
+    raise TypeError(f"BigInt cannot serialize {truth.kind(value)}")
 
 
 BigInt = NewType("BigInt", int)
@@ -209,7 +216,7 @@ _PACKAGE_SCALAR_MAP: dict[object, ScalarDefinition] = {
 
 `BigInt` is a **bare** `NewType`: passing a class or `NewType` to `strawberry.scalar(...)` emits Strawberry's `Passing a class to strawberry.scalar() is deprecated` warning, so the `ScalarDefinition` is built from the `name=`-only overload and bound to the `NewType` through `_PACKAGE_SCALAR_MAP`, which `strawberry_config()` merges into a consumer's schema config ([Decision 6](#decision-6--bigint-public-export-status-and-registration-contract)).
 
-**Subclass normalization.** The parser returns `int.__int__(value)` and matches `str.__str__(value)`, and the serializer emits `int.__repr__(value)`, so an `int` / `str` subclass's own `__int__` / `__str__` / `__repr__` can neither alter the accepted value nor replace the scalar's error contract. Error text names a value through `exceptions.py`'s `_safe_arg_repr` / `_safe_type_name`, so an unprintable value cannot replace the `ValueError` either.
+**Subclass normalization.** The parser returns `int.__int__(value)` and matches a `str` subclass's base-slot copy (`utils/truth.py::text`), and the serializer emits `int.__repr__(value)`, so an `int` / `str` subclass's own `__int__` / `__str__` / `__repr__` can neither alter the accepted value nor replace the scalar's error contract. Error text names a rejected value's kind through `utils/truth.py::kind`, which reads the interpreter's type slot, so a hostile metaclass `__name__` hook never runs; a rejected string is spelled through `utils/truth.py::render`.
 **Why `BigInt` exists at all:** GraphQL's `Int` is a signed 32-bit scalar. Executing a query that returns an `int`-annotated field whose value exceeds `2**31 - 1` yields a `GraphQLError` with message containing `Int cannot represent non 32-bit signed integer value`.
 
 **The parser must reject rather than coerce.** `bool` is rejected before the `int` check because `bool` subclasses `int`; `float` is rejected outright because `int(1.9) == 1` truncates silently. The regex is deliberately narrower than `int(str)`, so `"1_000"`, `"+1"`, `"01"`, `"-0"`, and Unicode-digit strings raise instead of parsing.
@@ -232,29 +239,30 @@ Reject nested arrays and outer `choices` at type creation with `ConfigurationErr
 # in convert_scalar, before the scalar_for_field SCALAR_MAP walk.
 # ``effective_null`` is the tri-state ``force_nullable`` override collapsed to
 # one boolean; see the nullability-override note below.
-if _ARRAY_FIELD_CLS is not None and isinstance(field, _ARRAY_FIELD_CLS):
-    if isinstance(field.base_field, _ARRAY_FIELD_CLS):
+element = array_element_field(field)
+if element is not None:
+    if array_element_field(element) is not None:
         raise ConfigurationError(
             f"Nested ArrayField on {_field_label(field)} is not supported.",
         )
-    if _field_has_choices(field):
+    if field.choices:
         raise ConfigurationError(
             f"ArrayField on {_field_label(field)} declares choices on the outer "
             f"field; outer-array choices are ambiguous at the GraphQL boundary. Declare choices "
             f"on base_field for element-level enum, or use FilterSet.",
         )
-    inner = convert_scalar(field.base_field, type_name)
+    inner = convert_scalar(element, type_name)
     result = GenericAlias(list, (inner,))
     return result | None if effective_null else result
 ```
 
-`_field_label(field)` and `_field_has_choices(field)` are the module's guarded metadata readers: they render `Model.field` for diagnostics and read the choices flag without letting a hostile field descriptor's exception escape as something other than a `ConfigurationError`. Interpolating `field.model.__name__` / `field.name` directly, or testing `field.choices` as a bare truth value, reintroduces that escape.
+`array_element_field(field)` is the module's one `ArrayField` test: it returns the `base_field` of an `ArrayField` (matched through `utils/truth.py::is_instance`, so a field class cannot claim to be one) and `None` for any other column or when `django.contrib.postgres` is unavailable. `_field_label(field)` renders `Model.field` for diagnostics from truthful reads of the bound model class and the field name; an unbound field reads `<unbound>`.
 
-**Choice handling on `base_field` is inherited automatically:** the recursive `convert_scalar(field.base_field, type_name)` call re-enters and hits the existing choices branch, producing `list[<TypeName><FieldName>Enum]`. The outer-`choices` rejection only fires for the outer `ArrayField` itself.
+**Choice handling on `base_field` is inherited automatically:** the recursive `convert_scalar(element, type_name)` call on the `base_field` re-enters and hits the existing choices branch, producing `list[<TypeName><FieldName>Enum]`. The outer-`choices` rejection only fires for the outer `ArrayField` itself.
 
 `null=True` semantics: outer `null=True` → `list[T] | None`; inner `null=True` → `list[T | None]`; both → `list[T | None] | None`.
 
-**Nullability override.** `convert_scalar` takes a keyword-only `force_nullable: bool | None = None` tri-state (the `Meta.nullable_overrides` / `Meta.required_overrides` seam). It is collapsed once, at the top of the function, into `effective_null = field.null if force_nullable is None else force_nullable` (a field whose `null` read raises surfaces as `ConfigurationError`), and every outer widening site in this Decision and in [Decision 5](#decision-5--hstorefield-wire-shape) reads `effective_null`. The recursive `base_field` call above is deliberately left `force_nullable`-**unset**, so the outer override never reaches the inner element: inner nullability continues to follow `base_field.null`.
+**Nullability override.** `convert_scalar` takes a keyword-only `force_nullable: bool | None = None` tri-state (the `Meta.nullable_overrides` / `Meta.required_overrides` seam). It is collapsed once, at the top of the function, into `effective_null = field.null if force_nullable is None else force_nullable`, and every outer widening site in this Decision and in [Decision 5](#decision-5--hstorefield-wire-shape) reads `effective_null`. The recursive `base_field` call above is deliberately left `force_nullable`-**unset**, so the outer override never reaches the inner element: inner nullability continues to follow `base_field.null`.
 
 ### Decision 3 — `JSONField` target type
 
@@ -285,8 +293,8 @@ Map `HStoreField` → `strawberry.scalars.JSON`. Strawberry rejects `dict[str, s
 
 ```python
 # in convert_scalar, after the ArrayField branch, before the scalar_for_field walk:
-if _HSTORE_FIELD_CLS is not None and isinstance(field, _HSTORE_FIELD_CLS):
-    if _field_has_choices(field):
+if _HSTORE_FIELD_CLS is not None and truth.is_instance(field, _HSTORE_FIELD_CLS):
+    if field.choices:
         raise ConfigurationError(
             f"HStoreField on {_field_label(field)} declares choices; "
             f"HStore stores a dict[str, str | None] with no enum-able shape at the "

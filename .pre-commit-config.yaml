@@ -94,6 +94,17 @@ repos:
         pass_filenames: false
         require_serial: true
 
+      - id: truthful-reads
+        name: truthful identity reads (no dunder lookups, no swallowed BaseException)
+        entry: uv run python scripts/check_truthful_reads.py --check
+        language: system
+        # `pass_filenames: false`: the gate scans the configured package paths
+        # and applies the `[tool.truthful_reads]` exemptions itself, so a staged
+        # package file, the gate itself or its pyproject table only triggers the run.
+        pass_filenames: false
+        files: ^(django_strawberry_framework/.*\.py|scripts/check_truthful_reads\.py|pyproject\.toml)$
+        require_serial: true
+
       - id: check-kanban-anchors
         name: kanban anchors collision-free (card vs card, card vs glossary, render ids)
         entry: uv run python scripts/check_kanban_anchors.py

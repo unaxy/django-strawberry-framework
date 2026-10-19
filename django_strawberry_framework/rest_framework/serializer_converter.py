@@ -61,21 +61,19 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import types
+import typing
 import uuid
 from collections.abc import Callable
 from types import GenericAlias
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import strawberry
-from django.core.exceptions import FieldDoesNotExist
+from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import models
 from rest_framework import serializers
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import (
     annotate_queryset_relation,
     model_column_write_annotation,
@@ -91,6 +89,7 @@ from django_strawberry_framework.types.converters import (
     convert_scalar,
     scalar_for_field,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import enum_value
 from django_strawberry_framework.utils.converters import (
     convert_with_mro,
@@ -270,7 +269,7 @@ _CONVERT_MULTIPLE_CHOICE: SerializerFieldConverter = make_kind_converter(
 
 def _is_field_class(value: object) -> TypeGuard[type[DRFField]]:
     """Whether ``value`` is a ``serializers.Field`` subclass."""
-    return isinstance(value, type) and issubclass(value, serializers.Field)
+    return truth.is_subclass(value, serializers.Field)
 
 
 def _registered_field_class(field_class: object, converter: object) -> type[DRFField]:
@@ -284,12 +283,13 @@ def _registered_field_class(field_class: object, converter: object) -> type[DRFF
     if not _is_field_class(field_class):
         raise ConfigurationError(
             "register_serializer_field_converter: field_class must be a serializers.Field "
-            f"subclass; got {field_class!r}.",
+            f"subclass; got {truth.render(field_class)}.",
         )
     if not callable(converter):
         raise ConfigurationError(
-            f"register_serializer_field_converter: converter for {field_class.__name__!r} must be "
-            f"a callable(field) -> SerializerFieldConversion; got {converter!r}.",
+            f"register_serializer_field_converter: converter for {truth.name(field_class)!r} "
+            f"must be a callable(field) -> SerializerFieldConversion; got "
+            f"{truth.render(converter)}.",
         )
     return field_class
 
@@ -319,7 +319,7 @@ def register_serializer_field_converter(
     field_class = _registered_field_class(field_class, converter)
     if field_class in _SERIALIZER_FIELD_CONVERTERS and not override:
         raise ConfigurationError(
-            f"A serializer-field converter is already registered for {field_class.__name__!r}; "
+            f"A serializer-field converter is already registered for {truth.name(field_class)!r}; "
             "pass override=True to replace it, or register a distinct subclass.",
         )
     _SERIALIZER_FIELD_CONVERTERS[field_class] = converter
@@ -335,12 +335,7 @@ def register_serializer_field_converter(
 _SERIALIZER_CHOICE_ENUMS: dict[str, type[Enum]] = {}
 
 
-def clear_serializer_choice_enums() -> None:
-    """Reset the serializer-only choice-enum cache for a fresh build (the registered clear)."""
-    _SERIALIZER_CHOICE_ENUMS.clear()
-
-
-register_subsystem_clear(clear_serializer_choice_enums, owner="rest_framework.choice_enums")
+register_subsystem_clear(_SERIALIZER_CHOICE_ENUMS.clear, owner="rest_framework.choice_enums")
 
 
 def is_nested_serializer_field(field: DRFField) -> TypeGuard[DRFBaseSerializer]:
@@ -397,10 +392,11 @@ def _reject_nested_serializer(field: DRFField) -> None:
     if isinstance(field, serializers.BaseSerializer):
         raise ConfigurationError(
             f"Serializer field {field.field_name!r} is a nested "
-            f"{type(field).__name__}; nested serializer writes are opt-in only. Declare it in the "
-            f"mutation's Meta.nested_fields ({{{field.field_name!r}: NestedSerializerConfig(...)}}) - "
-            "the serializer must implement create()/update() for the nested write - drop it via "
-            "Meta.fields / Meta.exclude, or model the relation with a PrimaryKeyRelatedField.",
+            f"{truth.name(type(field))}; nested serializer writes are opt-in only. Declare it in "
+            f"the mutation's Meta.nested_fields ({{{field.field_name!r}: "
+            "NestedSerializerConfig(...)}) - the serializer must implement create()/update() "
+            "for the nested write - drop it via Meta.fields / Meta.exclude, or model the "
+            "relation with a PrimaryKeyRelatedField.",
         )
 
 
@@ -425,7 +421,7 @@ def _reject_unsupported_relation_field(field: DRFField) -> None:
         if not isinstance(child, serializers.PrimaryKeyRelatedField):
             raise ConfigurationError(
                 f"Serializer field {field_name!r} is a ManyRelatedField wrapping a "
-                f"{type(child).__name__}; only PrimaryKeyRelatedField(many=True) is supported "
+                f"{truth.name(type(child))}; only PrimaryKeyRelatedField(many=True) is supported "
                 "(the relation input decodes to a primary key). A slug / URL / custom related "
                 "field has no pk-based input shape - drop it via Meta.fields / Meta.exclude, or "
                 "model the relation with PrimaryKeyRelatedField(many=True).",
@@ -433,7 +429,7 @@ def _reject_unsupported_relation_field(field: DRFField) -> None:
         return
     if not isinstance(field, serializers.PrimaryKeyRelatedField):
         raise ConfigurationError(
-            f"Serializer relation field {field_name!r} is a {type(field).__name__}; only "
+            f"Serializer relation field {field_name!r} is a {truth.name(type(field))}; only "
             "PrimaryKeyRelatedField is supported (the relation input decodes to a primary key). "
             "A slug / URL / custom related field has no pk-based input shape - drop it via "
             "Meta.fields / Meta.exclude, or use a PrimaryKeyRelatedField.",
@@ -446,7 +442,8 @@ def _list_child_conversion(field: serializers.ListField) -> SerializerFieldConve
     A ``ListField(child=IntegerField())`` becomes ``list[int]`` by recursing the
     child through the SAME scalar registry; a child with ``allow_null=True`` makes the
     element nullable (``list[int | None]``, SDL ``[Int]``), since DRF validates each
-    element through the child. A relation / nested-serializer child
+    element through the child, so a ``None`` element DRF accepts is not rejected at
+    GraphQL coercion. A relation / nested-serializer child
     raises ``ConfigurationError`` (the spec-039 contract: only a scalar
     child is supported - a list of relation ids is expressed as
     ``PrimaryKeyRelatedField(many=True)``, not ``ListField(child=relation)``).
@@ -454,7 +451,7 @@ def _list_child_conversion(field: serializers.ListField) -> SerializerFieldConve
     field_name = getattr(field, "field_name", None)
     # drf-stubs: ``ListField.child: Field``.
     child: DRFField | None = getattr(field, "child", None)
-    if child is None or type(child).__name__ == "_UnvalidatedField":
+    if child is None or truth.name(type(child)) == "_UnvalidatedField":
         raise ConfigurationError(
             f"Serializer field {field_name!r} is a ListField with no explicit child field; "
             "a GraphQL list input requires a typed scalar child "
@@ -464,14 +461,14 @@ def _list_child_conversion(field: serializers.ListField) -> SerializerFieldConve
     if isinstance(child, (serializers.RelatedField, serializers.ManyRelatedField)):
         raise ConfigurationError(
             f"Serializer field {field_name!r} is a ListField whose child is a "
-            f"{type(child).__name__} (a relation); only a scalar child is supported. "
+            f"{truth.name(type(child))} (a relation); only a scalar child is supported. "
             "Express a list of relation ids with PrimaryKeyRelatedField(many=True).",
         )
     child_conversion = convert_serializer_field(child)
     if child_conversion.kind != SCALAR or child_conversion.annotation is None:
         raise ConfigurationError(
             f"Serializer field {field_name!r} is a ListField whose child "
-            f"{type(child).__name__} does not resolve to a scalar annotation; only a "
+            f"{truth.name(type(child))} does not resolve to a scalar annotation; only a "
             "scalar child is supported.",
         )
     return SerializerFieldConversion(
@@ -510,26 +507,18 @@ def _finish_serializer_conversion(
     """
     if isinstance(result, SerializerFieldConversion):
         return result
-    try:
-        conversion = finish_field_conversion(result, field)
-    except ConfigurationError:
-        raise
-    except Exception as exc:
+    # The registered converter is consumer code: what it raises propagates.
+    conversion = finish_field_conversion(result, field)
+    if not truth.is_instance(conversion, SerializerFieldConversion):
         raise ConfigurationError(
-            f"Registered serializer-field converter for {_safe_type_name(field)!r} on field "
-            f"{_safe_arg_repr(getattr(field, 'field_name', None))} raised "
-            f"{_safe_type_name(exc)} while converting the field.",
-        ) from exc
-    if not isinstance(conversion, SerializerFieldConversion):
-        raise ConfigurationError(
-            f"Registered serializer-field converter for {_safe_type_name(field)!r} on field "
-            f"{_safe_arg_repr(getattr(field, 'field_name', None))} must return "
-            f"SerializerFieldConversion; got {_safe_type_name(conversion)}.",
+            f"Registered serializer-field converter for {truth.name(type(field))!r} on field "
+            f"{truth.render(getattr(field, 'field_name', None))} must return "
+            f"SerializerFieldConversion; got {truth.kind(conversion)}.",
         )
     if conversion.kind != SCALAR:
         raise ConfigurationError(
-            f"Registered serializer-field converter for {_safe_type_name(field)!r} on field "
-            f"{_safe_arg_repr(getattr(field, 'field_name', None))} must return a scalar "
+            f"Registered serializer-field converter for {truth.name(type(field))!r} on field "
+            f"{truth.render(getattr(field, 'field_name', None))} must return a scalar "
             f"conversion; got kind {conversion.kind!r}.",
         )
     return conversion
@@ -648,13 +637,10 @@ def _unsupported_serializer_field(field: DRFField) -> ConfigurationError:
     ``ConfigurationError``). The no-catch-all contract - raise, never silently
     coerce to ``String`` - lives in this wording.
     """
-    try:
-        field_name = repr(getattr(field, "field_name", None))
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        field_name = "<unavailable>"
     return ConfigurationError(
-        f"Unsupported serializer field type {_safe_type_name(field)!r} on serializer "
-        f"field {field_name}. convert_serializer_field has no mapping for it "
+        f"Unsupported serializer field type {truth.name(type(field))!r} on serializer "
+        f"field {truth.render(getattr(field, 'field_name', None))}. convert_serializer_field has "
+        "no mapping for it "
         "and no supported ancestor; register a supported base class, or drop it via "
         "Meta.fields / Meta.exclude.",
     )
@@ -690,7 +676,7 @@ def _reject_relation_cardinality_mismatch(field: DRFField, column: ModelField) -
     actual = "many=True" if serializer_many else "a single related object"
     raise ConfigurationError(
         f"Serializer relation field {field.field_name!r} has a cardinality mismatch: it declares "
-        f"{actual}, but its backing model relation {column.model.__name__}.{column.name} "
+        f"{actual}, but its backing model relation {truth.name(column.model)}.{column.name} "
         f"requires {expected}. Align the "
         "serializer relation's many= shape with the model relation, or map the field to a "
         "serializer-only target with an explicit queryset.",
@@ -725,7 +711,7 @@ def _reject_relation_column_source(field: DRFField, column: ModelField) -> None:
     )
     raise ConfigurationError(
         f"Serializer relation field {field.field_name!r} binds source {source!r}, {spelling} "
-        f"of relation {column.model.__name__}.{column.name}. A "
+        f"of relation {truth.name(column.model)}.{column.name}. A "
         "PrimaryKeyRelatedField validates to the related instance, which DRF writes under the "
         f"source as spelled: Django cannot insert an instance into {source!r} (every create "
         "fails) and an update leaves the instance in that attribute. Bind the relation "
@@ -774,41 +760,31 @@ def serializer_field_description(field: DRFField) -> str | None:
     undescribed). Graphene-django threads only ``help_text``; this surfaces the DRF
     validation summary too without changing coercion semantics.
     """
-    try:
-        parts: list[str] = []
-        help_text: object = getattr(field, "help_text", None)
-        if help_text:
-            parts.append(str(help_text))
-        facts: list[str] = []
-        for attr in (
-            "min_length",
-            "max_length",
-            "min_value",
-            "max_value",
-        ):
-            value: object = getattr(field, attr, None)
-            if value is not None:
-                facts.append(f"{attr}={value}")
-        # A ``ListField``'s choice child carries the per-element ``allow_blank`` the
-        # generated enum's ``BLANK`` member reflects, so it is described like a
-        # ``MultipleChoiceField``'s own.
-        blank_source: DRFField = serializer_choice_source(field) or field
-        if getattr(blank_source, "allow_blank", False):
-            facts.append("allow_blank=true")
-        if getattr(field, "allow_empty", None) is False:
-            facts.append("allow_empty=false")
-        if facts:
-            parts.append("Constraints: " + ", ".join(facts) + ".")
-        return " ".join(parts) if parts else None
-    except BaseException as exc:
-        try:
-            field_name = _safe_arg_repr(getattr(field, "field_name", None))
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            field_name = "<unavailable>"
-        raise ConfigurationError(
-            f"Serializer field {field_name} has metadata that cannot be rendered as a GraphQL "
-            "description.",
-        ) from exc
+    parts: list[str] = []
+    help_text: object = getattr(field, "help_text", None)
+    if help_text:
+        parts.append(str(help_text))
+    facts: list[str] = []
+    for attr in (
+        "min_length",
+        "max_length",
+        "min_value",
+        "max_value",
+    ):
+        value: object = getattr(field, attr, None)
+        if value is not None:
+            facts.append(f"{attr}={value}")
+    # A ``ListField``'s choice child carries the per-element ``allow_blank`` the
+    # generated enum's ``BLANK`` member reflects, so it is described like a
+    # ``MultipleChoiceField``'s own.
+    blank_source: DRFField = serializer_choice_source(field) or field
+    if getattr(blank_source, "allow_blank", False):
+        facts.append("allow_blank=true")
+    if getattr(field, "allow_empty", None) is False:
+        facts.append("allow_empty=false")
+    if facts:
+        parts.append("Constraints: " + ", ".join(facts) + ".")
+    return " ".join(parts) if parts else None
 
 
 def require_one_segment_source(field: DRFField, *, field_label: str, must_map_to: str) -> None:
@@ -819,7 +795,8 @@ def require_one_segment_source(field: DRFField, *, field_label: str, must_map_to
     attribute, so every schema-time path that needs one segment (model-column
     resolve and opted-in nested writes) routes through this helper - the one
     detection of the fail-loud one-segment source policy (spec-039 Decision 7 /
-    ). ``field_label`` / ``must_map_to`` keep the diagnostic nouns at
+    Improvements #"Explicit opt-in nested serializer input support").
+    ``field_label`` / ``must_map_to`` keep the diagnostic nouns at
     each call site (column vs nested write) without a second predicate copy.
     """
     # drf-stubs: ``Field.source_attrs: list[str]``, set by ``bind``.
@@ -852,6 +829,27 @@ def written_model_field(model: type[models.Model], source: str) -> ConcreteField
         return None
     # A reverse relation (``ForeignObjectRel``) is no attribute DRF writes.
     return field if isinstance(field, models.Field) else None
+
+
+def normalize_serializer_source(field: DRFField, field_name: str) -> str | None:
+    """Return a serializer field's normalized ``source``-axis value, or ``None``.
+
+    A falsy ``source``, or one equal to the DECLARED field name (the DRF bind
+    default), records ``None`` - keeps the reverse map terse and form-symmetric
+    (form/model specs never set the axis). Otherwise records the one-segment
+    source. The comparison basis is the spec's declared name: the walk's
+    effective-dict key, which ``rest_framework/sets.py::_validate_schema_field_map``
+    requires to equal the bound ``field.field_name`` on every build path.
+
+    This is only the RECORDING rule (falsy/equal folds to ``None``). The
+    effective-source READS - ``backing_model_field``'s resolve, the fingerprint's
+    raw ``field.source``, and the ``spec.source or target`` consumers - answer
+    which attribute to use or detect and never fold; they join this rule only if
+    a consumer needs the default-vs-renamed distinction the fold erases. The
+    dotted/star REJECTION stays in ``require_one_segment_source`` (a raising
+    guard with call-site nouns, not a pure fold).
+    """
+    return field.source if (field.source and field.source != field_name) else None
 
 
 def backing_model_field(model: type[models.Model] | None, field: DRFField) -> ModelField | None:
@@ -910,7 +908,7 @@ def _require_relation_primary(
     if primary is None:
         raise ConfigurationError(
             f"Serializer relation field {field_name!r} targets model "
-            f"{related_model.__name__!r}, which has no registered primary DjangoType. "
+            f"{truth.name(related_model)!r}, which has no registered primary DjangoType. "
             "A serializer relation needs a typed target to decode its id; register a "
             "primary DjangoType for the target model, or drop the field via "
             "Meta.fields / Meta.exclude.",
@@ -983,8 +981,19 @@ def _is_consumer_declared(field: DRFField) -> bool:
 
 
 def _scalar_name(scalar: object) -> str:
-    """Return a readable name for a scalar annotation (for the conflict diagnostic)."""
-    return getattr(scalar, "__name__", None) or repr(scalar)
+    """Return a readable name for a scalar annotation (for the conflict diagnostic).
+
+    A parameterized builtin generic (the ``list[<child>]`` a ``ListField`` converts
+    to) is named by its origin class, so ``list[str]`` reads ``list``.
+    """
+    if truth.is_type(scalar):
+        return truth.name(scalar)
+    if truth.is_exact(scalar, types.GenericAlias):
+        return truth.name(typing.get_origin(scalar))
+    declared = truth.static_attr(scalar, "__name__")
+    if truth.is_instance(declared, str) and truth.text(declared):
+        return truth.text(declared)
+    return truth.render(scalar)
 
 
 def _stored_choice_value(column: ConcreteField, value: object) -> object:
@@ -992,11 +1001,12 @@ def _stored_choice_value(column: ConcreteField, value: object) -> object:
 
     A serializer choice value is saved through the column and read back as the column's Python
     type (``"1"`` over an ``IntegerField`` reads as ``1``); a value the column cannot coerce
-    (``""`` over an ``IntegerField``) is returned unchanged, so it matches no member.
+    (``""`` over an ``IntegerField``: ``to_python`` raises Django's ``ValidationError``) is
+    returned unchanged, so it matches no member. Anything else ``to_python`` raises propagates.
     """
     try:
         return to_python_value(column, value)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+    except ValidationError:
         return value
 
 
@@ -1081,7 +1091,7 @@ def _reject_choice_values_the_column_does_not_list(field: DRFField, column: Conc
     field_fixes: list[str] = []
     missing_declared = [value for value in missing if value in declared]
     if missing_declared:
-        rendered = ", ".join(_safe_arg_repr(value) for value in missing_declared)
+        rendered = ", ".join(truth.render(value) for value in missing_declared)
         field_fixes.append(f"remove {rendered} from the serializer field's choices")
     if choice.allow_blank and "" in missing:
         field_fixes.append("drop allow_blank from the serializer field")
@@ -1091,12 +1101,12 @@ def _reject_choice_values_the_column_does_not_list(field: DRFField, column: Conc
         remedy = f"Set blank=True on the column, or {field_remedy}."
     else:
         remedy = f"{field_remedy[0].upper()}{field_remedy[1:]}."
-    serializer_name = _safe_type_name(getattr(field, "parent", None))
-    rendered_missing = ", ".join(_safe_arg_repr(value) for value in missing)
+    serializer_name = truth.kind(getattr(field, "parent", None))
+    rendered_missing = ", ".join(truth.render(value) for value in missing)
     them = "it" if len(missing) == 1 else "them"
     raise ConfigurationError(
         f"Serializer {serializer_name} field {field.field_name!r} admits {rendered_missing} "
-        f"over the choice column {column.model.__name__}.{column.name}, which does not list "
+        f"over the choice column {truth.name(column.model)}.{column.name}, which does not list "
         f"{them}. {remedy}",
     )
 
@@ -1121,10 +1131,10 @@ def _multiple_choice_element_column(field: DRFField, column: ConcreteField) -> C
         return element
     if not column.choices:
         return column
-    serializer_name = _safe_type_name(getattr(field, "parent", None))
+    serializer_name = truth.kind(getattr(field, "parent", None))
     raise ConfigurationError(
-        f"Serializer {serializer_name} field {field.field_name!r} is a {type(field).__name__} "
-        f"over the single-value choice column {column.model.__name__}.{column.name}: it writes "
+        f"Serializer {serializer_name} field {field.field_name!r} is a {truth.name(type(field))} "
+        f"over the single-value choice column {truth.name(column.model)}.{column.name}: it writes "
         "a list, which is not one of the column's choices. Declare a ChoiceField to write one "
         "value, or store many values in an ArrayField column whose base_field declares the "
         "choices.",
@@ -1151,10 +1161,10 @@ def _reject_read_enum_over_grouped_column(field: DRFField, column: ConcreteField
     declared = (
         "ChoiceField" if element is None else "MultipleChoiceField or ListField(child=ChoiceField)"
     )
-    serializer_name = _safe_type_name(getattr(field, "parent", None))
+    serializer_name = truth.kind(getattr(field, "parent", None))
     raise ConfigurationError(
         f"Serializer {serializer_name} field {field.field_name!r} takes the read enum of the "
-        f"choice column {column.model.__name__}.{column.name}, which uses Django's grouped-choices "
+        f"choice column {truth.name(column.model)}.{column.name}, which uses Django's grouped-choices "
         "form (nested tuples for option groups). Only the flat (value, label) form has a read "
         "enum; flatten the choices source, split into separate fields, or declare a flat "
         f"{declared} on the serializer.",
@@ -1221,7 +1231,7 @@ def _model_backed_scalar_annotation(
         raise ConfigurationError(
             f"Serializer field {field.field_name!r} (source {column.name!r}) declares a GraphQL "
             f"scalar {_scalar_name(serializer_scalar)} that disagrees with the backing model "
-            f"column {column.model.__name__}.{column.name}'s scalar {_scalar_name(model_scalar)}. "
+            f"column {truth.name(column.model)}.{column.name}'s scalar {_scalar_name(model_scalar)}. "
             "A consumer-declared serializer field is an explicit contract; the framework will not "
             "silently pick the model column. Align the serializer field's type with the column, "
             "declare it as a serializer-only field (no backing column), or drop it via "
@@ -1380,7 +1390,7 @@ def resolve_serializer_field(
     column = backing_model_field(model, field)
     # ``source`` axis: the resolved one-segment source (``None`` when it equals
     # the declared name - keeps the reverse map terse and form-symmetric).
-    source = field.source if (field.source and field.source != field_name) else None
+    source = normalize_serializer_source(field, field_name)
     # The relation target model recorded on the spec (``None`` for a non-relation),
     # so the decode reads it off the bind-stashed reverse map instead of
     # re-discovering the serializer field set per request.
@@ -1463,7 +1473,7 @@ def resolve_serializer_field(
             )
             graphql_name = graphql_camel_name(python_attr)
         else:
-            # #6: a serializer-only ``ChoiceField`` / ``MultipleChoiceField`` /
+            # A serializer-only ``ChoiceField`` / ``MultipleChoiceField`` /
             # ``ListField(child=ChoiceField)`` is upgraded to a generated GraphQL enum here
             # (the build site owns ``type_name``); every other scalar keeps its converter
             # annotation.

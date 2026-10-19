@@ -32,9 +32,10 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from apps.library.models import Book, Issue, Patron, Periodical
+from apps.library.models import Book, Genre, Issue, Patron, Periodical
 from apps.scalars.models import ScalarSpecimen
 from django.conf import settings as django_settings
+from django.core.exceptions import FieldDoesNotExist
 from django.db.models import Field, Model, Prefetch, QuerySet
 from django.db.models.lookups import Lookup
 from django.db.models.sql.where import WhereNode
@@ -150,6 +151,18 @@ def test_cursor_columns_for_resolves_pk_alias() -> None:
     assert column.value_source == "id"
 
 
+def test_cursor_columns_for_resolves_named_column() -> None:
+    (column,) = cursor_columns_for(Issue, ("number",))
+    assert column.name == "number"
+    assert column.field is Issue._meta.get_field("number")
+    assert column.value_source == "number"
+
+
+def test_cursor_columns_for_missing_column_raises_field_does_not_exist() -> None:
+    with pytest.raises(FieldDoesNotExist):
+        cursor_columns_for(Issue, ("nope",))
+
+
 # ---------------------------------------------------------------------------
 # validate_cursor_field_columns (the finalization column contract)
 # ---------------------------------------------------------------------------
@@ -194,6 +207,11 @@ def test_validate_cursor_field_rejects_unknown_column() -> None:
 def test_validate_cursor_field_rejects_relation_column() -> None:
     with pytest.raises(ConfigurationError, match="local concrete column"):
         validate_cursor_field_columns("IssueType", Issue, ("periodical", "id"))
+
+
+def test_validate_cursor_field_rejects_reverse_column() -> None:
+    with pytest.raises(ConfigurationError, match="local concrete column"):
+        validate_cursor_field_columns("GenreType", Genre, ("books", "id"))
 
 
 def test_validate_cursor_field_rejects_nullable_column() -> None:

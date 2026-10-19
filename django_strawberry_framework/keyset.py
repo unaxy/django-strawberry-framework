@@ -10,8 +10,10 @@ The BACKLOG ``stable_cursor_field`` contract: a ``DjangoType`` may declare::
 and every connection over that type switches from Strawberry's positional
 ``arrayconnection:N`` offset cursors to VALUE-ENCODED cursors: each edge's
 cursor carries the row's ordering-column values (plus the unique terminal
-tiebreak), so ``after:`` becomes a tuple-comparison seek
-(``WHERE (created_at, id) > (%s, %s)``) instead of a row-number offset -
+tiebreak), so ``after:`` becomes a tuple-comparison seek (``WHERE`` on the
+ordering columns - a redundant leading bound plus an OR-expansion across
+the tuple, collapsing to ``(created_at, id) > (%s, %s)`` only when every
+column seeks the same direction) instead of a row-number offset -
 insert-safe and delete-safe (no cursor drift), and an index seek instead of
 numbering-and-discarding ``offset`` rows per page where the fetch strategy
 controls the SQL shape (``optimizer/lateral_fetch.py``).
@@ -100,8 +102,10 @@ from graphql import GraphQLError
 from strawberry.relay.utils import from_base64, to_base64
 
 from .exceptions import ConfigurationError
+from .utils import truth
 from .utils._narrowing import is_dict, is_list, list_of, read_attr
 from .utils.imports import require_optional_module
+from .utils.relations import _resolve_segment_field
 from .utils.typing import object_result
 
 if TYPE_CHECKING:
@@ -160,9 +164,10 @@ class KeysetSeek:
     (``NestedConnectionRequest.keyset_seek`` -> ``apply_window_pagination``
     / ``build_lateral_sql``) and the resolve-time slicer builds for the
     root / per-parent paths - one carrier so every consumer renders the
-    SAME predicate through ``q()``. ``flip=False`` is the ``after:`` seek
-    (rows past the cursor under the effective order); ``flip=True`` the
-    ``before:`` seek.
+    SAME predicate: ORM consumers through ``q()``, the lateral SQL
+    renderer through ``plan()`` + ``keyset_seek_sql``. ``flip=False`` is
+    the ``after:`` seek (rows past the cursor under the effective order);
+    ``flip=True`` the ``before:`` seek.
     """
 
     columns: tuple[CursorColumn, ...]
@@ -214,12 +219,12 @@ def split_order_ref(order_ref: str, *, owner: str | None = None) -> tuple[str, b
     name = order_ref[1:] if descending else order_ref
     if not name or name.startswith("-"):
         raise ConfigurationError(
-            f"{lead} {order_ref!r} is not a valid order string. Expected one optional "
+            f"{lead} {truth.render(order_ref)} is not a valid order string. Expected one optional "
             "leading '-' followed by a local field name.",
         )
     if "__" in name:
         raise ConfigurationError(
-            f"{lead} {order_ref!r} traverses a relation; keyset cursor columns must be "
+            f"{lead} {truth.render(order_ref)} traverses a relation; keyset cursor columns must be "
             "local columns.",
         )
     return name, descending
@@ -243,21 +248,21 @@ def validate_cursor_field_references(
     for order_ref in order_refs:
         name, descending = split_order_ref(order_ref, owner=owner)
         if name in seen:
-            raise ConfigurationError(f"{owner} names {name!r} more than once.")
+            raise ConfigurationError(f"{owner} names {truth.render(name)} more than once.")
         seen.add(name)
         parsed.append((name, descending))
     return tuple(parsed)
 
 
 def _resolve_cursor_field_column(model: type[models.Model], name: str) -> ModelField:
-    """Resolve one cursor column name to its model field (``pk`` alias honored).
+    """Resolve one cursor column name through the shared segment-field rule.
 
-    A reverse-relation name resolves to its ``ForeignObjectRel``;
-    ``validate_cursor_field_columns`` is what rejects it.
+    The ``pk`` alias and the ``FieldDoesNotExist`` vocabulary are owned by
+    ``utils.relations._resolve_segment_field``; a reverse-relation name
+    resolves to its ``ForeignObjectRel``, which ``validate_cursor_field_columns``
+    rejects.
     """
-    if name == "pk":
-        return model._meta.pk
-    return model._meta.get_field(name)
+    return _resolve_segment_field(model, name)
 
 
 def cursor_columns_for(
@@ -358,16 +363,16 @@ def validate_cursor_field_columns(
             field = _resolve_cursor_field_column(model, name)
         except FieldDoesNotExist:
             raise ConfigurationError(
-                f"{lead} entry {order_ref!r} does not resolve to a field on {model.__name__}.",
+                f"{lead} entry {truth.render(order_ref)} does not resolve to a field on {truth.name(model)}.",
             ) from None
         if getattr(field, "is_relation", False) or not getattr(field, "concrete", False):
             raise ConfigurationError(
-                f"{lead} entry {order_ref!r} must be a local concrete column; "
+                f"{lead} entry {truth.render(order_ref)} must be a local concrete column; "
                 "relation and reverse fields cannot anchor a keyset cursor.",
             )
         if getattr(field, "null", False):
             raise ConfigurationError(
-                f"{lead} entry {order_ref!r} is nullable. Keyset cursor columns "
+                f"{lead} entry {truth.render(order_ref)} is nullable. Keyset cursor columns "
                 "must be non-nullable: NULL placement diverges across database "
                 "backends and poisons tuple comparisons. Use a non-nullable "
                 "column (or a defaulted denormalization of the nullable one).",
@@ -375,7 +380,7 @@ def validate_cursor_field_columns(
         # The relation / non-concrete check above leaves only a local concrete column.
         if not _is_supported_cursor_field(cast("ConcreteField", field)):
             raise ConfigurationError(
-                f"{lead} entry {order_ref!r} uses JSONField. Keyset cursor columns "
+                f"{lead} entry {truth.render(order_ref)} uses JSONField. Keyset cursor columns "
                 "must have portable ordering semantics across database backends; "
                 "JSON ordering differs between SQLite and PostgreSQL. Use a scalar "
                 "column containing the intended ordering key.",
@@ -386,7 +391,7 @@ def validate_cursor_field_columns(
     if not (terminal.primary_key or getattr(terminal, "unique", False)):
         raise ConfigurationError(
             f"{lead} must end in a unique column so the cursor order is a total "
-            f"order; got {cursor_field[-1]!r}. Append the pk (e.g. "
+            f"order; got {truth.render(cursor_field[-1])}. Append the pk (e.g. "
             f"cursor_field = ({', '.join(repr(entry) for entry in cursor_field)}, 'id')).",
         )
 
@@ -436,10 +441,10 @@ def keyset_contract_error(detail: str) -> GraphQLError:
 
     Every one of these errors says the same thing first - this connection is on
     keyset cursors because it declared ``Meta.cursor_field`` - and then names
-    the single requirement the request violated. The stem was re-typed at five
-    sites across two modules, so a reword of the shared half was a five-site
-    edit with nothing checking it; the per-site half stays at its own site,
-    because that half is the actual message.
+    the single requirement the request violated. Five sites across two
+    modules share this stem: without this helper a reword of the shared
+    half would be a five-site edit with nothing checking it; the per-site
+    half stays at its own site, because that half is the actual message.
     """
     return GraphQLError(
         f"This connection uses keyset cursors (Meta.cursor_field), which {detail}",
@@ -547,8 +552,10 @@ def encode_keyset_cursor(
     Payload shape: ``{"o": <order fingerprint>, "v": [<field-serialized
     values, one per column>]}``, authenticated-encrypted with the project key
     (module docstring), then base64-wrapped under ``KEYSET_CURSOR_PREFIX``
-    so bounds derivation can discriminate the cursor vocabulary without
-    decrypting the payload first.
+    so each vocabulary's decoder rejects a foreign cursor on its prefix:
+    ``decode_keyset_cursor`` refuses a non-keyset prefix before attempting
+    authenticated-decryption, and the offset path's ``SliceMetadata``
+    refuses a keyset prefix the same way.
 
     A ``None`` ordering value raises ``GraphQLError`` (same boundary language
     as the ``orderBy:`` nullable-column rejection in ``connection.py``): the
@@ -635,8 +642,11 @@ class KeysetSeekPlan:
 
     ``greater[i]`` is whether column ``i`` compares strictly greater in the
     total order (from ``keyset_seek_greater``). The canonical portable shape
-    both dialects render is the redundant leading inclusive bound on column
-    0 plus the OR-expansion of strict-comparison arms (one arm per column).
+    is the redundant leading inclusive bound on column 0 plus the
+    OR-expansion of strict-comparison arms (one arm per column); the ORM
+    dialect always renders it, while the SQL dialect renders it only for
+    mixed directions (uniform directions emit the native row-value
+    comparison below).
     ``uniform`` is True when every column shares that direction - the SQL
     dialect may emit a native row-value comparison as a rendering
     optimization; that is the same predicate, not a second rule.

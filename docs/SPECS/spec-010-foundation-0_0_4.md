@@ -415,9 +415,10 @@ The error is the load-bearing fail-loud signal. It must name the source model, s
 ```python path=null start=null
 def _format_unresolved_targets_error(unresolved: list[PendingRelation]) -> str:
     lines = [
-        f"  - {_safe_class_name(p.source_model)}.{_safe_field_label(p.field_name)} -> "
-        f"{_safe_class_name(p.related_model)} (no registered DjangoType)"
-        for p in unresolved
+        f"  - {truth.name(pending.source_model)}."
+        f"{truth.text(pending.field_name)} -> "
+        f"{truth.name(pending.related_model)} (no registered DjangoType)"
+        for pending in unresolved
     ]
     body = "\n".join(lines)
     return (

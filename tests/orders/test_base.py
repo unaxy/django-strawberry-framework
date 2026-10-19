@@ -185,9 +185,9 @@ def test_related_order_orderset_setter_assigns_underscore_orderset() -> None:
     ``sets_mixins.py::RelatedSetTargetMixin._set_target``, which assigns
     ``self._orderset``. Re-assignment via the property setter is the
     cookbook contract that lets a caller substitute the target after
-    construction (e.g., the lazy-resolution cache write at
-    ``RelatedOrder.orderset.fget`` re-stores the resolved class through
-    this setter).
+    construction (contrast the lazy-resolution cache write at
+    ``RelatedOrder.orderset.fget``, which re-stores the resolved class by
+    writing the ``_orderset`` slot directly, not through this setter).
     """
     related = RelatedOrder(AOrder, field_name="a")
     related.orderset = BOrder
@@ -332,3 +332,26 @@ def test_related_order_target_gate_preserves_importerror_for_unresolved_strings(
 
     with pytest.raises(ImportError):
         _ = Owner.a.orderset
+
+
+def test_related_order_gate_rejection_message_is_pinned() -> None:
+    """The target-gate rejection names the owner, the declaration and the target kind."""
+
+    class _PlainTarget:
+        pass
+
+    class Owner(OrderSet):
+        # basedpyright: the non-OrderSet target is the hostile input under test; RelatedOrder types
+        # the parameter as _OrderSetTarget
+        rel = RelatedOrder(_PlainTarget, field_name="shelves")  # pyright: ignore[reportArgumentType]
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = Owner.related_orders["rel"].orderset
+    assert str(exc_info.value) == (
+        f"{Owner.__qualname__} declares RelatedOrder 'shelves' targeting "
+        "_PlainTarget, which is not an OrderSet subclass. "
+        "RelatedOrder targets must resolve to an OrderSet subclass (a class, "
+        "an import-path string, or a zero-arg factory returning one); "
+        "a FilterSet or unrelated class cannot order a relation branch. "
+        "Declare the branch with an OrderSet or remove it."
+    )

@@ -17,8 +17,8 @@ Covers:
 - Per Decision 6 the order side does NOT enforce the filter side's own-PK
   Relay-identity check.
 - Unresolved ``RelatedOrder`` propagates as ``ConfigurationError`` with the
-  underlying ``ImportError`` preserved on ``__cause__``; non-import
-  expansion failure rewraps uniformly.
+  underlying ``ImportError`` preserved on ``__cause__``; a non-import
+  expansion failure propagates unchanged.
 - Materialization writes input classes to ``orders.inputs.__dict__``;
   idempotent ``finalize_django_types()``.
 - Partial-failure recovery (the partially-materialized state stays consistent
@@ -200,7 +200,7 @@ def test_phase_2_5_binds_all_owners_before_expansion(monkeypatch: pytest.MonkeyP
 
 
 # ---------------------------------------------------------------------------
-# Subpass 2 -- ImportError / non-import rewrap
+# Subpass 2 -- ImportError rewrap; other failures propagate
 # ---------------------------------------------------------------------------
 
 
@@ -238,8 +238,8 @@ def test_phase_2_5_unresolved_related_order_raises_at_finalize() -> None:
     assert isinstance(exc_info.value.__cause__, ImportError)
 
 
-def test_phase_2_5_non_import_get_fields_failure_rewraps_as_configuration_error() -> None:
-    """Non-``ImportError`` raised during ``get_fields()`` surfaces as ``ConfigurationError``."""
+def test_phase_2_5_non_import_get_fields_failure_propagates_unchanged() -> None:
+    """A consumer factory's own exception raised during ``get_fields()`` propagates."""
 
     def _broken_factory() -> NoReturn:
         raise ValueError("intentional factory failure")
@@ -266,13 +266,8 @@ def test_phase_2_5_non_import_get_fields_failure_rewraps_as_configuration_error(
 
     assert registry.get(Book) is BookType
 
-    with pytest.raises(ConfigurationError) as exc_info:
+    with pytest.raises(ValueError, match="intentional factory failure"):
         finalize_django_types()
-    msg = str(exc_info.value)
-    assert "BookOrder" in msg
-    assert "raised during expansion" in msg
-    assert "ValueError" in msg
-    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 def test_phase_2_5_non_order_set_related_target_raises_uniform_error() -> None:
@@ -280,11 +275,10 @@ def test_phase_2_5_non_order_set_related_target_raises_uniform_error() -> None:
 
     The target-type gate on ``RelatedOrder.orderset`` raises
     ``ConfigurationError`` at the subpass-2 Layer-2 walk (``_expand_orderset``
-    forces ``related.orderset``), which propagates BY IDENTITY (the
-    ``except ConfigurationError: raise`` pass-through) -- the mis-wiring can
-    no longer survive until subpass 4's BFS materialization, where it used to
-    leak a raw ``AttributeError`` (``type_name_for`` missing on the target)
-    outside the uniform rewrap.
+    forces ``related.orderset``), which propagates BY IDENTITY -- the
+    mis-wiring cannot survive until subpass 4's BFS materialization, where it
+    would leak a raw ``AttributeError`` (``type_name_for`` missing on the
+    target).
     """
 
     class NotAnOrderSet:
@@ -327,11 +321,9 @@ def test_phase_2_5_non_order_set_related_target_raises_uniform_error() -> None:
 def test_phase_2_5_configuration_error_during_expansion_propagates_by_identity() -> None:
     """A ``ConfigurationError`` from the subpass-2 expansion re-raises unchanged.
 
-    The order twin of the filter side's ``finalizer.py`` ``except
-    ConfigurationError: raise`` pass-through: if ``get_fields()`` / the
-    ``related.orderset`` Layer-2 walk raises a ``ConfigurationError`` directly
-    (as opposed to an ``ImportError`` or a generic ``Exception``), it must
-    propagate by identity rather than being re-wrapped into a second
+    If ``get_fields()`` / the ``related.orderset`` Layer-2 walk raises a
+    ``ConfigurationError`` directly (as opposed to an ``ImportError``), it
+    propagates by identity rather than being re-wrapped into a second
     ``ConfigurationError`` with the first on ``__cause__``.
     """
     sentinel = ConfigurationError("intentional config failure from related factory")

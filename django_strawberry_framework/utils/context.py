@@ -85,25 +85,16 @@ def get_context_value(context: object, key: str, default: object = None) -> obje
       ``tests/optimizer/test_extension.py::test_get_context_value_swallows_attribute_error_from_getitem``
       (bridged-``AttributeError`` shape) - a future refactor that
       removes this fallback must trip those pins.
-    - A failed ordinary attribute or item access is treated as an unavailable
-      key and returns ``default``. This includes ``KeyError``, ``TypeError``,
-      ``AttributeError``, and exceptions from hostile consumer descriptors or
-      mapping methods; read-only / frozen contexts are safe for the same
-      reason. ``BaseException`` subclasses are deliberately not swallowed so
-      cancellation and process-control signals retain their meaning.
+    - A missing key is an unavailable key and returns ``default``: the
+      ``KeyError`` / ``TypeError`` / ``AttributeError`` an item read documents
+      for an absent key or a non-subscriptable context. Anything else a
+      consumer context's own descriptor or mapping method raises is its
+      behaviour and propagates.
     """
     if context is None:
         return default
     if not is_dict(context):
-        try:
-            val: object = getattr(context, key, MISSING)
-        except Exception:  # noqa: BLE001 - consumer code may raise anything
-            # A consumer context can expose a descriptor that fails while
-            # answering an internal key. Treat that shape as an unreadable
-            # attribute and still try its mapping interface, if any; a
-            # context read is a fail-closed lookup, not a reason to abort the
-            # resolver before the resource / optimizer defaults can apply.
-            val = MISSING
+        val: object = getattr(context, key, MISSING)
         if val is not MISSING:
             return val
     try:
@@ -113,11 +104,9 @@ def get_context_value(context: object, key: str, default: object = None) -> obje
         # Item access is attempted on any context shape: one without ``__getitem__``
         # raises ``TypeError``, which the ``except`` below turns into ``default``.
         return cast("Mapping[str, object]", context)[key]
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        # Missing, frozen, or hostile mapping access all mean that this key is
-        # unavailable. Keep the read fail-closed; write helpers intentionally
-        # retain their narrower exception contract because an unexpected write
-        # failure can indicate a consumer-side programming error.
+    except (KeyError, TypeError, AttributeError):
+        # A missing key, a non-subscriptable context, or a ``__getitem__``
+        # bridged to attribute access all mean that this key is unavailable.
         return default
 
 

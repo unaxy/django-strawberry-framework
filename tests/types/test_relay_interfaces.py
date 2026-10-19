@@ -19,13 +19,14 @@ from apps.products import services
 from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
 from django.db.models import CompositePrimaryKey, Model, QuerySet
+from django.utils.functional import SimpleLazyObject
 from strawberry import relay
 from strawberry.schema.name_converter import NameConverter
 from strawberry.types.base import StrawberryObjectDefinition
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType, conf, finalize_django_types, strawberry_config
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_class_name
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types import base as types_base
 from django_strawberry_framework.types import relay as types_relay
@@ -48,6 +49,7 @@ from django_strawberry_framework.types.relay import (
     install_relay_node_resolvers,
     published_node_type_name,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import class_dict, require
 from django_strawberry_framework.utils.querysets import model_for
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
@@ -79,8 +81,8 @@ def _meta(**attrs: object) -> type:
 
 def _as_django_type(cls: type[object]) -> type[DjangoType]:
     """Hand a plain host class to a builder that takes a ``DjangoType``."""
-    # basedpyright: a bare host whose bases cannot take the interface (or whose name lookups
-    # raise) is the input under test; apply_interfaces types the parameter as type[DjangoType]
+    # basedpyright: a bare host whose bases cannot take the interface is the input under test;
+    # apply_interfaces types the parameter as type[DjangoType]
     return cls  # pyright: ignore[reportReturnType]
 
 
@@ -91,8 +93,11 @@ def _as_definition(stand_in: object) -> DjangoTypeDefinition:
     return stand_in  # pyright: ignore[reportReturnType]
 
 
-def test_safe_class_name_renders_non_string_metaclass_name_metadata() -> None:
-    """A non-string ``__name__`` renders through ``repr`` instead of escaping."""
+def test_class_name_reads_the_slot_past_a_non_string_metaclass_name() -> None:
+    """A metaclass answering ``__name__`` with a non-string never reaches a rendered name.
+
+    ``utils/truth.py::name`` reads the class's own slot, so the hook never runs.
+    """
 
     class _NonStringNameMeta(type):
         @override
@@ -104,7 +109,7 @@ def test_safe_class_name_renders_non_string_metaclass_name_metadata() -> None:
     class _MalformedName(metaclass=_NonStringNameMeta):
         pass
 
-    assert _safe_class_name(_MalformedName) == "42"
+    assert truth.name(_MalformedName) == "_MalformedName"
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +390,7 @@ def test_consumer_declared_is_type_of_is_preserved() -> None:
 
 
 def test_is_type_of_hostile_hint_descriptor_falls_back_to_instance_check() -> None:
-    """A hostile Relay hint descriptor cannot break concrete-type dispatch."""
+    """A hostile Relay hint descriptor never runs: the hint is read from the instance namespace."""
 
     class HostileObject:
         @override
@@ -1512,8 +1517,12 @@ def test_apply_interfaces_wraps_typeerror_as_configuration_error() -> None:
     class _SyntheticDef:
         interfaces = (_BadInterface,)
 
-    with pytest.raises(ConfigurationError, match="cannot add interface"):
+    with pytest.raises(ConfigurationError, match="cannot add interface") as exc_info:
         apply_interfaces(_as_django_type(_Host), _as_definition(_SyntheticDef))
+    assert str(exc_info.value).startswith(
+        "_Host: cannot add interface(s) _BadInterface to bases. Python rejected the resulting "
+        "MRO (TypeError(",
+    )
 
 
 def test_model_for_returns_registered_model() -> None:
@@ -1560,6 +1569,28 @@ def test_resolve_id_default_unit_dict_cache_and_getattr_branches(
     uncached = Category(name="x")
     del vars(uncached)["id"]
     assert _resolve_id_default(CategoryNode, uncached, info=unread_info()) == "12"
+
+
+def test_resolve_id_default_refuses_a_root_with_no_instance_namespace() -> None:
+    """A root without an instance ``__dict__`` raises what reading ``root.__dict__`` raises."""
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+
+    class SlottedRoot:
+        __slots__ = ()
+        _meta = Category._meta
+
+    with pytest.raises(AttributeError) as excinfo:
+        # basedpyright: a root with no instance namespace is the input under test;
+        # _resolve_id_default types root as a Model
+        _resolve_id_default(CategoryNode, SlottedRoot(), info=unread_info())  # pyright: ignore[reportArgumentType]
+    assert str(excinfo.value) == "'SlottedRoot' object has no attribute '__dict__'"
 
 
 @pytest.mark.django_db
@@ -1745,42 +1776,6 @@ def test_direct_relay_node_inheritance_composite_pk_raises(
         finalize_django_types()
 
 
-def test_composite_pk_diagnostic_survives_hostile_model_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A hostile model ``__name__`` cannot replace the composite-pk error."""
-
-    class HostileName(str):
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("hostile model name")
-
-        @override
-        def __format__(self, spec: str) -> str:
-            raise RuntimeError("hostile model format")
-
-    class CategoryNode(DjangoType, relay.Node):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    assert registry.get(Category) is CategoryNode
-
-    # ``__name__`` is NOT restorable by ``monkeypatch``: a class carries it on the
-    # ``type`` descriptor rather than in its own ``__dict__``, so monkeypatch reads
-    # the slot as absent and undoes with ``delattr`` -- which a heap type refuses.
-    # The teardown then RAISES and the hostile name leaks into every later test in
-    # the worker. Save and restore by assignment; do not "modernize" this block.
-    original_name = Category.__name__
-    Category.__name__ = HostileName("Category")
-    try:
-        monkeypatch.setattr(Category._meta, "pk", CompositePrimaryKey("name", "is_private"))
-        with pytest.raises(ConfigurationError, match="composite primary key"):
-            finalize_django_types()
-    finally:
-        Category.__name__ = original_name
-
-
 def test_install_relay_node_resolvers_preserves_consumer_override() -> None:
     """A consumer-declared ``resolve_id_attr`` is preserved by ``install_relay_node_resolvers``.
 
@@ -1813,8 +1808,13 @@ def test_install_relay_node_resolvers_preserves_consumer_override() -> None:
     assert CategoryNode.resolve_id_attr() == sentinel_value
 
 
-def test_apply_interfaces_diagnostic_survives_hostile_class_names() -> None:
-    """An MRO TypeError cannot escape while naming hostile interface classes."""
+def test_apply_interfaces_propagates_a_name_hook_the_interpreter_runs() -> None:
+    """A metaclass name hook that raises while Python builds the MRO error propagates.
+
+    The interpreter reads the classes' ``__name__`` through the metaclass to word its own
+    MRO ``TypeError``, so the hook's exception replaces that ``TypeError``. Only the
+    ``TypeError`` is translated; a consumer hook's exception reaches the caller as raised.
+    """
 
     class HostileMeta(type):
         @override
@@ -1832,7 +1832,7 @@ def test_apply_interfaces_diagnostic_survives_hostile_class_names() -> None:
     class Definition:
         interfaces = (BadInterface,)
 
-    with pytest.raises(ConfigurationError, match="cannot add interface"):
+    with pytest.raises(RuntimeError, match="hostile __name__"):
         apply_interfaces(_as_django_type(Host), _as_definition(Definition))
 
 
@@ -1946,6 +1946,31 @@ def test_globalid_callable_strategy_emits_custom() -> None:
     assert _emitted_typename(CategoryNode) == "custom:products.category"
 
 
+def test_globalid_staticmethod_strategy_is_stored_as_its_function() -> None:
+    """A ``staticmethod`` encoder is stored as the function it wraps and emits its slot.
+
+    Reading the attribute off the ``Meta`` class returns the wrapped function, so
+    the declaration means the function; the stored strategy is that function,
+    never the wrapper.
+    """
+
+    def encoder(_type_cls: type[DjangoType], model: type[Model], _root: object) -> str:
+        return f"static:{model._meta.label_lower}"
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            globalid_strategy = staticmethod(encoder)
+
+    finalize_django_types()
+    definition = _definition_of(CategoryNode)
+    assert definition.globalid_strategy is encoder
+    assert definition.effective_globalid_strategy == "callable"
+    assert _emitted_typename(CategoryNode) == "static:products.category"
+
+
 @pytest.mark.parametrize(
     "bad_return",
     [
@@ -1977,19 +2002,13 @@ def test_globalid_callable_non_string_return_raises(bad_return: object) -> None:
 
 
 def test_globalid_callable_string_subclass_is_normalized() -> None:
-    """A callable encoder's hostile ``str`` subclass cannot escape later encoding."""
+    """A callable encoder's ``str`` subclass return is handed on as an exact ``str``."""
 
-    class HostileString(str):
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("hostile string")
-
-        @override
-        def __format__(self, spec: str) -> str:
-            raise RuntimeError("hostile format")
+    class PayloadString(str):
+        pass
 
     def encoder(_type_cls: type[DjangoType], _model: type[Model], _root: object) -> str:
-        return HostileString("custom-payload")
+        return PayloadString("custom-payload")
 
     class CategoryNode(DjangoType):
         class Meta:
@@ -3112,7 +3131,7 @@ def test_decode_non_str_input_raises(bad_input: object) -> None:
 
 
 def test_decode_hostile_input_type_name_stays_typed() -> None:
-    """A hostile input metaclass cannot escape the GlobalID type gate."""
+    """A hostile input metaclass's ``__name__`` hook never runs at the GlobalID type gate."""
 
     class HostileMeta(type):
         @override
@@ -3128,8 +3147,8 @@ def test_decode_hostile_input_type_name_stays_typed() -> None:
         decode_global_id(BadInput())
 
 
-def test_decode_hostile_globalid_slots_stay_typed() -> None:
-    """A malformed GlobalID subclass cannot escape while its slots are read."""
+def test_decode_hostile_globalid_slots_propagate() -> None:
+    """A GlobalID subclass whose slot reads raise propagates that error (consumer behaviour)."""
 
     class HostileGlobalID(relay.GlobalID):
         @override
@@ -3141,7 +3160,7 @@ def test_decode_hostile_globalid_slots_stay_typed() -> None:
     value = object.__new__(HostileGlobalID)
     object.__setattr__(value, "type_name", "CategoryNode")
     object.__setattr__(value, "node_id", "1")
-    with pytest.raises(ConfigurationError, match="fields could not be read"):
+    with pytest.raises(RuntimeError, match="hostile type_name"):
         decode_global_id(value)
 
 
@@ -3153,22 +3172,6 @@ def test_decode_globalid_rejects_non_string_slots() -> None:
 
     with pytest.raises(ConfigurationError, match="fields must be strings"):
         decode_global_id(value)
-
-
-def test_decode_hostile_string_subclass_stays_typed() -> None:
-    """A malformed string subclass cannot escape while its diagnostic is rendered."""
-
-    class HostileString(str):
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("hostile id repr")
-
-        @override
-        def __format__(self, spec: str) -> str:
-            raise RuntimeError("hostile id format")
-
-    with pytest.raises(ConfigurationError, match="not a valid GlobalID"):
-        decode_global_id(HostileString("!!!not-base64!!!"))
 
 
 def test_decode_empty_type_name_raises() -> None:
@@ -3388,3 +3391,33 @@ def test_published_name_table_is_per_schema_and_built_once() -> None:
     )
     assert _published_node_name_table(prefixed) is _published_node_name_table(prefixed)
     assert _published_node_name_table(prefixed) == {category_node: "ApiCategoryNode"}
+
+
+@pytest.mark.django_db
+def test_is_type_of_unwraps_a_django_lazy_object_before_the_type_check() -> None:
+    """A ``SimpleLazyObject`` (``request.user``'s shape) is checked as the object it wraps.
+
+    The proxy passes ``isinstance`` only by forwarding ``__class__``, which the
+    truthful class read ignores; the wrapped object is read from the proxy
+    instead, running the factory on first use.
+    """
+    services.seed_data(1)
+    category = Category.objects.first()
+
+    class LazyCheckedCategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    calls: list[int] = []
+
+    def factory() -> Category | None:
+        calls.append(1)
+        return category
+
+    lazy = SimpleLazyObject(factory)
+    assert LazyCheckedCategoryType.is_type_of(lazy, None) is True
+    assert calls == [1]
+    assert LazyCheckedCategoryType.is_type_of(lazy, None) is True
+    assert calls == [1]
+    assert LazyCheckedCategoryType.is_type_of(SimpleLazyObject(object), None) is False

@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, cast
 
 from django.core.exceptions import FieldDoesNotExist, FieldError
-from django.db.models import Count, F, OrderBy, Prefetch, Q, Value, Window, sql
+from django.db.models import Count, F, OrderBy, Q, QuerySet, Value, Window, sql
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression, RawSQL
 from django.db.models.functions import Random, RowNumber
@@ -57,6 +57,7 @@ from django_strawberry_framework.keyset import (
     keyset_contract_error,
     order_fingerprint,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
     is_str,
@@ -64,6 +65,7 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
     require,
 )
+from django_strawberry_framework.utils._queryset_private import queryset_prefetch_lookups
 from django_strawberry_framework.utils.connections import (
     assert_window_fetch_mode,
     window_range_plan,
@@ -80,17 +82,15 @@ if TYPE_CHECKING:
 
     from django.db import models
     from django.db.backends.base.base import BaseDatabaseWrapper
-    from django.db.models import QuerySet
     from django.db.models.expressions import Combinable, Expression
     from django.db.models.options import Options
     from django.db.models.sql.query import Query
 
     from django_strawberry_framework.keyset import KeysetSeek
+    from django_strawberry_framework.utils._queryset_private import PrefetchLookup
     from django_strawberry_framework.utils.connections import WindowRangePlan
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
-    #: One ``QuerySet.prefetch_related`` lookup: a plain lookup path or a ``Prefetch``.
-    PrefetchLookup: TypeAlias = str | Prefetch[str]
     #: One connection order entry both ``QuerySet.order_by`` and a ``Window``'s
     #: ``order_by`` accept: a string ref, an ``F``, or an expression (``OrderBy``,
     #: ``Lower(...)``, ...).
@@ -489,7 +489,7 @@ def resolver_key(
     path = ".".join(runtime_path)
     if parent_type is None:
         return f"{field_name}@{path}"
-    return f"{parent_type.__name__}.{field_name}@{path}"
+    return f"{truth.name(parent_type)}.{field_name}@{path}"
 
 
 def runtime_path_from_info(info: object) -> tuple[str, ...]:
@@ -623,7 +623,7 @@ def _append_to_mutable(values: Sequence[_T], value: _T) -> None:
     if isinstance(values, MutableSequence):
         values.append(value)
         return
-    message = f"{type(values).__name__!r} object has no attribute 'append'"
+    message = f"{truth.kind(values)!r} object has no attribute 'append'"
     raise AttributeError(message)
 
 
@@ -669,21 +669,18 @@ def append_prefetch_unique(values: Sequence[PrefetchLookup], prefetch: PrefetchL
 
 
 def _consumer_prefetch_lookups(queryset: object) -> list[PrefetchLookup]:
-    """Return the ``_prefetch_related_lookups`` already attached to a queryset.
+    """Return the ``prefetch_related`` lookups already attached to ``queryset``.
 
-    Centralizes the brittle Django-private contract for
-    ``QuerySet._prefetch_related_lookups``.  Returns an empty list when
-    the queryset has no prefetches (or the attribute is missing entirely
-    on a non-QuerySet input).  The trailing ``or ()`` is a paranoid
-    guard for non-``QuerySet`` inputs (test doubles, custom managers)
-    whose ``_prefetch_related_lookups`` attribute is present but
-    ``None``; stock Django always stores a tuple
-    (``prefetch_related(None)`` resets to ``()``), so the guard is dead
-    code under a real ``QuerySet``.  Trigger to revisit removal: a real
-    consumer surfaces a ``None`` lookups attribute or the test-double
-    case is otherwise retired.
+    Lenient adapter over ``utils/_queryset_private.py::queryset_prefetch_lookups``,
+    which owns the ``QuerySet._prefetch_related_lookups`` spelling: a real
+    queryset contributes its lookups as a list, anything else contributes
+    nothing. Total over ``object`` because one call site reads a
+    consumer-controlled ``Prefetch.queryset``, which a consumer can set to
+    anything at runtime; such an input contributes no lookups to reconcile.
     """
-    return list(getattr(queryset, "_prefetch_related_lookups", ()) or ())
+    if not isinstance(queryset, QuerySet):
+        return []
+    return list(queryset_prefetch_lookups(queryset))
 
 
 def deferred_loading_of(queryset: object) -> tuple[frozenset[str], bool] | None:
@@ -694,8 +691,7 @@ def deferred_loading_of(queryset: object) -> tuple[frozenset[str], bool] | None:
     where ``defer_flag is False`` means ``.only()`` was applied (Django's
     "load only this set" mode) and ``defer_flag is True`` is the default
     ``.defer()``-or-nothing mode. Every consumer builds on this one unpack
-    (``_consumer_projection``, the lateral backend's projection read) so a
-    future Django rename has one fix.
+    so a future Django rename has one fix.
 
     Returns ``None`` when the state is unreadable: the attribute is missing
     (a non-QuerySet input, e.g. a test double), the tuple shape is
@@ -1094,11 +1090,8 @@ def order_entry_name_and_direction(entry: object) -> tuple[str, bool] | None:
     expression. Anything else - a raw expression with no resolvable name, a bare
     ``"-"`` - returns ``None`` and the caller decides its fallback posture.
 
-    Shared by the nested planner's order-column projection
-    (``nested_planner.py::_order_entry_field_name``), the unique-terminal check
-    (``ends_in_unique_column`` below), and the lateral backend's column
-    resolution (``lateral_fetch.py::_order_columns``), so the three cannot
-    disagree on dash stripping.
+    Shared by every order-column consumer, so they cannot disagree on dash
+    stripping.
     """
     if isinstance(entry, str):
         descending = entry.startswith("-")
@@ -1163,7 +1156,8 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
     if parsed is None:
         return False
     ref = parsed[0]
-    meta: Options[models.Model] | None = getattr(model, "_meta", None)
+    # A model class's ``_meta`` is its ``Options``.
+    meta = cast("Options[models.Model] | None", truth.static_attr(model, "_meta"))
     if meta is None:
         return False
     pk = read_attr(meta, "pk", None)
@@ -1580,18 +1574,9 @@ def _keyset_order_ref(entry: object) -> tuple[str, str, bool] | None:
     (the nullable domain the v1 column contract excludes --
     ``order_entry_has_explicit_nulls``).
     """
-    try:
-        if order_entry_has_explicit_nulls(entry):
-            return None
-        parsed = order_entry_name_and_direction(entry)
-    except (
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-        IndexError,
-    ):
+    if order_entry_has_explicit_nulls(entry):
         return None
+    parsed = order_entry_name_and_direction(entry)
     if parsed is None:
         return None
     name, descending = parsed

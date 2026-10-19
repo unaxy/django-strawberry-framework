@@ -1,7 +1,7 @@
 # Review · Performance: `django_strawberry_framework/utils/strings.py`
 
 Status: verified
-Run: 0.0.15 2026-09-24-1
+Run: 0.0.15 2026-09-28-3
 
 ## Trace
 
@@ -256,3 +256,287 @@ Strawberry field per miss). The walk bench on this machine swung ~15% between id
 a later pass comparing walk figures should interleave copies as done here rather than compare to
 the baseline table. The miss probe's source is kept under `verify-performance-1/`; its copy under
 `tests/optimizer/test_zz_probe_miss.py` lives only in slot-3.
+
+## Review pass 2 (run 0.0.15 2026-09-28-3)
+
+Reopened: fingerprints moved. Every run-1 section above stands (L1 implemented and verified,
+5 rejections, looks-for discharged); this pass appends the re-review of the live target and
+records zero new findings.
+
+Baselines: CYCLE_BASELINE=6ac698704402240b954f95072bed4639354ab831
+ITEM_BASELINE=e79425515bb25b376f330ac50d46d9615b9aad19.
+
+Path class: hot - unchanged. `django_strawberry_framework/optimizer/walker.py` still calls
+`django_strawberry_framework/utils/strings.py::snake_case` once per selection on every plan
+build (plan-cache miss, every non-cacheable request); every other helper runs at declaration,
+finalize, or behind an upstream memo.
+
+### Trace (run 3)
+
+Live target read whole at blob `5a4f4811`. Its only delta vs HEAD (`991f7dad`, the verified
+post-pass-2 state; `git diff HEAD`, 5 insertions, 3 deletions) is concurrent work from the
+truthful-reads flow, not this item's: `from . import truth`, and
+`django_strawberry_framework/utils/strings.py::_plain_text` now calls
+`django_strawberry_framework/utils/truth.py::is_instance` where it called `isinstance`, and
+`django_strawberry_framework/utils/truth.py::kind` where it called the now-deleted
+`exceptions._safe_type_name`. The exact-`str` fast path L1 ordered first is byte-identical.
+`git diff e7942551 -- <target>` is empty: the concurrent edit predates the item baseline.
+
+Caller census (whole package, calls only, imports / defs / prose excluded): `snake_case` 3
+(walker lines 411, 769, 1421 - the same three sites as run 1);
+`flatten_lookup_path` 3 (`utils/inputs.py:200` input building,
+`utils/permissions.py:78` behind the unchanged `lru_cache(2048)`
+`django_strawberry_framework/utils/permissions.py::_check_method_name`,
+`django_strawberry_framework/orders/sets.py::OrderSet._resolve_order_expressions` line 731
+per to-many order entry beside `classify_path` + an aggregate build);
+`graphql_camel_name` 12 (forms / mutations / `utils/inputs.py` /
+`rest_framework/serializer_converter.py` / `rest_framework/inputs.py`, all declaration-time
+input building; the `_camel_case = graphql_camel_name` aliases in `filters/inputs.py:69` and
+`orders/inputs.py:56` predate HEAD and have no package call sites - test-only use);
+`pascal_case` 2 + the internal `pascal_case_or_raise` call (choice-enum names, declaration);
+`pascal_case_or_raise` 2 (`filters/inputs.py:261`, `sets_mixins.py:116`, declaration). No new
+hot caller; every caller's path class matches run 1. The walker miss path now reads the
+`_forward_names` memo (the run-1 routed lead, closed beside the run), but the `snake_case`
+reverse probe still runs first per selection, so call counts are unchanged.
+
+Orientation: `review_inspect.py` into `<root>/performance/inspect/` + `strings.json` (leads
+only; its `utils/imports.py` `_plain_text` callers are the pass-through twin, a name
+collision confirmed by reading).
+
+Measurements, both in copy `review/utils/strings.py/performance`, package digest
+`sha256:c9db5de2...0eae97c9`:
+
+- `review-20260928T202314-2c0073`: `probe_plain_text_ab.py` (source
+  `<root>/performance/probe_plain_text_ab.py`, run by absolute path; JSON
+  `<root>/performance/plain_text_ab.json`), timeit median of 9 repeats, HEAD logic
+  reconstructed verbatim (incl. the full HEAD `_safe_type_name` body) vs the live import in
+  one process. Parity ok on exact `str`, a `str` subclass, a hostile subclass, `None` / `3` /
+  `b"x"` (same outcomes, same `ConfigurationError` texts). Exact-`str`: head 34.2 ns vs live
+  34.4 ns (delta 0.2 ns, noise on identical bytecode - the hot path is untouched).
+  Subclass: 69.2 vs 247.2 ns (+178 ns). Error: 335.0 vs 681.2 ns (+346 ns).
+- `review-20260928T202329-201d65`: `importtime_report.py --rounds 5 --top 80 --json
+  <root>/performance/importtime.json` (instrument `15f679c9`, so the row compares nothing
+  numerically to run 1's `bfce84b9` baseline; the verdict below is session-internal).
+  Minimum across rounds: `utils.strings` self 85 us, cumulative 85 us;
+  `utils.truth` self 163 us; `utils.relations` cumulative 916 us; package cumulative
+  178.2 ms, self 22.1 ms over 69 modules. Strings cumulative equals its self: the
+  `from . import truth` contributes nothing, because `utils/__init__.py` imports
+  `.relations` (line 44, itself `from . import truth`) before `.strings` (line 45), so
+  `truth` is already in `sys.modules` when `strings.py:24` executes (a dict hit). Run 1's
+  83 us figure is context, not a delta.
+
+Cells: default only. Sharded and pg `inapplicable by construction`, as in run 1: the module
+is pure `str -> str`, opens no connection, reads no alias, makes no dialect decision, and
+imports no ORM symbol (`functools`, `collections.abc`, `exceptions`, `truth` only).
+
+Fingerprints (`git hash-object`): `utils/strings.py`
+5a4f481132f87cc83abeb2a4a4a679990fa5b9bc; `utils/truth.py`
+d5c96bc8d191d3fce0a20140d8e91063bb466ec9; `optimizer/walker.py`
+d5759ef8533a6218942a0a2a33e64f59599a93a7; `utils/permissions.py`
+1c9cfd398e6096e03bda82ba93dfd66a6d2fb890; `orders/sets.py`
+60859f2d54525acfdb3dc997d3e931ff3d58d956; `exceptions.py`
+206e9f8d914f640134cf72e374fadeac41d13a39; `utils/__init__.py`
+1a4c2ec8bfd31ff7b55b337dfe405ffbd2f24cee (unchanged since run 1); `utils/inputs.py`
+b5af8255dfa18a2ff423cdd2de211723c5a15590; `filters/inputs.py`
+a932dbf85d89791280774b0600a40b5fb43b89e4; `orders/inputs.py`
+2d258da74ee36f5d851ffa6550462b0fd65bd460; `mutations/inputs.py`
+840da733f95678be5ea494bb6ab595c8425a1884; `forms/inputs.py`
+259afbb2d5c7eeadb2ec3e996b26567328dd7295; `rest_framework/serializer_converter.py`
+96d2b56a043e7f17000a654d1b6320bec39fdac3; `rest_framework/inputs.py`
+eab5cf34112f691e87faaec9119a974d145ffc00; `types/converters.py`
+f6cadb0856c725d96ce316abb4418b4c9d55bf9d; `sets_mixins.py`
+088ddab0c0f68c0605bc4a440dfa3daa544452dd; `scripts/bench_optimizer_walk.py`
+de745175799b1d8c0efa5c75cd296f9dd6910e34 (same blob as the run-1 baseline instrument);
+`scripts/importtime_report.py` 15f679c9ad736b71215d8ead0733116f56083cef;
+`examples/fakeshop/apps/library/models.py` b980e82c5e5a73690a18befd1eb5c7db1cf05691;
+`tests/utils/test_strings.py` 2a822a3fff4c910407968165ee34e242c551a41b.
+
+### Findings (run 3)
+
+#### High
+
+None.
+
+#### Medium
+
+None.
+
+#### Low
+
+None.
+
+### Rejected (run 3)
+
+- **R1 (new): the truth-call cost on `_plain_text`'s cold branches is not a finding.**
+  Subclass inputs cost +178 ns/call and the error branch +346 ns/raise
+  (`review-20260928T202314-2c0073`), buying the truthful-reads property (no consumer
+  `__instancecheck__` / metaclass hook runs). Both branches are cold-only: the hot path
+  passes exact `str` (graphql-core AST names, declared paths), which returns before either
+  call at zero delta (+0.2 ns, noise). Cold-path performance needs a stated reason to
+  implement, and none exists: any "fix" would re-spell the guard or weaken a security
+  property owned by concurrent work outside this item's fence. Reopens if a hot caller
+  starts passing non-exact-`str` per request (then the +178 ns lands on the hot path), or
+  if a measured plan build shows `_plain_text` above 2% of walk time.
+- **Inline exact-`str` fast path in `snake_case`: rejection stands.** Trigger was snake
+  above 2% of `bench_optimizer_walk.py` time. Bench candidates are unchanged (same script
+  blob `de745175`, same four lowercase hit-path queries), the per-call cache-hit cost is
+  unchanged (identical code below `_plain_text`), and per-candidate call counts are
+  unchanged (same three walker sites, probe-first). The `_forward_names` memo only
+  cheapens miss paths the bench never hits. Not re-measured: every term of the trigger
+  inequality is unchanged by reading.
+- **`lru_cache(maxsize=2048)` sizing: rejection stands.** Vocabulary was 708 in run 1;
+  since then fakeshop gained two models totalling four fields (`displayName`, `label`,
+  `distributorRef`, `consignmentItems`), so the vocabulary stays an order of magnitude
+  below `maxsize`. Same trigger: a supported schema exceeding 2048 distinct field names.
+- **Char-by-char rebuild in `_snake_case_cached`: rejection stands.** Code unchanged
+  (the target diff touches only imports and `_plain_text`); still once per distinct name
+  per process behind the cache.
+- **`camel +=` / `pascal_case` slices / joins: rejection stands.** Code unchanged; every
+  caller still declaration/finalize time (census above).
+- **`while "__" in flattened` in `flatten_lookup_path`: rejection stands.** Code
+  unchanged; still one call per to-many order entry beside classification + aggregate,
+  memoized on the permission path.
+
+Looks-for discharged, `none` (run 3): N+1 / per-row queries, `len(qs)` / `bool(qs)`,
+`only()` / `defer()`, unbatched writes, `blog.id` vs `blog_id` (still no ORM use);
+repeated `_meta` walks, settings reads, regex compilation, schema or type lookups (none in
+the module); `lru_cache` on methods / B019 (the one cache still decorates a module-level
+function); locks, cache reads, re-parses, round trips on a per-request path (only the
+`lru_cache` lookup, the intended memo); import-time cost (strings 85 us self with zero
+child cost; no settings read at import); allocation in the walk (cached path allocates
+nothing; the exact-`str` path is two byte-identical bytecode ops).
+
+### Cross-axis (run 3)
+
+None. No out-of-axis finding; the `truth.kind` vs `_safe_type_name` message-text
+equivalence under hostile metaclasses is intended behavior of the concurrent work that owns
+it (observed equal on `None` / `3` / `b"x"` as the timing probe's control), not a lead.
+
+Handoff: Read beyond the trace: `utils/truth.py::is_instance` / `::kind` bodies (a
+Python-level MRO identity walk, structurally slower than the C `isinstance` it replaces -
+the measured +178 ns), the walker's three `snake_case` sites and the `_forward_names` memo
+shape, the `OrderSet._resolve_order_expressions` to-many branch, the `_check_method_name`
+memo, both `_camel_case` aliases (pre-existing, test-only use). The only target delta is
+concurrent work outside this item's fence; Worker-2 must not touch it from this record.
+The sibling Mechanics and Comments reviewers run concurrently on the same live target;
+their records held only run-1 content when this pass closed, so no run-3 cross-axis text
+existed to answer. If a later pass re-opens the inline-fast-path trigger, it must measure
+a walk, not argue shares: the bench candidates are lowercase-only, so a miss-heavy
+consumer query is the shape that could move the share. Scratch kept under
+`docs/review/temp-tests/utils__strings/performance/` (inspect/, strings.json,
+probe_plain_text_ab.py, plain_text_ab.json, importtime.json). Superseded run
+`review-20260928T202301-4e1750` (exit 1, probe `repr()` tripped the hostile subclass)
+measured nothing; its fix is the static-label loop in the kept probe.
+
+## Verification (Performance) pass 2
+
+Address `review/utils/strings.py/verify-performance-2`, copy slot-3 synced
+2026-09-28T20:43:34Z from the shared tree, package digest
+`sha256:c9db5de2...0eae97c9` (= the run-3 reviewer's digest on both runs);
+scratch `docs/review/temp-tests/utils__strings/verify-performance-2/`.
+Baselines: CYCLE_BASELINE=6ac698704402240b954f95072bed4639354ab831,
+ITEM_BASELINE=e79425515bb25b376f330ac50d46d9615b9aad19. Run-1 sections stand;
+this pass verifies run 3's `no-findings` against Implement pass 3's zero-path
+landing.
+
+Step 1: `git diff e7942551 -- django_strawberry_framework/utils/strings.py`
+is empty (0 bytes), hash-equal to the empty item diff
+`docs/review/temp-tests/utils__strings/diff/pass-3.diff` (0 bytes, by design:
+all three run-3 reviews closed `no-findings`). Re-checked after the last probe
+run: still 0 bytes. The tree did not move under the pass. (`git status` shows
+the target `M` vs HEAD: the concurrent truth switch, which predates
+ITEM_BASELINE and sits in none of this item's hunks, as the run-3 records
+state.)
+
+Proof lines: none exist for run 3 (zero findings, zero Proof lines in this
+record, in the siblings' `## Cross-axis (for Performance)` - both "None" -
+and in Implement pass 3). Run-1 Proof lines were not re-run as expectations
+(closed run; several oracles moved since); nothing below depends on them.
+
+Numbers reproduced, every run-3 reviewer number for this axis from its
+recorded command (no `before` figure exists or is owed: both run-3 numbers
+are session-internal, the A/B probe carrying its own HEAD reconstruction):
+
+- A/B probe, `review-20260928T204334-686afe` (reviewer's
+  `performance/probe_plain_text_ab.py` by absolute path, copy unedited, JSON
+  `verify-performance-2/plain_text_ab.json`, exit 0): `parity: ok`; exact-str
+  head 31.4 vs live 31.7 ns (delta 0.3 ns; reviewer 34.2 vs 34.4, delta 0.2);
+  subclass head 66.3 vs live 289.2 ns (+222.9; reviewer +178.0); error head
+  361.0 vs live 748.2 ns (+387.2; reviewer +346.2). Same verdict on the same
+  digest: the hot exact-`str` path is untouched (sub-nanosecond noise on
+  identical bytecode), the cold branches carry the truth cost.
+- Import time, `review-20260928T204341-320afa` (`importtime_report.py --rounds
+  5 --top 80`, instrument blob `15f679c9` = reviewer's, JSON
+  `verify-performance-2/importtime.json`, exit 0): `utils.strings` self 88 us,
+  cumulative 88 us (reviewer 85/85); `utils.truth` 167/167 (reviewer 163/163);
+  package cumulative 182.6 ms, self 23.0 ms over 69 modules (reviewer 178.2 /
+  22.1 / 69; machine spread). Strings cumulative equals its self: the
+  `from . import truth` is a `sys.modules` dict hit, zero child cost.
+  Reproduced.
+
+Whole-diff reading (Performance): the item diff is empty - there is no hunk to
+grade, no branch-order, cache, import or call-site change on any path class.
+Path class hot stands (three walker `snake_case` sites, confirmed at 411,
+769, 1421); every rejection trigger is evaluated below, not re-argued.
+
+Attacks (current state, other cardinality / caller / input class):
+
+- A. R1's reopen trigger ("a hot caller starts passing non-exact-`str` per
+  request") does not fire. All three walker sites pass `sel.name`, which
+  `selections.py::included_field_selections` and
+  `walker.py::_merge_aliased_selections` pass through untouched from
+  Strawberry's selection objects (built from the graphql-core parser's
+  `NameNode.value`, an exact `str`; no rebuild, no subclass feeder in the
+  package). The `OrderSet._resolve_order_expressions` `flatten_lookup_path`
+  input is a coerced GraphQL input string beside `classify_path` + an
+  aggregate build; the permissions path stays behind the unchanged
+  `lru_cache(2048)` `_check_method_name`. Static reading, shared tree; no
+  finding.
+- B. Cache-sizing rejection measured at full-vocabulary cardinality (the
+  reviewer carried 708 + arithmetic). Probe
+  `verify-performance-2/probe_vocab.py` boots the live fakeshop schema and
+  counts distinct introspected field + input-field names,
+  `review-20260928T204636-ff9174` (exit 0, same digest): vocabulary 732 vs
+  `maxsize` 2048, 2.8x headroom (and this count includes input fields the
+  walker never reverses, so the true walker vocabulary is smaller). Full-vocab
+  `snake_case` sweep: cold pass 0.45 ms, warm pass 0.044 ms (~60 ns/name);
+  cache after warm `hits 8784, misses 732, currsize 732`: zero evictions. The
+  rejection stands, now measured. Superseded `review-20260928T204623-f31aaf`
+  (exit 1, probe bug: `cache_parameters()` is a dict on this interpreter).
+
+Disputes: none recorded in `## Implementation (Worker-2)` / Implement pass 3
+for this axis. Cross-axis findings placed here: none.
+
+Failability: none owed. No change exists to fail - Implement pass 3 landed
+zero paths, so no test-fails-without-the-change proof is possible or
+required. Stated, not skipped.
+
+Cells: default only. Sharded and pg `inapplicable by construction`, judged and
+upheld: the module is pure `str -> str`, imports `functools`,
+`collections.abc`, `exceptions`, `truth` (stdlib-only) only, opens no
+connection, reads no alias, makes no dialect decision. Siblings concur.
+
+New findings: none. Verdict: verified.
+
+Fingerprints (`git hash-object`, shared tree, all equal to the run-3 records
+and Implement pass 3): `utils/strings.py` 5a4f481132f8; `utils/truth.py`
+d5c96bc8d191; `optimizer/walker.py` d5759ef8533a; `tests/utils/test_strings.py`
+2a822a3fff; `scripts/importtime_report.py` 15f679c9ad73;
+`scripts/bench_optimizer_walk.py` de745175799b. Item diff `pass-3.diff`
+0 bytes.
+
+Handoff: Read beyond the record: the live `_plain_text` body against
+`truth.is_instance` / `truth.kind`, the walker's three `snake_case` sites
+plus the `sel.name` passthrough chain in `selections.py`, the
+`OrderSet._resolve_order_expressions` to-many branch, the `_check_method_name`
+memo, the run-3 probe sources and JSON, Implement pass 3's attribution (the
+`cmp` identity proof holds: item diff still 0 bytes). Conclusions the checks
+do not state: the concurrent truth switch is the only live delta and it is
+outside this item's fence; every run-1 rejection trigger was re-evaluated
+against current state (R1 trigger read at all five hot call sites, cache
+sizing measured at 732, bench candidates unchanged per the pinned
+`de745175` blob). Open threads, none this item's: sibling verifiers run
+concurrently (the Mechanics record moved mid-pass; its run-3 content as read
+still routes nothing to Performance). Scratch kept under
+`docs/review/temp-tests/utils__strings/verify-performance-2/`
+(plain_text_ab.json, importtime.json, probe_vocab.py, vocab.json).

@@ -1,10 +1,9 @@
 """Shared auth-test helpers hoisted out of the individual test modules.
 
 Plain (non-fixture) helpers the auth test modules share: the bounded event-loop
-barrier ``_drain_until`` (previously defined in ``test_sessions`` and
-cross-imported by ``test_mutations``) and the session-carrying request builder
-``_session_request`` (previously duplicated byte-for-byte between
-``test_mutations`` and ``test_queries``). Fixtures live in ``conftest.py``; these
+barrier ``_drain_until`` and the session-carrying request builder
+``_session_request``, each used by more than one of ``test_sessions`` /
+``test_mutations`` / ``test_queries``. Fixtures live in ``conftest.py``; these
 are ordinary callables, so they are imported explicitly rather than injected.
 """
 

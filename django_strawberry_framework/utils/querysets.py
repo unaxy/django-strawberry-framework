@@ -39,11 +39,11 @@ show why: an instance-shadowed ``.all()``, a replaced instance-level
 synthetic rows AFTER a class-level inventory accepts the object. A finite
 inventory is the wrong abstraction. Instead the boundary treats the consumer
 queryset as untrusted query STATE: it reads that state without dispatching any
-consumer code (every read comes from the instance ``__dict__`` via
-``object.__getattribute__``, so a custom ``__getattribute__`` or an
-instance-shadowed attribute cannot lie or run code), validates it, then rebuilds
-a framework-owned plain ``django.db.models.QuerySet`` from the validated state.
-It NEVER returns the consumer object.
+consumer code (every read comes from the real instance ``__dict__`` via
+``truth.instance_dict``, so a custom ``__getattribute__``, a class-level
+``__dict__`` override or an instance-shadowed attribute cannot lie or run code),
+validates it, then rebuilds a framework-owned plain ``django.db.models.QuerySet``
+from the validated state. It NEVER returns the consumer object.
 
 What the seal preserves: the SQL query state (filters, annotations, joins,
 ordering, values projection), database routing / hints, and the prefetch
@@ -89,7 +89,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeGuard, TypeVar, cast, overload
 
 from asgiref.sync import sync_to_async
-from django.core.exceptions import FieldError
+from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
 from django.db import models, router
 from django.db.models import Prefetch, sql
 from django.db.models import query as django_query
@@ -115,27 +115,18 @@ from django.db.models.query import (
 )
 from django.db.models.sql.where import ExtraWhere, WhereNode
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 
+from . import truth
 from ._narrowing import (
-    class_dict,
-    instance_dict,
     is_awaitable,
-    is_class,
     is_exact_dict,
     is_exact_list,
     is_exact_list_or_tuple,
     is_exact_pair,
     is_exact_set_or_frozenset,
     is_exact_tuple,
-    read_attr,
-    type_attr,
-    type_mro,
 )
 from ._queryset_private import (
     queryset_db,
@@ -273,24 +264,6 @@ class SyncMisuseError(ConfigurationError, RuntimeError):
     """
 
 
-def _safe_class_name(value: object) -> str:
-    """Render a class name without allowing hostile metaclass metadata to escape.
-
-    Deliberately STRICTER than the shared ``exceptions._safe_class_name``:
-    this module assembles sealed-boundary defect messages about consumer
-    querysets, so a non-string ``__name__`` degrades to ``_safe_type_name``
-    (the metaclass label) rather than ``repr(name)`` - the repr would
-    dispatch a hostile dunder on the very object the boundary is rejecting.
-    """
-    try:
-        name = read_attr(value, "__name__")
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return _safe_type_name(value)
-    if isinstance(name, str):
-        return str.__str__(name)
-    return _safe_type_name(value)
-
-
 def reject_async_in_sync_context(
     value: Awaitable[object] | _T,
     *,
@@ -398,7 +371,7 @@ def base_queryset(model: type[_ModelT], *, using: str | None = None) -> models.Q
     """
     if model._meta.abstract:
         raise ConfigurationError(
-            f"{model.__name__} is an abstract model and has no default manager to seed a "
+            f"{truth.name(model)} is an abstract model and has no default manager to seed a "
             f"queryset from. Point Meta.model at a concrete model, or resolve the field with "
             f"a custom resolver that returns concrete rows.",
         )
@@ -746,10 +719,12 @@ def coerce_field_value_or_none(field: ModelField | None, value: object) -> objec
     ``OverflowError`` (``Python int too large to convert to SQLite INTEGER``);
     the field's own validators (``integer_field_range`` Min/MaxValueValidators,
     etc.) reject it here as a ``ValidationError`` instead, and a non-numeric
-    literal fails ``to_python`` itself. Every Django core field wraps its
-    ``to_python`` failure in ``ValidationError`` already; ``TypeError`` /
-    ``ValueError`` are caught too as a defensive superset for a field whose
-    ``to_python`` raises one of those directly.
+    literal fails ``to_python`` itself. Most Django core fields wrap their
+    ``to_python`` failure in ``ValidationError``; ``TypeError`` / ``ValueError``
+    cover a field whose ``to_python`` raises one of those directly, and
+    ``OverflowError`` is what ``DurationField.to_python`` raises for a
+    well-formed duration string past ``timedelta``'s range (``int(inf)`` in
+    ``IntegerField.to_python`` raises it too).
 
     Every caller treats ``None`` the same way - "identifies no row": dropped
     from a query, or mapped to a not-found / invalid sentinel - never a raw
@@ -764,7 +739,12 @@ def coerce_field_value_or_none(field: ModelField | None, value: object) -> objec
     try:
         coerced = to_python_value(field, value)
         field.run_validators(coerced)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
+    except (
+        ValidationError,
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):
         return None
     return coerced
 
@@ -921,20 +901,17 @@ def _concrete_or_none(candidate: object) -> type[models.Model] | None:
     escape the typed boundary as malformed state. So the class-ness and the model
     ancestry are proven BEFORE any metadata is read, which also means a consumer
     ``_meta`` property / ``concrete_model`` descriptor on such an object never runs.
+    Both are read from the real MRO (``truth.is_subclass`` / ``truth.static_attr``).
     """
-    try:
-        if not isinstance(candidate, type) or not issubclass(candidate, models.Model):
-            return None
-        meta: object = getattr(candidate, "_meta", None)
-        if meta is None:
-            return None
-        # ``ModelBase.__new__`` sets ``_meta.concrete_model`` on every model class to a
-        # model class (the class itself, or its concrete ancestor for a proxy).
-        concrete: type[models.Model] | None = getattr(meta, "concrete_model", None)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+    if not truth.is_subclass(candidate, models.Model):
         return None
-    else:
-        return concrete
+    meta: object = truth.static_attr(candidate, "_meta", None)
+    if meta is None:
+        return None
+    # ``ModelBase.__new__`` sets ``_meta.concrete_model`` on every model class to a
+    # model class (the class itself, or its concrete ancestor for a proxy).
+    concrete: type[models.Model] | None = getattr(meta, "concrete_model", None)
+    return concrete
 
 
 def _is_model_of_concrete(
@@ -990,7 +967,7 @@ def _base_table_defect(query: object, concrete: type[models.Model]) -> str | Non
     first_alias = next(iter(alias_map))
     table = alias_map[first_alias].table_name
     if type(table) is not str:
-        return _safe_type_name(table)
+        return truth.kind(table)
     if table != concrete._meta.db_table:
         return table
     return None
@@ -1030,22 +1007,18 @@ def _type_is_genuinely_django(node_type: type[object]) -> bool:
     them is ``VisibleRowExists``, matched by identity: it overrides nothing, so its
     ``clone`` / ``as_sql`` / ``resolve_expression`` are Django's ``Exists`` code.
 
-    ``__module__`` and ``__qualname__`` are read through ``type.__getattribute__`` so a
-    consumer METACLASS that overrides ``__getattribute__`` / ``__getattr__`` cannot run
-    code (or return a lie) during the very read that is meant to reject the type
-    (spec-045 Decision 2): ``type.__getattribute__`` resolves both names
-    from the class's own namespace without dispatching a metaclass hook.
+    ``__module__`` and ``__qualname__`` are read truthfully (``truth.module`` /
+    ``truth.qualname``) so a consumer METACLASS that overrides ``__getattribute__`` /
+    ``__getattr__`` or defines a ``__module__`` property cannot run code (or return a
+    lie) during the very read that is meant to reject the type (spec-045 Decision 2).
     """
     if node_type is VisibleRowExists:
         return True
-    try:
-        module_name = type_attr(node_type, "__module__")
-        qualname = type_attr(node_type, "__qualname__")
-    except (AttributeError, TypeError):
+    module_name = truth.module(node_type)
+    qualname = truth.qualname(node_type)
+    if not module_name.startswith("django."):
         return False
-    if type(module_name) is not str or not module_name.startswith("django."):
-        return False
-    if type(qualname) is not str or "." in qualname:
+    if "." in qualname:
         return False
     module = sys.modules.get(module_name)
     if module is None:
@@ -1132,16 +1105,15 @@ def _shadow_defect(node: object, label: str) -> tuple[str, str] | None:
     modules re-export SLOTTED classes at module level (``django.utils.safestring``
     ``SafeString``, the ``namedtuple`` helpers in ``django.db.models.query_utils`` /
     ``django.db.backends.*.introspection``, ``django.db.models.expressions.UUID``), so a
-    provenance-genuine type whose instances carry no ``__dict__`` does reach here; reading
-    the slot unguarded would raise a raw ``AttributeError`` past the boundary's typed
-    ``(code, detail)`` contract. No such object is a clonable / compilable Django node --
+    provenance-genuine type whose instances carry no ``__dict__`` does reach here, and
+    ``truth.instance_dict`` answers ``None`` for it, which becomes the boundary's typed
+    ``(code, detail)`` defect. No such object is a clonable / compilable Django node --
     every ``Expression`` / ``WhereNode`` / ``Join`` / ``sql.Query`` carries an instance
     ``__dict__`` -- so its presence in a compiler-reachable slot is untrusted state.
     """
-    try:
-        node_dict = instance_dict(node)
-    except AttributeError:
-        return ("untrusted", f"{label} is a {_safe_type_name(node)} with no instance state")
+    node_dict = truth.instance_dict(node)
+    if node_dict is None:
+        return ("untrusted", f"{label} is a {truth.kind(node)} with no instance state")
     node_type = type(node)
     for key in node_dict:
         if type(key) is not str:
@@ -1206,12 +1178,12 @@ def _template_params_defect(node_dict: Mapping[str, object], label: str) -> tupl
         return None
     extra = node_dict["extra"]
     if not is_exact_dict(extra):
-        return ("untrusted", f"{label} extra is a {_safe_type_name(extra)}")
+        return ("untrusted", f"{label} extra is a {truth.kind(extra)}")
     for key, value in extra.items():
         if type(key) is not str:
             return ("untrusted", f"{label} extra has a non-string key")
         if value is not None and type(value) not in _TEMPLATE_PARAM_VALUE_TYPES:
-            return ("untrusted", f"{label} extra[{key!r}] is a {_safe_type_name(value)}")
+            return ("untrusted", f"{label} extra[{key!r}] is a {truth.kind(value)}")
     return None
 
 
@@ -1241,10 +1213,10 @@ def _node_metadata_defect(node: object, label: str) -> tuple[str, str] | None:
     when the field itself is reached, and forcing it Django-owned would fail-close every
     query over a custom model field.
     """
-    node_dict = instance_dict(node)
+    node_dict = truth.instance_state(node)
     for attr in _SQL_TEMPLATE_ATTRS:
         if attr in node_dict and type(node_dict[attr]) is not str:
-            return ("untrusted", f"{label} {attr} is a {_safe_type_name(node_dict[attr])}")
+            return ("untrusted", f"{label} {attr} is a {truth.kind(node_dict[attr])}")
     return _template_params_defect(node_dict, label)
 
 
@@ -1258,10 +1230,10 @@ def _raw_sql_params_defect(params: object, label: str) -> tuple[str, str] | None
     expression-graph proof accepts.
     """
     if not is_exact_list_or_tuple(params):
-        return ("untrusted", f"{label} params is a {_safe_type_name(params)}")
+        return ("untrusted", f"{label} params is a {truth.kind(params)}")
     for param in params:
         if not _is_inert_value(param):
-            return ("untrusted", f"{label} params carries a {_safe_type_name(param)}")
+            return ("untrusted", f"{label} params carries a {truth.kind(param)}")
     return None
 
 
@@ -1272,10 +1244,10 @@ def _raw_sql_node_defect(node: object, label: str) -> tuple[str, str] | None:
     if type(node) is ExtraWhere:
         sqls = node.sqls
         if type(sqls) not in (list, tuple):
-            return ("untrusted", f"{label} sqls is a {_safe_type_name(sqls)}")
+            return ("untrusted", f"{label} sqls is a {truth.kind(sqls)}")
         for statement in sqls:
             if type(statement) is not str:
-                return ("untrusted", f"{label} sqls carries a {_safe_type_name(statement)}")
+                return ("untrusted", f"{label} sqls carries a {truth.kind(statement)}")
         return _raw_sql_params_defect(node.params, label)
     return None
 
@@ -1391,10 +1363,10 @@ def _expression_state_defect(node: object, label: str) -> tuple[str, str] | None
     dispatches nothing. Genuine Django only ever stores exact builtin sequences in these
     slots, so the check costs no legitimate query.
     """
-    node_dict = instance_dict(node)
+    node_dict = truth.instance_state(node)
     for attr in _EXPRESSION_SEQUENCE_STATE_ATTRS:
         if attr in node_dict and type(node_dict[attr]) not in (list, tuple):
-            return ("untrusted", f"{label} {attr} is a {_safe_type_name(node_dict[attr])}")
+            return ("untrusted", f"{label} {attr} is a {truth.kind(node_dict[attr])}")
     return None
 
 
@@ -1420,7 +1392,7 @@ def _genuine_node_defect(
     """
     node_type = type(node)
     if not _type_is_genuinely_django(node_type):
-        return ("untrusted", f"{label} {phrase} {_safe_type_name(node)}{suffix}")
+        return ("untrusted", f"{label} {phrase} {truth.kind(node)}{suffix}")
     return _shadow_defect(node, label)
 
 
@@ -1480,7 +1452,7 @@ def _expr_mapping_key_detail(label: str, _key: object) -> str:
 
 def _deferred_mapping_key_detail(label: str, key: object) -> str:
     """Non-string mapping-key detail for the deferred-filter value walk."""
-    return f"{label} mapping key is a {_safe_type_name(key)}"
+    return f"{label} mapping key is a {truth.kind(key)}"
 
 
 def _container_defect(
@@ -1544,7 +1516,7 @@ _DIRECT_RHS_DATA_BASES: tuple[type[object], ...] = (*_INERT_VALUE_TYPES, enum.En
 
 # MRO entries whose own hook definitions are trusted: the data bases themselves plus
 # ``object`` (whose ``__getattribute__`` every type inherits).
-_DIRECT_RHS_TRUSTED_MRO: frozenset[type[object]] = frozenset(_DIRECT_RHS_DATA_BASES) | {object}
+_DIRECT_RHS_TRUSTED_MRO: tuple[type[object], ...] = (*_DIRECT_RHS_DATA_BASES, object)
 
 
 def _static_attr_present(value: object, name: str) -> bool:
@@ -1553,27 +1525,27 @@ def _static_attr_present(value: object, name: str) -> bool:
     Reproduces the ``hasattr(value, name)`` semantics Django itself uses to classify a
     lookup RHS (``Lookup.rhs_is_direct_value`` / ``Lookup.process_rhs`` test
     ``hasattr(rhs, "as_sql")``) -- instance ``__dict__`` first, then the type's MRO --
-    while dispatching nothing: ``inspect.getattr_static`` reads the raw slots and never
+    while dispatching nothing: ``truth.static_attr`` reads the real slots and never
     invokes ``__getattr__`` / ``__getattribute__`` / a descriptor. The real ``hasattr``
     would run a consumer RHS object's attribute hook DURING the proof, before the query
     is cloned, which is exactly the dispatch the seal exists to prevent.
     """
-    return inspect.getattr_static(value, name, MISSING_ATTRIBUTE) is not MISSING_ATTRIBUTE
+    return truth.static_attr(value, name, MISSING_ATTRIBUTE) is not MISSING_ATTRIBUTE
 
 
 def _rhs_hook_defect(value_type: type[object], label: str) -> tuple[str, str] | None:
     """Return a defect if a direct-RHS type defines an attribute hook below its data bases.
 
-    The MRO and each class's namespace are read through ``type``'s own descriptors, so a
-    consumer METACLASS overriding ``__getattribute__`` or declaring ``__mro__`` /
-    ``__dict__`` itself cannot run code (or lie) during the very read meant to reject the
-    type. Classes in
-    ``_DIRECT_RHS_TRUSTED_MRO`` are skipped: their hooks are the interpreter's own.
+    The real MRO and each class's real namespace are read (``truth.mro`` /
+    ``truth.class_dict``), so a consumer METACLASS overriding ``__getattribute__`` cannot
+    run code (or lie) during the very read meant to reject the type. Classes in
+    ``_DIRECT_RHS_TRUSTED_MRO`` are skipped by identity: their hooks are the interpreter's
+    own.
     """
-    for klass in type_mro(value_type):
-        if klass in _DIRECT_RHS_TRUSTED_MRO:
+    for klass in truth.mro(value_type):
+        if any(klass is trusted for trusted in _DIRECT_RHS_TRUSTED_MRO):
             continue
-        klass_dict = class_dict(klass)
+        klass_dict = truth.class_dict(klass)
         for hook in _RHS_ATTRIBUTE_HOOKS:
             if hook in klass_dict:
                 return ("untrusted", f"{label} lookup rhs defines the {hook!r} attribute hook")
@@ -1614,7 +1586,7 @@ def _direct_rhs_defect(value: object, walk: _GraphWalk, label: str) -> tuple[str
     if hook_defect is not None:
         return hook_defect
     if not issubclass(value_type, _DIRECT_RHS_DATA_BASES):
-        return ("untrusted", f"{label} lookup rhs is a {_safe_type_name(value)}")
+        return ("untrusted", f"{label} lookup rhs is a {truth.kind(value)}")
     return None
 
 
@@ -1637,7 +1609,7 @@ def _lookup_operands_defect(node: object, walk: _GraphWalk, label: str) -> tuple
     own ``hasattr`` would find -- so a dispatched RHS recurses like any other node and a
     direct one must satisfy the inert-data rules.
     """
-    node_dict = instance_dict(node)
+    node_dict = truth.instance_state(node)
     lhs_defect = _expr_graph_defect(node_dict.get("lhs"), walk, label)
     if lhs_defect is not None:
         return lhs_defect
@@ -1736,7 +1708,7 @@ def _expr_sequence_defect(holder: object, walk: _GraphWalk, label: str) -> tuple
     if holder is None or type(holder) is bool:
         return None
     if not is_exact_list_or_tuple(holder):
-        return ("untrusted", f"query {label} is a {_safe_type_name(holder)}")
+        return ("untrusted", f"query {label} is a {truth.kind(holder)}")
     for item in holder:
         if type(item) is str:
             continue
@@ -1760,10 +1732,10 @@ def _raw_sql_sequence_defect(holder: object, label: str) -> tuple[str, str] | No
     if holder is None:
         return None
     if not is_exact_list_or_tuple(holder):
-        return ("untrusted", f"query {label} is a {_safe_type_name(holder)}")
+        return ("untrusted", f"query {label} is a {truth.kind(holder)}")
     for item in holder:
         if type(item) is not str:
-            return ("untrusted", f"query {label} carries a {_safe_type_name(item)}")
+            return ("untrusted", f"query {label} carries a {truth.kind(item)}")
     return None
 
 
@@ -1826,16 +1798,16 @@ def _where_tree_defect(node: object, walk: _GraphWalk) -> tuple[str, str] | None
     shadow = _shadow_defect(node, "where node")
     if shadow is not None:
         return shadow
-    node_dict = instance_dict(node)
+    node_dict = truth.instance_state(node)
     # ``WhereNode.as_sql`` interpolates ``self.connector`` (``AND`` / ``OR``) straight
     # into the emitted SQL, so an instance override with a non-``str`` connector would
     # run its ``__str__`` at compile time (spec-045 Decision 2).
     connector = node_dict.get("connector")
     if connector is not None and type(connector) is not str:
-        return ("untrusted", f"where node connector is a {_safe_type_name(connector)}")
+        return ("untrusted", f"where node connector is a {truth.kind(connector)}")
     children = node_dict.get("children")
     if children is not None and not is_exact_list_or_tuple(children):
-        return ("untrusted", f"where node children is a {_safe_type_name(children)}")
+        return ("untrusted", f"where node children is a {truth.kind(children)}")
     for child in children or ():
         child_defect = _where_tree_defect(child, walk)
         if child_defect is not None:
@@ -1856,10 +1828,10 @@ def _select_related_defect(select_related: object) -> tuple[str, str] | None:
     if isinstance(select_related, bool):
         return None
     if not is_exact_dict(select_related):
-        return ("untrusted", f"select_related is a {_safe_type_name(select_related)}")
+        return ("untrusted", f"select_related is a {truth.kind(select_related)}")
     for key, value in select_related.items():
         if type(key) is not str:
-            return ("untrusted", f"select_related key is a {_safe_type_name(key)}")
+            return ("untrusted", f"select_related key is a {truth.kind(key)}")
         nested_defect = _select_related_defect(value)
         if nested_defect is not None:
             return nested_defect
@@ -1915,20 +1887,20 @@ def _query_payload_defect(query: object) -> tuple[str, str] | None:
     refcount: dict[str, object] = getattr(query, "alias_refcount", None) or {}
     for alias, count in refcount.items():
         if type(count) is not int:
-            return ("untrusted", f"query alias_refcount[{alias!r}] is a {_safe_type_name(count)}")
+            return ("untrusted", f"query alias_refcount[{alias!r}] is a {truth.kind(count)}")
     external: dict[str, object] = getattr(query, "external_aliases", None) or {}
     for alias, flag in external.items():
         if type(flag) is not bool:
-            return ("untrusted", f"query external_aliases[{alias!r}] is a {_safe_type_name(flag)}")
+            return ("untrusted", f"query external_aliases[{alias!r}] is a {truth.kind(flag)}")
     table_map: dict[str, object] = getattr(query, "table_map", None) or {}
     for table, aliases in table_map.items():
         if not is_exact_list(aliases):
-            return ("untrusted", f"query table_map[{table!r}] is a {_safe_type_name(aliases)}")
+            return ("untrusted", f"query table_map[{table!r}] is a {truth.kind(aliases)}")
         for table_alias in aliases:
             if type(table_alias) is not str:
                 return (
                     "untrusted",
-                    f"query table_map[{table!r}] carries a {_safe_type_name(table_alias)}",
+                    f"query table_map[{table!r}] carries a {truth.kind(table_alias)}",
                 )
     filtered_relations: dict[str, object] = getattr(query, "_filtered_relations", None) or {}
     for alias, relation in filtered_relations.items():
@@ -2225,11 +2197,11 @@ def _normalized_bound_value(value: object) -> object:
         if issubclass(value_type, _RETAINED_SCHEMA_BASES):
             return value
         if not issubclass(value_type, enum.Enum):
-            raise _UntrustedBoundValueError(f"binds a {_safe_type_name(value)} bound value")
-        member_state = instance_dict(value)
+            raise _UntrustedBoundValueError(f"binds a {truth.kind(value)} bound value")
+        member_state = truth.instance_state(value)
         normalized = _normalized_bound_value(member_state["_value_"])
     if not _is_inert_value(normalized):
-        raise _UntrustedBoundValueError(f"binds a {_safe_type_name(value)} bound value")
+        raise _UntrustedBoundValueError(f"binds a {truth.kind(value)} bound value")
     return normalized
 
 
@@ -2365,9 +2337,8 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
         # unchanged) or a plain-data SUBCLASS bound value, which is replaced by an exact
         # inert equivalent so no consumer method stays on the compile path.
         return _normalized_bound_value(value)
-    try:
-        source_state = instance_dict(value)
-    except AttributeError:
+    source_state = truth.instance_dict(value)
+    if source_state is None:
         # A genuine Django class whose instances are SLOTTED (the module-level namedtuple
         # and string-subclass exports) is not query AST: every clonable / compilable node
         # carries an instance ``__dict__``, so there is no state to rebuild slot-by-slot.
@@ -2383,7 +2354,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     # its validated state is transferred.
     rebuilt = object.__new__(value_type)
     memo[value_id] = rebuilt
-    rebuilt_state = instance_dict(rebuilt)
+    rebuilt_state = truth.instance_state(rebuilt)
     rebuilt_state.update(
         {
             key: item
@@ -2447,7 +2418,7 @@ def _rebuild_query_payloads(query: object) -> None:
     reconstruction dispatches no consumer ``__init__``, descriptor, or copy hook.
     """
     memo: dict[int, object] = {}
-    state = instance_dict(query)
+    state = truth.instance_state(query)
     for key in tuple(state):
         state[key] = _reconstructed_value(state[key], memo)
 
@@ -2518,7 +2489,7 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
         if value is None:
             continue
         if not is_exact_dict(value):
-            return ("untrusted", f"query {attr} is a {_safe_type_name(value)}")
+            return ("untrusted", f"query {attr} is a {truth.kind(value)}")
         for key in value:
             if type(key) is not str:
                 return ("untrusted", f"query {attr} has a non-string key")
@@ -2530,16 +2501,16 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
         if value is None:
             continue
         if not is_exact_set_or_frozenset(value):
-            return ("untrusted", f"query {attr} is a {_safe_type_name(value)}")
+            return ("untrusted", f"query {attr} is a {truth.kind(value)}")
         for member in value:
             if type(member) is not str:
-                return ("untrusted", f"query {attr} carries a {_safe_type_name(member)}")
+                return ("untrusted", f"query {attr} carries a {truth.kind(member)}")
     for attr in ("extra", "_extra_select_cache"):
         extra: object = getattr(query, attr, None)
         if extra is None:
             continue
         if not is_exact_dict(extra):
-            return ("untrusted", f"query {attr} is a {_safe_type_name(extra)}")
+            return ("untrusted", f"query {attr} is a {truth.kind(extra)}")
         for alias, payload in extra.items():
             if type(alias) is not str:
                 return ("untrusted", f"query {attr} has a non-string key")
@@ -2549,14 +2520,14 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
             if type(statement) is not str:
                 return (
                     "untrusted",
-                    f"query {attr}[{alias!r}] SQL is a {_safe_type_name(statement)}",
+                    f"query {attr}[{alias!r}] SQL is a {truth.kind(statement)}",
                 )
             params_defect = _raw_sql_params_defect(params, f"query {attr}[{alias!r}]")
             if params_defect is not None:
                 return params_defect
     combined: object = getattr(query, "combined_queries", None)
     if combined is not None and type(combined) is not tuple:
-        return ("untrusted", f"query combined_queries is a {_safe_type_name(combined)}")
+        return ("untrusted", f"query combined_queries is a {truth.kind(combined)}")
     return None
 
 
@@ -2627,7 +2598,7 @@ def _query_genuineness_defect(query: object, walk: _GraphWalk) -> tuple[str, str
     branches under the same rule.
     """
     if type(query) is not sql.Query:
-        return ("untrusted", f"embedded query is a {_safe_type_name(query)}")
+        return ("untrusted", f"embedded query is a {truth.kind(query)}")
     query_id = id(query)
     state = walk.begin(query_id)
     if state is not _WalkState.ENTERED:
@@ -2715,7 +2686,7 @@ def _combined_query_table_defect(
         return _walk_short_circuit(state, "combined-query branches contain a reference cycle")
     query_model: object = getattr(query, "model", None)
     if _concrete_or_none(query_model) is not concrete:
-        return ("table", _safe_class_name(query_model))
+        return ("table", truth.name(query_model))
     shadow_defect = _shadow_defect(query, "query instance")
     if shadow_defect is not None:
         return shadow_defect
@@ -2735,7 +2706,7 @@ def _combined_query_table_defect(
     combined_branches: tuple[object, ...] = getattr(query, "combined_queries", ()) or ()
     for branch in combined_branches:
         if type(branch) is not sql.Query:
-            return ("untrusted", f"combined-query branch is {_safe_type_name(branch)}")
+            return ("untrusted", f"combined-query branch is {truth.kind(branch)}")
         defect = _combined_query_table_defect(branch, concrete, branches)
         if defect is not None:
             return defect
@@ -2784,7 +2755,7 @@ def _rebuilt_prefetch_or_defect(
     ``prefetch_to``, ``to_attr``) is copied forward; a subclass-injected extra
     attribute or a non-``str`` path fails closed as ``untrusted``.
     """
-    entry_state = instance_dict(entry)
+    entry_state = truth.instance_state(entry)
     through = entry_state.get("prefetch_through")
     prefetch_to = entry_state.get("prefetch_to")
     to_attr = entry_state.get("to_attr")
@@ -2796,7 +2767,7 @@ def _rebuilt_prefetch_or_defect(
     # parametrized class is named by annotation on a plain alias of it
     prefetch_cls: type[_SealedPrefetch] = Prefetch
     rebuilt = prefetch_cls.__new__(prefetch_cls)
-    rebuilt_state = instance_dict(rebuilt)
+    rebuilt_state = truth.instance_state(rebuilt)
     rebuilt_state["prefetch_through"] = through
     rebuilt_state["prefetch_to"] = prefetch_to
     rebuilt_state["to_attr"] = to_attr
@@ -2839,7 +2810,7 @@ def _prefetch_relation_target_or_none(
     for part in path.split(LOOKUP_SEP):
         try:
             field: object = current._meta.get_field(part)
-        except Exception:  # noqa: BLE001 - consumer code may raise anything
+        except FieldDoesNotExist:
             # Not in the field map: the default ``<model>_set`` / bare-name
             # reverse accessor spelling (a relation declared without a
             # ``related_name``) is what prefetch actually accepts, so resolve
@@ -2848,7 +2819,7 @@ def _prefetch_relation_target_or_none(
         if field is None or not getattr(field, "is_relation", False):
             return None
         related: object = getattr(field, "related_model", None)
-        if not isinstance(related, type) or not issubclass(related, models.Model):
+        if not truth.is_subclass(related, models.Model):
             return None
         current = related
     return current
@@ -2962,7 +2933,7 @@ def _sealed_prefetch_related_lookups(
     if lookups is None:
         return (), None
     if not is_exact_list_or_tuple(lookups):
-        return None, ("untrusted", f"{cls_name} prefetch lookups is a {_safe_type_name(lookups)}")
+        return None, ("untrusted", f"{cls_name} prefetch lookups is a {truth.kind(lookups)}")
     sealed_entries: list[str | _SealedPrefetch] = []
     for entry in lookups:
         if not isinstance(entry, Prefetch):
@@ -2970,17 +2941,16 @@ def _sealed_prefetch_related_lookups(
             # related queryset itself); a ``str`` subclass or arbitrary lookup
             # object retains method dispatch and fails closed (spec-045 Decision 4).
             if type(entry) is not str:
-                return None, (
-                    "untrusted",
-                    f"{cls_name} prefetch lookup is a {_safe_type_name(entry)}",
-                )
+                return None, ("untrusted", f"{cls_name} prefetch lookup is a {truth.kind(entry)}")
             sealed_entries.append(entry)
             continue
-        entry_state = instance_dict(entry)
+        entry_state = truth.instance_state(entry)
         inner = entry_state.get("queryset")
         sealed_inner: models.QuerySet[models.Model, object] | None = None
         if inner is not None:
-            inner_state = instance_dict(inner) if isinstance(inner, models.QuerySet) else None
+            inner_state = (
+                truth.instance_dict(inner) if isinstance(inner, models.QuerySet) else None
+            )
             inner_concrete = (
                 _concrete_or_none(inner_state.get("model")) if inner_state is not None else None
             )
@@ -3022,8 +2992,8 @@ def _sealed_prefetch_related_lookups(
                     "untrusted",
                     (
                         f"{cls_name} prefetch {lookup!r} queryset is over "
-                        f"{_safe_class_name(inner_state.get('model'))} rows, but the {lookup!r} "
-                        f"relation targets {_safe_class_name(relation_target)} rows; a prefetch "
+                        f"{truth.name(inner_state.get('model'))} rows, but the {lookup!r} "
+                        f"relation targets {truth.name(relation_target)} rows; a prefetch "
                         "child over an unrelated table would populate the relation with rows "
                         "the related type's visibility hook never saw"
                     ),
@@ -3113,7 +3083,7 @@ def _deferred_value_defect(value: object, walk: _GraphWalk, label: str) -> tuple
             elif is_exact_pair(child) and type(child[0]) is str:
                 child_defect = _deferred_value_defect(child[1], walk, label)
             else:
-                return ("untrusted", f"{label} Q child is a {_safe_type_name(child)}")
+                return ("untrusted", f"{label} Q child is a {truth.kind(child)}")
             if child_defect is not None:
                 return child_defect
         walk.leave(value_id)
@@ -3133,10 +3103,10 @@ def _deferred_value_defect(value: object, walk: _GraphWalk, label: str) -> tuple
         # (in the model instance's own ``__dict__``) is still found by ``build_filter``'s
         # ``hasattr`` and dispatched, so reject it. Read ``__dict__`` directly to detect
         # the shadow without triggering it.
-        if "resolve_expression" in instance_dict(value):
+        if "resolve_expression" in truth.instance_state(value):
             return ("untrusted", f"{label} model instance shadows resolve_expression")
         return None
-    return ("untrusted", f"{label} is a {_safe_type_name(value)}")
+    return ("untrusted", f"{label} is a {truth.kind(value)}")
 
 
 # Django's ``_deferred_filter`` is ``(negate, args, kwargs)``.
@@ -3175,11 +3145,11 @@ def _bake_deferred_filter_or_defect(
         # negated -- the one consumer-dispatch point left inside a helper whose whole
         # contract is that it runs genuine Django code over pre-proven arguments.
         # Django stores an exact ``bool`` here, so every other shape fails closed.
-        return ("untrusted", f"{cls_name} deferred filter negate is a {_safe_type_name(negate)}")
+        return ("untrusted", f"{cls_name} deferred filter negate is a {truth.kind(negate)}")
     if not is_exact_dict(kwargs):
-        return ("untrusted", f"{cls_name} deferred filter kwargs is a {_safe_type_name(kwargs)}")
+        return ("untrusted", f"{cls_name} deferred filter kwargs is a {truth.kind(kwargs)}")
     if not is_exact_list_or_tuple(args):
-        return ("untrusted", f"{cls_name} deferred filter args is a {_safe_type_name(args)}")
+        return ("untrusted", f"{cls_name} deferred filter args is a {truth.kind(args)}")
     if PROHIBITED_FILTER_KWARGS.intersection(kwargs):
         return ("untrusted", f"{cls_name} deferred filter carries prohibited kwargs")
     walk = _GraphWalk()
@@ -3189,10 +3159,7 @@ def _bake_deferred_filter_or_defect(
             return arg_defect
     for key, value in kwargs.items():
         if type(key) is not str:
-            return (
-                "untrusted",
-                f"{cls_name} deferred filter kwarg key is a {_safe_type_name(key)}",
-            )
+            return ("untrusted", f"{cls_name} deferred filter kwarg key is a {truth.kind(key)}")
         kwarg_defect = _deferred_value_defect(value, walk, f"{cls_name} deferred filter {key!r}")
         if kwarg_defect is not None:
             return kwarg_defect
@@ -3224,25 +3191,25 @@ def _queryset_state_defect(state: Mapping[str, object], cls_name: str) -> tuple[
     """
     db = state.get("_db")
     if db is not None and type(db) is not str:
-        return ("untrusted", f"{cls_name}._db is a {_safe_type_name(db)}")
+        return ("untrusted", f"{cls_name}._db is a {truth.kind(db)}")
     hints = state.get("_hints")
     if hints is not None:
         if not is_exact_dict(hints):
-            return ("untrusted", f"{cls_name}._hints is a {_safe_type_name(hints)}")
+            return ("untrusted", f"{cls_name}._hints is a {truth.kind(hints)}")
         for key in hints:
             if type(key) is not str:
                 return ("untrusted", f"{cls_name}._hints has a non-string key")
     fields = state.get("_fields")
     if fields is not None:
         if not is_exact_tuple(fields):
-            return ("untrusted", f"{cls_name}._fields is a {_safe_type_name(fields)}")
+            return ("untrusted", f"{cls_name}._fields is a {truth.kind(fields)}")
         for name in fields:
             if type(name) is not str:
-                return ("untrusted", f"{cls_name}._fields carries a {_safe_type_name(name)}")
+                return ("untrusted", f"{cls_name}._fields carries a {truth.kind(name)}")
     for attr in ("_sticky_filter", "_for_write"):
         flag = state.get(attr)
         if flag is not None and type(flag) is not bool:
-            return ("untrusted", f"{cls_name}.{attr} is a {_safe_type_name(flag)}")
+            return ("untrusted", f"{cls_name}.{attr} is a {truth.kind(flag)}")
     return None
 
 
@@ -3454,78 +3421,71 @@ def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingInte
     Reads come from the instance ``__dict__`` without attribute dispatch,
     matching the seal; the model comes from that same state, because the source
     reaching this seam is already a sealed framework-owned queryset whose
-    ``model`` the visibility boundary proved.
+    ``model`` the visibility boundary proved. The router is the deployment's own
+    code: whatever it raises propagates.
     """
-    try:
-        state = instance_dict(queryset)
-        # The source is a queryset this package built, so its routing slots are the ones
-        # Django's own ``QuerySet`` writes: ``_db`` an alias or ``None`` (``using``), and
-        # ``_hints`` a str-keyed dict.
-        db = cast("str | None", state.get("_db"))
-        hints = cast("dict[str, object] | None", state.get("_hints"))
-        model = state.get("model")
-        for_write = state.get("_for_write") is True
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"{method_name} could not verify the source QuerySet's database routing intent.",
-        ) from exc
+    state: dict[str, object] = truth.instance_state(queryset)
+    # The source is a queryset this package built, so its routing slots are the ones
+    # Django's own ``QuerySet`` writes: ``_db`` an alias or ``None`` (``using``), and
+    # ``_hints`` a str-keyed dict.
+    db = cast("str | None", state.get("_db"))
+    hints = cast("dict[str, object] | None", state.get("_hints"))
+    model = state.get("model")
+    for_write = state.get("_for_write") is True
     if type(hints) is dict:
         hints = dict(hints)
     if db is not None:
         return _RoutingIntent(db=db, hints=hints, effective_alias=db)
-    if not (is_class(model) and issubclass(model, models.Model)):
+    if not truth.is_subclass(model, models.Model):
         raise ConfigurationError(
             f"{method_name} could not resolve the source QuerySet's effective database "
-            f"alias: its model is {_safe_type_name(model)}, so no router answer can be "
+            f"alias: its model is {truth.kind(model)}, so no router answer can be "
             f"obtained for it.",
         )
     resolve = router.db_for_write if for_write else router.db_for_read
-    try:
-        alias = resolve(model, **(hints if type(hints) is dict else {}))
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"{method_name} could not resolve the source QuerySet's effective database "
-            f"alias; the database router raised while answering for "
-            f"{_safe_class_name(model)}.",
-        ) from exc
+    alias = resolve(model, **(hints if type(hints) is dict else {}))
     if type(alias) is not str:
         raise ConfigurationError(
             f"{method_name} could not resolve the source QuerySet's effective database "
-            f"alias: the database router answered {_safe_arg_repr(alias)} for "
-            f"{_safe_class_name(model)}; an alias must be a string.",
+            f"alias: the database router answered {truth.render(alias)} for "
+            f"{truth.name(model)}; an alias must be a string.",
         )
     return _RoutingIntent(db=None, hints=hints, effective_alias=alias)
 
 
-def _safe_routing_repr(value: object) -> str:
-    """Safely format database routing intent without invoking arbitrary consumer code.
+_ROUTING_SCALAR_TYPES = (
+    int,
+    float,
+    bool,
+    str,
+    bytes,
+    type(None),
+)
 
-    Renders primitives directly, dictionary key-value pairs safely, and non-primitives
-    with their safe class name and id without calling consumer __repr__.
+
+def _routing_repr(value: object) -> str:
+    """Format database routing intent for a ``routing`` defect.
+
+    Scalars render as their builtin repr; an exact ``dict`` of hints renders its
+    keys in ``str`` order and each non-scalar hint value as ``<ClassName at 0x...>``
+    (its real name and identity), so an instance hint is named by what it is
+    rather than by its own ``__repr__``.
     """
     if value is None:
         return "None"
     if type(value) is str:
-        return repr(value)
+        return truth.render(value)
     if is_exact_dict(value):
         items: list[str] = []
-        for k in sorted(value.keys(), key=str):
-            k_repr = repr(k) if type(k) is str else _safe_arg_repr(k)
+        for k in sorted(value.keys(), key=truth.text):
             v = value[k]
-            if type(v) in (
-                int,
-                float,
-                bool,
-                str,
-                bytes,
-                type(None),
-            ):
-                v_repr = repr(v)
+            if any(type(v) is scalar for scalar in _ROUTING_SCALAR_TYPES):
+                v_repr = truth.render(v)
             else:
-                v_repr = f"<{_safe_class_name(v)} at {hex(id(v))}>"
-            items.append(f"{k_repr}: {v_repr}")
+                v_repr = f"<{truth.name(v)} at {hex(id(v))}>"
+            items.append(f"{truth.render(k)}: {v_repr}")
         return "{" + ", ".join(items) + "}"
-    return _safe_arg_repr(value)
+    return truth.render(value)
 
 
 def _validate_post_orderset_result(
@@ -3562,7 +3522,7 @@ def _validate_post_orderset_result(
         expected_routing=expected_routing,
     )
     if defect is not None:
-        model_name = _safe_class_name(model)
+        model_name = truth.name(model)
         # Every SHAPE defect renders one wording: the public method's contract is a
         # single sentence, and naming the code plus its detail is what makes each
         # rejection actionable. ``routing`` is the one defect that is not a shape
@@ -3620,7 +3580,7 @@ def require_orderset_class(
     """
     if orderset_class is None:
         raise ConfigurationError(
-            f"Field target {_safe_class_name(target_type)} has no orderset_class configured.",
+            f"Field target {truth.name(target_type)} has no orderset_class configured.",
         )
     return orderset_class
 
@@ -3636,6 +3596,12 @@ def _apply_sidecar_sync(
 ) -> models.QuerySet[models.Model]:
     """Call a sidecar set's ``apply_sync`` and re-seal what it returned.
 
+    The awaitable refusal below names every awaitable kind ``an awaitable``
+    (uniform, with no coroutine special-case): this guard fires on any
+    awaitable kind and carries no coroutine-compat wording burden, while
+    ``reject_async_in_sync_context`` keeps its kind-distinguishing template
+    for its hook-result seams.
+
     The ONE post-sidecar seal the list field and the Relay connection field run
     over a public ``FilterSet.apply_sync`` / ``OrderSet.apply_sync`` return:
     routing intent is frozen before the consumer override receives the
@@ -3648,7 +3614,7 @@ def _apply_sidecar_sync(
     pre-evaluates its result is rejected here rather than silently serving
     foreign rows or a wrong page.
     """
-    method_name = f"{set_class.__name__}.apply_sync"
+    method_name = f"{truth.name(set_class)}.apply_sync"
     # Frozen BEFORE the override receives the queryset: it can mutate the
     # object it was handed, so a post-call read is not a baseline.
     expected_routing = _snapshot_routing_intent(queryset, method_name)
@@ -3683,20 +3649,20 @@ async def _apply_sidecar_async(
     the extra arms reject a public method that never returned an awaitable at
     all, and one that awaited to a second awaitable.
     """
-    method_name = f"{set_class.__name__}.apply_async"
+    method_name = f"{truth.name(set_class)}.apply_async"
     expected_routing = _snapshot_routing_intent(queryset, method_name)
     candidate_awaitable = set_class.apply_async(input_value, queryset, info)
     if not inspect.isawaitable(candidate_awaitable):
         raise ConfigurationError(
             f"{method_name} returned a non-awaitable value "
-            f"({_safe_type_name(candidate_awaitable)}); expected an awaitable coroutine or Future.",
+            f"({truth.kind(candidate_awaitable)}); expected an awaitable coroutine or Future.",
         )
     candidate = await candidate_awaitable
     if inspect.isawaitable(candidate):
         _dispose_sync_awaitable(candidate)
         raise ConfigurationError(
             f"{method_name} returned a residual awaitable value "
-            f"({_safe_type_name(candidate)}); expected a QuerySet.",
+            f"({truth.kind(candidate)}); expected a QuerySet.",
         )
     return _validate_post_orderset_result(
         target_type,
@@ -3886,7 +3852,7 @@ def _combined_lost_property(
         for entry in query.order_by:
             if not _is_carried_order_term(entry, model):
                 return (
-                    f"its ordering by {entry!r} is not a {model.__name__} column, so the "
+                    f"its ordering by {entry!r} is not a {truth.name(model)} column, so the "
                     "rewritten query cannot carry it (it carries a column name or an F() "
                     "over a column, with .asc() / .desc(); never a lookup, transform or "
                     "other expression)"
@@ -3990,10 +3956,11 @@ def _seal_or_defect(
     normal attribute access, so only a proven-genuine ``sql.Query`` may be
     walked.
 
-    Every read of ``candidate`` state comes from its instance ``__dict__`` (via
-    ``object.__getattribute__``), never through attribute access, so a custom
-    ``__getattribute__``, an instance-shadowed callable, or a redefined ``query``
-    / ``_query`` descriptor cannot run code or return a lie during extraction.
+    Every read of ``candidate`` state comes from its real instance ``__dict__``
+    (via ``truth.instance_dict``), never through attribute access, so a custom
+    ``__getattribute__``, a redefined ``__dict__``, an instance-shadowed callable,
+    or a redefined ``query`` / ``_query`` descriptor cannot run code or return a
+    lie during extraction.
     The extracted state is what BOTH the validation checks and the rebuilt seal
     consume, so validation and execution provably cannot diverge.
 
@@ -4069,6 +4036,9 @@ def _seal_or_defect(
       one edge down only where something downstream answers for the slice: the
       optimizer walker's nested-connection child, whose own gate degrades a sliced
       child instead of recomposing, and a consumer's own ``Prefetch`` child.
+      The connection guard rejects this shape one step earlier with a
+      wire-facing ``GraphQLError``; this arm stays because the visibility
+      boundary owes authors its own ``ConfigurationError``.
     - ``projection`` -- only when ``policy.require_model_rows`` (every surface
       except the cascade and the raw-list row source): the row iterable is not
       ``ModelIterable`` (a ``.values()`` / ``.values_list()`` projection whose
@@ -4115,12 +4085,9 @@ def _seal_or_defect(
     # consumer code. The real type is the one thing the candidate cannot restate, so
     # the shape proof starts from it and a spoofed class stays the typed ``type``
     # defect every other unusable shape is.
-    if not issubclass(type(candidate), models.QuerySet):
-        return None, ("type", _safe_type_name(candidate))
-    try:
-        state = instance_dict(candidate)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return None, ("untrusted", "the QuerySet instance state is unreadable")
+    if not truth.is_subclass(type(candidate), models.QuerySet):
+        return None, ("type", truth.kind(candidate))
+    state: dict[str, object] = truth.instance_state(candidate)
     query = state.get("_query")
     qmodel = state.get("model")
     # Read before, used only after, ``_queryset_state_defect`` pins ``_db`` to ``None`` or
@@ -4130,9 +4097,9 @@ def _seal_or_defect(
     # A model class always carries its concrete model (``ModelBase`` sets it); django-stubs
     # types the attribute by ``Options``' pre-class ``None`` default.
     concrete = cast("type[models.Model]", model._meta.concrete_model)
-    cls_name = _safe_type_name(candidate)
+    cls_name = truth.kind(candidate)
     if not _is_model_of_concrete(qmodel, concrete):
-        return None, ("table", _safe_class_name(qmodel))
+        return None, ("table", truth.name(qmodel))
     # The outer exact-type check must precede the table walk AND the deferred-filter
     # resolution below: the walk reads ``query.model`` / ``query.alias_map`` /
     # ``query.combined_queries`` through normal attribute access, which on a foreign
@@ -4140,7 +4107,7 @@ def _seal_or_defect(
     # proven-genuine ``sql.Query`` is walked (the walk itself type-checks each branch
     # before recursing into it, extending the same discipline down the combinator tree).
     if type(query) is not sql.Query:
-        return None, ("untrusted", f"{cls_name}.query is {_safe_type_name(query)}")
+        return None, ("untrusted", f"{cls_name}.query is {truth.kind(query)}")
     # Pin every retained ``QuerySet`` state field (``_db`` / ``_hints`` / ``_fields`` /
     # ``_sticky_filter`` / ``_for_write``) to its exact shape BEFORE any truthiness /
     # comparison / copy runs on it, so a consumer ``__bool__`` / ``__eq__`` / ``__iter__``
@@ -4160,10 +4127,10 @@ def _seal_or_defect(
             return None, (
                 "routing",
                 (
-                    f"expected db={_safe_routing_repr(original_db)}, "
-                    f"hints={_safe_routing_repr(original_hints)}, got "
-                    f"db={_safe_routing_repr(candidate_db)}, "
-                    f"hints={_safe_routing_repr(candidate_hints)}"
+                    f"expected db={_routing_repr(original_db)}, "
+                    f"hints={_routing_repr(original_hints)}, got "
+                    f"db={_routing_repr(candidate_db)}, "
+                    f"hints={_routing_repr(candidate_hints)}"
                 ),
             )
     # Validate the candidate's ENTIRE query graph BEFORE cloning it. sql.Query.clone is
@@ -4234,7 +4201,7 @@ def _seal_or_defect(
     # candidate iterable, dispatching a consumer metaclass ``__hash__`` / ``__eq__``
     # (spec-045 Decision 5). ``is`` compares object identity only.
     if not _is_django_iterable_class(iterable):
-        detail = _safe_class_name(iterable)
+        detail = truth.name(iterable)
         return None, ("untrusted", f"{cls_name}._iterable_class is {detail}")
     # The outer effective alias is what this seal pins the queryset onto (a required
     # alias, else the source's own explicit ``_db``); prefetch children are sealed
@@ -4259,16 +4226,13 @@ def _seal_or_defect(
         # the one thing this seam exists to prevent. Django stores an exact ``list``
         # here and nothing else, so refusing every other shape fails closed on state
         # Django does not produce.
-        return None, (
-            "untrusted",
-            f"{cls_name}._result_cache is a {_safe_type_name(result_cache)}",
-        )
+        return None, ("untrusted", f"{cls_name}._result_cache is a {truth.kind(result_cache)}")
     if policy.require_unevaluated and result_cache is not None:
         return None, ("evaluated", "the result cache is populated")
     if policy.reject_sliced and rebuilt_query.is_sliced:
         return None, ("sliced", f"rows {rebuilt_query.low_mark}:{rebuilt_query.high_mark}")
     if policy.require_model_rows and iterable is not ModelIterable:
-        return None, ("projection", _safe_class_name(iterable))
+        return None, ("projection", truth.name(iterable))
     # ``_fields`` is proven ``None`` or an exact ``tuple`` of exact ``str`` names by
     # ``_queryset_state_defect``.
     fields = cast("tuple[str, ...] | None", state.get("_fields"))
@@ -4348,16 +4312,14 @@ def _row_source_model(state: Mapping[str, object], origin: str) -> type[models.M
     table, so the model IT declares is the only one available, and that slot
     holds whatever the candidate's instance dictionary holds.
 
-    ``issubclass(type(model), type)`` asks whether ``model`` IS a class without
-    letting a ``__class__`` property answer for it - ``type(model)`` is a real
-    type object whatever ``model`` is - which also makes the following
-    ``issubclass`` call safe to reach.
+    ``truth.is_subclass`` asks whether ``model`` IS a model class from its real
+    metaclass chain and MRO, without letting a ``__class__`` property answer.
     """
     model = state.get("model")
-    if not is_class(model) or not issubclass(model, models.Model):
+    if not truth.is_subclass(model, models.Model):
         raise ConfigurationError(
             f"{_sentence_start(origin)} a QuerySet subclass whose model is "
-            f"{_safe_type_name(model)}; the row bound rebuilds a framework-owned "
+            f"{truth.kind(model)}; the row bound rebuilds a framework-owned "
             "queryset from that state and cannot do so without a model class.",
         )
     return model
@@ -4409,13 +4371,13 @@ def normalized_row_source(
     resolver the consumer never wrote.
     """
     source_type = type(value)
-    if source_type is models.QuerySet or not issubclass(source_type, models.QuerySet):
+    if source_type is models.QuerySet or not truth.is_subclass(source_type, models.QuerySet):
         return value
-    model = _row_source_model(_readable_queryset_state(value, origin), origin)
+    model = _row_source_model(_readable_queryset_state(value), origin)
     sealed, defect = _seal_or_defect(value, model, None, _RAW_LIST_SOURCE_POLICY)
     if defect is not None:
         raise ConfigurationError(
-            _raw_list_source_message(defect, _safe_type_name(value), origin),
+            _raw_list_source_message(defect, truth.kind(value), origin),
         )
     # ``_seal_or_defect`` returns a queryset exactly when it returns no defect.
     return cast("models.QuerySet[models.Model, object]", sealed)
@@ -4449,29 +4411,17 @@ def _is_exact_queryset(value: object) -> TypeGuard[models.QuerySet[models.Model,
     return type(value) is models.QuerySet
 
 
-def _readable_queryset_state(
-    value: object,
-    origin: str = "a collection resolver returned",
-) -> dict[str, object]:
-    """Return the instance dictionary of ``value``, read without dispatching consumer code.
+def _readable_queryset_state(value: object) -> dict[str, object]:
+    """Return the real instance dictionary of ``value``, read without dispatching consumer code.
 
-    ``object.__getattribute__`` is the only read here for the reason the seal
-    gives: a custom ``__getattribute__`` or a redefined descriptor cannot run
-    code or return a lie during extraction. A shape with no instance dictionary
-    at all is not a queryset Django produced, so it fails closed rather than
-    being waved through with an empty one.
+    ``truth.instance_dict`` is the only read here for the reason the seal gives:
+    neither a custom ``__getattribute__`` nor a subclass that redefines
+    ``__dict__`` itself can run code or return a lie during extraction. Every
+    ``QuerySet`` instance carries the genuine slot Django's base class declares.
     """
-    try:
-        # An instance dictionary, read through the base slot.
-        state = instance_dict(value)
-    except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
-        raise ConfigurationError(
-            f"{_sentence_start(origin)} a {_safe_type_name(value)} whose "
-            "QuerySet instance state is unreadable, so the row bound cannot "
-            "rebuild a framework-owned queryset to apply itself to.",
-        ) from None
-    else:
-        return state
+    # Every caller hands in a ``QuerySet`` instance, which always carries the genuine
+    # ``__dict__`` slot.
+    return truth.instance_state(value)
 
 
 def _sentence_start(phrase: str) -> str:
@@ -4555,36 +4505,22 @@ def _coerced_manager_queryset(
     (an unrouted manager must stay unrouted until the required-alias resolution
     pins it). The returned queryset still flows through the full source /
     result validation (concrete table, actual base table, trust, alias); this
-    helper only closes the Manager-coercion-specific holes.
+    helper only closes the Manager-coercion-specific holes. ``all()`` is the
+    Manager's own code: whatever it raises propagates.
     """
-    try:
-        manager_state = instance_dict(manager)
-        explicit = manager_state.get("_db")
-    except BaseException as exc:
+    explicit = truth.instance_state(manager).get("_db")
+    queryset = manager.all()
+    if not truth.is_instance(queryset, models.QuerySet):
         raise ConfigurationError(
-            f"A {_safe_type_name(manager)}.all() coercion could not read the manager's "
-            "routing state; a Manager with unreadable routing metadata cannot enter the "
-            "visibility boundary.",
-        ) from exc
-    try:
-        queryset = manager.all()
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"A {_safe_type_name(manager)}.all() coercion could not produce a QuerySet; "
-            "the Manager's query source raised while entering the visibility boundary.",
-        ) from exc
-    # basedpyright: trust boundary: a consumer Manager can override ``all()`` to return anything
-    if not isinstance(queryset, models.QuerySet):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raise ConfigurationError(
-            f"A {_safe_type_name(manager)}.all() coercion must produce a QuerySet, but "
-            f"returned {_safe_type_name(queryset)}; a Manager that degrades into a list "
+            f"A {truth.kind(manager)}.all() coercion must produce a QuerySet, but "
+            f"returned {truth.kind(queryset)}; a Manager that degrades into a list "
             f"or other non-queryset cannot enter the visibility boundary and must not "
             f"be treated as the deliberate plain-iterable bypass.",
         )
     routed = queryset_db(queryset)
     if routed != explicit:
         raise ConfigurationError(
-            f"A {_safe_type_name(manager)} pinned to alias {explicit!r} produced a "
+            f"A {truth.kind(manager)} pinned to alias {explicit!r} produced a "
             f"queryset routed to {routed!r} on .all(); a Manager coercion must "
             f"preserve the manager's explicit routing exactly (an unrouted manager "
             f"must stay unrouted until the resolution's required alias pins it), so a "
@@ -4607,7 +4543,10 @@ def _defect_message(messages: dict[str, str], defect: tuple[str, str], subject: 
 
     Each site owns its own prose (a cascade edge names the edge, a read surface
     names ``get_queryset``); what is shared is the dispatch and the
-    exhaustiveness, never the wording.
+    exhaustiveness, plus the two clause texts no surface respells -- the
+    untrusted cause list (``_UNSEALABLE_STATE_CAUSES``) and the
+    combined-queryset contract (``_COMBINED_WHAT``) -- each composed under the
+    site's own subject.
     """
     code, detail = defect
     message = messages.get(code)
@@ -4639,8 +4578,8 @@ def _visibility_result_error(
     code, detail = defect
     if render_error is not None:
         return ConfigurationError(render_error(code, detail))
-    name = _safe_class_name(type_cls)
-    model_name = _safe_class_name(model)
+    name = truth.name(type_cls)
+    model_name = truth.name(model)
     return ConfigurationError(
         _defect_message(
             {
@@ -4790,8 +4729,8 @@ def _prepared_visibility_source(
         code, detail = defect
         if render_error is not None:
             raise ConfigurationError(render_error(code, detail))
-        name = _safe_class_name(type_cls)
-        model_name = _safe_class_name(model)
+        name = truth.name(type_cls)
+        model_name = truth.name(model)
         raise ConfigurationError(
             _defect_message(
                 {
@@ -4839,7 +4778,7 @@ def _prepared_visibility_source(
         sealed = pin_write_queryset(
             sealed,
             pipeline.alias,
-            owner=f"The {_safe_class_name(type_cls)} visibility source",
+            owner=f"The {truth.name(type_cls)} visibility source",
         )
         required_alias = pipeline.alias
     else:
@@ -4982,7 +4921,7 @@ def apply_type_visibility_sync(
     result = type_cls.get_queryset(queryset, info)
     result = reject_async_in_sync_context(
         result,
-        owner=_safe_class_name(type_cls),
+        owner=truth.name(type_cls),
         method="get_queryset",
         context="resolver",
         recourse=async_recourse,
@@ -5230,7 +5169,8 @@ def visible_related_object(
     (hidden / missing - the caller maps ``None`` to the field-keyed ``FieldError``,
     indistinguishable). The decoder needs the OBJECT (the form converts it to its
     ``to_field_name`` key; the serializer reduces it to the pk), which the ``036``
-    ``_relation_visibility_error`` does not return, so it cannot call that helper -
+    ``utils/errors.py::relation_field_error`` does not return, so it cannot call
+    that helper -
     but it reuses the same primitives so the query shape is identical. An ``async
     def get_queryset`` met here raises ``SyncMisuseError``.
 
@@ -5350,7 +5290,7 @@ async def apply_type_visibility_async(
         result = await result
         if _disposed_awaitable(result):
             raise ConfigurationError(
-                f"{_safe_class_name(type_cls)}.get_queryset resolved to a nested awaitable; an "
+                f"{truth.name(type_cls)}.get_queryset resolved to a nested awaitable; an "
                 f"async get_queryset must resolve to a QuerySet (or Manager) after ONE "
                 f"await, and an unbounded awaitable chain is never consumed.",
             )
@@ -5379,7 +5319,7 @@ def reject_awaitable_sync_source(source: object, type_cls: type[DjangoType]) -> 
     if not _disposed_awaitable(source):
         return
     raise SyncMisuseError(
-        f"A sync {_safe_class_name(type_cls)} consumer resolver returned an awaitable. "
+        f"A sync {truth.name(type_cls)} consumer resolver returned an awaitable. "
         "Declare the resolver `async def` (or use an async callable) so the "
         "field awaits it and applies the get_queryset visibility hook; a plain "
         "`def` resolver that returns an awaitable is committed to the sync path "
@@ -5409,7 +5349,7 @@ def reject_residual_async_source(source: object, type_cls: type[DjangoType]) -> 
     if not _disposed_awaitable(source):
         return
     raise ConfigurationError(
-        f"An async {_safe_class_name(type_cls)} consumer resolver resolved to another "
+        f"An async {truth.name(type_cls)} consumer resolver resolved to another "
         f"awaitable after being awaited; a nested awaitable is neither a QuerySet "
         f"nor a plain iterable, and passing it through would silently skip the "
         f"get_queryset visibility hook. Return the queryset (or iterable) directly.",

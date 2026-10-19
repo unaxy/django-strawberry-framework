@@ -87,6 +87,58 @@ __all__ = ("PrivateAuthority", "PrivateMembership")
 
 StateT = TypeVar("StateT")
 MemberT = TypeVar("MemberT")
+PayloadT = TypeVar("PayloadT")
+
+#: One filed entry: which object the entry belongs to, and the payload filed
+#: for it.
+_Entry = tuple[ReferenceType[object], PayloadT]
+
+
+class _IdFiledEntries(Generic[PayloadT]):
+    """Entries filed under ``id(owner)``, verified on every read, cleaned at death.
+
+    The one filing lifecycle both tamper-proof stores compose. The key is the
+    owner's identity, never its hash or equality, which consumer code may
+    define. Every read answers only while the filed weak reference still
+    points at the asker: an ``id()`` names a live object only, so the key
+    may already name a successor that reused the address. The reference's
+    own callback removes the entry only while the filed reference is still
+    the dead one.
+
+    The payload is opaque here. Authority files the record itself, held
+    strongly; membership files per-member evidence, held weakly; neither
+    retention half is this class's business. Nothing here refuses a write
+    either: settling twice is refused by each caller with its own typed
+    error, and accepting replaces whatever was filed.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[int, _Entry[PayloadT]] = {}
+
+    def _live_entry(self, owner: object) -> _Entry[PayloadT] | None:
+        """Return the entry filed for ``owner``, when its weak reference still points at it."""
+        entry = self._entries.get(id(owner))
+        return entry if entry is not None and entry[0]() is owner else None
+
+    def has(self, owner: object) -> bool:
+        """Whether a live entry is filed for ``owner``."""
+        return self._live_entry(owner) is not None
+
+    def file(self, owner: object, payload: PayloadT) -> None:
+        """File ``payload`` as ``owner``'s entry, replacing whatever was filed for it."""
+        key = id(owner)
+
+        def forget(dead: ReferenceType[object]) -> None:
+            entry = self._entries.get(key)
+            if entry is not None and entry[0] is dead:
+                del self._entries[key]
+
+        self._entries[key] = (ref(owner, forget), payload)
+
+    def verified(self, owner: object) -> PayloadT | None:
+        """Return the payload filed for ``owner``, or ``None`` when no live entry answers for it."""
+        entry = self._live_entry(owner)
+        return None if entry is None else entry[1]
 
 
 class PrivateAuthority(Generic[StateT]):
@@ -106,7 +158,7 @@ class PrivateAuthority(Generic[StateT]):
 
     def __init__(self) -> None:
         """Start with no owner settled."""
-        self._settled: dict[int, tuple[ReferenceType[object], StateT]] = {}
+        self._filed: _IdFiledEntries[StateT] = _IdFiledEntries()
 
     def settled(self, owner: object) -> bool:
         """Whether ``owner`` already has an authority filed here.
@@ -124,19 +176,11 @@ class PrivateAuthority(Generic[StateT]):
         supported configuration as an object that was never constructed at all,
         and admit the second constructor call that configuration is open to.
         """
-        entry = self._settled.get(id(owner))
-        return entry is not None and entry[0]() is owner
+        return self._filed.has(owner)
 
     def settle(self, owner: object, state: StateT) -> None:
         """File ``state`` as ``owner``'s authority."""
-        key = id(owner)
-
-        def forget(dead: ReferenceType[object]) -> None:
-            entry = self._settled.get(key)
-            if entry is not None and entry[0] is dead:
-                del self._settled[key]
-
-        self._settled[key] = (ref(owner, forget), state)
+        self._filed.file(owner, state)
 
     def recall(self, owner: object) -> StateT | None:
         """Return the authority ``owner`` was settled with, or ``None`` if it has none.
@@ -146,8 +190,7 @@ class PrivateAuthority(Generic[StateT]):
         an owner that is alive to ask still has the authority it was accepted
         with.
         """
-        entry = self._settled.get(id(owner))
-        return None if entry is None or entry[0]() is not owner else entry[1]
+        return self._filed.verified(owner)
 
 
 def _boxed_member() -> None:
@@ -184,10 +227,6 @@ class _BoxedMember(NamedTuple):
 #: the member itself, or - for a member no weak reference can be taken of - one
 #: to the box its owner holds it in.
 _Evidence = ReferenceType[MemberT] | _BoxedMember
-
-#: One owner's filed evidence: which object the entry belongs to, and one piece
-#: of evidence per member of the sequence it was accepted with.
-_Accepted = tuple[ReferenceType[object], tuple[_Evidence[MemberT], ...]]
 
 
 def _accepted_member(member: MemberT) -> tuple[_Evidence[MemberT], MemberT | MethodType]:
@@ -237,7 +276,7 @@ class PrivateMembership(Generic[MemberT]):
     def __init__(self, attribute: str) -> None:
         """Hold sequences under the private ``attribute`` of their owner, with none accepted yet."""
         self._attribute: str = attribute
-        self._accepted: dict[int, _Accepted[MemberT]] = {}
+        self._filed: _IdFiledEntries[tuple[_Evidence[MemberT], ...]] = _IdFiledEntries()
 
     def accept(self, owner: object, members: Iterable[MemberT]) -> None:
         """Accept ``members`` as ``owner``'s sequence, replacing whatever it carried.
@@ -248,15 +287,10 @@ class PrivateMembership(Generic[MemberT]):
         Strawberry can run it.
         """
         taken = tuple(_accepted_member(member) for member in members)
-        owner.__dict__[self._attribute] = tuple(hold for _, hold in taken)
-        key = id(owner)
-
-        def forget(dead: ReferenceType[object]) -> None:
-            entry = self._accepted.get(key)
-            if entry is not None and entry[0] is dead:
-                del self._accepted[key]
-
-        self._accepted[key] = (ref(owner, forget), tuple(evidence for evidence, _ in taken))
+        # The base ``object.__setattr__`` writes the owner's own namespace past
+        # any ``__setattr__`` a subclass defines.
+        object.__setattr__(owner, self._attribute, tuple(hold for _, hold in taken))
+        self._filed.file(owner, tuple(evidence for evidence, _ in taken))
 
     def recall(self, owner: object) -> tuple[MemberT, ...] | None:
         """Return the sequence ``owner`` was accepted with, or ``None`` for one that is gone.
@@ -273,11 +307,11 @@ class PrivateMembership(Generic[MemberT]):
         attribute, and the entry the write dropped the last hold on is the one
         that ends the sequence.
         """
-        entry = self._accepted.get(id(owner))
-        if entry is None or entry[0]() is not owner:
+        payload = self._filed.verified(owner)
+        if payload is None:
             return None
         accepted: list[MemberT] = []
-        for evidence in entry[1]:
+        for evidence in payload:
             if isinstance(evidence, _BoxedMember):
                 box = evidence.box()
                 if box is None:

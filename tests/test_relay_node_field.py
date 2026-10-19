@@ -1,7 +1,7 @@
 """Root Relay refetch tests for DjangoNodeField and DjangoNodesField.
 
-Mirrors the top-level ``django_strawberry_framework/relay.py`` (the card-named
-two-file split over a strict ``docs/TREE.md`` mirror -
+Mirrors the top-level ``django_strawberry_framework/relay.py`` (the two-file
+split over a strict ``docs/TREE.md`` mirror -
 ``docs/SPECS/spec-032-full_relay-0_0_9.md`` Decision 11). Consumer refetch over
 HTTP lives in ``examples/fakeshop/test_query/test_library_api.py`` (shipped
 ``node`` / ``nodes`` / typed ``genre(id:)``, plus a ``/graphql-test/`` holder
@@ -16,7 +16,6 @@ field), and the public-export surface.
 
 import re
 from collections.abc import Awaitable, Callable, Iterable, Iterator
-from typing import NoReturn, SupportsIndex
 
 import pytest
 import strawberry
@@ -24,12 +23,14 @@ from apps.products import services
 from apps.products.models import Category
 from asgiref.sync import sync_to_async
 from django.db.models import Model, QuerySet
+from django.utils.functional import SimpleLazyObject
 from strawberry import relay
 from strawberry.schema_directive import Location as DirectiveLocation
 from strawberry.schema_directive import schema_directive
 from typing_extensions import Self, override
 
 import django_strawberry_framework
+import django_strawberry_framework.relay as relay_module
 from django_strawberry_framework import (
     DjangoNodeField,
     DjangoNodesField,
@@ -49,6 +50,8 @@ from django_strawberry_framework.relay import (
     decode_model_global_id,
 )
 from django_strawberry_framework.types.relay import SyncMisuseError, implements_relay_node
+from django_strawberry_framework.utils import truth as real_truth
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import json_at, json_list, saved_pk
 
 
@@ -70,7 +73,7 @@ def _make_node_type(
     *,
     model: type[Model] = Category,
     strategy: str | None = None,
-) -> type:
+) -> type[DjangoType]:
     """Build a Relay-Node-shaped ``DjangoType`` over ``model`` for a test."""
     meta_attrs = {
         "model": model,
@@ -80,7 +83,9 @@ def _make_node_type(
     }
     if strategy is not None:
         meta_attrs["globalid_strategy"] = strategy
-    return type(name, (DjangoType,), {"Meta": type("Meta", (), meta_attrs)})
+    node_type = type(name, (DjangoType,), {"Meta": type("Meta", (), meta_attrs)})
+    assert issubclass(node_type, DjangoType)
+    return node_type
 
 
 def _schema_with(
@@ -211,7 +216,7 @@ def test_bare_node_field_multi_type_model_typename_follows_gid() -> None:
 
 @pytest.mark.django_db
 def test_bare_nodes_field_multi_type_model_typenames_follow_gids() -> None:
-    """Batch sibling of the S2 regression: per-position ``__typename`` routing."""
+    """Batch sibling of the single-node multi-type regression: per-position ``__typename`` routing."""
     services.seed_data(1)
     primary, secondary = _make_multi_type_category_nodes()
     schema = _schema_with(
@@ -242,10 +247,9 @@ def test_node_type_hint_does_not_poison_reused_model_instance() -> None:
 
     The bare node field must route a secondary GlobalID to its named concrete
     type without mutating the model object a consumer may return from another
-    field in the same operation. Before ``_stamp_node_type`` copied model
-    instances, the later concrete ``PrimaryNode`` field rejected that reused
-    object because its stale ``SecondaryNode`` hint made ``is_type_of`` return
-    false.
+    field in the same operation. Stamped in place, the later concrete
+    ``PrimaryNode`` field would reject that reused object because its stale
+    ``SecondaryNode`` hint makes ``is_type_of`` return false.
     """
     services.seed_data(1)
     row = Category.objects.order_by("pk").first()
@@ -299,6 +303,67 @@ def test_node_type_hint_does_not_poison_reused_model_instance() -> None:
     assert not hasattr(row, "_dsf_node_type_hint")
 
 
+@pytest.mark.django_db
+def test_node_type_hint_from_a_lazy_resolve_node_return_does_not_poison_the_row() -> None:
+    """A ``resolve_node`` override returning a Django lazy proxy stamps a copy of its row.
+
+    The proxy forwards attribute writes to the object it wraps, so stamping the
+    proxy itself would write the hint onto the shared row (``request.user``'s
+    shape). The proxy is unwrapped first and the row is copied, so the
+    concrete ``PrimaryNode`` field returning the same row still dispatches.
+    """
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+
+    class PrimaryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            primary = True
+            globalid_strategy = "type"
+
+    class SecondaryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            globalid_strategy = "type"
+
+        @classmethod
+        def resolve_node(
+            cls,
+            node_id: str,
+            *,
+            info: strawberry.Info,
+            required: bool = False,
+        ) -> SimpleLazyObject[Category | None]:
+            del cls, node_id, info, required
+            return SimpleLazyObject(lambda: row)
+
+    class Query:
+        node: relay.Node | None = DjangoNodeField()
+        # basedpyright: a DjangoType field resolves to its model row; the checker cannot see
+        # that ``PrimaryNode`` wraps ``Category``
+        primary: PrimaryNode = strawberry.field(resolver=lambda: row)  # pyright: ignore[reportAssignmentType]
+
+    Query = strawberry.type(Query)
+    finalize_django_types()
+    schema = strawberry.Schema(
+        query=Query,
+        config=strawberry_config(),
+        types=[PrimaryNode, SecondaryNode],
+    )
+    assert row is not None
+    result = schema.execute_sync(
+        "query($id: ID!) { node(id: $id) { __typename } primary { name } }",
+        variable_values={"id": _gid("SecondaryNode", row.pk)},
+    )
+    assert result.errors is None, result.errors
+    assert result.data == {"node": {"__typename": "SecondaryNode"}, "primary": {"name": row.name}}
+    assert "_dsf_node_type_hint" not in vars(row)
+
+
 def test_stamp_node_type_passes_through_none_and_unstampable_objects() -> None:
     """``None`` rides through; an attribute-rejecting return stays unstamped.
 
@@ -324,28 +389,6 @@ def test_stamp_node_type_passes_through_none_and_unstampable_objects() -> None:
     assert not hasattr(unstampable, "_dsf_node_type_hint")
 
 
-def test_stamp_node_type_returns_a_model_instance_that_rejects_copying() -> None:
-    class Model:
-        pass
-
-    class UncopyableNode(Model):
-        @override
-        def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
-            raise TypeError("copy unavailable")
-
-    resolved_type = type(
-        "ResolvedType",
-        (),
-        {"__django_strawberry_definition__": type("Definition", (), {"model": Model})()},
-    )
-    node = UncopyableNode()
-    # basedpyright: a type()-built class whose definition names a plain (non-Django) model, so
-    # the node is an instance that refuses copying; _stamp_node_type types the parameter as
-    # the class of a Relay Django type
-    assert _stamp_node_type(resolved_type, node) is node  # pyright: ignore[reportArgumentType]
-    assert not hasattr(node, "_dsf_node_type_hint")
-
-
 # ---------------------------------------------------------------------------
 # Custom relay.NodeID[...] id attribute (coercion must key on resolve_id_attr())
 # ---------------------------------------------------------------------------
@@ -357,7 +400,7 @@ def test_node_custom_node_id_attr_resolves() -> None:
 
     Coercion must key on ``resolve_id_attr()`` (here ``name``), not
     ``model._meta.pk``: a non-numeric name coerced against the int pk becomes
-    ``None`` -> a spurious ``null`` for a row that exists (the P2 bug). The
+    ``None`` -> a spurious ``null`` for a row that exists. The
     NodeID column is consumed as the ``id`` slot, so the query selects ``id`` /
     ``__typename``, not the column itself.
     """
@@ -433,7 +476,7 @@ def test_decode_model_global_id_resolves_custom_node_id_to_real_pk() -> None:
     and FK / M2M assignment), all of which treat ``result.pk`` as an actual primary
     key. For a consumer ``id: relay.NodeID[str]`` over the non-pk ``name`` column,
     the decoded value is the ``name`` string; handing that to a ``pk=`` lookup
-    targets the wrong column (the P1 bug). The fix resolves it to ``row.pk`` here.
+    targets the wrong column. The value resolves to ``row.pk`` here.
     """
     services.seed_data(1)
 
@@ -492,7 +535,7 @@ def test_decode_model_global_id_passes_raw_value_for_non_field_node_id() -> None
     ``_resolve_real_pk`` mirrors ``_coerce_pk_or_none``'s ``FieldDoesNotExist``
     fall-through: with no concrete column to map to a pk, the coerced literal is
     returned unchanged rather than crashing on ``get_field`` (a downstream
-    ``pk=<literal>`` lookup then fails as not-found, the pre-032 behavior).
+    ``pk=<literal>`` lookup then fails as not-found).
     """
     services.seed_data(1)
 
@@ -518,7 +561,7 @@ def test_coerce_pk_or_none_passes_raw_string_for_non_field_node_id() -> None:
 
     ``_coerce_pk_or_none`` keys on ``resolve_id_attr()``; when that names no
     concrete model field (``FieldDoesNotExist``) it cannot coerce, so it
-    returns the literal unchanged (pre-032 behavior) rather than crashing.
+    returns the literal unchanged rather than crashing.
     """
 
     class SlugNode(DjangoType):
@@ -533,6 +576,43 @@ def test_coerce_pk_or_none_passes_raw_string_for_non_field_node_id() -> None:
     finalize_django_types()
     assert implements_relay_node(SlugNode)
     assert _coerce_pk_or_none(SlugNode, "abc-123") == "abc-123"
+
+
+@pytest.mark.django_db
+def test_batch_coercion_computes_id_slot_once_per_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The id slot is computed once per distinct type per call path.
+
+    ``_node_id_slot`` is a per-type constant threaded through the batch coerce
+    loop and the write decode halves. A 4-id same-type batch computes it twice,
+    never per id: once in the field's gate, and once in the default
+    ``resolve_nodes``, which receives the decoded ``node_id`` strings (Strawberry's
+    contract) and coerces them itself. One write decode computes it once.
+    """
+    services.seed_data(4)
+    category_node = _make_node_type("CategoryNode")
+    schema = _schema_with(
+        "categories",
+        list[category_node | None],
+        DjangoNodesField(category_node),
+    )
+    rows = list(Category.objects.order_by("pk")[:4])
+    gids = [_gid("products.category", row.pk) for row in rows]
+
+    calls: list[type] = []
+    real_slot = relay_module._node_id_slot
+
+    def counting_slot(resolved_type: type) -> object:
+        calls.append(resolved_type)
+        return real_slot(resolved_type)
+
+    monkeypatch.setattr(relay_module, "_node_id_slot", counting_slot)
+    result = schema.execute_sync(_CATEGORIES_QUERY, variable_values={"ids": gids})
+    assert result.errors is None
+    assert len(calls) == 2
+    calls.clear()
+    decoded = decode_model_global_id(gids[0], Category)
+    assert decoded.status is GlobalIDDecode.OK
+    assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -779,36 +859,6 @@ def test_node_field_rejects_bare_string_directives(
         match=rf"{factory.__name__} directives must be a sequence of directive instances",
     ):
         factory(directives=bare)
-
-
-@pytest.mark.parametrize("factory", [DjangoNodeField, DjangoNodesField])
-def test_node_field_rejects_hostile_directives_iterator(factory: Callable[..., object]) -> None:
-    """A hostile iterator escaped raw pre-fix; a non-iterable detonated as TypeError.
-
-    The rejection also runs BEFORE the ``_node_fields_declared`` ledger append,
-    so a refused construction leaves no phantom entry behind the finalize-time
-    no-Node-types check.
-    """
-
-    class HostileDirectives:
-        def __iter__(self) -> Iterator[object]:
-            raise RuntimeError("hostile iterator detonated")
-
-    with pytest.raises(
-        ConfigurationError,
-        match=rf"{factory.__name__} directives could not be read",
-    ) as exc:
-        factory(directives=HostileDirectives())
-    assert isinstance(exc.value.__cause__, RuntimeError)
-
-    with pytest.raises(
-        ConfigurationError,
-        match=rf"{factory.__name__} directives could not be read",
-    ) as exc:
-        factory(directives=42)
-    assert isinstance(exc.value.__cause__, TypeError)
-
-    assert _node_fields_declared == []
 
 
 @pytest.mark.parametrize("factory", [DjangoNodeField, DjangoNodesField])
@@ -1179,6 +1229,53 @@ def test_node_sync_async_get_queryset_raises_sync_misuse() -> None:
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
     assert (result.errors[0].extensions or {}).get("code") != "GLOBALID_INVALID"
     assert "Invalid GlobalID" not in str(result.errors[0])
+
+
+@pytest.mark.django_db
+def test_sync_node_path_builds_no_owner_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sync node(s) success paths skip the error-only owner-name build.
+
+    ``reject_async_in_sync_context`` reads ``owner`` only on the raise path, so
+    both sync resolvers guard the ``truth.name`` call with ``isawaitable``: one
+    sync single refetch plus one sync batch refetch build zero owner names. The
+    spy is scoped to this module's own ``truth`` reference (other subsystems
+    name eagerly on their own paths), and the ``SyncMisuseError`` rows still pin
+    the raise path.
+    """
+    services.seed_data(1)
+    category_node = _make_node_type("CategoryNode")
+    single_schema = _schema_with(
+        "category",
+        category_node | None,
+        DjangoNodeField(category_node),
+    )
+    batch_schema = _schema_with(
+        "categories",
+        list[category_node | None],
+        DjangoNodesField(category_node),
+    )
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    gid = _gid("products.category", row.pk)
+
+    calls: list[object] = []
+
+    class _CountingTruth:
+        """Delegate every truth read while counting ``name`` calls."""
+
+        def __getattr__(self, attr: str) -> object:
+            return read_attr(real_truth, attr)
+
+        def name(self, obj: object) -> str:
+            calls.append(obj)
+            return real_truth.name(obj)
+
+    monkeypatch.setattr(relay_module, "truth", _CountingTruth())
+    single = single_schema.execute_sync(_CATEGORY_QUERY, variable_values={"id": gid})
+    assert single.errors is None
+    batch = batch_schema.execute_sync(_CATEGORIES_QUERY, variable_values={"ids": [gid, gid]})
+    assert batch.errors is None
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

@@ -19,9 +19,9 @@ Every name transform the package applies at the GraphQL/Django boundary:
 import functools
 from typing import TYPE_CHECKING, cast
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_type_name
+from django_strawberry_framework.exceptions import ConfigurationError
 
-from ._narrowing import is_str
+from . import truth
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,9 +62,9 @@ def _plain_text(value: object) -> str:
     """
     if type(value) is str:
         return value
-    if not is_str(value):
+    if not truth.is_instance(value, str):
         raise ConfigurationError(
-            f"String helper input must be a string; got {_safe_type_name(value)}.",
+            f"String helper input must be a string; got {truth.kind(value)}.",
         )
     return str.__str__(value)
 

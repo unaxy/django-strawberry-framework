@@ -8,7 +8,7 @@ walker metadata have no wire shape. Relation SQL on shipped types is
 import copy
 from collections.abc import Iterable, Iterator
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING
 
 import pytest
 import strawberry
@@ -28,7 +28,6 @@ from apps.library.models import (
 from apps.products import services
 from apps.products.models import Category, Item
 from django.db.models import QuerySet
-from typing_extensions import override
 
 from django_strawberry_framework import DjangoOptimizerExtension, DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
@@ -355,30 +354,8 @@ def test_from_django_field_rejects_partial_shape() -> None:
         FieldMeta.from_django_field(PartialField())  # pyright: ignore[reportArgumentType]
 
 
-def test_from_django_field_rejects_hostile_required_attributes_safely() -> None:
-    """Malformed field descriptors cannot replace the typed error with their own failure."""
-
-    class HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr should never run")
-
-    class HostileAttribute:
-        name = "field"
-
-        @property
-        def is_relation(self) -> NoReturn:
-            raise RuntimeError("attribute should be translated")
-
-    for field in (HostileRepr(), HostileAttribute()):
-        with pytest.raises(OptimizerError, match="expected a Django field descriptor"):
-            # basedpyright: each raising descriptor is the hostile input under test;
-            # FieldMeta.from_django_field types the parameter as a Django field
-            FieldMeta.from_django_field(field)  # pyright: ignore[reportArgumentType]
-
-
-def test_target_pk_name_defensively_resolves_and_contains_errors() -> None:
-    """_target_pk_name returns model's pk name or None without raising unhandled errors."""
+def test_target_pk_name_resolves_or_answers_none() -> None:
+    """_target_pk_name returns the model's pk name, or None for a shape without one."""
     assert _target_pk_name(None) is None
     # basedpyright: each non-model is the hostile input under test; _target_pk_name types the
     # parameter as type[Model] | None
@@ -394,24 +371,6 @@ def test_target_pk_name_defensively_resolves_and_contains_errors() -> None:
     assert _target_pk_name(nameless_pk) is None  # pyright: ignore[reportArgumentType]
     assert _target_pk_name(non_str_pk) is None  # pyright: ignore[reportArgumentType]
 
-    class HostileMeta:
-        @property
-        def _meta(self) -> NoReturn:
-            raise RuntimeError("hostile _meta access")
-
-    # basedpyright: the raising _meta is the hostile input under test; _target_pk_name types
-    # the parameter as type[Model] | None
-    assert _target_pk_name(HostileMeta()) is None  # pyright: ignore[reportArgumentType]
-
-    class HostilePkMeta:
-        @property
-        def pk(self) -> NoReturn:
-            raise RuntimeError("hostile pk property")
-
-    raising_pk = SimpleNamespace(_meta=HostilePkMeta())
-    # basedpyright: the raising pk is the hostile input under test; _target_pk_name types the
-    # parameter as type[Model] | None
-    assert _target_pk_name(raising_pk) is None  # pyright: ignore[reportArgumentType]
     assert _target_pk_name(Category) == "id"
 
 
@@ -424,22 +383,8 @@ def test_from_django_field_rejects_non_string_field_name() -> None:
         FieldMeta.from_django_field(non_str_field)  # pyright: ignore[reportArgumentType]
 
 
-def test_from_django_field_rejects_hostile_or_invalid_relation_metadata() -> None:
-    """Hostile or invalid relation metadata raises typed ConfigurationError."""
-
-    class HostileM2M:
-        name = "rel"
-        is_relation = True
-
-        @property
-        def many_to_many(self) -> NoReturn:
-            raise RuntimeError("m2m access error")
-
-    with pytest.raises(
-        ConfigurationError,
-        match="Could not read relation metadata 'many_to_many'",
-    ):
-        FieldMeta.from_django_field(HostileM2M())
+def test_from_django_field_rejects_invalid_relation_metadata() -> None:
+    """Invalid relation metadata raises typed ConfigurationError."""
 
     class NonBoolM2M:
         name = "rel"
@@ -451,18 +396,6 @@ def test_from_django_field_rejects_hostile_or_invalid_relation_metadata() -> Non
         match=r"Relation metadata 'many_to_many' on .* must be a bool",
     ):
         FieldMeta.from_django_field(NonBoolM2M())
-
-    class HostileAccessor:
-        name = "rel"
-        is_relation = True
-        one_to_many = True
-        auto_created = True
-
-        def get_accessor_name(self) -> NoReturn:
-            raise RuntimeError("accessor error")
-
-    with pytest.raises(ConfigurationError, match="Could not resolve relation accessor"):
-        FieldMeta.from_django_field(HostileAccessor())
 
     class NonCallableAccessor:
         name = "rel"

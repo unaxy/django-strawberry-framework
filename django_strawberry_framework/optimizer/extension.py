@@ -45,7 +45,6 @@ from graphql.language.printer import print_ast
 from graphql.type.definition import GraphQLInterfaceType
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import _safe_arg_repr
 from django_strawberry_framework.extensions.operation_state import (
     OperationState,
     _OperationBoundExtension,
@@ -54,14 +53,13 @@ from django_strawberry_framework.extensions.operation_state import (
     operation_is_nested as _operation_is_nested,
 )
 from django_strawberry_framework.registry import register_subsystem_clear, registry
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_abstract_set,
     is_awaitable,
-    is_list,
     is_mapping,
     is_set_or_frozenset,
     is_str,
-    is_tuple,
     read_attr,
 )
 from django_strawberry_framework.utils.private_state import PrivateAuthority
@@ -424,28 +422,23 @@ def _hashable_variable_value(value: object) -> "FrozenVariableValue":
     custom scalar that happens to be hashable, receives a fresh opaque token:
     that request may miss the cross-request plan cache, but it cannot invoke
     consumer-defined equality/hash code or collide with another value and serve
-    the wrong plan. The same fallback terminates a custom scalar that returns a
-    cyclic or hostile container.
+    the wrong plan. A cyclic container a custom scalar returns terminates on its
+    ``cycle`` token.
     """
     return _freeze_variable_value(value, set())
 
 
 def _freeze_variable_value(value: object, active_containers: set[int]) -> "FrozenVariableValue":
     """Recursive implementation for ``_hashable_variable_value``."""
-    value_type_id = id(type(value))
-    try:
-        if type(value) in _SAFE_CACHE_SCALAR_TYPES:
-            return ("scalar", value_type_id, value)
-        value_is_mapping = is_mapping(value)
-        value_is_set = is_abstract_set(value)
-        value_is_sequence = is_list(value) or is_tuple(value)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        # ``Exception``, never ``BaseException`` - matching the container branch
-        # below and the package's boundary policy: a hostile ``__class__`` or
-        # ``__instancecheck__`` degrades to an opaque identity, while
-        # cancellation and process-control signals still propagate rather than
-        # being absorbed into a cache key.
-        return ("opaque", value_type_id, object())
+    value_type = type(value)
+    value_type_id = id(value_type)
+    # Exact-type identity, never ``in`` on a set of classes (which would hash
+    # and compare ``value_type`` through its metaclass).
+    if any(value_type is scalar_type for scalar_type in _SAFE_CACHE_SCALAR_TYPES):
+        return ("scalar", value_type_id, value)
+    value_is_mapping = is_mapping(value)
+    value_is_set = is_abstract_set(value)
+    value_is_sequence = issubclass(truth.class_of(value), (list, tuple))
 
     if not (value_is_mapping or value_is_set or value_is_sequence):
         # Do not probe ``hash(value)`` here. A custom scalar's hash/equality
@@ -459,40 +452,34 @@ def _freeze_variable_value(value: object, active_containers: set[int]) -> "Froze
         return ("cycle", value_type_id, object())
     active_containers.add(container_id)
     try:
-        try:
-            # The three flags hold the ``isinstance`` verdicts taken once above, so a
-            # hostile ``__instancecheck__`` runs once.
-            if value_is_mapping:
-                mapping = value
-                return (
-                    "mapping",
-                    value_type_id,
-                    frozenset(
-                        (
-                            _freeze_variable_value(key, active_containers),
-                            _freeze_variable_value(item, active_containers),
-                        )
-                        for key, item in mapping.items()
-                    ),
-                )
-            members = cast("Iterable[object]", value)
-            if value_is_set:
-                return (
-                    "set",
-                    value_type_id,
-                    frozenset(_freeze_variable_value(item, active_containers) for item in members),
-                )
+        # A container a custom scalar parser returned is iterated on its own
+        # terms; whatever its iteration raises is the parser's behaviour and
+        # propagates. The three flags hold the verdicts taken once above.
+        if value_is_mapping:
+            mapping = value
             return (
-                "list" if isinstance(value, list) else "tuple",
+                "mapping",
                 value_type_id,
-                tuple(_freeze_variable_value(item, active_containers) for item in members),
+                frozenset(
+                    (
+                        _freeze_variable_value(key, active_containers),
+                        _freeze_variable_value(item, active_containers),
+                    )
+                    for key, item in mapping.items()
+                ),
             )
-        except Exception:  # noqa: BLE001 - consumer code may raise anything
-            # Custom scalar parsers may return hostile container subclasses.
-            # Their hash/iteration/repr behaviour is outside the optimizer's
-            # control; an opaque per-value token preserves cache safety without
-            # letting malformed user data abort an otherwise valid operation.
-            return ("opaque", value_type_id, object())
+        members = cast("Iterable[object]", value)
+        if value_is_set:
+            return (
+                "set",
+                value_type_id,
+                frozenset(_freeze_variable_value(item, active_containers) for item in members),
+            )
+        return (
+            "list" if truth.is_instance(value, list) else "tuple",
+            value_type_id,
+            tuple(_freeze_variable_value(item, active_containers) for item in members),
+        )
     finally:
         active_containers.remove(container_id)
 
@@ -1003,7 +990,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         self.execution_context: ExecutionContext | None = execution_context
         accepted_strictness = _matched_strictness(strictness)
         if accepted_strictness is None:
-            msg = f"strictness must be 'off', 'warn', or 'raise', got {_safe_arg_repr(strictness)}"
+            msg = f"strictness must be 'off', 'warn', or 'raise', got {truth.render(strictness)}"
             raise ValueError(msg)
         # The nested-connection fetch strategy is fixed per extension INSTANCE
         # at construction (``None`` reads the ``NESTED_CONNECTION_STRATEGY``
@@ -1218,6 +1205,12 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
            node type). A combined queryset passes through ``apply_to``
            unplanned.
 
+        The async-adapter contract wraps every step: ``result`` is unwrapped
+        on entry and re-wrapped on exit exactly when it arrived adapted, so
+        each step sees the plain queryset
+        (``utils/querysets.py::unwrap_async_queryset_adapter`` /
+        ``utils/querysets.py::wrap_async_queryset_adapter``).
+
         """
         inner_result, was_adapted = unwrap_async_queryset_adapter(result)
 
@@ -1236,10 +1229,11 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # clone (which would re-execute the SQL). ``is not None`` is the exact,
         # allocation-free signal upstream uses: ``_result_cache`` is ``None``
         # until evaluated and a (possibly empty) list after, so truthiness would
-        # mis-handle an evaluated-but-empty queryset. ``getattr`` is defensive
-        # per the package posture - a non-queryset that slipped the gate above
-        # simply lacks the attribute and falls through.
-        if getattr(inner_result, "_result_cache", None) is not None:
+        # mis-handle an evaluated-but-empty queryset. The gate above proves a
+        # queryset (``normalize_query_source`` narrows here), and Django's
+        # ``QuerySet.__init__`` always sets the slot, so the typed read is
+        # exact - a non-queryset returns at the gate and never reaches this line.
+        if inner_result._result_cache is not None:
             return finish(inner_result)
         resolved = _resolve_model_from_return_type(info)
         if resolved is None:
@@ -1560,7 +1554,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
                         continue
                     seen.add(key)
                     warnings.append(
-                        f"{type_cls.__name__} ({_model.__name__}.{field_name}) "
+                        f"{truth.name(type_cls)} ({truth.name(_model)}.{field_name}) "
                         "has no registered target DjangoType",
                     )
         return warnings

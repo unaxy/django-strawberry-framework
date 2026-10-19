@@ -24,7 +24,8 @@ single sanctioned exception is an in-function lazy read -
 leaf read that does not reintroduce module-load coupling.  Shared primitives
 otherwise belong in ``optimizer/`` or in a sibling utility module.  This
 subpackage also consumes leaf helpers from ``..utils`` (``pascal_case``,
-``RelationKind``, ``relation_kind``); the inverse direction is bounded by the
+``RelationKind``, ``instance_accessor``, ``is_many_side_relation_kind``,
+``is_single_column_foreign_key``); the inverse direction is bounded by the
 same rule.
 """
 

@@ -7,6 +7,13 @@ pending prefetches and its deferred filter. Django keeps all of these as private
 access is an unknown attribute to the type checker. Each one is spelled here
 once, under the type Django stores, and every caller goes through these
 functions instead of the attribute.
+
+These are attribute reads and writes, so they suit a queryset the framework
+built, sealed or already proved a ``QuerySet``. The seal's inspection of an
+untrusted consumer queryset must not dispatch consumer code, so it reads the
+instance namespace through ``truth.instance_state`` instead
+(``django_strawberry_framework/utils/querysets.py::_seal_or_defect``) and comes
+here only to write the validated state onto the queryset it rebuilds.
 """
 
 from __future__ import annotations

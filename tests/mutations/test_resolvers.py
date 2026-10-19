@@ -7,17 +7,25 @@ mocked ``IntegrityError`` race, ``async def get_queryset`` ``SyncMisuseError``,
 async-row leak isolation, Relay M2M hide on a second ``Genre`` primary
 (shipped ``GenreType`` has no hide hook; a second primary cannot coexist in the
 live process), raw-pk M2M *update* (no shipped ``updateShelf``), unregistered
-primary existence-only decode, ``TaggedItem.object_id`` GFK indexing,
+primary existence-only decode, ``TaggedItem.object_id`` GFK indexing (no
+shipped ``TaggedItemType``; rung 1 would add one to the library schema, rung 3
+cannot declare ``DjangoMutation`` after the live autouse finalize),
 relation-override visibility (no shipped override declares a relation field, so
-the composite is package-only), pipeline pk-drift, ``ScalarSpecimen`` writes
-(the scalars app exposes no ``ScalarSpecimen`` mutation), and the keying of a
-save-time Django ``ValidationError`` against the backing model through a renamed
-``Meta.input_class`` input, a relation ``attname`` and a dotted name (fakeshop's
-``Item.save()`` rule raises only ``name``). Consumer-visible
-create/update/delete, empty-name ``full_clean``, unresolvable relation ids, M2M
-replace/clear/omit, choice-enum unwrap, raw-pk create visibility, the
-``PROTECT`` / ``RESTRICT`` refused delete and the ``blank=True, null=False`` FK
-null guard live in ``examples/fakeshop/test_query/test_products_api.py`` and
+the composite is package-only), pipeline pk-drift, model-flavor ``full_clean``
+wire-name re-key (the only
+multi-word validated model column, ``Book.circulation_status``, rides an
+enum-guarded input, so no live request can fail its ``full_clean``), the keying
+of a save-time Django ``ValidationError`` against the backing model through a
+renamed ``Meta.input_class`` input, a relation ``attname`` and a dotted name
+(fakeshop's ``Item.save()`` rule raises only ``name``), and
+``ScalarSpecimen`` writes (no shipped mutation; rung 1
+would add ``CreateScalarSpecimen`` to the scalars schema, rung 3 is the same
+late-declaration reject). Consumer-visible create/update/delete, empty-name
+``full_clean``, unresolvable relation ids, M2M replace/clear/omit, choice-enum
+unwrap, raw-pk create visibility, model-flavor ``Item.attachment`` omit /
+replace, the ``PROTECT`` / ``RESTRICT`` refused delete and the
+``blank=True, null=False`` FK null guard live in
+``examples/fakeshop/test_query/test_products_api.py`` and
 ``examples/fakeshop/test_query/test_library_api.py``; file-column update omit /
 replace / explicit null live in ``examples/fakeshop/test_query/test_uploads_api.py``. Atomicity live in
 ``examples/fakeshop/test_query/test_mutation_atomicity.py``.
@@ -72,6 +80,7 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework.resolvers import resolve_serializer_sync
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr, require_instance
 from django_strawberry_framework.utils.errors import validation_error_to_field_errors
 from django_strawberry_framework.utils.input_values import UNSET
@@ -1377,7 +1386,9 @@ def test_create_omitting_empty_value_default_field_succeeds() -> None:
     in Django's ``empty_values``) and rejected it ("This field cannot be blank") -
     stricter than ``Model.objects.create()``, which applies the default unvalidated.
     Create now excludes unprovided fields from ``full_clean``, so the omission writes
-    the default cleanly.
+    the default cleanly. No shipped ScalarSpecimen mutation: rung 1 would add one to
+    the scalars schema; a live holder cannot declare ``DjangoMutation`` after
+    finalize.
     """
     schema, CreateSpec = _build_scalar_specimen_schema()
     assert CreateSpec._input_class is not None
@@ -1409,7 +1420,9 @@ def test_create_naive_datetime_input_is_made_timezone_aware() -> None:
     ``RuntimeWarning`` at save - which this suite's ``-W error`` config escalates to a
     top-level error. The decode step makes a naive datetime aware (like DRF), so the
     create succeeds warning-free and stores an aware value. (A regression would
-    surface as the escalated warning failing this test.)
+    surface as the escalated warning failing this test.) No shipped ScalarSpecimen
+    mutation: rung 1 would add one to the scalars schema; a live holder cannot
+    declare ``DjangoMutation`` after finalize.
     """
     schema, CreateSpec = _build_scalar_specimen_schema()
     assert CreateSpec._input_class is not None
@@ -1510,7 +1523,9 @@ def test_partial_update_validates_scalar_field_named_id_suffix() -> None:
     ``full_clean`` keyed to the ``objectId`` input the client sent - NOT skipped from validation (which the
     old ``_id`` suffix-strip caused: ``object_id`` was mangled to ``object``, read
     as unprovided, excluded from ``full_clean``, and the invalid value slipped to
-    the DB as a mis-labeled ``IntegrityError`` / ``"__all__"`` envelope).
+    the DB as a mis-labeled ``IntegrityError`` / ``"__all__"`` envelope). No
+    shipped ``TaggedItemType``: rung 1 would add one to the library schema; a live
+    holder cannot declare ``DjangoMutation`` after finalize.
     """
     schema, TaggedItemT = _build_tagged_item_schema()
     ct = ContentType.objects.get_for_model(library_models.Branch)
@@ -1574,8 +1589,8 @@ def test_relation_field_index_excludes_generic_foreign_key() -> None:
     """``_relation_field_index`` does not index a ``GenericForeignKey`` as a FK (spec-036).
 
     A GFK reports ``is_relation=True`` but ``column=None`` / ``related_model=None``,
-    so it must never enter ``fk_by_attr`` (where ``_decode_relation_id_set`` would
-    later compare a decoded model against ``related_model=None``). The real
+    so it must never enter ``fk_by_attr`` (where ``decode_visible_relation_ids``
+    would later compare a decoded model against ``related_model=None``). The real
     ``content_type`` FK is still indexed.
     """
     fk_by_attr, _m2m_by_name = _relation_field_index(library_models.TaggedItem)
@@ -1892,15 +1907,57 @@ def test_pipeline_snapshots_authorized_pk_before_permission_hook(
         )
 
 
-def test_pipeline_pk_drift_diagnostic_survives_hostile_repr(
+def test_pipeline_rejects_pk_drift_during_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pk forged by a hook cannot replace the typed drift error while formatting it."""
+    """An update permission hook re-pointing ``instance.pk`` fails closed with the drift error."""
+    located = SimpleNamespace(
+        pk=7,
+        get_deferred_fields=set,
+        _meta=SimpleNamespace(concrete_fields=[]),
+    )
+
+    def drifting_authorize(*_args: object, **_kwargs: object) -> None:
+        located.pk = 8
+
+    mutation_cls = _pipeline_harness(monkeypatch, authorize=drifting_authorize)
+    monkeypatch.setattr(mutation_resolvers, "locate_instance", _returning(located))
+
+    with (
+        patch.object(transaction, "atomic"),
+        managed_write_transaction("default"),
+        pytest.raises(ConfigurationError) as exc,
+    ):
+        object_result(
+            mutation_resolvers.run_write_pipeline_sync,
+            mutation_cls,
+            info=None,
+            data=None,
+            id_="ignored",
+            decode_step=_decode_marker,
+            write_step=_write_located,
+        )
+    assert str(exc.value) == (
+        f"{truth.name(mutation_cls)}: the located instance's pk changed from 7 to 8 during "
+        "authorization; an update must write the row that was authorized, never a "
+        "substituted one."
+    )
+
+
+def test_pipeline_pk_drift_hostile_repr_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pk forged by a hook renders through its own ``__repr__``; what that raises propagates.
+
+    The drift is still refused before the write; the diagnostic names the forged pk
+    through ``truth.render``, so the forged object's own exception surfaces in place of
+    the ``ConfigurationError``.
+    """
 
     class _HostilePk:
         @override
         def __repr__(self) -> str:
-            raise RuntimeError("repr should never escape")
+            raise RuntimeError("hostile pk repr")
 
     located = SimpleNamespace(
         pk=7,
@@ -1917,7 +1974,7 @@ def test_pipeline_pk_drift_diagnostic_survives_hostile_repr(
     with (
         patch.object(transaction, "atomic"),
         managed_write_transaction("default"),
-        pytest.raises(ConfigurationError, match="must write the row that was authorized"),
+        pytest.raises(RuntimeError, match="hostile pk repr"),
     ):
         object_result(
             mutation_resolvers.run_write_pipeline_sync,
@@ -1993,15 +2050,20 @@ def test_delete_pipeline_rejects_pk_drift_during_authorization(
         object_result(mutation_resolvers._run_delete, mutation_cls, info=None, id_="ignored")
 
 
-def test_delete_pipeline_pk_drift_diagnostic_survives_hostile_repr(
+def test_delete_pipeline_pk_drift_hostile_repr_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A delete-path pk forged by a hook cannot replace the typed drift error while formatting."""
+    """A delete-path pk forged by a hook renders through its own ``__repr__``; it propagates.
+
+    The drift is still refused before any delete; the diagnostic names the forged pk
+    through ``truth.render``, so the forged object's own exception surfaces in place of
+    the ``ConfigurationError``.
+    """
 
     class _HostilePk:
         @override
         def __repr__(self) -> str:
-            raise RuntimeError("repr should never escape")
+            raise RuntimeError("hostile pk repr")
 
     located = SimpleNamespace(
         pk=7,
@@ -2023,7 +2085,7 @@ def test_delete_pipeline_pk_drift_diagnostic_survives_hostile_repr(
     with (
         patch.object(transaction, "atomic"),
         managed_write_transaction("default"),
-        pytest.raises(ConfigurationError, match="pk changed"),
+        pytest.raises(RuntimeError, match="hostile pk repr"),
     ):
         object_result(mutation_resolvers._run_delete, mutation_cls, info=None, id_="ignored")
 
@@ -2114,6 +2176,52 @@ def test_assign_m2m_integrity_error_contained_in_envelope() -> None:
         assert len(errors) == 1
         assert errors[0].field == NON_FIELD_ERROR_KEY
         assert errors[0].codes == ["constraint"]
+
+
+@pytest.mark.django_db
+def test_model_write_step_full_clean_error_keys_to_wire_name() -> None:
+    """A ``full_clean`` failure on a multi-word column reports the GraphQL wire name.
+
+    The write step re-keys the Django field buckets through the bind-stashed
+    specs: ``Book.circulation_status`` (whose input is the enum-guarded
+    ``circulationStatus``, so no live request can fail its ``full_clean``) surfaces
+    as ``circulationStatus`` - the wire-name contract the relation-decode errors,
+    the serializer flattener, and the committed ``categoryId`` rows already keep.
+    The key map itself is pinned too: the FK ``shelf`` and its ``shelf_id`` column
+    both ride the ``shelfId`` input.
+    """
+
+    class BookType(DjangoType):
+        class Meta:
+            model = library_models.Book
+            fields = ("id", "title", "circulation_status")
+
+    del BookType
+
+    class CreateBookMutation(DjangoMutation):
+        class Meta:
+            model = library_models.Book
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+    finalize_django_types()
+    key_map = resolvers._model_error_key_map(CreateBookMutation)
+    assert key_map["shelf"][0] == "shelfId"
+    assert key_map["shelf_id"][0] == "shelfId"
+    assert key_map["circulation_status"][0] == "circulationStatus"
+
+    branch = library_models.Branch.objects.create(name="WireNameMapBranch")
+    shelf = library_models.Shelf.objects.create(code="WM-1", branch=branch)
+    book = library_models.Book(
+        title="Wire",
+        circulation_status="bogus-not-a-choice-value!!",
+        shelf=shelf,
+    )
+    decoded: _ModelDecoded = (book, [], [])
+    with managed_write_transaction("default"), open_write_pipeline(CreateBookMutation):
+        failure = resolvers._model_write_step(CreateBookMutation, None, decoded)
+    assert isinstance(failure, resolvers.StepFailure)
+    assert [field_error.field for field_error in failure.errors] == ["circulationStatus"]
 
 
 @pytest.mark.django_db

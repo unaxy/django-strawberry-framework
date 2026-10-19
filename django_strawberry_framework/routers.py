@@ -35,16 +35,18 @@ module ``__getattr__`` behind the ``require_channels()`` guard - the
 install-hint ``ImportError`` fires at the consumer's
 ``from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter``
 line (their ``asgi.py``), never at ``import django_strawberry_framework``. The
-HTTP half of the card needs none of it: ``views.py`` is channels-free, so a
+HTTP half needs none of it: ``views.py`` is channels-free, so a
 WSGI-only project adopts the GraphQL view without the soft dependency.
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 import threading
-from typing import TYPE_CHECKING, cast
+import types
+from typing import TYPE_CHECKING
 
 from django.urls import re_path
 
@@ -54,14 +56,16 @@ from .consumers import (
     build_revalidating_consumer_class,
     resolved_revalidation_window,
 )
-from .exceptions import ConfigurationError, _safe_predicate, describe_value
-from .utils._narrowing import is_class
+from .exceptions import ConfigurationError
+from .utils import truth
 from .utils.imports import CHANNELS_FLOOR, STRAWBERRY_FLOOR, require_optional_module
+from .utils.lazy import unwrap_lazy_object
+from .utils.querysets import _dispose_sync_awaitable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable
     from types import ModuleType
-    from typing import Protocol
+    from typing import Protocol, TypeAlias
 
     from channels.routing import ProtocolTypeRouter
     from django.core.handlers.asgi import ASGIHandler
@@ -97,6 +101,9 @@ if TYPE_CHECKING:
         ) -> None:
             """Build the router; the runtime constructor in the builder is the one that runs."""
 
+    _CoroutineAny: TypeAlias = types.CoroutineType[object, object, object]
+else:
+    _CoroutineAny = types.CoroutineType
 
 # The one public symbol is resolved lazily via the PEP 562 module ``__getattr__``
 # below, so at run time it is never a module global; the ``TYPE_CHECKING``
@@ -105,11 +112,12 @@ if TYPE_CHECKING:
 # (spec-041).
 __all__ = ("DjangoGraphQLProtocolRouter",)
 
-# The single channels-ABSENT install hint (spec-041 Decision 5). The floor
-# itself is ``utils/imports.py::CHANNELS_FLOOR`` - the only other place it is
-# written is the ``channels[daphne]`` dev-group row in ``pyproject.toml``, which
-# must be bumped with it. One floor covers the package's whole advertised Django
-# range through 6.0.
+# This module's single channels-ABSENT install hint (spec-041 Decision 5). The
+# auth transport carries its own feature-keyed twin (``auth/sessions.py``). The
+# floor itself is ``utils/imports.py::CHANNELS_FLOOR`` - the only other place it
+# is written is the ``channels[daphne]`` dev-group row in ``pyproject.toml``,
+# which must be bumped with it. One floor covers the package's whole advertised
+# Django range through 6.1.
 _CHANNELS_INSTALL_HINT = (
     "DjangoGraphQLProtocolRouter requires channels, which is not installed. Install it "
     f"with `pip install 'channels>={CHANNELS_FLOOR}'` (the package's verified Channels floor)."
@@ -137,7 +145,7 @@ _STRAWBERRY_CHANNELS_BROKEN_HINT = (
 # (spec-046 Decision 3 / Error shapes). Names all three facts a migrant needs:
 # what the removed mode was actually doing, that it is REMOVED rather than
 # flagged, and the two-place repair (the asgi.py argument AND the URLconf
-# entry - migration is no longer one line). Omitting the argument entirely is
+# entry). Omitting the argument entirely is
 # Python's own ``TypeError``, deliberately, so a required parameter fails as one.
 _MISSING_DJANGO_APPLICATION_HINT = (
     "DjangoGraphQLProtocolRouter requires a usable Django ASGI application for its `http` "
@@ -187,6 +195,11 @@ _ASYNC_FACTORY_HINT = (
     "Router construction is synchronous and cannot await anything."
 )
 
+# The native coroutine and future classes with their parameters solved, so the
+# real-class checks against them narrow to a known type.
+_COROUTINE: type[_CoroutineAny] = types.CoroutineType
+_FUTURE: type[asyncio.Future[object]] = asyncio.Future
+
 # Rejecting the combination rather than ignoring the window: a knob that does
 # nothing is worse than an error
 # (spec-046 Edge cases #"is meaningless when a custom class"). An explicit
@@ -227,21 +240,22 @@ def _validated_websocket_url_pattern(value: object) -> str:
     """Validate the WebSocket URL regex before Django installs a route.
 
     Django's ``re_path`` stringifies non-string values when it lazily compiles a
-    ``RegexPattern``.  That makes ``None``, a number, or an arbitrary object silently
-    install a route that never matches (and lets a hostile ``__str__`` fail later during
+    ``RegexPattern``.  That makes ``None``, a number, or an arbitrary object
+    silently install a route matching the stringified value instead of the
+    intended pattern (and runs an arbitrary object's ``__str__`` later, during
     the first handshake).  The router's public annotation is a string, so reject every
     other type at construction and compile the string now to turn malformed regexes into
     the same typed configuration boundary.
     """
     if type(value) is not str:
         raise ConfigurationError(
-            f"{_INVALID_WEBSOCKET_URL_PATTERN_HINT}{describe_value(value)}.",
+            f"{_INVALID_WEBSOCKET_URL_PATTERN_HINT}{truth.describe(value)}.",
         )
     try:
         _ = re.compile(value)
-    except BaseException as exc:
+    except (re.error, OverflowError, RecursionError) as exc:
         raise ConfigurationError(
-            f"{_INVALID_WEBSOCKET_URL_PATTERN_HINT}{describe_value(value)}.",
+            f"{_INVALID_WEBSOCKET_URL_PATTERN_HINT}{truth.describe(value)}.",
         ) from exc
     return value
 
@@ -250,7 +264,7 @@ def require_channels() -> ModuleType:
     """Import + return the ``channels`` package, or raise the install-hint ``ImportError``.
 
     A thin wrapper over the shared optional-import owner
-    (``utils/imports.py::require_optional_module``) passing the single
+    (``utils/imports.py::require_optional_module``) passing this module's
     ``_CHANNELS_INSTALL_HINT`` string - the ``require_drf()`` contract
     generalized (spec-041 Decision 5). No memoization: each access re-fires the
     guard so eviction-based absence tests can re-hit it in one process.
@@ -268,21 +282,46 @@ def _require_factory_calling_convention(
     See ``_factory_application`` rejection 1 for why the binding is pre-checked
     rather than caught. An un-introspectable callable is deliberately allowed
     through: ``inspect.signature`` raises ``TypeError`` / ``ValueError`` for the
-    standard un-introspectable shapes, and a consumer-defined ``__signature__``
-    descriptor may raise another ordinary exception; none is evidence that the
-    CALL would fail.
+    standard un-introspectable shapes, and neither is evidence that the CALL
+    would fail.
     """
     try:
         signature = inspect.signature(factory)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
+    except (TypeError, ValueError):
         return
     try:
         _ = signature.bind(schema=schema)
     except TypeError as exc:
         raise ConfigurationError(
-            f"{_FACTORY_CONTRACT_HINT} The factory {describe_value(factory)} cannot accept "
+            f"{_FACTORY_CONTRACT_HINT} The factory {truth.describe(factory)} cannot accept "
             f"that call: {exc}.",
         ) from exc
+
+
+def _refused_coroutine(application: object) -> bool:
+    """Dispose of a refused factory result; return whether it is a coroutine.
+
+    The refused value is released through the package's one awaitable disposal
+    (``utils/querysets.py::_dispose_sync_awaitable``): a coroutine is closed and
+    a future is cancelled. Dropping a coroutine un-awaited makes CPython emit an
+    unraisable "coroutine ... was never awaited" RuntimeWarning from the garbage
+    collector at an unrelated moment - noise that points at the package instead
+    of at the factory, and a hard error in any consumer running under
+    ``-W error``.
+
+    Both tests read the real class (``utils/truth.py::is_instance``), so a
+    ``__class__`` that raises or lies is never consulted and the construction
+    error is what the caller sees. A Django lazy proxy is seen through first
+    (``utils/lazy.py::unwrap_lazy_object``), so a coroutine handed back behind
+    one is still recognized and closed. Anything else is disposed of by nobody:
+    the disposal helper's own tests are ``isinstance`` checks that would read a
+    hostile ``__class__``, so it is reached only with a real coroutine or future.
+    """
+    target = unwrap_lazy_object(application)
+    is_coroutine = truth.is_instance(target, _COROUTINE)
+    if is_coroutine or truth.is_instance(target, _FUTURE):
+        _dispose_sync_awaitable(target)
+    return is_coroutine
 
 
 def _factory_application(
@@ -305,13 +344,16 @@ def _factory_application(
        configuration error would mask a consumer bug behind the wrong diagnosis.
        Pre-binding uses the same algorithm the call itself would, so it accepts
        exactly what the call accepts; a callable whose signature cannot be read
-       (a C callable, a ``__signature__`` liar) skips the pre-check and is judged
+       (a C callable) skips the pre-check and is judged
        by the call, which is why this is not a new source of false rejections.
        The originating ``TypeError`` is preserved as ``__cause__``.
     2. **The returned object.** What "a valid ASGI application" means at
        construction time is deliberately narrow, and stated rather than implied:
        the only honest, false-positive-free check is that the object is
-       CALLABLE. ASGI conformance - accepting ``(scope, receive, send)``,
+       CALLABLE. ``callable`` reads the type's call slot, so it dispatches
+       into no consumer code; the coroutine check reads the real class
+       (:func:`_refused_coroutine`).
+       ASGI conformance - accepting ``(scope, receive, send)``,
        awaiting, emitting the right event dicts - is observable only by running a
        real connection through it, which construction must not do. So this is a
        floor, not a conformance proof: it converts every shape that CANNOT be an
@@ -320,9 +362,12 @@ def _factory_application(
        error, and leaves a callable that merely misbehaves to fail at the
        handshake, where its own traceback is the useful signal. Rejected
        alternative: arity-checking the RESULT with
-       ``bind(scope, receive, send)``, which would falsely reject legitimate
-       ``*args`` middleware, ``functools.partial`` mounts and callable instances
-       whose ``__call__`` is a C slot - a real cost for no security gain.
+       ``bind(scope, receive, send)``. ``bind`` accepts ``*args`` shapes and
+       ``functools.partial`` mounts exactly as the call does, so the check
+       would only fire on wrong-arity callables - which fail at the handshake
+       with their own traceback anyway - while an un-introspectable result (a
+       C-defined ``__call__``) would force the same pass-through the
+       convention check already grants: a real cost for no security gain.
 
     The factory's OWN exceptions are never normalized. A factory that raises from
     its body is a consumer bug whose traceback is the most useful thing the
@@ -333,22 +378,10 @@ def _factory_application(
     if callable(application):
         return application
 
-    received = describe_value(application)
-    addendum = ""
-    # Guarded: ``iscoroutine`` is ``isinstance``, which reads the value's ``__class__`` when
-    # its real type does not match, and a ``__class__`` that raises must not replace the
-    # rejection. A faithful proxy of a coroutine still answers True and is closed.
-    if _safe_predicate(inspect.iscoroutine, application):
-        # Close the coroutine this rejection refuses. Dropping it un-awaited makes
-        # CPython emit an unraisable "coroutine ... was never awaited"
-        # RuntimeWarning from the garbage collector at an unrelated moment - noise
-        # that points at the package instead of at the factory, and a hard error
-        # in any consumer running under ``-W error``. The guarded predicate is the
-        # coroutine proof; a ``bool`` from a helper carries no narrowing.
-        cast("Coroutine[object, object, object]", application).close()
-        addendum = _ASYNC_FACTORY_HINT
+    received = truth.describe(application)
+    addendum = _ASYNC_FACTORY_HINT if _refused_coroutine(application) else ""
     raise ConfigurationError(
-        f"{_FACTORY_CONTRACT_HINT}{addendum} The factory {describe_value(factory)} returned "
+        f"{_FACTORY_CONTRACT_HINT}{addendum} The factory {truth.describe(factory)} returned "
         f"{received}.",
     )
 
@@ -374,6 +407,9 @@ def _websocket_application(
     The class test comes first on purpose: a class IS callable, so testing
     ``callable`` first would route a non-consumer class into the factory branch
     and call it with an unexpected keyword instead of naming the real mistake.
+    The class and subclass tests read the candidate's real metaclass chain and
+    MRO (``utils/truth.py``), and ``callable`` reads the type's call slot, so no
+    candidate-side hook is consulted.
     Lives here rather than inline in ``__init__`` so the class builder does not
     grow a four-branch selector, and takes ``base_consumer_class`` as an argument
     because ``GraphQLWSConsumer`` is only in scope inside that builder.
@@ -383,13 +419,13 @@ def _websocket_application(
             schema=schema,
             revalidation_window=revalidation_window,
         )
-    if is_class(candidate):
-        if issubclass(candidate, base_consumer_class):
+    if truth.is_type(candidate):
+        if truth.is_subclass(candidate, base_consumer_class):
             return candidate.as_asgi(schema=schema)
     elif callable(candidate):
         return _factory_application(candidate, schema=schema)
     raise ConfigurationError(
-        f"{_UNUSABLE_WEBSOCKET_CONSUMER_HINT} Got {describe_value(candidate)}.",
+        f"{_UNUSABLE_WEBSOCKET_CONSUMER_HINT} Got {truth.describe(candidate)}.",
     )
 
 
@@ -410,9 +446,10 @@ def _build_router_class() -> type[ProtocolTypeRouter]:
 def _build_router_class_uncached() -> type[ProtocolTypeRouter]:
     """Materialize and cache ``DjangoGraphQLProtocolRouter`` behind the soft guard.
 
-    ``require_channels()`` runs FIRST so every true-absence path routes through
-    the single install hint (``strawberry.channels`` imports ``channels.db`` at
-    module level, so it is equally unimportable without channels). A guard-passing
+    ``require_channels()`` runs FIRST so every true-absence path of this builder
+    routes through its single install hint (``strawberry.channels`` imports
+    ``channels.db`` at module level, so it is equally unimportable without
+    channels). A guard-passing
     build whose imports then fail is a present-but-incompatible install; each
     half raises its own actionable ``ImportError`` chaining the original
     (spec-041 Error shapes).
@@ -441,7 +478,7 @@ def _build_router_class_uncached() -> type[ProtocolTypeRouter]:
     class DjangoGraphQLProtocolRouter(ProtocolTypeRouter):
         """GraphQL over WebSocket, with the consumer's Django application owning HTTP.
 
-        The ASGI entrypoint, which now pairs with one URLconf entry (spec-046
+        The ASGI entrypoint, which pairs with one URLconf entry (spec-046
         Decisions 2, 3, 4 and 6)::
 
             # myproject/asgi.py

@@ -10,10 +10,22 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
+import strawberry
 from apps.library.models import Book, Branch, Genre, Patron, TaggedItem
 from apps.products.models import Category, Item
-from django.db.models import Field, ForeignKey
+from django.db import connection
+from django.db.models import Field, ForeignKey, ForeignObjectRel, QuerySet
+from strawberry import relay
+from strawberry.relay import NodeID
 
+from django_strawberry_framework import (
+    DjangoOptimizerExtension,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+)
+from django_strawberry_framework.connection import _connection_type_cache
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.join_taxonomy import (
     WINDOWABLE_RELATION_KINDS,
@@ -21,7 +33,9 @@ from django_strawberry_framework.optimizer.join_taxonomy import (
     RelationJoinDescriptor,
     classify_relation_join,
 )
-from tests._relation_fixtures import RpCompositeParent
+from django_strawberry_framework.registry import registry
+from tests._idioms import json_at, json_list
+from tests._relation_fixtures import RpCompositeChild, RpCompositeParent, relation_fixture_tables
 
 from ._link_models import LnkParent, LnkSlugChild
 
@@ -130,7 +144,7 @@ def test_reverse_one_to_one_classifies_direct_fk() -> None:
 def test_windowable_kind_without_partition_classifies_unwindowable() -> None:
     """A many-shaped double with no resolvable partition -> windowable False.
 
-    The descriptor never raises; callers own the fallback posture.
+    An unresolvable partition is not an error; callers own the fallback posture.
     """
     double = SimpleNamespace(
         name="mystery",
@@ -183,6 +197,51 @@ def test_generic_relation_classifies_direct_fk_partitioned_by_object_id() -> Non
     assert descriptor.through_model is None
     assert descriptor.parent_link_field is None
     assert descriptor.through_child_field is None
+
+
+def test_non_pk_to_field_reverse_hop_stays_windowable() -> None:
+    """A reverse hop over a single-column non-pk ``to_field`` FK stays plannable.
+
+    A ``to_field`` FK carries one real child column, so the window partitions
+    and attaches on it. ``PatronProfile.favorite_genre`` targets
+    ``Genre.name``, and ``Genre.favoring_profiles`` is its reverse hop.
+    """
+    reverse = Genre._meta.get_field("favoring_profiles")
+    assert isinstance(reverse, ForeignObjectRel)
+    favorite_genre_fk = reverse.field
+    assert isinstance(favorite_genre_fk, ForeignKey)
+    descriptor = classify_relation_join(reverse)
+    assert descriptor == RelationJoinDescriptor(
+        kind="reverse_many_to_one",
+        windowable=True,
+        partition_expr="favorite_genre_id",
+        parent_join_columns=("favorite_genre_id",),
+        through_model=None,
+        lateral_shape=LateralJoinShape.DIRECT_FK,
+        parent_link_field=favorite_genre_fk,
+        through_child_field=None,
+    )
+
+
+def test_composite_fk_forward_hop_classifies_forward_single_on_every_target() -> None:
+    """The forward side of a multi-column ``ForeignObject`` classifies without raising.
+
+    Django's single-target ``target_field`` raises ``FieldError`` for a relation
+    bound on more than one target column, so the classifier reads the link's
+    target columns instead: the hop is an unwindowable ``forward_single`` whose
+    prefetch attach loads both of them.
+    """
+    descriptor = classify_relation_join(RpCompositeChild._meta.get_field("parent"))
+    assert descriptor == RelationJoinDescriptor(
+        kind="forward_single",
+        windowable=False,
+        partition_expr=None,
+        parent_join_columns=("tenant_id", "code"),
+        through_model=None,
+        lateral_shape=LateralJoinShape.UNSUPPORTED,
+        parent_link_field=None,
+        through_child_field=None,
+    )
 
 
 def test_generic_double_without_related_model_classifies_unwindowable() -> None:
@@ -239,12 +298,12 @@ class _BrokenMeta:
         raise RuntimeError(name)
 
 
-def test_classifier_fail_closes_when_m2m_target_model_has_no_meta() -> None:
-    """An M2M whose target model carries no ``_meta`` -> connector ``None``.
+def test_classifier_m2m_target_model_without_meta_propagates() -> None:
+    """An M2M whose target model carries no ``_meta`` raises ``AttributeError``.
 
-    The M2M connector is the target's pk attname, so a target that cannot
-    report one leaves ``parent_join_columns`` empty rather than raising
-    ``AttributeError`` out of plan building.
+    The M2M connector is the target's pk attname, read plainly off a Django
+    relation's model class; a target with no ``_meta`` is not one, and the read
+    raises rather than classifying a half-resolved shape.
     """
 
     class MissingTargetMeta:
@@ -260,16 +319,15 @@ def test_classifier_fail_closes_when_m2m_target_model_has_no_meta() -> None:
         through=None,
         related_model=MissingTargetMeta,
     )
-    descriptor = classify_relation_join(_as_field(m2m))
-    assert descriptor.parent_join_columns == ()
+    with pytest.raises(AttributeError, match="_meta"):
+        classify_relation_join(_as_field(m2m))
 
 
-def test_classifier_fail_closes_when_generic_target_field_lookup_raises() -> None:
-    """A generic relation whose target ``get_field`` raises -> both morph facts ``None``.
+def test_classifier_generic_target_field_lookup_error_propagates() -> None:
+    """A generic relation whose target ``get_field`` raises lets that error through.
 
-    ``object_id`` and ``content_type_id`` are each resolved through the target
-    model's ``_meta.get_field``; a target that refuses both leaves the
-    partition and the morph column unresolved and the relation unwindowable.
+    ``object_id`` is resolved through the target model's ``_meta.get_field``;
+    what a refusing lookup raises is the model's own behaviour.
     """
 
     class BrokenModel:
@@ -285,19 +343,12 @@ def test_classifier_fail_closes_when_generic_target_field_lookup_raises() -> Non
         object_id_field_name="object_id",
         related_model=BrokenModel,
     )
-    descriptor = classify_relation_join(_as_field(generic))
-    assert descriptor.windowable is False
-    assert descriptor.partition_expr is None
-    assert descriptor.content_type_column is None
+    with pytest.raises(RuntimeError, match="object_id"):
+        classify_relation_join(_as_field(generic))
 
 
-def test_classifier_fail_closes_when_through_model_field_lookup_raises() -> None:
-    """A resolvable through model whose ``get_field`` raises -> no link-FK pair.
-
-    ``through_model`` still rides the descriptor (it resolved), but neither
-    side of the through table's FK pair does, so the lateral backend refuses
-    the shape instead of planning a join on half-resolved metadata.
-    """
+def test_classifier_through_model_field_lookup_error_propagates() -> None:
+    """A resolvable through model whose ``get_field`` raises lets that error through."""
 
     class BrokenThrough:
         _meta = _BrokenMeta()
@@ -318,10 +369,8 @@ def test_classifier_fail_closes_when_through_model_field_lookup_raises() -> None
         def m2m_reverse_field_name(self) -> str:
             return "target"
 
-    descriptor = classify_relation_join(_as_field(BrokenM2M()))
-    assert descriptor.through_model is BrokenThrough
-    assert descriptor.parent_link_field is None
-    assert descriptor.through_child_field is None
+    with pytest.raises(RuntimeError, match="source"):
+        classify_relation_join(_as_field(BrokenM2M()))
 
 
 class _AttributeReadRaises:
@@ -332,13 +381,8 @@ class _AttributeReadRaises:
         raise RuntimeError("many_to_many boom")
 
 
-class _TruthinessRaises:
-    """A field whose ``many_to_many`` VALUE raises on ``bool()``.
-
-    Hostile on EVERY read: each site that tests this flag's truth is its own
-    boundary, so a double that went benign after the first few reads would
-    silently stop covering the later ones.
-    """
+class _NonBoolFlag:
+    """A field whose ``many_to_many`` VALUE is not a ``bool`` (its ``bool()`` raises)."""
 
     class _HostileBool:
         def __bool__(self) -> bool:
@@ -350,28 +394,26 @@ class _TruthinessRaises:
 
 
 @pytest.mark.parametrize(
-    "field_factory",
-    [_AttributeReadRaises, _TruthinessRaises],
-    ids=["attribute_read_raises", "truthiness_raises"],
+    ("field_factory", "raised", "match"),
+    [
+        (_AttributeReadRaises, RuntimeError, "many_to_many boom"),
+        (_NonBoolFlag, ConfigurationError, "'many_to_many' .* must be a bool"),
+    ],
+    ids=["attribute_read_raises", "non_bool_flag"],
 )
-def test_classifier_fail_closes_on_hostile_many_to_many_metadata(
+def test_classifier_hostile_many_to_many_metadata(
     field_factory: Callable[[], object],
+    raised: type[Exception],
+    match: str,
 ) -> None:
-    """Hostile ``many_to_many`` metadata yields the fully unresolved descriptor.
+    """Hostile ``many_to_many`` metadata is never classified as a relation shape.
 
-    Neither a raising attribute read nor a value whose ``bool()`` raises may
-    escape ``classify_relation_join``; both degrade to the single
-    nothing-resolved shape the callers treat as "do not plan this relation".
+    A raising attribute read propagates as raised; a non-``bool`` flag is
+    malformed relation metadata (``utils/relations.py::relation_bool``) and
+    raises ``ConfigurationError`` before its ``bool()`` is ever asked.
     """
-    descriptor = classify_relation_join(_as_field(field_factory()))
-    assert descriptor == RelationJoinDescriptor(
-        kind="forward_single",
-        windowable=False,
-        partition_expr=None,
-        parent_join_columns=(),
-        through_model=None,
-        lateral_shape=LateralJoinShape.UNSUPPORTED,
-    )
+    with pytest.raises(raised, match=match):
+        classify_relation_join(_as_field(field_factory()))
 
 
 @pytest.mark.parametrize(
@@ -453,3 +495,85 @@ def test_reverse_double_with_malformed_carrier_slot_has_no_connector() -> None:
     descriptor = classify_relation_join(_as_field(double))
     assert descriptor.parent_join_columns == ()
     assert descriptor.windowable is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_composite_reverse_nested_connection_falls_back_per_parent() -> None:
+    """An unwindowable composite-FK hop resolves per-parent with exact rows.
+
+    The planner leaves the relation unplanned, so each parent reads its own
+    children through the relation manager instead of a window over a link
+    with no single partition column.
+    """
+    registry.clear()
+    _connection_type_cache.clear()
+
+    class RpChildNode(DjangoType):
+        class Meta:
+            model = RpCompositeChild
+            fields = ("name",)
+            interfaces = (relay.Node,)
+
+    assert registry.get(RpCompositeChild) is RpChildNode
+
+    class RpParentNode(DjangoType):
+        code: NodeID[str]
+
+        class Meta:
+            model = RpCompositeParent
+            fields = ("label", "code", "children")
+            interfaces = (relay.Node,)
+
+    @strawberry.type
+    class Query:
+        def _rp_parents(self) -> QuerySet[RpCompositeParent]:
+            return RpCompositeParent.objects.order_by("tenant_id", "code")
+
+        rp_parents: QuerySet[RpCompositeParent] = strawberry.field(
+            resolver=_rp_parents,
+            graphql_type=list[RpParentNode],
+        )
+
+    try:
+        with relation_fixture_tables(connection):
+            RpCompositeParent.objects.create(tenant_id=1, code="A", label="PA")
+            RpCompositeParent.objects.create(tenant_id=2, code="B", label="PB")
+            RpCompositeChild.objects.create(
+                parent_tenant_id=1,
+                parent_code="A",
+                name="a-one",
+            )
+            RpCompositeChild.objects.create(
+                parent_tenant_id=1,
+                parent_code="A",
+                name="a-two",
+            )
+            RpCompositeChild.objects.create(
+                parent_tenant_id=2,
+                parent_code="B",
+                name="b-one",
+            )
+            finalize_django_types()
+            optimizer = DjangoOptimizerExtension()
+            schema = strawberry.Schema(
+                query=Query,
+                config=strawberry_config(),
+                extensions=[lambda: optimizer],
+            )
+            result = schema.execute_sync(
+                "{ rpParents { label childrenConnection(first: 10) "
+                "{ edges { node { name } } } } }",
+            )
+            assert result.errors is None, result.errors
+            assert result.data is not None
+            by_label = {
+                json_at(row, "label"): sorted(
+                    str(json_at(edge, "node", "name"))
+                    for edge in json_list(row, "childrenConnection", "edges")
+                )
+                for row in json_list(result.data, "rpParents")
+            }
+            assert by_label == {"PA": ["a-one", "a-two"], "PB": ["b-one"]}, by_label
+    finally:
+        registry.clear()
+        _connection_type_cache.clear()

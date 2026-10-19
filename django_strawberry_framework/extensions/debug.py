@@ -11,8 +11,8 @@ native response-extensions seam.
 Off by default, and **fails closed under ``settings.DEBUG = False``**: an
 instance constructed without the ``allow_unsafe_production=True``
 acknowledgement withholds the whole payload on a non-debug deployment and logs
-the misconfiguration, so a single production schema-list entry cannot
-silently publish the disclosure. The payload is also capped - bounded row
+the misconfiguration, so a single production schema-list entry withholds the payload unless the
+deployment acknowledged the disclosure. The payload is also capped - bounded row
 counts and a bounded serialized size, with deterministic marked truncation - so
 the diagnostic cannot amplify a large operation into an enormous response.
 
@@ -36,8 +36,9 @@ Every executed operation then carries ``extensions["debug"]`` with two lists,
 both always present: ``sql`` rows (``vendor`` / ``alias`` / ``sql`` /
 ``duration`` / ``isSlow`` / ``isSelect`` - graphene's wire names) and
 ``exceptions`` rows (``excType`` / ``message`` / ``stack``). Parse and
-validation failures carry **no** ``debug`` key: nothing executed, and the
-engine reads extension results before this hook's teardown on those paths.
+validation failures carry **no** ``debug`` key: nothing executed, and the stash writer publishes
+only for a graphql-core ``ExecutionResult`` (sync leaves ``result`` as ``None`` or a strawberry
+pre-execution shape, version-dependent; async assigns a strawberry ``PreExecutionError``).
 
 Security - development schemas ONLY, never internet-facing production:
 
@@ -88,7 +89,8 @@ Capture mechanism and its documented boundaries:
   teardowns unwind LIFO and ``MaskErrors`` strips ``original_error`` in its
   teardown, so list ``DjangoDebugExtension`` **after** the masking extension
   (torn down first, reading the originals). Listed before it, ``exceptions``
-  reads ``[]``.
+  reads ``[]`` on the non-streaming paths; the streaming seam carries the pre-masking
+  payload whatever the order (see the class docstring).
 """
 
 import math
@@ -98,14 +100,16 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypedDict, cast
 
-from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
 from graphql import ExecutionResult as GraphQLExecutionResult
 from graphql import GraphQLError
 from typing_extensions import override
 
 from django_strawberry_framework import logger
-from django_strawberry_framework.exceptions import ConfigurationError, describe_value
+from django_strawberry_framework.conf import django_setting
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import list_of, read_attr
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 
@@ -128,7 +132,8 @@ _SLOW_QUERY_SECONDS = 10
 # ``utils/typing.py``'s ``MAX_TYPE_WRAPPER_DEPTH`` ceiling re-spelled locally
 # (deliberately NOT imported: the walk's failure policy differs - stop and
 # keep the best-effort terminal instead of raising - so it stays a local
-# helper until a fourth chain-peel motivates a shared extraction).
+# helper until a fourth independent chain-peel motivates a shared extraction (the narrow
+# ``NonNull``/container specializations of the ``of_type`` peel do not count)).
 _MAX_ORIGINAL_ERROR_HOPS = 64
 
 # Payload caps (spec-048 Decision 6). Module constants, not settings keys: a
@@ -139,9 +144,9 @@ _MAX_ORIGINAL_ERROR_HOPS = 64
 # Row counts bound how many rows a single operation can publish; the per-row
 # character limits bound one row's variable-length text; and the payload budget
 # bounds all of them together, so a thousand short rows cannot evade the per-row
-# limits. Every limit counts CHARACTERS - the payload is JSON-encoded downstream,
-# where one character is at least one byte, so a character ceiling is a byte
-# ceiling that does not depend on the encoder.
+# limits. Every limit counts CHARACTERS of the pre-encoding text, so the budget does not move
+# with encoder choice (separators, escaping, UTF-8 vs UTF-16); it is not a byte
+# ceiling - multi-byte characters and JSON escaping expand past the character count.
 #
 # ``_MAX_PAYLOAD_TEXT_CHARS`` is named for exactly what it measures: the summed
 # length of the rows' variable-length STRING values (``_row_cost``). It is not a
@@ -157,8 +162,7 @@ _MAX_EXCEPTION_MESSAGE_CHARS = 4096
 _MAX_EXCEPTION_STACK_CHARS = 16384
 _MAX_PAYLOAD_TEXT_CHARS = 262144
 
-# The single marker appended to every truncated string, so a consumer reading
-# the payload can always tell a cut value from a short one.
+# The single marker appended to every cut string, so a truncated value reads as truncated.
 _TRUNCATION_MARKER = "... [truncated]"
 
 
@@ -366,28 +370,36 @@ def _collect_exceptions(execution_result: object) -> "list[_DebugExceptionRow]":
     errors = read_attr(execution_result, "errors", None)
     if errors is None:
         return []
-    rows: list[_DebugExceptionRow] = []
+    bearers: list[GraphQLError] = []
     for error in list_of(errors):
         if not isinstance(error, GraphQLError) or error.original_error is None:
             continue
-        rows.append(_serialize_exception(_terminal_original_error(error)))
-    return rows
+        bearers.append(error)
+        if len(bearers) >= _MAX_EXCEPTION_ROWS:
+            break
+    return [_serialize_exception(_terminal_original_error(error)) for error in bearers]
 
 
-def _query_log_entries_since(snapshot: _ConnectionSnapshot) -> list[dict[str, str]]:
+def _query_log_entries_since(
+    snapshot: _ConnectionSnapshot,
+    budget: int = _MAX_SQL_ROWS,
+) -> list[dict[str, str]]:
     """Return the query-log entries appended since ``snapshot`` was taken.
 
-    Materializes the bounded deque (a deque is not sliceable) and clamps the
-    start index, mirroring Django's own length-snapshot approach: it cannot
+    Reads at most ``budget`` entries via indexed tail access over the clamped
+    window, mirroring Django's own length-snapshot approach: it cannot
     raise when ``reset_queries()`` shortened the log, and it is explicitly
     **best effort after rollover** - once a full deque evicts old rows while
     staying the same length, a length snapshot cannot distinguish old from
     new entries and may omit some or all operation queries
-    (``CaptureQueriesContext`` shares the limitation).
+    (``CaptureQueriesContext`` shares the limitation). The bound keeps a deep
+    stale log from costing a full copy when only the earliest rows can publish.
     """
-    entries = list(snapshot.database_connection.queries_log)
-    start = min(snapshot.query_log_start, len(entries))
-    return entries[start:]
+    log = snapshot.database_connection.queries_log
+    length = len(log)
+    start = min(snapshot.query_log_start, length)
+    end = min(start + budget, length)
+    return [log[index] for index in range(start, end)]
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -483,9 +495,9 @@ def _serialized_sql_row_or_dropped(
     The per-ROW half of the SQL degrade, and a named function rather than a
     ``try`` inside ``_build_payload``'s entry loop for two reasons. The
     containment MUST be per row - a guard wrapping the whole loop (or sitting
-    outside a generator expression feeding ``list.extend``) abandons the
-    generator on the first refusal and so drops every
-    remaining entry along with the offending one, turning "this row is not
+    outside a generator expression feeding ``list.extend``) would abandon the generator
+    on the first refusal and so drop every remaining entry along with the offending one,
+    turning "this row is not
     JSON-encodable" into "the diagnostic stops here". And a refusal is one
     hostile row in an otherwise healthy log, so the surviving rows must keep
     their log order, which appending only the successes preserves.
@@ -534,7 +546,8 @@ def _build_payload(
     sql_rows: list[_DebugSQLRow] = []
     try:
         for snapshot in snapshots:
-            for entry in _query_log_entries_since(snapshot):
+            remaining = _MAX_SQL_ROWS - len(sql_rows)
+            for entry in _query_log_entries_since(snapshot, remaining):
                 row = _serialized_sql_row_or_dropped(snapshot.database_connection, entry)
                 if row is not None:
                     sql_rows.append(row)
@@ -604,17 +617,17 @@ def _required_acknowledgement(value: object) -> bool:
     type checker (an env-var string read straight through), per GOAL.md "Trust
     boundary" (configuration is validated at construction).
     """
-    if not isinstance(value, bool):
+    if type(value) is not bool:
         raise ConfigurationError(
             "DjangoDebugExtension(allow_unsafe_production=...) must be a bool; got "
-            f"{describe_value(value)}. A truthy non-bool would arm "
+            f"{truth.describe(value)}. A truthy non-bool would arm "
             "the production disclosure, so it is refused rather than interpreted.",
         )
     return value
 
 
 class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
-    """Attach Django query-log SQL and execution exceptions to ``extensions["debug"]``.
+    """Development-only extension publishing query-log SQL and exceptions under ``extensions["debug"]``.
 
     Development tool - NEVER enable on an internet-facing schema: the payload
     carries unmasked exception details (type, message, traceback with server
@@ -667,9 +680,9 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
     query log, serializes the rows and the result's ``original_error``
     chain, and stashes the payload **only when** ``execution_context.result``
     is a graphql-core ``ExecutionResult`` (GraphQL execution ran). Sync
-    parse/validation early-returns leave ``result`` as ``None``; the async
-    path may assign a strawberry ``PreExecutionError`` before teardown -
-    neither is a graphql-core execution result, so the stash stays absent
+    parse/validation early-returns leave ``result`` as ``None`` or a strawberry pre-execution
+    shape (version-dependent); the async path may assign a strawberry ``PreExecutionError``
+    before teardown - neither is a graphql-core execution result, so the stash stays absent
     and ``get_results`` keeps returning ``{}`` even if the engine's
     early-result plus teardown-failure recovery path calls it a second
     time after teardown. ``get_results`` is a pure, idempotent read of that
@@ -749,7 +762,7 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
         return accepted is not None and accepted.allow_unsafe_production
 
     def _disclosure_permitted(self) -> bool:
-        """Whether this operation may publish the debug payload (spec-048 Decision 5).
+        """Return whether this operation may publish the debug payload (spec-048 Decision 5).
 
         ``settings.DEBUG`` is read per operation rather than cached on the
         instance: the instance IS per operation, and a test or management
@@ -757,13 +770,20 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
         Only the exact boolean ``True`` opens the development disclosure path;
         malformed truthy values fail closed.
         """
-        # ``getattr`` with a default, not attribute access: a deployment (or a
-        # test) that DELETED ``settings.DEBUG`` must get the same inert
-        # refusal a malformed value gets, not a request that dies inside the
-        # gate with an ``AttributeError``. Only the exact boolean ``True``
-        # opens the disclosure path; anything absent or malformed fails
-        # closed without touching the operation.
-        return self._acknowledged() or getattr(settings, "DEBUG", None) is True
+        # A ``DEBUG`` that cannot be read at all answers inert: a deployment (or a
+        # test) that DELETED the setting raises ``AttributeError``, and a schema
+        # answering outside a configured Django process raises
+        # ``ImproperlyConfigured`` - either must get the same inert refusal a
+        # malformed value gets, not a request that dies inside the gate. Only the
+        # exact boolean ``True`` opens the disclosure path; anything absent,
+        # unreadable, or malformed fails closed without touching the operation.
+        if self._acknowledged():
+            return True
+        try:
+            debug = django_setting("DEBUG")
+        except (AttributeError, ImproperlyConfigured):
+            return False
+        return debug is True
 
     @override
     def on_operation(self) -> "Iterator[None]":
@@ -823,9 +843,10 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
                 # is what execute/execute_sync publish - including the
                 # masking-order behavior the class docstring pins. It must
                 # still refuse every non-graphql result shape: parse and
-                # validation early-returns leave ``result`` as ``None`` (sync)
-                # or a strawberry ``PreExecutionError`` (async
-                # ``_handle_execution_result``), and stashing for those would
+                # validation early-returns leave ``result`` as ``None`` or a strawberry
+                # pre-execution shape (sync, version-dependent) or a strawberry
+                # ``PreExecutionError`` (async ``_handle_execution_result``), and stashing
+                # for those would
                 # let the engine's early-return + teardown-failure recovery
                 # path's second ``get_results`` call publish ``debug`` for an
                 # operation that never executed (the no-``debug``-key
@@ -846,7 +867,7 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
         here is the one the streaming seam publishes. The non-streaming paths
         read the results after ``on_operation``'s rebuild overwrites this
         stash, so their published payload is unchanged. Inert (fail-closed)
-        instances never bracketed: ``_snapshots`` is ``None`` and the hook
+        instances never bracketed: ``state.snapshots`` is ``None`` and the hook
         contributes nothing.
         """
         state = self._operation_state()
@@ -863,9 +884,10 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
 
         The one stash writer, shared by the two teardowns. Publish only when
         ``execution_context.result`` is a graphql-core ``ExecutionResult``:
-        parse/validation early-returns leave ``result`` as ``None`` (sync) or
-        a strawberry ``PreExecutionError`` (async ``_handle_execution_result``);
-        stashing an empty payload for those shapes would let the engine's
+        parse/validation early-returns leave ``result`` as ``None`` or a strawberry
+        pre-execution shape (sync, version-dependent) or a strawberry ``PreExecutionError``
+        (async ``_handle_execution_result``); stashing an empty payload for those shapes
+        would let the engine's
         early-return + teardown-failure recovery path's second ``get_results``
         call publish ``debug`` for an operation that never executed (the
         no-``debug``-key contract). The diagnostic's own failures degrade

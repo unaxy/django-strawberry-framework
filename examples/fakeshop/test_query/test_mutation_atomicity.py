@@ -1,13 +1,12 @@
 """Live HTTP acceptance for the mutation transaction that spans response completion.
 
-Pins the mutation-atomicity contract shipped at 0.0.14 (commit 1b06c39e;
-tracked pre-renumber as card BETA-055): a ``DjangoMutation`` runs its write inside a
-transaction that graphql-core historically committed when the resolver
-returned - BEFORE the returned payload was *completed* (serialized) - so a
-completion failure left the write committed while the client saw
-``data: null`` + a top-level error. ``DjangoSchema``'s execution context now
-holds each generated top-level mutation field's transaction open THROUGH value
-completion and rolls it back when completion adds an error.
+Pins the mutation-atomicity contract: a ``DjangoMutation`` runs its write inside a
+transaction that used to stand committed once the resolver returned - BEFORE the
+returned payload was *completed* (serialized) - so a completion failure left the
+write committed while the client saw ``data: null`` + a top-level error.
+``DjangoSchema``'s execution context holds each generated top-level mutation field's
+transaction open THROUGH value completion and rolls it back when completion adds an
+error.
 
 The trigger requires a row that can be written but not serialized back. Normal
 ORM writes can't produce one, so the tests corrupt the DB directly with raw
@@ -18,9 +17,8 @@ the create/update/delete side effect must ROLL BACK, not stay committed. The
 stored corruption is vendor-shaped (``_corrupt_created_date``); the hydrated
 value, the failing field and the rollback assertion are identical on both.
 
-These began life as ``xfail(strict=True)`` regressions; the 0.0.14 mutation-atomicity work landed, they
-XPASSed, and the markers were removed - the assertions encode the shipped
-contract (no 500, the completion error is surfaced, the write rolled back).
+The assertions encode the shipped contract (no 500, the completion error is surfaced, the
+write rolled back).
 The success-side contract (a serializable payload still commits, and serial
 top-level mutation fields keep independent transactions) is pinned alongside.
 Async colour uses a module-local ``/graphql-async/`` mount (``graphql_client.py``

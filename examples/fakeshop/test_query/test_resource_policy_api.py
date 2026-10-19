@@ -63,10 +63,9 @@ Row groups, in the order a request meets them:
 - the cross-cutting proofs: zero ORM work after a rejection, and one typed error
   code shared by the sync and async transports.
 
-``examples/fakeshop/tests`` and ``tests/test_resource_policy.py`` hold what a
-live request cannot reach: policy construction and validation, the
-settings/constructor precedence ladder, the narrowing rule, and the walker's
-degenerate inputs.
+``tests/test_resource_policy.py`` holds what a live request cannot reach:
+policy construction and validation, the settings/constructor precedence
+ladder, the narrowing rule, and the walker's degenerate inputs.
 """
 
 from __future__ import annotations

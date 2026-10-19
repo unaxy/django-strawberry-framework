@@ -707,7 +707,6 @@ def _order_input_subscript_form(value: object) -> object:
             id="class-read-interrupts",
         ),
         pytest.param(ClaimsClass(type), "<ClaimsClass>", id="claims-type"),
-        pytest.param(_RaisingRepr(), "<unprintable _RaisingRepr>", id="raising-repr"),
     ],
 )
 def test_order_input_helpers_type_reject_a_value_whose_class_hooks_fail(
@@ -725,6 +724,27 @@ def test_order_input_helpers_type_reject_a_value_whose_class_hooks_fail(
     with pytest.raises(TypeError) as excinfo:
         spell(value)
     assert str(excinfo.value) == f"{prefix}{rendered}"
+    assert _helper_referenced_ordersets == initial
+
+
+@pytest.mark.parametrize(
+    "spell",
+    [
+        pytest.param(_order_input_call_form, id="call-form"),
+        pytest.param(_order_input_subscript_form, id="subscript-form"),
+    ],
+)
+def test_order_input_helpers_propagate_a_rejected_value_whose_repr_raises(
+    spell: Callable[[object], object],
+) -> None:
+    """A rejected value's own ``__repr__`` runs to quote it, and what it raises propagates.
+
+    The class test reads the real class and never runs a hook, but the message quotes the
+    argument through ``utils/truth.py::render``, which is the value's consumer ``__repr__``.
+    """
+    initial = set(_helper_referenced_ordersets)
+    with pytest.raises(RuntimeError, match="hostile __repr__"):
+        spell(_RaisingRepr())
     assert _helper_referenced_ordersets == initial
 
 
@@ -1111,8 +1131,11 @@ def test_get_concrete_field_names_for_order_direct() -> None:
     assert "title" in names
     assert "shelf" in names  # ForeignKey has column shelf_id on Book table
 
-    with pytest.raises(ConfigurationError, match="Expected a Django Model class"):
+    with pytest.raises(ConfigurationError) as excinfo:
         _get_concrete_field_names_for_order("InvalidModel")
+    assert str(excinfo.value) == (
+        "Expected a Django Model class with '_meta.get_fields()'; got str ('InvalidModel')."
+    )
 
     with pytest.raises(ConfigurationError, match="Expected a Django Model class"):
         _get_concrete_field_names_for_order(None)

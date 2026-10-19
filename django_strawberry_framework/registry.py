@@ -21,6 +21,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 from .exceptions import ConfigurationError
+from .utils import truth
 from .utils.imports import import_attr_if_importable
 
 if TYPE_CHECKING:
@@ -123,17 +124,34 @@ class TypeRegistry:
     ``DjangoType.__init_subclass__`` (single-threaded module loading);
     ``clear`` is test-only. Do not mutate the registry from a request
     handler or async resolver.
+
+    Every map keyed by a consumer class (a model, a ``DjangoType`` subclass)
+    is a ``truth.IdentityMap``, and list membership is tested with ``is``: a
+    class is found by identity, so a metaclass ``__hash__`` / ``__eq__`` can
+    never claim another class's slot.
     """
 
     def __init__(self) -> None:
         """Start with no registered types, primaries, models or enums."""
-        self._types: dict[type[models.Model], list[type[DjangoType]]] = {}
-        self._primaries: dict[type[models.Model], type[DjangoType]] = {}
-        self._models: dict[type[DjangoType], type[models.Model]] = {}
-        self._enums: dict[tuple[type[models.Model], str], type[Enum]] = {}
-        self._definitions: dict[type[DjangoType], DjangoTypeDefinition] = {}
+        self._types: truth.IdentityMap[type[models.Model], list[type[DjangoType]]] = (
+            truth.IdentityMap()
+        )
+        self._primaries: truth.IdentityMap[type[models.Model], type[DjangoType]] = (
+            truth.IdentityMap()
+        )
+        self._models: truth.IdentityMap[type[DjangoType], type[models.Model]] = truth.IdentityMap()
+        # ``model -> {field_name: enum}``: the model half of the key is an
+        # identity key; the field name is a Django field's own ``str``.
+        self._enums: truth.IdentityMap[type[models.Model], dict[str, type[Enum]]] = (
+            truth.IdentityMap()
+        )
+        self._definitions: truth.IdentityMap[type[DjangoType], DjangoTypeDefinition] = (
+            truth.IdentityMap()
+        )
         self._pending: list[PendingRelation] = []
-        self._type_teardowns: dict[type[DjangoType], list[Callable[[], None]]] = {}
+        self._type_teardowns: truth.IdentityMap[type[DjangoType], list[Callable[[], None]]] = (
+            truth.IdentityMap()
+        )
         self._finalized: bool = False
         # The validated ``RELAY_GLOBALID_STRATEGY`` snapshot for the current
         # build, computed once by ``finalize_django_types`` and read by the Relay
@@ -173,17 +191,17 @@ class TypeRegistry:
         registration) and ``register_with_definition``'s rollback (undo of
         THIS call's own ``register`` when the paired ``register_definition``
         then raises) so the two sites cannot drift apart on how that
-        invariant is maintained. Callers own everything else that ``register``
-        does NOT touch here - ``_primaries``, ``_definitions``, pending
+        invariant is maintained. Callers own everything this helper does not
+        undo - ``_primaries``, ``_definitions``, pending
         relations, type teardowns - because ``unregister`` and the rollback
         deliberately disagree on those (``unregister`` purges the primary slot
         unconditionally; the rollback restores whatever primary predated its
         own call).
         """
         types = self._types[model]
-        # Identity removal, not ``list.remove``: the store records classes by identity, and
-        # ``remove`` would dispatch a consumer metaclass ``__eq__``.
-        types[:] = [stored for stored in types if stored is not type_cls]
+        # Both callers hold ``type_cls`` in ``_types[model]`` (the lock-step
+        # invariant above), so the identity search always finds it.
+        del types[cast("int", _identity_index(types, type_cls))]
         if not types:
             _ = self._types.pop(model, None)
         _ = self._models.pop(type_cls, None)
@@ -243,15 +261,17 @@ class TypeRegistry:
         self._check_mutable()
         existing_model = self._models.get(type_cls)
         if existing_model is not None and existing_model is not model:
-            raise self._already_registered("against", type_cls.__name__, existing_model.__name__)
+            raise self._already_registered(
+                "against",
+                truth.name(type_cls),
+                truth.name(existing_model),
+            )
         existing_types = self._types.setdefault(model, [])
-        # Identity scan, not ``in``: the store records classes by identity, and
-        # ``list.__contains__`` would dispatch a consumer metaclass ``__eq__``.
-        if any(stored is type_cls for stored in existing_types):
+        if _identity_index(existing_types, type_cls) is not None:
             stored_as_primary = self._primaries.get(model) is type_cls
             if primary != stored_as_primary:
                 raise ConfigurationError(
-                    f"{type_cls.__name__} is already registered for {model.__name__}; "
+                    f"{truth.name(type_cls)} is already registered for {truth.name(model)}; "
                     "primary flag cannot be flipped on re-register",
                 )
             return False
@@ -259,8 +279,9 @@ class TypeRegistry:
             existing_primary = self._primaries.get(model)
             if existing_primary is not None:
                 raise ConfigurationError(
-                    f"Cannot register {type_cls.__name__} as primary for {model.__name__}; "
-                    f"{existing_primary.__name__} is already the primary type",
+                    f"Cannot register {truth.name(type_cls)} as primary for "
+                    f"{truth.name(model)}; {truth.name(existing_primary)} is already the "
+                    "primary type",
                 )
         existing_types.append(type_cls)
         self._models[type_cls] = model
@@ -288,7 +309,7 @@ class TypeRegistry:
         self._check_mutable()
         if type_cls not in self._models:
             raise ConfigurationError(
-                f"Cannot register class teardown for unregistered type {type_cls.__name__}",
+                f"Cannot register class teardown for unregistered type {truth.name(type_cls)}",
             )
         self._type_teardowns.setdefault(type_cls, []).append(teardown)
 
@@ -356,9 +377,13 @@ class TypeRegistry:
         _clear_if_importable(
             "django_strawberry_framework.connection",
             "_connection_type_cache",
-            # The attribute is ``connection.py``'s own ``_connection_type_cache``, a dict
-            # keyed by ``DjangoType`` class, read by name to dodge the import cycle.
-            lambda cache: cast("dict[type[DjangoType], object]", cache).pop(type_cls, None),
+            # The attribute is ``connection.py``'s own ``_connection_type_cache``, an
+            # identity map keyed by ``DjangoType`` class, read by name to dodge the
+            # import cycle.
+            lambda cache: cast("truth.IdentityMap[type[DjangoType], object]", cache).pop(
+                type_cls,
+                None,
+            ),
         )
 
     def get(self, model: type[models.Model]) -> type[DjangoType] | None:
@@ -396,17 +421,16 @@ class TypeRegistry:
             return None
         # The stored keys are ``DjangoType`` classes but the probe is any object (a
         # Strawberry definition's ``origin``, which is a ``GraphQLScalarType`` instance
-        # for a scalar): ``dict.get`` is typed to the stored key type, while an identity
-        # lookup by a wider key is sound, so the map is read through an object-keyed view.
-        return cast("dict[object, type[models.Model]]", self._models).get(type_cls)
+        # for a scalar); the identity map's lookup accepts any object.
+        return self._models.get(type_cls)
 
     def iter_types(self) -> Iterator[tuple[type[models.Model], type[DjangoType]]]:
         """Yield ``(model, type_cls)`` pairs once per registered type.
 
         A model with multiple registered types appears multiple times in
         the iterator; consumers that need a per-model action must dedupe
-        by model. Public iterator so consumers (the schema audit, the
-        walker) do not reach into ``_types`` directly.
+        by model. Public iterator so the schema audit does not reach into
+        ``_types`` directly.
         """
         for model, type_list in self._types.items():
             for type_cls in type_list:
@@ -454,7 +478,7 @@ class TypeRegistry:
         existing = self._definitions.get(type_cls)
         if existing is not None and existing is not definition:
             raise ConfigurationError(
-                f"{type_cls.__name__} already has a registered DjangoTypeDefinition",
+                f"{truth.name(type_cls)} already has a registered DjangoTypeDefinition",
             )
         self._definitions[type_cls] = definition
 
@@ -466,7 +490,7 @@ class TypeRegistry:
         *,
         primary: bool = False,
     ) -> None:
-        """Atomic ``register`` + ``register_definition`` pair.
+        """Register ``type_cls`` and its definition as one atomic pair.
 
         Snapshots ``_primaries[model]`` before calling ``register`` and
         captures whether that call appended state.  If
@@ -492,9 +516,8 @@ class TypeRegistry:
 
     def get_definition(self, type_cls: object) -> DjangoTypeDefinition | None:
         """Return the collected definition for ``type_cls``, or ``None``."""
-        # Any object is a valid probe (see ``model_for_type``): read the
-        # ``DjangoType``-keyed map through its object-keyed view.
-        return cast("dict[object, DjangoTypeDefinition]", self._definitions).get(type_cls)
+        # Any object is a valid probe (see ``model_for_type``).
+        return self._definitions.get(type_cls)
 
     def definition_for_graphql_name(self, name: str) -> DjangoTypeDefinition:
         """Return the unique Relay-Node ``DjangoTypeDefinition`` for a GraphQL type ``name``.
@@ -511,9 +534,13 @@ class TypeRegistry:
         reads the schema's own published-name map.
 
         Keyed on ``definition.graphql_type_name`` (which honors ``Meta.name``),
-        NOT ``type_cls.__name__``, so a class ``ItemType`` with ``Meta.name =
+        NOT the class's own name, so a class ``ItemType`` with ``Meta.name =
         "Item"`` emits ``Item:<pk>`` under the default converter and decodes by
         inverting the same function.
+
+        A second production name-to-definition path, a decode key other than
+        ``graphql_type_name``, or a wider population than Relay-Node types
+        re-opens whether this scan stays the single inverse.
 
         Raises:
             ConfigurationError: no Relay-Node definition matches ``name`` (the
@@ -539,7 +566,7 @@ class TypeRegistry:
             raise ConfigurationError(
                 f"No registered Relay-Node DjangoType has GraphQL type name {name!r}",
             )
-        colliding = ", ".join(sorted(match.origin.__name__ for match in matches))
+        colliding = ", ".join(sorted(truth.name(match.origin) for match in matches))
         raise ConfigurationError(
             f"GraphQL type name {name!r} is ambiguous across multiple Relay-Node "
             f"DjangoTypes ({colliding})",
@@ -608,19 +635,20 @@ class TypeRegistry:
 
         """
         self._check_mutable()
-        key = (model, field_name)
-        existing = self._enums.get(key)
+        by_field = self._enums.setdefault(model, {})
+        existing = by_field.get(field_name)
         if existing is not None and existing is not enum_cls:
             raise self._already_registered(
                 "as",
-                f"{model.__name__}.{field_name}",
-                existing.__name__,
+                f"{truth.name(model)}.{field_name}",
+                truth.name(existing),
             )
-        self._enums[key] = enum_cls
+        by_field[field_name] = enum_cls
 
     def get_enum(self, model: type[models.Model], field_name: str) -> type[Enum] | None:
         """Return the cached enum for ``(model, field_name)``, or ``None``."""
-        return self._enums.get((model, field_name))
+        by_field = self._enums.get(model)
+        return None if by_field is None else by_field.get(field_name)
 
     def clear(self) -> None:
         """Drop all registered types and enums and undo registered class artifacts.
@@ -633,7 +661,7 @@ class TypeRegistry:
         consumer classes remain otherwise mutated; callbacks cover only
         explicitly registered, identity-safe framework artifacts.
         """
-        for type_cls in reversed(tuple(self._type_teardowns)):
+        for type_cls in reversed(self._type_teardowns.keys()):
             self._run_type_teardowns(type_cls)
         self._types.clear()
         self._primaries.clear()
@@ -650,6 +678,19 @@ class TypeRegistry:
         # import instead of silently leaving stale state behind here.
         for clear in iter_subsystem_clears():
             clear()
+
+
+def _identity_index(types: list[type[DjangoType]], type_cls: type[DjangoType]) -> int | None:
+    """Return the position of ``type_cls`` in ``types`` by identity, or ``None``.
+
+    ``list.__contains__`` / ``list.remove`` compare with ``==``, which a
+    metaclass ``__eq__`` answers; the registry's per-model lists are searched
+    by ``is`` instead.
+    """
+    for index, candidate in enumerate(types):
+        if candidate is type_cls:
+            return index
+    return None
 
 
 registry: TypeRegistry = TypeRegistry()

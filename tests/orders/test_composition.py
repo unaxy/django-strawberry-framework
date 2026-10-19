@@ -97,7 +97,7 @@ def _isolate_registry() -> Iterator[None]:
     composition test starts from a clean state on BOTH subsystems. The
     ``registry.clear()`` call already triggers
     ``clear_order_input_namespace()`` / ``clear_filter_input_namespace()``
-    plus both ``_helper_referenced_*.clear()`` via the local-import dance
+    plus both ``_helper_referenced_*.clear()`` via the registered-callback replay
     (spec-028 Decision 9); the explicit per-ledger clears below pin the
     contract -- a regression in the ``registry.clear()`` lifecycle would
     surface as state bleed across tests, not as a silent test pass.

@@ -276,9 +276,11 @@ def prime_selected_fields(info: Info[object, object]) -> None:
     # ``field_nodes`` is a list of ``FieldNode``s.
     raw_info: GraphQLResolveInfo | None = getattr(info, "_raw_info", None)
     field_nodes: list[FieldNode] | None = getattr(raw_info, "field_nodes", None)
-    if not field_nodes or "selected_fields" in info.__dict__:
+    # Strawberry's own ``cached_property`` slot on the Info it handed us.
+    namespace = info.__dict__  # truth: ok seeds Strawberry Info's cache slot, not an identity read
+    if not field_nodes or "selected_fields" in namespace:
         return
-    info.__dict__["selected_fields"] = ast_to_converted_selections(
+    namespace["selected_fields"] = ast_to_converted_selections(
         # ``field_nodes`` was read off it, so the raw info is present.
         cast("GraphQLResolveInfo", raw_info),
         field_nodes,

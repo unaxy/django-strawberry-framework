@@ -7,7 +7,7 @@ and ``examples/fakeshop/test_query/test_relations_async_api.py``. A nullable dan
 self-FK over HTTP lives in
 ``examples/fakeshop/test_query/test_scalars_api.py``
 (``test_nullable_self_fk_dangling_parent_resolves_to_null_over_http``). This module
-keeps direct ``_make_relation_resolver`` / ``_check_n1`` calls, hostile metadata,
+keeps direct ``_make_relation_resolver`` / ``_check_n1`` calls, consumer-exception propagation,
 router mocks, ``resolver.__name__``, and the nullable ``DoesNotExist`` swallow a
 planned JOIN never takes.
 """
@@ -819,6 +819,56 @@ def test_forward_resolver_propagates_consumer_attribute_error() -> None:
         resolver(HostileItem(), fake_info)
 
 
+def test_reverse_one_to_one_without_related_model_propagates_attribute_error() -> None:
+    """Reverse OneToOne with no target model: a plain ``AttributeError`` propagates.
+
+    The absence catch degrades to "catch nothing" when the relation carries no
+    target model, exactly as the forward branch degrades: a consumer descriptor
+    raising ``AttributeError`` is a programming error, not an absent row, on
+    both branches.
+    """
+    fake_field = SimpleNamespace(
+        name="profile",
+        many_to_many=False,
+        one_to_many=False,
+        one_to_one=True,
+        auto_created=True,
+    )
+    resolver = _make_relation_resolver(_as_field(fake_field))
+
+    class RootHostileProfile:
+        @property
+        def profile(self) -> NoReturn:
+            raise AttributeError("hostile reverse descriptor, unknown target")
+
+    with pytest.raises(AttributeError, match="hostile reverse descriptor, unknown target"):
+        resolver(RootHostileProfile(), make_info())
+
+
+def test_forward_resolver_without_related_model_propagates_attribute_error() -> None:
+    """Forward FK with no target model at all: a plain ``AttributeError`` propagates.
+
+    Pins the survivor half of the unified fallback: a double field without
+    ``related_model`` degrades to "catch nothing", so a consumer descriptor
+    raising ``AttributeError`` propagates instead of collapsing to ``None``.
+    """
+    fake_field = SimpleNamespace(
+        name="category",
+        many_to_many=False,
+        one_to_many=False,
+        one_to_one=False,
+    )
+    resolver = _make_relation_resolver(_as_field(fake_field))
+
+    class HostileRoot:
+        @property
+        def category(self) -> NoReturn:
+            raise AttributeError("hostile forward descriptor, no target")
+
+    with pytest.raises(AttributeError, match="hostile forward descriptor, no target"):
+        resolver(HostileRoot(), make_info())
+
+
 # ---------------------------------------------------------------------------
 # Multi-database cooperation (spec-023)
 # ---------------------------------------------------------------------------
@@ -1193,24 +1243,17 @@ def test_fk_id_elision_falls_back_on_real_deferred_only_instance(
 def test_fk_attname_is_deferred_and_stub_exceptions() -> None:
     class BrokenDeferred:
         def get_deferred_fields(self) -> NoReturn:
-            raise RuntimeError("hostile get_deferred_fields")
+            raise RuntimeError("consumer get_deferred_fields")
 
-    assert not _fk_attname_is_deferred(BrokenDeferred(), "category_id")
-
-    class BrokenDeferredIn:
-        def get_deferred_fields(self) -> object:
-            class HostileContainer:
-                def __contains__(self, item: object) -> bool:
-                    raise RuntimeError("hostile in")
-
-            return HostileContainer()
-
-    assert not _fk_attname_is_deferred(BrokenDeferredIn(), "category_id")
+    # A consumer ``get_deferred_fields`` override is consumer behaviour: its
+    # exception propagates to the schema's error policy.
+    with pytest.raises(RuntimeError, match="consumer get_deferred_fields"):
+        _fk_attname_is_deferred(BrokenDeferred(), "category_id")
 
     # _visible_related_object(None, ...) -> None
     assert _visible_related_object(None, DjangoType, unread_info()) is None
 
-    # _build_fk_id_stub with unreadable attname / uninstantiable related_model
+    # _build_fk_id_stub with an unreadable attname
     class BrokenRoot:
         @property
         def category_id(self) -> NoReturn:
@@ -1219,15 +1262,22 @@ def test_fk_attname_is_deferred_and_stub_exceptions() -> None:
     fm = FieldMeta.from_django_field(Item._meta.get_field("category"))
     assert _build_fk_id_stub(BrokenRoot(), fm) is None
 
-    class BrokenModel:
+    # A model refusing the pk-only stub with an ``Exception`` degrades to the
+    # ordinary load (pinned live in ``examples/fakeshop/test_query/test_library_api.py``);
+    # a ``BaseException`` is not an elision outcome and propagates.
+    class StubInterrupted(BaseException):
+        pass
+
+    class InterruptedModel:
         def __init__(self, pk: object = None) -> None:
             del pk  # the keyword is part of the model constructor contract; the body only raises
-            raise RuntimeError("uninstantiable model")
+            raise StubInterrupted("stub construction interrupted")
 
-    fake_fm = SimpleNamespace(attname="target_id", related_model=BrokenModel)
-    # basedpyright: a stand-in field meta carrying only the slots the code under test reads;
-    # _build_fk_id_stub types the parameter as FieldMeta
-    assert _build_fk_id_stub(SimpleNamespace(target_id=1), fake_fm) is _FK_ELISION_UNSAFE  # pyright: ignore[reportArgumentType]
+    fake_fm = SimpleNamespace(attname="target_id", related_model=InterruptedModel)
+    with pytest.raises(StubInterrupted, match="stub construction interrupted"):
+        # basedpyright: a stand-in field meta carrying only the slots the code under test reads;
+        # _build_fk_id_stub types the parameter as FieldMeta
+        _build_fk_id_stub(SimpleNamespace(target_id=1), fake_fm)  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.django_db(transaction=True)

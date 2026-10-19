@@ -121,6 +121,7 @@ from django.db import connections
 from django.test.testcases import SimpleTestCase
 
 from .conf import upstream_patches_enabled
+from .utils import truth
 from .utils._narrowing import read_attr
 
 if TYPE_CHECKING:
@@ -156,8 +157,8 @@ def _captured_upstream_descriptor() -> object:
     descriptor, so reload can recover and revalidate that upstream contract
     rather than treating this package's own prior function as Django code.
     """
-    descriptor = SimpleTestCase.__dict__.get("_remove_databases_failures")
-    function = getattr(descriptor, "__func__", None)
+    descriptor = truth.class_dict(SimpleTestCase).get("_remove_databases_failures")
+    function = descriptor.__func__ if truth.is_instance(descriptor, classmethod) else None
     if getattr(function, _PATCH_OWNER_ATTRIBUTE, None) == _PATCH_OWNER:
         return getattr(function, _PATCH_ORIGINAL_ATTRIBUTE, None)
     return descriptor
@@ -169,9 +170,9 @@ _original_remove_databases_failures = _captured_upstream_descriptor()
 # Every upstream body this module supersedes, verbatim and dedented. Because
 # :func:`_patched_remove_databases_failures` REIMPLEMENTS upstream's whole loop
 # instead of wrapping and delegating to it, an upstream body change does not
-# flow through the patch the way it does for the delegating siblings
-# (``_cross_web_patches``/``_strawberry_patches``). ``_validate_upstream_shape``
-# therefore pins these sources so any body OUTSIDE the audited set - a renamed
+# flow through the patch the way it does for a delegating wrapper.
+# ``_validate_upstream_shape`` therefore pins these sources so any body OUTSIDE
+# the audited set - a renamed
 # method list, a changed ``_DatabaseFailure`` protocol, or an upstream fix of
 # Trac #37064 itself - fails loudly at apply() time instead of clobbering a
 # working teardown.
@@ -248,21 +249,17 @@ def _validate_upstream_shape() -> str:
     ``_remove_databases_failures`` classmethod descriptor), the ``(cls)``
     call shape holds, and the captured original's body source is one of
     the bodies in ``_AUDITED_REMOVE_DATABASES_FAILURES_SOURCES``. The
-    body pin is the reimplementer's equivalent of the sibling patches'
-    delegation: they only need their call shape validated because
-    upstream body changes flow through the delegated call, while this
-    module supersedes the whole body and must re-audit whenever that body
-    changes. Any body outside the audited set - including unreadable
+    body pin is the reimplementer's equivalent of a delegator's
+    call-shape check: a delegating wrapper only needs its call shape
+    validated because upstream body changes flow through the delegated
+    call, while this module supersedes the whole body and must re-audit
+    whenever that body changes. Any body outside the audited set - including unreadable
     source (e.g. a bytecode-only distribution) - is treated as drift: an
     unverifiable body must not be silently superseded.
     """
     descriptor = _original_remove_databases_failures
-    function = read_attr(descriptor, "__func__", None)
-    if (
-        _DatabaseFailure is None
-        or not isinstance(descriptor, classmethod)
-        or not callable(function)
-    ):
+    function = descriptor.__func__ if truth.is_instance(descriptor, classmethod) else None
+    if _DatabaseFailure is None or not callable(function):
         raise RuntimeError(
             "Cannot apply django-strawberry-framework's Django patch: expected "
             "django.test.testcases._DatabaseFailure and "
@@ -338,7 +335,7 @@ def _disallowed_connection_methods(
 
 
 def _patched_remove_databases_failures(cls: type[SimpleTestCase]) -> None:
-    """Defensive replacement for ``SimpleTestCase._remove_databases_failures``.
+    """Remove Django's disallowed-database wrappers, leaving foreign replacements untouched.
 
     Identical to Django's upstream classmethod except for the
     ``isinstance(method, _DatabaseFailure)`` guard before the
@@ -360,9 +357,9 @@ def _patched_remove_databases_failures(cls: type[SimpleTestCase]) -> None:
       does.
     * When the wrapper has been replaced, the ``isinstance`` check
       fails and the (foreign) replacement is left untouched. This
-      mirrors Django's documented contract that
+      mirrors the symmetric contract the pair implements -
       ``_add_databases_failures`` / ``_remove_databases_failures``
-      operate symmetrically on the methods they themselves wrapped, and
+      operate on the methods they themselves wrapped - and
       simply declines to crash on a method the pair never owned.
 
     The unwrap-time isinstance check here is the mirror of the
@@ -401,10 +398,13 @@ def _patch_is_installed() -> bool:
     state" contract - if a third party reverted the class attribute
     after a prior ``apply()`` call, the next ``apply()`` re-installs.
     """
-    installed: object = SimpleTestCase.__dict__.get("_remove_databases_failures")
+    installed = truth.class_dict(SimpleTestCase).get("_remove_databases_failures")
     if installed is None:
         return False
-    return read_attr(installed, "__func__", None) is _patched_remove_databases_failures
+    return (
+        truth.is_instance(installed, classmethod)
+        and installed.__func__ is _patched_remove_databases_failures
+    )
 
 
 def apply() -> None:

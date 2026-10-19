@@ -2375,67 +2375,33 @@ def test_decode_form_relation_multi_one_shot_generator_fully_decoded() -> None:
     assert keys == [saved_pk(first), saved_pk(second)]
 
 
-def test_decode_form_relation_multi_iteration_failures_stay_in_envelope() -> None:
-    """A container that fails DURING iteration is the uniform field-keyed error.
-
-    A generator raising midway and an ``__iter__`` raising ``BaseException``
-    both collapse to the relation envelope instead of escaping the resolver as
-    a raw ``RuntimeError`` / ``BaseException``.
-    """
-
-    class _ProbeBaseException(BaseException):
-        pass
-
-    class _MidwayRaise:
-        def __iter__(self) -> Iterator[int]:
-            yield 1
-            raise RuntimeError("midway")
-
-    class _BaseExceptionIter:
-        def __iter__(self) -> Iterator[object]:
-            raise _ProbeBaseException("hostile iteration")
-
-    field = forms.ModelMultipleChoiceField(queryset=library_models.Genre.objects.none())
-    for values in (_MidwayRaise(), _BaseExceptionIter()):
-        keys, error = form_resolvers._decode_form_relation_multi(
-            values,
-            graphql_name="genres",
-            related_model=library_models.Genre,
-            form_field=field,
-            info=unread_info(),
-        )
-        assert keys is None
-        assert error is not None
-        assert error.field == "genres"
-
-
 @pytest.mark.django_db
 def test_decode_form_relation_multi_materializes_before_any_visibility_query() -> None:
     """A partially-consumed M2M container never reaches a visibility query.
 
     The container is materialized BEFORE any member is decoded, so an iterator
-    that raises after its first id yields the field-keyed container error with
-    ZERO database queries - a half-consumed id set can never be partially
-    confirmed against (or leaked into) the visibility check.
+    that raises after its first id propagates its own exception with ZERO
+    database queries - a half-consumed id set can never be partially confirmed
+    against (or leaked into) the visibility check.
     """
     genre = library_models.Genre.objects.create(name=_uniq("G"))
     field = forms.ModelMultipleChoiceField(queryset=library_models.Genre.objects.all())
 
     def _container() -> Iterator[int]:
         yield saved_pk(genre)
-        raise RuntimeError("hostile second pull")
+        raise RuntimeError("second pull")
 
-    with CaptureQueriesContext(connection) as ctx:
-        keys, error = form_resolvers._decode_form_relation_multi(
+    with (
+        CaptureQueriesContext(connection) as ctx,
+        pytest.raises(RuntimeError, match="second pull"),
+    ):
+        form_resolvers._decode_form_relation_multi(
             _container(),
             graphql_name="genres",
             related_model=library_models.Genre,
             form_field=field,
             info=unread_info(),
         )
-    assert keys is None
-    assert error is not None
-    assert error.field == "genres"
     assert ctx.captured_queries == []
 
 

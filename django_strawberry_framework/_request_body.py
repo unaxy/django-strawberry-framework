@@ -127,6 +127,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING
 
 from . import logger
+from .utils import truth
 from .utils._narrowing import call_method, read_attr
 
 if TYPE_CHECKING:
@@ -270,7 +271,7 @@ def body_exceeds_limit(request: HttpRequest, limit: int) -> bool:
         return False
     remaining = _measured_remaining(stream)
     if remaining is _Probe.CORRUPTED:
-        logger.warning(_CORRUPTED_PROBE_LOG_MESSAGE, type(stream).__name__)
+        logger.warning(_CORRUPTED_PROBE_LOG_MESSAGE, truth.name(truth.class_of(stream)))
         return True
     if remaining is _Probe.UNMEASURABLE:
         return _bounded_read_exceeds_limit(request, stream, limit)
@@ -286,7 +287,7 @@ def _measured_remaining(stream: object) -> int | _Probe:
     stream now"). "The body is empty" is not among them, which is enforced rather
     than merely intended - see below.
 
-    Every call into ``stream`` is guarded, because ``stream`` is the one object in
+    Every I/O call into ``stream`` is guarded, because ``stream`` is the one object in
     this file the package did not construct: it is whatever the ASGI server,
     ``WSGIRequest``, or a consumer's middleware installed, and a capability method
     that raises is a compatibility fact rather than a package bug. The guards
@@ -432,20 +433,18 @@ def _declares_seekable(stream: object) -> bool:
     ``SpooledTemporaryFile`` - the ASGI body file at the supported floor - where
     capability is decided by ``tell()`` a moment later instead). A ``seekable()``
     that raises is treated exactly like one that answered ``False``: nothing has
-    moved, so the bounded read is both available and correct. The attribute lookup
-    itself is guarded for the same reason, so a raising descriptor also selects
-    bounded fallback. A non-callable marker is treated as an explicit ``False``
-    rather than as an omitted method, so malformed foreign streams cannot be
-    probed accidentally.
+    moved, so the bounded read is both available and correct. A non-callable
+    marker is treated as an explicit ``False`` rather than as an omitted method,
+    so malformed foreign streams cannot be probed accidentally.
     """
+    seekable: object = getattr(stream, "seekable", None)
+    if seekable is None:
+        return True
+    if not callable(seekable):
+        return False
     try:
-        seekable: object = getattr(stream, "seekable", None)
-        if seekable is None:
-            return True
-        if not callable(seekable):
-            return False
         return bool(seekable())
-    except Exception:  # noqa: BLE001 - a capability that fails to answer answers no, not maybe
+    except Exception:  # noqa: BLE001 - a capability query that fails answers no, not maybe
         return False
 
 
@@ -460,18 +459,12 @@ def _lacks_seek(stream: object) -> bool:
     happened. Absence is decided here instead, after the position gate has
     established the one fact this verdict rests on, so the answer is
     :attr:`_Probe.UNMEASURABLE`: nothing to move means nothing moved, and the
-    bounded read is both safe and the answer. The lookup is guarded like
-    ``_declares_seekable``'s, with the answer flipped: an attribute read that
-    fails is not a proven absence, so it stays on the seek-and-verify path,
-    whose guards already know how to fail closed over an unreadable capability.
-    A ``seek`` marker that is present but not callable is likewise not an
-    absence - calling one raises ``TypeError``, which the end-seek's guard
-    handles as any other failed move attempt.
+    bounded read is both safe and the answer. A ``seek`` marker that is present
+    but not callable is likewise not an absence - calling one raises
+    ``TypeError``, which the end-seek's guard handles as any other failed move
+    attempt.
     """
-    try:
-        return getattr(stream, "seek", None) is None
-    except Exception:  # noqa: BLE001 - a capability read that fails proves no absence
-        return False
+    return getattr(stream, "seek", None) is None
 
 
 def _position_restored(stream: object, position: object) -> bool:
@@ -528,7 +521,7 @@ def _bounded_read_exceeds_limit(request: HttpRequest, stream: object, limit: int
     try:
         return _measured_by_bounded_read(request, stream, limit)
     except Exception:
-        logger.warning(_UNREADABLE_STREAM_LOG_MESSAGE, type(stream).__name__, exc_info=True)
+        logger.warning(_UNREADABLE_STREAM_LOG_MESSAGE, truth.name(type(stream)), exc_info=True)
         return True
 
 

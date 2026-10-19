@@ -131,7 +131,8 @@ def test_safe_wrap_connection_method_pairs_with_unwrap_time_patch_for_defense_in
     When a consumer uses :func:`safe_wrap_connection_method` AND Django's
     setup/teardown pair runs, the package's unwrap-time patch
     (:func:`_django_patches._patched_remove_databases_failures`)
-    restores the wrapper without any work from the consumer.
+    unwraps Django's wrapper, restoring the original method, without any
+    work from the consumer.
 
     The test wires up the full sequence: install a ``_DatabaseFailure``
     on the connection (simulating ``_add_databases_failures``), have

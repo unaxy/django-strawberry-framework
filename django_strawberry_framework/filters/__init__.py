@@ -53,12 +53,7 @@ from .sets import FilterSet, FilterSetMetaclass
 # raises `ConfigurationError` for orphans.
 _helper_referenced_filtersets: set[type[FilterSet]] = set()
 
-
-def _clear_helper_referenced_filtersets() -> None:
-    _helper_referenced_filtersets.clear()
-
-
-register_subsystem_clear(_clear_helper_referenced_filtersets, owner="filters.helper_references")
+register_subsystem_clear(_helper_referenced_filtersets.clear, owner="filters.helper_references")
 
 
 def _filter_input_annotation(filterset_class: object, *, helper_spelling: str) -> object:

@@ -536,43 +536,20 @@ def test_plain_form_one_shot_narrowing_is_snapshotted_before_finalize(narrowing:
     assert Submit._input_class is not None
 
 
-@pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_plain_form_hostile_permission_iterable_maps_to_configuration_error(
-    escape: type[BaseException],
-) -> None:
-    """A broken permission iterable cannot escape class validation as its raw exception.
-
-    The normalization catches ``BaseException``, so an iterable raising from outside
-    the ``Exception`` hierarchy is still reported as a typed configuration error.
-    """
+def test_plain_form_permission_iterable_error_propagates() -> None:
+    """A permission iterable's own ``__iter__`` is consumer code: what it raises propagates."""
 
     class BrokenPermissions:
         def __iter__(self) -> Iterator[object]:
-            raise escape("permission iterator exploded")
+            raise RuntimeError("permission iterator exploded")
 
-    with pytest.raises(ConfigurationError, match="permission_classes must be a sequence"):
+    with pytest.raises(RuntimeError, match="permission iterator exploded"):
 
         @definition_raises
         class Submit(DjangoFormMutation):
             class Meta:
                 form_class = _contact_form()
                 permission_classes = BrokenPermissions()
-
-
-def test_plain_form_hostile_form_repr_maps_to_configuration_error() -> None:
-    """An invalid form-class value with a broken repr still yields a typed config error."""
-
-    class HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    with pytest.raises(ConfigurationError, match="unprintable HostileRepr"):
-
-        @definition_raises
-        class Submit(DjangoFormMutation):
-            class Meta:
-                form_class = HostileRepr()
 
 
 def test_modelform_unknown_field_name_routes_through_slice1_narrowing() -> None:
@@ -1110,50 +1087,13 @@ def test_non_callable_get_form_fields_is_configuration_error(
 
 
 @pytest.mark.parametrize("mutation_base", [DjangoFormMutation, DjangoModelFormMutation])
-def test_plain_function_get_form_fields_hook_is_configuration_error(
+def test_raising_get_form_fields_body_propagates(
     mutation_base: type[DjangoFormMutation | DjangoModelFormMutation],
 ) -> None:
-    """A plain (non-classmethod) multi-arg hook fails as typed configuration, not raw ``TypeError``.
+    """A hook body raising mid-call propagates its own exception unchanged.
 
-    The hook invocation is the typed boundary both flavors' ``_validate_meta`` and
-    ``build_input`` route through. A plain 2-arg function (the forgotten
-    ``@classmethod``) is callable, so the non-callable gate passes, but invoking it
-    zero-arg raises the raw ``TypeError`` - the typed boundary wraps the call and
-    names the contract, the exception type, and the underlying detail.
-    """
-    form_cls = _contact_form() if mutation_base is DjangoFormMutation else _item_model_form()
-    meta_attrs: dict[str, object] = (
-        {"form_class": form_cls, "permission_classes": []}
-        if mutation_base is DjangoFormMutation
-        else {"form_class": form_cls, "operation": "create"}
-    )
-
-    def get_form_fields(self: object, info: object = None) -> dict[str, forms.Field]:
-        del self, info
-        return {"message": forms.CharField()}
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"get_form_fields must be a callable classmethod.*calling it raised TypeError",
-    ) as excinfo:
-        type(
-            "PlainFunctionHookMutation",
-            (mutation_base,),
-            {"get_form_fields": get_form_fields, "Meta": type("Meta", (), meta_attrs)},
-        )
-    # The chained cause is the original invocation failure, not the wrap.
-    assert isinstance(excinfo.value.__cause__, TypeError)
-
-
-@pytest.mark.parametrize("mutation_base", [DjangoFormMutation, DjangoModelFormMutation])
-def test_raising_get_form_fields_body_is_configuration_error(
-    mutation_base: type[DjangoFormMutation | DjangoModelFormMutation],
-) -> None:
-    """A hook body raising mid-call is reported as typed configuration, not the raw exception.
-
-    The invocation boundary catches ``BaseException`` (mirroring
-    ``forms/inputs.py::_form_field_basis``), so a hostile body cannot escape the
-    declaration as a raw error; the original exception rides ``__cause__``.
+    The hook is consumer behaviour: both flavors' ``_validate_meta`` invoke it at
+    class creation and whatever it raises reaches the caller as itself.
     """
     form_cls = _contact_form() if mutation_base is DjangoFormMutation else _item_model_form()
     meta_attrs: dict[str, object] = (
@@ -1165,10 +1105,7 @@ def test_raising_get_form_fields_body_is_configuration_error(
     def get_exploding_form_fields(_cls: type) -> NoReturn:
         raise RuntimeError("hook exploded")
 
-    with pytest.raises(
-        ConfigurationError,
-        match=r"calling it raised RuntimeError: hook exploded",
-    ) as excinfo:
+    with pytest.raises(RuntimeError, match="hook exploded"):
         type(
             "RaisingHookMutation",
             (mutation_base,),
@@ -1177,16 +1114,69 @@ def test_raising_get_form_fields_body_is_configuration_error(
                 "Meta": type("Meta", (), meta_attrs),
             },
         )
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def _uncalled_hook_cls(cls: type) -> NoReturn:
+    del cls
+    raise AssertionError("the hook body must not run")
+
+
+def _uncalled_hook_self_info(self: object, info: object) -> NoReturn:
+    del self, info
+    raise AssertionError("the hook body must not run")
+
+
+def _uncalled_hook_self_default_info(self: object, info: object = None) -> NoReturn:
+    del self, info
+    raise AssertionError("the hook body must not run")
+
+
+@pytest.mark.parametrize("mutation_base", [DjangoFormMutation, DjangoModelFormMutation])
+@pytest.mark.parametrize(
+    ("hook", "declared_as", "required"),
+    [
+        (_uncalled_hook_cls, "a plain function", "parameter 'cls'"),
+        (staticmethod(_uncalled_hook_cls), "a staticmethod", "parameter 'cls'"),
+        (_uncalled_hook_self_info, "a plain function", "parameters 'self', 'info'"),
+        (_uncalled_hook_self_default_info, "a plain function", "parameter 'self'"),
+    ],
+)
+def test_argument_requiring_get_form_fields_function_is_rejected_at_declaration(
+    mutation_base: type[DjangoFormMutation | DjangoModelFormMutation],
+    hook: object,
+    declared_as: str,
+    required: str,
+) -> None:
+    """A function hook that needs a positional argument is rejected before it is ever called.
+
+    The hook is read from the class, so only a classmethod receives an argument.
+    The declaration check runs at class creation and names the fix; the hook body
+    (which would raise ``AssertionError``) never runs.
+    """
+    form_cls = _contact_form() if mutation_base is DjangoFormMutation else _item_model_form()
+    meta_attrs: dict[str, object] = (
+        {"form_class": form_cls, "permission_classes": []}
+        if mutation_base is DjangoFormMutation
+        else {"form_class": form_cls, "operation": "create"}
+    )
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        type(
+            "ArgumentRequiringHookMutation",
+            (mutation_base,),
+            {"get_form_fields": hook, "Meta": type("Meta", (), meta_attrs)},
+        )
+    assert str(excinfo.value) == (
+        "ArgumentRequiringHookMutation.get_form_fields must be a callable classmethod "
+        "returning a mapping of form field names to forms.Field instances; it is declared "
+        f"as {declared_as} requiring the positional {required}, but the hook is called "
+        "with no arguments. Decorate it with @classmethod."
+    )
+    assert excinfo.value.__cause__ is None
 
 
 def test_get_form_fields_hook_raising_configuration_error_reraises_unchanged() -> None:
-    """A hook raising ``ConfigurationError`` propagates its own typed error, not a wrap.
-
-    The invocation boundary re-raises ``ConfigurationError`` unchanged so a hook
-    delegating to a typed reject (or the default hook's own rejects) is not
-    double-wrapped into a confusing nested message.
-    """
+    """A hook raising ``ConfigurationError`` propagates its own typed error, not a wrap."""
     form_cls = _contact_form()
 
     def get_config_error_form_fields(_cls: type) -> NoReturn:
@@ -1208,32 +1198,6 @@ def test_get_form_fields_hook_raising_configuration_error_reraises_unchanged() -
     assert "calling it raised" not in str(excinfo.value)
 
 
-def test_get_form_fields_hook_raising_empty_exception_reports_no_detail() -> None:
-    """An exception with no message degrades the detail clause instead of raising.
-
-    ``str(exc)`` on an empty exception is ``""``; the wrap renders ``no detail``
-    rather than a dangling ``raised TypeError: .`` fragment (a hostile/empty
-    exception body must not defeat the typed message assembly).
-    """
-
-    def get_empty_error_form_fields(_cls: type) -> NoReturn:
-        raise ValueError
-
-    with pytest.raises(ConfigurationError, match="calling it raised ValueError: no detail"):
-        type(
-            "EmptyDetailHookMutation",
-            (DjangoFormMutation,),
-            {
-                "get_form_fields": classmethod(get_empty_error_form_fields),
-                "Meta": type(
-                    "Meta",
-                    (),
-                    {"form_class": _contact_form(), "permission_classes": []},
-                ),
-            },
-        )
-
-
 @pytest.mark.parametrize("mutation_base", [DjangoFormMutation, DjangoModelFormMutation])
 @pytest.mark.parametrize(
     "hook_style",
@@ -1245,9 +1209,9 @@ def test_zero_arg_and_staticmethod_get_form_fields_hooks_are_accepted(
 ) -> None:
     """A zero-arg plain function / ``@staticmethod`` hook still binds (permissive posture).
 
-    Both are callable zero-arg, so the invocation boundary accepts them and the
-    returned mapping drives the input - the typed wrap only rejects hooks that
-    cannot be invoked or whose body fails.
+    Both are callable zero-arg, so the declaration check accepts them and the
+    returned mapping drives the input; only a function requiring a positional
+    argument is rejected.
     """
     _declare_products_primaries()
     form_cls = _contact_form() if mutation_base is DjangoFormMutation else _item_model_form()
@@ -1910,3 +1874,24 @@ def test_two_distinct_form_classes_sharing_name_still_collide() -> None:
 
     with pytest.raises(ConfigurationError, match="materialized by two distinct"):
         finalize_django_types()
+
+
+def test_non_callable_get_form_fields_hook_message_is_pinned() -> None:
+    """A non-callable hook is rejected typed, naming the mutation class."""
+    with pytest.raises(ConfigurationError) as exc_info:
+        type(
+            "NonCallableHookMutation",
+            (DjangoFormMutation,),
+            {
+                "get_form_fields": 42,
+                "Meta": type(
+                    "Meta",
+                    (),
+                    {"form_class": _contact_form(), "permission_classes": []},
+                ),
+            },
+        )
+    assert str(exc_info.value) == (
+        "NonCallableHookMutation.get_form_fields must be a callable classmethod "
+        "returning a mapping of form field names to forms.Field instances."
+    )

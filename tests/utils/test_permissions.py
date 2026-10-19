@@ -6,7 +6,7 @@ Channels scope adapters and hostile ``info.context`` reads have no HTTP mount
 ``examples/fakeshop/test_query/test_library_api.py``.
 """
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable
 from typing import NoReturn
 
 import pytest
@@ -24,7 +24,6 @@ from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.permissions import (
     ChannelsRequestAdapter,
     _channels_request_adapter,
-    _channels_scope,
     _fire_flat_relation_path_gates,
     _related_declarations,
     _request_from_context,
@@ -236,68 +235,6 @@ def test_non_mapping_websocket_scope_is_not_recognized_as_channels() -> None:
         request_from_info(info, family_label="OrderSet")
 
 
-def test_hostile_channels_scope_descriptors_become_configuration_errors() -> None:
-    """A malformed Channels request cannot leak a raw scope-descriptor exception."""
-
-    class _HostileConsumer:
-        @property
-        def scope(self) -> NoReturn:
-            raise RuntimeError("scope descriptor exploded")
-
-    class _HostileRequest:
-        consumer = _HostileConsumer()
-
-    info = type("Info", (), {"context": {"request": _HostileRequest()}})()
-    with pytest.raises(ConfigurationError, match="FilterSet could not resolve"):
-        request_from_info(info, family_label="FilterSet")
-
-
-def test_hostile_direct_scope_and_context_mapping_reads_fail_closed() -> None:
-    """A scope or context read that explodes yields no request rather than escaping."""
-
-    class _HostileDirectScope:
-        consumer = None
-
-        @property
-        def scope(self) -> NoReturn:
-            raise RuntimeError("direct scope exploded")
-
-    class _HostileContext(dict[str, object]):
-        @override
-        def __getitem__(self, key: str) -> NoReturn:
-            raise RuntimeError("context mapping exploded")
-
-    context = _HostileContext(request=object())
-
-    assert _channels_scope(_HostileDirectScope()) is None
-    assert _channels_request_adapter(context) is None
-    assert _request_from_context(context) is None
-
-
-def test_hostile_attribute_context_request_read_fails_closed() -> None:
-    """A context whose ``request`` descriptor raises resolves to no request."""
-
-    class _HostileContext:
-        @property
-        def request(self) -> NoReturn:
-            raise RuntimeError("request descriptor exploded")
-
-    assert _request_from_context(_HostileContext()) is None
-
-
-def test_hostile_channels_scope_mapping_becomes_configuration_error_on_user_read() -> None:
-    """A scope mapping that fails during lookup is typed at the adapter boundary."""
-
-    class _HostileScope(dict[str, object]):
-        @override
-        def __getitem__(self, key: str) -> NoReturn:
-            raise RuntimeError("scope mapping exploded")
-
-    adapter = ChannelsRequestAdapter(object(), _HostileScope())
-    with pytest.raises(ConfigurationError, match="Channels request scope"):
-        _ = adapter.user
-
-
 def test_mapping_request_must_be_a_django_request_or_channels_context() -> None:
     """A mapping's arbitrary ``request`` value must not bypass request validation."""
 
@@ -317,16 +254,31 @@ def test_request_like_attribute_context_remains_supported() -> None:
     assert request_from_info(info, family_label="DjangoMutation") is request
 
 
-def test_hostile_info_context_descriptor_becomes_configuration_error() -> None:
-    """A broken ``info.context`` descriptor still follows the typed error boundary."""
+def test_info_context_descriptor_error_propagates() -> None:
+    """A consumer ``info.context`` descriptor's own exception propagates unchanged."""
 
     class _Info:
         @property
         def context(self) -> NoReturn:
             raise RuntimeError("context descriptor exploded")
 
-    with pytest.raises(ConfigurationError, match="FilterSet requires"):
+    with pytest.raises(RuntimeError, match="context descriptor exploded"):
         request_from_info(_Info(), family_label="FilterSet")
+
+
+def test_unresolvable_request_context_message_is_pinned() -> None:
+    """The unresolvable-context rejection names the context's real class."""
+    info = type("Info", (), {"context": object()})()
+    with pytest.raises(ConfigurationError) as excinfo:
+        request_from_info(info, family_label="FilterSet")
+    assert str(excinfo.value) == (
+        "FilterSet could not resolve a Django HttpRequest from `info.context` "
+        "(got object). Expected `info.context.request`, a bare "
+        "HttpRequest, a mapping whose `request` is an HttpRequest, or a Strawberry "
+        "Channels mapping context whose `request` carries an ASGI scope "
+        '(`context["request"].consumer.scope` for the HTTP consumer, '
+        '`context["request"].scope` for the WebSocket consumer).'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -488,27 +440,16 @@ def test_invoke_permission_method_rejects_a_non_callable_gate_slot() -> None:
         )
 
 
-def test_invoke_permission_method_types_an_unreadable_gate_slot() -> None:
-    """A raising gate descriptor is a typed ConfigurationError, not a raw escape.
+def test_invoke_permission_method_propagates_a_gate_descriptor_error() -> None:
+    """The gate slot is the consumer class's own attribute: its exception propagates."""
 
-    The sibling metadata reads on this surface (``_related_declarations``, the
-    flat-path walker's ``field_name`` probe) wrap hostile reads in
-    ``ConfigurationError``; the gate-slot read now does too, chaining the
-    original failure as ``__cause__``.
-    """
-
-    class _Hostile:
+    class _GateSet:
         @property
         def check_name_permission(self) -> NoReturn:
             raise RuntimeError("gate descriptor exploded")
 
-    with pytest.raises(
-        ConfigurationError,
-        match=r"_Hostile permission gate 'check_name_permission' could not be read",
-    ) as excinfo:
-        invoke_permission_method(_Hostile(), "name", HttpRequest())
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
-    assert "gate descriptor exploded" in str(excinfo.value.__cause__)
+    with pytest.raises(RuntimeError, match="gate descriptor exploded"):
+        invoke_permission_method(_GateSet(), "name", HttpRequest())
 
 
 def test_invoke_permission_method_treats_a_none_slot_as_absent() -> None:
@@ -913,29 +854,8 @@ def test_fire_flat_relation_path_gates_is_a_noop_for_a_non_traversal_leaf() -> N
     assert calls == []
 
 
-def test_flat_relation_gate_rejects_unreadable_branch_metadata_and_skips_non_string_names() -> (
-    None
-):
-    """An unreadable branch name raises; a non-string one matches no hop and fires no gate."""
-
-    class _UnreadableRelation:
-        @property
-        def field_name(self) -> NoReturn:
-            raise RuntimeError("field name exploded")
-
-    class _UnreadableSet(ActiveInputPermissionMixin):
-        related_filters = {"category": _UnreadableRelation()}
-
-    with pytest.raises(ConfigurationError, match="unreadable related branch"):
-        _fire_flat_relation_path_gates(
-            _UnreadableSet,
-            "category__name",
-            HttpRequest(),
-            fired={},
-            related_attr="related_filters",
-            target_attr="filterset",
-        )
-
+def test_flat_relation_gate_skips_non_string_branch_names() -> None:
+    """A non-string branch name matches no hop and fires no gate."""
     calls: list[str] = []
 
     class _NonStringSet(ActiveInputPermissionMixin):
@@ -955,7 +875,11 @@ def test_flat_relation_gate_rejects_unreadable_branch_metadata_and_skips_non_str
 
 
 def test_related_permission_declarations_fail_closed_for_malformed_metadata() -> None:
-    """Only a readable mapping declares related branches; absent means none, malformed raises."""
+    """Only a mapping declares related branches; absent means none, malformed raises.
+
+    The declaration is read statically, so a metaclass ``__getattribute__`` that
+    would raise on it is never run: the class declares nothing and reads as none.
+    """
 
     class _HostileMeta(type):
         @override
@@ -973,32 +897,14 @@ def test_related_permission_declarations_fail_closed_for_malformed_metadata() ->
     class _InvalidSet:
         related_filters = []
 
-    class _UnreadableMapping(Mapping[str, object]):
-        @override
-        def __getitem__(self, key: str) -> NoReturn:
-            raise KeyError(key)
-
-        @override
-        def __iter__(self) -> Iterator[str]:
-            return iter(())
-
-        @override
-        def __len__(self) -> int:
-            return 0
-
-        @override
-        def items(self) -> NoReturn:
-            raise RuntimeError("items exploded")
-
-    mapping_set = type("MappingSet", (), {"related_filters": _UnreadableMapping()})
-
-    with pytest.raises(ConfigurationError, match="could not be read"):
-        _related_declarations(_UnreadableSet, "related_filters")
+    assert _related_declarations(_UnreadableSet, "related_filters") == ()
     assert _related_declarations(_NoneSet, "related_filters") == ()
-    with pytest.raises(ConfigurationError, match="must be a mapping"):
+    with pytest.raises(ConfigurationError) as excinfo:
         _related_declarations(_InvalidSet, "related_filters")
-    with pytest.raises(ConfigurationError, match="could not be read"):
-        _related_declarations(mapping_set, "related_filters")
+    assert str(excinfo.value) == (
+        "_InvalidSet related permission declarations under 'related_filters' must be a "
+        "mapping; got list."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1218,19 +1124,12 @@ def test_auth_aliases_for_permission_classes_gates_alias_resolution(
     assert calls == [None]
 
 
-def test_auth_alias_gate_rejects_unreadable_permission_collection_truthiness() -> None:
-    """A permission collection that cannot be tested for emptiness is a configuration error."""
-
-    class _UnreadablePermissions:
-        def __bool__(self) -> bool:
-            raise RuntimeError("permission truthiness exploded")
-
-    with pytest.raises(ConfigurationError, match="could not be inspected"):
-        auth_aliases_for_permission_classes(_UnreadablePermissions())
-
-
 def test_related_depth_error_survives_hostile_child_qualname() -> None:
-    """The depth-limit error is raised even when the child set's own name cannot be read."""
+    """The depth-limit error names the child set from its real qualname.
+
+    A metaclass ``__getattribute__`` that raises on ``__qualname__`` never runs:
+    the label is read from the interpreter, so the typed depth error surfaces.
+    """
 
     class _HostileMeta(type):
         @override
@@ -1272,7 +1171,7 @@ def test_related_depth_error_survives_hostile_child_qualname() -> None:
         ) -> tuple[list[str], list[tuple[str, object, object]]]:
             return [], [("child", related, input_value)]
 
-    with pytest.raises(ConfigurationError, match="nesting exceeded"):
+    with pytest.raises(ConfigurationError, match="nesting exceeded") as excinfo:
         run_active_input_permission_checks(
             _Parent,
             {"child": {}},
@@ -1282,6 +1181,7 @@ def test_related_depth_error_survives_hostile_child_qualname() -> None:
             target_attr="child_set",
             related_attr="related",
         )
+    assert "._Child" in str(excinfo.value)
 
 
 def test_run_active_input_permission_checks_falls_back_to_default_traversal_depth() -> None:
@@ -1366,9 +1266,7 @@ def test_resolve_auth_aliases_tracks_a_divergent_router_read_answer(
 def test_resolve_auth_aliases_skips_uninstalled_models() -> None:
     """A model the deployment does not install is skipped, never an error."""
     assert _safe_get_model("nonexistent_app", "Nope") is None
-    # basedpyright: the None app label and model name are the hostile input under test;
-    # _safe_get_model types both parameters as str
-    assert _safe_get_model(None, None) is None  # pyright: ignore[reportArgumentType]
+    assert _safe_get_model("auth", "Nope") is None
 
 
 def test_channels_request_in_object_context_is_adapted_to_channels_request_adapter() -> None:

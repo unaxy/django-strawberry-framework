@@ -34,16 +34,16 @@ declared generic over the container they read.
 The typed reads (``read_attr``, ``call_method``, ``pk_of``, ``enum_value``,
 ``dict_of``, ``list_of``, ``instance_dict``) are, at runtime, ``getattr`` (read, or
 read and called), ``operator.attrgetter("pk")`` / ``("value")``, ``dict``, ``list``
-and an ``object.__getattribute__(value, "__dict__")`` read. Typeshed declares a
-``getattr`` read, an enum member's ``value`` and an ``object.__getattribute__`` read
-``Any``, django-stubs declares ``Model.pk`` ``Any``, and ``dict`` / ``list`` of an
+and ``utils/truth.py::instance_state``. Typeshed declares a ``getattr`` read and an
+enum member's ``value`` ``Any``, django-stubs declares ``Model.pk`` ``Any``, and ``dict`` / ``list`` of an
 ``object`` match no overload; under the checker each answers in ``object`` terms,
 which the caller narrows like any other consumer value.
 
 ``require_instance`` / ``require`` are the narrowing for a value whose source
 guarantees its class but types it loosely: each checks the guarantee (``isinstance``,
 or a ``TypeIs`` predicate for a generic class) and raises ``TypeError`` the moment it
-stops holding.
+stops holding. ``optional_instance`` is ``require_instance`` for a slot that may hold
+``None``.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, TypeGuard, TypeVar
 
-from django_strawberry_framework.exceptions import _safe_type_name
+from . import truth
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, ItemsView, Iterator
@@ -130,11 +130,11 @@ if TYPE_CHECKING:
         ...
 
     def type_mro(_cls: type[object], /) -> tuple[type[object], ...]:
-        """``type.__mro__`` read through ``type``'s own getset descriptor, past any metaclass."""
+        """Read the real ``__mro__`` (``utils/truth.py::mro``), past any metaclass."""
         ...
 
     def class_dict(_cls: type[object], /) -> Mapping[str, object]:
-        """``type.__dict__`` read through ``type``'s own getset descriptor, past any metaclass."""
+        """Read the real own namespace (``utils/truth.py::class_dict``), past any metaclass."""
         ...
 
     def type_attr(_cls: type[object], _name: str, /) -> object:
@@ -187,7 +187,11 @@ if TYPE_CHECKING:
         ...
 
     def instance_dict(_value: object, /) -> dict[str, object]:
-        """Return the value's own ``__dict__``, read past any ``__getattribute__`` its class defines."""
+        """Return the value's own ``__dict__``, read past any ``__getattribute__`` its class defines.
+
+        ``utils/truth.py::instance_state``: a value whose class keeps no instance
+        ``__dict__`` is a ``TypeError``.
+        """
         ...
 
 else:
@@ -210,8 +214,8 @@ else:
     set_iter = set.__iter__
     frozenset_iter = frozenset.__iter__
     mapping_get = Mapping.get
-    type_mro = type.__dict__["__mro__"].__get__
-    class_dict = type.__dict__["__dict__"].__get__
+    type_mro = truth.mro
+    class_dict = truth.class_dict
     type_attr = type.__getattribute__
     is_awaitable = inspect.isawaitable
     read_attr = getattr
@@ -219,9 +223,7 @@ else:
     enum_value = attrgetter("value")
     dict_of = dict
     list_of = list
-
-    def instance_dict(value: object, /) -> dict[str, object]:
-        return object.__getattribute__(value, "__dict__")
+    instance_dict = truth.instance_state
 
     def call_method(value: object, name: str, /, *args: object) -> object:
         return getattr(value, name)(*args)
@@ -255,11 +257,11 @@ __all__ = (
     "is_set",
     "is_set_or_frozenset",
     "is_str",
-    "is_text_or_bytes",
     "is_tuple",
     "list_iter",
     "list_of",
     "mapping_get",
+    "optional_instance",
     "pk_of",
     "read_attr",
     "require",
@@ -281,23 +283,6 @@ def is_set_or_frozenset(value: object) -> TypeIs[set[object] | frozenset[object]
     return isinstance(value, (set, frozenset))
 
 
-def is_text_or_bytes(value: object) -> TypeIs[str | bytes | bytearray | memoryview]:
-    """Return whether ``value`` is text or a bytes-like atom (subclasses included).
-
-    The values that iterate character by character (or byte by byte), so a caller
-    expecting a sequence of items must refuse them before iterating.
-    """
-    return isinstance(
-        value,
-        (
-            str,
-            bytes,
-            bytearray,
-            memoryview,
-        ),
-    )
-
-
 def is_class(value: object) -> TypeIs[type[object]]:
     """Return whether ``value`` IS a class, asked of its real type.
 
@@ -314,16 +299,21 @@ def require_instance(value: object, cls: type[_InstanceT], /) -> _InstanceT:
     """Return ``value`` as the ``cls`` instance it must be, raising ``TypeError`` when it is not."""
     if not isinstance(value, cls):
         raise TypeError(
-            f"expected an instance of {_safe_type_name(cls)}, got {_safe_type_name(value)}",
+            f"expected an instance of {truth.kind(cls)}, got {truth.kind(value)}",
         )
     return value
+
+
+def optional_instance(value: object, cls: type[_InstanceT], /) -> _InstanceT | None:
+    """``require_instance`` for an optional slot: ``None`` stays ``None``, anything else must be a ``cls``."""
+    return None if value is None else require_instance(value, cls)
 
 
 def require(value: object, predicate: Callable[[object], TypeIs[_InstanceT]], /) -> _InstanceT:
     """Return ``value`` as the type ``predicate`` proves, raising ``TypeError`` when it does not."""
     if not predicate(value):
         raise TypeError(
-            f"expected the type the source guarantees, got {_safe_type_name(value)}",
+            f"expected the type the source guarantees, got {truth.kind(value)}",
         )
     return value
 

@@ -63,11 +63,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from rest_framework import serializers
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_predicate,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import CREATE
 from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATION_INPUT_KIND
 from django_strawberry_framework.mutations.sets import (
@@ -90,7 +86,8 @@ from django_strawberry_framework.mutations.sets import (
 from django_strawberry_framework.mutations.sets import (
     _validate_permission_classes as _validate_mutation_permission_classes,
 )
-from django_strawberry_framework.utils._narrowing import is_mapping, read_attr
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_mapping, optional_instance, tuple_iter
 from django_strawberry_framework.utils.inputs import normalize_field_name_sequence
 
 from .inputs import (
@@ -151,6 +148,9 @@ _ALLOWED_SERIALIZER_META_KEYS: frozenset[str] = MODEL_BACKED_WRITE_META_KEYS | f
 # ``<Serializer>Input`` (``CREATE``); ``update`` -> the all-optional
 # ``<Serializer>PartialInput`` (``PARTIAL``).
 
+# A mapping entry unpacks as exactly a ``(key, value)`` pair.
+_MAPPING_ENTRY_ARITY = 2
+
 
 def _validate_schema_field_map(name: str, field_map: object) -> dict[str, DRFField]:
     """Validate and snapshot the map returned by ``get_serializer_for_schema``.
@@ -160,81 +160,57 @@ def _validate_schema_field_map(name: str, field_map: object) -> dict[str, DRFFie
     assumes a mapping whose keys are the bound field names and whose values are DRF fields;
     validating that contract here turns malformed hook values into the package's typed
     configuration error instead of leaking ``AttributeError`` / ``TypeError`` during class
-    creation or finalization.
+    creation or finalization. The mapping's own ``items()`` is its behaviour and runs
+    untouched; each entry is classified by its real class (``utils/truth.py``).
 
-    The map and each value are class-tested with a guarded ``isinstance``: a ``Mapping`` /
-    ``serializers.Field`` subclass and a faithful proxy (``SimpleLazyObject``) pass, and a
-    ``__class__`` read that raises answers "not a mapping" / "not a field", so it is reported
-    with every other malformed entry instead of escaping as the consumer's exception.
+    The map and each value are class-tested with ``isinstance``, so a ``Mapping`` /
+    ``serializers.Field`` subclass and a faithful proxy (``SimpleLazyObject``) pass. A key is
+    not held to the identifier rule here: only the KEPT input set is
+    (``rest_framework/inputs.py::resolve_effective_serializer_fields``), so a read-only or
+    narrowed-away field may carry any name.
     """
-    if not _safe_predicate(is_mapping, field_map):
+    if not is_mapping(field_map):
         raise ConfigurationError(
             f"SerializerMutation {name}.get_serializer_for_schema() must return a mapping of "
-            f"field name -> DRF serializers.Field; got {_safe_arg_repr(field_map)}.",
+            f"field name -> DRF serializers.Field; got {truth.render(field_map)}.",
         )
-    # The guarded test above is the ``Mapping`` proof (a ``bool`` from a helper carries no
-    # narrowing); keys and values stay ``object`` until the per-entry guards below.
-    schema_map = cast("Mapping[object, object]", field_map)
-    try:
-        entries = tuple(schema_map.items())
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"SerializerMutation {name}.get_serializer_for_schema() returned a mapping that "
-            "could not be materialized; return a stable mapping of field name -> DRF "
-            "serializers.Field.",
-        ) from exc
+    # ``items()`` is the mapping's own behaviour, so an entry may be anything.
+    entries: tuple[object, ...] = tuple(field_map.items())
 
     normalized: dict[str, DRFField] = {}
     errors: list[str] = []
     for entry in entries:
-        try:
-            field_name, field = entry
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
+        # Read through the base iterator, so a tuple subclass's own ``__iter__`` /
+        # ``__len__`` / ``__getitem__`` never decides the entry's shape.
+        pair = tuple(tuple_iter(entry)) if truth.is_instance(entry, tuple) else ()
+        if len(pair) != _MAPPING_ENTRY_ARITY:
             errors.append(
                 "an entry could not be unpacked as (field_name, serializers.Field) "
-                f"({_safe_arg_repr(entry)})",
+                f"({truth.render(entry)})",
             )
             continue
-        # The PLAIN-string gate (the ``_hook_mapping`` precedent): a ``str`` subclass key
-        # carries overridable ``__hash__`` / ``__ne__`` and would detonate the downstream
-        # ``normalized[...] = field`` dict-set or comparisons with an arbitrary consumer
-        # exception, so only an exact ``str`` key may proceed to any dispatch on it.
+        field_name, field = pair
+        # The PLAIN-string gate (the ``_hook_mapping`` precedent): only an exact ``str``
+        # key may proceed to the downstream ``normalized[...] = field`` dict-set and
+        # comparisons, which then run ``str``'s own hash and equality.
         if type(field_name) is not str:
             errors.append(
-                f"a field-map key must be a plain string; got {_safe_arg_repr(field_name)}",
+                f"a field-map key must be a plain string; got {truth.render(field_name)}",
             )
             continue
-        if not _safe_predicate(isinstance, field, serializers.Field):
+        if not isinstance(field, serializers.Field):
             errors.append(
-                f"field {field_name!r} must be a DRF serializers.Field; got "
-                f"{_safe_arg_repr(field)}",
+                f"field {field_name!r} must be a DRF serializers.Field; got {truth.render(field)}",
             )
             continue
-        # The guarded ``isinstance`` above is the ``serializers.Field`` proof.
-        drf_field = cast("DRFField", field)
-        try:
-            bound_name = drf_field.field_name
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            errors.append(
-                f"field {field_name!r} has a field_name descriptor that could not be read",
-            )
-            continue
-        # The bound-name VALUE is untrusted (only its READ was guarded above): a hostile
-        # ``__ne__`` on it must not escape the comparison as a raw exception.
-        try:
-            name_mismatch = bound_name != field_name
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            errors.append(
-                f"field {field_name!r} has a field_name whose comparison failed",
-            )
-            continue
-        if name_mismatch:
+        bound_name = field.field_name
+        if bound_name != field_name:
             errors.append(
                 f"field-map key {field_name!r} does not match the DRF field's bound name "
-                f"{_safe_arg_repr(bound_name)}",
+                f"{truth.render(bound_name)}",
             )
             continue
-        normalized[field_name] = drf_field
+        normalized[field_name] = field
 
     if errors:
         details = "; ".join(errors)
@@ -265,7 +241,7 @@ def _checked_schema_field_map(
     passed at class validation, so both windows fingerprint the identical opt-in structure and an
     unopted nested field is never descended into.
     """
-    field_map = _validate_schema_field_map(cls.__name__, cls.get_serializer_for_schema())
+    field_map = _validate_schema_field_map(truth.name(cls), cls.get_serializer_for_schema())
     if meta.schema_fingerprint is not None:
         effective = resolve_effective_serializer_fields(
             # The serializer flavor's ``_validate_meta`` stored a validated serializer class.
@@ -280,7 +256,7 @@ def _checked_schema_field_map(
             != meta.schema_fingerprint
         ):
             raise ConfigurationError(
-                f"SerializerMutation {cls.__name__}.get_serializer_for_schema() returned a "
+                f"SerializerMutation {truth.name(cls)}.get_serializer_for_schema() returned a "
                 "DIFFERENT field shape at bind than at class validation; the hook must be "
                 "deterministic and request-independent (the input is generated once at "
                 "finalization). Return a stable field map (do not read request state or "
@@ -312,19 +288,6 @@ def _serializer_input_shape_for(
     return dedupe_serializer_input_shape(input_cls, shape)
 
 
-# ``operation`` -> the DRF serializer write method whose OVERRIDE ``Meta.nested_fields`` requires
-#: a create routes nested data through ``create()``, an update through
-# ``update()``. DRF's ``ModelSerializer.create`` / ``.update`` ``assert`` (via
-# ``raise_errors_on_nested_writes``) that no nested writable data is present unless the method is
-# overridden - a raw ``AssertionError`` that would escape the error envelope - so the framework
-# requires the override at class creation instead (the "only pass nested data to serializers that
-# implement create()/update()" contract).
-_SERIALIZER_OPERATION_NESTED_WRITE_METHOD: dict[str, str] = {
-    "create": "create",
-    "update": "update",
-}
-
-
 def _validate_serializer_nested_fields(
     name: str,
     serializer_class: type[DRFSerializer],
@@ -339,7 +302,7 @@ def _validate_serializer_nested_fields(
 
     - it must be a mapping of plain ``str -> NestedSerializerConfig`` (a wrong container /
       wrong value type fails loud; the plain-string gate is the resolver-tier ``_hook_mapping``
-      precedent, so no hostile key object can destabilize the downstream key-hashing consumers);
+      precedent, so the downstream key-hashing consumers run ``str``'s own hash and equality);
     - each key must name a field in the schema-time ``field_map`` that IS a nested
       ``Serializer`` / ``ListSerializer`` (a typo / non-nested field fails loud - the deeper
       per-level key validation runs in the recursive build);
@@ -360,36 +323,25 @@ def _validate_serializer_nested_fields(
     # ``require_nested_fields_mapping`` raised unless this is a ``Mapping`` (a raising helper
     # cannot narrow its argument); every key / value is still checked per entry below.
     nested_mapping = cast("Mapping[object, object]", nested_fields)
-    # The SAME untrusted-mapping containment the schema field map applies: the hook/Meta
-    # boundary materializes ``.items()`` and unpacks each entry under a guard, so a hostile
-    # mapping (a raising ``items()``, a midway-raising iterator, a wrong-arity entry) becomes
-    # the typed configuration error instead of leaking a raw ``RuntimeError`` / ``ValueError``
-    # during class creation.
-    try:
-        entries = tuple(nested_mapping.items())
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"SerializerMutation {name}.Meta.nested_fields returned a mapping that could not "
-            "be materialized; use a stable mapping of field name -> NestedSerializerConfig.",
-        ) from exc
+    # The SAME entry shape check the schema field map applies: the mapping's own
+    # ``items()`` runs untouched, and each entry is accepted only as a real 2-tuple.
+    entries: tuple[object, ...] = tuple(nested_mapping.items())
     normalized: dict[str, NestedSerializerConfig] = {}
     for entry in entries:
-        try:
-            field_name, config = entry
-        except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
+        pair = tuple(tuple_iter(entry)) if truth.is_instance(entry, tuple) else ()
+        if len(pair) != _MAPPING_ENTRY_ARITY:
             raise ConfigurationError(
                 f"SerializerMutation {name}.Meta.nested_fields has an entry that could not be "
-                f"unpacked as (field_name, NestedSerializerConfig) ({_safe_arg_repr(entry)}).",
-            ) from None
-        # The PLAIN-string gate (the ``_hook_mapping`` precedent): a non-``str`` or
-        # ``str``-subclass key would detonate ``field_map.get()`` (unhashable), the error
-        # message renders below (a hostile ``__repr__``), or the ``normalized`` dict-set
-        # (a hostile ``__hash__``) with a raw consumer exception, so only an exact ``str``
-        # key may proceed to any dispatch on it.
+                f"unpacked as (field_name, NestedSerializerConfig) ({truth.render(entry)}).",
+            )
+        field_name, config = pair
+        # The PLAIN-string gate (the ``_hook_mapping`` precedent): only an exact ``str``
+        # key may proceed to ``field_map.get()`` and the ``normalized`` dict-set, which
+        # then run ``str``'s own hash and equality.
         if type(field_name) is not str:
             raise ConfigurationError(
                 f"SerializerMutation {name}.Meta.nested_fields keys must be plain strings; "
-                f"got {_safe_arg_repr(field_name)}.",
+                f"got {truth.render(field_name)}.",
             )
         require_nested_serializer_config(name, field_name, config)
         # ``require_nested_serializer_config`` raised unless this is a ``NestedSerializerConfig``.
@@ -404,7 +356,7 @@ def _validate_serializer_nested_fields(
         if not is_nested_serializer_field(field):
             raise ConfigurationError(
                 f"SerializerMutation {name}.Meta.nested_fields names {field_name!r}, but it is a "
-                f"{type(field).__name__}, not a nested serializer. nested_fields is only for "
+                f"{truth.name(type(field))}, not a nested serializer. nested_fields is only for "
                 "nested Serializer / ListSerializer fields (a relation is a "
                 "PrimaryKeyRelatedField).",
             )
@@ -415,13 +367,17 @@ def _validate_serializer_nested_fields(
         # data to the serializer, so the write-method-override requirement is vacuous and an
         # explicit ``{}`` must not spuriously demand a create()/update() override.
         return normalized
-    write_method = _SERIALIZER_OPERATION_NESTED_WRITE_METHOD[operation]
-    if getattr(serializer_class, write_method) is getattr(
+    # ``operation`` arrives whitelist-proven (create/update only) from the sole caller, and the
+    # DRF write method shares the operation's name, so the method IS the operation (DRF's
+    # default asserts via ``raise_errors_on_nested_writes`` unless overridden - hence the check).
+    write_method = operation
+    if truth.static_attr(serializer_class, write_method) is truth.static_attr(
         serializers.ModelSerializer,
         write_method,
     ):
         raise ConfigurationError(
-            f"SerializerMutation {name}.Meta.nested_fields is declared, but {serializer_class.__name__} "
+            f"SerializerMutation {name}.Meta.nested_fields is declared, but "
+            f"{truth.name(serializer_class)} "
             f"does not override {write_method}(); DRF's default ModelSerializer.{write_method}() "
             "raises on writable nested data (an AssertionError that would escape the error "
             f"envelope). Implement {write_method}() to perform the nested write yourself (the "
@@ -603,7 +559,7 @@ class SerializerMutation(DjangoMutation):
         requiredness + the descriptor identity (re-validated at bind via
         ``resolve_optional_fields``).
         """
-        name = cls.__name__
+        name = truth.name(cls)
         meta = reject_unknown_meta_keys(
             f"SerializerMutation {name}",
             meta,
@@ -628,16 +584,17 @@ class SerializerMutation(DjangoMutation):
             expected=serializers.Serializer,
             expected_label="DRF serializers.Serializer",
         )
-        if not issubclass(serializer_class, serializers.ModelSerializer):
+        if not truth.is_subclass(serializer_class, serializers.ModelSerializer):
             raise ConfigurationError(
-                f"SerializerMutation {name}.Meta.serializer_class {serializer_class.__name__} "
+                f"SerializerMutation {name}.Meta.serializer_class "
+                f"{truth.name(serializer_class)} "
                 "must be a serializers.ModelSerializer with a concrete Meta.model; a plain "
                 "serializers.Serializer has no backing model + no DjangoType to return.",
             )
 
         # The "resolves no model" raise is the shared ``resolve_backed_model_or_raise``,
         # run after the type-gates so ``Meta.serializer_class`` is a
-        # real class with a ``.__name__``. ``require_model_class`` then type-gates
+        # real class. ``require_model_class`` then type-gates
         # the resolved value (a string / instance ``Meta.model``) so it cannot
         # leak to bind.
         model = require_model_class(
@@ -688,7 +645,7 @@ class SerializerMutation(DjangoMutation):
         # identity. (The bind re-validates names via ``resolve_optional_fields``; this
         # is the earliest class-creation check.)
         optional_fields = normalize_field_name_sequence(
-            getattr(meta, "optional_fields", None),
+            truth.static_attr(meta, "optional_fields"),
             label="optional_fields",
             flavor="SerializerMutation",
         )
@@ -698,7 +655,7 @@ class SerializerMutation(DjangoMutation):
         # ``build_input`` subtracts these from the create-required guard and the resolver
         # verifies they reach the serializer's data.
         injected_fields = normalize_field_name_sequence(
-            getattr(meta, "injected_fields", None),
+            truth.static_attr(meta, "injected_fields"),
             label="injected_fields",
             flavor="SerializerMutation",
         )
@@ -743,7 +700,7 @@ class SerializerMutation(DjangoMutation):
             serializer_class,
             operation,
             field_map,
-            getattr(meta, "nested_fields", None),
+            truth.static_attr(meta, "nested_fields"),
         )
         # A runtime write ``source`` must be UNIQUE across EVERY field that can
         # contribute to ``validated_data``, not merely the generated input + injected
@@ -764,7 +721,7 @@ class SerializerMutation(DjangoMutation):
 
         permission_classes = _validate_mutation_permission_classes(
             name,
-            getattr(meta, "permission_classes", None),
+            truth.static_attr(meta, "permission_classes"),
         )
 
         return _ValidatedMutationMeta(
@@ -815,20 +772,27 @@ class SerializerMutation(DjangoMutation):
         present (the bind window) else from ``cls.Meta.serializer_class`` (class creation,
         before the snapshot is assigned), resolving the SAME serializer in both windows.
 
-        The snapshot is read via ``cls.__dict__`` - the OWN snapshot only, NOT an
+        The snapshot is read from the class's own namespace (``truth.class_dict``) - the
+        OWN snapshot only, NOT an
         inherited one (spec-039): the metaclass assigns ``_mutation_meta`` AFTER
         ``_validate_meta`` runs, so during a SUBCLASS's validation ``cls._mutation_meta``
         would resolve up the MRO to the PARENT's snapshot (the parent's serializer),
-        making the default hook discover the wrong serializer's fields. Reading
-        ``cls.__dict__.get("_mutation_meta")`` returns ``None`` until the class's own
+        making the default hook discover the wrong serializer's fields. The own-namespace
+        read returns ``None`` until the class's own
         snapshot is assigned, so a subclass redefining ``Meta.serializer_class`` validates
         against ``cls.Meta.serializer_class`` (its OWN ``Meta``), not the parent's.
         """
-        meta: _ValidatedMutationMeta | None = cls.__dict__.get("_mutation_meta")
+        # The metaclass writes this own-namespace slot with the validated snapshot.
+        meta = optional_instance(
+            truth.class_dict(cls).get("_mutation_meta"),
+            _ValidatedMutationMeta,
+        )
         # Both windows read the serializer class ``_validate_meta`` gated before this hook runs.
         serializer_class = cast(
             "type[DRFSerializer]",
-            meta.serializer_class if meta is not None else read_attr(cls.Meta, "serializer_class"),
+            meta.serializer_class
+            if meta is not None
+            else truth.static_attr(truth.static_attr(cls, "Meta"), "serializer_class"),
         )
         return _default_serializer_schema_fields(serializer_class)
 
@@ -940,7 +904,7 @@ class SerializerMutation(DjangoMutation):
             materialize=materialize_serializer_input_class,
             specs_of=lambda shape: list(shape.field_specs),
         )
-        cls._input_type_name = input_cls.__name__
+        cls._input_type_name = truth.name(input_cls)
         return input_cls
 
     @classmethod
@@ -962,7 +926,7 @@ class SerializerMutation(DjangoMutation):
         # when the bound name is already stashed; explicit calls to this seam still
         # enforce the determinism contract.
         field_map = _checked_schema_field_map(cls, meta)
-        bound_name = cls.__dict__.get("_input_type_name")
+        bound_name = truth.class_dict(cls).get("_input_type_name")
         if bound_name is not None:
             # ``build_input`` stashes the materialized class name here (own dict only).
             return cast("str", bound_name)

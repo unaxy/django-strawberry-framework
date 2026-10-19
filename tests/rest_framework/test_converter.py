@@ -54,7 +54,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Iterator
 from enum import Enum
-from typing import TYPE_CHECKING, NoReturn, get_args, get_origin
+from typing import TYPE_CHECKING, NewType, NoReturn, get_args, get_origin
 
 import pytest
 import strawberry
@@ -62,7 +62,7 @@ from apps.library import models as library_models
 from apps.library.models import Book, Genre
 from apps.products import models as product_models
 from apps.scalars import models as scalar_models
-from apps.scalars.models import MediaSpecimen
+from apps.scalars.models import MediaSpecimen, ScalarSpecimen
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from rest_framework import serializers
@@ -82,6 +82,7 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
     SerializerFieldConversion,
     backing_model_field,
     convert_serializer_field,
+    normalize_serializer_source,
     register_serializer_field_converter,
     require_one_segment_source,
     resolve_serializer_field,
@@ -412,8 +413,15 @@ def test_resolve_serializer_field_rejects_nested_over_relation_column() -> None:
             fields = ("name", "items")
 
     field = bound_fields(CategorySer())["items"]
-    with pytest.raises(ConfigurationError, match="opt-in only"):
+    with pytest.raises(ConfigurationError) as exc:
         resolve_serializer_field(field, product_models.Category, "CategorySerInput")
+    assert str(exc.value) == (
+        "Serializer field 'items' is a nested ListSerializer; nested serializer writes are "
+        "opt-in only. Declare it in the mutation's Meta.nested_fields "
+        "({'items': NestedSerializerConfig(...)}) - the serializer must implement "
+        "create()/update() for the nested write - drop it via Meta.fields / Meta.exclude, or "
+        "model the relation with a PrimaryKeyRelatedField."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1097,6 +1105,21 @@ def test_require_one_segment_source_rejects_star_and_dotted() -> None:
     )
 
 
+def test_normalize_serializer_source_records_explicit_source_else_none() -> None:
+    """The shared source-axis helper keeps renamed sources and folds the rest to ``None``.
+
+    ``resolve_serializer_field`` and the nested-input walk both call this owner:
+    a renamed source is recorded, the bind-default (equal to the declared name)
+    and a falsy source record ``None``.
+    """
+    renamed = bind_unparented(serializers.CharField(source="name"), "nm")
+    assert normalize_serializer_source(renamed, "nm") == "name"
+    bind_default = bind_unparented(serializers.CharField(), "nm")
+    assert normalize_serializer_source(bind_default, "nm") is None
+    falsy = bind_unparented(serializers.CharField(source=""), "nm")
+    assert normalize_serializer_source(falsy, "nm") is None
+
+
 # ---------------------------------------------------------------------------
 # Serializer-only relation (queryset.model) + missing primary DjangoType
 # ---------------------------------------------------------------------------
@@ -1275,14 +1298,14 @@ def test_registered_converter_malformed_return_is_configuration_error() -> None:
 
 
 @pytest.mark.usefixtures("_restore_converter_registry")
-def test_registered_converter_exception_is_wrapped_as_configuration_error() -> None:
-    """A converter that raises is reported against the registry, not as its own exception."""
+def test_registered_converter_exception_propagates() -> None:
+    """A registered converter is consumer code: what it raises propagates unchanged."""
 
     def broken_converter(_field: DRFField) -> NoReturn:
         raise RuntimeError("converter failed")
 
     register_serializer_field_converter(_CustomHexField, broken_converter)
-    with pytest.raises(ConfigurationError, match="raised RuntimeError"):
+    with pytest.raises(RuntimeError, match="converter failed"):
         convert_serializer_field(bind_unparented(_CustomHexField(), "c"))
 
 
@@ -2440,6 +2463,30 @@ def test_consumer_declared_scalar_disagreeing_with_column_raises() -> None:
         resolve_serializer_field(field, product_models.Item, "X")
 
 
+def test_consumer_declared_list_field_over_json_column_names_both_scalars() -> None:
+    """The conflict diagnostic names a ``list[...]`` scalar by its origin class, byte for byte."""
+
+    class ListOverJsonSer(serializers.ModelSerializer[ScalarSpecimen]):
+        payload = serializers.ListField(child=serializers.CharField())
+
+        # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
+        class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+            model = ScalarSpecimen
+            fields = ("payload",)
+
+    field = bound_fields(ListOverJsonSer())["payload"]
+    with pytest.raises(ConfigurationError) as excinfo:
+        resolve_serializer_field(field, ScalarSpecimen, "X")
+    assert str(excinfo.value) == (
+        "Serializer field 'payload' (source 'payload') declares a GraphQL scalar list that "
+        "disagrees with the backing model column ScalarSpecimen.payload's scalar JSON. A "
+        "consumer-declared serializer field is an explicit contract; the framework will not "
+        "silently pick the model column. Align the serializer field's type with the column, "
+        "declare it as a serializer-only field (no backing column), or drop it via "
+        "Meta.fields / Meta.exclude."
+    )
+
+
 def test_consumer_declared_scalar_agreeing_with_column_ok() -> None:
     """A benign rename (``CharField`` over a text column) AGREES and resolves to the model scalar."""
     _register_products_types()
@@ -2543,42 +2590,6 @@ def test_serializer_field_description_notes_allow_empty_false() -> None:
     assert serializer_field_description(field) == "Constraints: allow_empty=false."
 
 
-def test_serializer_field_description_hostile_metadata_is_configuration_error() -> None:
-    """A hostile help-text descriptor cannot replace the typed schema error."""
-
-    class HostileText:
-        def __bool__(self) -> bool:
-            raise KeyboardInterrupt("bool trap")
-
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("str trap")
-
-    # basedpyright: the raising help text is the hostile input under test; drf-stubs types
-    # help_text as _StrOrPromise | None
-    field = bind_unparented(serializers.CharField(help_text=HostileText()), "name")  # pyright: ignore[reportArgumentType]
-    with pytest.raises(ConfigurationError, match="metadata that cannot be rendered"):
-        serializer_field_description(field)
-
-
-def test_serializer_field_description_handles_an_unreadable_field_name_in_diagnostic() -> None:
-    """The diagnostic names an unreadable field as ``<unavailable>`` rather than raising itself."""
-
-    class HostileField:
-        @property
-        def help_text(self) -> NoReturn:
-            raise RuntimeError("help unavailable")
-
-        @property
-        def field_name(self) -> NoReturn:
-            raise RuntimeError("name unavailable")
-
-    with pytest.raises(ConfigurationError, match="Serializer field <unavailable>"):
-        # basedpyright: the field whose reads raise is the hostile input under test;
-        # serializer_field_description types the parameter as DRFField
-        serializer_field_description(HostileField())  # pyright: ignore[reportArgumentType]
-
-
 def test_declared_choicefield_over_model_column_emits_serializer_enum() -> None:
     """A declared ``ChoiceField(source=<model col>, choices=...)`` emits the serializer-only enum.
 
@@ -2659,31 +2670,6 @@ def test_unsupported_serializer_field_without_field_name_raises_cleanly() -> Non
         convert_serializer_field(field)
 
 
-def test_unsupported_serializer_field_with_hostile_field_name_repr() -> None:
-    """An unmapped serializer field with a hostile field_name repr raises ``ConfigurationError``.
-
-    The error text carries ``<unavailable>`` in place of the unreadable repr.
-    """
-
-    class HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("hostile repr")
-
-    class HostileField(serializers.Field[object, object, object, object]):
-        pass
-
-    field = HostileField()
-    # basedpyright: the hostile field_name is the input under test; DRF types the slot as
-    # str | None
-    field.field_name = HostileRepr()  # pyright: ignore[reportAttributeAccessIssue]
-    with pytest.raises(
-        ConfigurationError,
-        match="on serializer field <unavailable>",
-    ):
-        convert_serializer_field(field)
-
-
 def test_backing_model_field_nonexistent_column_returns_none() -> None:
     """A serializer field referencing a non-existent model field returns None."""
 
@@ -2730,3 +2716,57 @@ def test_resolve_serializer_field_column_less_file_field() -> None:
     assert annotation is Upload
     assert spec.kind == FILE
     assert spec.graphql_name == "avatar"
+
+
+def test_list_field_nullable_child_maps_to_nullable_elements() -> None:
+    """A ListField whose child allows null emits a nullable-element list annotation."""
+    field = bind_unparented(
+        serializers.ListField(child=serializers.CharField(allow_null=True)),
+        "tags",
+    )
+    conversion = convert_serializer_field(field)
+    assert conversion.annotation == list[str | None]
+    assert conversion.kind == SCALAR
+
+
+def test_serializer_only_choicefield_allow_blank_enum_has_blank_member() -> None:
+    """A serializer-only ``ChoiceField(allow_blank=True)`` keeps its enum, with ``BLANK`` for ``""``.
+
+    DRF accepts the empty string alongside the declared choices, so the generated enum
+    carries the ``BLANK`` member and the blank the serializer admits stays reachable.
+    """
+
+    class BlankSer(serializers.Serializer[object]):
+        color = serializers.ChoiceField(
+            choices=[("r", "Red"), ("g", "Green")],
+            allow_blank=True,
+        )
+
+    field = bound_fields(BlankSer())["color"]
+    _attr, annotation, spec = resolve_serializer_field(field, None, "X")
+    assert spec.kind == SCALAR
+    assert isinstance(annotation, type)
+    assert issubclass(annotation, Enum)
+    assert {member.name: enum_value(member) for member in annotation} == {
+        "BLANK": "",
+        "r": "r",
+        "g": "g",
+    }
+
+
+def test_scalar_name_names_classes_newtypes_and_other_annotations() -> None:
+    """The conflict diagnostic names a class, a ``NewType`` scalar and a builtin generic.
+
+    A builtin generic is named by its origin; anything else falls back to the repr.
+    """
+
+    class _Nameless:
+        @override
+        def __repr__(self) -> str:
+            return "<nameless annotation>"
+
+    JSONLike = NewType("JSONLike", object)
+    assert serializer_converter._scalar_name(int) == "int"
+    assert serializer_converter._scalar_name(JSONLike) == "JSONLike"
+    assert serializer_converter._scalar_name(list[int]) == "list"
+    assert serializer_converter._scalar_name(_Nameless()) == "<nameless annotation>"

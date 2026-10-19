@@ -132,7 +132,8 @@ from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.extensions.runner import SchemaExtensionsRunner
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_type_name
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.execution_mode import OperationMode, bind_operation_mode
 from django_strawberry_framework.utils.operation_lease import OperationLease
 from django_strawberry_framework.utils.private_state import PrivateAuthority
@@ -409,7 +410,7 @@ def _carrier(extension: object) -> ContextVar[OperationLease[ref[OperationState]
     carrier = _OPERATION_CARRIERS.recall(extension)
     if carrier is None:
         raise ConfigurationError(
-            f"{type(extension).__name__} has no operation-state binding, so its "
+            f"{truth.name(type(extension))} has no operation-state binding, so its "
             "__init__ never ran the one this package installs. A subclass "
             "defining __init__ has to call super().__init__().",
         )
@@ -448,7 +449,7 @@ def _mark_package_managed(extension: object) -> None:
     """
     if not _PACKAGE_MANAGED.settled(extension):
         _PACKAGE_MANAGED.settle(extension, state=True)
-    extension.__dict__.pop("_compatibility_state", None)
+    extension.__dict__.pop("_compatibility_state", None)  # truth: ok own instance namespace
 
 
 def _is_operation_bound(extension: object) -> TypeIs[_OperationBoundExtension[OperationState]]:
@@ -459,7 +460,7 @@ def _is_operation_bound(extension: object) -> TypeIs[_OperationBoundExtension[Op
     ``__class__`` with whatever it likes, and this predicate decides whose
     state the runner binds.
     """
-    return issubclass(type(extension), _OperationBoundExtension)
+    return truth.is_subclass(type(extension), _OperationBoundExtension)
 
 
 def _binds_operation_state(execution_context: object) -> bool:
@@ -467,17 +468,14 @@ def _binds_operation_state(execution_context: object) -> bool:
 
     Only a ``DjangoSchema`` overrides the runner factory, so only a context
     belonging to one gets its state from the runner. The import is deferred
-    because the schema module builds on this one; the read is guarded because
-    the context is an engine object on the supported path and an arbitrary
-    consumer object on every other.
+    because the schema module builds on this one. The context is an engine
+    object on the supported path; its ``schema`` is read as it answers and
+    judged by its real class.
     """
     from django_strawberry_framework.schema import DjangoSchema  # noqa: PLC0415 - import cycle
 
-    try:
-        schema = getattr(execution_context, "schema", None)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        return False
-    return issubclass(type(schema), DjangoSchema)
+    schema = getattr(execution_context, "schema", None)
+    return truth.is_subclass(truth.class_of(schema), DjangoSchema)
 
 
 class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
@@ -542,7 +540,7 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
         context = self.execution_context
         if context is None:
             raise ConfigurationError(
-                f"{_safe_type_name(self)} read its operation context outside an operation; "
+                f"{truth.kind(self)} read its operation context outside an operation; "
                 "only its hooks run inside one.",
             )
         return context
@@ -581,7 +579,8 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
         if _binds_operation_state(value):
             _mark_package_managed(self)
             return
-        self.__dict__["_compatibility_state"] = (
+        namespace = self.__dict__  # truth: ok own instance namespace
+        namespace["_compatibility_state"] = (
             None if value is None else self._new_operation_state(value)
         )
 
@@ -607,7 +606,7 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
             return state
         if _is_package_managed(self):
             return None
-        return self.__dict__.get("_compatibility_state")
+        return self.__dict__.get("_compatibility_state")  # truth: ok own instance namespace
 
 
 def _operation_states(

@@ -1,18 +1,17 @@
-"""Shared mutation-error constructors remain total over hostile metadata.
+"""Shared mutation-error constructors: leaf shapes, the Django mapper, the code vocabulary.
 
-Hostile string subclasses, midway iterators, and lazy translation proxies never
-arrive on the wire; the constructors must still return a FieldError. Consumer
-envelopes (constraint ``codes``, ``__all__`` sentinel, relation ``not_found``)
-live in ``examples/fakeshop/test_query/test_products_api.py``. The error key map
+Scalar / byte / lazy-translation message coercion and the ``ValidationError``
+mapping read Python values no wire request can shape. Consumer envelopes
+(constraint ``codes``, ``__all__`` sentinel, relation ``not_found``) live in
+``examples/fakeshop/test_query/test_products_api.py``. The error key map
 primitives (``build_error_key_map``, ``rekey_error_segment``,
 ``model_field_error_names``) are pinned here directly; the per-flavor keying matrix
 is ``tests/utils/test_error_keys.py``.
 """
 
 import ast
-from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import TYPE_CHECKING
 
 import pytest
 from apps.library import models as library_models
@@ -20,7 +19,7 @@ from apps.products import models as product_models
 from django.core.exceptions import ValidationError
 from django.db.models import Model
 from django.utils.translation import gettext_lazy as _
-from typing_extensions import Self, override
+from typing_extensions import override
 
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError
 from django_strawberry_framework.utils import errors as errors_module
@@ -48,73 +47,50 @@ from django_strawberry_framework.utils.errors import (
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR, InputFieldSpec
-from tests._idioms import ClassReadRaisesBase
 
 if TYPE_CHECKING:
     from django_strawberry_framework.utils.errors import ErrorKeyMap
 
 
-def _as_validation_error(stand_in: object) -> ValidationError:
-    """Hand a duck-typed validation error to the mapper that takes a Django ValidationError."""
-    # basedpyright: a stand-in validation error carrying only the slots the code under test reads;
-    # validation_error_to_field_errors types the parameter as ValidationError
-    return stand_in  # pyright: ignore[reportReturnType]
-
-
-class _HostileString:
+class _RaisingMessage:
     @override
     def __str__(self) -> str:
-        raise RuntimeError("hostile message string")
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("hostile message repr")
+        raise RuntimeError("message string")
 
 
-class _HostilePath(str):
-    def __bool__(self) -> bool:
-        raise RuntimeError("hostile path truthiness")
-
-    @override
-    def __eq__(self, other: object) -> bool:
-        raise RuntimeError("hostile path equality")
-
-    @override
-    def split(self, *args: object, **kwargs: object) -> NoReturn:
-        raise RuntimeError("hostile path split")
-
-    # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-    __hash__ = None  # pyright: ignore[reportAssignmentType]
+def test_validation_error_message_object_render_propagates() -> None:
+    """A consumer message object renders through its own ``__str__``; what it raises propagates."""
+    with pytest.raises(RuntimeError, match="message string"):
+        validation_error_to_field_errors(ValidationError({"name": [_RaisingMessage()]}))
 
 
-class _HostileIterable:
-    def __iter__(self) -> Iterator[object]:
-        raise RuntimeError("hostile iterable")
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ValidationError("value %(v)s", params={"w": 3}),
+        ValidationError({"name": ValidationError("value %(v)s", params={"w": 3})}),
+    ],
+    ids=["non-field", "field"],
+)
+def test_validation_error_params_mismatch_propagates_like_django(payload: ValidationError) -> None:
+    """A message whose params do not match its placeholders raises Django's own ``KeyError``.
+
+    Django's ``ValidationError.messages`` interpolates ``message %= params``
+    unguarded, so the admin and forms raise the same error for the same
+    consumer ``clean()``; the mapper renders through that path and never
+    substitutes the raw template.
+    """
+    with pytest.raises(KeyError, match="'v'"):
+        list(ValidationError("value %(v)s", params={"w": 3}))
+    with pytest.raises(KeyError, match="'v'"):
+        validation_error_to_field_errors(payload)
 
 
-def test_field_error_normalizes_hostile_string_subclass_paths_and_messages() -> None:
-    error = field_error(_HostilePath("items.0.name"), [_HostileString()])
-
-    assert error.field == "items.0.name"
-    assert error.path == ["items", "0", "name"]
-    assert error.messages == ["<unprintable _HostileString>"]
-
-
-def test_relation_field_error_and_path_joining_normalize_hostile_string_subclasses() -> None:
-    relation_error = relation_field_error(_HostilePath("categoryId"))
-
-    assert relation_error.field == "categoryId"
-    assert relation_error.messages == ["Invalid id for relation 'categoryId'."]
-    assert join_error_path(_HostilePath("items.0"), _HostilePath("name")) == "items.0.name"
-
-
-def test_validation_error_mapper_survives_hostile_message_objects() -> None:
-    (error,) = validation_error_to_field_errors(
-        ValidationError({"name": [_HostileString()]}),
-    )
-
-    assert error.field == "name"
-    assert error.messages == ["<unprintable _HostileString>"]
+def test_relation_field_error_message_is_pinned() -> None:
+    leaf = relation_field_error("categoryId")
+    assert leaf.field == "categoryId"
+    assert leaf.messages == ["Invalid id for relation 'categoryId'."]
+    assert leaf.codes == [FIELD_ERROR_CODE_INVALID]
 
 
 def test_validation_error_mapper_keeps_normal_codes_and_non_field_shape() -> None:
@@ -126,106 +102,6 @@ def test_validation_error_mapper_keeps_normal_codes_and_non_field_shape() -> Non
     assert error.path == []
     assert error.messages == ["whole-object"]
     assert error.codes == ["invalid"]
-
-
-def test_validation_error_mapper_degrades_malformed_error_dict_entries() -> None:
-    exception = ValidationError("whole-object")
-
-    class _MalformedErrorDict:
-        def items(self) -> list[tuple[str]]:
-            return [("missing-value",)]
-
-    # basedpyright: the malformed error_dict is the hostile input under test; the stubs type it
-    # as the dict a ValidationError builds itself
-    exception.error_dict = _MalformedErrorDict()  # pyright: ignore[reportAttributeAccessIssue]
-    (error,) = validation_error_to_field_errors(exception)
-
-    assert error.field == NON_FIELD_ERROR_KEY
-    assert error.messages == ["Validation details could not be normalized."]
-    assert error.codes == ["invalid"]
-
-
-def test_field_error_degrades_an_unreadable_message_container() -> None:
-    error = field_error("name", _HostileIterable())
-
-    assert error.field == "name"
-    assert error.messages == ["<unprintable _HostileIterable>"]
-
-
-def test_validation_error_mapper_degrades_unreadable_dict_and_fallback_metadata() -> None:
-    class _UnreadableErrorDict:
-        def items(self) -> NoReturn:
-            raise RuntimeError("hostile error items")
-
-    class _MalformedValidationError:
-        error_dict = _UnreadableErrorDict()
-
-        @property
-        def error_list(self) -> NoReturn:
-            raise RuntimeError("hostile error list")
-
-        @property
-        def messages(self) -> NoReturn:
-            raise RuntimeError("hostile messages")
-
-        @override
-        def __str__(self) -> str:
-            return "unreadable validation details"
-
-    (error,) = validation_error_to_field_errors(_as_validation_error(_MalformedValidationError()))
-
-    assert error.field == NON_FIELD_ERROR_KEY
-    assert error.messages == ["unreadable validation details"]
-    assert error.codes == []
-
-
-def test_validation_error_mapper_degrades_unreadable_field_error_metadata() -> None:
-    class _UnreadableFieldErrors:
-        def __iter__(self) -> Iterator[object]:
-            raise RuntimeError("hostile field errors")
-
-        @property
-        def messages(self) -> NoReturn:
-            raise RuntimeError("hostile leaf messages")
-
-        @property
-        def message(self) -> NoReturn:
-            raise RuntimeError("hostile leaf message")
-
-        @property
-        def error_list(self) -> NoReturn:
-            raise RuntimeError("hostile leaf list")
-
-        @override
-        def __str__(self) -> str:
-            return "unreadable field details"
-
-    class _MalformedValidationError:
-        error_dict = {"name": _UnreadableFieldErrors()}
-
-    (error,) = validation_error_to_field_errors(_as_validation_error(_MalformedValidationError()))
-
-    assert error.field == "name"
-    assert error.messages == ["unreadable field details"]
-    assert error.codes == []
-
-
-def test_validation_error_mapper_drops_an_unreadable_leaf_code() -> None:
-    class _UnreadableCode:
-        @property
-        def code(self) -> NoReturn:
-            raise RuntimeError("hostile code")
-
-    class _MalformedValidationError:
-        error_dict = None
-        error_list = (_UnreadableCode(),)
-        messages = ("invalid value",)
-
-    (error,) = validation_error_to_field_errors(_as_validation_error(_MalformedValidationError()))
-
-    assert error.field == NON_FIELD_ERROR_KEY
-    assert error.messages == ["invalid value"]
-    assert error.codes == []
 
 
 @pytest.mark.parametrize(
@@ -265,112 +141,6 @@ def test_field_error_handles_byte_strings_without_splitting() -> None:
     assert error.field == "token"
     assert error.messages == ["b'invalid_token'"]
     assert error.codes == ["b'invalid'"]
-
-
-def test_validation_error_mapper_handles_bare_string_and_byte_values_in_error_dict() -> None:
-    class _BareStringDictError:
-        error_dict = {"title": "This title is already taken", "code": b"invalid_code"}
-
-    errors = validation_error_to_field_errors(_as_validation_error(_BareStringDictError()))
-    assert len(errors) == 2
-    by_field = {e.field: e for e in errors}
-    assert by_field["title"].messages == ["This title is already taken"]
-    assert by_field["code"].messages == ["b'invalid_code'"]
-
-
-def test_validation_error_mapper_handles_leaf_with_string_messages_attribute() -> None:
-    class _StringMessagesError:
-        messages = "Single error message as string"
-
-    (error,) = validation_error_to_field_errors(_as_validation_error(_StringMessagesError()))
-    assert error.field == NON_FIELD_ERROR_KEY
-    assert error.messages == ["Single error message as string"]
-
-
-def test_validation_error_mapper_extracts_code_from_leaf_without_error_list() -> None:
-    class _CodeOnlyError:
-        code = "permission_denied"
-        message = "Permission denied for operation"
-
-    (error,) = validation_error_to_field_errors(_as_validation_error(_CodeOnlyError()))
-    assert error.field == NON_FIELD_ERROR_KEY
-    assert error.messages == ["Permission denied for operation"]
-    assert error.codes == ["permission_denied"]
-
-
-def test_field_error_and_join_path_survive_hostile_class_property() -> None:
-    class _HostileClass(ClassReadRaisesBase):
-        @override
-        def __str__(self) -> str:
-            return "hostile_instance"
-
-    bad = _HostileClass()
-    # basedpyright: the object whose __class__ raises is the hostile input under test; field_error
-    # types path and messages as str
-    err = field_error(bad, bad, codes=bad)  # pyright: ignore[reportArgumentType]
-    assert err.field == "<unprintable _HostileClass>"
-    assert err.messages == ["<unprintable _HostileClass>"]
-    assert err.codes == ["<unprintable _HostileClass>"]
-    # basedpyright: the object whose __class__ raises is the hostile input under test;
-    # join_error_path types the parameter as str
-    assert join_error_path(bad, "child") == "<unprintable _HostileClass>.child"  # pyright: ignore[reportArgumentType]
-
-
-class _RaisingClassLeaf(ClassReadRaisesBase):
-    """A leaf whose ``__class__`` read raises (so a bare ``isinstance`` raises)."""
-
-    messages = ("hostile-leaf message",)
-    code = "hostile_leaf"
-
-
-@pytest.mark.parametrize("raised", [RuntimeError, KeyboardInterrupt, SystemExit])
-@pytest.mark.parametrize("route", ["duck", "post_construction"])
-def test_validation_error_mapper_contains_an_error_dict_value_whose_class_read_raises(
-    route: str,
-    raised: type[BaseException],
-) -> None:
-    """The atom check on each ``error_dict`` value is contained like every sibling check.
-
-    The value is a lone leaf carrying its own message and code, exactly as a value the
-    mapper cannot classify is treated everywhere else in this module. ``duck`` is a
-    consumer exception exposing an ``error_dict``; ``post_construction`` is a real
-    ``ValidationError`` whose ``error_dict`` was edited after Django flattened it.
-    """
-    leaf = _RaisingClassLeaf(raised)
-    if route == "duck":
-
-        class _Duck:
-            error_dict = {"title": leaf}
-
-        exception = _as_validation_error(_Duck())
-    else:
-        exception = ValidationError({"title": ["placeholder"]})
-        # basedpyright: the post-construction edit this row pins puts a non-``ValidationError``
-        # value into the typed ``error_dict``
-        cast("dict[str, object]", exception.error_dict)["title"] = leaf
-
-    (error,) = validation_error_to_field_errors(exception)
-
-    assert (error.field, error.messages, error.codes) == (
-        "title",
-        ["hostile-leaf message"],
-        ["hostile_leaf"],
-    )
-
-
-def test_validation_error_mapper_handles_leaf_with_message_collection_when_messages_raises() -> (
-    None
-):
-    class _CollectionMessageError:
-        @property
-        def messages(self) -> NoReturn:
-            raise RuntimeError("hostile messages")
-
-        message = ["First message", "Second message"]
-
-    errors = validation_error_to_field_errors(_as_validation_error(_CollectionMessageError()))
-    assert len(errors) == 1
-    assert errors[0].messages == ["First message", "Second message"]
 
 
 def test_field_error_handles_lazy_translation_proxy_without_character_iteration() -> None:
@@ -506,46 +276,6 @@ def test_validation_error_mapper_keys_django_non_field_bucket_to_sentinel() -> N
     assert by_field["name"].messages == ["bad"]
 
 
-def test_field_error_degrades_a_midway_raising_iterator_to_one_unprintable_leaf() -> None:
-    class _MidwayIterator:
-        consumed = 0
-
-        def __iter__(self) -> Self:
-            return self
-
-        def __next__(self) -> str:
-            self.consumed += 1
-            if self.consumed > 1:
-                raise RuntimeError("midway iterator failure")
-            return "first message"
-
-    iterator = _MidwayIterator()
-    error = field_error("name", iterator)
-
-    assert iterator.consumed >= 1
-    assert error.messages == ["<unprintable _MidwayIterator>"]
-
-
-def test_validation_error_mapper_drops_a_hostile_truthiness_leaf_code() -> None:
-    class _HostileBoolCode(int):
-        @override
-        def __bool__(self) -> bool:
-            raise RuntimeError("hostile code truthiness")
-
-    class _Leaf:
-        code = _HostileBoolCode(1)
-
-    class _MalformedValidationError:
-        error_dict = None
-        error_list = (_Leaf(),)
-        messages = ("msg",)
-
-    (error,) = validation_error_to_field_errors(_as_validation_error(_MalformedValidationError()))
-
-    assert error.messages == ["msg"]
-    assert error.codes == []
-
-
 def test_errors_module_performs_no_settings_reads() -> None:
     """The error leaf module is configuration-free (layering pin)."""
     source = Path(errors_module.__file__).read_text(encoding="utf-8")
@@ -559,36 +289,6 @@ def test_errors_module_performs_no_settings_reads() -> None:
             hits.append(f"name {node.id} @ line {node.lineno}")
 
     assert hits == [], hits
-
-
-@pytest.mark.parametrize(
-    "atom",
-    [
-        "atom list",
-        b"atom list",
-        bytearray(b"atom list"),
-        memoryview(b"atom list"),
-    ],
-)
-def test_validation_error_mapper_treats_a_text_atom_error_list_as_one_leaf(atom: object) -> None:
-    """A text atom planted in the ``error_list`` slot is ONE leaf, never iterated.
-
-    The hostile slot shape would otherwise explode into per-character /
-    per-byte leaves (and per-character code reads); ``_validation_leaves``
-    returns the atom itself as the single leaf, whose own ``code`` read then
-    fails contained.
-    """
-
-    class _TextAtomErrorList:
-        error_dict = None
-        error_list = atom
-        messages = ("whole-object",)
-
-    (error,) = validation_error_to_field_errors(_as_validation_error(_TextAtomErrorList()))
-
-    assert error.field == NON_FIELD_ERROR_KEY
-    assert error.messages == ["whole-object"]
-    assert error.codes == []
 
 
 # ---------------------------------------------------------------------------

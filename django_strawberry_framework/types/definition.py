@@ -4,24 +4,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from types import MethodType
 from typing import TYPE_CHECKING, Literal
 
 from django.core.exceptions import FieldDoesNotExist
 from strawberry import relay
 from strawberry.relay.exceptions import NodeIDAnnotationError
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_attr,
-    _safe_type_name,
-)
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
 
 from .relay import _resolve_id_default
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
     from typing import TypeAlias
 
     from django.db import models
@@ -262,34 +258,28 @@ class DjangoTypeDefinition:
         That is the name under the default ``NameConverter``; a schema's converter
         can publish another name (``types/relay.py::published_node_type_name``).
         Strawberry derives the surface name as ``self.name`` when set,
-        falling back to ``self.origin.__name__``. Centralized here so
+        falling back to the origin class's declared name. Centralized here so
         every call site that needs the same derivation rule reads from
         one source - the alternative was three inline copies in
         ``finalizer.py``, ``filters/base.py``, and ``filters/inputs.py``
         which would silently diverge across renames.
         """
-        try:
-            name = self.name if self.name is not None else read_attr(self.origin, "__name__")
-        except BaseException as exc:
+        name = self.name if self.name is not None else truth.name(self.origin)
+        label = truth.kind(self.origin)
+        if not truth.is_instance(name, str):
             raise ConfigurationError(
-                f"Could not inspect the GraphQL type name for {_safe_type_name(self.origin)}.",
-            ) from exc
-        # A consumer metaclass can answer ``__name__`` with any object.
-        if not isinstance(name, str):
-            raise ConfigurationError(
-                f"GraphQL type name for {_safe_type_name(self.origin)} must be a non-empty string; "
-                f"got {_safe_arg_repr(name)}.",
+                f"GraphQL type name for {label} must be a non-empty string; "
+                f"got {truth.render(name)}.",
             )
-        normalized = str.__str__(name)
+        normalized = truth.text(name)
         if not normalized:
             raise ConfigurationError(
-                f"GraphQL type name for {_safe_type_name(self.origin)} must be a non-empty string; "
-                "got an empty name.",
+                f"GraphQL type name for {label} must be a non-empty string; got an empty name.",
             )
         if not _GRAPHQL_NAME_RE.fullmatch(normalized) or normalized.startswith("__"):
             raise ConfigurationError(
-                f"GraphQL type name for {_safe_type_name(self.origin)} must be a valid GraphQL "
-                f"name; got {_safe_arg_repr(normalized)}.",
+                f"GraphQL type name for {label} must be a valid GraphQL "
+                f"name; got {truth.render(normalized)}.",
             )
         return normalized
 
@@ -312,13 +302,14 @@ class DjangoTypeDefinition:
         Returns ``None`` when no ``DjangoType`` is registered for the
         target model.
         """
-        if not isinstance(field_name, str):
+        if not truth.is_instance(field_name, str):
             return None
-        field_name = str.__str__(field_name)
+        field_name = truth.text(field_name)
 
-        # In-function import: dodge the `definition -> registry -> definition`
-        # module-load cycle (registry imports DjangoTypeDefinition lazily under
-        # TYPE_CHECKING). Do NOT hoist to module top.
+        # In-function import: ``registry`` stays a method-local edge so this
+        # module does not depend on it at import time (no load cycle exists
+        # either way -- ``registry.py`` keeps its ``types.*`` edges
+        # ``TYPE_CHECKING``-only). Do NOT hoist to module top.
         from django_strawberry_framework.registry import registry  # noqa: PLC0415
 
         # Memoize the lookup per field name. ``_meta.get_field`` is
@@ -338,28 +329,15 @@ class DjangoTypeDefinition:
         try:
             model_field = self.model._meta.get_field(field_name)
         except FieldDoesNotExist:
-            result = None
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            result = None
-        else:
-            if not _safe_attr(model_field, "is_relation"):
-                result = None
-            else:
-                try:
-                    target_model: type[models.Model] | None = getattr(
-                        model_field,
-                        "related_model",
-                        None,
-                    )
-                    target_type = None if target_model is None else registry.get(target_model)
-                    target_definition = (
-                        None if target_type is None else registry.get_definition(target_type)
-                    )
-                except BaseException:  # noqa: BLE001 - hostile object, contained by design
-                    target_definition = None
-                result = (
-                    (target_definition, model_field) if target_definition is not None else None
-                )
+            model_field = None
+        result = None
+        if model_field is not None and model_field.is_relation:
+            target_model = model_field.related_model
+            target_type = registry.get(target_model) if target_model is not None else None
+            if target_type is not None:
+                target_definition = registry.get_definition(target_type)
+                if target_definition is not None:
+                    result = (target_definition, model_field)
 
         if cache_ok:
             self._related_target_cache[field_name] = result
@@ -400,23 +378,20 @@ def origin_has_custom_id_resolver(origin: type[object], pk_name: str) -> bool:
     if normalized_pk_name is None:
         return False
     resolver_names = (normalized_pk_name, f"resolve_{normalized_pk_name}")
-    try:
-        mro: tuple[type[object], ...] = getattr(origin, "__mro__", ())
-        if any(_class_has_custom_id_resolver(cls, name) for cls in mro for name in resolver_names):
-            return True
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+    if any(
+        _class_has_custom_id_resolver(cls, name)
+        for cls in truth.mro(origin)
+        for name in resolver_names
+    ):
         return True
     return _resolves_id_off_pk(origin, normalized_pk_name)
 
 
 def _normalize_pk_name(pk_name: object) -> str | None:
     """Return a plain primary-key or id attribute name, or ``None`` for malformed input."""
-    if not isinstance(pk_name, str):
+    if not truth.is_instance(pk_name, str):
         return None
-    normalized = str.__str__(pk_name)
-    if not normalized:
-        return None
-    return normalized
+    return truth.text(pk_name) or None
 
 
 def _resolves_id_off_pk(origin: type[object], pk_name: str) -> bool:
@@ -430,43 +405,48 @@ def _resolves_id_off_pk(origin: type[object], pk_name: str) -> bool:
     safe; a Relay target with no ``NodeID`` annotation resolves to ``"pk"`` and
     is likewise safe.
     """
+    if not truth.is_subclass(origin, relay.Node):
+        return False
     try:
-        if not issubclass(origin, relay.Node):
-            return False
         # A consumer ``Node`` may override ``resolve_id_attr`` to return anything, so the
         # result is normalized under the same guard that contains the call.
         normalized_id_attr = _normalize_pk_name(origin.resolve_id_attr())
     except NodeIDAnnotationError:
         # No ``NodeID`` annotation: the framework default resolves to "pk".
         return False
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return True
     # A non-string or empty override result cannot name the pk column.
     return normalized_id_attr is None or normalized_id_attr not in ("pk", pk_name)
 
 
 def _class_has_custom_id_resolver(type_cls: type[object], name: str) -> bool:
-    """Return whether ``type_cls`` defines a consumer id resolver marker."""
-    try:
-        class_dict: Mapping[str, object] = getattr(type_cls, "__dict__", {})
-        if name not in class_dict:
-            return False
-        if name != "resolve_id":
-            return True
-        descriptor = class_dict[name]
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+    """Return whether ``type_cls``'s own namespace defines a consumer id resolver marker."""
+    class_dict = truth.class_dict(type_cls)
+    if name not in class_dict:
+        return False
+    if name != "resolve_id":
         return True
-    return not _is_framework_relay_id_resolver(descriptor)
+    return not _is_framework_relay_id_resolver(class_dict[name])
 
 
 def _is_framework_relay_id_resolver(value: object) -> bool:
     """Return whether ``value`` is the framework-installed Relay id resolver."""
-    try:
-        resolver_func = getattr(value, "__func__", value)
-        node_default = getattr(relay.Node, "resolve_id", None)
-        node_default_func = getattr(node_default, "__func__", None)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return False
+    resolver_func = _unwrap_method(value)
+    node_default_func = _unwrap_method(truth.class_dict(relay.Node).get("resolve_id"))
     return resolver_func is _resolve_id_default or (
         node_default_func is not None and resolver_func is node_default_func
     )
+
+
+def _unwrap_method(value: object) -> object:
+    """Return what a ``classmethod`` / ``staticmethod`` / bound method wraps, else ``value``.
+
+    Only the exact builtin wrapper types are unwrapped, so the ``__func__``
+    read is the builtin's own slot.
+    """
+    if (
+        truth.is_exact(value, classmethod)
+        or truth.is_exact(value, staticmethod)
+        or truth.is_exact(value, MethodType)
+    ):
+        return value.__func__
+    return value

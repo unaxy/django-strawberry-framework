@@ -28,8 +28,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_arg_repr, _safe_attr
-from django_strawberry_framework.utils._narrowing import call_method, read_attr
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import call_method, read_attr, require
 from django_strawberry_framework.utils.permissions import request_from_info
 from django_strawberry_framework.utils.querysets import reject_async_in_sync_context
 
@@ -112,17 +113,25 @@ def _require_sync_bool_auth_result(value: object, *, owner: str, method: str) ->
         context="mutation",
         recourse=_PERMISSION_ASYNC_RECOURSE,
     )
-    if not isinstance(allowed, bool):
+    if not truth.is_instance(allowed, bool):
         raise ConfigurationError(
-            f"{owner}.{method} must return a bool; got {_safe_arg_repr(allowed)}. "
+            f"{owner}.{method} must return a bool; got {truth.render(allowed)}. "
             "Authorization results are never coerced from truthiness.",
         )
     return allowed
 
 
 def is_permission_class(value: object) -> TypeIs[WritePermissionClass]:
-    """Whether ``value`` is a permission class: a class with a callable ``has_permission``."""
-    return isinstance(value, type) and callable(_safe_attr(value, "has_permission"))
+    """Whether ``value`` is a permission class: a class with a callable ``has_permission``.
+
+    Both reads are truthful (``truth.is_type`` / ``truth.static_attr``), so no
+    metaclass hook runs; the declared hook comes back as stored, so a
+    ``classmethod`` (not itself callable) counts as the callable it binds to.
+    """
+    if not truth.is_type(value):
+        return False
+    has_perm = truth.static_attr(value, "has_permission")
+    return callable(has_perm) or truth.is_instance(has_perm, classmethod)
 
 
 def run_permission_classes(
@@ -169,7 +178,7 @@ def run_permission_classes(
                 data,
                 instance,
             ),
-            owner=permission_class.__name__,
+            owner=truth.name(permission_class),
             method="has_permission",
         )
         if not allowed:
@@ -218,8 +227,10 @@ class DjangoModelPermission:
         user = read_attr(request, "user", None)
         if user is None:
             return False
-        # Class-creation validation already required the seam to resolve a model.
-        model = cast("type[models.Model]", mutation._resolve_model(mutation.Meta))
+        # Trusted, not checked: ``Meta`` is the nested declaration class. Class-creation
+        # validation already required the seam to resolve a model from it.
+        meta = require(truth.static_attr(mutation, "Meta"), truth.is_type)
+        model = cast("type[models.Model]", mutation._resolve_model(meta))
         action = _OPERATION_PERMISSION_ACTION[operation]
         codename = f"{model._meta.app_label}.{action}_{model._meta.model_name}"
         # ``user.has_perm`` is sync Django auth; an awaitable / non-bool return
@@ -227,7 +238,7 @@ class DjangoModelPermission:
         # closes for ``has_permission`` / ``check_permission`` (0.0.14 auth hardening).
         return _require_sync_bool_auth_result(
             call_method(user, "has_perm", codename),
-            owner=type(user).__name__,
+            owner=truth.name(truth.class_of(user)),
             method="has_perm",
         )
 

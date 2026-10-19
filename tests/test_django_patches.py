@@ -87,9 +87,9 @@ def _database_failure(wrapped: object) -> object:
 def test_apply_is_idempotent() -> None:
     """Repeated calls to :func:`apply` leave the patch installed.
 
-    Pins the "ensure current state" contract called out in the module
-    docstring. AppConfig.ready() may run more than once under some
-    Django test runners; the patch must tolerate that.
+    Pins the "ensure current state" contract called out in the
+    _patch_is_installed docstring. AppConfig.ready() may run more than
+    once under some Django test runners; the patch must tolerate that.
     """
     _django_patches.apply()
     _django_patches.apply()  # second call should be a self-healing no-op
@@ -740,7 +740,8 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
     ``_validated_remove_databases_failures_source`` therefore turned every
     subsequent ``tearDownClass`` in the process into a ``RuntimeError``
     ("ran without a validated upstream body") between the reload and the next
-    ``apply()`` - the module docstring's reload-safety promise held for the
+    ``apply()`` - the reload-safety promise in the
+    ``_captured_upstream_descriptor`` docstring held for the
     NEXT ``apply()`` (``_captured_upstream_descriptor`` recovers the original
     so validation succeeds) but not for the patch generation already running.
     Without the reload-aware initialization, the teardown call below raises

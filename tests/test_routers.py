@@ -1808,26 +1808,6 @@ def test_malformed_websocket_url_pattern_fails_at_construction(pattern: object) 
         _router(websocket_url_pattern=pattern)
 
 
-def test_hostile_websocket_url_pattern_repr_still_has_a_typed_error() -> None:
-    """The malformed-route rejection remains render-safe for hostile string subclasses.
-
-    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
-    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
-    """
-
-    class HostilePattern(str):
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("str exploded")
-
-    with pytest.raises(ConfigurationError, match="unprintable HostilePattern"):
-        _router(websocket_url_pattern=HostilePattern("graphql"))
-
-
 def test_the_websocket_pattern_is_keyword_only_with_no_legacy_url_pattern_alias() -> None:
     """Spec-046 Decision 4: both NEGATIVE halves of the rename.
 
@@ -2160,7 +2140,7 @@ def test_a_factory_returning_a_non_application_fails_at_construction(
     refuses to convert an integer of more than 4300 digits to a string, so an
     f-string tail would have raised ``ValueError`` from inside the rejection and
     replaced the promised ``ConfigurationError``. The message degrades to the
-    type instead (``exceptions.py::describe_value``).
+    type instead (``utils/truth.py::describe``).
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
@@ -2234,11 +2214,11 @@ def test_a_factory_returning_a_value_whose_class_cannot_be_read_fails_at_constru
 ) -> None:
     """The returned object is judged without trusting its ``__class__``.
 
-    The coroutine test that decides whether the refused object is closed is an
-    ``isinstance`` check, which falls back to reading the value's ``__class__``.
-    A non-callable whose class read raises is still a non-callable: it is the
-    same construction error as any other value that cannot be an application,
-    not the consumer's exception from inside the router.
+    The coroutine test that decides whether the refused object is closed reads
+    the value's real class, never its ``__class__`` attribute. A non-callable
+    whose class read raises is still a non-callable: it is the same construction
+    error as any other value that cannot be an application, not the consumer's
+    exception from inside the router.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
@@ -2265,11 +2245,11 @@ def test_a_factory_returning_a_value_whose_class_cannot_be_read_fails_at_constru
 def test_a_factory_returning_a_lazy_proxy_of_a_coroutine_still_closes_it() -> None:
     """A faithful proxy of a coroutine is recognized as one, and the coroutine is closed.
 
-    The guarded ``isinstance`` answers through the proxy's ``__class__``, which is
-    what lets the router close a coroutine handed back behind a lazy wrapper. A
-    check of the value's real type would see only the proxy, leave the coroutine
-    un-awaited, and let CPython report it from the collector at an unrelated
-    moment.
+    The router sees through a Django lazy proxy before it reads the real class,
+    which is what lets it close a coroutine handed back behind a lazy wrapper. A
+    real-class check of the proxy itself would see only the proxy, leave the
+    coroutine un-awaited, and let CPython report it from the collector at an
+    unrelated moment.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
@@ -2292,6 +2272,36 @@ def test_a_factory_returning_a_lazy_proxy_of_a_coroutine_still_closes_it() -> No
     assert _ASYNC_FACTORY_SUBSTRING in str(exc_info.value)
     [refused] = coroutines
     assert refused.cr_frame is None, "the router must close the coroutine behind the proxy"
+
+
+def test_a_factory_returning_a_future_is_rejected_and_the_future_is_cancelled() -> None:
+    """A future is not an ASGI application either, and it is cancelled, not dropped.
+
+    The seam composes the package's one awaitable disposal
+    (``utils/querysets.py::_dispose_sync_awaitable``): the row above pins the
+    coroutine close, this row pins the future cancel. The async-factory hint
+    stays coroutine-specific (a future is not what an ``async def`` factory
+    returns), so the message carries the contract but not the addendum.
+
+    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
+    """
+    loop = asyncio.new_event_loop()
+    future = loop.create_future()
+
+    def future_factory(*, schema: object) -> object:
+        del schema  # the router passes schema= by keyword; this factory ignores it
+        return future
+
+    try:
+        with pytest.raises(ConfigurationError) as exc_info:
+            _router(websocket_consumer_class=future_factory)
+        message = str(exc_info.value)
+        assert _FACTORY_CONTRACT_SUBSTRING in message
+        assert _ASYNC_FACTORY_SUBSTRING not in message
+        assert future.cancelled() is True
+    finally:
+        loop.close()
 
 
 def test_a_factory_that_cannot_accept_the_schema_keyword_fails_at_construction() -> None:
@@ -2342,7 +2352,7 @@ def test_a_factory_whose_signature_cannot_be_read_is_judged_by_the_call() -> Non
     """An un-introspectable callable is not pre-rejected.
 
     ``inspect.signature`` raises for a callable it cannot describe (a C callable,
-    or - as here - an object carrying a lying ``__signature__``). That is not
+    or - as here - an object whose ``__signature__`` is not a signature). That is not
     evidence the call would fail, so the pre-check skips and the factory is
     judged by its result, which mounts normally.
 
@@ -2364,8 +2374,12 @@ def test_a_factory_whose_signature_cannot_be_read_is_judged_by_the_call() -> Non
     assert callback is _valid_asgi_application
 
 
-def test_a_factory_signature_descriptor_failure_is_treated_as_unintrospectable() -> None:
-    """A consumer-defined signature descriptor may fail without blocking a valid factory.
+def test_a_factory_signature_descriptor_failure_propagates() -> None:
+    """A consumer-defined ``__signature__`` descriptor's own exception propagates.
+
+    ``inspect.signature``'s documented un-introspectable outcomes are
+    ``TypeError`` / ``ValueError``; anything else the descriptor raises is
+    consumer behaviour and reaches the caller unchanged.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
@@ -2382,9 +2396,8 @@ def test_a_factory_signature_descriptor_failure_is_treated_as_unintrospectable()
         ) -> Callable[[object, object, object], Awaitable[None]]:
             return _valid_asgi_application
 
-    callback = _mounted_ws_app(_router(websocket_consumer_class=_BrokenSignature()))
-
-    assert callback is _valid_asgi_application
+    with pytest.raises(RuntimeError, match="signature inspection exploded"):
+        _router(websocket_consumer_class=_BrokenSignature())
 
 
 @pytest.mark.parametrize(
@@ -4083,10 +4096,10 @@ async def test_the_legacy_graphql_ws_protocol_is_revalidated_at_handle_start() -
 
     ``graphql-ws`` is live on the package's mount (upstream's default
     ``subscription_protocols`` carries both), so its per-operation entry -
-    ``handle_start`` - needs the same pre-hook. The response is now the same
-    connection-level close ``graphql-transport-ws`` gets: with revocation
-    connection-scoped there is no per-protocol rejection payload left to differ,
-    which removed the one asymmetry the two call sites used to carry.
+    ``handle_start`` - needs the same pre-hook. The response is the same
+    connection-level close ``graphql-transport-ws`` gets: revocation is
+    connection-scoped, so no per-protocol rejection payload differs between
+    the two call sites.
 
     The success baseline is a subscription because a query cannot execute on this
     protocol at all (see ``Subscription.tick``).
@@ -4240,14 +4253,15 @@ async def test_a_subscribe_before_connection_init_is_closed_by_upstream_without_
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An unacknowledged connection is upstream's 4401, not our rejection.
+    """An unacknowledged connection is upstream's 4401, not a revocation.
 
     The pre-hook's first decision is to pass an unacknowledged connection
     straight through, so what the client sees is upstream's own
-    ``4401 Unauthorized`` close - identical to the un-patched package. The socket
-    carries a REAL session cookie here, so the actor on the scope IS
-    authenticated: only the acknowledged carve-out can be what skipped the read,
-    and the poisoned resolver proves it was skipped.
+    ``4401 Unauthorized`` close - identical to upstream without the
+    revalidating subclass. The socket carries a REAL session cookie here, so
+    the actor on the scope IS authenticated: only the acknowledged carve-out
+    can be what skipped the read, and the poisoned resolver proves it was
+    skipped.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.

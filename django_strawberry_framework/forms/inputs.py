@@ -52,16 +52,7 @@ from django import forms
 from django.core.exceptions import FieldDoesNotExist
 from django.utils.choices import CallableChoiceIterator
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_attr,
-    _safe_call,
-    _safe_class_name,
-    _safe_predicate,
-    _safe_text,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import (
     CREATE,
     PARTIAL,
@@ -72,12 +63,12 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import (
-    _field_has_choices,
     array_element_field,
     build_enum_from_choices,
     choice_column_pairs,
 )
-from django_strawberry_framework.utils._narrowing import dict_of, is_str
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import dict_of
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     build_strawberry_input_class,
@@ -108,7 +99,6 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from django.db import models
-    from typing_extensions import TypeIs
 
     from django_strawberry_framework.utils.typing import ConcreteField
 
@@ -121,9 +111,16 @@ if TYPE_CHECKING:
     FormClass: TypeAlias = type[forms.Form | forms.ModelForm[Any]]  # pyright: ignore[reportExplicitAny]
     #: Any ``ModelChoiceField``: its model parameter is read-only here.
     _ModelChoiceFieldAny: TypeAlias = forms.ModelChoiceField[models.Model]
+    _ModelMultipleChoiceFieldAny: TypeAlias = forms.ModelMultipleChoiceField[models.Model]
 else:
     # ``ModelChoiceField`` has no ``__class_getitem__`` at runtime: the hint stays the class.
     _ModelChoiceFieldAny = forms.ModelChoiceField
+    _ModelMultipleChoiceFieldAny = forms.ModelMultipleChoiceField
+
+# The multi-valued relation field class with its model parameter solved, so the
+# real-class check against it answers over a known type.
+_MODEL_MULTIPLE_CHOICE_FIELD: type[_ModelMultipleChoiceFieldAny] = forms.ModelMultipleChoiceField
+_MODEL_CHOICE_FIELD: type[_ModelChoiceFieldAny] = forms.ModelChoiceField
 
 # Module path the ``strawberry.lazy(...)`` marker references for the FORM input
 # namespace; pinned as a single constant so any forward-ref and
@@ -227,27 +224,22 @@ def get_form_fields(form_class: FormClass) -> dict[str, forms.Field]:
     ``get_form_fields(cls)`` classmethod on the base delegates here for its
     default; this module ships the module-level discovery function only.
 
-    The read is guarded: a consumer having clobbered ``base_fields`` to a
-    non-mapping raises a typed ``ConfigurationError`` naming the form (the bind's
-    default hook delegates here, so a corrupted basis can never escape the
-    schema-time build as a raw ``TypeError`` / ``ValueError``).
+    A consumer having clobbered ``base_fields`` to a value ``dict()`` cannot
+    read (its documented ``TypeError`` / ``ValueError``) raises a typed
+    ``ConfigurationError`` naming the form (the bind's default hook delegates
+    here, so a corrupted basis never escapes the schema-time build raw).
     """
     try:
-        return dict(form_class.base_fields)
-    except BaseException as exc:
+        # The form metaclass stores ``base_fields`` as the name-keyed ``Field`` map; a
+        # clobbered value fails ``dict()`` and is reported below.
+        return dict(
+            cast("Mapping[str, forms.Field]", truth.static_attr(form_class, "base_fields", None)),
+        )
+    except (TypeError, ValueError) as exc:
         raise ConfigurationError(
-            f"DjangoFormMutation for {form_class.__name__} get_form_fields() must return "
+            f"DjangoFormMutation for {truth.name(form_class)} get_form_fields() must return "
             "a mapping of field names to forms.Field instances.",
         ) from exc
-
-
-def _is_form_field(value: object) -> TypeIs[forms.Field]:
-    """Whether ``value`` is a ``forms.Field``; ``False`` when the check itself raises.
-
-    ``isinstance`` asks the value's real type before any ``__class__`` read, so a raising
-    read only ever hides a value whose real type is not a field.
-    """
-    return _safe_predicate(isinstance, value, forms.Field)
 
 
 def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict[str, forms.Field]:
@@ -258,17 +250,16 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
     form's class-level ``base_fields`` through ``get_form_fields``. Copying the
     mapping keeps later narrowing/build passes from observing caller mutation,
     while the hook remains responsible for returning a request-independent
-    field representation. The default ``base_fields`` acquisition is guarded
-    alongside the hook mapping: a corrupted ``base_fields`` (a consumer having
-    clobbered the class attribute) raises this same typed diagnostic naming the
-    form instead of a raw ``TypeError`` out of ``dict(form_class.base_fields)``.
+    field representation. A hook mapping ``dict()`` cannot read (its documented
+    ``TypeError`` / ``ValueError``) raises the same typed diagnostic
+    ``get_form_fields`` raises for a corrupted ``base_fields``.
     """
+    source = get_form_fields(form_class) if form_fields is None else form_fields
     try:
-        source = get_form_fields(form_class) if form_fields is None else form_fields
         basis = dict_of(source)
-    except BaseException as exc:
+    except (TypeError, ValueError) as exc:
         raise ConfigurationError(
-            f"DjangoFormMutation for {form_class.__name__} get_form_fields() must return "
+            f"DjangoFormMutation for {truth.name(form_class)} get_form_fields() must return "
             "a mapping of field names to forms.Field instances.",
         ) from exc
     # A field name becomes a generated input attribute (the dataclass renders it
@@ -277,40 +268,33 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
     # the string check and detonate as a raw ``SyntaxError`` out of the generated
     # ``__init__`` source at input-class construction. ``base_fields`` keys are
     # always identifiers (declared form attributes / model columns), so this
-    # rejects only names that could never have built an input. Each per-entry
-    # interrogation is guarded: a hook-supplied ``str`` subclass whose
-    # ``isidentifier`` (or ``__hash__`` under ``keyword.iskeyword``) raises, or a
-    # value whose ``__class__`` raises under ``isinstance``, cannot be interrogated
-    # at all, so the entry is invalid by the same rule instead of escaping this
-    # typed boundary as the raw exception.
+    # rejects only names that could never have built an input. A name is
+    # classified by its real class and interrogated as the exact ``str`` copy
+    # ``truth.text`` makes, so a ``str`` subclass's overrides never run.
     invalid_names: list[object] = []
     invalid_fields: list[object] = []
     valid: dict[str, forms.Field] = {}
     for name, field in basis.items():
-        try:
-            valid_name = is_str(name) and name.isidentifier() and not keyword.iskeyword(name)
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            valid_name = False
+        valid_name = (
+            truth.is_instance(name, str)
+            and truth.text(name).isidentifier()
+            and not keyword.iskeyword(truth.text(name))
+        )
         if not valid_name:
             invalid_names.append(name)
-        # The same hook can map a name to any value. ``is_str`` cannot raise, so it restates
-        # the name check for the checker.
-        if not _is_form_field(field):
+        # The same hook can map a name to any value. The second real-class read of the
+        # name restates the name check for the checker.
+        if not truth.is_instance(field, forms.Field):
             invalid_fields.append(name)
-        elif valid_name and is_str(name):
+        elif valid_name and truth.is_instance(name, str):
             valid[name] = field
     if invalid_names or invalid_fields:
-        # Each entry renders through ``_safe_arg_repr``: this message is assembled
-        # at the raise site, so a hook-supplied key with a hostile ``__repr__``
-        # must not replace the typed diagnostic with the repr's own exception
-        # (the ``exceptions.py::describe_value`` failure mode - a rejection
-        # message cannot fail on the value it is rejecting). The per-entry join
-        # keeps the benign ``['a', 'b']`` list-repr byte shape.
+        # The per-entry join keeps the benign ``['a', 'b']`` list-repr byte shape.
         raise ConfigurationError(
-            f"DjangoFormMutation for {form_class.__name__} get_form_fields() must return "
+            f"DjangoFormMutation for {truth.name(form_class)} get_form_fields() must return "
             "a mapping of string names to forms.Field instances; invalid names "
-            f"[{', '.join(_safe_arg_repr(name) for name in invalid_names)}], invalid "
-            f"fields [{', '.join(_safe_arg_repr(name) for name in invalid_fields)}].",
+            f"[{', '.join(truth.render(name) for name in invalid_names)}], invalid "
+            f"fields [{', '.join(truth.render(name) for name in invalid_fields)}].",
         )
     return valid
 
@@ -322,7 +306,7 @@ def normalize_form_field_basis(
     """Normalize a mutation hook's returned field basis with typed diagnostics."""
     if form_fields is None:
         raise ConfigurationError(
-            f"DjangoFormMutation for {form_class.__name__} get_form_fields() must return "
+            f"DjangoFormMutation for {truth.name(form_class)} get_form_fields() must return "
             "a mapping of field names to forms.Field instances, not None.",
         )
     return _form_field_basis(form_class, form_fields)
@@ -336,16 +320,9 @@ def _related_model_of(field: forms.Field) -> object:
     field.queryset, ...)``). A field without a ``queryset`` attribute (every
     scalar) and a queryset-less field (the request-scoped-choices idiom, whose
     build-time annotation raises its own typed error when emitted) project
-    ``None``. A hostile attribute that raises here projects ``None`` instead of
-    escaping the identity walk: the projection must never fail where the build
-    would not (an EXCLUDED field with a broken ``queryset`` builds fine today),
-    and the build re-reads ``field.queryset`` unguarded where the field is
-    actually emitted.
+    ``None``.
     """
-    # A deliberate probe of an attribute only relation fields carry: a scalar
-    # field's missing ``queryset`` projects ``None``, exactly like a hostile
-    # attribute that raises.
-    return _safe_attr(_safe_attr(field, "queryset"), "model")
+    return getattr(getattr(field, "queryset", None), "model", None)
 
 
 def _form_basis_content_identity(
@@ -376,25 +353,12 @@ def _form_basis_content_identity(
     (bases are rebuilt per call); the content tuple is the stable quantity.
 
     ``form_fields`` is the (already normalized or ``None``) hook basis; ``None``
-    resolves through ``get_form_fields`` exactly as the build does. Resolution
-    and the per-field walk are guarded: a hostile basis is reported as the same
-    typed ``ConfigurationError`` the build raises (never a raw escape from the
-    cache-key assembly), chained from the original failure.
+    resolves through ``get_form_fields`` exactly as the build does, so a
+    malformed basis raises the same typed ``ConfigurationError`` the build
+    raises.
     """
-    try:
-        basis = _form_field_basis(form_class, form_fields)
-        return tuple(
-            _basis_field_identity(form_class, name, field) for name, field in basis.items()
-        )
-    except ConfigurationError:
-        raise
-    except BaseException as exc:
-        detail = _safe_text(exc) or "no detail"
-        raise ConfigurationError(
-            f"DjangoFormMutation for {form_class.__name__} get_form_fields() must return "
-            "a mapping of field names to forms.Field instances; reading the field basis "
-            f"for the input shape identity raised {type(exc).__name__}: {detail}.",
-        ) from exc
+    basis = _form_field_basis(form_class, form_fields)
+    return tuple(_basis_field_identity(form_class, name, field) for name, field in basis.items())
 
 
 def _basis_field_identity(
@@ -457,11 +421,11 @@ def resolve_effective_form_fields(
         _form_field_basis(form_class, form_fields),
         fields=fields,
         exclude=exclude,
-        subject=f"DjangoFormMutation for {form_class.__name__}",
+        subject=f"DjangoFormMutation for {truth.name(form_class)}",
         seq_flavor="DjangoFormMutation / DjangoModelFormMutation",
         unknown_noun="unknown form field(s)",
         empty_message=(
-            f"DjangoFormMutation input for {form_class.__name__} has no fields; "
+            f"DjangoFormMutation input for {truth.name(form_class)} has no fields; "
             "Meta.fields / Meta.exclude narrowed the form field set to empty (or the "
             "form declares no fields). A form input must define at least one field."
         ),
@@ -530,7 +494,7 @@ def form_input_type_name(
     (``operation_kind == PARTIAL``; a ``FORM`` sentinel is create-shaped).
     """
     return name_set_input_type_name(
-        form_class.__name__,
+        truth.name(form_class),
         is_partial=operation_kind == PARTIAL,
         effective_field_names=effective_field_names,
         full_field_names=full_field_names,
@@ -556,39 +520,20 @@ def _model_column_for(form_class: FormClass, name: str) -> ConcreteField | None:
     Treating them as columns would mis-emit a relation id input (``itemsId``) or
     crash on missing related models.
     """
-    try:
-        meta: object = getattr(form_class, "_meta", None)
-        # A ``ModelForm``'s ``_meta`` is its ``ModelFormOptions``, whose ``model`` is the
-        # ``Meta.model`` class ``ModelFormMetaclass`` already read ``_meta`` from
-        # (``fields_for_model``); a plain ``Form`` has no ``_meta``.
-        model: type[models.Model] | None = getattr(meta, "model", None)
-    except BaseException as exc:
-        # The corrupted-internals twin of the guarded ``base_fields`` read: a
-        # ``_meta.model`` read that RAISES is a clobbered form class, so it fails
-        # loud as the typed diagnostic naming the form - never as a raw exception
-        # out of the schema-time build, and never a silent ``None`` that would
-        # mis-type the field through the model-less table.
-        raise ConfigurationError(
-            f"DjangoFormMutation for {_safe_class_name(form_class)} could not read "
-            f"form_class._meta.model while resolving the backing column for field "
-            f"{_safe_arg_repr(name)}; the form's internals are corrupted "
-            f"({_safe_type_name(exc)}: {_safe_text(exc)}).",
-        ) from exc
+    # A ``ModelForm``'s ``_meta`` is its ``ModelFormOptions``, whose ``model`` is the
+    # ``Meta.model`` class ``ModelFormMetaclass`` already read ``_meta`` from
+    # (``fields_for_model``); a plain ``Form`` has no ``_meta``.
+    model: type[models.Model] | None = getattr(
+        truth.static_attr(form_class, "_meta", None),
+        "model",
+        None,
+    )
     if model is None:
         return None
     try:
         column = model._meta.get_field(name)
     except FieldDoesNotExist:
         return None
-    except BaseException as exc:
-        # ``get_field`` only ever raises ``FieldDoesNotExist`` for a healthy
-        # model; any other raise is corrupted model internals, and like the
-        # ``_meta.model`` arm above it fails loud typed instead of raw.
-        raise ConfigurationError(
-            f"DjangoFormMutation for {_safe_class_name(form_class)} could not resolve the "
-            f"backing model column for field {_safe_arg_repr(name)}; "
-            f"model._meta.get_field raised {_safe_type_name(exc)}: {_safe_text(exc)}.",
-        ) from exc
     if getattr(column, "is_relation", False):
         if getattr(column, "many_to_many", False):
             if not is_forward_many_to_many(column):
@@ -625,15 +570,15 @@ def _model_less_relation_annotation(
     is a fail-loud ``ConfigurationError`` naming the form / field rather than a bare
     ``AttributeError`` on ``None.model``, keeping the package's fail-loud contract.
     """
-    many = isinstance(field, forms.ModelMultipleChoiceField)
+    many = truth.is_instance(field, _MODEL_MULTIPLE_CHOICE_FIELD)
     return annotate_queryset_relation(
         field.queryset,
         many=many,
         python_attr=name if many else f"{name}_id",
         primary_of=registry.get,
         missing=lambda: ConfigurationError(
-            f"Form {form_class.__name__!r} field {name!r} is a "
-            f"{type(field).__name__} whose queryset is None at class definition. "
+            f"Form {truth.name(form_class)!r} field {name!r} is a "
+            f"{truth.kind(field)} whose queryset is None at class definition. "
             "Schema-time input generation reads base_fields WITHOUT instantiating the "
             "form, so a queryset assigned in __init__ is not visible and the relation "
             "id type cannot be resolved. Declare the field with a concrete queryset "
@@ -644,12 +589,10 @@ def _model_less_relation_annotation(
 
 
 def _form_admits_choice_value(
-    name: str,
     field: forms.ChoiceField,
     value: object,
     *,
     writes_list: bool,
-    form_class: FormClass,
 ) -> bool:
     """Return whether a form choice field admits ``value``, the way its own ``validate`` decides.
 
@@ -657,19 +600,12 @@ def _form_admits_choice_value(
     when the field is not required (``ChoiceField.validate`` checks ``valid_value`` only for a
     non-empty value), and refuses it as required otherwise; every other value, and every element
     of a ``MultipleChoiceField`` list, is admitted exactly when ``valid_value`` admits it (the
-    field's own choices, option groups descended, compared as given and as ``str``). A
-    ``valid_value`` that raises is a broken field, refused typed naming the form field.
+    field's own choices, option groups descended, compared as given and as ``str``). Whatever a
+    consumer ``valid_value`` override raises propagates to the schema build.
     """
-    if not writes_list and isinstance(value, str) and value == "":
+    if not writes_list and truth.is_instance(value, str) and value == "":
         return not field.required
-    try:
-        return bool(field.valid_value(value))
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Form {_safe_class_name(form_class)} field {_safe_arg_repr(name)} could not check "
-            f"whether it admits the choice value {_safe_arg_repr(value)}; its valid_value raised "
-            f"{_safe_type_name(exc)}: {_safe_text(exc)}.",
-        ) from exc
+    return bool(field.valid_value(value))
 
 
 def _form_choice_narrowing(
@@ -707,49 +643,48 @@ def _form_choice_narrowing(
     scalar choice column) and a single-value ``ChoiceField`` over an ``ArrayField`` keep the
     column's type.
     """
-    if not isinstance(field, forms.ChoiceField) or isinstance(field, forms.ModelChoiceField):
+    if not truth.is_instance(field, forms.ChoiceField) or truth.is_instance(
+        field,
+        _MODEL_CHOICE_FIELD,
+    ):
         return None
     element = array_element_field(column)
     choice_column = element or column
-    if not _field_has_choices(choice_column):
+    if not choice_column.choices:
         return None
     if model_column_write_kind(column) != SCALAR:
         # A relation or file column declaring choices keeps its own kind and id / ``Upload``
         # type: the published type must match the kind the decode routes the value by.
         return None
-    writes_list = isinstance(field, forms.MultipleChoiceField)
+    writes_list = truth.is_instance(field, forms.MultipleChoiceField)
     if writes_list and element is None:
         raise ConfigurationError(
-            f"Form {_safe_class_name(form_class)} field {_safe_arg_repr(name)} is a "
-            f"{_safe_type_name(field)} over the single-value choice column "
-            f"{column.model.__name__}.{column.name}: it writes a list, which is not one of the "
+            f"Form {truth.name(form_class)} field {truth.render(name)} is a "
+            f"{truth.kind(field)} over the single-value choice column "
+            f"{truth.name(column.model)}.{column.name}: it writes a list, which is not one of the "
             "column's choices. Declare a ChoiceField to write one value, or store many values in "
             "an ArrayField column whose base_field declares the choices.",
         )
     if element is not None and not writes_list:
         return None
     choices: object = field.choices
-    if isinstance(choices, CallableChoiceIterator) or not list(cast("Iterable[object]", choices)):
+    if truth.is_instance(choices, CallableChoiceIterator) or not list(
+        cast("Iterable[object]", choices),
+    ):
         return None
     listed = choice_column_pairs(choice_column)
     admitted = [
         (value, label)
         for value, label in listed
-        if _form_admits_choice_value(
-            name,
-            field,
-            value,
-            writes_list=writes_list,
-            form_class=form_class,
-        )
+        if _form_admits_choice_value(field, value, writes_list=writes_list)
     ]
     if len(admitted) == len(listed):
         return None
-    if all(isinstance(value, str) and value == "" for value, _label in admitted):
+    if all(truth.is_instance(value, str) and value == "" for value, _label in admitted):
         raise ConfigurationError(
-            f"Form {_safe_class_name(form_class)} field {_safe_arg_repr(name)} admits none of the "
+            f"Form {truth.name(form_class)} field {truth.render(name)} admits none of the "
             "non-empty values the choice column "
-            f"{choice_column.model.__name__}.{choice_column.name} lists, so no non-empty value "
+            f"{truth.name(choice_column.model)}.{choice_column.name} lists, so no non-empty value "
             "its input could carry passes the form. Declare choices the column lists, or drop "
             "the field via Meta.fields / Meta.exclude.",
         )
@@ -775,7 +710,7 @@ def _form_choice_annotation(
     enum_cls = build_enum_from_choices(
         pairs,
         f"{type_name}{pascal_case(name)}Enum",
-        source_label=f"Form {_safe_class_name(form_class)} field {_safe_arg_repr(name)}",
+        source_label=f"Form {truth.name(form_class)} field {truth.render(name)}",
     )
     return GenericAlias(list, (enum_cls,)) if writes_list else enum_cls
 
@@ -795,7 +730,10 @@ def _choice_narrowing_identity(
     """
     if column is None:
         return None
-    narrowing = _safe_call(_form_choice_narrowing, None, name, field, column, form_class)
+    try:
+        narrowing = _form_choice_narrowing(name, field, column, form_class)
+    except ConfigurationError:
+        return None
     if narrowing is None:
         return None
     pairs, writes_list = narrowing
@@ -943,7 +881,7 @@ def _guard_input_attr_collisions(form_class: FormClass, field_specs: list[InputF
     """
     for message in iter_input_field_collisions(
         field_specs,
-        subject=f"Form {form_class.__name__!r}",
+        subject=f"Form {truth.name(form_class)!r}",
         field_noun="form fields",
         rename_clause="Rename one of the form fields,",
         name_of=lambda spec: spec.target_name,
@@ -978,7 +916,7 @@ def build_form_input_class(
     """
     if operation_kind not in CREATE_SHAPED_KINDS | {PARTIAL}:
         raise ConfigurationError(
-            f"DjangoFormMutation input build for {form_class.__name__} received "
+            f"DjangoFormMutation input build for {truth.name(form_class)} received "
             f"out-of-vocabulary operation_kind {operation_kind!r}; expected CREATE, "
             "FORM, or PARTIAL.",
         )
@@ -1089,7 +1027,7 @@ def guard_create_required_fields(
         _required_form_field_names(form_class, form_fields),
         effective_field_names,
         make_error=lambda dropped: ConfigurationError(
-            f"DjangoFormMutation create input for {form_class.__name__} drops required form "
+            f"DjangoFormMutation create input for {truth.name(form_class)} drops required form "
             f"field(s) {dropped!r} via Meta.fields / Meta.exclude; a bound form can "
             "never validate without them. Keep them in the input, or override get_form_kwargs "
             "/ get_form to supply them (which waives this guard).",
@@ -1132,7 +1070,7 @@ def guard_partial_required_column_less_fields(
         column_less_required,
         effective_field_names,
         make_error=lambda dropped: ConfigurationError(
-            f"DjangoModelFormMutation update input for {form_class.__name__} drops required "
+            f"DjangoModelFormMutation update input for {truth.name(form_class)} drops required "
             f"column-less form field(s) {dropped!r} via Meta.fields / Meta.exclude; they cannot "
             "be reconstructed from the row, so a bound form can never validate without them. Keep "
             "them in the input, or override get_form_kwargs / get_form to supply them (which "

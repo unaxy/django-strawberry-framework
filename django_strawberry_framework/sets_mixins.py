@@ -6,7 +6,7 @@ lives at the package root so the shipped ``filters`` / ``orders`` subpackages
 and future ``aggregates`` / ``fieldsets`` subpackages all import shared
 set-machinery from one neutral home rather than from each other.
 
-The two foundational mixins the shipped ``FilterSet`` / ``OrderSet`` use:
+The three foundational mixins the shipped ``FilterSet`` / ``OrderSet`` use:
 
 - ``ClassBasedTypeNameMixin`` -- class-derived GraphQL type naming
   (``type_name_for``), the single naming rule every set's arguments factory
@@ -21,7 +21,7 @@ The two foundational mixins the shipped ``FilterSet`` / ``OrderSet`` use:
 
 Plus the set-family DECLARATION-LIFECYCLE substrate single-sited here, so a
 future set family does not copy the related-declaration +
-metaclass + expansion lifecycle a fourth time:
+metaclass + expansion lifecycle a third time:
 
 - ``RelatedSetTargetMixin`` -- the idempotent owner-bind + lazy target-class
   property machinery, parameterized by the per-family attr names and the
@@ -53,15 +53,11 @@ from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 from django.db.models.constants import LOOKUP_SEP
 from django.utils.module_loading import import_string
 
-from .exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_class_name,
-    _safe_predicate,
-    _safe_type_name,
-)
-from .utils._narrowing import call_method, list_of, read_attr
+from .exceptions import ConfigurationError
+from .utils import truth
+from .utils._narrowing import is_mapping, read_attr, require
 from .utils.input_values import SetInputTraversal, is_inactive_value
+from .utils.lazy import unwrap_lazy_object
 from .utils.permissions import (
     active_permission_targets,
     active_related_branches,
@@ -87,7 +83,7 @@ _D = TypeVar("_D", bound="RelatedSetTargetMixin")
 
 
 class ClassBasedTypeNameMixin:
-    """Contribute a ``type_name_for()`` classmethod for class-derived GraphQL naming.
+    """Class-derived GraphQL naming through a ``type_name_for()`` classmethod.
 
     Subclasses tune two class attributes:
 
@@ -123,38 +119,38 @@ class ClassBasedTypeNameMixin:
         ``utils.strings.pascal_case_or_raise`` (shared with
         ``filters/inputs.py::_pascal_case``); ``pascal_case`` splits on
         ``"_"`` and drops empty tokens, so a ``LOOKUP_SEP`` (``"__"``)
-        boundary PascalCases each path segment exactly as the previous
-        per-segment split did. Raising here surfaces the real cause at the
+        boundary PascalCases each path segment, matching the cookbook's
+        per-segment split. Raising here surfaces the real cause at the
         call site for every consumer (``_build_input_fields`` operator-bag
-        naming, shipped ``OrderSet`` and future ``AggregateSet`` per-field
-        naming).
+        naming; the order side mints root names only, and a future
+        ``AggregateSet`` shares the per-field rule).
         """
+        cls_name = truth.name(cls)
         if field_path is None:
-            return f"{cls.__name__}{cls._root_type_suffix}"
+            return f"{cls_name}{cls._root_type_suffix}"
         pascal = pascal_case_or_raise(
             field_path,
             make_error=lambda bad: ConfigurationError(
-                f"{cls.__name__}.type_name_for received field_path {bad!r} "
+                f"{cls_name}.type_name_for received field_path {truth.render(bad)} "
                 "which contains no word characters; rename the filter / field so "
                 "its name has at least one alphanumeric token.",
             ),
         )
-        return f"{cls.__name__}{pascal}{cls._field_type_suffix}"
+        return f"{cls_name}{pascal}{cls._field_type_suffix}"
 
 
 class LazyRelatedClassMixin:
-    """Resolve a class reference that may be a string, callable, or class.
+    """Lazy resolution for a class reference that may be a string, callable, or class.
 
-    Port of `django_graphene_filters/mixins.py::LazyRelatedClassMixin`; the
-    ``resolve_lazy_class`` body is byte-equivalent to upstream while the
-    class docstring is rewritten to surface the consumer-side rationale.
+    Port of `django_graphene_filters/mixins.py::LazyRelatedClassMixin`, with upstream's
+    resolution order and truthful identity reads.
     Used by `RelatedFilter` to break cycles between filtersets declared in
     the same module without forcing an `if TYPE_CHECKING` dance on the
     consumer.
     """
 
     def resolve_lazy_class(self, class_ref: object, bound_class: type[object] | None) -> object:
-        """Resolve `class_ref` to a class.
+        """Resolve `class_ref`: strings via import, callables via zero-arg call, everything else as-is.
 
         Strings resolve via two attempts:
 
@@ -163,21 +159,23 @@ class LazyRelatedClassMixin:
            unqualified `"ManagerFilter"` resolves against the owning
            filterset's module.
 
-        If attempt 1 raises and `bound_class` is `None` (or otherwise
-        falsy), the original `ImportError` propagates unchanged.
+        If attempt 1 raises and `bound_class` is not a class (`None` when
+        unbound), the original `ImportError` propagates unchanged.
 
-        Callables that are not classes are invoked as zero-arg factories;
-        everything else is returned as-is.
+        Callables that are not classes are invoked as zero-arg factories
+        (their exceptions propagate); everything else is returned as-is.
+        Whether ``class_ref`` is a string or a class, and the owner's module,
+        are read by ``utils/truth.py``, so the value is never asked what it is.
         """
-        if isinstance(class_ref, str):
+        if truth.is_instance(class_ref, str):
+            ref = truth.text(class_ref)
             try:
-                return _import_object(class_ref)
+                return _import_object(ref)
             except ImportError:
-                if bound_class:
-                    path = f"{bound_class.__module__}.{class_ref}"
-                    return _import_object(path)
+                if truth.is_type(bound_class):
+                    return _import_object(f"{truth.module(bound_class)}.{ref}")
                 raise
-        elif callable(class_ref) and not isinstance(class_ref, type):
+        if callable(class_ref) and not truth.is_type(class_ref):
             return class_ref()
         return class_ref
 
@@ -185,13 +183,13 @@ class LazyRelatedClassMixin:
 class RelatedSetTargetMixin(LazyRelatedClassMixin):
     """Idempotent owner-bind + lazy target-class resolution for a related-set declaration.
 
-    The machinery ``RelatedFilter`` / ``RelatedOrder`` grew as byte-parallel
-    copies: an idempotent ``bind_*`` that records
+    The machinery shared by ``RelatedFilter`` / ``RelatedOrder``: an idempotent ``bind_*`` that records
     the owning set ONCE (a second, possibly divergent, bind is a no-op - strict
     cross-owner mismatch is caught later at finalize), and a lazy ``.<target>``
     property that resolves a string / callable target through
-    ``resolve_lazy_class`` and re-stores the result so the next access is a plain
-    read.
+    ``resolve_lazy_class``, validates it through the family gate, and memoizes
+    the validated result so a repeat access of an identical value skips
+    re-validation (a substituted value re-resolves and re-validates).
 
     Parameterized by two instance-attribute names a subclass sets as class
     attributes:
@@ -205,7 +203,7 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
     Plus one family-supplied hook: ``_validate_target`` is the resolved-target
     TYPE gate (raise ``ConfigurationError`` for anything outside the family).
     Firing it inside ``_resolved_target`` -- not inline in each family's
-    property getter -- means every read of a resolved target is family-checked
+    property getter -- means every distinct value is family-checked
     at the one seam all of them share (the Layer-5 BFS enqueue in
     ``utils/inputs.py::GeneratedInputArgumentsFactory._ensure_built``, the
     families' expansions, the finalizer's target audit, the permission
@@ -222,6 +220,8 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
 
     _target_attr: str
     _owner_attr: str
+    # The last resolved target the family gate accepted (set per instance, read by identity).
+    _validated_target_memo: object
 
     def _bind_owner(self, owner: FilterSetMetaclass | OrderSetMetaclass) -> None:
         """Bind the owning set once; a second (possibly divergent) bind is a no-op."""
@@ -229,23 +229,27 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
             setattr(self, self._owner_attr, owner)
 
     def _resolved_target(self) -> object:
-        """Resolve the (possibly-lazy) target class on first access and re-store it.
+        """Resolve the (possibly-lazy) target class and re-store it, validating each distinct value once.
 
-        The family gate (``_validate_target``) fires here, AFTER the re-store,
-        exactly where the pre-hook property getters sat relative to this call:
-        a failed read leaves the slot resolved and re-raises on every retry,
-        the same observable behavior the inline family gates had.
+        The family gate (``_validate_target``) fires here, AFTER the re-store:
+        a failed read leaves the slot resolved and re-raises on every retry.
+        A successfully resolved+validated value is memoized by identity, so a
+        repeat read of an identical value returns it without re-validation;
+        failures are never memoized.
         """
-        target = read_attr(self, self._target_attr)
+        current = read_attr(self, self._target_attr)
+        if current is not None and current is read_attr(self, "_validated_target_memo", None):
+            return current
         # ``_bind_owner`` is the one writer of the owner slot, and it stores a set class.
         owner: type[object] | None = getattr(self, self._owner_attr, None)
-        resolved = self.resolve_lazy_class(target, owner)
+        resolved = self.resolve_lazy_class(current, owner)
         setattr(self, self._target_attr, resolved)
         if resolved is not None:
             # ``None`` is the shared skip-silently placeholder (the branch is
             # skipped at input emission and BFS enqueue) -- it never reaches
             # the family gate.
             self._validate_target(resolved)
+            self._validated_target_memo = resolved
         return resolved
 
     def _validate_target(self, _resolved: object, /) -> None:
@@ -259,9 +263,9 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
         read instead of accepting any target.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} must supply a `_validate_target()` family gate "
+            f"{truth.kind(self)} must supply a `_validate_target()` family gate "
             "(raise ConfigurationError for a resolved target outside the family); "
-            "the resolution seam validates every read, so a hookless related "
+            "the resolution seam validates every distinct value, so a hookless related "
             "declaration would otherwise accept any target.",
         )
 
@@ -328,11 +332,11 @@ def collect_related_declarations(
     if inherit_from_bases:
         for base in reversed(bases):
             # Every family class's ``collection_attr`` is the map this function stores below.
-            inherited: Mapping[str, _D] = getattr(base, collection_attr, {})
+            inherited = cast("Mapping[str, _D]", truth.static_attr(base, collection_attr, {}))
             for name, inherited_declaration in inherited.items():
                 collected[name] = inherited_declaration
     for name, declaration in own_items:
-        if isinstance(declaration, declaration_type):
+        if truth.is_instance(declaration, declaration_type):
             collected[name] = declaration
         elif name in collected:
             del collected[name]
@@ -346,19 +350,20 @@ def collect_related_declarations(
         if name in class_values:
             continue
         for base in bases:
-            declarations: Mapping[str, object] = getattr(base, base_declarations_attr, {})
+            # Each family class keeps its complete declaration map under this name.
+            declarations = require(truth.static_attr(base, base_declarations_attr, {}), is_mapping)
             if name in declarations:
                 selected = declarations[name]
-                if isinstance(selected, declaration_type):
+                if truth.is_instance(selected, declaration_type):
                     collected[name] = selected
                 else:
                     del collected[name]
                 break
             inherited_value = next(
                 (
-                    ancestor.__dict__[name]
-                    for ancestor in base.__mro__
-                    if name in ancestor.__dict__
+                    truth.class_dict(ancestor)[name]
+                    for ancestor in truth.mro(base)
+                    if name in truth.class_dict(ancestor)
                 ),
                 missing,
             )
@@ -394,7 +399,7 @@ def _reject_shared_relations(
         prior = claimed.setdefault(relation, name)
         if prior != name:
             raise ConfigurationError(
-                f"{_safe_class_name(new_class, qualified=True)}: {_safe_type_name(declaration)}s "
+                f"{truth.qualname(new_class)}: {truth.kind(declaration)}s "
                 f"{prior!r} and {name!r} both declare the relation "
                 f"{LOOKUP_SEP.join(relation)!r}. A set declares "
                 "each relation once, since its flat leaves, order terms and permission gates "
@@ -411,7 +416,7 @@ def _declared_relation(name: str, declaration: object) -> tuple[str, ...] | None
     """
     field_name: object = getattr(declaration, "field_name", None)
     relation = name if field_name is None else field_name
-    return tuple(relation.split(LOOKUP_SEP)) if isinstance(relation, str) else None
+    return tuple(relation.split(LOOKUP_SEP)) if truth.is_instance(relation, str) else None
 
 
 def reject_captured_branches(
@@ -451,7 +456,7 @@ def reject_captured_branches(
                 continue
             target = read_attr(short, target_attr)
             remainder = long_relation[len(short_relation) :]
-            if not isinstance(target, type) or not _target_reaches(
+            if not truth.is_type(target) or not _target_reaches(
                 target,
                 remainder,
                 related_attr=related_attr,
@@ -460,11 +465,11 @@ def reject_captured_branches(
             ):
                 continue
             raise ConfigurationError(
-                f"{_safe_class_name(set_cls, qualified=True)}: {_safe_type_name(long_declaration)} "
+                f"{truth.qualname(set_cls)}: {truth.kind(long_declaration)} "
                 f"{long_name!r} declares the relation {LOOKUP_SEP.join(long_relation)!r}, "
                 f"which continues the relation {LOOKUP_SEP.join(short_relation)!r} of "
                 f"{short_name!r} into {LOOKUP_SEP.join(remainder)!r}, a path the target "
-                f"{_safe_class_name(target, qualified=True)} of {short_name!r} reaches. Every "
+                f"{truth.qualname(target)} of {short_name!r} reaches. Every "
                 f"path through {short_name!r} into it would read {long_name!r} instead; drop "
                 "one of them.",
             )
@@ -497,7 +502,7 @@ def _target_reaches(
             continue
         child = read_attr(declaration, target_attr)
         # A ``None`` placeholder target generates no input, so no path runs through it.
-        if not isinstance(child, type):
+        if not truth.is_type(child):
             continue
         if len(relation) >= len(remainder) or _target_reaches(
             child,
@@ -518,16 +523,18 @@ def expanded_once(
     build: Callable[[], _T],
     on_reentry: Callable[[], _T] | None = None,
 ) -> _T:
-    """Run ``build()`` once under a class-level expansion cache + reentry guard.
+    """Run ``build()`` under a class-level expansion cache + reentry guard.
 
-    The control-flow skeleton ``FilterSet.get_filters`` / ``OrderSet.get_fields``
-    grew separately:
+    ``build`` re-runs on every call while it declines the cache write (a lazy
+    related target keeps ``should_cache_expansion`` false).
+
+    The control-flow skeleton shared by ``FilterSet.get_filters`` / ``OrderSet.get_fields``:
 
     - Return ``cls.__dict__[cache_attr]`` when populated. Read from the class's
       OWN ``__dict__`` (NOT ``getattr``) so a subclass never inherits a parent's
-      completed expansion cache via MRO, and so an in-flight class (the metaclass
-      runs ``super().__new__`` -> ``get_filters`` before stamping
-      ``related_filters``) cannot serve a half-built result.
+      completed expansion cache via MRO, and so an in-flight class cannot serve
+      a half-built result (on the filter side the upstream ``super().__new__``
+      triggers ``get_filters()`` before ``related_filters`` is stamped).
     - ``on_reentry`` (filter side only): when set AND ``cls`` is already mid-
       expansion (``guard_attr`` truthy in its own ``__dict__``), return
       ``on_reentry()`` -- the result for a call reading ``cls`` again while its
@@ -548,10 +555,11 @@ def expanded_once(
     and the order side's second thread builds once more). Do not introduce a
     ``threading.local`` here without a real consumer call path requiring it.
     """
-    cached = cls.__dict__.get(cache_attr)
+    own = truth.class_dict(cls)
+    cached = own.get(cache_attr)
     if cached is not None:
         return cast("_T", cached)  # the slot holds what ``build()`` stored for this class
-    if on_reentry is not None and cls.__dict__.get(guard_attr, False):
+    if on_reentry is not None and own.get(guard_attr, False):
         return on_reentry()
     setattr(cls, guard_attr, True)
     try:
@@ -564,7 +572,7 @@ def should_cache_expansion(cls: type[object], *, related_attr: str, target_slot:
     """Return whether a set class's expansion result may be cached.
 
     The two-condition cache-write gate ``FilterSet.get_filters`` and
-    ``OrderSet.get_fields`` grew separately, single-sited beside
+    ``OrderSet.get_fields`` share, single-sited beside
     ``expanded_once`` so the string-lazy-target rule (a CORRECTNESS rule:
     caching too early pins a half-resolved expansion) has one owner. Cache only
     when:
@@ -580,9 +588,11 @@ def should_cache_expansion(cls: type[object], *, related_attr: str, target_slot:
     class (``FilterSet._expand_along`` / ``OrderSet.get_fields``), so a cached
     value never depends on which class expanded first.
     """
-    return related_attr in cls.__dict__ and all(
-        not isinstance(read_attr(entry, target_slot), str)
-        for entry in list_of(call_method(read_attr(cls, related_attr), "values"))
+    own = truth.class_dict(cls)
+    # The set metaclass stores ``related_attr`` as a name-keyed declaration map.
+    return related_attr in own and all(
+        not truth.is_instance(read_attr(entry, target_slot), str)
+        for entry in require(own[related_attr], is_mapping).values()
     )
 
 
@@ -613,20 +623,23 @@ def is_re_readable_field_declaration(value: object) -> bool:
     ``collections.abc.Collection`` IS the contract: ``__len__`` + ``__iter__`` +
     ``__contains__`` together mean the object holds its members rather than
     producing them, so a second walk yields the same field names as the first.
-    That admits every shipped declaration shape (list / tuple / set / frozenset
+    That admits every shipped collection declaration shape (list / tuple / set / frozenset
     / dict) plus the view and range shapes a consumer legitimately computes
     (``some_dict.keys()``, ``some_dict.values()``, ``range(...)``, any custom
     ``Collection``), and rejects the one-shot shapes (generators, ``iter(...)``,
     ``map`` / ``filter`` objects) that expand correctly ONCE and silently to
-    nothing afterwards. The check is structural, so a hostile ``__iter__`` is
+    nothing afterwards. The check is structural, so the value's ``__iter__`` is
     never entered: an object that only defines ``__iter__`` is not a
-    ``Collection``. A value whose ``__class__`` cannot be read is not a container
-    an expansion may walk, so it answers ``False`` and the caller's typed
-    rejection names it.
+    ``Collection``. The protocol is asked of the value's real class, so an
+    instance-level ``__class__`` is never consulted (a value whose ``__class__``
+    read raises is judged by what it really is, never by the raise). A Django
+    lazy proxy is judged by the object it stands for: the proxy class itself
+    implements the whole ``Collection`` protocol, so a proxied string would
+    otherwise pass as a container.
     """
-    return _safe_predicate(isinstance, value, Collection) and not isinstance(
-        value,
-        _TEXT_ATOM_TYPES,
+    value_type = truth.class_of(unwrap_lazy_object(value))
+    return issubclass(value_type, Collection) and not any(
+        truth.is_subclass(value_type, atom) for atom in _TEXT_ATOM_TYPES
     )
 
 
@@ -655,8 +668,8 @@ def require_re_readable_field_declaration(
     if is_re_readable_field_declaration(value):
         return
     raise ConfigurationError(
-        f"{subject} {set_cls.__qualname__}.Meta.fields must be {accepted}; got "
-        f"{_safe_type_name(value)} ({_safe_arg_repr(value)}). {RE_READABLE_FIELDS_HELP}",
+        f"{subject} {truth.qualname(set_cls)}.Meta.fields must be {accepted}; got "
+        f"{truth.kind(value)} ({truth.render(value)}). {RE_READABLE_FIELDS_HELP}",
     )
 
 
@@ -765,7 +778,7 @@ class ActiveInputPermissionMixin:
         what lets a subclass's ``_permission`` override reach the apply path at
         all. ``field_specs`` inside the traversal is the same map the family's
         ``inputs`` module mutates in place at bind time, so it flows by
-        reference exactly as before.
+        reference.
         """
         return cls._permission.traversal
 
@@ -938,6 +951,7 @@ class ActiveInputPermissionMixin:
 
 
 __all__ = (
+    "RE_READABLE_FIELDS_HELP",
     "ActiveInputPermissionAttrs",
     "ActiveInputPermissionMixin",
     "ClassBasedTypeNameMixin",
@@ -946,6 +960,8 @@ __all__ = (
     "SetLifecycleAttrs",
     "collect_related_declarations",
     "expanded_once",
+    "is_re_readable_field_declaration",
     "reject_captured_branches",
+    "require_re_readable_field_declaration",
     "should_cache_expansion",
 )

@@ -60,17 +60,14 @@ import enum
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from django_strawberry_framework.exceptions import _safe_attr, _safe_call
 from django_strawberry_framework.utils._narrowing import call_method, is_str, read_attr, require
 from django_strawberry_framework.utils.relations import (
     RelationKind,
     is_single_column_foreign_key,
     m2m_through_link_fields,
     m2m_through_model,
-    relation_bool,
     relation_kind,
     relation_link,
-    safe_truthy,
 )
 
 if TYPE_CHECKING:
@@ -102,24 +99,21 @@ WINDOWABLE_RELATION_KINDS: frozenset[RelationKind] = frozenset(
 )
 
 
-# This module's never-raises contract is the lenient MODE of the shared
-# relation readers rather than a parallel family beside them: plain reads go
-# through ``_safe_attr`` (the body ``relation_attr(lenient=True)`` delegates to),
-# truth tests through ``safe_truthy``, and flags through ``relation_bool``.
-_safe_truthy = safe_truthy
+# The field is Django's (or a synthetic test double), so its metadata is read
+# plainly: an attribute a shape omits takes the default, and nothing is guarded.
+def _attr(value: object, name: str, default: object = None) -> object:
+    """Return ``value.<name>``, or ``default`` when the shape does not carry it."""
+    return read_attr(value, name, default)
 
 
-def _safe_flag(value: object, name: str) -> bool:
-    """Read a boolean relation flag, guarding both the read and its truth test."""
-    return relation_bool(value, name, lenient=True)
+def _flag(value: object, name: str) -> bool:
+    """Return the truth of one relation flag; an omitted flag is ``False``."""
+    return bool(read_attr(value, name, False))
 
 
 def _first_truthy(*values: object) -> object:
-    """Return the first value that tests true, a raising truth test counting as false."""
-    for value in values:
-        if _safe_truthy(value):
-            return value
-    return None
+    """Return the first value that tests true, or ``None``."""
+    return next((value for value in values if value), None)
 
 
 @dataclass(frozen=True)
@@ -145,16 +139,16 @@ class RelationJoinDescriptor:
     link of any width has no single ``column`` / ``db_type`` to join or cast on,
     so the correlated strategies refuse it and the windowed body serves it); for
     ``THROUGH_TABLE`` the through table's parent-side FK and child-side FK
-    respectively; ``None`` when the shape is ``UNSUPPORTED`` or the field cannot
-    resolve them (synthetic doubles - the classifier never raises).
+    respectively; ``None`` when the shape is ``UNSUPPORTED`` or the field does
+    not carry them (synthetic doubles).
 
     ``content_type_column`` is the child ``content_type_id`` attname a
     ``GenericRelation`` needs alongside the ``object_id`` partition column:
     Django's prefetch attach key is ``(object_id, content_type_id)``, and the
     composite-index advisory recommends ``(content_type_id, object_id, ...)``
     because every generic query also carries a constant morph WHERE. ``None``
-    for every non-generic shape and for a synthetic generic double that cannot
-    resolve it - the classifier never raises.
+    for every non-generic shape and for a synthetic generic double that does
+    not carry it.
 
     ``prefetch_attach_columns`` is the derived attach-complete set projection
     writers must ``.only()`` (every connector, plus morph when present) so
@@ -196,20 +190,20 @@ def _partition_expr(field: object) -> str | None:
     target's reverse query name for a forward M2M (``"books"`` - NOT the
     accessor when ``related_name`` is absent).
     """
-    remote_field = _safe_attr(field, "remote_field")
+    remote_field = _attr(field, "remote_field")
     # A relation's ``attname`` / ``name`` slots hold strings.
     return cast(
         "str | None",
         _first_truthy(
-            _safe_attr(remote_field, "attname"),
-            _safe_attr(remote_field, "name"),
+            _attr(remote_field, "attname"),
+            _attr(remote_field, "name"),
         ),
     )
 
 
 def _precomputed_attnames(field: object, slot: str) -> tuple[str, ...]:
     """Return the ``FieldMeta`` link slot stamped from ``relation_link``; ``()`` if absent or malformed."""
-    precomputed = _safe_attr(field, slot)
+    precomputed = _attr(field, slot)
     if isinstance(precomputed, tuple) and all(
         isinstance(attname, str) for attname in cast("tuple[object, ...]", precomputed)
     ):
@@ -226,7 +220,7 @@ def _carrier_attnames(field: object) -> tuple[str, ...]:
     answers from its ``link_carrier_attnames`` slot, which its builder fills
     from the same reader. ``()`` when neither resolves.
     """
-    carriers = relation_link(field, lenient=True).carrier_attnames
+    carriers = relation_link(field).carrier_attnames
     if carriers:
         return carriers
     return _precomputed_attnames(field, "link_carrier_attnames")
@@ -242,7 +236,7 @@ def _forward_join_columns(field: object) -> tuple[str, ...]:
     ``FieldMeta`` from its ``link_target_attnames`` slot, which its builder fills
     from the same reader. ``()`` when neither resolves.
     """
-    targets = relation_link(field, lenient=True).target_attnames
+    targets = relation_link(field).target_attnames
     if targets:
         return targets
     return _precomputed_attnames(field, "link_target_attnames")
@@ -257,16 +251,12 @@ def _m2m_join_columns(field: object) -> tuple[str, ...]:
     and keys ``rel_obj_attr`` on those), so the related row contributes no link
     column of its own.
     """
-    # ``related_model._meta`` is read inside the try/except below, which is the guard
-    # (synthetic doubles carry no model class).
-    related_model = _safe_attr(field, "related_model")
+    related_model = _attr(field, "related_model")
     if related_model is None:
         return ()
-    try:
-        pk = read_attr(read_attr(related_model, "_meta"), "pk")
-        return (require(read_attr(pk, "attname"), is_str),)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return ()
+    # A model's pk ``attname`` is its column name, a string.
+    pk = read_attr(read_attr(related_model, "_meta"), "pk")
+    return (require(read_attr(pk, "attname"), is_str),)
 
 
 def _generic_child_attname(field: object, name_attr: str) -> str | None:
@@ -282,36 +272,31 @@ def _generic_child_attname(field: object, name_attr: str) -> str | None:
     EQUALITY (Django's alias-late morph WHERE), so the content-type column
     belongs ahead of ``object_id`` in a covering composite index even though it
     is not part of the partition. ``None`` when the related model or the field
-    name is missing (synthetic doubles) - the classifier never raises.
+    name is missing (synthetic doubles).
     ``get_field`` resolves for a genuine ``GenericRelation``, so no defensive
     ``FieldDoesNotExist`` swallow is needed once both inputs exist.
     """
-    # ``related_model._meta`` is read inside the try/except below, which is the guard
-    # (synthetic doubles carry no model class).
-    related_model = _safe_attr(field, "related_model")
-    child_field_name = _safe_attr(field, name_attr)
+    related_model = _attr(field, "related_model")
+    child_field_name = _attr(field, name_attr)
     if related_model is None or child_field_name is None:
         return None
-    try:
-        # A resolved child field's ``attname`` is its column name, a string.
-        child = call_method(read_attr(related_model, "_meta"), "get_field", child_field_name)
-        return require(read_attr(child, "attname"), is_str)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return None
+    # A resolved child field's ``attname`` is its column name, a string.
+    child = call_method(read_attr(related_model, "_meta"), "get_field", child_field_name)
+    return require(read_attr(child, "attname"), is_str)
 
 
 def classify_relation_join(field: ModelField | FieldMeta) -> RelationJoinDescriptor:
     """Classify one raw Django relation field into its join descriptor.
 
     Pure and side-effect-free; safe to call at plan time on every nested
-    connection (the field flag reads are attribute lookups). Never raises -
-    an unwindowable or unresolvable shape classifies as
+    connection (the field flag reads are attribute lookups). An unwindowable
+    or unresolvable shape classifies as
     ``windowable=False`` / ``partition_expr=None`` and the caller decides the
     fallback posture (``nested_planner.py::plan_connection_relation`` leaves an
     unwindowable relation unplanned for per-parent resolution).
     """
-    kind: RelationKind = _safe_call(relation_kind, "forward_single", field)
-    is_m2m = _safe_flag(field, "many_to_many")
+    kind = relation_kind(field)
+    is_m2m = _flag(field, "many_to_many")
     windowable = kind in WINDOWABLE_RELATION_KINDS
     parent_link_field = None
     through_child_field = None
@@ -337,8 +322,8 @@ def classify_relation_join(field: ModelField | FieldMeta) -> RelationJoinDescrip
         partition = _partition_expr(field)
         parent_join_columns = _m2m_join_columns(field)
         lateral_shape = LateralJoinShape.THROUGH_TABLE
-        through = m2m_through_model(field, lenient=True)
-        parent_link_field, through_child_field = m2m_through_link_fields(field, lenient=True)
+        through = m2m_through_model(field)
+        parent_link_field, through_child_field = m2m_through_link_fields(field)
     elif windowable:
         # Reverse FK / reverse O2O: the child rows carry the parent key in the
         # link's carrier columns. One carrier partitions the window; a
@@ -352,7 +337,7 @@ def classify_relation_join(field: ModelField | FieldMeta) -> RelationJoinDescrip
         lateral_shape = LateralJoinShape.DIRECT_FK
         # The child-side link (a reverse rel descriptor's ``.field``), kept only
         # when it is one column the correlated strategies can join and cast on.
-        link = _safe_attr(field, "field")
+        link = _attr(field, "field")
         if is_single_column_foreign_key(link):
             parent_link_field = link
     else:

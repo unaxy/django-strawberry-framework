@@ -19,7 +19,7 @@ response cannot uniquely show:
 - generated-connection identity (concrete subclass, not the ``DjangoConnection[T]``
   alias; cache keyed on target; name from ``graphql_type_name``);
 - constructor ``ConfigurationError`` (non-DjangoType, non-callable ``resolver=``,
-  non-Relay, hostile ``directives=``);
+  non-Relay, malformed ``directives=``);
 - ``_total_count_requested`` AST walk (direct-child vs nested vs fragment);
 - consumer ``resolver=`` source-shape guards (Manager / iterable / generator /
   pre-sliced / SyncMisuseError / residual awaitable) - shipped connections use
@@ -47,7 +47,7 @@ import gc
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from types import SimpleNamespace, new_class
-from typing import NoReturn, TypeAlias, TypedDict, TypeVar, cast, get_origin
+from typing import NoReturn, TypeAlias, TypeVar, cast, get_origin
 
 import pytest
 import strawberry
@@ -119,7 +119,6 @@ from django_strawberry_framework.utils._queryset_private import (
 )
 from django_strawberry_framework.utils.connections import PaginationArgumentError
 from django_strawberry_framework.utils.input_values import UNSET
-from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import declare_django_type, json_at, json_list, json_object
 from tests._info import make_info
 
@@ -131,13 +130,6 @@ def _edge_names(connection: object) -> list[str]:
     return [
         require(json_at(edge, "node", "name"), is_str) for edge in json_list(connection, "edges")
     ]
-
-
-class _DefinitionReads(TypedDict):
-    """The counter a counting metaclass fills: whether it is armed and the names it read."""
-
-    armed: bool
-    names: list[str]
 
 
 @pytest.fixture(autouse=True)
@@ -884,6 +876,18 @@ def test_consumer_resolver_generator_paginates_without_total_count() -> None:
     assert result.data["items"]["pageInfo"] is not None
 
 
+def test_non_iterable_source_rejection_names_the_source_kind() -> None:
+    """The shape gate's message names the returned value's real class."""
+    with pytest.raises(GraphQLError) as exc_info:
+        _guard_non_queryset_iterable(42)
+    assert str(exc_info.value) == (
+        "A connection resolver returned int, which is neither a QuerySet (or a Manager) nor "
+        "a plain iterable. A connection field paginates by slicing or iterating its source, "
+        "so return a QuerySet (or a Manager), or an iterable of nodes, from the connection "
+        "resolver."
+    )
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("bad_source", [None, 42])
 def test_consumer_resolver_non_iterable_source_raises_graphql_error(bad_source: object) -> None:
@@ -906,6 +910,56 @@ def test_consumer_resolver_non_iterable_source_raises_graphql_error(bad_source: 
     assert result.errors is not None
     messages = [str(err.message) for err in result.errors]
     assert any("neither a QuerySet" in m and "plain iterable" in m for m in messages)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("make_source", [list, tuple])
+@pytest.mark.parametrize("argument", ["after", "before"])
+def test_consumer_resolver_sequence_negative_cursor_raises_graphql_error(
+    make_source: Callable[[list[Category]], Iterable[Category]],
+    argument: str,
+) -> None:
+    """A forged negative offset cursor fails closed over a sequence source.
+
+    A re-sliceable plain sequence would wrap a negative position silently
+    (``rows[-1:2]`` an empty page with false flags, ``rows[0:-1]`` all-but-last
+    for a ``last: 2`` request). The offset fallback validates the cursor
+    (``utils/connections.py::decode_offset_cursor``) before delegating, so every
+    source shape answers the field's own error. The bound cursor mints no row:
+    the page is never served, so no count or flag is asserted beyond the
+    rejection itself.
+    """
+    services.seed_data(1)
+    rows = list(Category.objects.order_by("pk"))
+    assert len(rows) >= 2
+
+    def resolver(_root: object, _info: object) -> Iterable[Category]:
+        return make_source(rows)
+
+    schema = _field_schema(_make_sidecar_node_type("NegativeCursorNode"), resolver=resolver)
+    cursor = relay.to_base64("arrayconnection", "-2")
+    tail = "first: 2" if argument == "after" else "last: 2"
+    result = schema.execute_sync(
+        f'{{ items({tail}, {argument}: "{cursor}") {{ edges {{ node {{ id }} }} }} }}',
+    )
+
+    assert result.errors is not None
+    assert result.data is None
+    messages = [str(err.message) for err in result.errors]
+    assert any("non-existing value" in m for m in messages)
+    assert not any("Traceback" in m for m in messages)
+
+    # Positive control: a minted cursor on the same source pages normally.
+    first_page = schema.execute_sync("{ items(first: 1) { edges { cursor node { id } } } }")
+    assert first_page.errors is None
+    assert first_page.data is not None
+    [edge] = json_list(first_page.data, "items", "edges")
+    second_page = schema.execute_sync(
+        f'{{ items(first: 1, after: "{json_at(edge, "cursor")}") {{ edges {{ node {{ id }} }} }} }}',
+    )
+    assert second_page.errors is None
+    assert second_page.data is not None
+    assert len(json_list(second_page.data, "items", "edges")) == 1
 
 
 @pytest.mark.django_db
@@ -956,9 +1010,9 @@ async def test_attach_count_async_awaits_before_guard_raises() -> None:
     """``_attach_count_async`` awaits the connection coroutine BEFORE the non-queryset guard can raise.
 
     Regression guard for the await-before-raise discipline (Decision 10, mirroring
-    ``utils/querysets.py::apply_type_visibility_sync``'s close-before-raise). With the
-    pre-fix ordering (guard first), a guard-raise on the non-queryset + ``totalCount``
-    path left the queued connection coroutine unawaited -> ``RuntimeWarning: coroutine
+    ``utils/querysets.py::apply_type_visibility_sync``'s close-before-raise). Were the
+    guard to run first, a guard-raise on the non-queryset + ``totalCount``
+    path would leave the queued connection coroutine unawaited -> ``RuntimeWarning: coroutine
     ... was never awaited`` (a hard failure under ``-W error``). Deterministic: assert
     the coroutine was actually awaited (``consumed``) AND that no unawaited-coroutine
     ``RuntimeWarning`` leaks even after a forced GC.
@@ -2765,68 +2819,62 @@ def test_connection_field_directives_bytes_rejected() -> None:
         DjangoConnectionField(node, directives=b"not-a-sequence")
 
 
-def test_connection_field_directives_hostile_iter_rejected() -> None:
-    """A ``directives=`` iterable that raises mid-iteration is ``ConfigurationError`` (not ``ValueError``)."""
+def test_connection_field_directives_iteration_error_propagates() -> None:
+    """A ``directives=`` iterable whose ``__iter__`` raises lets that error through.
 
-    class Hostile(tuple[object, ...]):
+    Only ``list()``'s documented ``TypeError`` refusal of a non-iterable becomes the
+    typed ``ConfigurationError``; an iterable's own iteration error is its behaviour.
+    """
+
+    class HostileIter(tuple[object, ...]):
         @override
         def __iter__(self) -> NoReturn:
             raise ValueError("hostile iter")
 
-    node = _make_node_type("DirHostileNode", total_count=None)
-    with pytest.raises(ConfigurationError, match="directives could not be read"):
-        DjangoConnectionField(node, directives=Hostile())
-
-
-def test_connection_field_directives_hostile_attribute_rejected() -> None:
-    """A ``directives=`` iterable raising ``AttributeError`` is ``ConfigurationError``."""
-
-    class Hostile(tuple[object, ...]):
+    class HostileAttr(tuple[object, ...]):
         @override
         def __iter__(self) -> NoReturn:
             raise AttributeError("hostile attr")
 
-    node = _make_node_type("DirHostileAttrNode", total_count=None)
-    with pytest.raises(ConfigurationError, match="directives could not be read"):
-        DjangoConnectionField(node, directives=Hostile())
+    node = _make_node_type("DirHostileNode", total_count=None)
+    with pytest.raises(ValueError, match="hostile iter"):
+        DjangoConnectionField(node, directives=HostileIter())
+    with pytest.raises(AttributeError, match="hostile attr"):
+        DjangoConnectionField(node, directives=HostileAttr())
 
 
-def test_window_rows_are_annotated_hostile_iter_returns_false() -> None:
-    """``_window_rows_are_annotated`` with hostile ``__iter__`` returns ``False`` (not ``ValueError``)."""
-
-    class HostileList(list[object]):
-        @override
-        def __iter__(self) -> NoReturn:
-            raise ValueError("hostile iter")
-
-    assert _window_rows_are_annotated(HostileList([object()])) is False
-
-
-def test_window_rows_are_annotated_hostile_key_error_returns_false() -> None:
-    """A ``KeyError`` during iteration is also contained."""
+@pytest.mark.parametrize("raised", [ValueError, KeyError])
+def test_window_rows_are_annotated_iteration_error_propagates(raised: type[Exception]) -> None:
+    """``_window_rows_are_annotated`` iterates the rows on their own terms; errors propagate."""
 
     class HostileList(list[object]):
         @override
         def __iter__(self) -> NoReturn:
-            raise KeyError("hostile key")
+            raise raised("hostile iter")
 
-    assert _window_rows_are_annotated(HostileList([object()])) is False
+    with pytest.raises(raised, match="hostile iter"):
+        _window_rows_are_annotated(HostileList([object()]))
 
 
-def test_keyset_order_ref_hostile_entry_returns_none() -> None:
-    """``_keyset_order_ref`` with a hostile ``__str__`` or attribute access returns ``None``."""
+def test_keyset_order_ref_unparseable_entry_returns_none() -> None:
+    """``_keyset_order_ref`` answers ``None`` for an entry with no resolvable name."""
+    assert _keyset_order_ref(None) is None
+
+
+def test_keyset_order_ref_attribute_read_error_propagates() -> None:
+    """An entry whose attribute read raises lets that error through, never ``None``."""
 
     class Hostile:
         def __getattr__(self, name: str) -> NoReturn:
             raise ValueError("hostile getattr")
 
-    assert _keyset_order_ref(Hostile()) is None
-    assert _keyset_order_ref(None) is None
+    with pytest.raises(ValueError, match="hostile getattr"):
+        _keyset_order_ref(Hostile())
 
 
-def test_consume_window_hostile_pagination_is_graphql_error() -> None:
+def test_consume_window_malformed_pagination_is_graphql_error() -> None:
     """A windowed ``_WindowedConnectionRows`` with ``first: -1`` is ``GraphQLError`` (not ``ValueError``)."""
-    node = _make_sidecar_node_type("WindowHostileNode")
+    node = _make_sidecar_node_type("WindowMalformedNode")
     finalize_django_types()
     conn_type = _connection_type_for(node, node.__django_strawberry_definition__)
     # Create a window marker with one annotated row
@@ -2849,22 +2897,19 @@ def test_consume_window_hostile_pagination_is_graphql_error() -> None:
 # =============================================================================
 
 
-def _counting_node_type(
+def _node_type(
     name: str,
     *,
     model: type[models.Model],
-    decoy_slot: dict[str, object],
-    reads: _DefinitionReads,
     orderset: type | None = None,
     filterset: type | None = None,
     get_queryset: Callable[..., object] | None = None,
 ) -> type[DjangoType]:
-    """Build a Relay-Node ``DjangoType`` whose definition reads are counted and swappable.
+    """Build a Relay-Node ``DjangoType`` whose definition attribute a test can swap.
 
-    ``decoy_slot`` is a one-key dict: while it holds ``None`` the real definition
-    is returned, and once a decoy is placed in it every later read answers with
-    that instead - so a residual read is both counted and consequential rather
-    than merely tallied.
+    A test replaces the class's ``__django_strawberry_definition__`` with a
+    decoy over another model once the definition is captured, so any residual
+    read of the class would be consequential: rows of the wrong table.
 
     ``get_queryset`` installs a visibility hook on the target. It changes which
     metadata the planner needs: a target with a hook sends its child queryset
@@ -2872,16 +2917,6 @@ def _counting_node_type(
     threaded into, so only an instrumented hook-bearing target can witness that
     half of the capture.
     """
-
-    class CountingMeta(type(DjangoType)):
-        @override
-        def __getattribute__(cls, attr: str) -> object:
-            if attr == "__django_strawberry_definition__" and reads["armed"]:
-                reads["names"].append(attr)
-                if decoy_slot["decoy"] is not None:
-                    return decoy_slot["decoy"]
-            return object_result(super().__getattribute__, attr)
-
     meta_attrs = {
         "model": model,
         "fields": ("id", "name"),
@@ -2896,7 +2931,7 @@ def _counting_node_type(
     namespace: dict[str, object] = {"Meta": type("Meta", (), meta_attrs)}
     if get_queryset is not None:
         namespace["get_queryset"] = classmethod(get_queryset)
-    return CountingMeta(name, (DjangoType,), namespace)
+    return declare_django_type(name, namespace)
 
 
 def _item_node_type(name: str) -> type[DjangoType]:
@@ -2920,34 +2955,25 @@ def _item_node_type(name: str) -> type[DjangoType]:
 
 
 @pytest.mark.django_db
-def test_a_root_connection_reads_the_target_definition_once_on_a_cold_cache() -> None:
-    """One construction read; nothing at schema build, nothing at request.
+def test_a_root_connection_uses_only_the_definition_captured_at_construction() -> None:
+    """The construction-time definition serves schema build and request alike.
 
     The generated connection class and its name, the ``totalCount`` shape, the
     published ``filter:`` / ``orderBy:`` arguments, the default seed, both
     visibility seals, the cursor vocabulary and the resolve-time total order all
-    come from that one object. The target answers with a decoy over a DIFFERENT
-    MODEL from the moment the accepted read is taken, so a residual read would
-    move the query to another table rather than merely raise a counter.
+    come from that one object. The target's definition attribute is replaced by
+    a decoy over a DIFFERENT MODEL once the field is built, so a residual read
+    would move the query to another table.
     """
     services.seed_data(3)
-    reads: _DefinitionReads = {"armed": False, "names": []}
-    decoy_slot: dict[str, object] = {"decoy": None}
-    node = _counting_node_type(
-        "ColdCacheCountedNode",
-        model=Category,
-        decoy_slot=decoy_slot,
-        reads=reads,
-    )
+    node = _node_type("ColdCacheCountedNode", model=Category)
     decoy = _item_node_type("ColdCacheDecoyNode")
     finalize_django_types()
     clear_connection_type_cache()
 
-    reads["armed"] = True
     field = DjangoConnectionField(node)
-    assert reads["names"] == ["__django_strawberry_definition__"]
     conn_type = _connection_type_cache[node].connection_type
-    decoy_slot["decoy"] = decoy.__django_strawberry_definition__
+    node.__django_strawberry_definition__ = decoy.__django_strawberry_definition__
 
     query_cls = strawberry.type(
         type(
@@ -2957,46 +2983,16 @@ def test_a_root_connection_reads_the_target_definition_once_on_a_cold_cache() ->
         ),
     )
     schema = strawberry.Schema(query=query_cls, config=strawberry_config())
-    assert reads["names"] == ["__django_strawberry_definition__"]
 
     result = schema.execute_sync(
         "{ rows { edges { node { id name } } } }",
         context_value={"request": HttpRequest()},
     )
     assert result.errors is None, result.errors
-    assert reads["names"] == ["__django_strawberry_definition__"]
     assert result.data is not None
     returned = set(_edge_names(json_at(result.data, "rows")))
     assert returned
     assert returned <= set(Category.objects.values_list("name", flat=True))
-
-
-@pytest.mark.django_db
-def test_a_root_connection_on_a_warm_cache_reads_the_definition_once_too() -> None:
-    """A second field over the same target still takes exactly its own one read.
-
-    The generated connection class is cached on target identity, so the warm
-    path generates nothing - and must not spend a read discovering that.
-    """
-    reads: _DefinitionReads = {"armed": False, "names": []}
-    decoy_slot: dict[str, object] = {"decoy": None}
-    node = _counting_node_type(
-        "WarmCacheCountedNode",
-        model=Category,
-        decoy_slot=decoy_slot,
-        reads=reads,
-    )
-    finalize_django_types()
-    clear_connection_type_cache()
-
-    reads["armed"] = True
-    first = DjangoConnectionField(node)
-    cold_reads = list(reads["names"])
-    reads["names"].clear()
-    second = DjangoConnectionField(node)
-    assert cold_reads == ["__django_strawberry_definition__"]
-    assert reads["names"] == ["__django_strawberry_definition__"]
-    assert first is not second
 
 
 @pytest.mark.django_db
@@ -3005,14 +3001,11 @@ def test_a_synthesized_relation_connection_is_built_from_the_registrys_definitio
 
     The synthesized field asks the registry rather than the target class - not
     for its connection class, not for its sidecar arguments, not for the model
-    its pipeline seeds and seals against - so a stateful target has nothing to
-    answer when the generated ``<field>Connection`` is built or resolved. The
-    one read counted during finalization is the finalizer's OWN Relay
-    composite-pk gate over every Relay type, which is not this field.
+    its pipeline seeds and seals against - so a target whose definition attribute
+    is replaced after finalization has nothing to answer when the generated
+    ``<field>Connection`` is built or resolved.
     """
     services.seed_data(3)
-    reads: _DefinitionReads = {"armed": False, "names": []}
-    decoy_slot: dict[str, object] = {"decoy": None}
 
     class RelationParentNode(DjangoType):
         class Meta:
@@ -3023,7 +3016,7 @@ def test_a_synthesized_relation_connection_is_built_from_the_registrys_definitio
             relation_shapes = {"items": "connection"}
             primary = True
 
-    _counting_node_type("RelationChildNode", model=Item, decoy_slot=decoy_slot, reads=reads)
+    child = _node_type("RelationChildNode", model=Item)
     decoy = declare_django_type(
         "RelationChildDecoyNode",
         {
@@ -3041,11 +3034,8 @@ def test_a_synthesized_relation_connection_is_built_from_the_registrys_definitio
         },
     )
 
-    reads["armed"] = True
     finalize_django_types()
-    assert reads["names"] == ["__django_strawberry_definition__"]
-    reads["names"].clear()
-    decoy_slot["decoy"] = decoy.__django_strawberry_definition__
+    child.__django_strawberry_definition__ = decoy.__django_strawberry_definition__
 
     parent_conn = _connection_type_for(
         RelationParentNode,
@@ -3067,7 +3057,6 @@ def test_a_synthesized_relation_connection_is_built_from_the_registrys_definitio
         context_value={"request": HttpRequest()},
     )
     assert result.errors is None, result.errors
-    assert reads["names"] == []
     assert result.data is not None
     nested = {
         name
@@ -3120,8 +3109,6 @@ _PLANNED_CONNECTION_DOCUMENT = (
 def _planned_relation_schema(
     suffix: str,
     *,
-    reads: _DefinitionReads,
-    decoy_slot: dict[str, object],
     hook_calls: list[type[models.Model]] | None,
 ) -> tuple[DjangoSchema, DjangoOptimizerExtension]:
     """Compose the parent/child/decoy trio and return ``(schema, optimizer)``.
@@ -3151,11 +3138,9 @@ def _planned_relation_schema(
         hook_calls.append(queryset.model)
         return queryset
 
-    _counting_node_type(
+    child = _node_type(
         f"OptimizedChild{suffix}",
         model=Item,
-        decoy_slot=decoy_slot,
-        reads=reads,
         get_queryset=None if hook_calls is None else _hook,
     )
     decoy = declare_django_type(
@@ -3199,8 +3184,7 @@ def _planned_relation_schema(
         config=strawberry_config(),
         extensions=[lambda: optimizer],
     )
-    decoy_slot["decoy"] = decoy.__django_strawberry_definition__
-    reads["armed"] = True
+    child.__django_strawberry_definition__ = decoy.__django_strawberry_definition__
     return schema, optimizer
 
 
@@ -3223,9 +3207,9 @@ def test_the_optimizer_plans_a_relation_without_reading_the_target_class(
     decision it makes about the TARGET - whether the visibility hook runs over the
     child queryset, which model that queryset's seal validates against, and which
     cursor vocabulary the window derives through - comes from the child definition
-    ``related_target_for`` handed back. The target answers with a decoy over a
-    DIFFERENT MODEL from the moment finalization ends, so a residual read would
-    move the planned prefetch to another table rather than merely raise a counter.
+    ``related_target_for`` handed back. The target's definition attribute is
+    replaced by a decoy over a DIFFERENT MODEL once the schema is built, so a
+    residual read would move the planned prefetch to another table.
 
     Both hook flavours run because they need different halves of the capture: a
     hook-less target never enters the visibility runner, while a hook-bearing one
@@ -3235,26 +3219,19 @@ def test_the_optimizer_plans_a_relation_without_reading_the_target_class(
     "warm" without reading those counters would pass just as well if caching had
     stopped altogether.
 
-    Package-side because the claim is a read COUNT on a class, which no response
-    shows: the decoy makes a residual read consequential, but only an instrumented
-    metaclass can say whether one happened. The consequence has live siblings -
+    Package-side because the claim is which definition the plan was built from,
+    which no response names; the decoy makes a residual read consequential. The
+    consequence has live siblings -
     ``examples/fakeshop/test_query/test_products_visibility_api.py``'s
     planned-relation rows and
     ``examples/fakeshop/test_query/test_keyset_api.py::test_nested_keyset_window_hides_embargoed_rows_and_counts_them_out``
     pin the rows a mis-answered plan would serve.
     """
     services.seed_data(3)
-    reads: _DefinitionReads = {"armed": False, "names": []}
-    decoy_slot: dict[str, object] = {"decoy": None}
     hook_calls: list[type[models.Model]] | None = [] if custom_hook else None
     suffix = f"{vocabulary}{'Hooked' if custom_hook else 'Bare'}"
 
-    schema, optimizer = _planned_relation_schema(
-        suffix,
-        reads=reads,
-        decoy_slot=decoy_slot,
-        hook_calls=hook_calls,
-    )
+    schema, optimizer = _planned_relation_schema(suffix, hook_calls=hook_calls)
     assert optimizer.cache_info().size == 0, optimizer.cache_info()
 
     item_names = set(Item.objects.values_list("name", flat=True))
@@ -3263,20 +3240,17 @@ def test_the_optimizer_plans_a_relation_without_reading_the_target_class(
     cold_cache, warm_cache = ((0, 1, 0), (0, 2, 0)) if custom_hook else ((0, 1, 1), (1, 1, 1))
 
     cold_rows, cold_counters = _planned_relation_request(schema, optimizer, document, vocabulary)
-    assert reads["names"] == [], reads["names"]
     assert cold_counters == cold_cache, cold_counters
     assert cold_rows, cold_rows
     assert cold_rows <= item_names, cold_rows
 
     warm_rows, warm_counters = _planned_relation_request(schema, optimizer, document, vocabulary)
-    assert reads["names"] == [], reads["names"]
     assert warm_counters == warm_cache, warm_counters
     assert warm_rows == cold_rows, (warm_rows, cold_rows)
 
     if custom_hook:
         # The hook has to have RUN for its request to say anything about the
-        # model the runner was handed: a hook that never fired would report zero
-        # reads because nothing consulted the target at all.
+        # model the runner was handed.
         assert hook_calls == [Item, Item], hook_calls
 
 

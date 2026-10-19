@@ -264,12 +264,12 @@ The class is built by ``routers.py::_build_router_class`` inside the same
 soft-``channels`` guard and the same ``_router_class`` cache the router itself
 lives in, so its lifetime is exactly the router class's; this module caches
 nothing. It is deliberately **not** exported, and unreachable by import rather
-than merely absent from ``__all__``: the class statement is FUNCTION-LOCAL to
+than merely private by convention: the class statement is FUNCTION-LOCAL to
 ``build_revalidating_consumer_class``, so ``from
 django_strawberry_framework.consumers import GraphQLWebSocketConsumer`` raises
 ``ImportError`` and there is no module attribute for a consumer to bind (the same
 is true of the three private classes beside it). The supported choices are the
-package default or an injected consumer of your own, passed as
+package default or an injected consumer, passed as
 ``DjangoGraphQLProtocolRouter(..., websocket_consumer_class=...)``.
 
 **A frame the protocol cannot dispatch ends the connection, not the connection
@@ -302,9 +302,9 @@ Importing this module is ``channels``-free, which is what lets ``routers.py``
 import it above its own guard: the module level reaches only for the standard
 library, Django's own ``HttpRequest`` / ``DisallowedHost`` (a HARD dependency, and
 the whole point of the Host boundary below), this package's logger,
-``exceptions.ConfigurationError`` / ``exceptions.describe_value``, and the
+``exceptions.ConfigurationError``, the truthful readers in ``utils/truth.py``, and the
 connection-actor-lease helpers from ``utils/sessions.py`` - a module whose own
-imports are ``__future__``, ``asyncio``, ``contextlib`` and typing names, so it
+imports are ``__future__``, ``asyncio``, ``contextlib``, ``dataclasses`` and typing names, so it
 adds nothing to the import graph.
 ``channels.auth.get_user`` and the package's session-store resolver are imported
 **inside** the revalidation coroutine (the
@@ -373,13 +373,14 @@ from django.http import HttpRequest
 from typing_extensions import override
 
 from . import logger
-from .exceptions import ConfigurationError, describe_value
+from .exceptions import ConfigurationError
 from .extensions.error_policy import (
     is_maskable_result,
     mask_execution_result,
     masking_is_active,
     schema_error_policy,
 )
+from .utils import truth
 from .utils._narrowing import is_class, read_attr
 from .utils.sessions import (
     actor_lease,
@@ -651,16 +652,16 @@ def _unusable_window_error(value: object) -> ConfigurationError:
 
     A single message for a single domain: the arms below differ in *how* they
     detect an unusable value, not in what the deployment has to change. The
-    value's tail goes through ``exceptions.py::describe_value`` because this
-    message is formatted while rejecting a value the package does not trust -
-    including an integer too large for CPython to render (see
+    value's tail goes through ``utils/truth.py::describe``, which renders the
+    admitted numbers through their builtin slots, so an integer too large for
+    CPython to render reads as unprintable instead of raising (see
     ``resolved_revalidation_window``).
     """
     return ConfigurationError(
         "websocket_revalidation_window must be a finite number of seconds >= 0.0 that "
         "converts to a float (0.0 revalidates the session actor at every operation "
         "admission and before every information-bearing operation frame); got "
-        f"{describe_value(value)}.",
+        f"{truth.describe(value)}.",
     )
 
 
@@ -707,7 +708,7 @@ def resolved_revalidation_window(value: object) -> float:
     finiteness checks below run on a real ``float``, which is the value the
     consumer will actually compare against.
     """
-    if type(value) not in (int, float):
+    if type(value) is not int and type(value) is not float:
         raise _unusable_window_error(value)
     try:
         # Exactly an ``int`` or a ``float`` per the type check above.
@@ -1000,102 +1001,22 @@ async def revalidate_operation_actor(handler: _AdmissionHandler) -> bool:
     """
     # The handshake is not complete, so upstream's own ``4401 Unauthorized``
     # close must be what the client sees. No session read.
-    try:
-        if not handler.connection_acknowledged:
-            return True
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        try:
-            websocket = handler.websocket
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            return False
-        try:
-            await _revoke_connection(websocket)
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:
-            logger.exception(
-                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                "connection is revoked and closed (fail-closed) rather than continuing on "
-                "the connection's cached actor.",
-            )
-        return False
+    if not handler.connection_acknowledged:
+        return True
 
-    try:
-        consumer = handler.view
-        websocket = handler.websocket
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        return False
-    try:
-        async with actor_lease(consumer.scope):
-            # The left arm short-circuits, so an already-revoked connection denies
-            # without a session read of its own. A client can still have pipelined
-            # this frame before the close reached it, so that arm is reachable rather
-            # than defensive - and it must stay read-free, which is what makes the
-            # denial stable at no further database cost. It still routes through
-            # ``_revoke_connection``, because "revoked" does not imply "closed": an
-            # earlier attempt may have raised, and this checkpoint is the next
-            # permitted one.
-            try:
-                revoked = consumer._revocation.revoked
-            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException:
-                logger.exception(
-                    "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                    "connection is revoked and closed (fail-closed) rather than continuing on "
-                    "the connection's cached actor.",
-                )
-                revoked = True
-            if not revoked:
-                try:
-                    is_current = await _actor_is_current(consumer)
-                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                    raise
-                except BaseException:
-                    logger.exception(
-                        "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                        "connection is revoked and closed (fail-closed) rather than continuing on "
-                        "the connection's cached actor.",
-                    )
-                    is_current = False
-                if is_current:
-                    return True
-            await _revoke_connection(websocket)
-            return False
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        try:
-            await _revoke_connection(websocket)
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:
-            logger.exception(
-                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                "connection is revoked and closed (fail-closed) rather than continuing on "
-                "the connection's cached actor.",
-            )
+    consumer = handler.view
+    async with actor_lease(consumer.scope):
+        # The left arm short-circuits, so an already-revoked connection denies
+        # without a session read of its own. A client can still have pipelined
+        # this frame before the close reached it, so that arm is reachable rather
+        # than defensive - and it must stay read-free, which is what makes the
+        # denial stable at no further database cost. It still routes through
+        # ``_revoke_connection``, because "revoked" does not imply "closed": an
+        # earlier attempt may have raised, and this checkpoint is the next
+        # permitted one.
+        if not consumer._revocation.revoked and await _actor_is_current(consumer):
+            return True
+        await _revoke_connection(handler.websocket)
         return False
 
 
@@ -1135,94 +1056,12 @@ async def send_revalidated_operation_frame(
     Upstream's own ``shutdown()`` / ``cleanup()`` still cancels and awaits every
     sibling operation on disconnect.
     """
-    try:
-        consumer = websocket.ws_consumer
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        try:
-            await _revoke_connection(websocket)
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:
-            logger.exception(
-                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                "connection is revoked and closed (fail-closed) rather than continuing on "
-                "the connection's cached actor.",
-            )
-        return
-    try:
-        async with actor_lease(consumer.scope):
-            try:
-                revoked = consumer._revocation.revoked
-            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException:
-                logger.exception(
-                    "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                    "connection is revoked and closed (fail-closed) rather than continuing on "
-                    "the connection's cached actor.",
-                )
-                revoked = True
-            if not revoked:
-                try:
-                    is_current = await _actor_is_current(consumer)
-                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                    raise
-                except BaseException:
-                    logger.exception(
-                        "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                        "connection is revoked and closed (fail-closed) rather than continuing on "
-                        "the connection's cached actor.",
-                    )
-                    is_current = False
-                if is_current:
-                    try:
-                        await send(message)
-                    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                        raise
-                    except BaseException:
-                        logger.exception(
-                            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                            "connection is revoked and closed (fail-closed) rather than continuing on "
-                            "the connection's cached actor.",
-                        )
-                        try:
-                            await _revoke_connection(websocket)
-                        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                            raise
-                        except BaseException:
-                            logger.exception(
-                                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                                "connection is revoked and closed (fail-closed) rather than continuing on "
-                                "the connection's cached actor.",
-                            )
-                    return
-            await _revoke_connection(websocket)
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        try:
-            await _revoke_connection(websocket)
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:
-            logger.exception(
-                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                "connection is revoked and closed (fail-closed) rather than continuing on "
-                "the connection's cached actor.",
-            )
-        return
+    consumer = websocket.ws_consumer
+    async with actor_lease(consumer.scope):
+        if not consumer._revocation.revoked and await _actor_is_current(consumer):
+            await send(message)
+            return
+        await _revoke_connection(websocket)
 
 
 async def _actor_is_current(consumer: _RevalidatedConsumer) -> bool:
@@ -1244,122 +1083,60 @@ async def _actor_is_current(consumer: _RevalidatedConsumer) -> bool:
     positive-window cache hit is an authorization decision, so it must not be
     reachable outside the lease that every other arm holds.
     """
-    # Hostile scope/actor/window containment: no hostile input escapes as
-    # TypeError/ValueError/AttributeError/IndexError/KeyError. Every hostile
-    # read fails closed (revoked) rather than propagating a raw exception, except
-    # for cancellation which must propagate. The anonymous carve-out keeps its
-    # provenance check even when the descriptor is hostile, so a hostile
-    # ``is_authenticated`` does not become a silent allow.
-    try:
-        scope = consumer.scope
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        return False
-    try:
-        actor = scope.get("user")
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        return False
-    try:
-        is_authenticated: object = getattr(actor, "is_authenticated", False)
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        # Hostile descriptor -> treat as not authenticated, but still check
-        # provenance so a never-authenticated socket is not spuriously revoked.
-        try:
-            return not connection_was_authenticated(scope)
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:
-            logger.exception(
-                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                "connection is revoked and closed (fail-closed) rather than continuing on "
-                "the connection's cached actor.",
-            )
-            return False
-    if actor is None or not is_authenticated:
-        try:
-            return not connection_was_authenticated(scope)
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:
-            logger.exception(
-                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                "connection is revoked and closed (fail-closed) rather than continuing on "
-                "the connection's cached actor.",
-            )
-            return False
-    try:
-        note_authenticated_actor(scope)
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        return False
-    try:
-        window = consumer.revalidation_window
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        return False
-    try:
-        if (
-            window > 0.0
-            # The key is package-private and written below only as a monotonic float; any
-            # other value raises out of the arithmetic into the handler below.
-            and _monotonic() - cast("float", scope.get(_REVALIDATED_AT_SCOPE_KEY, -math.inf))
-            < window
-        ):
-            return True
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        # Hostile cache read/comparison must not authorize from cache; fall
-        # through to the DB revalidation rather than denying outright.
+    scope = consumer.scope
+    actor = scope.get("user")
+    # The anonymous carve-out, keyed on PROVENANCE rather than on the current
+    # actor: a connection that has never carried an authenticated actor has no
+    # session actor to revalidate, so only an authenticated connection pays the
+    # cost. An authenticated -> anonymous change is the opposite of a free pass:
+    # it is the package's own ``logout`` having replaced the scope actor, which
+    # is a connection-scoped revocation event, so it is refused here and the
+    # caller closes the socket.
+    #
+    # The authenticated predicate's plain-attribute core is the one
+    # ``auth/mutations.py::_authenticated_actor_or_none`` applies - the None
+    # actor and the ``is_authenticated`` flag, without that helper's
+    # legacy-callable and awaitable arms, which no scope actor takes -
+    # deliberately spelled rather than imported - that helper is private to
+    # the auth-mutation surface, and importing it would pull the whole
+    # ``auth`` package (and the Strawberry type stack behind it) into a
+    # transport-layer coroutine. If a THIRD site ever needs this predicate,
+    # promote it to ``utils/permissions.py`` beside ``ChannelsRequestAdapter``
+    # instead.
+    if actor is None or not getattr(actor, "is_authenticated", False):
+        return not connection_was_authenticated(scope)
+    note_authenticated_actor(scope)
+
+    # Plain attribute access, deliberately: ``GraphQLWebSocketConsumer.__init__``
+    # always assigns ``revalidation_window`` BEFORE ``super().__init__``, and the
+    # class is function-local to the factory, so no third party can construct one
+    # without it. A ``getattr`` default here would be unreachable defensiveness on
+    # the one line that decides whether a session read happens - and if a future
+    # refactor did drop the attribute, the default would silently switch the
+    # deployment to "revalidate at every checkpoint" (a performance cliff that
+    # lives in an expression, where statement coverage cannot see it) instead of
+    # failing loudly.
+    window = consumer.revalidation_window
+    # ``-inf`` reads as "never revalidated, i.e. infinitely long ago", which
+    # keeps the expiry test one comparison with no sentinel branch of its own.
+    # With the default window of ``0.0`` the left arm short-circuits, so nothing
+    # is ever written to the scope.
+    if (
+        window > 0.0
+        # The key is package-private and written below only as a monotonic float.
+        and _monotonic() - cast("float", scope.get(_REVALIDATED_AT_SCOPE_KEY, -math.inf)) < window
+    ):
+        return True
 
     try:
         refreshed = await _refreshed_actor(scope)
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
+    except Exception:
         # Fail closed (spec-046 Edge cases #"A revalidation database error must fail closed"):
         # a store or auth failure denies the checkpoint - and so terminates the
         # connection - and is never a fall back to the cached actor.
-        # ``BaseException`` is used with an explicit re-raise for cancellation
-        # above so the ``CancelledError`` propagation contract holds on Python
-        # versions where it subclasses ``Exception``.
+        # ``Exception``, not ``BaseException`` - an ``asyncio.CancelledError``
+        # from task teardown must propagate rather than be converted into a
+        # denial.
         logger.exception(
             "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
             "connection is revoked and closed (fail-closed) rather than continuing on "
@@ -1367,20 +1144,7 @@ async def _actor_is_current(consumer: _RevalidatedConsumer) -> bool:
         )
         refreshed = None
 
-    try:
-        is_refreshed_authenticated: object = (
-            getattr(refreshed, "is_authenticated", False) if refreshed is not None else False
-        )
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        return False
-    if refreshed is None or not is_refreshed_authenticated:
+    if refreshed is None or not getattr(refreshed, "is_authenticated", False):
         # The stale actor stays on the scope. Downgrading it to ``AnonymousUser``
         # would let anything still holding this scope read an anonymous session
         # instead of a revoked one (spec-046 Decision 11); the connection is
@@ -1391,37 +1155,9 @@ async def _actor_is_current(consumer: _RevalidatedConsumer) -> bool:
     # ``logout`` replace ``scope["user"]`` the same way, and the Channels request
     # adapter reads that key - so every surface reached through
     # ``request_from_info`` observes the fresh actor with no new plumbing.
-    try:
-        scope["user"] = refreshed
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
-        return False
-    try:
-        if window > 0.0:
-            try:
-                scope[_REVALIDATED_AT_SCOPE_KEY] = _monotonic()
-            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException:
-                logger.exception(
-                    "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                    "connection is revoked and closed (fail-closed) rather than continuing on "
-                    "the connection's cached actor.",
-                )
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-            "connection is revoked and closed (fail-closed) rather than continuing on "
-            "the connection's cached actor.",
-        )
+    scope["user"] = refreshed
+    if window > 0.0:
+        scope[_REVALIDATED_AT_SCOPE_KEY] = _monotonic()
     return True
 
 
@@ -1439,48 +1175,9 @@ async def _revoke_connection(websocket: _GatedSocket) -> None:
     closed twice would put a second ``websocket.close`` on the wire after the
     first.
     """
-    try:
-        revocation = websocket.ws_consumer._revocation
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the revoked connection's close could not be "
-            "committed to the transport (attempt %s of %s). Information-bearing frames "
-            "stay refused on this connection either way; the next security checkpoint "
-            "retries the close while the attempt bound allows it.",
-            0,
-            _MAX_REVOCATION_CLOSE_ATTEMPTS,
-        )
-        return
-    try:
-        revocation.decide()
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the revoked connection's close could not be "
-            "committed to the transport (attempt %s of %s). Information-bearing frames "
-            "stay refused on this connection either way; the next security checkpoint "
-            "retries the close while the attempt bound allows it.",
-            getattr(revocation, "attempts", 0),
-            _MAX_REVOCATION_CLOSE_ATTEMPTS,
-        )
-        return
-    try:
-        await revocation.close(websocket)
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        logger.exception(
-            "GraphQLWebSocketConsumer: the revoked connection's close could not be "
-            "committed to the transport (attempt %s of %s). Information-bearing frames "
-            "stay refused on this connection either way; the next security checkpoint "
-            "retries the close while the attempt bound allows it.",
-            getattr(revocation, "attempts", 0),
-            _MAX_REVOCATION_CLOSE_ATTEMPTS,
-        )
-        return
+    revocation = websocket.ws_consumer._revocation
+    revocation.decide()
+    await revocation.close(websocket)
 
 
 async def _stop_aware_results(
@@ -1498,8 +1195,8 @@ async def _stop_aware_results(
     subscription passes through on both protocols, so each result is masked here,
     immediately before the transport renders it. The policy object and the
     masking are the extension module's, not re-stated: one classifier, one
-    replacement builder, two application sites - including the shape gate,
-    ``is_maskable_result``, which is what lets a value the policy cannot rewrite
+    replacement builder, and the shape gate, ``is_maskable_result``, which is
+    what lets a value the policy cannot rewrite
     (a raw incremental-delivery frame, on the upstream releases that stream one)
     reach the transport's own refusal to render it rather than be degraded into a
     shape that refusal no longer recognizes.
@@ -1635,17 +1332,16 @@ async def _contain_message_loop_failure(
 ) -> None:
     """Refuse a connection whose message loop escaped, saying honestly whose fault it was.
 
-    The loop-containment half of the exception-containment invariant (the
-    admission and outbound checkpoints contain what a frame can DO; this
-    contains what a frame can BE). Neither protocol handler's own message loop
-    carries containment - ``handle_message`` dispatches client-supplied values
-    straight into indexing and mapping lookups, and a frame that is not the
-    object the protocol's dispatcher assumes (a JSON scalar or array instead of
-    an object, an unhashable operation id, a missing or non-mapping payload)
-    raises a raw ``TypeError`` / ``KeyError`` out of the loop and kills the
-    connection task. The socket then
-    sits OPEN with nothing reading it: no close, no frames, no teardown - a
-    client-controlled dead connection the ASGI server will never reclaim.
+    The wire boundary for what a frame can BE: a client-supplied frame is
+    untrusted input, and this is where its shape failures end. Neither protocol
+    handler's own message loop carries containment - ``handle_message``
+    dispatches client-supplied values straight into indexing and mapping
+    lookups, and a frame that is not the object the protocol's dispatcher
+    assumes (a JSON scalar or array instead of an object, an unhashable
+    operation id, a missing or non-mapping payload) raises a raw ``TypeError``
+    / ``KeyError`` out of the loop and kills the connection task. The socket
+    then sits OPEN with nothing reading it: no close, no frames, no teardown -
+    a client-controlled dead connection the ASGI server will never reclaim.
 
     The CONTAINMENT is general - whatever ordinary (``Exception``) failure
     escapes the loop is refused and the connection ends, fail-closed - but the
@@ -1666,9 +1362,11 @@ async def _contain_message_loop_failure(
       still carries no exception text - the traceback is logged here, named by
       protocol, and never put on the wire.
 
-    Two upstream exceptions do NOT reach here because both handlers translate
-    them internally: ``NonTextMessageReceived`` / ``NonJsonMessageReceived`` (a
-    binary or malformed-JSON frame already gets upstream's controlled close).
+    Two upstream exceptions do NOT reach here because neither handler lets
+    them escape: transport-ws closes ``4400`` on a ``NonTextMessageReceived`` /
+    ``NonJsonMessageReceived``, while legacy closes ``1002`` on the former and
+    never raises the latter (``ignore_parsing_errors=True`` drops a
+    malformed-JSON frame outright).
 
     Why neither close is a revocation: the frame was invalid or the server
     broke, and in neither case was the actor in question, so ``4403`` would
@@ -1850,7 +1548,7 @@ def build_revalidating_consumer_class(
         and _is_websocket_adapter_base(websocket_adapter_base)
     ):
         raise ConfigurationError(
-            f"{describe_value(base_consumer_cls)} is not a Strawberry Channels GraphQLWSConsumer: "
+            f"{truth.describe(base_consumer_cls)} is not a Strawberry Channels GraphQLWSConsumer: "
             "its graphql_transport_ws_handler_class, graphql_ws_handler_class and "
             "websocket_adapter_class must be the classes whose hooks the revalidating "
             "consumer overrides.",
@@ -2013,75 +1711,13 @@ def build_revalidating_consumer_class(
             send, which is the deliberate head-of-line cost of the stronger
             "nothing after revocation" invariant.
             """
-            try:
-                message_type = message.get("type")
-            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException:
-                logger.exception(
-                    "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                    "connection is revoked and closed (fail-closed) rather than continuing on "
-                    "the connection's cached actor.",
-                )
-                try:
-                    await send_revalidated_operation_frame(self, message, super().send_json)
-                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                    raise
-                except BaseException:
-                    logger.exception(
-                        "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                        "connection is revoked and closed (fail-closed) rather than continuing on "
-                        "the connection's cached actor.",
-                    )
+            if message.get("type") not in _INFORMATION_BEARING_FRAME_TYPES:
+                async with actor_lease(self.ws_consumer.scope):
+                    if self.ws_consumer._revocation.revoked:
+                        return
+                    await super().send_json(message)
                 return
-            if message_type not in _INFORMATION_BEARING_FRAME_TYPES:
-                try:
-                    async with actor_lease(self.ws_consumer.scope):
-                        try:
-                            revoked = self.ws_consumer._revocation.revoked
-                        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                            raise
-                        except BaseException:
-                            logger.exception(
-                                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                                "connection is revoked and closed (fail-closed) rather than continuing on "
-                                "the connection's cached actor.",
-                            )
-                            revoked = True
-                        if revoked:
-                            return
-                        try:
-                            await super().send_json(message)
-                        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                            raise
-                        except BaseException:
-                            logger.exception(
-                                "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                                "connection is revoked and closed (fail-closed) rather than continuing on "
-                                "the connection's cached actor.",
-                            )
-                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                    raise
-                except BaseException:
-                    logger.exception(
-                        "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                        "connection is revoked and closed (fail-closed) rather than continuing on "
-                        "the connection's cached actor.",
-                    )
-                    # Fail closed on hostile scope: suppress the control frame
-                    return
-                return
-            try:
-                await send_revalidated_operation_frame(self, message, super().send_json)
-            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException:
-                logger.exception(
-                    "GraphQLWebSocketConsumer: the WebSocket session revalidation failed; the "
-                    "connection is revoked and closed (fail-closed) rather than continuing on "
-                    "the connection's cached actor.",
-                )
-                return
+            await send_revalidated_operation_frame(self, message, super().send_json)
 
     class GraphQLWebSocketConsumer(consumer_base):
         """The package's WebSocket GraphQL consumer: upstream plus revalidation.
@@ -2253,7 +1889,7 @@ def _host_validation_request(scope: WebSocketScope) -> HttpRequest:
 
 
 class DjangoWebSocketHostValidator:
-    """Deny a WebSocket handshake whose ``Host`` Django's own boundary refuses.
+    """An ASGI middleware denying the handshakes Django's own boundary refuses.
 
     A package-owned, UNSUPPORTED-to-import ASGI middleware (spec-046 Decision 19),
     composed by
@@ -2270,8 +1906,8 @@ class DjangoWebSocketHostValidator:
     consumer who wants a different Host policy configures ``ALLOWED_HOSTS``,
     exactly as they would for HTTP; there is no package setting to learn.
 
-    Not exported (no ``__all__`` entry here, and neither ``routers.py::__all__``
-    nor the package root names it). The name is deliberately NOT
+    Not exported (not documented as public here, and named by neither
+    ``routers.py::__all__`` nor the package root). The name is deliberately NOT
     underscore-prefixed the way this module's other new classes are, and the
     difference is worth stating rather than leaving as an inconsistency: it is
     named in the router's own construction-time hint text
@@ -2279,8 +1915,8 @@ class DjangoWebSocketHostValidator:
     ``_FACTORY_CONTRACT_HINT``) and in ``routers.py``'s composition docstrings, so a
     consumer reads this exact spelling in an error message and must be able to grep
     for it. "Private" here therefore means **unsupported to import or subclass** -
-    an ``__all__`` and documentation contract, not an import-time one - and an
-    absent underscore is not a promise of stability.
+    a documentation contract, not an import-time one - and an absent underscore
+    is not a promise of stability.
 
     It is applied by the router, so an injected ``websocket_consumer_class`` sits
     inside it by construction - which is what finally makes Decision 11's "an

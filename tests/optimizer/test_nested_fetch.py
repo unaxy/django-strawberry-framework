@@ -2,7 +2,9 @@
 
 Strategy registry identity, ``ConfigurationError`` at construction, and the
 ``ContextVar`` active-strategy seam have no HTTP envelope. Routed strategy SQL
-is ``examples/fakeshop/test_query/test_optimizer_auto_api.py``.
+is ``examples/fakeshop/test_query/test_optimizer_auto_api.py``. A ``.distinct()``
+child refusing the window is
+``test_optimizer_auto_api.py::test_distinct_child_queryset_never_windows_over_http``.
 """
 
 from collections.abc import Callable
@@ -35,7 +37,10 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     resolve_strategy,
     unwindowable_child_queryset_reason,
 )
-from django_strawberry_framework.optimizer.nested_planner import NestedConnectionPlanResult
+from django_strawberry_framework.optimizer.nested_planner import (
+    NestedConnectionPlanResult,
+    _select_nested_strategy,
+)
 from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
     WINDOW_TOTAL_COUNT,
@@ -163,14 +168,13 @@ def test_resolve_strategy_rejects_hostile_type_and_class_name() -> None:
         resolve_strategy(WindowedPrefetchStrategy)
 
 
-def test_resolve_strategy_hostile_str_dunders_stay_typed() -> None:
-    """A consumer-supplied str subclass cannot replace the typed rejection.
+def test_resolve_strategy_str_subclass_matches_by_content_and_renders_by_its_repr() -> None:
+    """A ``str`` subclass matches by content; the rejection renders it through its own repr.
 
-    Deciding never dispatches into the selection's dunders: the ``"auto"`` check
-    and the registry match compare content through the base ``str`` slot, so no
-    ``__eq__`` or ``__hash__`` runs. Rendering the unknown-name message reads
-    ``__repr__`` through a guard. A hostile override therefore degrades to the
-    typed ``ConfigurationError`` instead of an arbitrary exception.
+    Matching is content equality through the base ``str`` slot (no ``__eq__``,
+    no ``__hash__`` from a registry lookup), so those overrides never decide the
+    verdict. A subclass that overrides ``__repr__`` is rendered by it: that is
+    the consumer's own behaviour, and what it raises propagates.
     """
 
     class HostileEq(str):
@@ -201,24 +205,19 @@ def test_resolve_strategy_hostile_str_dunders_stay_typed() -> None:
         def __repr__(self) -> str:
             raise RuntimeError("hostile repr")
 
-    with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
+    with pytest.raises(RuntimeError, match="hostile repr"):
         resolve_strategy(HostileRepr("correlated"))
 
 
-def test_resolve_strategy_raising_plan_attribute_is_not_a_strategy() -> None:
-    """A raising ``plan`` attribute reads as "not a strategy", never escapes.
-
-    ``getattr(value, "plan", None)`` only absorbs ``AttributeError``; an
-    attribute read that raises anything else is guarded to the same typed
-    rejection a non-strategy object receives.
-    """
+def test_resolve_strategy_plan_attribute_error_propagates() -> None:
+    """A consumer object's ``plan`` read runs untouched; what it raises propagates."""
 
     class RaisingPlan:
         @property
         def plan(self) -> NoReturn:
-            raise RuntimeError("hostile plan read")
+            raise RuntimeError("plan read failed")
 
-    with pytest.raises(ConfigurationError, match="must be a strategy name"):
+    with pytest.raises(RuntimeError, match="plan read failed"):
         resolve_strategy(RaisingPlan())
 
 
@@ -375,6 +374,20 @@ def test_extension_pins_strategy_at_construction() -> None:
     )
     with pytest.raises(ConfigurationError):
         DjangoOptimizerExtension(nested_connection_strategy="correlated")
+
+
+def test_select_nested_strategy_honors_a_per_field_hint() -> None:
+    """A connection field's ``OptimizerHint.strategy`` overrides the extension default.
+
+    The PG HTTP rows in ``test_optimizer_auto_api.py`` exercise the same branch
+    against LATERAL vs windowed SQL; the SQLite HTTP pin is
+    ``test_per_field_strategy_hint_windowed_emits_over_when_the_default_refuses``.
+    This row is the call-identity half.
+    """
+    assert _select_nested_strategy(OptimizerHint.strategy("windowed")) is WINDOWED_STRATEGY
+    assert _select_nested_strategy(OptimizerHint.strategy("auto")) is AUTO_STRATEGY
+    assert _select_nested_strategy(OptimizerHint()) is WINDOWED_STRATEGY
+    assert _select_nested_strategy(None) is WINDOWED_STRATEGY
 
 
 def test_optimizer_hint_strategy_accepts_and_drives_a_consumer_instance() -> None:

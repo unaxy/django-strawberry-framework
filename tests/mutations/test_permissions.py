@@ -380,8 +380,13 @@ def test_awaitable_has_permission_is_rejected_not_bypassed() -> None:
 
 
 @pytest.mark.django_db
-def test_hostile_non_bool_permission_result_keeps_configuration_error() -> None:
-    """A hostile ``__repr__`` cannot replace the typed non-bool auth failure."""
+def test_hostile_non_bool_permission_result_repr_propagates_and_denies() -> None:
+    """A non-bool result's own ``__repr__`` renders it; what that raises propagates, no write.
+
+    The non-bool is still refused before any write: the message that names it is built
+    from the result's ``repr``, which is consumer behaviour, so its exception surfaces
+    in place of the ``ConfigurationError`` and the create never runs.
+    """
 
     class Hostile:
         @override
@@ -412,9 +417,8 @@ def test_hostile_non_bool_permission_result_keeps_configuration_error() -> None:
     )
 
     assert res.errors is not None
-    assert isinstance(res.errors[0].original_error, ConfigurationError)
-    assert "must return a bool" in res.errors[0].message
-    assert "unprintable" in res.errors[0].message
+    assert isinstance(res.errors[0].original_error, RuntimeError)
+    assert "repr escape" in res.errors[0].message
     assert not product_models.Item.objects.filter(name="HostileBlocked").exists()
 
 
@@ -608,6 +612,16 @@ def test_require_sync_bool_auth_result_rejects_non_bool_values(invalid_result: o
     """``_require_sync_bool_auth_result`` rejects non-bool values without coercion."""
     with pytest.raises(ConfigurationError, match="must return a bool"):
         _require_sync_bool_auth_result(invalid_result, owner="CustomPerm", method="has_permission")
+
+
+def test_require_sync_bool_auth_result_message_is_exact() -> None:
+    """The non-bool reject names the owner, the method and the rendered value."""
+    with pytest.raises(ConfigurationError) as exc:
+        _require_sync_bool_auth_result(1, owner="CustomPerm", method="has_permission")
+    assert str(exc.value) == (
+        "CustomPerm.has_permission must return a bool; got 1. Authorization results are "
+        "never coerced from truthiness."
+    )
 
 
 # ---------------------------------------------------------------------------

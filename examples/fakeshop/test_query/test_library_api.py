@@ -30,6 +30,7 @@ from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
 from django.db.models import Model, QuerySet
+from django.db.models.signals import post_init
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
@@ -1237,7 +1238,7 @@ def test_library_branches_via_djangolistfield_consumer_manager_resolver_over_htt
     Pins the field-wrapper's shared ``Manager.all()`` coercion - the
     ``_coerced_manager_queryset(source)`` call in
     ``django_strawberry_framework/utils/querysets.py::normalize_query_source``, reached via
-    ``_post_process_consumer_sync`` - before
+    ``prepared_resolver_source`` - before
     ``apply_type_visibility_sync`` runs. The fakeshop resolver
     ``apps.library.schema._branches_manager_resolver`` returns
     ``Branch.objects`` (a ``Manager``, NOT a ``QuerySet``); rows coming
@@ -8073,6 +8074,76 @@ def test_generic_relation_tags_resolve_over_http_with_optimizer() -> None:
     assert len(tag_sql) == 1, tag_sql
 
 
+@pytest.mark.django_db
+def test_declared_filter_bag_applies_each_lookup_through_its_own_filter() -> None:
+    """A bag over a declared filter plus generated lookups applies every lookup.
+
+    ``name`` is declared as an ``iexact`` filter while ``Meta.fields`` also
+    generates ``name__icontains``, so the generated ``name`` bag carries
+    ``iExact`` (the declared filter) and ``iContains`` (the generated one).
+    Each lookup resolves to its own filter, so supplying both is an ordinary
+    conjunction: the rows match both predicates, and a second request whose
+    ``iContains`` excludes the ``iExact`` row returns nothing, which a dropped
+    predicate could not produce. No shipped filterset declares a filter over a
+    generated head, so the consumer surface is a holder (rung 3).
+    """
+    models.Patron.objects.create(name="Ada Lovelace")
+    models.Patron.objects.create(name="Lovelace Reader")
+    models.Patron.objects.create(name="Grace Hopper")
+
+    registry.clear()
+    try:
+
+        class HolderDeclaredNameFilter(FilterSet):
+            name = CharFilter(field_name="name", lookup_expr="iexact")
+
+            class Meta:
+                model = models.Patron
+                fields = {"name": ["exact", "icontains"]}
+
+        class HolderDeclaredNamePatronType(DjangoType):
+            class Meta:
+                model = models.Patron
+                fields = ("id", "name")
+                filterset_class = HolderDeclaredNameFilter
+                name = "HolderDeclaredNamePatronType"
+
+        @strawberry.type
+        class Query:
+            def _patrons(
+                self,
+                info: Info,
+                filter: FilterInput[HolderDeclaredNameFilter] | None = None,  # noqa: A002
+            ) -> QuerySet[models.Patron]:
+                queryset = models.Patron.objects.order_by("name")
+                if filter is not None:
+                    queryset = HolderDeclaredNameFilter.apply_sync(filter, queryset, info)
+                return queryset
+
+            patrons: QuerySet[models.Patron] = strawberry.field(
+                resolver=_patrons,
+                graphql_type=list[HolderDeclaredNamePatronType],
+            )
+
+        finalize_django_types()
+        schema = strawberry.Schema(query=Query, config=strawberry_config())
+        both = _post_holder(
+            schema,
+            '{ patrons(filter: {name: {iExact: "ada lovelace", iContains: "LOVE"}}) { name } }',
+        )
+        disjoint = _post_holder(
+            schema,
+            '{ patrons(filter: {name: {iExact: "ada lovelace", iContains: "hopper"}}) { name } }',
+        )
+    finally:
+        registry.clear()
+
+    assert both.status_code == 200
+    assert both.json() == {"data": {"patrons": [{"name": "Ada Lovelace"}]}}
+    assert disjoint.status_code == 200
+    assert disjoint.json() == {"data": {"patrons": []}}
+
+
 async def _post_async_shipped(
     query: str,
     *,
@@ -12697,6 +12768,32 @@ def test_create_branch_with_shelf_perform_mutate_runs_custom_write() -> None:
 
 
 @pytest.mark.django_db
+def test_create_branch_with_shelf_validation_errors_key_to_wire_names() -> None:
+    """Overlong plain-form fields report the GraphQL wire name, not the Django name.
+
+    ``BranchWithShelfForm`` declares snake_case ``branch_name`` / ``shelf_code``
+    (``max_length=200``) while the generated input exposes ``branchName`` /
+    ``shelfCode``. A ``form.errors`` failure must key ``FieldError.field`` to the wire
+    name the client sent - the same contract the relation errors and the serializer
+    flattener keep - so both overlong values surface as ``branchName`` / ``shelfCode``.
+    """
+    response = _post_graphql(
+        "mutation($d: BranchWithShelfFormInput!){ createBranchWithShelf(data:$d){ "
+        "ok errors{ field messages } } }",
+        variables={"d": {"branchName": "B" * 201, "shelfCode": "S" * 201}},
+    )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    result = json_object(payload, "data", "createBranchWithShelf")
+    assert result["ok"] is False
+    assert {json_str(entry, "field") for entry in json_list(result, "errors")} == {
+        "branchName",
+        "shelfCode",
+    }
+
+
+@pytest.mark.django_db
 def test_create_branch_pair_rolls_back_first_write_when_second_conflicts() -> None:
     """An error envelope from a partial plain-form write rolls back every insert.
 
@@ -16770,6 +16867,53 @@ def test_library_consumer_join_survives_the_optimizers_projection(
     assert response_json(response) == {"data": data}
     assert len(captured) == query_count
     assert joined_column in captured[0]["sql"]
+
+
+@pytest.mark.django_db
+def test_id_only_fk_selection_serves_row_when_target_refuses_pk_only_stub() -> None:
+    """An id-only FK selection is served when the target model refuses its stub.
+
+    ``patron { id }`` is FK-id elided: the resolver builds a pk-only ``Patron``
+    from ``patron_id`` instead of loading the row. A ``post_init`` receiver that
+    reads a populated column (``name``) cannot run on that speculative stub.
+    The stub is the framework's optimization, not something the query asked
+    for, so the refusal degrades to the ordinary related-object load: the row
+    is served with a fully populated patron and one extra patron query.
+    """
+    _seed_library_graph()
+    stub_attempts: list[object] = []
+    first_name_tokens: list[str] = []
+
+    def _first_name_token(
+        sender: type[models.Patron],
+        instance: models.Patron,
+        **kwargs: object,
+    ) -> None:
+        del sender, kwargs
+        if not instance.name:
+            stub_attempts.append(instance.pk)
+        first_name_tokens.append(instance.name.split()[0])
+
+    post_init.connect(_first_name_token, sender=models.Patron)
+    try:
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql("{ allLibraryMembershipCards { barcode patron { id } } }")
+    finally:
+        post_init.disconnect(_first_name_token, sender=models.Patron)
+
+    patron = models.Patron.objects.get(name="Ada")
+    assert response.status_code == 200
+    assert response.json() == {
+        "data": {
+            "allLibraryMembershipCards": [
+                {"barcode": "CARD-1", "patron": {"id": patron.pk}},
+            ],
+        },
+    }
+    assert stub_attempts == [patron.pk]
+    assert len(captured) == 2
+    assert "library_patron" not in captured[0]["sql"]
+    assert "library_patron" in captured[1]["sql"]
 
 
 @pytest.mark.django_db

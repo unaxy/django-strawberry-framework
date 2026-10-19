@@ -1,7 +1,7 @@
 """Tests for the shared request-context read / write / delete dispatch.
 
-Stash/clear on slotted objects, frozen mappings, and hostile descriptors are
-not a response field. Optimizer and resource-policy stashes on the live request
+Stash/clear on slotted objects and frozen mappings are not a response field.
+Optimizer and resource-policy stashes on the live request
 are in ``examples/fakeshop/test_query/test_library_api.py`` and
 ``examples/fakeshop/test_query/test_resource_policy_api.py``.
 """
@@ -20,7 +20,6 @@ from django_strawberry_framework.utils.context import (
     restored_context_keys,
     stash_on_context,
 )
-from django_strawberry_framework.utils.typing import object_result
 
 
 def test_context_stash_round_trips_and_clears_object_dict_and_slots_mapping() -> None:
@@ -49,41 +48,16 @@ def test_context_stash_round_trips_and_clears_object_dict_and_slots_mapping() ->
         assert get_context_value(context, "dst_context_test", "missing") == "missing"
 
 
-def test_context_read_fails_closed_for_hostile_attribute_and_mapping_access() -> None:
-    """A broken consumer context cannot abort the resource/optimizer read path."""
+def test_context_read_propagates_a_consumer_descriptor_error() -> None:
+    """A consumer context's own descriptor runs untouched; what it raises propagates."""
 
-    class HostileAttribute:
+    class RaisingAttribute:
         @property
         def dst_context_test(self) -> NoReturn:
             raise RuntimeError("descriptor failed")
 
-    class HostileMapping(dict[str, object]):
-        @override
-        def get(self, key: str, default: object = None) -> NoReturn:
-            raise RuntimeError("mapping read failed")
-
-    assert get_context_value(HostileAttribute(), "dst_context_test", "missing") == "missing"
-    assert get_context_value(HostileMapping(), "dst_context_test", "missing") == "missing"
-
-
-def test_context_read_tries_mapping_after_hostile_attribute() -> None:
-    """A mapping value remains reachable when an object's attribute descriptor fails."""
-
-    class HostileAttributeMapping:
-        def __init__(self) -> None:
-            self.values = {"dst_context_test": 42}
-
-        @override
-        def __getattribute__(self, name: str) -> object:
-            if name == "dst_context_test":
-                raise RuntimeError("descriptor failed")
-            return object_result(object.__getattribute__, self, name)
-
-        def __getitem__(self, key: str) -> int:
-            return self.values[key]
-
-    context = HostileAttributeMapping()
-    assert get_context_value(context, "dst_context_test", "missing") == 42
+    with pytest.raises(RuntimeError, match="descriptor failed"):
+        get_context_value(RaisingAttribute(), "dst_context_test", "missing")
 
 
 def test_frozen_context_stash_and_clear_are_noops() -> None:
@@ -206,30 +180,6 @@ def test_restored_context_keys_on_a_none_context_is_inert() -> None:
         stash_on_context(None, "dst_context_test", 42)
         assert get_context_value(None, "dst_context_test", "d") == "d"
     assert get_context_value(None, "dst_context_test", "d") == "d"
-
-
-def test_restored_context_keys_snapshots_an_unreadable_key_as_absent() -> None:
-    """A hostile read cannot be distinguished from absence: the restore clears."""
-
-    class ReadGuarded(SlotsMapping):
-        __slots__ = ("readable",)
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.readable = False
-
-        @override
-        def __getitem__(self, key: str) -> object:
-            if not self.readable:
-                raise RuntimeError("reads locked")
-            return self.values[key]
-
-    context = ReadGuarded()
-    context.values["dst_context_test"] = "outer"
-    with restored_context_keys(context, "dst_context_test"):
-        context.readable = True
-        stash_on_context(context, "dst_context_test", "inner")
-    assert get_context_value(context, "dst_context_test", "absent") == "absent"
 
 
 def test_the_public_missing_sentinel_is_the_round_trip_identity() -> None:

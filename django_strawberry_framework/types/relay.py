@@ -26,6 +26,7 @@ package is not imported at runtime.
 
 from __future__ import annotations
 
+from types import GetSetDescriptorType, MethodType
 from typing import TYPE_CHECKING, TypeGuard, TypeVar, cast
 from weakref import WeakKeyDictionary
 
@@ -37,22 +38,20 @@ from strawberry.relay.exceptions import NodeIDAnnotationError
 from strawberry.types.base import StrawberryObjectDefinition
 
 from django_strawberry_framework.conf import relay_globalid_strategy_setting
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_class_name,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.resource_policy import check_deadline
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
-    instance_dict,
     is_str,
+    optional_instance,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.execution_mode import async_execution
+from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 
 # ``SyncMisuseError`` moved to ``utils/querysets.py``; the
 # redundant ``as`` alias re-exports it from this module so ``from
@@ -72,6 +71,8 @@ if TYPE_CHECKING:
     from strawberry.schema import Schema
     from strawberry.types import Info
     from strawberry.utils.await_maybe import AwaitableOrValue
+
+    from django_strawberry_framework.utils.typing import ModelField
 
     from .base import DjangoType
     from .definition import DjangoTypeDefinition, GlobalIDStrategy
@@ -97,7 +98,7 @@ def implements_relay_node(type_cls: type[DjangoType]) -> TypeGuard[type[_RelayDj
     runs pre-base-injection at collection time against the validated
     ``Meta.interfaces`` tuple.
     """
-    return issubclass(type_cls, relay.Node)
+    return truth.is_subclass(type_cls, relay.Node)
 
 
 # Attribute the root ``node``/``nodes`` resolvers (the root ``relay.py``'s
@@ -109,6 +110,14 @@ def implements_relay_node(type_cls: type[DjangoType]) -> TypeGuard[type[_RelayDj
 # type the GlobalID named. The hint is the missing wire
 # between the decode routing (which type's resolvers fetched the row) and
 # graphql-core's concrete-type selection.
+#
+# Reconsideration triggers (Family ``relay-node-type-stamp``): the stamp stays
+# in the root ``relay.py`` and the honor stays here - the stamp reads decode
+# routing only the root refetchers own, while every ``is_type_of`` reader
+# already depends on this module (moving either half reverses that direction).
+# A second hint scheme re-opens the attribute name; a stored value beyond the
+# resolving type re-opens the ``setattr``/``is`` value spells on both halves;
+# a stamper outside the root fields re-opens stamp ownership.
 _NODE_TYPE_HINT_ATTR = "_dsf_node_type_hint"
 
 
@@ -143,21 +152,18 @@ def install_is_type_of(type_cls: type[DjangoType]) -> None:
     needs ``strawberry.cast(...)`` support, a focused follow-up can
     add the branch without churn to the rest of the Relay machinery.
     """
-    if "is_type_of" in type_cls.__dict__:
+    if "is_type_of" in truth.class_dict(type_cls):
         return
     model = model_for(type_cls)
 
     def is_type_of(obj: object, _info: object) -> bool:
-        try:
-            hinted = getattr(obj, _NODE_TYPE_HINT_ATTR, None)
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            # A consumer model may expose the private hint slot through a
-            # hostile descriptor. The hint is only a dispatch optimization;
-            # preserve the ordinary isinstance fallback when reading it fails.
-            hinted = None
+        obj = unwrap_lazy_object(obj)
+        # The hint is the value the root fields stored on the instance; it is
+        # read from the instance namespace, so no descriptor runs.
+        hinted = truth.static_attr(obj, _NODE_TYPE_HINT_ATTR)
         if hinted is not None:
             return hinted is type_cls
-        return isinstance(obj, (type_cls, model))
+        return truth.is_instance(obj, type_cls) or truth.is_instance(obj, model)
 
     type_cls.is_type_of = is_type_of
 
@@ -174,28 +180,32 @@ def apply_interfaces(type_cls: type[DjangoType], definition: DjangoTypeDefinitio
     spec-015 #"Inherited interfaces via parent").
 
     Raises:
-        ConfigurationError: an exception from ``cls.__bases__`` assignment is
-            wrapped with the offending interface named in the message so
-            consumers see "cannot add interface X" rather than a raw layout
-            or hostile-metaclass exception
+        ConfigurationError: the ``TypeError`` Python raises when the extended
+            bases cannot form a consistent MRO or layout is wrapped with the
+            offending interface named in the message so consumers see "cannot
+            add interface X" rather than a raw layout error
             (spec-015 Decision 1 #"never as a raw layout error").
 
     """
     # Identity scan, not ``not in``: ``tuple.__contains__`` over the MRO would dispatch a
     # consumer metaclass ``__eq__``.
-    mro = type_cls.__mro__
+    mro = truth.mro(type_cls)
     additions = tuple(
-        iface for iface in definition.interfaces if not any(klass is iface for klass in mro)
+        iface for iface in definition.interfaces if not any(iface is base for base in mro)
     )
     if not additions:
         return
+    # Written through the ``type`` slot itself, so a metaclass ``__setattr__``
+    # cannot intercept the assignment.
+    # ``type.__bases__`` is a C getset descriptor in ``type``'s own namespace.
+    set_bases = require_instance(truth.class_dict(type)["__bases__"], GetSetDescriptorType).__set__
     try:
-        type_cls.__bases__ = (*type_cls.__bases__, *additions)
-    except BaseException as exc:
-        offending = ", ".join(_safe_class_name(iface) for iface in additions)
+        set_bases(type_cls, (*truth.bases(type_cls), *additions))
+    except TypeError as exc:
+        offending = ", ".join(truth.name(iface) for iface in additions)
         raise ConfigurationError(
-            f"{_safe_class_name(type_cls)}: cannot add interface(s) {offending} to bases. "
-            f"Python rejected the resulting MRO ({_safe_arg_repr(exc)}). Either drop the "
+            f"{truth.name(type_cls)}: cannot add interface(s) {offending} to bases. "
+            f"Python rejected the resulting MRO ({truth.render(exc)}). Either drop the "
             "incompatible interface from Meta.interfaces or rework the class "
             "hierarchy.",
         ) from exc
@@ -234,7 +244,7 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
     else:
         return
     raise ConfigurationError(
-        f"{_safe_class_name(model)}: relay.Node is not supported on models with a "
+        f"{truth.name(model)}: relay.Node is not supported on models with a "
         "composite primary key. Either declare an explicit id: "
         "relay.NodeID[...] annotation on the DjangoType or remove "
         "relay.Node from Meta.interfaces.",
@@ -311,7 +321,7 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
     classmethods that act on the runtime ``cls``.)
     """
     # Only ``_stamp_relay_id_attr`` writes the slot, with the scanned ``str``.
-    stamped = cast("str | None", cls.__dict__.get(_RELAY_ID_ATTR_SLOT))
+    stamped = optional_instance(truth.class_dict(cls).get(_RELAY_ID_ATTR_SLOT), str)
     if stamped is not None:
         return stamped
     try:
@@ -320,6 +330,11 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
         return cast("str", relay.Node.resolve_id_attr.__func__(cls))
     except NodeIDAnnotationError:
         return "pk"
+
+
+# Marks a column absent from a row's instance namespace (``None`` is a value a
+# loaded column can hold).
+_ID_NOT_CACHED = object()
 
 
 def _resolve_id_default(
@@ -345,26 +360,57 @@ def _resolve_id_default(
     (spec-015 #"id_attr = cls.resolve_id_attr" / Decision 7's "no
     avoidable lazy loads on ``resolve_id``").
 
-    Keying on ``root.__class__._meta.pk.attname`` is deliberate: the
+    Keying on ``type(root)._meta.pk.attname`` is deliberate: the
     alternative ``cls.__django_strawberry_definition__.model._meta.pk.attname``
     would mis-key the ``__dict__`` lookup for proxy-model rows whose actual
-    class differs from the declared DjangoType model.
+    class differs from the declared DjangoType model. A Django lazy proxy
+    root (``request.user`` returned by a ``me``-style resolver) is unwrapped
+    first, so the class read and the cache check see the row it stands for.
     """
     del info  # Strawberry's Relay machinery passes it by keyword; the default id never reads it
+    # A lazy proxy stands in for the row it wraps.
+    root = cast("models.Model", unwrap_lazy_object(root))
     id_attr = cls.resolve_id_attr()
     if id_attr == "pk":
-        id_attr = root.__class__._meta.pk.attname
-    try:
-        return str(instance_dict(root)[id_attr])
-    except KeyError:
-        return str(read_attr(root, id_attr))
+        # The row's real class, read without asking the row; a model class.
+        id_attr = cast("type[models.Model]", truth.class_of(root))._meta.pk.attname
+    # The cache is the row's real instance namespace, read without asking the
+    # row for it; ``dict.get`` never runs a namespace subclass's ``__missing__``.
+    # A root with no instance namespace is refused the way reading its
+    # ``__dict__`` attribute refuses it.
+    namespace = truth.instance_dict(root)
+    if namespace is None:
+        raise AttributeError(f"{truth.name(root)!r} object has no attribute '__dict__'")
+    cached = dict[str, object].get(namespace, id_attr, _ID_NOT_CACHED)
+    if cached is not _ID_NOT_CACHED:
+        return str(cached)
+    return str(read_attr(root, id_attr))
 
 
 def _coerce_node_id(node_id: object) -> object:
-    return node_id.node_id if isinstance(node_id, relay.GlobalID) else node_id
+    if truth.is_instance(node_id, relay.GlobalID):
+        return node_id.node_id
+    return node_id
 
 
-def _node_value_or_none(cls: type[_RelayDjangoType], node_id: object) -> object:
+def _classmethod_function(value: object) -> object:
+    """Return the function a stored ``classmethod`` (or bound method) wraps, else ``None``.
+
+    ``value`` is a class-namespace entry read by ``truth.static_attr``; only the
+    exact builtin wrapper types are unwrapped, so the ``__func__`` read is the
+    builtin's own slot.
+    """
+    if truth.is_exact(value, classmethod) or truth.is_exact(value, MethodType):
+        return value.__func__
+    return None
+
+
+def _node_value_or_none(
+    cls: type[_RelayDjangoType],
+    node_id: object,
+    *,
+    slot: tuple[str, ModelField | None] | None = None,
+) -> object:
     """Return the id-slot value ``node_id`` names, coerced to its column type; ``None`` if no row.
 
     Every caller of ``resolve_node`` / ``resolve_nodes`` passes the raw GlobalID
@@ -377,13 +423,15 @@ def _node_value_or_none(cls: type[_RelayDjangoType], node_id: object) -> object:
     id spelling a row's value differently (``"007"`` for pk ``7``, an upper-case
     UUID) still finds it, and a literal the column rejects identifies no row
     instead of leaking Django's ``ValueError`` from the filter. A
-    ``relay.GlobalID`` is unwrapped first.
+    ``relay.GlobalID`` is unwrapped first. ``slot`` is the batch's precomputed
+    ``relay.py::_node_id_slot`` value (see ``_node_values``); when omitted the
+    coercer resolves it.
     """
     # In-function import: ``relay.py`` imports this module at module top, so a
     # module-top import back would close the load cycle.
     from django_strawberry_framework.relay import _coerce_pk_or_none  # noqa: PLC0415 - import cycle
 
-    return _coerce_pk_or_none(cls, _coerce_node_id(node_id))
+    return _coerce_pk_or_none(cls, _coerce_node_id(node_id), slot=slot)
 
 
 def _raise_if_required(
@@ -404,7 +452,7 @@ def _raise_if_required(
         return
     model = model_for(cls)
     raise model.DoesNotExist(
-        f"{_safe_class_name(model)}: no row matching {id_attr}={_safe_arg_repr(node_id)}.",
+        f"{truth.name(model)}: no row matching {id_attr}={truth.render(node_id)}.",
     )
 
 
@@ -415,9 +463,17 @@ def _node_values(
     *,
     required: bool,
 ) -> list[object]:
-    """Coerce each of ``node_ids`` (``None`` where it names no row); a required miss raises."""
+    """Coerce each of ``node_ids`` (``None`` where it names no row); a required miss raises.
+
+    The id slot is a per-type constant, so it is resolved once for the batch
+    and threaded to every coercion instead of once per id.
+    """
+    # In-function import for the same load cycle ``_node_value_or_none`` names.
+    from django_strawberry_framework.relay import _node_id_slot  # noqa: PLC0415 - import cycle
+
     raw_ids = list(node_ids)
-    values = [_node_value_or_none(cls, node_id) for node_id in raw_ids]
+    slot = _node_id_slot(cls)
+    values = [_node_value_or_none(cls, node_id, slot=slot) for node_id in raw_ids]
     for node_id, value in zip(raw_ids, values, strict=True):
         if value is None:
             _raise_if_required(cls, id_attr, node_id, required=required)
@@ -543,9 +599,15 @@ def _resolve_globalid_strategy(
 # model label and which ACCEPT one on decode - because for the framework
 # strategies the two coincide. That is why ``_emits_model_label`` and
 # ``_accepts_model_label_decode`` have identical bodies and are still two names:
-# they are read by opposite halves of the contract (the encoder closure and the
-# routing audit; the decode-Step-2 enforcement). The asymmetry note belongs
-# here, on the shared set - split the set, not just the predicates, if encode
+# the routing audit reads the emit half and the accept half through them, and
+# the decode-Step-2 enforcement reads the accept half. The encoder closure reads
+# this set directly (it decides over the RAW resolved strategy - a live callable
+# or framework string - while the predicates answer over the RECORDED
+# classification; re-open if the closure ever captures the recorded value), and
+# the strategy-aware filter reads both sets directly (it derives an accepted
+# NAME SET for validation and its mismatch message, not a boolean verdict;
+# re-open if filter acceptance must diverge from decode acceptance, or a second
+# name-set deriver appears). Split the sets, not just the predicates, if encode
 # and decode acceptance ever diverge.
 MODEL_LABEL_STRATEGIES = frozenset({"model", "type+model"})
 TYPE_NAME_STRATEGIES = frozenset({"type", "type+model"})
@@ -555,8 +617,9 @@ def _emits_model_label(effective_strategy: str | None) -> bool:
     """Return whether a recorded effective strategy emits the model-label slot.
 
     ``model`` and ``type+model`` both emit ``app_label.modelname`` in the
-    ``GlobalID`` type-name slot. Used by the encoder closure (which slot to
-    emit) and the model-label-routing audit (the ``emits_model_label`` half).
+    ``GlobalID`` type-name slot. Read by the model-label-routing audit (the
+    ``emits_model_label`` half); the encoder closure reads
+    ``MODEL_LABEL_STRATEGIES`` directly - see the membership comment.
     """
     return effective_strategy in MODEL_LABEL_STRATEGIES
 
@@ -578,10 +641,10 @@ def _accepts_type_name_decode(effective_strategy: str | None) -> bool:
 
     ``type`` and ``type+model`` both accept a bare ``graphql_type_name`` payload.
     Sibling of ``_accepts_model_label_decode`` for the type-name shape. Read by
-    BOTH the decode-Step-2 enforcement (the no-dot branch) AND
-    ``filters/base.py::_accepted_globalid_type_names`` (the strategy-aware filter),
-    so the ``{"type", "type+model"}`` membership lives in one place
-    (``TYPE_NAME_STRATEGIES``) instead of being re-typed at each site.
+    the decode-Step-2 enforcement (the no-dot branch);
+    ``filters/base.py::_accepted_globalid_type_names`` (the strategy-aware filter)
+    reads ``TYPE_NAME_STRATEGIES`` directly to derive its accepted name set -
+    see the membership comment.
     """
     return effective_strategy in TYPE_NAME_STRATEGIES
 
@@ -622,20 +685,20 @@ def encode_typename(
     """
     if callable(strategy):
         result = strategy(type_cls, definition.model, root)
-        if not isinstance(result, str):
+        if not truth.is_instance(result, str):
             raise ConfigurationError(
                 f"{definition.graphql_type_name}: the Meta.globalid_strategy callable "
-                f"returned {_safe_arg_repr(result)}; a (type_cls, model, root) -> str encoder "
+                f"returned {truth.render(result)}; a (type_cls, model, root) -> str encoder "
                 "must return a non-empty string for the GlobalID type-name slot.",
             )
         # A str subclass can override ``__str__`` / ``__format__`` and escape
         # later in Strawberry's base64 encoder. Normalize it through the base
         # descriptor so the validated return contract is an inert exact str.
-        normalized = str.__str__(result)
+        normalized = truth.text(result)
         if not normalized:
             raise ConfigurationError(
                 f"{definition.graphql_type_name}: the Meta.globalid_strategy callable "
-                f"returned {_safe_arg_repr(result)}; a (type_cls, model, root) -> str encoder "
+                f"returned {truth.render(result)}; a (type_cls, model, root) -> str encoder "
                 "must return a non-empty string for the GlobalID type-name slot.",
             )
         return normalized
@@ -776,7 +839,7 @@ def _inherits_framework_closure(type_cls: type[relay.Node]) -> bool:
     emit the PARENT's payload (the parent ``definition`` is captured in the
     inherited closure).
     """
-    existing_func = getattr(getattr(type_cls, "resolve_typename", None), "__func__", None)
+    existing_func = _classmethod_function(truth.static_attr(type_cls, "resolve_typename"))
     return getattr(existing_func, _FRAMEWORK_CLOSURE_MARKER, False)
 
 
@@ -797,13 +860,12 @@ def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     ``custom`` - the intended semantics. Only a consumer-declared method is an
     override.
     """
-    existing = read_attr(type_cls, "resolve_typename", None)
-    existing_func = read_attr(existing, "__func__", None)
-    if existing is None or existing_func is None:
+    existing_func = _classmethod_function(truth.static_attr(type_cls, "resolve_typename"))
+    if existing_func is None:
         return False
     if read_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER, False):
         return False
-    node_func = getattr(relay.Node.resolve_typename, "__func__", None)
+    node_func = _classmethod_function(truth.class_dict(relay.Node).get("resolve_typename"))
     return existing_func is not node_func
 
 
@@ -936,7 +998,7 @@ def _plain_globalid_slot(slot: object) -> str | None:
     splitting, and registry lookups so hostile ``__str__`` / ``__format__`` overrides cannot
     escape the decode input boundary.
     """
-    if not isinstance(slot, str):
+    if not truth.is_instance(slot, str):
         return None
     return str.__str__(slot)
 
@@ -1005,40 +1067,29 @@ def decode_global_id(
     ``DjangoType`` class (``definition.origin``) and ``node_id`` is the parsed id
     string.
     """
-    # ``registry`` is reached in-function: ``registry.py`` imports
-    # ``implements_relay_node`` from this module in-function, and ``relay.py``
-    # must not import ``registry`` at module top - the same cycle-dodge
-    # ``_resolve_globalid_strategy`` above documents for its ``conf`` / ``base``
-    # imports. Decode runs well after module load, so the local import is cheap.
-    from django_strawberry_framework.registry import registry  # noqa: PLC0415 - import cycle
-
-    if not isinstance(gid, (relay.GlobalID, str)):
+    is_str_gid = truth.is_instance(gid, str)
+    if not (is_str_gid or truth.is_instance(gid, relay.GlobalID)):
         raise ConfigurationError(
             f"decode_global_id: expected a relay.GlobalID or its base64 string, got "
-            f"{_safe_type_name(gid)}. A GlobalID must be the encoded id, not a raw payload.",
+            f"{truth.kind(gid)}. A GlobalID must be the encoded id, not a raw payload.",
         )
 
-    if isinstance(gid, str):
-        raw_gid = str.__str__(gid)
+    if is_str_gid:
+        raw_gid = truth.text(gid)
         try:
             decoded = relay.GlobalID.from_id(raw_gid)
         except ValueError as exc:
             raise ConfigurationError(
-                f"decode_global_id: {_safe_arg_repr(raw_gid)} is not a valid GlobalID (malformed base64 or "
+                f"decode_global_id: {truth.render(raw_gid)} is not a valid GlobalID (malformed base64 or "
                 "not a 'type_name:node_id' shape).",
             ) from exc
     else:
+        # Not a ``str``, so the real-class gate above admitted a ``GlobalID``.
         decoded = gid
 
-    try:
-        # A caller-built ``GlobalID`` (or subclass) carries whatever its slots were given.
-        raw_type_name = decoded.type_name
-        raw_node_id = decoded.node_id
-    except BaseException as exc:
-        raise ConfigurationError(
-            "decode_global_id: GlobalID fields could not be read; both type_name and "
-            "node_id must be non-empty strings.",
-        ) from exc
+    # A caller-built ``GlobalID`` (or subclass) carries whatever its slots were given.
+    raw_type_name: object = decoded.type_name
+    raw_node_id: object = decoded.node_id
     if (type_name := _plain_globalid_slot(raw_type_name)) is None or (
         node_id := _plain_globalid_slot(raw_node_id)
     ) is None:
@@ -1048,8 +1099,8 @@ def decode_global_id(
         )
     if not type_name or not node_id:
         raise ConfigurationError(
-            f"decode_global_id: GlobalID has an empty slot (type_name={_safe_arg_repr(type_name)}, "
-            f"node_id={_safe_arg_repr(node_id)}); both must be non-empty.",
+            f"decode_global_id: GlobalID has an empty slot (type_name={truth.render(type_name)}, "
+            f"node_id={truth.render(node_id)}); both must be non-empty.",
         )
 
     is_model_label = "." in type_name
@@ -1131,7 +1182,7 @@ def _order_nodes(
                 output.append(index[key])
             except KeyError as exc:
                 raise model.DoesNotExist(
-                    f"{_safe_class_name(model)}: no row matching {id_attr}={key!r}.",
+                    f"{truth.name(model)}: no row matching {id_attr}={key!r}.",
                 ) from exc
         else:
             output.append(None if key is None else index.get(key))
@@ -1321,9 +1372,8 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
     """
     _stamp_relay_id_attr(type_cls)
     for attr, default_impl in _RELAY_RESOLVER_DEFAULTS:
-        existing = getattr(type_cls, attr, None)
-        node_default = getattr(relay.Node, attr, None)
-        existing_func = getattr(existing, "__func__", None)
-        node_func = getattr(node_default, "__func__", None)
+        existing = truth.static_attr(type_cls, attr)
+        existing_func = _classmethod_function(existing)
+        node_func = _classmethod_function(truth.class_dict(relay.Node).get(attr))
         if existing is None or (existing_func is not None and existing_func is node_func):
             setattr(type_cls, attr, classmethod(default_impl))

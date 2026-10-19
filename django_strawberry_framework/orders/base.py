@@ -10,10 +10,12 @@ entire filter subsystem just to build orders, and would re-couple sibling
 Layer-3 packages after the neutral module was extracted).
 
 The cookbook signature makes ``field_name`` required positional on the
-``RelatedOrder`` subclass; this port makes it optional so the metaclass's
-collection step can mutate it later if needed. The consumer-facing
-``OrderSet.Meta.fields`` surface always supplies one explicitly, so the
-relaxation is purely ergonomic.
+``RelatedOrder`` subclass; this port makes it optional as a purely
+ergonomic relaxation. The consumer-facing ``OrderSet.Meta.fields``
+surface always supplies one explicitly, and the input-field triples
+fall back to the declaration name (``entry.field_name or top_name``
+in ``orders/inputs.py::_build_input_fields``) when it is absent.
+Nothing assigns ``field_name`` after construction.
 
 No operator-bag / form-cleaning machinery - the order side has no
 operator-bag (no ``and_`` / ``or_`` / ``not_``) and no form validation per
@@ -26,14 +28,9 @@ from typing import TYPE_CHECKING, cast
 
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_class_name,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
-from django_strawberry_framework.utils._narrowing import is_class
+from django_strawberry_framework.utils import truth
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -133,16 +130,17 @@ class RelatedOrder(RelatedSetTargetMixin):
         silently walking the filter family's fields through the order input
         builder). Mirrors the filter twin's
         ``filters/base.py::RelatedFilter._validate_target``.
+
+        Target and owner identity are read by ``utils/truth.py``, so a value
+        is never asked whether it is a class.
         """
-        if not (is_class(resolved) and issubclass(resolved, _order_set_class())):
+        if not truth.is_subclass(resolved, _order_set_class()):
             # ``_bind_owner`` is the one writer of the owner slot, and it stores a set class.
             owner: type[object] | None = getattr(self, self._owner_attr, None)
-            owner_label = (
-                _safe_class_name(owner, qualified=True) if isinstance(owner, type) else "<unbound>"
-            )
+            owner_label = truth.qualname(owner) if truth.is_type(owner) else "<unbound>"
             raise ConfigurationError(
-                f"{owner_label} declares RelatedOrder {_safe_arg_repr(self.field_name)} targeting "
-                f"{_safe_type_name(resolved)}, which is not an OrderSet subclass. "
+                f"{owner_label} declares RelatedOrder {truth.render(self.field_name)} targeting "
+                f"{truth.kind(resolved)}, which is not an OrderSet subclass. "
                 "RelatedOrder targets must resolve to an OrderSet subclass (a class, "
                 "an import-path string, or a zero-arg factory returning one); "
                 "a FilterSet or unrelated class cannot order a relation branch. "

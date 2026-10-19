@@ -1,18 +1,15 @@
 """Exceptions raised by django-strawberry-framework.
 
-Lives at the bottom of the import graph - no Django, no Strawberry, no
-internal package imports - so the exception hierarchy can be raised from
-anywhere without circulars.
+Lives at the bottom of the import graph - no Django, no Strawberry, and from
+the package only ``utils/truth.py`` (which imports nothing) - so the exception
+hierarchy can be raised from anywhere without circulars. ``truth`` is imported
+where a message is built, not at module scope: importing it runs the ``utils``
+package, whose modules import this one.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
-
 from typing_extensions import override
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 __all__ = (
     "ConfigurationError",
@@ -22,244 +19,6 @@ __all__ = (
     "PathResolutionError",
 )
 
-_P = ParamSpec("_P")
-_T = TypeVar("_T")
-_D = TypeVar("_D")
-
-_MISSING: object = object()
-
-
-def _safe_attr(obj: object, name: str, default: object = None) -> object:
-    """Return ``getattr(obj, name, default)``, or ``default`` when the read raises anything.
-
-    The one guarded attribute read. A missing attribute and a hostile
-    descriptor / ``__getattr__`` / metaclass lookup that raises (including a
-    ``BaseException`` such as ``SystemExit``) both degrade to ``default``, so a
-    caller that is assembling a diagnostic or classifying consumer-supplied
-    metadata never has its own contract replaced by the consumer's exception.
-    Pass a private sentinel as ``default`` to tell "absent or unreadable" apart
-    from a real ``None``.
-    """
-    try:
-        return getattr(obj, name, default)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return default
-
-
-def _safe_call(
-    fn: Callable[_P, _T],
-    fallback: _D,
-    /,
-    *args: _P.args,
-    **kwargs: _P.kwargs,
-) -> _T | _D:
-    """Return ``fn(*args, **kwargs)``, or ``fallback`` when the call raises anything.
-
-    The one guarded call. Only ``fn(*args, **kwargs)`` runs inside the guard:
-    ``fn`` itself is evaluated at the call site, so pass a callable that is
-    already safe to obtain (a builtin, an ``operator`` function, ``isinstance``)
-    rather than a bound method read off a hostile object, whose attribute
-    lookup would escape before this function runs.
-    """
-    try:
-        return fn(*args, **kwargs)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return fallback
-
-
-def _safe_predicate(fn: Callable[_P, bool], /, *args: _P.args, **kwargs: _P.kwargs) -> bool:
-    """Return ``fn(*args, **kwargs)``, or ``False`` when the call raises anything.
-
-    ``_safe_call`` for a boolean test (``isinstance``, ``operator.contains``,
-    ``bool``): the fallback is the single answer "not a match", and it is spelled
-    here once because a literal ``False`` fallback at every call site would be a
-    boolean positional argument. The same contract applies: ``fn`` is evaluated at
-    the call site, outside the guard.
-    """
-    try:
-        return fn(*args, **kwargs)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return False
-
-
-def _readable_type_name(source: type[object]) -> str | None:
-    """Return ``source``'s own ``__name__`` as a plain base ``str``, or ``None`` when unreadable.
-
-    ``None`` covers a ``__name__`` read that raises, a non-string or empty name,
-    and a name whose base ``str`` slot cannot be read, so the caller moves on to
-    the next candidate.
-    """
-    name = _safe_attr(source, "__name__")
-    try:
-        if not isinstance(name, str) or not name:
-            return None
-        # A metaclass can return a ``str`` subclass for ``__name__``.  Returning
-        # that object would let its ``__str__`` / ``__format__`` run while a
-        # typed error message is being assembled, replacing the framework error
-        # with an arbitrary consumer exception.  The base ``str`` slot strips
-        # the subclass before the value reaches any f-string or join operation.
-        return str.__str__(name)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return None
-
-
-def _safe_type_name(value: object) -> str:
-    """Return the name identifying ``value``'s kind, without trusting its metadata.
-
-    A class names itself. Reporting its metaclass instead would put ``ModelBase``
-    in front of every Django model and ``type`` in front of every plain class,
-    identifying nothing in the one diagnostic a consumer has left, so a class
-    contributes its own ``__name__`` and any other object contributes its type's.
-    A class whose own ``__name__`` is unreadable or non-string falls back to the
-    metaclass name before the ``"object"`` last resort, so the caller still gets
-    the most specific label that can be rendered safely.
-    """
-    is_type = _safe_predicate(isinstance, value, type)
-    sources = (cast("type[object]", value), type(value)) if is_type else (type(value),)
-    for source in sources:
-        name = _readable_type_name(source)
-        if name is not None:
-            return name
-    return "object"
-
-
-def _unprintable(value: object) -> str:
-    """Return the one standalone placeholder for a value that defeated rendering.
-
-    Single home of the ``<unprintable {T}>`` grammar so its spelling cannot
-    drift between the repr-based renderer (``_safe_arg_repr``), the str-based
-    renderer (``_safe_text``), and the write-error envelope that consumes the
-    latter (``utils/errors.py``).
-    """
-    return f"<unprintable {_safe_type_name(value)}>"
-
-
-def _safe_arg_repr(value: object) -> str:
-    """``repr(value)`` if it succeeds, else a placeholder naming the arg type."""
-    try:
-        return str.__str__(repr(value))
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return _unprintable(value)
-
-
-def _safe_text(value: object, fallback: str = "") -> str:
-    """Render ``value`` as a plain base ``str`` without ever raising.
-
-    The one body behind the write-error envelope's message / path coercion
-    (``utils/errors.py``) and the field converter's ``Model.field`` diagnostic
-    labels (``types/converters.py``): a ``str`` input is read through the base
-    ``str`` slot so a subclass's overridden ``__str__`` / ``__format__`` never
-    runs while an error envelope is being assembled; any other value renders
-    through ``str()`` guarded by ``BaseException`` (a display operation must
-    never propagate ``SystemExit`` / ``KeyboardInterrupt``) and the render is
-    read back through the base ``str`` slot too, because CPython returns a
-    ``tp_str`` result unchanged when it is a ``str`` SUBCLASS - handing that
-    object back would let its overridden ``__len__`` detonate inside the
-    truthiness check below and its ``__str__`` / ``__format__`` run inside the
-    caller's f-string, both while an error envelope is being assembled. An
-    empty render degrades to ``fallback`` so callers can name the slot
-    ("``<unknown>``") instead of publishing nothing; a raising dunder degrades
-    to the shared ``_unprintable`` placeholder.
-    """
-    try:
-        rendered = str.__str__(value) if isinstance(value, str) else str.__str__(str(value))
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return _unprintable(value)
-    return rendered or fallback
-
-
-def _safe_class_name(value: object, *, qualified: bool = False) -> str:
-    """Return a class label without trusting hostile metaclass metadata.
-
-    The one class-label renderer error-message assembly shares (``types/relay.py``
-    and ``types/finalizer.py`` import it; the sealed-queryset boundary in
-    ``utils/querysets.py`` deliberately keeps a stricter local variant whose
-    non-string fallback never dispatches the name object at all). A ``str``
-    subclass ``__name__`` is read through the base ``str`` slot so its overridden
-    ``__str__`` never runs; an unreadable ``__name__`` degrades to
-    ``_safe_type_name``; a non-string one renders through the guarded repr.
-    """
-    attribute = "__qualname__" if qualified else "__name__"
-    name = _safe_attr(value, attribute, _MISSING)
-    if name is _MISSING:
-        return _safe_type_name(value)
-    try:
-        if isinstance(name, str) and name:
-            return str.__str__(name)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return _safe_arg_repr(name)
-    return _safe_arg_repr(name)
-
-
-def _safe_model_label(model: object) -> str:
-    """Return a model label without trusting consumer-supplied metadata."""
-    try:
-        label = getattr(getattr(model, "_meta", None), "label", None)
-        rendered = str.__str__(str(label)) if isinstance(label, str) else ""
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        rendered = ""
-    return rendered or _safe_type_name(model)
-
-
-def _safe_terminal_label(terminal: object) -> str:
-    """Return a terminal field name without trusting consumer-supplied metadata."""
-    try:
-        name = getattr(terminal, "name", None)
-        rendered = str.__str__(str(name)) if isinstance(name, str) else ""
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        rendered = ""
-    return rendered or _safe_type_name(terminal)
-
-
-def describe_value(value: object) -> str:
-    """Render ``value`` as an error message's ``got <this>`` tail, without ever raising.
-
-    The shared renderer for the ``got {type} {value!r}`` tail a typed rejection
-    appends to its prose, so a rejection message cannot itself fail on the value
-    it is rejecting. That is a real failure mode rather than a defensive
-    flourish, because the tail is built by an f-string at the RAISE SITE - before
-    any exception object exists, so the ``__str__`` / ``__repr__`` guards on
-    ``DjangoStrawberryFrameworkError`` cannot help:
-
-    - a consumer-supplied object with a hostile or stateful ``__repr__`` raises
-      while the message is being formatted; and
-    - CPython 3.11+ refuses to convert an integer with more than
-      ``sys.get_int_max_str_digits()`` digits to a string, so
-      ``f"{10**10000!r}"`` raises ``ValueError`` - which would replace the
-      package's promised ``ConfigurationError`` with an unrelated exception
-      precisely on the hostile-configuration path where the typed error matters.
-
-    Both collapse to a placeholder that still names the type, because the type
-    is what makes the message actionable.
-
-    Scope, stated exactly rather than aspirationally: every typed rejection on
-    the package's **transport boundary** renders its tail through here - the
-    ``max_request_body_bytes`` cap (``views.py``), the WebSocket revalidation
-    window (``consumers.py``), and the router's three factory / consumer
-    rejections (``routers.py``) - and so do the schema-construction policy
-    rejections whose argument is equally deployment-supplied (``error_policy.py``,
-    ``resource_policy.py``, ``extensions/debug.py``, the ``MAX_FLAT_FILTERS``
-    limit in ``filters/sets.py``). Those are the rejections
-    whose argument is a value a hostile or fat-fingered deployment hands the
-    package directly, which is where a message that raises while being formatted
-    destroys the typed contract. Dozens of other ``got {...}`` tails elsewhere in
-    the package still interpolate their own values; routing them is a separate
-    change with its own surface and is deliberately not claimed here. A new
-    rejection whose value came from outside the package belongs on
-    this helper.
-    """
-    try:
-        return f"{_safe_type_name(value)} {value!r}"
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        # Deliberately NOT the ``<unprintable {T}>`` spelling the standalone
-        # renderers share (``_safe_arg_repr``, ``_safe_text`` through its shared
-        # ``_unprintable`` placeholder, and ``DjangoStrawberryFrameworkError.__str__``):
-        # those render STANDALONE, while this one is a FRAGMENT interpolated into
-        # prose ("got an unprintable Foo."). Two spellings across these sites is
-        # the cost of that grammatical difference - do not unify them, or one of
-        # the sites reads wrongly.
-        return f"an unprintable {_safe_type_name(value)}"
-
 
 class DjangoStrawberryFrameworkError(Exception):
     """Base exception for the package.
@@ -268,49 +27,13 @@ class DjangoStrawberryFrameworkError(Exception):
     single ``except``. Specific subclasses below distinguish causes when
     granular handling is needed.
 
-    Rendering safety: the ORIGINAL message args are kept in ``self.args``
-    (identity is authoritative - programmatic ``.args`` access sees the real
-    objects), and ``str`` / ``repr`` are made safe at CALL TIME instead of
-    sanitizing at construction. GraphQL-core's ``located_error`` wraps a
-    non-``GraphQLError`` by calling ``str(original_error)``; if that raised, the
-    typed framework exception would be replaced by a raw error on the wire and
-    ``except ConfigurationError`` / ``except OptimizerError`` catchability would
-    be destroyed. Overriding ``__str__`` / ``__repr__`` to render safely means:
-
-    - a message arg whose ``__str__`` / ``__repr__`` fails only LATER (stateful)
-      is still handled - the guard is at the render call, not at construction;
-    - rendering is recomputed from the current ``args`` on each call, preserving
-      standard exception behavior when callers replace ``args`` and preserving
-      lazy-translation behavior when the active locale changes;
-    - a ``BaseException`` (not just ``Exception``) raised by a hostile dunder is
-      swallowed too - a display operation must never propagate ``SystemExit`` /
-      ``KeyboardInterrupt`` and break wire identity.
+    Rendering is the standard ``Exception`` behaviour. Every message the
+    framework raises is built as an exact ``str`` at the raise site, from
+    truthful renders (``utils/truth.py``), so ``str`` / ``repr`` of a
+    framework-raised error never runs consumer code. A consumer that raises one
+    of these with its own object as the message gets that object's own
+    ``__str__`` / ``__repr__``, exactly as with any other exception.
     """
-
-    @override
-    def __str__(self) -> str:
-        """Render ``str`` safely from the current args (see class docstring)."""
-        try:
-            rendered = str.__str__(super().__str__())
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            args: tuple[object, ...] = self.args
-            rendered = (
-                f"<unprintable {_safe_type_name(args[0])}>"
-                if len(args) == 1
-                else "(" + ", ".join(_safe_arg_repr(a) for a in args) + ")"
-            )
-        return rendered
-
-    @override
-    def __repr__(self) -> str:
-        """Render ``repr`` safely from the current args (see class docstring)."""
-        try:
-            rendered = str.__str__(super().__repr__())
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            exception_args: tuple[object, ...] = self.args
-            args = ", ".join(_safe_arg_repr(a) for a in exception_args)
-            rendered = f"{_safe_type_name(self)}({args})"
-        return rendered
 
 
 class ConfigurationError(DjangoStrawberryFrameworkError):
@@ -340,6 +63,32 @@ class ConfigurationError(DjangoStrawberryFrameworkError):
     """
 
 
+def _model_label(model: object) -> str:
+    """Return ``app_label.ModelName`` for a Django model, or the value's kind for anything else.
+
+    ``_meta`` is read from the real namespaces (``truth.static_attr``), so a
+    consumer class cannot answer it through a metaclass hook; the ``label`` it
+    holds is Django's own ``Options`` property.
+    """
+    from .utils import truth  # noqa: PLC0415 - import cycle
+
+    meta = truth.static_attr(model, "_meta")
+    label = None if meta is None else getattr(meta, "label", None)
+    if truth.is_instance(label, str):
+        return truth.text(label, fallback=truth.kind(model))
+    return truth.kind(model)
+
+
+def _terminal_label(terminal: object) -> str:
+    """Return a Django field's ``name``, or the value's kind for anything else."""
+    from .utils import truth  # noqa: PLC0415 - import cycle
+
+    name = getattr(terminal, "name", None)
+    if truth.is_instance(name, str):
+        return truth.text(name, fallback=truth.kind(terminal))
+    return truth.kind(terminal)
+
+
 class PathResolutionError(ConfigurationError):
     """Raised when a model-field path cannot be strictly classified.
 
@@ -352,9 +101,10 @@ class PathResolutionError(ConfigurationError):
 
     The single named error for strict path classification. Distinct from the
     lenient boolean ``utils/relations.py::path_traverses_to_many`` walk (which
-    swallows resolution failure and answers ``False``) so strict callers never
-    turn a malformed declaration into a lenient "does not traverse many"
-    answer by accident.
+    answers a ``PathResolutionError`` from the legacy lenient walk - ``True``
+    once a many-side hop precedes the failure, ``False`` otherwise) so strict
+    callers never turn a malformed declaration into a lenient answer by
+    accident.
 
     Raise sites (all in ``utils/relations.py::classify_path``):
 
@@ -366,9 +116,13 @@ class PathResolutionError(ConfigurationError):
           ``path_infos``), whether terminal or mid-path - it is neither a
           scalar terminal nor a traversable relation.
         - A relation segment whose ``path_infos`` is empty.
+        - Guard arms the segment list above does not name: a ``field_path``
+          that is not a ``str`` (raised before segmentation, naming the whole
+          value as the segment), and a segment whose ``is_relation`` flag
+          ``utils/relations.py::relation_bool`` rejects as malformed metadata.
 
     The message always names the model label, the complete declared path, and
-    the offending segment so a lenient caller cannot silently downgrade it.
+    the offending segment so the failure is actionable.
     """
 
     def __init__(
@@ -378,10 +132,11 @@ class PathResolutionError(ConfigurationError):
         segment: str,
     ) -> None:
         """Build the message from the unclassifiable ``segment`` of ``field_path`` on ``model``."""
-        model_label = _safe_model_label(model)
+        from .utils import truth  # noqa: PLC0415 - import cycle
+
         super().__init__(
-            f"Cannot classify path {_safe_arg_repr(field_path)} on model {model_label}: "
-            f"segment {_safe_arg_repr(segment)} is not a traversable model-field relation.",
+            f"Cannot classify path {truth.render(field_path)} on model {_model_label(model)}: "
+            f"segment {truth.render(segment)} is not a traversable model-field relation.",
         )
         self.model: object = model
         self.field_path: str = field_path
@@ -390,7 +145,11 @@ class PathResolutionError(ConfigurationError):
     @override
     def __reduce__(self) -> tuple[object, ...]:
         """Preserve constructor arguments and instance state across pickle roundtrips."""
-        return (self.__class__, (self.model, self.field_path, self.segment), self.__dict__)
+        return (
+            type(self),
+            (self.model, self.field_path, self.segment),
+            vars(self),  # truth: ok the exception's own pickle state, read by its own __reduce__
+        )
 
 
 class LookupValidationError(ConfigurationError):
@@ -410,6 +169,10 @@ class LookupValidationError(ConfigurationError):
           output field (``get_transform`` returns ``None``).
         - The final part resolves as neither a lookup (``get_lookup``) nor a
           trailing transform whose output supports the implicit ``exact``.
+        - Guard arms the list above does not name: a ``lookup_expr`` that is
+          not a ``str`` (raised before splitting), and a chain Django refuses
+          with ``FieldError`` (e.g. a transform applied to a bare field with no
+          output field yet), converted to this error.
 
     The message names the terminal field, the full ``lookup_expr``, and the
     offending part so the failure is actionable.
@@ -422,10 +185,12 @@ class LookupValidationError(ConfigurationError):
         part: str,
     ) -> None:
         """Build the message from the invalid ``part`` of ``lookup_expr`` for ``terminal``."""
-        terminal_label = _safe_terminal_label(terminal)
+        from .utils import truth  # noqa: PLC0415 - import cycle
+
         super().__init__(
-            f"Invalid lookup expression {_safe_arg_repr(lookup_expr)} for terminal "
-            f"{terminal_label}: part {_safe_arg_repr(part)} is not a valid transform or lookup.",
+            f"Invalid lookup expression {truth.render(lookup_expr)} for terminal "
+            f"{_terminal_label(terminal)}: part {truth.render(part)} is not a valid transform "
+            "or lookup.",
         )
         self.terminal: object = terminal
         self.lookup_expr: str = lookup_expr
@@ -434,7 +199,11 @@ class LookupValidationError(ConfigurationError):
     @override
     def __reduce__(self) -> tuple[object, ...]:
         """Preserve constructor arguments and instance state across pickle roundtrips."""
-        return (self.__class__, (self.terminal, self.lookup_expr, self.part), self.__dict__)
+        return (
+            type(self),
+            (self.terminal, self.lookup_expr, self.part),
+            vars(self),  # truth: ok the exception's own pickle state, read by its own __reduce__
+        )
 
 
 class OptimizerError(DjangoStrawberryFrameworkError):
@@ -465,6 +234,10 @@ class OptimizerError(DjangoStrawberryFrameworkError):
           rejects a keyset-seek window that is also reversed, since backward
           keyset pagination resolves through the per-parent/root slicer, never a
           reversed window plan.
+        - Backward-window order reversal: ``optimizer/plans.py::_reverse_order_by``
+          rejects an order entry with neither a ``descending`` flag nor a
+          callable ``desc()``, since a backward (``last``-only) window cannot be
+          expressed for it.
         - Row-preserving predicate attachment
           (``optimizer/predicates.py::attach_exists``): the three runtime
           caller-contract guards - inner-queryset model does not match the outer

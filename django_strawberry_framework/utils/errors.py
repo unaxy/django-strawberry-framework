@@ -40,15 +40,12 @@ from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, Validati
 from django.db import models
 from django.utils.functional import Promise
 
-from django_strawberry_framework.exceptions import _safe_predicate, _safe_text, _unprintable
-
-from ._narrowing import is_iterable, is_list_or_tuple, is_set_or_frozenset, list_of, read_attr
+from . import truth
+from ._narrowing import is_iterable
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from typing import TypeAlias
-
-    from typing_extensions import TypeIs
 
     from django_strawberry_framework.mutations.inputs import FieldError
 
@@ -98,12 +95,6 @@ _TEXT_ATOM_TYPES = (
     memoryview,
     Promise,
 )
-
-
-def _is_text_atom(value: object) -> TypeIs[str | bytes | bytearray | memoryview | Promise]:
-    """Return whether ``value`` is one of the ``_TEXT_ATOM_TYPES`` (subclasses included)."""
-    return isinstance(value, _TEXT_ATOM_TYPES)
-
 
 # ---------------------------------------------------------------------------
 # ``FieldError.codes`` vocabulary
@@ -185,7 +176,7 @@ def field_error(path: str, messages: object, *, codes: object = None) -> FieldEr
     """
     from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError  # noqa: PLC0415 - import cycle
 
-    normalized_path = _safe_text(path, fallback="")
+    normalized_path = truth.text(path)
     key = normalized_path or NON_FIELD_ERROR_KEY
     # Root rule: a model-wide / non-field error (an empty path, or the bare
     # ``"__all__"`` sentinel as the WHOLE path - the DRF flattener joins the top-level
@@ -207,90 +198,35 @@ def field_error(path: str, messages: object, *, codes: object = None) -> FieldEr
     )
 
 
+def _is_text_atom(value: object) -> bool:
+    """Whether ``value``'s real class is one of the ``_TEXT_ATOM_TYPES``."""
+    return any(truth.is_instance(value, atom) for atom in _TEXT_ATOM_TYPES)
+
+
 def _str_list(value: object) -> list[str]:
     """Coerce a bare string or an iterable into a ``list[str]``.
 
     The one body behind ``field_error``'s ``messages`` AND ``codes`` coercion
-    (the rule the DRF ``ErrorDetail`` flattener depends on): a bare string
-    becomes a one-element list (never iterated char-by-char); any other iterable
-    (a DRF ``ErrorDetail`` list, a tuple) is materialized with each element
-    stringified.
+    (the rule the DRF ``ErrorDetail`` flattener depends on): a text atom or any
+    other non-iterable becomes a one-element list (never iterated
+    char-by-char); any other iterable (a DRF ``ErrorDetail`` list, a tuple) is
+    materialized with each element rendered by ``truth.text``.
     """
-    # A deliberate SUBSET of ``_TEXT_ATOM_TYPES``, not a missed site: this asks
-    # "is this already text?" (the one-element-list path), while the exclusion
-    # below asks "is this an atom rather than a container?". The byte-ish atoms
-    # are excluded from iteration but are not stringified by this first branch.
-    if _safe_predicate(isinstance, value, (str, Promise)):
-        return [_safe_text(value)]
-    try:
-        is_iter = is_iterable(value) and not _is_text_atom(value)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        is_iter = False
-    if not is_iter:
-        return [_safe_text(value)]
-    try:
-        # ``is_iter`` above is the ``isinstance(value, Iterable)`` proof; neither checker
-        # carries a narrowing through a bool assigned inside a ``try``.
-        items = list(cast("Iterable[object]", value))
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return [_unprintable(value)]
-    return [_safe_text(item) for item in items]
+    if _is_text_atom(value) or not is_iterable(value):
+        return [truth.text(value)]
+    return [truth.text(item) for item in value]
 
 
-def _validation_messages(error: object) -> list[object]:
-    """Read one Django validation leaf's messages without trusting its metadata."""
-    try:
-        msgs = read_attr(error, "messages")
-        if _is_text_atom(msgs):
-            return [msgs]
-        listed = list_of(msgs)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        try:
-            msg = read_attr(error, "message")
-            if is_list_or_tuple(msg) or is_set_or_frozenset(msg):
-                return list(msg)
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            return [error]
-        else:
-            return [msg]
-    else:
-        return listed
+def _leaf_codes(error: ValidationError) -> list[object]:
+    """Return the truthy ``code`` of every leaf of a Django ``ValidationError``.
 
-
-def _validation_code(leaf: object) -> object:
-    """Read one Django validation leaf's code, dropping hostile or empty values."""
-    try:
-        code = read_attr(leaf, "code")
-        cleaned = code or None
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return None
-    else:
-        return cleaned
-
-
-def _validation_leaves(error: object) -> tuple[object, ...]:
-    """Flatten one Django validation error into its leaf errors.
-
-    ``ValidationError.error_list`` is the flattened leaf list ``.messages``
-    reads. A hostile or absent ``error_list``, and a text atom planted in the
-    slot (which would otherwise be iterated character-by-character), both fall
-    back to treating the error itself as the single leaf.
+    ``error_list`` is the flattened leaf list ``messages`` reads; a dict-form
+    error carries none (its leaves live under ``error_dict``), and a ``None``
+    code is dropped.
     """
-    try:
-        error_list = read_attr(error, "error_list", None)
-        if error_list is None:
-            return (error,)
-        if _is_text_atom(error_list):
-            return (error_list,)
-        return tuple(list_of(error_list))
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return (error,)
-
-
-def _validation_codes(error: object) -> list[object]:
-    """Read all codes from one Django validation error leaf."""
-    leaves = _validation_leaves(error)
-    return [code for leaf in leaves if (code := _validation_code(leaf)) is not None]
+    # ``ValidationError.__init__`` stores every non-dict error's leaves as ``error_list``.
+    leaves = cast("Iterable[ValidationError]", truth.static_attr(error, "error_list", ()))
+    return [leaf.code for leaf in leaves if leaf.code]
 
 
 def empty_validation_error(path: str = "") -> FieldError:
@@ -326,24 +262,14 @@ def null_field_error(path: str) -> FieldError:
     return field_error(path, "This field cannot be null.", codes=FIELD_ERROR_CODE_NULL)
 
 
-def _error_dict_entry(
-    item: tuple[object, Iterable[object]],
-) -> tuple[object, Iterable[object]] | None:
-    """Unpack one ``ValidationError.error_dict`` item without trusting its shape."""
-    try:
-        field_name, field_errors = item
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return None
-    return field_name, field_errors
-
-
 def relation_field_error(graphql_name: str) -> FieldError:
     """Build the uniform invalid / hidden / wrong-model relation ``FieldError`` (spec-039 integration).
 
     The single leaf constructor for the relation-decode error all three write
     flavors raise - the ``036`` model path (``decode_visible_relation_ids``),
-    the ``038`` form decoder, and the ``039`` serializer decoder all call this
-    DIRECTLY (spec-039 folded away the former per-flavor ``_relation_error`` /
+    the ``038`` form decoder, and the ``039`` serializer decoder all route
+    through the shared ``utils/write_values.py`` decode spine to reach it
+    (spec-039 folded away the former per-flavor ``_relation_error`` /
     ``_relation_field_error`` aliases). A wrong-model, hidden, missing, or
     uncoercible id all collapse to this one field-keyed shape (no existence
     leak), keyed to the GraphQL wire name the client sent (``categoryId``). Siblings
@@ -351,7 +277,7 @@ def relation_field_error(graphql_name: str) -> FieldError:
     + leaf construction are single
     sourced across every flavor.
     """
-    name = _safe_text(graphql_name)
+    name = truth.text(graphql_name)
     return field_error(
         name,
         f"Invalid id for relation {name!r}.",
@@ -520,46 +446,26 @@ def validation_error_to_field_errors(
     flattens a nested ``error_dict`` value to its messages, so the error has no
     nested path to re-key.
     """
-    # An unreadable ``error_dict`` or ``items()`` leaves the dict branch entirely
-    # and falls through to the ``error_list`` / ``messages`` fallback below.
-    try:
-        error_items = tuple(exc.error_dict.items())
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        error_items = None
-    if error_items is not None:
+    # ``ValidationError.__init__`` stores a dict-form error's per-field leaf lists here.
+    error_dict = cast(
+        "dict[str, list[ValidationError]] | None",
+        truth.static_attr(exc, "error_dict"),
+    )
+    if error_dict is not None:
         errors: list[FieldError] = []
-        for item in error_items:
-            unpacked = _error_dict_entry(item)
-            if unpacked is None:
-                errors.append(
-                    field_error(
-                        "",
-                        "Validation details could not be normalized.",
-                        codes=FIELD_ERROR_CODE_INVALID,
-                    ),
-                )
-                continue
-            field_name, field_errors = unpacked
-            normalized_name = _safe_text(field_name)
+        for field_name, field_errors in error_dict.items():
+            normalized_name = truth.text(field_name)
+            # The sentinel check runs before the re-key (a ``NON_FIELD_ERRORS`` bucket
+            # is never re-keyed), and an unmapped name keeps its validator-side name.
             path = (
                 ""
                 if normalized_name == NON_FIELD_ERRORS
                 else rekey_error_segment(normalized_name, key_map)[0]
             )
-            try:
-                field_error_items: tuple[object, ...] = (
-                    (field_errors,) if _is_text_atom(field_errors) else tuple(field_errors)
-                )
-            except BaseException:  # noqa: BLE001 - hostile object, contained by design
-                field_error_items = (field_errors,)
-            messages: list[object] = []
-
-            for error in field_error_items:
-                messages.extend(_validation_messages(error))
+            messages = [message for error in field_errors for message in error.messages]
             # Preserve each leaf Django ``ValidationError.code`` alongside the
-            # message (``error.error_list`` is the flattened leaf list ``error.messages``
-            # reads; a ``None`` code is dropped).
-            codes = [code for error in field_error_items for code in _validation_codes(error)]
+            # message (a ``None`` code is dropped).
+            codes = [code for error in field_errors for code in _leaf_codes(error)]
             errors.append(
                 field_error(path, messages, codes=codes)
                 if messages
@@ -567,9 +473,8 @@ def validation_error_to_field_errors(
             )
         if errors:
             return errors
-    leaves = _validation_leaves(exc)
-    codes = [code for leaf in leaves if (code := _validation_code(leaf)) is not None]
-    messages = _validation_messages(exc)
+    messages = exc.messages
+    codes = _leaf_codes(exc)
     return [field_error("", messages, codes=codes) if messages else empty_validation_error()]
 
 
@@ -605,6 +510,6 @@ def join_error_path(prefix: str, segment: str) -> str:
     ``items.0.__all__`` (the root-vs-nested ``__all__`` distinction itself
     stays with each flattener's key handling).
     """
-    normalized_prefix = _safe_text(prefix, fallback="")
-    normalized_segment = _safe_text(segment)
+    normalized_prefix = truth.text(prefix)
+    normalized_segment = truth.text(segment)
     return f"{normalized_prefix}.{normalized_segment}" if normalized_prefix else normalized_segment

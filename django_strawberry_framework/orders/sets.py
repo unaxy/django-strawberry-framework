@@ -1,9 +1,13 @@
 """``OrderSet`` + ``OrderSetMetaclass`` - declaration, validation, and the apply pipeline.
 
-The metaclass is a verbatim port of
-``django_graphene_filters/orderset.py::OrderSetMetaclass``; ``OrderSet``
-mixes the cookbook's cycle-safe ``get_fields`` (the Layer-4 expansion)
-over ``ClassBasedTypeNameMixin`` from ``..sets_mixins``.
+The metaclass is a direct port of
+``django_graphene_filters/orderset.py::OrderSetMetaclass``: inherited
+declarations are collected through the shared
+``sets_mixins.py::collect_related_declarations`` walk and ``Meta.fields``
+resolution is ``utils/inputs.py::promote_set_meta_fields`` (shared
+write-back with ``FilterSetMetaclass``); ``OrderSet`` mixes the
+cookbook's cycle-safe ``get_fields`` (the Layer-4 expansion) over
+``ClassBasedTypeNameMixin`` from ``..sets_mixins``.
 
 On top of that skeleton the module carries:
 
@@ -40,12 +44,7 @@ from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    PathResolutionError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError, PathResolutionError
 from django_strawberry_framework.optimizer.predicates import visible_row_exists, visible_value
 from django_strawberry_framework.sets_mixins import (
     ActiveInputPermissionAttrs,
@@ -58,11 +57,8 @@ from django_strawberry_framework.sets_mixins import (
     require_re_readable_field_declaration,
     should_cache_expansion,
 )
-from django_strawberry_framework.utils._narrowing import (
-    is_exact_list,
-    is_exact_pair,
-    read_attr,
-)
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_exact_list, is_exact_pair
 from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
 from django_strawberry_framework.utils.inputs import promote_set_meta_fields, read_set_meta_fields
 from django_strawberry_framework.utils.permissions import (
@@ -99,7 +95,7 @@ from .inputs import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Mapping
     from typing import TypeGuard
 
     from django.db.models.expressions import OrderBy
@@ -227,9 +223,9 @@ class _NormalizationLedger:
         for other in matched[1:]:
             if other != first:
                 raise ConfigurationError(
-                    f"{orderset_class.__name__}._normalize_input is not pure; two "
+                    f"{truth.name(orderset_class)}._normalize_input is not pure; two "
                     f"applications of the same input in one resolution returned different "
-                    f"results ({_safe_arg_repr(list(first))} != {_safe_arg_repr(list(other))}).",
+                    f"results ({truth.render(list(first))} != {truth.render(list(other))}).",
                 )
         return first
 
@@ -349,16 +345,16 @@ def _validate_normalized_terms(
     """
     if not is_exact_list(data):
         raise ConfigurationError(
-            f"OrderSet {cls.__qualname__}._normalize_input returned invalid data "
-            f"{_safe_arg_repr(data)}; expected a list of (field_path, direction) tuples.",
+            f"OrderSet {truth.qualname(cls)}._normalize_input returned invalid data "
+            f"{truth.render(data)}; expected a list of (field_path, direction) tuples.",
         )
     if _are_normalized_terms(data):
         return data
     # The guard failed, so some term is invalid: name the first one.
     term = next(term for term in data if not _is_normalized_term(term))
     raise ConfigurationError(
-        f"OrderSet {cls.__qualname__}._normalize_input returned invalid term "
-        f"{_safe_arg_repr(term)}; expected a (field_path: str, direction: Ordering | None) tuple.",
+        f"OrderSet {truth.qualname(cls)}._normalize_input returned invalid term "
+        f"{truth.render(term)}; expected a (field_path: str, direction: Ordering | None) tuple.",
     )
 
 
@@ -521,11 +517,17 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
 
         def _build() -> OrderedDict[str, RelatedOrder | None]:
             fields = cls._expand_meta_fields()
-            for k, v in cls.related_orders.items():
+            # The metaclass stores ``related_orders`` from
+            # ``sets_mixins.py::collect_related_declarations`` (``RelatedOrder`` only).
+            related_orders = cast(
+                "Mapping[str, RelatedOrder]",
+                truth.static_attr(cls, "related_orders", {}),
+            )
+            for k, v in related_orders.items():
                 fields[k] = v
             reject_captured_branches(
                 cls,
-                cls.related_orders,
+                related_orders,
                 related_attr="related_orders",
                 target_attr="orderset",
                 reached_paths=_order_paths,
@@ -564,8 +566,9 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         ``ForeignObject`` link, which orders by its carrier columns -- forward
         FK columns are included, M2M managers, reverse relations and generic
         relations are excluded). Unordered ``set`` /
-        ``frozenset`` declarations expand in one ``repr``-sorted order under
-        every ``PYTHONHASHSEED`` (``read_set_meta_fields``); dict-shaped
+        ``frozenset`` declarations expand in one canonical-key order under
+        every ``PYTHONHASHSEED`` (``read_set_meta_fields``; the key is
+        ``utils/canonical.py::canonical_sort_key``); dict-shaped
         declarations iterate their keys (the django-filter lookup-bag shape
         degrades to its field names).
 
@@ -590,7 +593,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
           gate below sees only the entries that are not strings at all.
         """
         fields: OrderedDict[str, RelatedOrder | None] = OrderedDict()
-        meta = getattr(cls, "Meta", None)
+        meta = truth.static_attr(cls, "Meta", None)
         # Shared reader: synonym resolve + every name read as plain ``str`` text +
         # unordered ``set`` / ``frozenset`` canonicalization. No write-back here -- the
         # metaclass owns alias promotion; expansion must not mutate class Meta.
@@ -602,10 +605,10 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             # level with the other ``.inputs`` symbols; ``inputs.py`` only
             # TYPE_CHECKING-imports ``OrderSet``, so the runtime cycle stays
             # inert without a deferred local import.
-            model = read_attr(meta, "model", None)
+            model = truth.static_attr(meta, "model", None)
             if model is None:
                 raise ConfigurationError(
-                    f"{cls.__name__}.Meta.fields = '__all__' requires Meta.model "
+                    f"{truth.name(cls)}.Meta.fields = '__all__' requires Meta.model "
                     "so the order field names can be derived from "
                     "model._meta.get_fields().",
                 )
@@ -627,7 +630,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             subject="OrderSet",
             accepted="'__all__' or a re-readable collection of field names",
         )
-        model = read_attr(meta, "model", None)
+        model = truth.static_attr(meta, "model", None)
         # ``require_re_readable_field_declaration`` refused anything but a collection.
         for field_path in cast("Collection[object]", meta_fields):
             # Entry-TYPE validation is unconditional: a model-less related-only
@@ -638,18 +641,19 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             # ``TypeError: unhashable type`` from the ``fields[...]`` write
             # below) when ``Meta.model`` is absent.
             if type(field_path) is not str:
+                cls_label = truth.qualname(cls)
                 raise ConfigurationError(
-                    f"OrderSet {cls.__qualname__}.Meta.fields entries must be field-name "
-                    f"strings; got {_safe_type_name(field_path)} "
-                    f"({_safe_arg_repr(field_path)}).",
+                    f"OrderSet {cls_label}.Meta.fields entries must be field-name "
+                    f"strings; got {truth.kind(field_path)} "
+                    f"({truth.render(field_path)}).",
                 )
             if model is not None:
                 try:
                     _classify_declared_path(model, field_path)
                 except PathResolutionError as exc:
                     raise ConfigurationError(
-                        f"OrderSet {cls.__qualname__}.Meta.fields contains invalid "
-                        f"order path {field_path!r} for model {_safe_type_name(model)}: {exc}",
+                        f"OrderSet {truth.qualname(cls)}.Meta.fields contains invalid "
+                        f"order path {field_path!r} for model {truth.kind(model)}: {exc}",
                     ) from exc
             fields[field_path] = None
         return fields
@@ -691,18 +695,18 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
 
         if applied_data is not None:
             if applied_data != tuple(data_check):
-                first_repr = _safe_arg_repr(list(applied_data))
+                first_repr = truth.render(list(applied_data))
                 raise ConfigurationError(
-                    f"{cls.__name__}._normalize_input is not pure; returned different results "
-                    f"for the same input ({first_repr} != {_safe_arg_repr(data_check)}).",
+                    f"{truth.name(cls)}._normalize_input is not pure; returned different results "
+                    f"for the same input ({first_repr} != {truth.render(data_check)}).",
                 )
             data_to_walk = list(applied_data)
         else:
             data_check2 = _validate_normalized_terms(cls, cls._normalize_input(input_value))
             if data_check != data_check2:
                 raise ConfigurationError(
-                    f"{cls.__name__}._normalize_input is not pure; returned different results "
-                    f"for the same input ({_safe_arg_repr(data_check)} != {_safe_arg_repr(data_check2)}).",
+                    f"{truth.name(cls)}._normalize_input is not pure; returned different results "
+                    f"for the same input ({truth.render(data_check)} != {truth.render(data_check2)}).",
                 )
             data_to_walk = data_check
 
@@ -794,16 +798,16 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             # direction
             if not isinstance(direction, Ordering):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ConfigurationError(
-                    f"OrderSet {cls.__qualname__} received invalid order direction "
-                    f"{_safe_arg_repr(direction)} for path {field_path!r}; "
+                    f"OrderSet {truth.qualname(cls)} received invalid order direction "
+                    f"{truth.render(direction)} for path {field_path!r}; "
                     f"expected an Ordering enum member.",
                 )
             try:
                 terminal = classify_path(model, field_path).terminal
             except PathResolutionError as exc:
                 raise ConfigurationError(
-                    f"OrderSet {cls.__qualname__} received invalid order path "
-                    f"{field_path!r} for model {_safe_type_name(model)}: {exc}",
+                    f"OrderSet {truth.qualname(cls)} received invalid order path "
+                    f"{field_path!r} for model {truth.kind(model)}: {exc}",
                 ) from exc
             terms.append(
                 (
@@ -926,10 +930,10 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         inflates ``totalCount``; the aggregate keeps exactly one row per parent
         (the annotation forces a GROUP BY on the parent), so cursors index
         distinct nodes and ``.count()`` counts distinct parents
-        (``spec-030-connection_field-0_0_9`` P1-B). A hidden child's value is
-        ``NULL`` inside the aggregate, which ``Min`` / ``Max`` skip, so a parent
-        whose related rows are all hidden sorts like a parent with none. Scalar
-        columns and to-one relation paths (forward FK / O2O, reverse O2O --
+        (spec-030 Decision 11 -- aggregate-ordering coexistence). A hidden child's
+        value is ``NULL`` inside the aggregate, which ``Min`` / ``Max`` skip, so a
+        parent whose related rows are all hidden sorts like a parent with none.
+        Scalar columns and to-one relation paths (forward FK / O2O, reverse O2O --
         which never multiply) are ordered directly, unchanged.
 
         NULLS positioning carries onto the aggregate's ``OrderBy`` because the
@@ -1115,10 +1119,11 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
            scalar / to-one paths order directly via ``direction.resolve``,
            while a to-many path orders by an aggregate annotation
            (``Min`` / ``Max``) so the parent row is not multiplied
-           (``spec-030-connection_field-0_0_9`` P1-B); a related row a scoping
-           type hides reads as missing (``_visible_rows_sync`` derives each
-           such type's rows); ``None`` directions are filtered (spec-028
-           Decision 13 -- null-direction edge case).
+           (spec-030 Decision 11 -- aggregate-ordering coexistence); a related
+           row a scoping type hides reads as missing (``_visible_rows_sync``
+           derives each such type's rows); ``None`` directions are filtered
+           (spec-028 Decision 8 step 7 -- term-less input returns the queryset
+           unchanged; Edge cases -- null-direction no-op).
         5. ``annotate(**annotations)`` (when any to-many term produced one) then
            ``order_by(*expressions)`` when at least one expression survived;
            otherwise return ``queryset`` unchanged.

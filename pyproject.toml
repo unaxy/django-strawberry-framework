@@ -614,34 +614,42 @@ reportUnusedCallResult = "error"
 # diagnostic instead); one below it fails until the budget is lowered to match, and a rule at
 # zero leaves `ignores` (marked `# Locked` above once it is on in every environment).
 [tool.type-suppressions]
-cast = 410
+cast = 409
 
 [tool.type-suppressions.ignores]
-reportArgumentType = 307
-reportAssignmentType = 30
-reportAttributeAccessIssue = 119
-reportCallIssue = 13
+reportArgumentType = 280
+reportAssignmentType = 28
+reportAttributeAccessIssue = 113
+reportCallIssue = 11
 reportDeprecated = 2
 reportAny = 39
 reportExplicitAny = 36
 reportFunctionMemberAccess = 4
 reportGeneralTypeIssues = 5
-reportIncompatibleMethodOverride = 59
+reportIncompatibleMethodOverride = 58
 reportIncompatibleUnannotatedOverride = 1
-reportIncompatibleVariableOverride = 93
+reportIncompatibleVariableOverride = 89
 reportIndexIssue = 10
 reportInvalidTypeArguments = 5
 reportMissingSuperCall = 3
 reportOptionalMemberAccess = 3
 reportPropertyTypeMismatch = 5
-reportReturnType = 24
+reportReturnType = 23
 reportUndefinedVariable = 5
 reportUnknownArgumentType = 14
 reportUnknownMemberType = 33
 reportUnknownVariableType = 21
-reportUnnecessaryIsInstance = 6
+reportUnnecessaryIsInstance = 2
 reportUnsafeMultipleInheritance = 12
 reportUntypedFunctionDecorator = 2
+
+[tool.truthful_reads]
+# Read by scripts/check_truthful_reads.py (the `truthful-reads` hook and CI
+# step). `paths` is the default scan; `exempt` holds repo-relative fnmatch
+# patterns. utils/truth.py is the one module that reads identity slots
+# directly, on behalf of every other module.
+paths = ["django_strawberry_framework"]
+exempt = ["django_strawberry_framework/utils/truth.py"]
 
 [tool.coverage.run]
 source = ["django_strawberry_framework"]

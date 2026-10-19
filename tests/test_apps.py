@@ -69,9 +69,9 @@ def test_djangostrawberryframeworkconfig_resolves_through_django_app_registry() 
 @pytest.mark.parametrize(
     ("attribute", "why"),
     [
-        ("label", "Decision 2 (default last-segment label is already unique)"),
-        ("default_auto_field", "Decision 5 (package ships zero Django models)"),
-        ("default", "Decision 8 (no `default` attribute at any value)"),
+        ("label", "spec-021 Decision 2 (default last-segment label is already unique)"),
+        ("default_auto_field", "spec-021 Decision 5 (package ships zero Django models)"),
+        ("default", "spec-021 Decision 8 (no `default` attribute at any value)"),
     ],
     ids=["label", "default-auto-field", "default"],
 )
@@ -133,11 +133,13 @@ def test_ready_dispatches_all_four_patch_appliers_and_refires_safely(
     """``ready()`` itself installs all four upstream patches; a re-fire is safe.
 
     The patch-module suites each pin "installed at collection via
-    ``ready()``", but those assertions are masked by the direct
-    ``apply()`` calls ``test_apply_is_idempotent`` makes earlier in file
-    order on the same worker - a ``ready()`` that lost a dispatch line
-    would still pass them. This test owns the dispatch contract
-    deterministically: it reverts all four patches to the captured
+    ``ready()``", but in the three suites that split that assertion from
+    idempotence the direct ``apply()`` calls ``test_apply_is_idempotent``
+    makes earlier in file order on the same worker mask it - a ``ready()``
+    that lost one of those three dispatch lines would still pass them.
+    (The graphql-core suite's combined test asserts installed before
+    applying.) This test owns the dispatch contract deterministically
+    for every member: it reverts all four patches to the captured
     upstream originals, drives ``ready()`` through the registered
     AppConfig, and asserts every patch is installed. A second
     ``ready()`` pins dispatch-layer idempotence (some Django test

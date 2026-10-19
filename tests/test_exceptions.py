@@ -1,14 +1,13 @@
-"""Exception hierarchy: inheritance, GraphQL translation, hostile message args.
+"""Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 
-This file keeps exception-class internals and hostile-arg containment that a
-live ``/graphql/`` request cannot uniquely show: the inheritance lattice,
-``.args`` identity, call-time ``__str__`` / ``__repr__`` guards, pickle/copy
-fidelity, GraphQL-core ``located_error`` preserving the original exception
-type (the HTTP envelope carries only ``message``), and the ``_safe_*`` /
-``describe_value`` helpers. A client JSON body cannot distinguish a safe
-placeholder from a coincidentally similar string, cannot see
-``original_error``, and under the production error policy a resolver
-exception is masked anyway.
+This file keeps exception-class internals that a live ``/graphql/`` request
+cannot uniquely show: the inheritance lattice, ``.args`` identity, standard
+``str`` / ``repr`` rendering, pickle/copy fidelity, GraphQL-core
+``located_error`` preserving the original exception type (the HTTP envelope
+carries only ``message``), and the exact messages ``PathResolutionError`` /
+``LookupValidationError`` build. Under the production error policy a resolver
+exception is masked anyway, so a client JSON body cannot see
+``original_error``.
 
 Wire messages belong to the live suites that own the raise sites:
 ``examples/fakeshop/test_query/test_error_policy_api.py`` (masked resolver
@@ -28,38 +27,23 @@ from collections.abc import Callable
 
 import pytest
 import strawberry
+from apps.library.models import Book
 from strawberry.types import ExecutionResult
 from typing_extensions import override
 
-import django_strawberry_framework.exceptions as exc_mod
 from django_strawberry_framework.exceptions import (
     ConfigurationError,
     DjangoStrawberryFrameworkError,
     LookupValidationError,
     OptimizerError,
     PathResolutionError,
-    _safe_arg_repr,
-    _safe_class_name,
-    _safe_model_label,
-    _safe_terminal_label,
-    _safe_text,
-    _safe_type_name,
-    describe_value,
 )
-from django_strawberry_framework.types import converters as _converters_module
-from django_strawberry_framework.utils import errors as _errors_module
 from django_strawberry_framework.utils.querysets import SyncMisuseError
-from django_strawberry_framework.utils.typing import object_result
-from tests._idioms import (
-    ClassReadRaises,
-    ClassReadRaisesBase,
-    module_binding,
-    pickle_roundtrip,
-)
+from tests._idioms import pickle_roundtrip
 
 
 class _Unprintable:
-    """Hostile message arg whose ``str`` / ``repr`` both raise."""
+    """A consumer message arg whose ``str`` / ``repr`` both raise."""
 
     @override
     def __str__(self) -> str:
@@ -68,97 +52,6 @@ class _Unprintable:
     @override
     def __repr__(self) -> str:
         raise RuntimeError("repr failed")
-
-
-class _UnprintableBase:
-    """Hostile arg whose dunders raise a ``BaseException`` (not ``Exception``)."""
-
-    @override
-    def __str__(self) -> str:
-        raise KeyboardInterrupt
-
-    @override
-    def __repr__(self) -> str:
-        raise KeyboardInterrupt
-
-
-class _Counting:
-    """Arg that counts how many times it is rendered (side-effect probe)."""
-
-    def __init__(self) -> None:
-        self.renders = 0
-
-    @override
-    def __str__(self) -> str:
-        self.renders += 1
-        return "counted"
-
-    __repr__ = __str__
-
-
-class _HostileTypeNameMeta(type):
-    """Metaclass that makes even the fallback class-name lookup fail."""
-
-    @override
-    def __getattribute__(cls, name: str) -> object:
-        if name == "__name__":
-            raise RuntimeError("type name failed")
-        return object_result(super().__getattribute__, name)
-
-
-class _UnprintableTypeName(metaclass=_HostileTypeNameMeta):
-    @override
-    def __str__(self) -> str:
-        raise RuntimeError("str failed")
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("repr failed")
-
-
-class _Stateful:
-    """Arg whose ``str`` succeeds until ``armed`` flips, then raises (delayed failure)."""
-
-    def __init__(self) -> None:
-        self.armed = False
-
-    @override
-    def __str__(self) -> str:
-        if self.armed:
-            raise RuntimeError("now broken")
-        return "fine-for-now"
-
-    __repr__ = __str__
-
-
-class _HostileMetadata:
-    """Metadata-bearing input whose label lookup raises during error construction."""
-
-    @override
-    def __getattribute__(self, name: str) -> object:
-        if name in {"_meta", "name"}:
-            raise RuntimeError(f"{name} unavailable")
-        return object_result(super().__getattribute__, name)
-
-
-class _NonStringTypeNameMeta(type):
-    """Metaclass exposing malformed, non-string class-name metadata."""
-
-    @override
-    def __getattribute__(cls, name: str) -> object:
-        if name == "__name__":
-            return 42
-        return object_result(super().__getattribute__, name)
-
-
-class _NonStringTypeName(metaclass=_NonStringTypeNameMeta):
-    pass
-
-
-class _HostileString(str):
-    @override
-    def __str__(self) -> str:
-        raise RuntimeError("string normalization failed")
 
 
 class _PicklableDummyModelMeta:
@@ -207,44 +100,6 @@ def test_inheritance_lattice() -> None:
     assert not issubclass(PathResolutionError, OptimizerError)
 
 
-def test_unprintable_arg_str_and_repr_never_raise() -> None:
-    bad = _Unprintable()
-    err = ConfigurationError(bad)
-    assert str(err) == "<unprintable _Unprintable>"
-    assert "<unprintable _Unprintable>" in repr(err)
-    # Identity is authoritative: the original object stays in ``.args``; only
-    # rendering is made safe (str/repr never touch the hostile object twice).
-    assert err.args == (bad,)
-
-
-def test_unprintable_configuration_error_keeps_identity_through_graphql() -> None:
-    """GraphQL-core ``located_error`` calls ``str(exc)``; must not replace the type."""
-    result = _execute_raising(lambda: ConfigurationError(_Unprintable()))
-    assert result.errors
-    oe = result.errors[0].original_error
-    assert isinstance(oe, ConfigurationError)
-    assert isinstance(oe, DjangoStrawberryFrameworkError)
-    assert "<unprintable _Unprintable>" in result.errors[0].message
-
-
-def test_unprintable_optimizer_error_keeps_identity_through_graphql() -> None:
-    result = _execute_raising(lambda: OptimizerError(_Unprintable()))
-    assert result.errors is not None
-    oe = result.errors[0].original_error
-    assert isinstance(oe, OptimizerError)
-    assert "<unprintable _Unprintable>" in result.errors[0].message
-
-
-def test_unprintable_syncmisuse_keeps_identity_through_graphql() -> None:
-    result = _execute_raising(lambda: SyncMisuseError(_Unprintable()))
-    assert result.errors is not None
-    oe = result.errors[0].original_error
-    assert isinstance(oe, SyncMisuseError)
-    assert isinstance(oe, ConfigurationError)
-    assert isinstance(oe, RuntimeError)
-    assert "<unprintable _Unprintable>" in result.errors[0].message
-
-
 def test_normal_string_message_unchanged() -> None:
     err = OptimizerError("Unplanned N+1: books")
     assert str(err) == "Unplanned N+1: books"
@@ -252,28 +107,8 @@ def test_normal_string_message_unchanged() -> None:
 
 
 def test_empty_args_render_empty_string() -> None:
-    """No message args: ``str`` is empty and never hits the placeholder path."""
+    """No message args: ``str`` is empty, exactly as with any other exception."""
     assert str(DjangoStrawberryFrameworkError()) == ""
-
-
-def test_multiple_args_mixed_printable_and_unprintable() -> None:
-    """Multi-arg render is safe, keeps every original arg, and shows both."""
-    bad = _Unprintable()
-    err = ConfigurationError("ctx", bad)
-    rendered = str(err)
-    assert "'ctx'" in rendered
-    assert "<unprintable _Unprintable>" in rendered
-    assert err.args == ("ctx", bad)
-
-
-def test_render_is_lazy_and_recomputed() -> None:
-    """Construction is lazy while later renders reflect current value/context."""
-    counter = _Counting()
-    err = OptimizerError(counter)
-    assert counter.renders == 0  # construction does not render
-    assert str(err) == "counted"
-    assert str(err) == "counted"
-    assert counter.renders == 2
 
 
 def test_args_reassignment_and_pickle_never_leave_stale_render_caches() -> None:
@@ -289,91 +124,6 @@ def test_args_reassignment_and_pickle_never_leave_stale_render_caches() -> None:
     assert repr(err) == "ConfigurationError('second')"
     assert str(restored) == "second"
     assert repr(restored) == "ConfigurationError('second')"
-
-
-def test_delayed_stateful_failure_is_handled() -> None:
-    """An arg that only breaks AFTER construction still renders safely (call-time guard)."""
-    arg = _Stateful()
-    err = OptimizerError(arg)
-    arg.armed = True  # str() is the render site; construction already succeeded
-    assert str(err) == "<unprintable _Stateful>"
-    assert str(err) == "<unprintable _Stateful>"  # cached, still safe
-
-
-def test_base_exception_from_arg_is_swallowed() -> None:
-    """A dunder raising ``BaseException`` (not ``Exception``) must not propagate."""
-    err = ConfigurationError(_UnprintableBase())
-    assert str(err) == "<unprintable _UnprintableBase>"
-    assert "<unprintable _UnprintableBase>" in repr(err)
-
-
-def test_hostile_metaclass_type_name_is_guarded_too() -> None:
-    """Fallback rendering does not trust ``type(arg).__name__``."""
-    err = ConfigurationError(_UnprintableTypeName())
-    assert str(err) == "<unprintable object>"
-    assert repr(err) == "ConfigurationError(<unprintable object>)"
-
-
-def test_diagnostic_metadata_helpers_fall_back_for_malformed_consumer_metadata() -> None:
-    """Typed diagnostics survive non-string names and hostile string-valued labels.
-
-    The fallback still has to NAME something. A model is a class, so it names
-    itself: reporting ``type(model).__name__`` would print the metaclass
-    (``ModelBase`` for every Django model) and identify nothing.
-    """
-
-    class _Model:
-        _meta = type("Meta", (), {"label": _HostileString("catalog.Item")})()
-
-    class _Terminal:
-        name = _HostileString("category")
-
-    assert _safe_type_name(_NonStringTypeName()) == "object"
-    assert _safe_model_label(_Model) == "_Model"
-    assert _safe_terminal_label(_Terminal()) == "_Terminal"
-
-
-def test_syncmisuse_error_renders_safely_and_keeps_identity() -> None:
-    """The base overrides reach the multiply-inheriting ``SyncMisuseError`` subclass."""
-    bad = _Unprintable()
-    err = SyncMisuseError(bad)
-    assert str(err) == "<unprintable _Unprintable>"
-    assert err.args == (bad,)
-    assert isinstance(err, (ConfigurationError, RuntimeError))
-
-
-def test_path_resolution_error_constructor_survives_hostile_metadata_and_values() -> None:
-    """Typed path errors remain constructible when diagnostic inputs are hostile."""
-    model = _HostileMetadata()
-    path = _Unprintable()
-    segment = _Unprintable()
-
-    # basedpyright: the unprintable path and segment are the hostile input under test;
-    # PathResolutionError types both as str
-    err = PathResolutionError(model, path, segment)  # pyright: ignore[reportArgumentType]
-
-    assert err.model is model
-    assert err.field_path is path
-    assert err.segment is segment
-    assert "Cannot classify path <unprintable _Unprintable>" in str(err)
-    assert "model _HostileMetadata" in str(err)
-
-
-def test_lookup_validation_error_constructor_survives_hostile_metadata_and_values() -> None:
-    """Typed lookup errors remain constructible when diagnostic inputs are hostile."""
-    terminal = _HostileMetadata()
-    lookup_expr = _Unprintable()
-    part = _Unprintable()
-
-    # basedpyright: the unprintable lookup expression and part are the hostile input under test;
-    # LookupValidationError types both as str
-    err = LookupValidationError(terminal, lookup_expr, part)  # pyright: ignore[reportArgumentType]
-
-    assert err.terminal is terminal
-    assert err.lookup_expr is lookup_expr
-    assert err.part is part
-    assert "Invalid lookup expression <unprintable _Unprintable>" in str(err)
-    assert "terminal _HostileMetadata" in str(err)
 
 
 @pytest.mark.parametrize(
@@ -428,314 +178,55 @@ def test_lookup_validation_error_roundtrip_preserves_attributes(
         assert restored.terminal is not term
 
 
-def test_str_subclass_with_hostile_format_is_stripped_by_helpers() -> None:
-    """Helpers strip str subclasses so hostile __format__ cannot detonate error message formatting."""
+def test_framework_error_keeps_its_type_through_graphql() -> None:
+    """GraphQL-core ``located_error`` calls ``str(exc)``; the original type survives."""
+    result = _execute_raising(lambda: ConfigurationError("bad config"))
+    assert result.errors is not None
+    oe = result.errors[0].original_error
+    assert isinstance(oe, ConfigurationError)
+    assert isinstance(oe, DjangoStrawberryFrameworkError)
+    assert result.errors[0].message == "bad config"
 
-    class _HostileFormatStr(str):
-        @override
-        def __str__(self) -> str:
-            return self
-
-        @override
-        def __format__(self, format_spec: str) -> str:
-            raise RuntimeError("hostile __format__ detonated")
-
-    class _HostileFormatRepr:
-        @override
-        def __repr__(self) -> str:
-            return _HostileFormatStr("<HostileFormatRepr>")
-
-    class _ModelWithHostileLabel:
-        _meta = type("Meta", (), {"label": _HostileFormatStr("app.HostileModel")})()
-
-    class _TerminalWithHostileName:
-        name = _HostileFormatStr("hostile_field")
-
-    # Safe helpers strip the subclass
-    label = _safe_model_label(_ModelWithHostileLabel)
-    assert type(label) is str
-    assert label == "app.HostileModel"
-
-    terminal_name = _safe_terminal_label(_TerminalWithHostileName())
-    assert type(terminal_name) is str
-    assert terminal_name == "hostile_field"
-
-    arg_repr = _safe_arg_repr(_HostileFormatRepr())
-    assert type(arg_repr) is str
-    assert arg_repr == "<HostileFormatRepr>"
-
-    # PathResolutionError and LookupValidationError construct without detonating
-    # basedpyright: the path whose repr returns a hostile str subclass is the hostile input under
-    # test; PathResolutionError types the parameter as str
-    path_err = PathResolutionError(_ModelWithHostileLabel, _HostileFormatRepr(), "segment")  # pyright: ignore[reportArgumentType]
-    assert "app.HostileModel" in str(path_err)
-    assert "<HostileFormatRepr>" in str(path_err)
-
-    lookup_err = LookupValidationError(_TerminalWithHostileName(), "field__exact", "exact")
-    assert "hostile_field" in str(lookup_err)
+    result = _execute_raising(lambda: SyncMisuseError("sync misuse"))
+    assert result.errors is not None
+    oe = result.errors[0].original_error
+    assert isinstance(oe, SyncMisuseError)
+    assert isinstance(oe, RuntimeError)
 
 
-def test_safe_diagnostic_helpers_survive_hostile_class_property() -> None:
-    """Diagnostic helpers survive hostile __class__ properties on inputs."""
+def test_consumer_message_arg_renders_through_its_own_dunders() -> None:
+    """A consumer object as the message renders like any exception's args.
 
-    class _HostileClass(ClassReadRaisesBase):
-        pass
-
-    bad = _HostileClass()
-    assert _safe_type_name(bad) in {"_HostileClass", "object"}
-    assert _safe_arg_repr(bad).startswith("<")
-    assert _safe_class_name(bad) in {"_HostileClass", "object"}
-    assert _safe_model_label(bad) in {"_HostileClass", "object"}
-    assert _safe_terminal_label(bad) in {"_HostileClass", "object"}
-    assert "unprintable" in describe_value(bad) or "_HostileClass" in describe_value(bad)
-
-
-def test_safe_class_name_survives_hostile_name_metadata() -> None:
-    """_safe_class_name survives a name attribute whose __class__ or __bool__ raises."""
-
-    class _HostileClassAndBool(ClassReadRaisesBase):
-        def __bool__(self) -> bool:
-            raise RuntimeError("hostile __bool__ on name")
-
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("hostile __repr__ on name")
-
-    class _HostileNameObj:
-        @property
-        def __name__(self) -> object:
-            return _HostileClassAndBool(message="hostile __class__ on name")
-
-    assert _safe_class_name(_HostileNameObj()) == "<unprintable _HostileClassAndBool>"
-
-
-def test_safe_type_name_empty_string_name_falls_back_past_the_class() -> None:
-    """An empty ``__name__`` is skipped; a class then names its metaclass."""
-    empty_cls = type("", (), {})
-    assert _safe_type_name(empty_cls) == "type"
-    assert _safe_type_name(empty_cls()) == "object"
-
-
-def test_safe_type_name_survives_isinstance_raising_base_exception() -> None:
-    """A ``__name__`` whose ``isinstance(..., str)`` raises is skipped, not propagated."""
-
-    class _HostileTypeNameMeta(type):
-        @property
-        @override
-        # basedpyright: the hostile shape under test, a ``__name__`` property answering a hostile
-        # object; the checker rejects any property overriding a base class attribute
-        def __name__(cls) -> object:  # pyright: ignore[reportIncompatibleVariableOverride]
-            return ClassReadRaises(KeyboardInterrupt)
-
-    class _HostileType(metaclass=_HostileTypeNameMeta):
-        pass
-
-    assert _safe_type_name(_HostileType) == "_HostileTypeNameMeta"
-    assert _safe_type_name(_HostileType()) == "object"
-
-
-def test_safe_type_name_survives_base_str_slot_raising_base_exception(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A name that blows up in the base ``str`` slot is skipped, not propagated."""
-
-    class _MockStrMeta(type):
-        @override
-        def __instancecheck__(cls, instance: object) -> bool:
-            return True
-
-    class _MockStr(metaclass=_MockStrMeta):
-        @override
-        def __str__(self) -> str:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(exc_mod, "str", _MockStr, raising=False)
-    assert _safe_type_name(int) == "object"
-
-
-def test_safe_arg_repr_falls_back_for_hostile_values_and_type_metadata() -> None:
-    """A diagnostic message can never be blocked or corrupted by the value it names.
-
-    Both fallback rungs return the same sentinel: a ``__repr__`` that raises drops
-    to the type name, and a ``__name__`` that is unavailable OR is not a string
-    drops further to the literal ``"object"``.
+    The framework never raises one (its messages are exact ``str``), so a
+    consumer that does gets its object's own ``__str__`` / ``__repr__``, and
+    whatever those raise propagates.
     """
-
-    class _HostileNameMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__name__":
-                raise RuntimeError("name unavailable")
-            return object_result(super().__getattribute__, name)
-
-    class _HostileValue(metaclass=_HostileNameMeta):
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr unavailable")
-
-    assert _safe_arg_repr(_HostileValue()) == "<unprintable object>"
-
-    class _NonStringNameMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__name__":
-                return 42
-            return object_result(super().__getattribute__, name)
-
-    class _NonStringName(metaclass=_NonStringNameMeta):
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr unavailable")
-
-    assert _safe_arg_repr(_NonStringName()) == "<unprintable object>"
+    bad = _Unprintable()
+    err = ConfigurationError(bad)
+    assert err.args == (bad,)
+    with pytest.raises(RuntimeError, match="str failed"):
+        str(err)
+    with pytest.raises(RuntimeError, match="repr failed"):
+        repr(err)
 
 
-def test_framework_error_str_and_repr_strip_str_subclasses() -> None:
-    """__str__ and __repr__ strip str subclasses so hostile __format__ cannot detonate."""
-
-    class _HostileFormatStr(str):
-        @override
-        def __str__(self) -> str:
-            return self
-
-        @override
-        def __format__(self, format_spec: str) -> str:
-            raise RuntimeError("hostile __format__ detonated")
-
-    err = ConfigurationError(_HostileFormatStr("safe-message"))
-    s = str(err)
-    r = repr(err)
-
-    assert type(s) is str
-    assert type(r) is str
-    assert s == "safe-message"
-    assert "ConfigurationError('safe-message')" in r
-    # Formatting the rendered strings never detonates
-    assert f"{s}" == "safe-message"
-    assert f"{r}" == repr(err)
-
-
-def test_safe_class_name_on_standard_classes() -> None:
-    """_safe_class_name resolves __name__ and __qualname__ on normal classes and instances."""
-
-    class _FooClass:
-        pass
-
-    assert _safe_class_name(_FooClass) == "_FooClass"
-    assert _safe_class_name(_FooClass, qualified=True).endswith("_FooClass")
-    assert _safe_class_name(_FooClass()) == "_FooClass"
-
-
-def test_describe_value_on_printable_and_unprintable_values() -> None:
-    """describe_value renders type and value for normal inputs and falls back on error."""
-    assert describe_value(100) == "int 100"
-    assert describe_value("test") == "str 'test'"
-    assert describe_value(None) == "NoneType None"
-    assert describe_value(_Unprintable()) == "an unprintable _Unprintable"
-    assert describe_value(_UnprintableBase()) == "an unprintable _UnprintableBase"
-
-    huge_int = 10**5000
-    try:
-        str(huge_int)
-    except ValueError:
-        assert describe_value(huge_int) == "an unprintable int"
-
-
-def test_safe_text_is_the_shared_str_renderer() -> None:
-    """The consolidated renderer strips str subclasses, falls back, and degrades."""
-
-    class _HostileStrStr(str):
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("string normalization failed")
-
-    class _RaisingStr:
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("str failed")
-
-    rendered = _safe_text(_HostileStrStr("content"))
-    assert type(rendered) is str
-    assert rendered == "content"
-    assert _safe_text(7) == "7"
-    assert _safe_text("", fallback="fallback") == "fallback"
-    assert _safe_text(_RaisingStr()) == "<unprintable _RaisingStr>"
-
-
-def test_safe_text_strips_a_str_subclass_returned_by_tp_str() -> None:
-    """A ``tp_str`` render that is a ``str`` SUBCLASS is stripped before the truthiness check.
-
-    CPython returns a ``tp_str`` result unchanged when it is a ``str`` subclass,
-    so without the base-``str``-slot strip the ``rendered or fallback``
-    truthiness check dispatched the leaked subclass's hostile ``__len__`` OUT
-    of this renderer (a raw ``RuntimeError`` replacing the promised typed
-    envelope), and its overridden ``__str__`` / ``__format__`` would run inside
-    the caller's f-string while the envelope was still being assembled.
-    """
-
-    class _LeakedRender(str):
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("leaked-subclass __str__ ran")
-
-        @override
-        def __format__(self, format_spec: str) -> str:
-            raise RuntimeError("hostile __format__ detonated")
-
-        @override
-        def __len__(self) -> int:
-            raise RuntimeError("hostile __len__ detonated")
-
-    class _LeakyStrFactory:
-        @override
-        def __str__(self) -> str:
-            return _LeakedRender("from-factory")
-
-    rendered = _safe_text(_LeakyStrFactory())
-    assert type(rendered) is str
-    assert rendered == "from-factory"
-    # The caller's f-string interpolation of the render never detonates either.
-    assert f"{rendered}" == "from-factory"
-    # The empty-render fallback rung stays reachable through the base slot.
-    assert _safe_text("", fallback="<unknown>") == "<unknown>"
-
-
-def test_write_error_envelope_survives_hostile_str_returning_message_object() -> None:
-    """The shared envelope ctor survives a message leaf whose str leaks a subclass.
-
-    ``field_error`` is the single FieldError leaf constructor. A validator or
-    serializer error whose message is a non-str object whose ``__str__``
-    returns a hostile ``str`` subclass must stay a field-keyed ``FieldError``,
-    never escape envelope assembly as a raw ``RuntimeError``.
-    """
-
-    class _HostileRender(str):
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("leaked-subclass __str__ ran")
-
-        @override
-        def __format__(self, format_spec: str) -> str:
-            raise RuntimeError("hostile __format__ detonated")
-
-        @override
-        def __len__(self) -> int:
-            raise RuntimeError("hostile __len__ detonated")
-
-    class _StrFactoryMessage:
-        @override
-        def __str__(self) -> str:
-            return _HostileRender("hostile message")
-
-    leaf = _errors_module.field_error("name", ["fine", _StrFactoryMessage()])
-    assert leaf.field == "name"
-    assert leaf.messages == ["fine", "hostile message"]
-
-
-def test_safe_text_is_single_sourced_across_consumer_modules() -> None:
-    """utils.errors and types.converters import the ONE renderer, not local twins."""
-    assert module_binding(_errors_module, "_safe_text") is _safe_text
-    assert module_binding(_errors_module, "_unprintable").__module__ == (
-        "django_strawberry_framework.exceptions"
+def test_path_resolution_error_message_is_pinned() -> None:
+    err = PathResolutionError(Book, "loans__x", "x")
+    assert str(err) == (
+        "Cannot classify path 'loans__x' on model library.Book: "
+        "segment 'x' is not a traversable model-field relation."
     )
-    assert module_binding(_converters_module, "_safe_text") is _safe_text
+    assert err.model is Book
+    assert (err.field_path, err.segment) == ("loans__x", "x")
+    # A value without ``_meta`` is named by its kind.
+    assert "on model object:" in str(PathResolutionError(object(), "a", "a"))
+
+
+def test_lookup_validation_error_message_is_pinned() -> None:
+    terminal = Book._meta.get_field("title")
+    err = LookupValidationError(terminal, "title__nope", "nope")
+    assert str(err) == (
+        "Invalid lookup expression 'title__nope' for terminal title: "
+        "part 'nope' is not a valid transform or lookup."
+    )
+    assert "for terminal object:" in str(LookupValidationError(object(), "x", "x"))

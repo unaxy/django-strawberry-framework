@@ -8,7 +8,7 @@ Companion to [`spec-017-deferred_scalars-0_0_6.md`][spec-017]. The spec states t
 - **`parse_value=int` rejected.** `int(True) == 1`, `int(False) == 0` and `int(1.9) == 1`; the last is a silent truncation. The parser therefore checks `bool` before `int` (`bool` subclasses `int`) and rejects `float` outright.
 - **`serialize=str` rejected.** It stringifies `True`, `1.9`, `Decimal(...)` and arbitrary objects, so a schema could emit values its own parser rejects. Parser and serializer are strict symmetrically because `BigInt` is a public scalar.
 - **A permissive regex or plain `int(str)` rejected.** The regex `^(0|-?[1-9][0-9]*)$` is deliberately narrower than `int(str)`: `"1_000"` (PEP 515), `"+1"`, `"01"`, `"-0"` and Unicode decimal digits raise. Predictability over leniency.
-- **Subclass normalization.** `int.__int__`, `str.__str__` and `int.__repr__` read the base slots, so a hostile `int` / `str` subclass can neither change the accepted value nor replace the scalar's error contract; error text goes through `_safe_arg_repr` / `_safe_type_name` for the same reason.
+- **Subclass normalization.** `int.__int__`, `int.__repr__` and `utils/truth.py::text` (a `str` subclass's base-slot copy) read the base slots, so a hostile `int` / `str` subclass can neither change the accepted value nor replace the scalar's error contract; error text names a rejected value's kind through `utils/truth.py::kind`, which reads the interpreter's type slot, for the same reason.
 - **Int64 range enforcement rejected.** `BigInt` is arbitrary-precision; a hard 64-bit cap is a separate concern a consumer can enforce in a resolver or `clean`. A `BigInt64` variant stays out of scope.
 - **`BigAutoField` stays `int`.** PK wire-format stability; the consumer recourse for a PK past `2**31` is the annotation override of `DONE-019-0.0.6`.
 
@@ -17,7 +17,7 @@ Companion to [`spec-017-deferred_scalars-0_0_6.md`][spec-017]. The spec states t
 - **Multi-dimensional `ArrayField` rejected as scope.** A nested array raises `ConfigurationError`.
 - **Outer `choices` rejected, not ignored.** Outer-array `choices` have no unambiguous GraphQL shape; loud over silent. Element-level enums come from `choices` on `base_field`, which the recursive `convert_scalar` call handles.
 - **The recursion is left `force_nullable`-unset.** `Meta.nullable_overrides` / `Meta.required_overrides` describe the outer column; threading the override into `base_field` would silently change element nullability.
-- **Guarded metadata readers.** `_field_label` / `_field_has_choices` keep a hostile field descriptor's exception from escaping as anything other than `ConfigurationError`.
+- **Truthful diagnostic labels.** `_field_label` names `Model.field` from truthful reads of the bound model class and the field name, so a field's model class cannot misreport itself in a rejection; `array_element_field` recognizes an `ArrayField` through `utils/truth.py::is_instance`, so a field class cannot claim to be one.
 
 ## Decision 3 — `JSONField` target type
 

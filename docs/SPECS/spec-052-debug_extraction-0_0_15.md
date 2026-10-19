@@ -23,7 +23,7 @@ verdicts flow from the same evidence standard, applied to opposite facts.
 The optimizer is bidirectionally fused to the type system; the debug
 extension imports stdlib + Django + graphql-core + `typing_extensions`
 **plus a small set of package symbols (the root `logger`,
-`exceptions.ConfigurationError` / `exceptions.describe_value`,
+`exceptions.ConfigurationError`, the `utils/truth.py` reads,
 `utils/private_state.py::PrivateAuthority`, and the per-operation binding
 base in `extensions/operation_state.py`)**, nothing in the package imports
 it back, and it works against ANY
@@ -165,7 +165,7 @@ a package-tier suite and a live tier riding a dedicated
 runtime module imports it back** (it is deliberately absent from the root
 `__all__`); **fakeshop deliberately does not enable it**; and — unlike every
 other subsystem — **it imports little from the package**: the root
-`logger`, `exceptions.ConfigurationError` / `exceptions.describe_value`,
+`logger`, `exceptions.ConfigurationError`, the `utils/truth.py` reads,
 `utils/private_state.py::PrivateAuthority`, and the per-operation binding
 base (`OperationState`, `_OperationBoundExtension`) from
 `extensions/operation_state.py`. It is a low-coupling
@@ -187,13 +187,16 @@ evidence — is exactly right for this module, on the same evidence standard.
   pins the "not part of the default recipe" posture for `debug` and the
   root-exported posture for the other two).
 - `debug.py`'s imports: `math`, `threading`, `traceback`, `contextlib`,
-  `collections.abc`, `dataclasses`, `typing`, `django.conf.settings` (the
-  fail-closed `DEBUG` gate), `django.db.connections`, `graphql`,
-  `typing_extensions.override`, `from .. import logger`,
-  `from ..exceptions import ConfigurationError, describe_value`,
-  `from ..utils.private_state import PrivateAuthority`, and
-  `from .operation_state import OperationState, _OperationBoundExtension`
-  (Strawberry's `ExecutionContext` only under `TYPE_CHECKING`).
+  `dataclasses`, `typing`, `django.conf.settings` (the fail-closed `DEBUG`
+  gate), `django.core.exceptions.ImproperlyConfigured`,
+  `django.db.connections`, `graphql`, `typing_extensions.override`,
+  `from django_strawberry_framework import logger`,
+  `from django_strawberry_framework.exceptions import ConfigurationError`,
+  `from django_strawberry_framework.utils import truth`,
+  `from django_strawberry_framework.utils.private_state import PrivateAuthority`,
+  and `from .operation_state import OperationState, _OperationBoundExtension`
+  (`collections.abc`, the backend wrapper and Strawberry's `ExecutionContext`
+  only under `TYPE_CHECKING`).
   No registry, no `DjangoType`, no optimizer.
 - Tests: `tests/extensions/test_debug.py` (package tier) and
   `examples/fakeshop/test_query/test_debug_extension_api.py` (live tier
@@ -308,7 +311,7 @@ standalone package.
 **Evidence** (the same standard that rejected the optimizer split): (a) the
 import surface is stdlib + Django + graphql-core + `typing_extensions` +
 a small set of package symbols (the root `logger`,
-`exceptions.ConfigurationError`, `exceptions.describe_value`,
+`exceptions.ConfigurationError`, the `utils/truth.py` reads,
 `PrivateAuthority`, and the `extensions/operation_state.py` binding base) —
 no type-system contract, no registry, no optimizer; (b)
 reverse coupling is zero for the module — no package module imports
@@ -339,11 +342,11 @@ mirrors this package's family prefix (it is the maintainer's package, not a
 ### Decision 3 — The package-import seams are the only code changes
 
 **Decision**: `debug.py` moves verbatim except its package imports:
-`from .. import logger` becomes a module-level
+`from django_strawberry_framework import logger` becomes a module-level
 `logger = logging.getLogger("django_strawberry_debug")`, and
-`from ..exceptions import ConfigurationError, describe_value` (the
-non-bool `allow_unsafe_production` refusal path) is replaced by a
-package-local equivalent — the new package cannot depend on the framework,
+`from django_strawberry_framework.exceptions import ConfigurationError` plus
+`utils/truth.py::describe` (the non-bool `allow_unsafe_production` refusal
+path) are replaced by a package-local equivalent — the new package cannot depend on the framework,
 so it vendors a minimal configuration-error class and value describer of
 its own. The moved suite's `pytest.raises(ConfigurationError, ...)`
 assertion retargets to the vendored class, and its six logger-identity

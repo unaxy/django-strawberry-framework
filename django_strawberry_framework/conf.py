@@ -48,7 +48,8 @@ from typing import TYPE_CHECKING
 from django.conf import settings as django_settings
 from django.test.signals import setting_changed
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_type_name
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_exact_dict, is_mapping, read_attr
 
 if TYPE_CHECKING:
@@ -72,10 +73,13 @@ APPLY_UPSTREAM_PATCHES_KEY = "APPLY_UPSTREAM_PATCHES"
 # ``400`` hardening a consumer gets on STRAWBERRY'S OWN view: the Strawberry
 # patch hardens both transports' body parse, the cross_web patch routes that
 # view's sync bytes into it), so disabling one of the pair alone is safe but
-# leaves upstream's sync view unfixed. A package view is unaffected by every
-# state of this setting - it owns both its strict decode and its own body
-# source (``views.py::_RawBodyRequestAdapter``). ``graphql_core`` independently
-# owns async-iterable list completion and has no HTTP-view lifecycle coupling.
+# leaves upstream's sync view unfixed. A package view keeps the strict UTF-8
+# half of that hardening in every state of this setting - it owns both its
+# strict decode and its own body source (``views.py::_RawBodyRequestAdapter``)
+# - but it rides the gate for the body-envelope guard: with the ``strawberry``
+# half off, a scalar or non-object-batch body is an unhandled ``500`` on a
+# package mount too. ``graphql_core`` independently owns async-iterable list
+# completion and has no HTTP-view lifecycle coupling.
 UPSTREAM_PATCH_DEPENDENCIES = frozenset(
     {
         "cross_web",
@@ -197,8 +201,8 @@ def _normalize_user_settings(value: object) -> dict[object, object]:
     - Non-``Mapping`` value -> ``ConfigurationError`` naming the
       received type. Protects ``Settings.__getattr__`` from raising a
       bare ``TypeError`` on subscript when a consumer assigns a string
-      / list / other non-mapping by mistake, which the pre-fix ``or
-      {}`` fallback silently absorbed.
+      / list / other non-mapping by mistake, instead of silently
+      treating it as "no settings".
     - ``dict`` -> returned as-is (fast path; preserves identity so
       tests that capture the same dict by reference observe their
       mutations).
@@ -210,32 +214,22 @@ def _normalize_user_settings(value: object) -> dict[object, object]:
 
     Shared by ``Settings.__init__`` (eager construction),
     ``Settings.user_settings`` (lazy read from ``django.conf.settings``),
-    and ``Settings.reload`` (signal-driven and direct cache replacement)
-    so a single shape contract applies across every cache write site.
+    ``Settings.reload`` (direct cache replacement) and
+    ``Settings._reload_from_django`` (the ``setting_changed`` path, which
+    keeps django backing) so a single shape contract applies across every
+    cache write site.
     """
     if value is None:
         return {}
-    try:
-        value_is_mapping = is_mapping(value)
-    except Exception as exc:
+    if not is_mapping(value):
         raise ConfigurationError(
-            f"`{DJANGO_SETTINGS_KEY}` must be a mapping or None; got {_safe_type_name(value)}.",
-        ) from exc
-    if not value_is_mapping:
-        raise ConfigurationError(
-            f"`{DJANGO_SETTINGS_KEY}` must be a mapping or None; got {_safe_type_name(value)}.",
+            f"`{DJANGO_SETTINGS_KEY}` must be a mapping or None; got {truth.kind(value)}.",
         )
     mapping = value
     if is_exact_dict(mapping):
         return mapping
-    try:
-        return dict(mapping)
-    except ConfigurationError:
-        raise
-    except Exception as exc:
-        raise ConfigurationError(
-            f"`{DJANGO_SETTINGS_KEY}` must be a mapping or None; got {_safe_type_name(value)}.",
-        ) from exc
+    # The copy runs the mapping's own iteration, whose exceptions propagate.
+    return dict(mapping)
 
 
 class Settings:
@@ -358,7 +352,9 @@ class Settings:
         the lazy ``self.user_settings`` read raise ``ConfigurationError``,
         which propagates through ``hasattr`` and ``getattr(default=...)``
         probes by design - bad configuration should fail loud rather than
-        masquerade as a missing attribute.
+        masquerade as a missing attribute. The cache is always a plain
+        ``dict`` (``_normalize_user_settings`` copies every other mapping), so
+        the lookup has no other failure of its own.
         """
         if name in {
             "user_settings",
@@ -368,21 +364,15 @@ class Settings:
         } or name.startswith("__"):
             raise AttributeError(name)
         try:
-            # ``self.user_settings`` is a descriptor (``@property``), not a
-            # ``__getattr__``-driven lookup; keep it a ``@property`` to avoid
-            # recursive lookup on malformed config raising
-            # ``ConfigurationError`` inside this handler.
+            # ``self.user_settings`` is a descriptor (``@property``), so this
+            # internal read resolves without routing through ``__getattr__``
+            # - until the lazy load itself raises ``AttributeError``, which
+            # retries lookup once as ``"user_settings"`` and is cut by the
+            # guard above. A ``ConfigurationError`` from the lazy load
+            # propagates straight out.
             return self.user_settings[name]
         except KeyError:
             raise AttributeError(f"Invalid setting: `{name}`") from None
-        except ConfigurationError:
-            raise
-        except AttributeError:
-            raise
-        except Exception as exc:
-            raise ConfigurationError(
-                f"`{DJANGO_SETTINGS_KEY}` is not a valid mapping; lookup of {name!r} failed.",
-            ) from exc
 
 
 settings: Settings = Settings(None)
@@ -392,28 +382,19 @@ def _validated_patch_flags(plain: dict[object, object]) -> dict[str, bool]:
     """Validate the plain copy of an ``APPLY_UPSTREAM_PATCHES`` mapping and return its flags.
 
     Raises ``ConfigurationError`` for a non-string key, an unknown dependency
-    name or a non-bool value. Any other exception a hostile key or value
-    raises while being inspected propagates to the caller, which reports it as
-    an unreadable mapping.
+    name or a non-bool value. ``is_mapping`` proves only a ``Mapping`` of
+    ``object`` entries, so each one is checked here.
     """
-    # Key-type guard FIRST so a non-string key never reaches the
-    # unknown-name framing below, whose ``sorted()`` would leak a bare
-    # ``TypeError`` on mixed unorderable key types instead of the
-    # promised ``ConfigurationError`` (the
+    # Key-type guard FIRST so a non-string key never reaches the unknown-name
+    # framing below, whose ``sorted()`` would leak a bare ``TypeError`` on mixed
+    # unorderable key types instead of the promised ``ConfigurationError`` (the
     # ``types/base.py::_validate_relation_shapes`` key-guard precedent).
     keyed: dict[str, object] = {}
     for name, entry in plain.items():
-        try:
-            is_str = isinstance(name, str)
-        except Exception as exc:
+        if not truth.is_instance(name, str):
             raise ConfigurationError(
                 f"`{APPLY_UPSTREAM_PATCHES_KEY}` keys must be dependency name strings; "
-                f"got {name!r}.",
-            ) from exc
-        if not is_str:
-            raise ConfigurationError(
-                f"`{APPLY_UPSTREAM_PATCHES_KEY}` keys must be dependency name strings; "
-                f"got {name!r}.",
+                f"got {truth.render(name)}.",
             )
         keyed[name] = entry
     unknown = set(keyed) - UPSTREAM_PATCH_DEPENDENCIES
@@ -426,8 +407,8 @@ def _validated_patch_flags(plain: dict[object, object]) -> dict[str, bool]:
     for name, value in keyed.items():
         if type(value) is not bool:
             raise ConfigurationError(
-                f"`{APPLY_UPSTREAM_PATCHES_KEY}[{name!r}]` must be a bool; "
-                f"got {_safe_type_name(value)}.",
+                f"`{APPLY_UPSTREAM_PATCHES_KEY}[{truth.render(name)}]` must be a bool; "
+                f"got {truth.kind(value)}.",
             )
         flags[name] = value
     return flags
@@ -484,38 +465,15 @@ def upstream_patches_enabled(dependency: str) -> bool:
     configured: object = getattr(settings, APPLY_UPSTREAM_PATCHES_KEY, True)
     if type(configured) is bool:
         return configured
-    try:
-        configured_is_mapping = is_mapping(configured)
-    except Exception as exc:
+    if not is_mapping(configured):
         raise ConfigurationError(
             f"`{APPLY_UPSTREAM_PATCHES_KEY}` must be a bool or a mapping of dependency names "
-            f"to bools; got {_safe_type_name(configured)}.",
-        ) from exc
-    if configured_is_mapping:
-        # Defensive copy FIRST so hostile __iter__/__getitem__/__get__
-        # and one-shot generators cannot diverge between validation and
-        # the final ``get``. ``dict()`` iteration is the single
-        # consumption point; the plain copy is then the only object
-        # validated and read.
-        try:
-            plain = dict(configured)
-        except Exception as exc:
-            raise ConfigurationError(
-                f"`{APPLY_UPSTREAM_PATCHES_KEY}` is not a valid mapping; iteration failed.",
-            ) from exc
-        try:
-            flags = _validated_patch_flags(plain)
-        except ConfigurationError:
-            raise
-        except Exception as exc:
-            raise ConfigurationError(
-                f"`{APPLY_UPSTREAM_PATCHES_KEY}` is not a valid mapping; iteration failed.",
-            ) from exc
-        return flags.get(dependency, True)
-    raise ConfigurationError(
-        f"`{APPLY_UPSTREAM_PATCHES_KEY}` must be a bool or a mapping of dependency names "
-        f"to bools; got {_safe_type_name(configured)}.",
-    )
+            f"to bools; got {truth.kind(configured)}.",
+        )
+    # One copy is the single consumption point, so a one-shot mapping cannot
+    # answer validation and the final ``get`` differently; the copy runs the
+    # mapping's own iteration, whose exceptions propagate.
+    return _validated_patch_flags(dict(configured)).get(dependency, True)
 
 
 def django_setting(name: str) -> object:

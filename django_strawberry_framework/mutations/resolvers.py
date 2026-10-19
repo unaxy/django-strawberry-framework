@@ -89,7 +89,6 @@ from django.utils import timezone
 from graphql import GraphQLError
 
 from django_strawberry_framework.conf import django_setting
-from django_strawberry_framework.exceptions import _safe_arg_repr
 from django_strawberry_framework.optimizer.extension import (
     apply_connection_optimization,
     mutation_payload_child_selections,
@@ -97,6 +96,7 @@ from django_strawberry_framework.optimizer.extension import (
 from django_strawberry_framework.relay import GlobalIDDecode, decode_model_global_id
 from django_strawberry_framework.resource_policy import check_deadline
 from django_strawberry_framework.types.relay import implements_relay_node
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import call_method, list_of, pk_of, read_attr
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
@@ -172,7 +172,7 @@ if TYPE_CHECKING:
     # A class ``authorize_or_raise`` / ``payload_cls_for`` receives: every
     # write-mutation declaration, plus the auth surfaces' synthesized permission
     # holders (zero-arg-constructible classes carrying ``check_permission`` and the
-    # bind outputs, built by ``_SealedAuthHolderMeta``).
+    # bind outputs, typed as ``_SealedAuthHolderMeta``).
     _AuthorizedClass: TypeAlias = WriteMutationClass | _SealedAuthHolderMeta
 
     class _GeneratedPayload(Protocol):
@@ -387,7 +387,7 @@ def run_write_pipeline_sync(
         # non-pinned connection - read or write, signal-ful or signal-less -
         # raises before it executes, so a hook cannot write (or probe) through
         # another database and escape the pinned transaction.
-        with pipeline_alias_guard(mutation_cls.__name__, using):
+        with pipeline_alias_guard(truth.name(mutation_cls), using):
             # Authorize exactly once - AFTER the target is located + locked, BEFORE
             # the flavor decode (the security invariant): the decode issues
             # visibility-scoped ``get_queryset`` queries, so running it pre-auth
@@ -410,8 +410,8 @@ def run_write_pipeline_sync(
                         pk_of(instance),
                         authorized_pk,
                         message=(
-                            f"{mutation_cls.__name__}: the located instance's pk changed from "
-                            f"{_safe_arg_repr(authorized_pk)} to {_safe_arg_repr(pk_of(instance))} during "
+                            f"{truth.name(mutation_cls)}: the located instance's pk changed from "
+                            f"{truth.render(authorized_pk)} to {truth.render(pk_of(instance))} during "
                             "authorization; an update must "
                             "write the row that was authorized, never a substituted one."
                         ),
@@ -446,10 +446,9 @@ def run_write_pipeline_sync(
                     pk_of(saved_row),
                     authorized_pk,
                     message=(
-                        f"{mutation_cls.__name__}: the write step returned "
-                        f"{cast('type[models.Model]', model).__name__} "
-                        f"pk={_safe_arg_repr(pk_of(saved_row))}, but the located, "
-                        f"authorized row is pk={_safe_arg_repr(authorized_pk)}; an update must write "
+                        f"{truth.name(mutation_cls)}: the write step returned "
+                        f"{truth.name(model)} pk={truth.render(pk_of(saved_row))}, but the located, "
+                        f"authorized row is pk={truth.render(authorized_pk)}; an update must write "
                         "the row that was "
                         "authorized, never a substituted one."
                     ),
@@ -1233,8 +1232,8 @@ def _delete_write_step(
         pk_of(instance),
         authorized_pk,
         message=(
-            f"{mutation_cls.__name__}: the located instance's pk changed from "
-            f"{_safe_arg_repr(authorized_pk)} to {_safe_arg_repr(pk_of(instance))} during "
+            f"{truth.name(mutation_cls)}: the located instance's pk changed from "
+            f"{truth.render(authorized_pk)} to {truth.render(pk_of(instance))} during "
             "authorization; a delete must "
             "remove the row that was located and authorized, never a substituted one."
         ),
@@ -1331,16 +1330,17 @@ def authorize_or_raise(
     """
     allowed = _require_sync_bool_auth_result(
         mutation_cls().check_permission(info, operation, data, instance),
-        owner=mutation_cls.__name__,
+        owner=truth.name(mutation_cls),
         method="check_permission",
     )
     if not allowed:
-        # The model / ``ModelForm`` flavor names its target model
-        # (``_primary_type.__name__``); a plain ``DjangoFormMutation`` carries
-        # ``_primary_type is None`` (no object to return - spec-038 Decision 6), so
-        # fall back to the mutation class name, keeping ONE auth gate for both
-        # flavors (spec-038 plain-form auth-message discretion).
-        target_name = getattr(mutation_cls._primary_type, "__name__", mutation_cls.__name__)
+        # The model / ``ModelForm`` flavor names its target model; a plain
+        # ``DjangoFormMutation`` carries ``_primary_type is None`` (no object to
+        # return - spec-038 Decision 6), so fall back to the mutation class name,
+        # keeping ONE auth gate for both flavors (spec-038 plain-form auth-message
+        # discretion).
+        primary_type = mutation_cls._primary_type
+        target_name = truth.name(mutation_cls if primary_type is None else primary_type)
         raise GraphQLError(f"Not authorized to {operation} {target_name}.")
 
 

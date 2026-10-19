@@ -53,11 +53,8 @@ from typing import cast
 import strawberry
 from django import forms
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.converters import (
     MRO_CONTINUE,
     convert_with_mro,
@@ -297,12 +294,11 @@ def _unsupported_form_field(field: forms.Field) -> ConfigurationError:
     ``ImproperlyConfigured`` parity, raised as the package's own
     ``ConfigurationError``). Spelt as a factory so the no-catch-all contract -
     raise, never silently coerce to ``str`` - stays in this module's wording.
-    Hostile ``__name__`` / ``__repr__`` ride the shared
-    ``exceptions._safe_type_name`` / ``_safe_arg_repr`` guards.
+    The field's kind and repr are read through ``truth.kind`` / ``truth.render``.
     """
     return ConfigurationError(
-        f"Unsupported form field type {_safe_type_name(field)!r} on form "
-        f"field {_safe_arg_repr(field)}. convert_form_field has no mapping "
+        f"Unsupported form field type {truth.kind(field)!r} on form "
+        f"field {truth.render(field)}. convert_form_field has no mapping "
         "for it and no supported ancestor; register a supported base class, or "
         "supply a custom input_class field for it.",
     )

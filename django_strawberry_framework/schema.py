@@ -1,6 +1,6 @@
 """``DjangoSchema`` - the schema whose mutation transactions span response completion.
 
-The 0.0.14 mutation-atomicity commit-gap fix. A generated mutation's write pipeline runs inside
+The mutation-atomicity commit-gap fix. A generated mutation's write pipeline runs inside
 ``transaction.atomic()``, but graphql-core *completes* (serializes) the returned
 payload only after the resolver returns - historically after that transaction had
 already committed. A completion failure (a non-nullable field resolving ``null``,
@@ -19,7 +19,7 @@ back. The window also publishes the managed alias
 REQUIRES: a generated mutation executed through a plain ``strawberry.Schema``
 fails before any database work, directing the consumer here.
 
-Execution-mode split (spec plan "Implementation Changes"):
+Execution-mode split:
 
 - **Sync** (``schema.execute_sync`` / the WSGI view): graphql-core completes the
   field synchronously inside ``execute_field``, so the context holds the
@@ -82,7 +82,7 @@ from typing_extensions import override
 from . import logger
 from ._graphql_core_patches import _is_awaitable
 from .error_policy import _PACKAGE_ERROR_POLICY, ErrorPolicy, resolve_error_policy
-from .exceptions import ConfigurationError, describe_value
+from .exceptions import ConfigurationError
 from .extensions.error_policy import (
     DjangoErrorPolicyExtension,
     degraded_result,
@@ -94,7 +94,9 @@ from .extensions.operation_state import DjangoExtensionsRunner, _OperationModeMa
 from .extensions.resource_policy import AdmissionGuard, DjangoResourcePolicyExtension
 from .mutations.fields import MUTATION_CLASS_MARKER
 from .resource_policy import _PACKAGE_RESOURCE_POLICY, ResourcePolicy, resolve_resource_policy
-from .utils._narrowing import is_class, is_mapping, mapping_get
+from .utils import truth
+from .utils._narrowing import is_mapping, mapping_get
+from .utils.errors import coded_error_extensions
 from .utils.execution_mode import OperationMode, async_execution
 from .utils.policies import copy_policy
 from .utils.private_state import PrivateAuthority, PrivateMembership
@@ -199,7 +201,11 @@ async def _outlast_cancellation(done: asyncio.Future[None]) -> None:
 
 
 class DjangoMutationExecutionContext(ExecutionContext):
-    """Hold each generated mutation field's transaction open through value completion."""
+    """Generated-mutation execution context.
+
+    The execution context that holds each generated mutation field's transaction open
+    through value completion.
+    """
 
     @override
     def execute_field(
@@ -214,7 +220,8 @@ class DjangoMutationExecutionContext(ExecutionContext):
         if mutation_cls is None:
             return super().execute_field(parent_type, source, field_nodes, path)
 
-        model = getattr(getattr(mutation_cls, "_mutation_meta", None), "model", None)
+        mutation_meta = truth.static_attr(mutation_cls, "_mutation_meta", None)
+        model = getattr(mutation_meta, "model", None)
         alias = resolve_write_alias(model)
         if async_execution():
             return self._execute_mutation_field_async(
@@ -271,8 +278,8 @@ class DjangoMutationExecutionContext(ExecutionContext):
     def _execution_errors(self) -> list[GraphQLError]:
         """Return the execution's live error list across graphql-core versions.
 
-        graphql-core < 3.2.9 stores located errors directly as
-        ``ExecutionContext.errors`` (a plain list); 3.2.9 replaced that
+        graphql-core < 3.2.10 stores located errors directly as
+        ``ExecutionContext.errors`` (a plain list); 3.2.10 replaced that
         attribute with a ``CollectedErrors`` container exposing the same list
         as ``collected_errors.errors``. Both are append-only during execution,
         so a before/after length comparison stays valid on either shape.
@@ -525,7 +532,7 @@ class _SchemaEnforcement:
 #: write it (``policy.__dict__[bound] = wider``).
 #:
 #: So no attribute answers with it at all. Holding it here is what the record's
-#: own shape permits: two policies and two flags point at nothing, so this
+#: own shape permits: two policies and a flag point at nothing, so this
 #: mapping retains a schema's configuration without retaining the schema, and
 #: the weak reference filed beside each record drops the entry when its schema
 #: dies. The arbitrary extension graph, which does point back, is held the other
@@ -583,7 +590,7 @@ def _enforcement(schema: object) -> _SchemaEnforcement:
 
 #: What the wire is told when a schema cannot produce the chain it was accepted
 #: with. One message per cause and nothing more: the object that was invalid,
-#: the exception a factory raised, and the population that was ambiguous are all
+#: the exception a factory raised, and the authority a resolved member claimed are all
 #: diagnostics for the deployment's own logs, and a wire field carrying any of
 #: them hands a client the shape of a schema's configuration.
 _UNREADABLE_CONFIGURATION = (
@@ -672,7 +679,7 @@ def _refuse_operation_document(execution_context: StrawberryExecutionContext) ->
 
 
 class _RefusedConfiguration(SchemaExtension):
-    """Refuse every operation on a schema that cannot produce its accepted chain.
+    """An extension refusing every operation on a schema that cannot produce its accepted chain.
 
     Installed in place of the consumer chain in two cases. The configuration a
     schema was constructed with was replaced or deleted behind the attribute
@@ -728,7 +735,7 @@ class _RefusedConfiguration(SchemaExtension):
         """Return the error this schema answers every operation with."""
         return GraphQLError(
             self._message,
-            extensions={"code": SCHEMA_CONFIGURATION_ERROR_CODE},
+            extensions=coded_error_extensions(SCHEMA_CONFIGURATION_ERROR_CODE),
         )
 
 
@@ -992,7 +999,7 @@ class DjangoSchema(strawberry.Schema):
                     "Every entry in DjangoSchema(extensions=[...]) has to be something "
                     "Strawberry can resolve into an extension for an operation - a "
                     "SchemaExtension subclass, an instance of one, or a callable that "
-                    f"returns one. {describe_value(entry)} is none of those.",
+                    f"returns one. {truth.describe(entry)} is none of those.",
                 )
         # The flag goes where no attribute answers with it, so that deleting the
         # accepted entries cannot make a schema look unconstructed and admit a
@@ -1108,22 +1115,18 @@ class DjangoSchema(strawberry.Schema):
         try:
             resolved = super().get_extensions(sync=sync)
         except Exception as exc:  # noqa: BLE001 - boundary fails closed
-            # ``describe_value`` and not ``{exc!r}``: the object being rendered
-            # is a consumer exception raised by a consumer factory, and its
-            # ``__repr__`` is as much consumer code as the factory was. An
-            # f-string here would let it raise while the containment result is
-            # being built, replacing the refusal with the very exception the
-            # refusal exists to keep off the wire.
+            # The refusal names the consumer factory's exception by its real
+            # class and its own ``repr``.
             return _refused_chain(
                 _UNRESOLVED_CHAIN,
-                f"resolving the accepted extension entries raised {describe_value(exc)}",
+                f"resolving the accepted extension entries raised {truth.describe(exc)}",
                 sync=sync,
             )
         for member in resolved:
             if not _is_extension(member, SchemaExtension):
                 return _refused_chain(
                     _UNRESOLVED_CHAIN,
-                    f"a resolved extension entry is {describe_value(member)}, "
+                    f"a resolved extension entry is {truth.describe(member)}, "
                     "which is not a SchemaExtension instance",
                     sync=sync,
                 )
@@ -1131,7 +1134,7 @@ class DjangoSchema(strawberry.Schema):
             if claimed is not None:
                 return _refused_chain(
                     _UNRESOLVED_CHAIN,
-                    f"a resolved extension entry is {describe_value(member)}, "
+                    f"a resolved extension entry is {truth.describe(member)}, "
                     f"which claims the {claimed} authority this schema owns",
                     sync=sync,
                 )
@@ -1300,10 +1303,9 @@ class DjangoSchema(strawberry.Schema):
         # in an ImportError fallback, so StreamResult carries Unknown
         upstream_args = (execution_context, extensions_runner, *args)
         source = call_forwarded(super()._stream, upstream_args, kwargs)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
-        if issubclass(type(extensions_runner), DjangoExtensionsRunner):
-            # The cast is the exact-type check above, a narrowing the checker cannot read.
+        if truth.is_instance(extensions_runner, DjangoExtensionsRunner):
             # basedpyright: ``source`` carries the StreamResult Unknown from Strawberry's alias rebinding
-            return cast("DjangoExtensionsRunner", extensions_runner).resumed_stream(source)  # pyright: ignore[reportUnknownArgumentType]
+            return extensions_runner.resumed_stream(source)  # pyright: ignore[reportUnknownArgumentType]
         # basedpyright: the StreamResult Unknown from Strawberry's alias rebinding, unchanged
         return source  # pyright: ignore[reportUnknownVariableType]
 
@@ -1347,7 +1349,7 @@ def _is_resolvable_extension_entry(entry: object) -> bool:
     object answers ``__class__`` with whatever it likes, and an object that only
     CLAIMS to be an extension must still pass as a callable to be accepted.
     """
-    return issubclass(type(entry), SchemaExtension) or callable(entry)
+    return truth.is_instance(entry, SchemaExtension) or callable(entry)
 
 
 def _is_extension(extension: object, extension_type: type[SchemaExtension]) -> bool:
@@ -1361,7 +1363,7 @@ def _is_extension(extension: object, extension_type: type[SchemaExtension]) -> b
     beside the authority actually enforcing the request. ``type()`` cannot be
     answered.
     """
-    return issubclass(type(extension), extension_type)
+    return truth.is_instance(extension, extension_type)
 
 
 def _claimed_authority(member: object) -> str | None:
@@ -1523,7 +1525,7 @@ def _declared_authority(entry: object) -> type[SchemaExtension] | None:
             return extension_type
         if _extension_entry_matches(entry, extension_type):
             raise ConfigurationError(
-                f"{describe_value(entry)} subclasses the package's {kind} "
+                f"{truth.describe(entry)} subclasses the package's {kind} "
                 "extension, and a schema's enforcement authority is not something "
                 "an extension entry can be. A subclass can override the hook that "
                 "does the enforcing while still answering every check for it. "
@@ -1544,7 +1546,7 @@ def _entry_resource_policy(
     extension's own canonical copy, read through the private record that holds
     it rather than off the object.
     """
-    if is_class(entry):
+    if truth.is_type(entry):
         return None
     policy = entry._policy
     return policy if type(policy) is ResourcePolicy else None
@@ -1559,9 +1561,9 @@ def _entry_type(entry: object) -> type[object]:
     pass for an entry that declares nothing. ``type()`` cannot be answered and
     cannot raise.
     """
-    return entry if is_class(entry) else type(entry)
+    return entry if truth.is_type(entry) else type(entry)
 
 
 def _extension_entry_matches(extension: object, extension_type: type[SchemaExtension]) -> bool:
     """Match a class or instance entry by its real type, without invoking factories."""
-    return issubclass(_entry_type(extension), extension_type)
+    return truth.is_subclass(_entry_type(extension), extension_type)

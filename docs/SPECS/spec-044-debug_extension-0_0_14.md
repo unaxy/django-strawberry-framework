@@ -1701,7 +1701,7 @@ down (D-N2–D-N8).
   `typing`), `django.conf` / `django.db`, `graphql` (the `ExecutionResult`
   the stash writer tests for and the `GraphQLError` the chain walk types
   against), `typing_extensions`, and from the package only the root `logger`,
-  `exceptions.ConfigurationError` / `describe_value`,
+  `exceptions.ConfigurationError`, the `utils/truth.py` reads,
   `utils/private_state.py::PrivateAuthority`, and `extensions/operation_state.py`
   — nothing from the query/write/input pipeline modules of `utils/`, which
   serve concerns the extension never touches (queryset visibility, generated

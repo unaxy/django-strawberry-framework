@@ -12,6 +12,7 @@ import sys
 from collections.abc import Iterator
 from enum import Enum
 from typing import TYPE_CHECKING, NoReturn
+from unittest import mock
 
 import pytest
 import strawberry
@@ -38,6 +39,7 @@ from django_strawberry_framework.utils.inputs import (
     SCALAR,
     InputFieldSpec,
 )
+from django_strawberry_framework.utils.write_transaction import write_pipeline
 from django_strawberry_framework.utils.write_values import (
     coerce_relation_pk_or_none,
     decode_field_handlers,
@@ -177,24 +179,30 @@ def test_decode_visible_relation_ids_rejects_uncoercible_member_without_a_visibi
     assert ctx.captured_queries == []
 
 
-def test_decode_visible_relation_ids_maps_malformed_containers_to_relation_error() -> None:
-    """A non-iterable or iterator failure stays inside the field error envelope."""
+def test_decode_visible_relation_ids_maps_a_non_iterable_to_relation_error() -> None:
+    """A non-iterable container stays inside the field error envelope."""
+    pks, error = decode_visible_relation_ids(
+        object(),
+        graphql_name="categoryIds",
+        related_model=Category,
+        info=unread_info(),
+        async_recourse="Use a synchronous visibility hook.",
+    )
+    assert pks is None
+    assert error is not None
+    assert error.field == "categoryIds"
 
-    class HostileIterator:
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("hostile relation iterator")
 
-    for values in (object(), HostileIterator()):
-        pks, error = decode_visible_relation_ids(
-            values,
-            graphql_name="categoryIds",
-            related_model=Category,
-            info=unread_info(),
-            async_recourse="Use a synchronous visibility hook.",
-        )
-        assert pks is None
-        assert error is not None
-        assert error.field == "categoryIds"
+def test_materialize_relation_id_container_iteration_error_propagates() -> None:
+    """An iterable's own iteration runs untouched; what it raises propagates."""
+
+    class RaisingIterator:
+        def __iter__(self) -> Iterator[int]:
+            yield 1
+            raise RuntimeError("relation iterator detonated")
+
+    with pytest.raises(RuntimeError, match="relation iterator detonated"):
+        materialize_relation_id_container(RaisingIterator(), "categoryIds")
 
 
 def test_materialize_relation_id_container_rejects_text_mapping_and_non_iterable_atoms() -> None:
@@ -229,19 +237,11 @@ def test_materialize_relation_id_container_rejects_text_mapping_and_non_iterable
         assert error.field == "categoryIds"
 
 
-def test_materialize_relation_id_container_materializes_once_and_contains_failures() -> None:
-    """Legitimate iterables materialize ONCE; iteration failures stay in the envelope.
+def test_materialize_relation_id_container_materializes_once() -> None:
+    """A one-shot generator is fully consumed by exactly one materialization pass.
 
-    A one-shot generator is fully consumed by the materialization (exactly one
-    pass - the decoded set is what the container yielded, never a re-iteration),
-    while a generator raising midway, an ``__iter__`` raising ``BaseException``,
-    and an ``__iter__`` returning a non-iterator all collapse to the uniform
-    field-keyed error instead of escaping the resolver.
+    The decoded set is what the container yielded, never a re-iteration.
     """
-
-    class _HostileBaseException(BaseException):
-        pass
-
     consumed: list[int] = []
 
     def _one_shot() -> Iterator[int]:
@@ -249,29 +249,10 @@ def test_materialize_relation_id_container_materializes_once_and_contains_failur
             consumed.append(item)
             yield item
 
-    class _MidwayRaise:
-        def __iter__(self) -> Iterator[int]:
-            yield 1
-            raise RuntimeError("midway")
-
-    class _BaseExceptionIter:
-        def __iter__(self) -> NoReturn:
-            raise _HostileBaseException("hostile")
-
-    class _NonIterator:
-        def __iter__(self) -> int:
-            return 42  # not an iterator
-
     provided_values, error = materialize_relation_id_container(_one_shot(), "categoryIds")
     assert error is None
     assert provided_values == [1, 2]
     assert consumed == [1, 2]
-
-    for values in (_MidwayRaise(), _BaseExceptionIter(), _NonIterator()):
-        provided_values, error = materialize_relation_id_container(values, "categoryIds")
-        assert provided_values is None
-        assert error is not None
-        assert error.field == "categoryIds"
 
 
 def _spec(
@@ -675,20 +656,14 @@ def test_decode_visible_relation_ids_rejects_non_collection_types() -> None:
         assert error.field == "categoryIds"
 
 
-def test_coerce_relation_pk_or_none_handles_non_models_and_hostile_objects() -> None:
-    """coerce_relation_pk_or_none returns None without crashing on non-models or hostile objects."""
+def test_coerce_relation_pk_or_none_handles_non_models_and_uncoercible_values() -> None:
+    """coerce_relation_pk_or_none returns None for non-models and uncoercible pks."""
     # basedpyright: the non-model class is the hostile input under test; coerce_relation_pk_or_none
     # types the parameter as type[Model]
     assert coerce_relation_pk_or_none(object, 1) is None  # pyright: ignore[reportArgumentType]
     # basedpyright: the None model is the hostile input under test; coerce_relation_pk_or_none
     # types the parameter as type[Model]
     assert coerce_relation_pk_or_none(None, 1) is None  # pyright: ignore[reportArgumentType]
-
-    class HostileInt:
-        def __int__(self) -> int:
-            raise RuntimeError("hostile int conversion")
-
-    assert coerce_relation_pk_or_none(Category, HostileInt()) is None
     assert coerce_relation_pk_or_none(Category, object()) is None
 
 
@@ -876,6 +851,138 @@ def test_decode_visible_relation_ids_accepts_global_id_members_with_one_query() 
         assert pks is None
         assert error is not None
         assert error.field == "categoryIds"
+
+
+@pytest.mark.django_db
+def test_custom_node_id_relation_set_batches_real_pk_lookup() -> None:
+    """A same-type non-pk-NodeID set maps to real pks in ONE query, not one per id.
+
+    The batched set decode resolves each distinct non-pk ``(type, id_attr)``
+    group with a single ``__in`` mapping query: total queries stay constant at
+    one mapping plus one visibility query across K=1/2/4 (the GlobalID decode
+    reads the executing schema off ``info``). A value matching no row is the
+    uniform field-keyed error after the mapping query alone (no visibility
+    query).
+    """
+
+    class NameBatchNodeType(DjangoType):
+        name: relay.NodeID[str]
+
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    assert registry.get(Category) is NameBatchNodeType
+
+    finalize_django_types()
+    recourse = "Use a synchronous visibility hook."
+    rows = [Category.objects.create(name=f"BatchNode{i}") for i in range(4)]
+    for size in (1, 2, 4):
+        members = [relay.GlobalID("products.category", rows[i].name) for i in range(size)]
+        with CaptureQueriesContext(connection) as ctx:
+            pks, error = decode_visible_relation_ids(
+                members,
+                graphql_name="categoryIds",
+                related_model=Category,
+                info=make_info(),
+                async_recourse=recourse,
+            )
+        assert error is None
+        assert pks == [rows[i].pk for i in range(size)]
+        assert len(ctx.captured_queries) == 2
+
+    with CaptureQueriesContext(connection) as ctx:
+        pks, error = decode_visible_relation_ids(
+            [relay.GlobalID("products.category", "no-such-batch-name")],
+            graphql_name="categoryIds",
+            related_model=Category,
+            info=make_info(),
+            async_recourse=recourse,
+        )
+    assert pks is None
+    assert error is not None
+    assert error.field == "categoryIds"
+    assert len(ctx.captured_queries) == 1
+
+
+@pytest.mark.django_db
+def test_custom_node_id_relation_set_refuses_unencodable_text_before_the_mapping_query() -> None:
+    """A text node id carrying a lone surrogate is the element's field error, with no query run.
+
+    A non-pk ``NodeID[str]`` decodes to the text value the batched ``__in`` mapping query
+    would bind, so it meets the same text preflight a raw text pk meets: the answer is the
+    preflight's ``invalid`` error keyed to the member's index, before any query.
+    """
+
+    class SurrogateBatchNodeType(DjangoType):
+        name: relay.NodeID[str]
+
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    assert registry.get(Category) is SurrogateBatchNodeType
+
+    finalize_django_types()
+    row = Category.objects.create(name="SurrogateBatchNode")
+    with CaptureQueriesContext(connection) as ctx:
+        pks, error = decode_visible_relation_ids(
+            [
+                relay.GlobalID("products.category", row.name),
+                relay.GlobalID("products.category", "Batch\ud800"),
+            ],
+            graphql_name="categoryIds",
+            related_model=Category,
+            info=make_info(),
+            async_recourse="Use a synchronous visibility hook.",
+        )
+    assert pks is None
+    assert error is not None
+    assert error.field == "categoryIds.1"
+    assert error.codes == ["invalid"]
+    assert ctx.captured_queries == []
+
+
+@pytest.mark.django_db
+def test_custom_node_id_relation_set_mapping_uses_pipeline_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The batched NodeID mapping recovers the active write pipeline's alias.
+
+    The set decoder cannot thread an alias through its flavor handlers, so the
+    batched mapping recovers the pinned alias exactly like the single-id
+    primitive: with a pipeline active, the ``__in`` mapping query runs on the
+    pipeline alias.
+    """
+
+    class AliasBatchNodeType(DjangoType):
+        name: relay.NodeID[str]
+
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    assert registry.get(Category) is AliasBatchNodeType
+
+    finalize_django_types()
+    row = Category.objects.create(name="AliasBatchNode")
+    manager = Category._default_manager
+    using = mock.Mock(wraps=manager.using)
+    monkeypatch.setattr(manager, "using", using)
+    with write_pipeline("default", lock=False):
+        pks, error = decode_visible_relation_ids(
+            [relay.GlobalID("products.category", row.name)],
+            graphql_name="categoryIds",
+            related_model=Category,
+            info=make_info(),
+            async_recourse="Use a synchronous visibility hook.",
+        )
+    assert error is None
+    assert pks == [row.pk]
+    using.assert_any_call("default")
 
 
 @pytest.mark.django_db

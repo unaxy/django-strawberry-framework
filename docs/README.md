@@ -663,6 +663,8 @@ Three trust levels, and every row below reads against them.
 
 That last boundary is Django's own. A report is a defect here when the code it needs could feasibly exist in a project using supported public API and the input that triggers it arrives over the wire or through ordinary configuration, and not when it depends on calling private internals unsafely ([Django's security policy][django-security-policy]).
 
+**Identity is read from the interpreter, never asked of your classes.** Whatever a class body, a metaclass or an instance dunder does, the package records a class's name, module, bases and subclass relationships from the interpreter's own type slots, and reads declared attributes such as `Meta` from the real class namespaces. A metaclass property, a `__class__` override, or an `__instancecheck__` / `__subclasscheck__` / `__eq__` cannot make one class pass for another, claim another class's registry slot, or rename a published type. Your hooks are not wrapped: an exception raised by a resolver, a `get_queryset`, a permission check or an object's own `__repr__` propagates unchanged to the [production error policy](#production-error-policy), which masks it under `DEBUG=False`. `SystemExit`, `KeyboardInterrupt`, `GeneratorExit` and task cancellation always propagate.
+
 This package sits on Django, Strawberry and graphql-core and is no more secure than they are. What it guarantees beyond them — a bounded raw list, per-operation isolation of its own extensions, an error masked for the right operation — it states as its own; [`../GOAL.md`][goal] owns the boundary these rows are read against.
 
 ### What the package already defaults to safe

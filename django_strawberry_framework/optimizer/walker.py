@@ -14,6 +14,7 @@ from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_list,
     list_of,
@@ -64,12 +65,9 @@ from .plans import (
 from .selections import (
     included_field_selections,
     is_fragment,
-    named_children,
-    node_children_with_runtime_prefix,
     response_key,
     response_keys,
     should_include,
-    with_runtime_prefix,
 )
 
 if TYPE_CHECKING:
@@ -96,35 +94,17 @@ if TYPE_CHECKING:
 # ``_included_field_selections`` are consumed by this module's own bodies;
 # ``_should_include`` and ``_is_fragment`` are imported from
 # ``optimizer.walker`` by ``tests/optimizer/test_walker.py``.
-# ``_named_children``, ``_node_children_with_runtime_prefix`` and
-# ``_with_runtime_prefix`` have NO reader through this module - the look-alike
-# importers take the first two from ``optimizer.extension``, which carries its
-# own aliases.
 _should_include = should_include
 _is_fragment = is_fragment
 _response_key = response_key
 _response_keys = response_keys
 _included_field_selections = included_field_selections
-_named_children = named_children
-_node_children_with_runtime_prefix = node_children_with_runtime_prefix
-_with_runtime_prefix = with_runtime_prefix
-# Aliases for private names that predate the connection-planner extraction; the
-# implementations live in ``optimizer/nested_planner.py``. Only
-# ``_concrete_order_columns`` and ``_relay_max_results_from_info`` are read
-# through this module, both imported from ``optimizer.walker`` by
-# ``tests/optimizer/test_walker.py``. The other seven have NO reader here:
-# ``connection.py`` and ``tests/test_keyset_connection.py`` import
-# ``_extend_only_projection`` / ``_keyset_window_slice_from_arguments`` /
-# ``_relation_connection_to_attr`` / ``_relation_connection_to_attr_for_key``
-# from ``optimizer/nested_planner.py`` directly.
+# Two underscore aliases with live test readers (both imported from
+# ``optimizer.walker`` by ``tests/optimizer/test_walker.py``):
+# ``_concrete_order_columns`` is implemented in ``optimizer/nested_planner.py``;
+# ``_relay_max_results_from_info`` binds ``utils/connections.py``'s
+# ``relay_max_results_from_info``.
 _concrete_order_columns = _nested_planner._concrete_order_columns
-_connection_window_slice_from_arguments = _nested_planner._connection_window_slice_from_arguments
-_extend_only_projection = _nested_planner._extend_only_projection
-_keyset_window_slice_from_arguments = _nested_planner._keyset_window_slice_from_arguments
-_order_entry_field_name = _nested_planner._order_entry_field_name
-_project_scalar_only_window = _nested_planner._project_scalar_only_window
-_relation_connection_to_attr = _nested_planner._relation_connection_to_attr
-_relation_connection_to_attr_for_key = _nested_planner._relation_connection_to_attr_for_key
 _relay_max_results_from_info = relay_max_results_from_info
 
 
@@ -245,9 +225,7 @@ def plan_relation(
         logger.debug(
             "Optimizer: will downgrade %s to Prefetch because %s overrides get_queryset.",
             field.name,
-            # The walk pairs a definition with its origin, so a downgrade verdict
-            # always has a target type.
-            cast("type[DjangoType]", target_type).__name__,
+            truth.name(target_type),
         )
         return ("prefetch", "custom_get_queryset")
     if is_many_side_relation_kind(relation_kind(field)):
@@ -289,7 +267,7 @@ def _graphql_names_by_python_name(
     info: object,
 ) -> dict[str, str]:
     """Return authoritative GraphQL names for the Strawberry fields on ``type_cls``."""
-    definition = getattr(type_cls, "__strawberry_definition__", None)
+    definition = truth.static_attr(type_cls, "__strawberry_definition__")
     converter = _schema_name_converter(info)
     names: dict[str, str] = {}
     # A Strawberry type's ``__strawberry_definition__`` is a
@@ -330,19 +308,13 @@ class _ForwardNames(NamedTuple):
 # converter, so the ``id`` in its key cannot be reused while it lives.
 # Correctness-neutral under concurrency like the plan cache: the value is
 # deterministic, so a dropped or double insert only changes the hit rate.
+# Drained by ``registry.clear()`` via the registered subsystem clear below so
+# a registry-clearing test drops the entries of the types it discards; the
+# next plan rebuilds each map once.
 _forward_names_memo: dict[tuple[type[DjangoType] | None, int], _ForwardNames] = {}
 
 
-def clear_forward_names() -> None:
-    """Empty the forward GraphQL-name memo.
-
-    Registered with ``registry.clear()`` so a registry-clearing test drops the
-    entries of the types it discards; the next plan rebuilds each map once.
-    """
-    _forward_names_memo.clear()
-
-
-register_subsystem_clear(clear_forward_names, owner="optimizer.forward_names")
+register_subsystem_clear(_forward_names_memo.clear, owner="optimizer.forward_names")
 
 
 def _build_forward_names(
@@ -584,7 +556,7 @@ def _hook_info(info: GraphQLResolveInfo | None, target_type: type[DjangoType]) -
     """
     if info is None:
         raise OptimizerError(
-            f"{target_type.__name__}.get_queryset runs under an executing operation; a "
+            f"{truth.name(target_type)}.get_queryset runs under an executing operation; a "
             f"relation to it cannot be planned without that operation's resolve info.",
         )
     strawberry_field = cast(
@@ -599,13 +571,20 @@ def _hook_info(info: GraphQLResolveInfo | None, target_type: type[DjangoType]) -
     return config.info_class(_raw_info=info, _field=strawberry_field)
 
 
+_WALKER_ASYNC_RECOURSE = (
+    "The optimizer walker plans prefetch children synchronously on both the sync "
+    "and async surfaces, so it cannot await an async get_queryset hook; redefine "
+    "the target type's get_queryset as a sync method."
+)
+
+
 def _build_child_queryset(
     field: FieldMeta,
     target_type: type[DjangoType] | None,
     info: GraphQLResolveInfo | None,
     *,
     has_custom_qs: bool,
-    target_model: type[models.Model] | None = None,
+    target_definition: DjangoTypeDefinition | None = None,
     policy: _SealPolicy[models.Model] = _LIST_RELATION_CHILD_POLICY,
     seed: QuerySet[models.Model] | None = None,
 ) -> QuerySet[models.Model]:
@@ -622,12 +601,14 @@ def _build_child_queryset(
     definition (``_target_has_custom_get_queryset``), so the question is
     answered once per relation rather than once per consumer of the answer.
 
-    ``target_model`` is that same definition's model, threaded into the
-    visibility runner's captured-model seam. Without it the runner reads the
-    target class for a model of its own, which is a second request-time
-    definition read on the one path that decides which rows a prefetch may
-    see; with it, both seals of this visibility call validate against the
-    model the relation was resolved through.
+    ``target_definition`` is that same definition, spent here for its model:
+    both seals of this visibility call validate against the model the
+    relation was resolved through. The read lives here - the builder is its
+    only consumer - rather than once per caller, so the two child paths
+    cannot name two validation subjects. Without a definition the runner
+    reads the target class for a model of its own, which is a second
+    request-time definition read on the one path that decides which rows a
+    prefetch may see.
 
     The custom ``get_queryset`` visibility hook receives the Strawberry ``Info``
     of the resolver whose plan is walked (``_hook_info``), never the walk's raw
@@ -699,7 +680,8 @@ def _build_child_queryset(
             hook_type,
             queryset,
             _hook_info(info, hook_type),
-            model=target_model,
+            async_recourse=_WALKER_ASYNC_RECOURSE,
+            model=target_definition.model if target_definition is not None else None,
             policy=policy,
         )
     return queryset
@@ -711,7 +693,7 @@ def _build_connection_child_queryset(
     info: GraphQLResolveInfo | None,
     *,
     has_custom_qs: bool,
-    target_model: type[models.Model] | None = None,
+    target_definition: DjangoTypeDefinition | None = None,
 ) -> QuerySet[models.Model]:
     """Build a nested-connection child queryset under ``_PREFETCH_CHILD_POLICY``.
 
@@ -720,14 +702,17 @@ def _build_connection_child_queryset(
     the planner classifies the value it gets back with
     ``nested_fetch.py::unwindowable_child_queryset_reason`` and degrades a sliced
     child to the per-parent fallback. The plain list relation, which has no such
-    gate, takes the builder's default seal.
+    gate, takes the builder's default seal. The seal choice stays on this seam -
+    the planner takes the fixed-policy callable and holds no seal-policy
+    vocabulary of its own; a future child path whose seal needs planner-local
+    state moves the choice into the planner with a ``policy`` argument.
     """
     return _build_child_queryset(
         field,
         target_type,
         info,
         has_custom_qs=has_custom_qs,
-        target_model=target_model,
+        target_definition=target_definition,
         policy=_PREFETCH_CHILD_POLICY,
     )
 
@@ -888,8 +873,11 @@ def _walk_selections(
             # and reintroduce the lazy-load. Django's ``.only(attname)``
             # accepts the FK column directly, which avoids dragging the
             # related row in along with it.
-            if django_name == "id" and type_cls is not None and issubclass(type_cls, relay.Node):
-                id_attr = type_cls.resolve_id_attr()
+            # Widened so the ``relay.Node`` narrowing is not intersected with
+            # ``DjangoType``, which the checkers treat as disjoint under ``TypeIs``.
+            node_cls: type[object] | None = type_cls
+            if django_name == "id" and truth.is_subclass(node_cls, relay.Node):
+                id_attr = node_cls.resolve_id_attr()
                 if id_attr == "pk":
                     id_attr = model._meta.pk.attname
                 db_field = next(
@@ -1312,7 +1300,7 @@ def _build_prefetch_child_queryset(
         target_type,
         info,
         has_custom_qs=has_custom_get_queryset,
-        target_model=getattr(target_definition, "model", None),
+        target_definition=target_definition,
     )
     return _build_prefetch_child_queryset_from_base(
         sel,
@@ -1418,7 +1406,7 @@ def _apply_hint(
             # loud at plan time with the fix spelled out.
             raise ConfigurationError(
                 f"OptimizerHint.prefetch(Prefetch(..., to_attr={hinted_to_attr!r})) on "
-                f"{type_cls.__name__}.{django_name}: the generated relation resolver "
+                f"{truth.name(type_cls)}.{django_name}: the generated relation resolver "
                 "reads Django's prefetch cache (_prefetched_objects_cache) and would "
                 "ignore rows landed on the to_attr (per-row lazy loads behind a plan strictness "
                 "trusts). Drop to_attr from the hinted Prefetch, or assign your own "
@@ -1450,14 +1438,14 @@ def _apply_hint(
                 hint.prefetch_obj,
                 django_field=django_field,
                 django_name=django_name,
-                type_name=type_cls.__name__,
+                type_name=truth.name(type_cls),
                 target_type=target_type,
                 target_definition=target_definition,
                 info=info,
             ),
             django_name=django_name,
             full_path=f"{prefix}{instance_accessor(django_field)}",
-            type_name=type_cls.__name__,
+            type_name=truth.name(type_cls),
         )
         _record_relation_access(
             plan,
@@ -1494,7 +1482,7 @@ def _apply_hint(
         kind = relation_kind(django_field)
         if is_many_side_relation_kind(kind):
             raise ConfigurationError(
-                f"OptimizerHint.select_related() on {type_cls.__name__}.{django_name}: "
+                f"OptimizerHint.select_related() on {truth.name(type_cls)}.{django_name}: "
                 f"Django requires prefetch_related for {kind} relations; "
                 "use OptimizerHint.prefetch_related() or OptimizerHint.prefetch(obj) instead.",
             )
@@ -1560,7 +1548,7 @@ def _scoped_hint_prefetch(
         target_type,
         info,
         has_custom_qs=True,
-        target_model=getattr(target_definition, "model", None),
+        target_definition=target_definition,
         seed=prefetch.queryset,
     )
     return Prefetch(prefetch.prefetch_through, queryset=scoped, to_attr=prefetch.to_attr)
@@ -1592,7 +1580,7 @@ def _hint_prefetch_over_pk_set(
         raise ConfigurationError(
             f"OptimizerHint.prefetch(obj) on {type_name}.{django_name}: the hinted "
             f"Prefetch queryset is combined ({defect[1]}); "
-            + _COMBINED_WHAT.format(model=inner.model.__name__, detail=defect[1]),
+            + _COMBINED_WHAT.format(model=truth.name(inner.model), detail=defect[1]),
         )
     rebuilt: models.QuerySet[models.Model] = models.QuerySet(
         model=inner.model,
@@ -1645,9 +1633,13 @@ def _absorb_child_plan(parent_plan: OptimizationPlan, child_plan: OptimizationPl
     the ``cacheable`` propagation: a non-cacheable child (request-scoped
     consumer queryset, custom hook) must poison the parent's cacheability, or
     the plan cache could serve one request's child queryset to the next.
-    Folded in here - rather than a separate line at each absorb site - so a
-    future third site cannot forget it (the cache-poisoning hazard the plan
-    docstring warns about).
+    Folded in here so the absorb cannot be forgotten (the cache-poisoning
+    hazard the plan docstring warns about).
+
+    Pure delegation to ``OptimizationPlan.merge_metadata_from``: the planner
+    keeps its own direct merge line while the absorb is one call. If the
+    absorb gains logic beyond delegation, the planner site routes through
+    the (injected) wrapper or this wrapper dies.
     """
     parent_plan.merge_metadata_from(child_plan)
 

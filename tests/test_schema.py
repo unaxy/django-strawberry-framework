@@ -118,12 +118,6 @@ class _ClassClaimingResourcePolicy(ClaimsClassBase, DjangoResourcePolicyExtensio
     claimed = type
 
 
-class _ClassClaimingErrorPolicy(ClaimsClassBase, DjangoErrorPolicyExtension):
-    """The masking-authority subclass making the same claim."""
-
-    claimed = type
-
-
 #: Every marker extension that ran, in order, since a test last cleared it.
 _MARKS: list[str] = []
 
@@ -255,8 +249,6 @@ def test_extension_entry_matches_adversarial() -> None:
         HybridPolicyExtension,
         ReversedHybridPolicyExtension,
         HybridPolicyExtension(),
-        _ClassClaimingResourcePolicy(),
-        _ClassClaimingErrorPolicy(),
     ],
     ids=[
         "error-subclass-class",
@@ -265,8 +257,6 @@ def test_extension_entry_matches_adversarial() -> None:
         "hybrid-class",
         "hybrid-class-reversed-bases",
         "hybrid-instance",
-        "resource-subclass-instance-claiming-a-class",
-        "error-subclass-instance-claiming-a-class",
     ],
 )
 def test_a_subclass_of_an_enforcement_extension_is_refused_at_construction(entry: object) -> None:
@@ -1406,7 +1396,7 @@ def test_an_extension_entry_strawberry_could_not_resolve_is_refused(entry: objec
     operation, deep inside the engine, on a schema the deployment already
     started; the refusal names it where it was supplied instead. What is NOT a
     reason is a memory layout - see
-    ``test_a_slotted_callable_factory_is_accepted_and_enforces``.
+    ``test_a_slotted_callable_factory_is_accepted_and_runs``.
     """
     with pytest.raises(ConfigurationError, match="is none of those"):
         DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
@@ -2170,9 +2160,9 @@ def test_a_refused_request_snapshots_the_transport_policy_exactly_once() -> None
 def test_a_refused_request_never_asks_a_transport_policy_whether_it_is_empty() -> None:
     """Emptiness is consumer code, and the refusal path is the wrong place to run it.
 
-    The same posture the accepted-entry reader takes one function away: a
-    container supplied by a consumer is normalized by being read, never by being
-    truth-tested.
+    The same posture the accepted-entry reader takes in
+    ``_consumer_extension_entries``: a container supplied by a consumer is
+    normalized by being read, never by being truth-tested.
     """
     schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
 
@@ -2298,75 +2288,15 @@ async def test_a_refused_schema_answers_a_streamed_operation_with_one_frame() ->
     ]
 
 
-class _HostileReprError(Exception):
-    """A consumer exception whose display is as much consumer code as the factory."""
+def test_a_factory_exception_is_a_configuration_refusal() -> None:
+    """A factory that raises while the chain resolves refuses the operation.
 
-    @override
-    def __repr__(self) -> str:
-        """Raise while the containment result is being built."""
-        raise RuntimeError("repr bomb")
-
-    @override
-    def __str__(self) -> str:
-        """Raise on the other rendering path too."""
-        raise RuntimeError("str bomb")
-
-
-class _HostileArg:
-    """An exception argument whose own representation raises."""
-
-    @override
-    def __repr__(self) -> str:
-        """Raise while the exception carrying this is being rendered."""
-        raise RuntimeError("arg bomb")
-
-
-class _HostileTypeError(Exception):
-    """A consumer exception whose type metadata cannot be read either."""
-
-
-class _HostileTypeMeta(type):
-    @property
-    @override
-    # basedpyright: the hostile shape under test, a ``__name__`` property whose read raises; the
-    # checker rejects any property overriding a base class attribute
-    def __name__(cls) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-        """Raise when the safe renderer asks the type for its name."""
-        raise RuntimeError("name bomb")
-
-
-class _HostileNameError(Exception, metaclass=_HostileTypeMeta):
-    """A consumer exception whose class name raises while it is being rendered."""
-
-
-@pytest.mark.parametrize(
-    "raised",
-    [
-        RuntimeError("factory sentinel"),
-        _HostileReprError("secret"),
-        _HostileTypeError(_HostileArg()),
-        _HostileNameError("secret"),
-    ],
-    ids=[
-        "ordinary-exception",
-        "raising-repr-and-str",
-        "raising-argument-representation",
-        "raising-type-name",
-    ],
-)
-def test_a_factory_exception_cannot_escape_while_the_refusal_is_being_built(
-    raised: Exception,
-) -> None:
-    """The diagnostic is assembled from a consumer exception, so it is rendered safely.
-
-    Interpolating the exception into the private reason runs its ``__repr__``
-    while the containment result is being built - and that is consumer code,
-    which may raise and replace the refusal with the very exception the refusal
-    exists to keep off the wire. The wire message is the constant either way.
+    The private reason names the factory's exception by its real class and its
+    own ``repr``; the wire message is the constant.
     """
 
     def factory() -> NoReturn:
-        raise raised
+        raise RuntimeError("factory sentinel")
 
     schema = DjangoSchema(query=DummyQuery, extensions=[factory])
 

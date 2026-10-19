@@ -285,8 +285,13 @@ def _nested_array_text(depth: int) -> str:
     return "[" * depth + "]" * depth
 
 
-def _json_loads_overflow_depth() -> int:
-    """Return the shallowest probed depth whose parse overflows ``json.loads``."""
+def _json_loads_overflow_depth() -> int | None:
+    """Return the shallowest probed depth whose parse overflows ``json.loads``, if any.
+
+    ``None`` when every probed depth parses: an interpreter whose parser
+    tolerates the whole probe range offers no overflowing document within the
+    request-body cap.
+    """
     depth = 1024
     while depth <= _MAX_NESTING_PROBE_DEPTH:
         try:
@@ -294,14 +299,7 @@ def _json_loads_overflow_depth() -> int:
         except RecursionError:
             return depth
         depth *= 2
-    msg = (
-        f"json.loads parsed a {_MAX_NESTING_PROBE_DEPTH}-deep document without "
-        "overflowing, so the transport's RecursionError guard cannot be exercised "
-        "under a body this interpreter would accept. Raise "
-        "_MAX_NESTING_PROBE_DEPTH only if the resulting body still fits the 1 MiB "
-        "request-body cap."
-    )
-    raise RuntimeError(msg)
+    return None
 
 
 def _deepcopy_overflow_depth() -> int:
@@ -332,7 +330,17 @@ def pathological_json_text() -> str:
     document is syntactically valid, so nothing short of the parser's own stack
     budget rejects it.
     """
-    return _nested_array_text(_json_loads_overflow_depth())
+    depth = _json_loads_overflow_depth()
+    if depth is None:
+        msg = (
+            f"json.loads parsed a {_MAX_NESTING_PROBE_DEPTH}-deep document without "
+            "overflowing, so the transport's RecursionError guard cannot be exercised "
+            "under a body this interpreter would accept. Raise "
+            "_MAX_NESTING_PROBE_DEPTH only if the resulting body still fits the 1 MiB "
+            "request-body cap."
+        )
+        raise RuntimeError(msg)
+    return _nested_array_text(depth)
 
 
 @pytest.fixture(scope="session")
@@ -351,11 +359,13 @@ def deepcopy_overflow_operations_text() -> str:
     frame. The text is emitted directly rather than through ``json.dumps``
     because the ENCODER recurses too, and on the 3.10 floor - where both it and
     ``copy.deepcopy`` answer to the same ``sys.getrecursionlimit()`` - building
-    the fixture overflowed before the test could run.
+    the fixture overflowed before the test could run. When ``json.loads``
+    overflows nowhere in the probe range the window is unbounded - the emitted
+    text is still proven parseable below.
     """
     depth = _deepcopy_overflow_depth()
     loads_limit = _json_loads_overflow_depth()
-    if depth >= loads_limit:
+    if loads_limit is not None and depth >= loads_limit:
         msg = (
             f"copy.deepcopy overflows at depth {depth} but json.loads already "
             f"overflows at {loads_limit}, so no document can reach the upload "

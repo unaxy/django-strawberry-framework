@@ -49,7 +49,8 @@ def _registry_registration_identity() -> tuple[object, ...]:
         tuple(
             sorted(
                 (id(model), field_name, id(enum_cls))
-                for (model, field_name), enum_cls in registry._enums.items()
+                for model, enums_by_field in registry._enums.items()
+                for field_name, enum_cls in enums_by_field.items()
             ),
         ),
         tuple(

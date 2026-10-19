@@ -138,12 +138,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.settings import api_settings
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_predicate,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError
 from django_strawberry_framework.mutations.resolvers import (
     StepFailure,
@@ -152,6 +147,7 @@ from django_strawberry_framework.mutations.resolvers import (
     save_or_field_errors,
 )
 from django_strawberry_framework.mutations.sets import backing_model_of
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     is_dict,
@@ -183,6 +179,7 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.relations import (
     is_forward_many_to_many,
+    is_model_class,
     is_single_column_foreign_key,
 )
 from django_strawberry_framework.utils.write_transaction import (
@@ -238,7 +235,6 @@ if TYPE_CHECKING:
         _AsyncResolverEntry,
         _SyncResolverEntry,
     )
-    from django_strawberry_framework.mutations.sets import _ValidatedMutationMeta
     from django_strawberry_framework.utils.errors import ErrorKeyMap
     from django_strawberry_framework.utils.inputs import InputFieldSpec
     from django_strawberry_framework.utils.typing import ForeignKeyField, ModelField
@@ -445,7 +441,7 @@ def _decode_input_object(
     """
     if data is None:
         return {}, None
-    if not hasattr(data, "__strawberry_definition__"):
+    if truth.static_attr(data, "__strawberry_definition__", _OMITTED) is _OMITTED:
         return {}, field_error(
             path_prefix or NON_FIELD_ERROR_KEY,
             "Invalid input object.",
@@ -502,7 +498,7 @@ def _decode_nested(
     if spec.kind == NESTED_MULTI:
         try:
             items = list_of(value)
-        except Exception:  # noqa: BLE001 - consumer code may raise anything
+        except TypeError:
             return None, field_error(
                 path_prefix,
                 "Expected a list of items.",
@@ -717,22 +713,17 @@ def _upload_metadata(item: _FileAny) -> UploadMetadata:
     safe descriptor; the real object stays on the framework-built serializer
     ``data`` for the serializer's own validation.
     """
-    try:
-        name = getattr(item, "name", None)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        name = None
+    # Django's ``File.size`` falls back to ``seek`` / ``tell`` / ``os.path.getsize`` and
+    # raises ``AttributeError`` when none can size the stream; an unsizable upload
+    # reports no size.
     try:
         size = item.size
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
+    except (AttributeError, OSError):
         size = None
-    try:
-        content_type = getattr(item, "content_type", None)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        content_type = None
     return UploadMetadata(
-        name=name,
+        name=getattr(item, "name", None),
         size=size,
-        content_type=content_type,
+        content_type=getattr(item, "content_type", None),
     )
 
 
@@ -746,38 +737,30 @@ def _hook_mapping(
     The three serializer hooks that return keyword/data mappings are consumer extension points.
     A malformed ``None`` / sequence / stateful mapping must not leak a raw ``TypeError`` from
     ``dict(...)`` into GraphQL; reject it at the hook boundary with the same
-    ``ConfigurationError`` used for other reserved-key violations. A mapping whose keys are not
-    strings is malformed too: non-string keys would escape the typed boundary as a raw
-    ``TypeError`` later (``keywords must be strings`` from ``serializer_class(**kwargs)`` /
-    ``serializer.save(**save_kwargs)``), so they are rejected here with every other malformed
-    shape; the str-key gate also keeps every downstream key-hashing consumer (the exact-match
-    injection comparison, the shadow/model-field save-kwarg checks) operating on plain string
-    keys no hostile key object can destabilize.
+    ``ConfigurationError`` used for other reserved-key violations. A mapping's own
+    iteration is its behaviour and runs untouched. A mapping whose keys are not strings is
+    malformed too: non-string keys would escape the typed boundary as a raw ``TypeError``
+    later (``keywords must be strings`` from ``serializer_class(**kwargs)`` /
+    ``serializer.save(**save_kwargs)``), so they are rejected here with every other
+    malformed shape; the exact-``str`` key gate also keeps every downstream key-hashing
+    consumer (the exact-match injection comparison, the shadow/model-field save-kwarg
+    checks) operating on ``str``'s own hash and equality.
 
-    Nothing here lets the return's own code replace the typed error: the mapping test is a
-    guarded ``isinstance`` (a ``Mapping`` subclass and a faithful proxy pass; a ``__class__``
-    read that raises is "not a mapping"), and each non-string key is rendered once through
-    the guarded repr before the offender list is sorted, so the list is built and sorted from
-    plain strings and a key whose ``__repr__`` / ``__hash__`` raises is never asked again
-    after ``dict()`` stored it.
+    The mapping test is ``isinstance``, so a ``Mapping`` subclass and a faithful proxy pass.
+    Each non-string key is rendered once (``truth.render``) before the offender list is
+    sorted, so the list is built and sorted from plain strings and a key's ``__hash__`` is
+    never asked again after ``dict()`` stored it.
     """
-    if not _safe_predicate(is_mapping, value):
+    if not is_mapping(value):
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.{hook_name} must return a mapping; "
-            f"got {_safe_type_name(value)}.",
+            f"SerializerMutation {truth.name(mutation_cls)}.{hook_name} must return a mapping; "
+            f"got {truth.kind(value)}.",
         )
-    try:
-        # The guarded test above is the ``Mapping`` proof; ``dict()`` itself is guarded too.
-        materialized: dict[object, object] = dict(cast("Mapping[object, object]", value))
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.{hook_name} returned a mapping that "
-            "could not be materialized for the serializer pipeline.",
-        ) from exc
-    offenders = sorted(_safe_arg_repr(key) for key in materialized if type(key) is not str)
+    materialized: dict[object, object] = dict(value)
+    offenders = sorted(truth.render(key) for key in materialized if type(key) is not str)
     if offenders:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.{hook_name} returned a mapping with "
+            f"SerializerMutation {truth.name(mutation_cls)}.{hook_name} returned a mapping with "
             f"non-string key(s) {offenders!r}; hook mappings become "
             "serializer kwargs / data keys, so every key must be a plain string.",
         )
@@ -831,19 +814,18 @@ _FROZEN_VIEW_CONTAINERS: tuple[
 )
 
 
+def _is_one_of(value: object, classes: tuple[type[object], ...]) -> bool:
+    """Whether ``value``'s real class is (a subclass of) one of ``classes``."""
+    return any(truth.is_instance(value, cls) for cls in classes)
+
+
 def _is_frozen_container(value: object) -> TypeIs[_FrozenContainer]:
-    """Return whether ``value`` IS one of the containers the hook view freezes, asked of its real type.
+    """Whether ``value``'s real class is one of the ``_FROZEN_VIEW_CONTAINERS``.
 
-    ``issubclass(type(value), ...)`` (subclasses included) rather than ``isinstance``, which
-    falls back to a ``__class__`` read when the real type does not match: a ``__class__``
-    property can raise or claim a container the value is not.
+    Asked of the real class (``truth.is_instance``, subclasses included), never of a
+    ``__class__`` read, which can raise or claim a container the value is not.
     """
-    return issubclass(type(value), _FROZEN_VIEW_CONTAINERS)
-
-
-def _is_real_dict(value: object) -> TypeIs[dict[object, object]]:
-    """Return whether ``value`` IS a ``dict`` (subclasses included), asked of its real type."""
-    return issubclass(type(value), dict)
+    return _is_one_of(value, _FROZEN_VIEW_CONTAINERS)
 
 
 @overload
@@ -881,20 +863,20 @@ def _frozen_hook_view(value: object) -> object:
     error). ``memo`` keeps a SHARED (diamond) reference shared in the view;
     ``active`` tracks the ancestor path so a genuine CYCLE (impossible in parsed
     GraphQL JSON, constructible by a hook) fails loud instead of looping forever.
+    Every value is classified by its real class (``truth.is_instance``), never by a
+    ``__class__`` the value reports.
     """
 
     def _freeze_leaf(item: object) -> object:
-        # Each real-type test is the proof the cast after it states.
-        leaf_type = type(item)
-        if issubclass(leaf_type, File):
+        if truth.is_instance(item, File):
             return _upload_metadata(cast("_FileAny", item))
-        if issubclass(leaf_type, bytearray):
-            return bytes(cast("bytearray", item))
-        if issubclass(leaf_type, _IMMUTABLE_LEAF_TYPES):
+        if truth.is_instance(item, bytearray):
+            return bytes(item)
+        if _is_one_of(item, _IMMUTABLE_LEAF_TYPES):
             return item
         raise ConfigurationError(
             "SerializerMutation hook data contains a value of type "
-            f"{type(item).__name__!r} that cannot be frozen into an immutable hook view. "
+            f"{truth.name(type(item))!r} that cannot be frozen into an immutable hook view. "
             "The frozen view exposes only immutable scalars, uploads (as UploadMetadata), "
             "and dict/list/tuple/set containers; an opaque, possibly-mutable leaf is "
             "rejected rather than passed by reference (a hook could mutate it and thereby "
@@ -905,16 +887,20 @@ def _frozen_hook_view(value: object) -> object:
         return _freeze_leaf(value)
 
     def _entries(container: _FrozenContainer) -> Iterator[tuple[object, object]]:
-        return iter(container.items()) if _is_real_dict(container) else iter(enumerate(container))
+        return (
+            iter(container.items())
+            if truth.is_instance(container, dict)
+            else iter(enumerate(container))
+        )
 
     def _new_acc(container: object) -> _FrozenAccumulator:
-        return {} if _is_real_dict(container) else []
+        return {} if truth.is_instance(container, dict) else []
 
     def _finalize(source: object, acc: _FrozenAccumulator) -> object:
-        if _is_real_dict(source):
+        if truth.is_instance(source, dict):
             # ``_new_acc`` built a dict accumulator for exactly this dict source.
             return MappingProxyType(cast("dict[object, object]", acc))
-        if issubclass(type(source), (set, frozenset)):
+        if _is_one_of(source, (set, frozenset)):
             return frozenset(acc)
         return tuple(acc)
 
@@ -1022,7 +1008,7 @@ def _injected_serializer_data(
     )
     if frozenset(injected) != declared:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.get_serializer_injected_data returned "
+            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_injected_data returned "
             f"key(s) {sorted(injected)!r}, but Meta.injected_fields declares "
             f"{sorted(declared)!r}. The hook must supply EXACTLY the declared injected fields - "
             "declare every supplied field in Meta.injected_fields and supply every declared one.",
@@ -1092,7 +1078,7 @@ def _merged_serializer_kwargs(
     returned_data = kwargs.pop("data", _OMITTED)
     if returned_data is not _OMITTED and returned_data is not frozen_data:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.get_serializer_kwargs returned a "
+            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_kwargs returned a "
             "`data` value that is not the exact object the hook received; `data` is "
             "framework-owned (decoded client input plus Meta.injected_fields injection), so "
             "the hook must pass it through unchanged or omit it. Supply extra fields via "
@@ -1102,7 +1088,7 @@ def _merged_serializer_kwargs(
 
     if "instance" in kwargs:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.get_serializer_kwargs returned an "
+            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_kwargs returned an "
             "`instance` kwarg; `instance` is framework-owned (authorization is point-in-time "
             "against the located row - the framework injects that row itself, and hooks only "
             "see its pk via hook_context.instance_pk). Remove `instance` from the override.",
@@ -1110,7 +1096,7 @@ def _merged_serializer_kwargs(
 
     if "partial" in kwargs:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.get_serializer_kwargs returned a "
+            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_kwargs returned a "
             "`partial` kwarg; the framework owns partial-update semantics (it injects "
             "partial=True for update, never for create). Remove `partial` from the override.",
         )
@@ -1121,26 +1107,19 @@ def _merged_serializer_kwargs(
     request = request_from_info(info, family_label="SerializerMutation")
     raw_context = kwargs.get("context")
     if raw_context is not None:
-        # A guarded ``isinstance`` (the ``_hook_mapping`` test): a faithful proxy passes, a
-        # ``__class__`` read that raises is "not a mapping".
-        if not _safe_predicate(is_mapping, raw_context):
+        # The ``_hook_mapping`` test: a ``Mapping`` subclass and a faithful proxy pass.
+        if not is_mapping(raw_context):
             raise ConfigurationError(
-                f"SerializerMutation {mutation_cls.__name__}.get_serializer_kwargs returned a "
-                f"`context` that is not a mapping; got {_safe_type_name(raw_context)}.",
+                f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_kwargs returned a "
+                f"`context` that is not a mapping; got {truth.kind(raw_context)}.",
             )
-        try:
-            context: dict[object, object] = dict(cast("Mapping[object, object]", raw_context))
-        except BaseException as exc:
-            raise ConfigurationError(
-                f"SerializerMutation {mutation_cls.__name__}.get_serializer_kwargs returned a "
-                "`context` mapping that could not be materialized for the serializer pipeline.",
-            ) from exc
+        context: dict[object, object] = dict(raw_context)
     else:
         context = {}
     override_request = context.get("request")
     if override_request is not None and override_request is not request:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.get_serializer_kwargs set a different "
+            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_kwargs set a different "
             "context['request'] object; the framework owns the request context (the actor "
             "check_permission authorized against). Drop context['request'] from the override.",
         )
@@ -1152,8 +1131,8 @@ def _merged_serializer_kwargs(
         is_str(override_alias) and str.__eq__(override_alias, alias)
     ):
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.get_serializer_kwargs set "
-            f"context['write_alias'] to {_safe_arg_repr(override_alias)}, but the mutation's "
+            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_kwargs set "
+            f"context['write_alias'] to {truth.render(override_alias)}, but the mutation's "
             f"transaction is pinned to {alias!r}; the write alias is framework-owned (one "
             "transaction, one alias). Drop context['write_alias'] from the override.",
         )
@@ -1161,6 +1140,11 @@ def _merged_serializer_kwargs(
     context["write_alias"] = alias
     kwargs["context"] = context
     return kwargs
+
+
+def _model_name_repr(model: object) -> str:
+    """``repr`` of a relation target's class name, or of the value itself when it is no class."""
+    return truth.render(truth.name(model) if truth.is_type(model) else model)
 
 
 def _relation_queryset_of(field: DRFField) -> object:
@@ -1246,7 +1230,7 @@ def _assert_runtime_write_source_ownership(
     )
     runtime_sources = {field_name: field.source for field_name, field in runtime_fields.items()}
     raise_writable_source_ownership_errors(
-        mutation_cls.__name__,
+        truth.name(mutation_cls),
         runtime_sources,
         location=f"runtime serializer path {(path or '<root>')!r}",
         model=serializer_model(type(serializer)),
@@ -1294,12 +1278,12 @@ def _assert_field_agreement(
     the boundary.
     """
     runtime_fields = bound_fields(serializer)
-    name = type(serializer).__name__
+    name = truth.name(type(serializer))
     target = spec.target_name
     runtime: DRFField | None = runtime_fields.get(target)
     if runtime is None:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: the schema exposes field "
+            f"SerializerMutation {truth.name(mutation_cls)}: the schema exposes field "
             f"{target!r}, but the runtime serializer {name} does not declare it. DRF would "
             "silently ignore the incoming value. Make get_serializer_for_schema() and the "
             "runtime serializer_class agree (declare the field on the serializer, or drop it "
@@ -1307,7 +1291,7 @@ def _assert_field_agreement(
         )
     if runtime.read_only:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: the schema exposes writable field "
+            f"SerializerMutation {truth.name(mutation_cls)}: the schema exposes writable field "
             f"{target!r}, but the runtime serializer {name} declares it read_only; the "
             "incoming value would be ignored. Make the runtime field writable or drop it "
             "from the schema field map.",
@@ -1316,7 +1300,7 @@ def _assert_field_agreement(
     runtime_source = runtime.source or target
     if runtime_source != schema_source:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: field {target!r} binds source "
+            f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} binds source "
             f"{runtime_source!r} at runtime but {schema_source!r} in the schema field map; "
             "the write would target a different attribute than the schema implies. Align "
             "the runtime serializer's source with get_serializer_for_schema().",
@@ -1328,8 +1312,8 @@ def _assert_field_agreement(
     elif spec.kind == FILE:
         if not isinstance(runtime, serializers.FileField):
             raise ConfigurationError(
-                f"SerializerMutation {mutation_cls.__name__}: field {target!r} is a file input "
-                f"in the schema but {type(runtime).__name__} at runtime; the kind moved. Align "
+                f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} is a file input "
+                f"in the schema but {truth.name(type(runtime))} at runtime; the kind moved. Align "
                 "the runtime serializer field with get_serializer_for_schema().",
             )
     elif isinstance(
@@ -1342,8 +1326,8 @@ def _assert_field_agreement(
         ),
     ):
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: field {target!r} is a scalar in the "
-            f"schema but a relation / file / nested serializer ({type(runtime).__name__}) at "
+            f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} is a scalar in the "
+            f"schema but a relation / file / nested serializer ({truth.name(type(runtime))}) at "
             "runtime; the kind moved. Align the runtime serializer field with "
             "get_serializer_for_schema().",
         )
@@ -1352,19 +1336,20 @@ def _assert_field_agreement(
     # Both incoherent spellings - the attribute missing and the attribute ``None`` (an
     # abstract base) - normalize to one rejection: with no validated snapshot the
     # requiredness / annotation answer is undeterminable, so it leaves the permit path
-    # instead of being coerced onto it. Every bound mutation carries the snapshot, so the
-    # attributes below are read directly.
-    meta: _ValidatedMutationMeta | None = getattr(mutation_cls, "_mutation_meta", None)
+    # instead of being coerced onto it. Every bound mutation carries the snapshot; the guard
+    # reads only the three attributes it compares, so any object carrying them answers.
+    meta = truth.static_attr(mutation_cls, "_mutation_meta")
     if meta is None:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: field {target!r} carries a schema "
+            f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} carries a schema "
             "requiredness or annotation contract, but the mutation has no validated Meta "
             "snapshot, so agreement with the runtime field cannot be determined. A bound "
             "mutation always carries one; reaching this guard without it is a framework "
             "invariant violation, not a supported configuration.",
         )
-    operation = meta.operation
-    optional_fields = frozenset(meta.optional_fields or ())
+    operation = read_attr(meta, "operation")
+    declared_optional = read_attr(meta, "optional_fields")
+    optional_fields = frozenset(list_of(declared_optional) if declared_optional else ())
     runtime_required = (
         False
         if operation == "update"
@@ -1374,7 +1359,7 @@ def _assert_field_agreement(
     )
     if spec.required is not None and runtime_required != spec.required:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: field {target!r} is "
+            f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} is "
             f"{'required' if runtime_required else 'optional'} at runtime but "
             f"{'required' if spec.required else 'optional'} in the schema input. Align "
             "the runtime serializer's required/default declaration with "
@@ -1392,11 +1377,12 @@ def _assert_field_agreement(
         # annotation is checked there - so the container's annotation is covered by
         # that walk plus the requiredness check above.
         return
+    snapshot_model = read_attr(meta, "model")
     try:
         _python_attr, runtime_annotation, _runtime_spec = resolve_serializer_field(
             runtime,
-            meta.model,
-            f"{type(serializer).__name__}{'PartialInput' if operation == 'update' else 'Input'}",
+            None if snapshot_model is None else require(snapshot_model, is_model_class),
+            f"{truth.name(type(serializer))}{'PartialInput' if operation == 'update' else 'Input'}",
         )
         runtime_annotation, _field_kwargs = optional_input_field(
             runtime_annotation,
@@ -1410,13 +1396,13 @@ def _assert_field_agreement(
         )
     except ConfigurationError as exc:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: runtime field {target!r} "
+            f"SerializerMutation {truth.name(mutation_cls)}: runtime field {target!r} "
             "could not be resolved to the schema's generated input annotation; align "
             "the runtime serializer with get_serializer_for_schema().",
         ) from exc
     if repr(runtime_annotation) != spec.annotation_repr:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: runtime field {target!r} "
+            f"SerializerMutation {truth.name(mutation_cls)}: runtime field {target!r} "
             f"resolves to annotation {runtime_annotation!r}, but the schema input "
             f"resolves to {spec.annotation_repr}; align the runtime serializer field "
             "with get_serializer_for_schema().",
@@ -1445,25 +1431,25 @@ def _assert_relation_agreement(
         )
     if not ok_shape:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: relation field {spec.target_name!r} is "
-            f"{type(runtime).__name__} at runtime, but the schema types it as a primary-key "
+            f"SerializerMutation {truth.name(mutation_cls)}: relation field {spec.target_name!r} is "
+            f"{truth.name(type(runtime))} at runtime, but the schema types it as a primary-key "
             "relation; only PrimaryKeyRelatedField (single) / PrimaryKeyRelatedField(many=True) "
             "decode a pk. Align the runtime serializer field with get_serializer_for_schema().",
         )
     runtime_model = _relation_model_of(runtime)
     if runtime_model is not spec.related_model:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: relation field {spec.target_name!r} "
-            f"targets {getattr(runtime_model, '__name__', runtime_model)!r} at runtime but "
-            f"{getattr(spec.related_model, '__name__', spec.related_model)!r} in the schema field "
+            f"SerializerMutation {truth.name(mutation_cls)}: relation field {spec.target_name!r} "
+            f"targets {_model_name_repr(runtime_model)} at runtime but "
+            f"{_model_name_repr(spec.related_model)} in the schema field "
             "map; the decoded id would be validated against a different model. Align the runtime "
             "relation's queryset with get_serializer_for_schema().",
         )
     runtime_queryset = _relation_queryset_of(runtime)
     if not (is_manager(runtime_queryset) or isinstance(runtime_queryset, QuerySet)):
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: relation field {spec.target_name!r} "
-            f"holds a {type(runtime_queryset).__name__!r} queryset at runtime, but the schema "
+            f"SerializerMutation {truth.name(mutation_cls)}: relation field {spec.target_name!r} "
+            f"holds a {truth.name(type(runtime_queryset))!r} queryset at runtime, but the schema "
             "types it as a primary-key relation, which looks its id up in a QuerySet or a "
             "Manager. Align the runtime relation's queryset with get_serializer_for_schema().",
         )
@@ -1493,8 +1479,8 @@ def _assert_nested_agreement(
         )
     if not ok_shape:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: nested field {spec.target_name!r} is "
-            f"{type(runtime).__name__} at runtime, but the schema types it as a nested "
+            f"SerializerMutation {truth.name(mutation_cls)}: nested field {spec.target_name!r} is "
+            f"{truth.name(type(runtime))} at runtime, but the schema types it as a nested "
             f"{'list of serializers' if spec.kind == NESTED_MULTI else 'serializer'}. Align the "
             "runtime serializer field with get_serializer_for_schema().",
         )
@@ -1575,12 +1561,12 @@ def _pin_validator_querysets(serializer: DRFField, alias: str, *, path: str = ""
             local_validator.queryset = pin_write_queryset(
                 queryset.all(),
                 alias,
-                owner=f"{owner} {type(validator).__name__} queryset",
+                owner=f"{owner} {truth.kind(validator)} queryset",
             )
             pinned.append(local_validator)
         return pinned
 
-    serializer_name = type(serializer).__name__
+    serializer_name = truth.name(type(serializer))
 
     def _pin_field(field: DRFField, field_path: str) -> None:
         field.validators = _pinned(field.validators, f"{serializer_name}.{field_path}")
@@ -1671,7 +1657,7 @@ def _scope_specs_over_serializer(
         scoped = pin_write_queryset(
             author_queryset.all(),
             pipeline.alias,
-            owner=(f"{type(serializer).__name__}.{spec.target_name} relation queryset"),
+            owner=(f"{truth.name(type(serializer))}.{spec.target_name} relation queryset"),
         )
         # ``related_visibility_queryset`` single-sites the ``registry.get`` resolve +
         # the visibility-scoping call (spec-039); ``None`` = raw-pk relation with
@@ -1721,7 +1707,7 @@ def _assert_save_kwargs_no_shadow(
     shadowed = sorted(key for key in save_kwargs if key in validated_keys)
     if shadowed:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.get_serializer_save_kwargs returned "
+            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_save_kwargs returned "
             f"kwarg(s) {shadowed!r} that shadow key(s) in the serializer's validated_data; DRF "
             "merges save kwargs over validated_data, so the value would silently replace the "
             "validated one (client input, injection, default, or hidden field). Save kwargs are "
@@ -1759,8 +1745,8 @@ def _assert_save_kwargs_not_model_fields(
     offenders = sorted(set(save_kwargs) & field_names)
     if offenders:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}.get_serializer_save_kwargs returned "
-            f"kwarg(s) {offenders!r} that name {model.__name__} model field(s); a save kwarg "
+            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_save_kwargs returned "
+            f"kwarg(s) {offenders!r} that name {truth.name(model)} model field(s); a save kwarg "
             "bypasses validation and visibility, so model-field injection must go through "
             "Meta.injected_fields + get_serializer_injected_data instead. Save kwargs may "
             "only carry non-model custom arguments.",
@@ -1820,7 +1806,7 @@ class _RelationIntentLedger:
         for path, entries in self.records.items():
             if self.counters.get(path, 0) != len(entries):
                 raise ConfigurationError(
-                    f"SerializerMutation {mutation_cls.__name__}: relation {path!r} was "
+                    f"SerializerMutation {truth.name(mutation_cls)}: relation {path!r} was "
                     "supplied by the client and resolved by the field, then removed from "
                     "validated_data before the write (a nested value was nulled or dropped, "
                     "or list items were removed); the client's relation intent would be "
@@ -2097,7 +2083,7 @@ def _assert_intent_specs(
             # would be silently discarded (the relation dropped on create, or a
             # replaced relation preserved on update). Fail closed.
             raise ConfigurationError(
-                f"SerializerMutation {mutation_cls.__name__}: relation {field_path!r} was "
+                f"SerializerMutation {truth.name(mutation_cls)}: relation {field_path!r} was "
                 "supplied by the client and resolved by the field, then removed from "
                 "validated_data by a validator; the client's relation intent would be "
                 "silently dropped. Validators may reject a supplied relation, never pop it.",
@@ -2105,7 +2091,7 @@ def _assert_intent_specs(
         value = validated_data[source]
         if recorded is _OMITTED:
             raise ConfigurationError(
-                f"SerializerMutation {mutation_cls.__name__}: validated_data carries relation "
+                f"SerializerMutation {truth.name(mutation_cls)}: validated_data carries relation "
                 f"{field_path!r} with a value the field's run_validation never produced; a "
                 "validator injected a relation object around the visibility-scoped field "
                 "lookup. Relation values must come from the field's own validation.",
@@ -2132,10 +2118,10 @@ def _assert_intent_specs(
             )
         if not intact:
             raise ConfigurationError(
-                f"SerializerMutation {mutation_cls.__name__}: validated_data's relation "
+                f"SerializerMutation {truth.name(mutation_cls)}: validated_data's relation "
                 f"{field_path!r} is not the exact object(s) the field's run_validation "
                 "resolved; a validator replaced a visibility-checked relation value. "
-                "Validators may reject or pop a relation, never substitute it.",
+                "Validators may reject a relation, never substitute it.",
             )
         if path == "":
             # Record the CAPTURED link key / pk set for the top-level post-save
@@ -2273,9 +2259,14 @@ def _attest_saved_relations(
 
     A divergence is a loud ``ConfigurationError`` (a configuration/trust failure of the
     consumer's custom write code), never a plausible success payload.
+
+    If the saved row itself vanished between the save and this read (a concurrent
+    delete this transaction could not see), there is no database state left to
+    attest: the check returns without attesting and the pipeline tail reports the
+    vanished row as the in-band ``conflict`` envelope.
     """
     model = backing_model_of(mutation_cls._mutation_meta)
-    name = type(serializer).__name__
+    name = truth.name(type(serializer))
 
     fk_checks: list[tuple[str, ForeignKeyField, object]] = []
     for spec in _write_surface_specs(mutation_cls):
@@ -2290,11 +2281,19 @@ def _attest_saved_relations(
             fk_checks.append((spec.target_name, model_field, relation_keys[spec.target_name]))
 
     if fk_checks:
-        row = dict_of(
-            model._base_manager.using(alias)
-            .values(*[model_field.attname for _, model_field, _ in fk_checks])
-            .get(pk=pk_of(saved)),
-        )
+        try:
+            row = dict_of(
+                model._base_manager.using(alias)
+                .values(*[model_field.attname for _, model_field, _ in fk_checks])
+                .get(pk=pk_of(saved)),
+            )
+        except model.DoesNotExist:
+            # The saved row vanished between the save and this read (a concurrent
+            # delete this transaction could not see): there is no database state
+            # left to attest, and the pipeline tail's pk re-fetch maps the vanished
+            # row to the in-band ``conflict`` envelope. Skip the attestation so the
+            # tail owns the verdict.
+            return
         for target_name, model_field, expected_key in fk_checks:
             db_value = row[model_field.attname]
             if expected_key is None:
@@ -2307,7 +2306,7 @@ def _attest_saved_relations(
                 )
             if not intact:
                 raise ConfigurationError(
-                    f"SerializerMutation {mutation_cls.__name__}: after {name}.save(), the "
+                    f"SerializerMutation {truth.name(mutation_cls)}: after {name}.save(), the "
                     f"database column for relation {target_name!r} holds {db_value!r}, not "
                     f"the validated target's {model_field.target_field.attname!r} value "
                     f"{expected_key!r}; the custom create()/update() ignored or replaced a "
@@ -2322,7 +2321,7 @@ def _attest_saved_relations(
             expected = relation_keys[spec.target_name]
             if current != expected:
                 raise ConfigurationError(
-                    f"SerializerMutation {mutation_cls.__name__}: after {name}.save(), the "
+                    f"SerializerMutation {truth.name(mutation_cls)}: after {name}.save(), the "
                     f"M2M relation {spec.target_name!r} holds pk set {sorted(map(str, current))!r}, "
                     "not the validated set "
                     f"{sorted(map(str, cast('frozenset[object]', expected)))!r}; the custom "
@@ -2330,7 +2329,7 @@ def _attest_saved_relations(
                 )
         elif source in m2m_before and current != m2m_before[source]:
             raise ConfigurationError(
-                f"SerializerMutation {mutation_cls.__name__}: after {name}.save(), the "
+                f"SerializerMutation {truth.name(mutation_cls)}: after {name}.save(), the "
                 f"OMITTED partial-update M2M relation {spec.target_name!r} changed from its "
                 "pre-save membership; a custom update() must not rewrite memberships the "
                 "client never sent.",
@@ -2381,7 +2380,7 @@ def _write_witness(
     # actor / recourse message halves are serializer-specific.
     _block_cross_alias = make_cross_alias_save_guard(
         alias,
-        actor=(f"SerializerMutation {mutation_cls.__name__}: the serializer write phase"),
+        actor=(f"SerializerMutation {truth.name(mutation_cls)}: the serializer write phase"),
         recourse="context['write_alias']",
         guard_thread=owner,
     )
@@ -2463,30 +2462,28 @@ def _checked_saved_result(
       persist the returned row via ``instance.save()``.
     """
     model = backing_model_of(mutation_cls._mutation_meta)
-    name = type(serializer).__name__
+    name = truth.name(type(serializer))
     # The return must really be a row of the model (the identity check below then proves it is
-    # ``serializer.instance``), so the test asks its real type: a ``__class__`` that raises or
-    # claims the model is never read, and a lazy proxy is never evaluated. The rejection renders
-    # it through the guarded repr, so a drifted return cannot replace this error with its own.
-    if not issubclass(type(saved), model):
+    # ``serializer.instance``), so the test asks its real class: a ``__class__`` that raises or
+    # claims the model is never read, and a lazy proxy is never evaluated.
+    if not truth.is_instance(saved, model):
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: {name}.save() returned "
-            f"{_safe_arg_repr(saved)}, not a {model.__name__} instance; the serializer's "
+            f"SerializerMutation {truth.name(mutation_cls)}: {name}.save() returned "
+            f"{truth.render(saved)}, not a {truth.name(model)} instance; the serializer's "
             "create()/update() must return the written model row.",
         )
-    saved = cast("models.Model", saved)
     if saved is not serializer.instance:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: {name}.save() returned a "
-            f"{model.__name__} that is not serializer.instance; DRF's save() assigns the "
+            f"SerializerMutation {truth.name(mutation_cls)}: {name}.save() returned a "
+            f"{truth.name(model)} that is not serializer.instance; DRF's save() assigns the "
             "written row to self.instance and returns it, so a detached return object was "
             "never written through the serializer (a spoofed saved-looking instance would "
             "launder some other row through the re-fetch).",
         )
     if pk_of(saved) is None or saved._state.adding:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: {name}.save() returned an unsaved "
-            f"{model.__name__} (pk={pk_of(saved)!r}, adding={saved._state.adding!r}); the "
+            f"SerializerMutation {truth.name(mutation_cls)}: {name}.save() returned an unsaved "
+            f"{truth.name(model)} (pk={pk_of(saved)!r}, adding={saved._state.adding!r}); the "
             "serializer's create()/update() must persist and return the written row - a "
             "never-persisted instance with a spoofed pk would launder an existing row "
             "through the re-fetch.",
@@ -2494,7 +2491,7 @@ def _checked_saved_result(
     saved_alias = saved._state.db
     if saved_alias != alias:
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: {name}.save() returned a row on "
+            f"SerializerMutation {truth.name(mutation_cls)}: {name}.save() returned a row on "
             f"database alias {saved_alias!r}, but the mutation's transaction is pinned to "
             f"{alias!r}; a write outside the pinned alias escapes the transaction. Route the "
             "custom save through context['write_alias'].",
@@ -2504,8 +2501,8 @@ def _checked_saved_result(
     # row, and a forged pk of the wrong shape must read as a mismatch.
     if authorized_pk is not None and not pks_match(model, pk_of(saved), authorized_pk):
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: {name}.save() returned "
-            f"{model.__name__} pk={pk_of(saved)!r}, but the located, authorized row is "
+            f"SerializerMutation {truth.name(mutation_cls)}: {name}.save() returned "
+            f"{truth.name(model)} pk={pk_of(saved)!r}, but the located, authorized row is "
             f"pk={authorized_pk!r}; an update must write the row that was authorized, never "
             "a substituted one.",
         )
@@ -2519,8 +2516,8 @@ def _checked_saved_result(
     if not matching_write:
         action = "INSERTED" if authorized_pk is None else "UPDATED"
         raise ConfigurationError(
-            f"SerializerMutation {mutation_cls.__name__}: {name}.save() returned a "
-            f"{model.__name__} that was never observed being {action} on alias {alias!r} "
+            f"SerializerMutation {truth.name(mutation_cls)}: {name}.save() returned a "
+            f"{truth.name(model)} that was never observed being {action} on alias {alias!r} "
             "during the save; the serializer must persist and return the same row addressed "
             "by this mutation. Returning an existing instance without saving it is not an "
             "update and cannot be reported as success.",
@@ -2723,7 +2720,10 @@ def _guarded_serializer_write(
         # row would otherwise ride into ``serializer.save()`` as an unvalidated
         # write - DRF's ``update()`` saves the WHOLE instance).
         if instance is not None:
-            assert_no_target_drift(f"SerializerMutation {mutation_cls.__name__}", instance)
+            assert_no_target_drift(
+                f"SerializerMutation {truth.name(mutation_cls)}",
+                instance,
+            )
         # The write phase opens for exactly ``serializer.save()``; everything
         # before this point was database-read-only under the phased alias guard.
         with pipeline_write_phase():

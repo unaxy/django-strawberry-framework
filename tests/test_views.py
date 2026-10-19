@@ -509,6 +509,16 @@ def test_an_invalid_cap_value_raises_configuration_error_on_either_rung(
         _resolved_max_request_body_bytes(kwarg)
 
 
+def test_an_invalid_cap_value_message_is_exact() -> None:
+    """The rejection's honest message, byte for byte, for a plain string value."""
+    with pytest.raises(ConfigurationError) as excinfo:
+        _resolved_max_request_body_bytes("4096")
+    assert str(excinfo.value) == (
+        "max_request_body_bytes must be a positive int of bytes or None to disable the "
+        "package request-body cap; got str '4096'."
+    )
+
+
 @pytest.mark.parametrize("rung", ["kwarg", "setting"])
 def test_a_cap_value_too_large_to_render_still_raises_configuration_error(rung: str) -> None:
     """An unrenderable rejected value must not replace the typed error.
@@ -517,12 +527,11 @@ def test_a_cap_value_too_large_to_render_still_raises_configuration_error(rung: 
     NAMES the received type, while this one proves the message cannot itself
     fail. CPython 3.11+ refuses to convert an integer with more than
     ``sys.get_int_max_str_digits()`` digits to a string, and the ``got``
-    tail is built by an f-string at the RAISE SITE - before any exception object
-    exists - so ``DjangoStrawberryFrameworkError``'s own ``__str__`` guard cannot
-    intercept it. Interpolating ``{value!r}`` directly therefore raised
+    tail is built by an f-string at the RAISE SITE, before any exception object
+    exists. Interpolating ``{value!r}`` directly therefore raised
     ``ValueError`` instead of ``ConfigurationError`` on exactly the
     hostile-configuration path where the typed error is the contract; the tail is
-    rendered by ``exceptions.py::describe_value`` so it degrades to a
+    rendered by ``utils/truth.py::describe`` so it degrades to a
     type-naming placeholder instead. The negative value is what reaches the
     ``value <= 0`` arm.
     """
@@ -1012,14 +1021,6 @@ class _CapabilityQueryRaisingStream(_UndeclaredSeekableStream):
         raise OSError("this stream refuses to answer capability queries")
 
 
-class _SeekableAttributeRaisingStream(_UndeclaredSeekableStream):
-    """A descriptor that raises before the probe can call ``seekable()``."""
-
-    @property
-    def seekable(self) -> NoReturn:
-        raise RuntimeError("this stream refuses attribute inspection")
-
-
 class _UnseekableToEndStream(_UndeclaredSeekableStream):
     """Reports its position, then refuses the seek to the end.
 
@@ -1141,16 +1142,6 @@ class _TellWithoutSeekStream(_RecordingStream):
 
     def tell(self) -> int:
         return self._buffer.tell()
-
-
-class _UnreadableSeekAttributeStream(_UndeclaredSeekableStream):
-    """A descriptor that raises before the probe can even read ``seek``."""
-
-    @property
-    @override
-    # basedpyright: deliberately a ``seek`` whose read raises, the stream the probe must contain
-    def seek(self) -> NoReturn:  # pyright: ignore[reportIncompatibleMethodOverride]
-        raise RuntimeError("this stream refuses attribute inspection")
 
 
 class _ReadRaisingStream(_RecordingNonSeekableStream):
@@ -1689,7 +1680,6 @@ def test_a_non_callable_seekable_marker_uses_the_bounded_read(view_class: _ViewC
     "stream_class",
     [
         pytest.param(_CapabilityQueryRaisingStream, id="seekable-raises"),
-        pytest.param(_SeekableAttributeRaisingStream, id="seekable-attribute-raises"),
         pytest.param(_UnseekableToEndStream, id="seek-to-end-raises"),
         pytest.param(_UnnumberedSeekStream, id="unnumbered-end-position"),
     ],
@@ -1701,10 +1691,10 @@ def test_a_probe_that_fails_without_moving_the_stream_falls_back_to_the_bounded_
 ) -> None:
     """A failed probe is a ``413`` from a bounded read, never a ``500``.
 
-    Four failure sites, one classification. A raising ``seekable`` attribute,
-    ``seekable()`` raising, and an unnumbered end position leave the stream
-    untouched; the seek to the end raising leaves it unknown until the restore
-    proves otherwise - and here the restore does. In all four the position is
+    Three failure sites, one classification. ``seekable()`` raising and an
+    unnumbered end position leave the stream untouched; the seek to the end
+    raising leaves it unknown until the restore proves otherwise - and here the
+    restore does. In all three the position is
     provably where the request started, so the bounded read is licensed and
     supplies the bound.
 
@@ -1876,38 +1866,6 @@ def test_a_stream_with_no_seek_method_over_limit_is_still_bounded(view_class: _V
     assert stream.delivered == _PROBE_CAP + 1
     assert stream.unread > 0
     assert hasattr(request, "_body") is False
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_an_unreadable_seek_attribute_is_not_a_proven_absence(
-    view_class: _ViewClass,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A raising ``seek`` descriptor stays on the conservative path.
-
-    The guard inside the absence check has one answer for an attribute read
-    that fails: not proven absent, so the stream keeps the end-seek-and-verify
-    treatment, whose own guards fail closed. Here every attempt to touch
-    ``seek`` raises, so the restore cannot verify and the request is refused
-    with the ordinary ``413`` and the corrupted-probe record - the correct
-    outcome when the package cannot even establish what the stream can do,
-    unlike the sibling rows where absence itself is the proof of intactness.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _UnreadableSeekAttributeStream(b"x" * (_PROBE_CAP * 16))
-    request = _asgi_request(stream, None)
-
-    with (
-        caplog.at_level(logging.WARNING, logger="django_strawberry_framework"),
-        pytest.raises(HTTPException) as excinfo,
-    ):
-        view._enforce_request_body_limit(request)
-
-    assert excinfo.value.status_code == 413
-    assert excinfo.value.reason == _BODY_LIMIT_REASON
-    assert stream.requested == []
-    assert hasattr(request, "_body") is False
-    _assert_the_corrupted_probe_was_recorded(caplog, stream)
 
 
 @pytest.mark.parametrize("view_class", _VIEW_CLASSES)
@@ -2168,8 +2126,9 @@ def _strawberry_patch_opted_out() -> Generator[None, None, None]:
     The patch installs from ``AppConfig.ready()``, so flipping the setting inside
     a test cannot un-install it; the honest simulation restores upstream's own two
     methods *and* sets the setting, so a stray ``apply()`` stays a no-op for the
-    duration. What is left running is exactly what a consumer who opted out would
-    be running.
+    duration. The two multipart delegates stay installed: no row in
+    this block posts multipart, so they are unreachable here, and what the rows
+    observe is exactly what an opted-out consumer observes on the JSON-body path.
     """
     override = override_settings(
         DJANGO_STRAWBERRY_FRAMEWORK={"APPLY_UPSTREAM_PATCHES": {"strawberry": False}},
@@ -3094,90 +3053,6 @@ def _marked_callback_with_a_foreign_view_class(_request: HttpRequest) -> HttpRes
     return HttpResponse("marked, foreign view_class")
 
 
-class _BoundaryReadRaisesMeta(type):
-    """A metaclass that raises when the boundary method's name is read off the class.
-
-    Deliberately narrow - every other absent attribute answers ``AttributeError``
-    as usual - so what the rows below measure is a read of the probed name rather
-    than some unrelated introspection of the class.
-    """
-
-    def __getattr__(cls, name: str) -> NoReturn:
-        if name == _BOUNDARY_METHOD:
-            raise RuntimeError("this metaclass answers the boundary read with a raise")
-        raise AttributeError(name)
-
-
-class _ViewClassWhoseMetaclassRaises(metaclass=_BoundaryReadRaisesMeta):
-    """A real, buildable class whose boundary read raises instead of answering."""
-
-    def __init__(self, **initkwargs: object) -> None:
-        raise AssertionError("a class whose boundary cannot be read must never be built")
-
-
-class _RaisingBoundaryDescriptor:
-    """A descriptor under the boundary method's name whose read raises."""
-
-    def __get__(self, instance: object, owner: type | None = None) -> NoReturn:
-        raise RuntimeError("this descriptor answers the boundary read with a raise")
-
-
-class _ViewClassWhoseBoundaryDescriptorRaises:
-    """The second shape of attribute machinery a forged ``view_class`` can carry.
-
-    A metaclass ``__getattr__`` runs only for a name the class does not have; a
-    descriptor of that name runs for a name it does. Both are ordinary Python and
-    both are code the forged class chooses, so a recognition that reads the name
-    has to survive either.
-    """
-
-    def __init__(self, **initkwargs: object) -> None:
-        raise AssertionError("a class whose boundary cannot be read must never be built")
-
-
-setattr(_ViewClassWhoseBoundaryDescriptorRaises, _BOUNDARY_METHOD, _RaisingBoundaryDescriptor())
-
-
-class _CallbackWhoseBookkeepingReadRaises:
-    """A marked callback whose own attribute reads raise, before any class is reached.
-
-    Recognition reads three attributes off the callback and one off the class, so
-    the callback is the other side the guard has to cover: the marker sits in this
-    instance's ``__dict__`` and every other read reaches ``__getattr__``, which
-    raises. Unmounted on purpose - a callback that raises on arbitrary reads would
-    break the URL resolver and the CSRF middleware too, and then a row would be
-    measuring its own scaffolding rather than the recognition.
-    """
-
-    def __call__(self, _request: HttpRequest) -> NoReturn:
-        raise AssertionError("a callback the recognition declines is never called by it")
-
-    def __getattr__(self, name: str) -> NoReturn:
-        raise RuntimeError("this callback answers a bookkeeping read with a raise")
-
-
-def _marked_callback_with_a_raising_metaclass(_request: HttpRequest) -> HttpResponse:
-    """A callback whose class turns the boundary probe's read into an exception.
-
-    Every clause before the probe says yes: the marker is there, ``view_class`` is
-    a class, ``view_initkwargs`` is a ``dict``. The probe's read is where the
-    forged class gets to run code, and this one raises - so what the recognition
-    has is not an answer but a failure, and the hook it answers to has no
-    ``except`` around it.
-    """
-    return HttpResponse("marked, metaclass read raises")
-
-
-def _marked_callback_with_a_raising_boundary_descriptor(_request: HttpRequest) -> HttpResponse:
-    """The same failure through the other shape of attribute machinery.
-
-    Refused by the same guard as the metaclass route rather than by a clause of
-    its own, and it is a separate route because the two shapes reach the read by
-    different mechanisms and a guard on one is not a guard on the other.
-    """
-    return HttpResponse("marked, descriptor read raises")
-
-
 #: Every boundary run the minimal view class below received, so a row can assert
 #: the middleware ran the boundary it probed the class for.
 _MINIMAL_BOUNDARY_RUNS: list[HttpRequest] = []
@@ -3219,8 +3094,6 @@ setattr(_marked_callback_with_unusable_initkwargs, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_initkwargs_the_class_rejects, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_a_callable_view_class, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_a_foreign_view_class, _BOUNDARY_MARKER, True)
-setattr(_marked_callback_with_a_raising_metaclass, _BOUNDARY_MARKER, True)
-setattr(_marked_callback_with_a_raising_boundary_descriptor, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_a_minimal_boundary_view_class, _BOUNDARY_MARKER, True)
 # Django's ``as_view()`` callback contract puts ``view_class`` / ``view_initkwargs`` in the
 # callback function's namespace, mimicked here with values ``as_view`` never produces.
@@ -3240,23 +3113,10 @@ vars(_marked_callback_with_a_foreign_view_class).update(
     view_class=_ForeignButBuildableView,
     view_initkwargs={},
 )
-vars(_marked_callback_with_a_raising_metaclass).update(
-    view_class=_ViewClassWhoseMetaclassRaises,
-    view_initkwargs={},
-)
-vars(_marked_callback_with_a_raising_boundary_descriptor).update(
-    view_class=_ViewClassWhoseBoundaryDescriptorRaises,
-    view_initkwargs={},
-)
 vars(_marked_callback_with_a_minimal_boundary_view_class).update(
     view_class=_MinimalBoundaryViewClass,
     view_initkwargs={},
 )
-
-#: The callback-side read failure, built once: the marker is in the instance's
-#: ``__dict__`` so recognition gets past the first clause and fails on the next read.
-_CALLBACK_WHOSE_BOOKKEEPING_READ_RAISES = _CallbackWhoseBookkeepingReadRaises()
-setattr(_CALLBACK_WHOSE_BOOKKEEPING_READ_RAISES, _BOUNDARY_MARKER, True)
 
 
 _BOUNDARY_MIDDLEWARE_PATH = (
@@ -3299,8 +3159,6 @@ urlpatterns = [
     path("marked-rejected-initkwargs/", _marked_callback_with_initkwargs_the_class_rejects),
     path("marked-callable-view-class/", _marked_callback_with_a_callable_view_class),
     path("marked-foreign-view-class/", _marked_callback_with_a_foreign_view_class),
-    path("marked-raising-metaclass/", _marked_callback_with_a_raising_metaclass),
-    path("marked-raising-descriptor/", _marked_callback_with_a_raising_boundary_descriptor),
     path("plain/", _plain_view),
 ]
 
@@ -3515,15 +3373,15 @@ async def test_the_view_does_not_measure_a_body_the_chain_already_measured() -> 
 
 
 def test_middleware_ignores_an_unreadable_optional_mount_handoff() -> None:
-    """A mount lookup that raises cannot turn a boundary the middleware already ran into a 500.
+    """A mount attribute behind a raising lookup cannot turn a passed boundary into a 500.
 
     The mount handoff is an OPTIMIZATION - it lets ``as_view``'s wrapper dispatch
     the very instance whose boundary just ran instead of building a second one -
-    and it is read after the boundary has already passed. So the read is guarded:
-    the callback is whatever the deployment's decorators produced, its attribute
-    access is consumer code, and a raising one must cost the request its handoff,
-    never its response. Without the guard the request would 500 having already
-    been checked, which is the one outcome the boundary exists to prevent.
+    and it is read after the boundary has already passed. The read is static
+    (``utils/truth.py::static_attr``): the callback is whatever the deployment's
+    decorators produced, and its ``__getattribute__`` is never run, so a raising
+    one costs the request nothing - no handoff is found, and the response is the
+    ordinary one.
     """
 
     class BoundaryView:
@@ -3896,8 +3754,6 @@ async def test_a_chain_with_the_boundary_and_no_csrf_middleware_still_checks_csr
         "/marked-rejected-initkwargs/",
         "/marked-callable-view-class/",
         "/marked-foreign-view-class/",
-        "/marked-raising-metaclass/",
-        "/marked-raising-descriptor/",
     ],
 )
 async def test_a_marked_callback_the_middleware_cannot_build_is_declined_not_crashed(
@@ -3912,7 +3768,7 @@ async def test_a_marked_callback_the_middleware_cannot_build_is_declined_not_cra
     unhandled ``500`` from a hook whose every other outcome is a controlled
     response.
 
-    The first five routes are five ways the recognition *decides* no, and no two are
+    The five routes are five ways the recognition decides no, and no two are
     refused by the same clause: the bookkeeping can be absent, it can be the wrong
     shape to splat, it can have ``as_view``'s exact shape while naming keywords the
     class rejects - which only attempting the construction tells apart from a real
@@ -3922,14 +3778,10 @@ async def test_a_marked_callback_the_middleware_cannot_build_is_declined_not_cra
     keywords and simply is not a package view, which nothing but the boundary probe
     tells apart from a real mount.
 
-    The last two are the other kind of input: the recognition cannot decide at all,
-    because a read it performs raises rather than answering. Both are refused by the
-    guard around the reads rather than by a clause, and they are two routes because a
-    metaclass ``__getattr__`` and a class-level descriptor of the probed name reach
-    that read by different mechanisms. One recognition, two kinds of no: a callback
-    the middleware cannot run a boundary for is declined, whether it cannot be built,
-    carries no boundary to run, or cannot be asked, and declining it leaves that
-    request on the view-local arrangement rather than on neither.
+    One recognition, one kind of no: a callback the middleware cannot run a boundary
+    for is declined, whether it cannot be built or carries no boundary to run, and
+    declining it leaves that request on the view-local arrangement rather than on
+    neither.
     """
     with _chain(_ORDERED_CHAIN):
         response = Client().get(route)
@@ -3968,31 +3820,6 @@ def test_a_view_class_without_the_boundary_is_never_constructed() -> None:
 
     assert _package_view_instance(_marked_callback_with_a_foreign_view_class) is None
     assert len(_FOREIGN_VIEW_CONSTRUCTIONS) == constructions_before
-
-
-@pytest.mark.parametrize(
-    "callback",
-    [
-        pytest.param(_marked_callback_with_a_raising_metaclass, id="metaclass"),
-        pytest.param(_marked_callback_with_a_raising_boundary_descriptor, id="descriptor"),
-        pytest.param(_CALLBACK_WHOSE_BOOKKEEPING_READ_RAISES, id="callback-bookkeeping"),
-    ],
-)
-def test_a_read_that_raises_is_declined_rather_than_raised_out_of_the_hook(
-    callback: object,
-) -> None:
-    """An attribute read is not only an answer: it can also fail.
-
-    ``getattr``'s default covers an absent attribute and nothing else, and
-    ``process_view`` calls the recognizer outside any ``except``, so a read that
-    raises would leave the hook on an exception the forged object chose - the same
-    uncontrolled failure as an unrecognized foreign class, one layer earlier. The
-    three inputs are the reads the recognition performs: the boundary read off the
-    class, in each of the two shapes of attribute machinery a class can carry, and a
-    bookkeeping read off the callback itself. Each answers ``None`` - the decline,
-    which is the arm that keeps the view-local arrangement - rather than propagating.
-    """
-    assert _package_view_instance(callback) is None
 
 
 def test_the_probed_boundary_method_is_the_one_the_package_views_define() -> None:

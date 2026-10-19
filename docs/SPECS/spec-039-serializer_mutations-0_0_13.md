@@ -1950,8 +1950,8 @@ The pipeline steps:
      pk, alias and stored key captured at run_validation (a key re-pointed in place is a
      substitution): renamed sources, injected fields, single relations, lists (length plus
      pairwise identity, so duplicate and explicit-empty-list set semantics pass through),
-     and nested paths alike. A validator may reject or pop a relation (popping reverts to
-     omitted semantics); it may never substitute or inject one.
+     and nested paths alike. A validator may reject a supplied relation but never pop,
+     substitute, or inject one.
    - **Validator queryset pinning.** `_pin_validator_querysets` walks the serializer's
      validators recursively — per instance, on a copy — and pins each one's queryset to
      the operation's write alias, so a `UniqueTogetherValidator` (or any author validator)
@@ -2497,9 +2497,8 @@ held by the identity ratchet where a symbol is shared:
   ([Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth) / Slice 2.)
 - **One PascalCase token encoder.** The descriptor-derived names for narrowed /
   divergent shapes use the injective single-token encoder
-  `utils/inputs.py::pascalize_token` (`mutations/inputs.py::_pascalize_token` is an alias
-  of it); the canonical `<Serializer>Input` / `<Serializer>PartialInput` names need no
-  helper. ([Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth).)
+  `utils/inputs.py::pascalize_token`; the canonical `<Serializer>Input` /
+  `<Serializer>PartialInput` names need no helper. ([Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth).)
 - **One error-flattener leaf primitive.** `serializer_errors_to_field_errors` is
   recursive — the flat `036` `utils/errors.py::validation_error_to_field_errors` cannot
   walk DRF's nested tree. Its **base case** — construct a `FieldError(field=<path>,

@@ -1,7 +1,7 @@
 # DRY review: `django_strawberry_framework/utils/querysets.py`
 
 Status: verified
-Run: 0.0.15 2026-09-17-1
+Run: 0.0.15 2026-09-30-8
 
 Revision pass 1 (Worker 1, after Worker 2's `revision-needed`): see `## Iterations` at the
 bottom. Two figures in `## System trace` were corrected in place; nothing else above was
@@ -2163,3 +2163,3582 @@ this revision and remain non-blocking, each needing a named owning card.
 
 Scratch: `<scratch>/dry-ws/d1-verify-2` joins `d1-verify` on disk; both are workspace copies and
 neither holds anything the shared tree needs.
+
+### Adjudication pass 1 (run 2) — Worker 1
+
+Adjudication run: `0.0.15 2026-09-21-2`. Run 1 verified this item at `5c62515a`;
+HEAD is now `bfaee91d`. Scoped freshness adjudication only: every finding
+F1..F12, iteration I-R1..I-R6 and defect D1..D5 re-derived against the new
+tree. No production edits, no test edits, no new tracked files. Prior text
+above untouched; this section appends.
+
+Method. All nine causing commits were read as full diffs, never as messages:
+`f7192bfb` (seal admits a project queryset class + `carry_result_cache`),
+`4d9f1c3d` (retires `_UNRECOMPOSED_CHILD_POLICY`), `5741eaa6` (drops dead
+seal wording + a false docstring reason), `fd39cac6` (owned D1 fix, ledgered),
+`ffce6f29` / `0b110b51` / `319a1ec0` / `737b971b` (list_field ordering
+guards), `dfb95984` (glossary child-seal wording), `02e266df` (tests). Every
+claim below was verified against HEAD bytes via `git show bfaee91d:<path>`
+and `git grep -n <symbol> bfaee91d`, not against the working tree (which
+carries 60 dirty concurrent paths) and not against any commit message. The
+`django_strawberry_framework/utils/querysets.py` diff `5c62515a..bfaee91d`
+holds 26 hunks, all inside `f7192bfb` / `4d9f1c3d` / `5741eaa6`; their
+old-line ranges are 51, 254, 2410, 2639, 2671, 2764, 2771, 2782, 2802, 3083,
+3102, 3234, 3244, 3286, 3327, 3385, 3410, 3440, 3465, 3593, 3626, 3664, 3724,
+3751, 3867, 4121. A symbol cited below as "outside all hunks" was checked
+against exactly that list.
+
+Enumeration recount at HEAD (`ast.Module.body`): 99 sync functions + 3 async
+(`run_in_one_sync_boundary`, `apply_type_visibility_async`,
+`post_process_queryset_result_async`) = 102 functions, 7 classes (same names),
+24 module-level constants. 133 names, was 134: the one retirement is
+`_UNRECOMPOSED_CHILD_POLICY`, which was assigned (F8 / I-R4), and no name was
+added — so I-R5's completeness claim survives with one fewer assigned name.
+
+#### Adjudication pass 1 (run 2) — F1 (CONFIRM)
+
+Count stays 3. `auth/mutations.py` and `routers.py` are byte-identical
+(MATCH), and every querysets hunk lies outside `_dispose_sync_awaitable` /
+`_disposed_awaitable` / the reject sites (lines 160-230): `f7192bfb` touches
+the seal, the deferred-filter bake, the policy record and the message sites;
+`4d9f1c3d` touches the policy constants and two `apply_type_visibility`
+docstrings; `5741eaa6` touches the `base_queryset` docstring and three
+message sites. The second-axis challenge (futures awaited-with-timeout)
+forces the same 3. Family `awaitable-refusal-and-disposal` unchanged.
+
+#### Adjudication pass 1 (run 2) — F2 (REVISE: counts only, conclusion stands)
+
+Still one owner. Re-ran the three package-wide mechanism searches at HEAD:
+`models.QuerySet(` outside `utils/querysets.py` = 0 hits;
+`sql.Query` touches outside = 0; executable `object.__getattribute__` /
+`type.__getattribute__` / `inspect.getattr_static` outside = 0 (the one
+textual hit, `utils/converters.py:119`, is a comment explaining why that
+module avoids the protocol; the file predates the range, verified via
+`git log`). `_seal_or_defect` still has exactly 5 call sites, all in this
+file (querysets.py:2535, :2996, :3444, :3743, :3851). The four planning
+readers on already-sealed querysets are unchanged and untouched in range:
+`connection.py:1603` (`source.query.is_sliced`), `optimizer/nested_fetch.py`
+123/131/197, `optimizer/predicates.py:165` (`queryset.query.combinator`),
+`optimizer/extension.py:1161`; the three cited inventory-oracle tests still
+exist at HEAD (`tests/utils/test_querysets.py:5033, :5055, :5082`).
+`f7192bfb` extends the single sealing body (bake for every class, exact-bool
+`negate` gate, `carry_result_cache` axis); it adds no second body, so no
+challenge count moves. What does move is the record's own census: "the five
+`_SealPolicy` fields" is now six (`carry_result_cache` added), and "the
+seven policy constants" is now six (`_UNRECOMPOSED_CHILD_POLICY` retired):
+`_DEFAULT`, `_CASCADE`, `_PREFETCH_CHILD`, `_LIST_ARGUMENT_VISIBILITY`,
+`_ORDERSET_RESULT`, `_RAW_LIST_SOURCE_POLICY` (querysets.py:2792-2826). C13
+still forces 1 definition — the new axis arrived as one field plus its
+checks, the worked-example shape. The glossary *Sealed execution queryset*
+projection moved with the code (`f7192bfb` documents the raw-list carry
+there); production + projection moving together is the legitimate shape, not
+a second definition. Family `sealed-execution-queryset` unchanged.
+
+#### Adjudication pass 1 (run 2) — F3 (REVISE: gate population, rule now holds)
+
+`_defect_message` still has exactly 6 call sites (permissions.py:353, :412;
+querysets.py:3040, :3500, :3625, :3751) and the dispatcher itself
+(querysets.py:3576) is outside all hunks. `f7192bfb` rewords only the
+`untrusted` arm prose (deferred-filter phrase) at three sites; it changes no
+code set and no arm set. `5741eaa6` removed the three dead-arm sites'
+unreachable arms (see D5), so the rule F3 gates — "each site renders only
+the subset IT can reach" — now HOLDS at every site except the two documented
+modelling artifacts carried in I-R4 (orderset-alias subsumption, unchanged;
+source-alias source-shape, new — both argued there, neither a defect).
+Finding stays gate-plus-declaration in family `seal-defect-code-wording`,
+now with D5 fixed rather than open.
+
+#### Adjudication pass 1 (run 2) — F4 (CONFIRM)
+
+Count stays 2. The seal's `reject_sliced` check is context (not `+`/`-`) in
+the `f7192bfb` result-cache hunk; `connection.py::_guard_source_not_pre_sliced`
+and `optimizer/nested_fetch.py::unwindowable_child_queryset_reason` are in
+MATCH files, byte-identical including the contract difference (reject vs
+degrade-a-plan). `4d9f1c3d` preserves the slice licence on the surviving
+`_PREFETCH_CHILD_POLICY` (`reject_sliced=False`); the retired constant was a
+consumer of the policy field, never a third definition. `5741eaa6` is
+wording-only. The family item's open question (legitimate wire adapter vs
+second definition to delete) is unchanged, as is the `GraphQLError` vs
+`ConfigurationError` proof it owes.
+
+#### Adjudication pass 1 (run 2) — F5 (CONFIRM)
+
+Count stays 2, site lists unchanged. The entire `types/resolvers.py` diff in
+range is one 6-line comment reword inside `_make_relation_resolver`
+(`f7192bfb`, lines 570-577, prefetched-rows-carry note);
+`types/resolvers.py::_visible_related_object` (:395) is untouched, as is
+`utils/querysets.py::visible_related_object` (:4060, outside all hunks) and
+`related_visibility_queryset_or_default` (:3991). `utils/write_values.py`
+and `rest_framework/resolvers.py` are MATCH. The disprove-first question the
+family item owes (confirm-a-prefetched-row vs admit-a-client-named-row) is
+untouched by every causing commit.
+
+#### Adjudication pass 1 (run 2) — F6 (CONFIRM)
+
+Rejection stands. `_stringified` (:4012), `stringified_pks_present`,
+`pks_all_present` and `coerce_field_value_or_none` (310-344) are all outside
+all hunks; `utils/write_transaction.py`, `utils/write_values.py` and
+`rest_framework/resolvers.py` are MATCH. The contract difference (hashability
+convenience over pre-canonical values vs fail-closed authorization equality)
+is byte-identical, and the reconsideration trigger is untriggered (the
+callers still route through `type_check_relation_id` — that file is MATCH).
+`keyset.py:384` was not touched in range (not among the causing commits'
+paths).
+
+#### Adjudication pass 1 (run 2) — F7 (CONFIRM)
+
+Rejection stands. `sync_pipeline_recourse` and `_RELAY_ASYNC_RECOURSE`
+(347-372) are outside all hunks and byte-identical to the recorded literals;
+`mutations/permissions.py` and `utils/permissions.py` are MATCH
+(`_PERMISSION_ASYNC_RECOURSE` :50, `_GATE_ASYNC_RECOURSE` :59, same lines).
+`permissions.py` changed only in the cascade `untrusted` arm wording
+(`f7192bfb` hunks at :366, :397, :429); `_ASYNC_RECOURSE` (:136) and the
+four-clauses-differ reason are untouched. Reconsideration trigger (differ
+only in the subject noun) untriggered.
+
+#### Adjudication pass 1 (run 2) — F8 (REVISE: the unguarded member is now guarded)
+
+The two enforcement mechanisms are still 2 definitions, correctly counted:
+`base_queryset`'s `using` arm (body unchanged — `5741eaa6` trimmed only the
+docstring's false order clause, see D4) and `_seal_or_defect`'s
+`require_shared_alias` arm (untouched). Enforcement sites `permissions.py:692`
+(`using=state.alias`) and `filters/sets.py:2592` (`using=parent_db`) are
+present at the same lines, and `_sealed_prefetch_related_lookups` still
+threads the outer effective alias into the child seal (the `f7192bfb` hunk in
+that function is comment-only). What changed is the row's "Unguarded member"
+line: `optimizer/walker.py::_build_child_queryset` now seals under
+`_PREFETCH_CHILD_POLICY` (owned fix `fd39cac6`, in the ledger; walker file
+changed by no other commit in range) while still seeding unrouted by design
+(the plan cache cannot hold a per-request alias — the D1-fix reasoning,
+unchanged). `_UNRECOMPOSED_CHILD_POLICY`, the policy that line named, no
+longer exists anywhere in `.py` at HEAD (`4d9f1c3d` deleted it; remaining
+hits are this artifact's own history plus builder records). The glossary
+projection now names `reject_sliced=False` in `_PREFETCH_CHILD_POLICY`
+(`dfb95984`). The run-1 probe asymmetry (accepted under the walker's policy,
+rejected under the prefetch child's) is therefore gone: both child seals are
+now the same policy. Re-derived execution-verified — see "Probes re-run".
+Coupling to D1 is discharged (D1 fixed, owned). Family
+`child-queryset-alias-inheritance` still owes its family item (verify the
+two-mechanism split at the new tree); Worker 0 note below proposes retiring
+the `defect-routed` status.
+
+#### Adjudication pass 1 (run 2) — F9 (CONFIRM)
+
+Still no production reader. HEAD census (`git grep`): the definition
+(querysets.py:412) is the only package hit; test readers are 5 asserts in
+`tests/test_list_field.py` (689, 1450, 1456, 1466, 1475) plus 5 in
+`tests/optimizer/test_extension.py` (5874, 5888, 5890, 5911, 5944) — 10
+total, drifted from run-1's 16/11 by concurrent test edits, and the
+conclusion never depended on the count. `wrap_` consumers are still
+`list_field.py` only (4 call sites + import) and `unwrap_` still
+`optimizer/extension.py:1142-1145` (returning `(value, was_adapted)`); the
+list_field guard commits touch only the ordering classifier
+(`_is_deterministic_order_name` / `_term` / `_value`, the order-value tables,
+imports) plus nothing in the adapter path, and `list_field.py` is still
+absent from every `__all__`/re-export for this symbol. The `resource_policy.py`
+diff (`f7192bfb`: `_windowed_rows` / `bounded_rows` carry tails) adds no
+reader. The principle-11 keep-or-delete decision with its oracle-shape
+entailment still belongs to family `async-only-queryset-row-adapter`.
+
+#### Adjudication pass 1 (run 2) — F10 (CONFIRM verdict, corrected census)
+
+Rejection stands; the contract difference is byte-identical
+(`connection.py` MATCH — :1050/:1095 still answer yes for a QuerySet, :1575
+still the union admission test; `is_async_only_iterable` :375 outside all
+hunks; `resource_policy.py:1216` still composes it by name; `list_field.py`
+holds no direct `AsyncIterable`/`AsyncIterator` reference at HEAD, so no new
+predicate was introduced by the guard commits). Census correction, in my
+favour to record precisely: `list_field.py` had THREE composed call sites
+already at run 1 (891, 895, 1387 at `5c62515a` — F10 cited two); at HEAD the
+same three sites sit at 1333, 1337, 1829 (shifted by classifier growth, none
+added or removed in range). Reconsideration trigger untriggered.
+
+#### Adjudication pass 1 (run 2) — F11 (CONFIRM)
+
+Still 1 definition, same classification. `run_in_one_sync_boundary` (:465)
+is outside all hunks; all six consumer files still compose it by name
+(`schema.py` import shifted 73→79 inside `f7192bfb`'s schema hunk;
+`permissions.py:125`, `orders/sets.py:50`, `filters/sets.py`,
+`mutations/resolvers.py`, `auth/mutations.py` unchanged). The five direct
+`sync_to_async(...)` sites are at byte-identical lines with byte-identical
+shapes: `types/resolvers.py` 616/689/760 (`sync_to_async(getattr,
+thread_sensitive=True)` — `f7192bfb`'s 6-line comment swap preserved the
+line count) and `testing/client.py` 471/475 (bare calls). Neither encodes
+the consumer-hook rule, as recorded. Family `one-sync-boundary` unchanged.
+
+#### Adjudication pass 1 (run 2) — F12 (CONFIRM all live rows; two stay superseded)
+
+Re-swept every row whose consumers live in a changed module; the two
+superseded rows (`_safe_class_name`, `_prefetch_relation_target_or_none`)
+are adjudicated under I-R6 / I-R1 and not here.
+
+- `_safe_routing_repr`: production readers still only `_seal_or_defect`'s
+  routing arm (:3225-3228). 1 definition. CONFIRM.
+- `_GraphWalk` / `_WalkState` / `_walk_short_circuit`: lines 826-900,
+  outside all hunks; no second recursive proof in range (the
+  `converters.py:119` textual hit is a pre-existing comment). CONFIRM.
+- `_snapshot_routing_intent` (:2881, outside hunks): sole external consumer
+  still `list_field.py` (:1369, :1397); guard commits don't touch the call
+  sites. CONFIRM.
+- `_routing_hints_equal` (:2830, outside hunks): reader still the seal
+  (:3219). CONFIRM.
+- `_bake_deferred_filter_or_defect` + `_deferred_value_defect`: `f7192bfb`
+  strengthened the single body (exact-`bool` `negate` gate; bake runs for
+  every class instead of exact-`QuerySet` only) without adding a second one:
+  sole caller still `_seal_or_defect` (:3274), `PROHIBITED_FILTER_KWARGS`
+  still single-sited (import + floor mirror :101-108, one use :2660). The
+  recorded challenge still returns 1. CONFIRM.
+- `prepared_resolver_source` (:4241, outside hunks): still composed by both
+  collection flavors (`connection.py:1762`, `list_field.py:1793, :1840`);
+  guard hunks never touch the resolver head. CONFIRM.
+- `_coerced_manager_queryset` and `SyncMisuseError`: see I-R3 / I-R5.
+
+#### Adjudication pass 1 (run 2) — I-R1 (CONFIRM)
+
+Rejection stands. `_prefetch_relation_target_or_none` (:2304) and
+`_reverse_relation_by_accessor_or_none` (:2354) are outside all hunks (the
+nearest hunk, 2410, is the NEXT function's docstring, per its `@@` header);
+`utils/relations.py`, `connection.py` and `optimizer/plans.py` are MATCH, so
+the five-body mechanism table is byte-identical. `list_field.py::
+_is_deterministic_order_name` still exists (:824 def, :956 call), so the
+"count rises to 7" caveat stands. `02e266df`'s `tests/utils/test_querysets.py`
+edit retires a package-tier proxy-prefetch test in favour of its live-tier
+promotion — a tier move, not a contract change; the fail-open-vs-raise
+contract difference and both reconsideration triggers are untouched.
+
+#### Adjudication pass 1 (run 2) — I-R2 (CONFIRM)
+
+Family naming and both exclusions stand. `utils/permissions.py` and
+`filters/base.py` are MATCH, so the exclusion reasoning rests on unchanged
+bodies (the former never touches `Model._meta.get_field`, the latter
+resolves through the registry graph). No causing commit touches either file.
+Family `orm-lookup-path-resolution` unchanged.
+
+#### Adjudication pass 1 (run 2) — I-R3 (CONFIRM)
+
+Still file-local. `models.Manager` appears at exactly three lines
+package-wide, all in this file (querysets.py:305, :3526, :3849 — numbers
+shifted by the carry hunks, count and file identical). `_coerced_manager_queryset`
+(:3526) sits below the last message-site hunk (ends :3522) and is untouched;
+both entry points (`normalize_query_source`, `_normalized_visibility_result`)
+are intact. The flag to the `utils/` folder item (least margin, visibility
+bypass on failure) stands.
+
+#### Adjudication pass 1 (run 2) — I-R4 (REVISE: policy set swapped, dead arms gone, one new artifact)
+
+Both load-bearing facts re-derived against the new tree rather than
+inherited. (1) `expected_routing` is still passed at exactly 1 of the 5
+`_seal_or_defect` calls (`_validate_post_orderset_result`, :3001); the other
+four (:2535, :3444, :3743, :3851) pass none — verified by `git grep`, not
+from the probe's table. So `routing` is still unreachable at both
+visibility sites. (2) The complete `policy=` set reaching the runners is
+now `_DEFAULT_SEAL_POLICY` (default), `_CASCADE_SEAL_POLICY`
+(permissions.py:623, :705), `_PREFETCH_CHILD_POLICY` (walker.py:476) and
+`_LIST_ARGUMENT_VISIBILITY_POLICY` (list_field.py:1522, :1575) — four
+policies, with `_PREFETCH_CHILD_POLICY` in place of the retired
+`_UNRECOMPOSED_CHILD_POLICY`. None of the four sets `require_unevaluated`
+(still only `_ORDERSET_RESULT_POLICY`, still reaching the seal solely
+through `_validate_post_orderset_result`), so `evaluated` is still
+unreachable at both sites. The `SITES` table with that one swap is sound.
+
+`probe_defect_arms_r2.py` (adjudication scope, same instrument, swapped
+policy) reports `sites with a mismatch: 2/6` with ZERO dead arms anywhere:
+`_raw_list_source_message` OK, `_visibility_result_error` OK, both
+`permissions.py` sites OK — the D5 fix holds. The two mismatch rows are both
+`missing: ['alias']` modelling artifacts, and they need different reasons:
+(a) `_validate_post_orderset_result` — the KNOWN I-R4 artifact (documented
+`routing`-subsumes-`alias` subsumption, comment intact at :3013-3023);
+(b) `_prepared_visibility_source` — NEW, and it arrives from the coarse
+model, not from the tree: the model adds `alias` because
+`_PREFETCH_CHILD_POLICY.require_shared_alias` is set, but the seal emits
+`alias` there only for a (shared-alias policy, explicitly-routed source)
+pair, and the sole caller passing that policy (the walker) always passes the
+unrouted `base_queryset` seed — the write-pipeline pin resolves AFTER this
+seal and cannot change what it emits, and on a plan walk there is no
+pipeline at all (D1 re-pass). A pre-routed default manager is the only
+shape that could produce the pair; none exists, and even it would fail
+closed (unrendered-code wording), never open. So no arm is owed — adding
+one would be wording no rejection can quote, exactly what D5 deleted.
+Trigger: if a caller ever passes `_PREFETCH_CHILD_POLICY` with a routed
+source to `_prepared_visibility_source`, the site owes an `alias` arm.
+The gate population's fourth term (declared subsumptions must be
+machine-readable) gains this fifth: source-shape pairings the coarse model
+cannot see must be recorded with the site. Family
+`seal-defect-code-wording` stays gate-plus-declaration.
+
+#### Adjudication pass 1 (run 2) — I-R5 (CONFIRM)
+
+Still file-local with the population recorded. `SyncMisuseError` (119-139)
+is outside all hunks with unchanged bases
+(`ConfigurationError`, `RuntimeError`); both siblings keep
+(`GraphQLError`, `DjangoStrawberryFrameworkError`)
+(`list_field.py::ListArgumentError` :248,
+`resource_policy.py::ResourceLimitExceeded` :121) — the list_field guard
+hunks touch only the ordering classifier and the resource_policy hunks only
+the window/bound tails, neither near a marker. Declarations-not-definitions
+reasoning stands.
+
+#### Adjudication pass 1 (run 2) — I-R6 (CONFIRM)
+
+Rejection stands. `utils/querysets.py::_safe_class_name` (142-157) is
+outside all hunks; `exceptions.py` is MATCH, so the contract difference
+(`_safe_arg_repr` routing vs metaclass-label degrade) and the trigger (stop
+routing non-string names through `_safe_arg_repr`) rest on unchanged bodies
+at both owners.
+
+#### Adjudication pass 1 (run 2) — D1 (FIXED by owned fd39cac6; policy retired by 4d9f1c3d)
+
+Disposition: fixed (owned fix, in the ledger — not a concurrent fix).
+Verified at HEAD: the walker seeds `base_queryset(field.related_model)`
+unrouted and seals `policy=_PREFETCH_CHILD_POLICY` (walker.py:447-476; the
+file changed by no commit but `fd39cac6` in range); the policy D1 named no
+longer exists (`4d9f1c3d`). `probe_alias_policy_r2.py` re-derives the
+now-holding behavior execution-verified: the same explicitly-routed
+queryset is rejected with `('alias', 'shard_b')` under `_PREFETCH_CHILD_POLICY`
+and the walker's only `policy=` keyword is that policy — the run-1
+accept/reject asymmetry is gone because both child seals are one policy.
+The five permanent live rows `fd39cac6` added (2 single-DB, 3 sharded) pin
+the observable half, including the cross-connection consequence that
+`## Pending execution` entry 1 left `unverified` — see the Pending note
+below. `## Defects` routing note stays accurate (owner pair named; the
+seal-policy half is deleted, the walker half carries the fix).
+
+#### Adjudication pass 1 (run 2) — D2 (CONCURRENTLY FIXED by dfb95984 + 4d9f1c3d)
+
+Disposition: concurrently fixed. Glossary half fixed by `dfb95984`: *Prefetch
+alias threading* now reads "`reject_sliced=False` in `_PREFETCH_CHILD_POLICY`"
+(GLOSSARY.md:1558). spec-034 half fixed by `4d9f1c3d`: the "Verified
+dependency to protect" clause now reads
+`apply_type_visibility_sync(target_type, queryset, info,
+policy=_PREFETCH_CHILD_POLICY)` (spec-034:353). `allow_sliced` has zero hits
+at HEAD across the package, the glossary and spec-034; the remaining hits
+(spec-045's four, rationale appendices, build records, this artifact's own
+history) are the historical records D2 already exempted. `## Defects`
+routing note stays accurate; the repair Worker 0 must home is record-keeping
+(the fix has landed), not new work.
+
+#### Adjudication pass 1 (run 2) — D3 (CONFIRM: still ambiguous, still routed to the maintainer)
+
+`list_field.py::_apply_orderset_sync` / `_async` still freeze routing intent
+(:1369/:1397) and re-seal through `_validate_post_orderset_result`
+(:1377/:1411); `connection.py:1828/:1865` still invoke the same public
+`OrderSet.apply_sync` / `apply_async` with neither (connection.py MATCH).
+Both contract sources still scope the rule to the list field:
+`_SealPolicy.require_unevaluated`'s prose still reasons from "the list field
+invoked that ordering method one step earlier" (the new `carry_result_cache`
+bullet names itself that axis's complement without rescoping it), and the
+spec-050 Edge sentence still reads as quoted (spec-050:2123). No
+consolidation depends on it. Unchanged: ambiguous → the maintainer, through Worker 0.
+
+#### Adjudication pass 1 (run 2) — D4 (CONCURRENTLY FIXED by 5741eaa6)
+
+Disposition: concurrently fixed. The "`manager.using(alias).all()` (never
+`.all().using(alias)`)" clause is gone from `base_queryset`'s docstring;
+what stays is the real reason (`using` pins the seed so a sharded parent
+seeds children on the same connection). Body unchanged
+(`manager.using(using).all() if using is not None else manager.all()`).
+`probe_using_order.py` re-run read-only at the new tree: identical output
+(`default manager: shard_b shard_b True True`) — replayable as
+`uv run python docs/dry/temp-tests/dry-file-utils__querysets/probe_using_order.py`.
+`## Defects` routing note stays accurate; like D2 the fix has landed, so
+Worker 0 homes the record, not new work.
+
+#### Adjudication pass 1 (run 2) — D5 (CONCURRENTLY FIXED by 5741eaa6)
+
+Disposition: concurrently fixed, arm by arm re-derived against the new tree
+(not the commit message). `_raw_list_source_message` declares only
+type/table/untrusted: `combined` unreachable because
+`_RAW_LIST_SOURCE_POLICY` still leaves `reject_combined` at its `False`
+default (verified :2823-2826) — arm correctly removed, and the docstring now
+enumerates `combined` among the switched-off codes, repairing the false
+sentence. `_prepared_visibility_source` and `_visibility_result_error`:
+`routing` unreachable (expected_routing still single-site, :3001) and
+`evaluated` unreachable (no runner policy sets `require_unevaluated` — the
+set is re-derived in I-R4, not inherited) — both arms correctly removed at
+both sites. Now-holding behavior: each site renders exactly its reachable
+set (type/table/untrusted at the raw-list site; + sliced/combined/projection
+at the source site; + alias at the result site; the permissions pair
+unchanged as the discriminating control), and any code the seal gains
+without an arm renders as the framework defect `_defect_message` names
+rather than as wording nothing can quote. `probe_defect_arms_r2.py`: zero
+dead arms at all six sites. Family `seal-defect-code-wording`; routing note
+stays accurate (fix landed; Worker 0 homes the record).
+
+Worker-2 D1-verification defects, observed (outside the F/D scope, one line
+each for Worker 0): D-W2-a is fixed — `4d9f1c3d` deleted the constant and
+named the walker's actual policy in both `apply_type_visibility` docstrings.
+D-W2-b is untouched — the slice-licence premise still reads as recorded
+(nested-connection gate paths unchanged in range), still open as recorded.
+
+#### Adjudication pass 1 (run 2) — probes re-run (replay info)
+
+Retained probes: `probe_using_order.py` re-run read-only at the new tree,
+same output as run 1 (command + output in D4 above); it needs no update.
+`probe_alias_policy.py` and `probe_defect_arms.py` no longer import — both
+name the retired `_UNRECOMPOSED_CHILD_POLICY` (verified: `ImportError` /
+`AttributeError` on the live tree). Their successors live ONLY in the
+adjudication scope `docs/dry/temp-tests/dry-adjud-querysets-w1-r2/` (earlier
+scopes untouched); both read-only, zero SQL:
+
+- `uv run python docs/dry/temp-tests/dry-adjud-querysets-w1-r2/probe_alias_policy_r2.py`
+  → `_DEFAULT_SEAL_POLICY: defect=None sealed_db='shard_b'`,
+  `_PREFETCH_CHILD_POLICY: defect=('alias', 'shard_b') sealed_db=None`,
+  `walker passes _PREFETCH_CHILD_POLICY: True` (AST-asserted). Discharges
+  F8/D1's now-holding behavior. `execution-verified`.
+- `uv run python docs/dry/temp-tests/dry-adjud-querysets-w1-r2/probe_defect_arms_r2.py`
+  → `sites with a mismatch: 2/6`, zero dead arms; the two rows are the
+  documented artifacts argued in I-R4 (orderset-alias subsumption;
+  source-alias source-shape). Negative control intact
+  (`raw-list policy reaches ['type', 'table', 'untrusted']`), exit 0.
+  Discharges D5/I-R4/F3. `execution-verified`.
+
+No source-mutating proof was needed (nothing here mutates source), so no
+disposable workspace was built. The one authorized focused shared-tree run
+was not spent. `FAKESHOP_SHARDED=1` and Postgres cells stay `unverified`
+except where `fd39cac6`'s own record already ran them in its workspaces.
+
+#### Adjudication pass 1 (run 2) — freshness, refreshed to HEAD bfaee91d
+
+`git rev-parse HEAD:<path>` for every input any finding fingerprints
+(including the four I-R exclusions Worker 0's 18-row table did not list):
+
+```text
+django_strawberry_framework/utils/querysets.py    96618fba4eafb6a87e73414770014e3aee5b41ef
+django_strawberry_framework/auth/mutations.py     dbe64995b87240b87a1d5119f46cc42c7cab646f
+django_strawberry_framework/routers.py            a18c5001471d4a937bb81d2ff41a2e442e7d2dad
+tests/utils/test_querysets.py                     977a81df44b5cede99b2be9b8dcc5be76db0f03a
+django_strawberry_framework/permissions.py        757dce34cecd7a249b2634947a771d4608808bfe
+django_strawberry_framework/connection.py         93e998f2c7ea1d7f18607a6e37e394466ac75ad4
+django_strawberry_framework/optimizer/nested_fetch.py 4d8d37a7f52cf94d2916f17db3a8a21393e28d57
+django_strawberry_framework/types/resolvers.py    f3341e6a9f52659925762bce097033bac67e3b51
+django_strawberry_framework/utils/write_values.py d28587c7c8d9f0d25e0a01bf289a63d9c3291728
+django_strawberry_framework/rest_framework/resolvers.py 8024703ec0fb09758daeec0585e0065de1c61fc3
+django_strawberry_framework/utils/write_transaction.py eca9ad4d3f765964df05884e080eb3ea63190ca8
+django_strawberry_framework/mutations/permissions.py 54f770ae5aa1238327246cd2dcb141e8aac14965
+django_strawberry_framework/utils/permissions.py  9889d6fe2a24a6e4f17325cbe3fc1955c0a18cec
+django_strawberry_framework/optimizer/walker.py   9b111ed938951a073a9226ccbcfacabc3af981e8
+django_strawberry_framework/filters/sets.py       4ab65a26b0ccf56f7f40f4938282bba9690673d1
+docs/GLOSSARY.md                                  bc51debc54cf3ed142b45fa9feda1b99bce60c79
+django_strawberry_framework/list_field.py         ce682d5f79518919ff3676f2fc8bbe2bd33995a4
+django_strawberry_framework/resource_policy.py    647133d23785d325856b2d1d495d18c5741dd23c
+django_strawberry_framework/utils/relations.py    7662b0bb669c4dfba4a437f3b8f309357f718dca
+django_strawberry_framework/optimizer/plans.py    cce985319c8833f3660653327d3003f1f03655a5
+django_strawberry_framework/exceptions.py         e06b0b7f776e2f182bc9bfd9e2ee2836e660f55b
+django_strawberry_framework/filters/base.py       ba52351c284425336262ae6c2b82b262f6586fc0
+```
+
+The last four match their run-1 values (I-R1/I-R2/I-R6 rest on unchanged
+bodies). Every other row above supersedes the corresponding run-1 `Freshness`
+line for the re-derived conclusion; no run-1 line was edited.
+
+#### Adjudication pass 1 (run 2) — `## Pending execution` note (state changed, entries kept)
+
+Entries 1-3 above stand as run-1 history; two state changes for the gate:
+
+1. Entry 1 (`proof: FAKESHOP_SHARDED=1 ... -k prefetch`) is now pinned by
+   permanent tests: owned `fd39cac6` added five live rows (2 single-DB in
+   `test_products_visibility_api.py`, 3 sharded in `test_multi_db.py`) whose
+   fail-without-fix runs are recorded in `## D1 fix` / `## D1 independent
+   verification`. The gate should run those node ids (both modes) instead of
+   treating D1's consequence as deferred — the `-k prefetch` sweep stays a
+   valid superset command.
+2. Entry 3's witness command names the retired probe path. The gate should
+   run `uv run python docs/dry/temp-tests/dry-adjud-querysets-w1-r2/probe_defect_arms_r2.py`
+   and expect `sites with a mismatch: 2/6` with zero dead arms (rows argued
+   in I-R4 above); the original path now exits `AttributeError` by design
+   (it names the deleted policy).
+
+Entry 2 unchanged.
+
+#### Adjudication pass 1 (run 2) — family-index changes Worker 0 must apply (I never edit the plan)
+
+1. `child-queryset-alias-inheritance`: `defect-routed` → `open`. D1 is fixed
+   by the owned `fd39cac6` (ledgered) and F8 is revised; the family item is
+   still owed (verify the two-mechanism split at the new tree) but no defect
+   blocks it.
+2. `seal-defect-code-wording`: keep `open`, update the parenthetical. It
+   reads "carries F3 as gate-plus-declaration, and D5"; D5 is now fixed by
+   `5741eaa6` and F3/I-R4 are revised (rule holds modulo two documented
+   artifacts). Suggested: "carries F3 as gate-plus-declaration (D5 fixed by
+   5741eaa6; gate population revised run 2)".
+3. No other index row changes: no new family, no further status move. The
+   file-item line keeps `verified, pending execution` pending Worker 2's
+   two-phase verification of this pass; only its verdict returns the item to
+   `verified`.
+
+#### Adjudication pass 1 (run 2) — item state
+
+Zero production edits, zero test edits, zero new tracked files. Untracked
+scratch created, all inside the adjudication scope (other scopes untouched):
+`docs/dry/temp-tests/dry-adjud-querysets-w1-r2/probe_alias_policy_r2.py` and
+`.../probe_defect_arms_r2.py`. Item-scoped diff vs
+`ITEM_BASELINE=1eb4ae4fd24cf3297f43f97df4e6c8cfe72040de` covers only this
+artifact's append (verified before finishing; package tree clean, zero
+untracked package files). `uv run ruff check` / `ruff format` not run: no
+`.py` file was edited; the layout script's `.md` scaffold needs nothing
+(the append carries no cross-file links). Concurrent dirt (60 paths,
+docs/examples/tests, none under the package) left alone.
+
+## Independent verification (Worker 2) — adjudication expectations (Phase A)
+
+Recorded BEFORE reading `### Adjudication pass 1 (run 2) — Worker 1` or opening
+Worker 1's run-2 scratch. Every claim below is re-derived from HEAD bytes
+(`git show HEAD:<path>` / `git grep -n <symbol> HEAD`) and the causing-commit
+diffs, never from the dirty working copy and never from run-1 prose. HEAD is
+`bfaee91d`; `git status --short -- django_strawberry_framework/` is empty;
+`git diff 1eb4ae4fd24cf3297f43f97df4e6c8cfe72040de -- django_strawberry_framework/`
+is empty when checked mid-phase (a concurrent session dirtied package files before phase end — see the Phase-B ruling; all evidence here is HEAD-pinned, unaffected).
+
+### Provenance and scope
+
+Re-hashed all 18 plan inputs at HEAD: all match the plan's `HEAD now` column
+exactly (10 MATCH byte-for-byte, 8 STALE as recorded). The four extra
+fingerprints revision 1 added (`utils/relations.py` `7662b0bb…`,
+`optimizer/plans.py` `cce98531…`, `exceptions.py` `e06b0b7f…`,
+`filters/base.py` `ba52351c…`) are unchanged `5c62515a..bfaee91d`.
+Commit-to-file scope in range (`git log --oneline 5c62515a..bfaee91d -- <path>`):
+querysets.py ← exactly f7192bfb + 4d9f1c3d + 5741eaa6; permissions.py,
+types/resolvers.py, resource_policy.py ← f7192bfb only; walker.py ← fd39cac6
+only; list_field.py ← exactly ffce6f29 + 0b110b51 + 319a1ec0 + 737b971b;
+schema.py ← f7192bfb + ffce6f29; GLOSSARY.md ← dfb95984 + f7192bfb + 737b971b;
+tests/utils/test_querysets.py ← f7192bfb + 4d9f1c3d + 5741eaa6 + 02e266df.
+Unchanged in range (verified, each bears on a finding below): connection.py,
+nested_fetch.py, write_values.py, write_transaction.py, rest_framework/resolvers.py,
+mutations/permissions.py, utils/permissions.py, filters/sets.py, auth/mutations.py,
+routers.py, optimizer/extension.py, optimizer/predicates.py, optimizer/plans.py,
+optimizer/lateral_fetch.py, optimizer/nested_planner.py, optimizer/single_parent_fetch.py,
+mutations/resolvers.py, forms/resolvers.py, relay.py, filters/base.py, keyset.py,
+orders/sets.py, testing/client.py, utils/converters.py, exceptions.py,
+utils/relations.py.
+
+Full querysets.py hunk map `5c62515a..bfaee91d` (26 hunks; `grep -c` over the
+diff): module docstring + `_sealed_prefetch_related_lookups` docstring +
+`_visibility_result_error`/`_prepared_visibility_source` `untrusted` strings +
+permissions.py strings (f7192bfb wording "unresolved deferred filter" →
+"malformed deferred-filter state", prose only); `base_queryset` docstring
+(5741eaa6, D4 clause dropped, body identical); `_bake_deferred_filter_or_defect`
++1 exact-`bool` `negate` gate + docstring; `_SealPolicy` +1 field
+(`carry_result_cache`) + bullet; policy constants −1 (`_UNRECOMPOSED_CHILD_POLICY`
+retired, 4d9f1c3d) with `_PREFETCH_CHILD_POLICY` comment rewritten and
+`_RAW_LIST_SOURCE_POLICY` gaining `carry_result_cache=True`; `_seal_or_defect`
+docstring (deferred-bake-for-all + carry prose), bake call for EVERY candidate
+(the exact-`QuerySet`-only refusal deleted), +1 exact-`list` carry gate
+(emits existing code `untrusted`), +1 carry tail (`sealed._result_cache =
+result_cache`); `normalized_row_source`/`materialized_rows` docstrings;
+−5 message arms (`combined` at raw-list; `evaluated` + `routing` at each
+visibility site) + raw-list docstring fix (5741eaa6, D5); both runner docstrings
+(walker policy name). Untouched bodies (no hunk in their spans): every
+disposal/refusal symbol, `model_for`, `initial_queryset`, `_coerced_manager_queryset`,
+`normalize_query_source`, `is_async_only_iterable`, the adapter trio,
+`run_in_one_sync_boundary`, `sync_pipeline_recourse`, `coerce_field_value_or_none`,
+`_stringified` + both pk-set helpers, all visibility runners/relation helpers,
+`_safe_class_name`, `_safe_routing_repr`, `_GraphWalk` family,
+`_snapshot_routing_intent`, `_routing_hints_equal`, `_prefetch_relation_target_or_none`,
+`prepared_resolver_source`, `SyncMisuseError`, both post-process twins,
+`_validate_post_orderset_result`, `_defect_message`, `_RoutingIntent`.
+
+### Findings
+
+**F1 — HOLDS.** `_dispose_sync_awaitable` body byte-identical (region has no
+hunk); auth/mutations.py + routers.py MATCH so both inline copies
+(auth/mutations.py #"is_authenticated.close()" ×2, routers.py
+#"application.close()") are byte-identical. Count stays 3 definitions;
+consumer list unchanged (all consumer files MATCH or untouched: list_field.py
+still reaches `_apply_orderset_sync`/`_async` at HEAD lines 1356/1386 with the
+same freeze/re-seal shape; relay.py, utils/permissions.py, mutations/permissions.py
+unchanged). f7192bfb/4d9f1c3d/5741eaa6 hunks never mention the disposal symbols
+in a `+`/`-` line (verified by grep over the diff).
+
+**F2 — NEEDS REVISION (counts only).** Owner, exclusivity, and mechanism census
+all re-verified at HEAD: `_seal_or_defect` is still the single sealing
+primitive with exactly 5 call sites, all in-file (HEAD
+utils/querysets.py:2535 inner-prefetch, :2996 post-orderset, :3444 raw-list,
+:3743 prepared-source, :3851 normalized-result); `models.QuerySet(` is
+constructed at exactly 1 package site (HEAD :3352, the seal's own rebuild);
+`sql.Query` outside querysets.py is only the pre-existing
+optimizer/lateral_fetch.py:82 `sql.where` import (file unchanged in range — no
+new site); `object.__getattribute__`/`type.__getattribute__`/
+`inspect.getattr_static` outside querysets.py is only the pre-existing prose
+mention at utils/converters.py:119 (file unchanged — no new site); the four
+planning readers are byte-identical files (connection.py, nested_fetch.py,
+predicates.py, extension.py all unchanged); the defect-code set is still the
+same closed 9 with the same canonical order (HEAD :3056-3058; f7192bfb's carry
+gate emits existing code `untrusted`, no new code). What is stale: "the five
+`_SealPolicy` fields" is now SIX (`carry_result_cache`, HEAD :2782-2787) and
+"the seven policy constants" is now SIX (HEAD :2792-2826; `_UNRECOMPOSED_CHILD_POLICY`
+retired, zero `.py` hits at HEAD). C13's shorthand "one field + one check"
+needs one clause: f7192bfb — a live C13 exercise — landed as one field + one
+check + one rebuild-tail write (`sealed._result_cache`), all inside the one
+definition plus the one constant that sets the flag; definition count 1 held
+in practice.
+
+**F3 — NEEDS REVISION (gate population, not the verdict).** Core holds: 1
+definition (control flow in `_seal_or_defect`), 6 `_defect_message` call sites
+(permissions.py:353/:412 unchanged lines; querysets.py:3040 post-orderset,
+:3500 raw-list, :3625 result-error, :3751 prepared-source), canonical order
+intact, still no gate. What is stale: the population must be restated for the
+D5-fixed tree (all dead arms gone — measured zero, see D5) AND for the walker
+policy swap: `SOURCE_POLICIES` now contains a `require_shared_alias` setter
+(`_PREFETCH_CHILD_POLICY`), so the run-1 union model newly flags `missing:
+['alias']` at `_prepared_visibility_source` (measured with my successor probe;
+see I-R4). The finding stays gate-plus-declaration per I-R4 with one more
+population term owed.
+
+**F4 — HOLDS.** `connection.py::_guard_source_not_pre_sliced` byte-identical
+(file MATCH); the seal's `sliced` arm (`if policy.reject_sliced and
+rebuilt_query.is_sliced`, HEAD :~3329) untouched; `nested_fetch.py`
+(byte-identical) still degrades rather than rejects. f7192bfb's bake/carry
+hunks do not touch `reject_sliced` or any of the three sites. Count stays 2
+definitions; the error-class/timing/dispatch differences are unchanged text.
+
+**F5 — HOLDS.** types/resolvers.py's only range hunk is the f7192bfb comment
+reword at :~570 (no executable line); `_visible_related_object` (def HEAD :395)
+with its 7 call sites (:625/:640/:701/:718/:737/:774/:794) and
+`visible_related_object` (def HEAD :4060) are byte-identical; consumers
+(write_values.py:226, rest_framework/resolvers.py, types/resolvers.py ×7) all in
+MATCH files. Count stays 2 definitions; seed-pin/coloring adapter shape
+unchanged.
+
+**F6 REJECTED — HOLDS.** `utils/write_transaction.py` + `utils/write_values.py`
+MATCH; `_stringified`/pk-set helpers/coercion regions have no hunk. The
+contract difference (pre-canonicalized set-membership basis vs uncoerced
+same-row? raise) is unchanged text; the trigger (a caller reaching the
+stringified basis without `type_check_relation_id`) has no new caller — no
+file in the family changed except querysets.py prose/bake regions that do not
+call these helpers (verified: no `+`/`-` line mentions them).
+
+**F7 REJECTED — HOLDS.** All four recourse definitions byte-identical
+(querysets.py region untouched; mutations/permissions.py, utils/permissions.py
+MATCH; permissions.py:136 `_ASYNC_RECOURSE` outside the three string hunks at
+:366/:397/:429). The three `sync_pipeline_recourse` compositions intact
+(mutations/resolvers.py:139, forms/resolvers.py:125,
+rest_framework/resolvers.py:201 — all files unchanged). Shared-one-clause /
+differing-remedy differences re-read and unchanged; trigger unmet.
+
+**F8 — NEEDS REVISION (the member is now guarded).** Mechanisms intact: seed pin
+(`base_queryset(using=)`, body identical) + `require_shared_alias` arm
+(HEAD :3336-3342, identical semantics); enforcement sites intact
+(permissions.py:692 `using=state.alias` re-read; filters/sets.py:2592 in a MATCH
+file; `_sealed_prefetch_related_lookups` threading comment + code re-read, only
+its docstring retouched). What is stale: the "one unguarded member" —
+walker.py:476 now seals under `_PREFETCH_CHILD_POLICY` (fd39cac6, the owned
+fix); the accepting policy `_UNRECOMPOSED_CHILD_POLICY` no longer exists (zero
+`.py` hits); the glossary projection now names the current policy (dfb95984).
+F8's run-1 probe quotation is history; my successor probe re-proves the current
+asymmetry (default accepts, prefetch-child rejects `('alias', 'shard_b')`,
+unrouted inherits — exit 0). The family is no longer blocked by an unguarded
+member; the defect-routed status wants the fixed state recorded.
+
+**F9 — HOLDS.** `is_async_queryset_adapter` (def HEAD :412) still has zero
+production readers package-wide (only test files read it:
+tests/test_list_field.py 7 lines, tests/optimizer/test_extension.py 9 lines —
+same files, and neither gained a production use); `wrap_` readers still
+list_field.py (HEAD :1515/:1551/:1568/:1604) + extension.py:1145, `unwrap_`
+still extension.py:1142 (same lines — file unchanged). The four list_field
+guard commits added no reader (their hunks are classifier/offset-guard code;
+verified the reader census, not the commit messages). Principle-11 question
+stands as written for the family item.
+
+**F10 REJECTED — HOLDS.** connection.py MATCH, so the three async-shape tests
+(:1050/:1095/:1575) and the contract difference (difference vs union vs
+admission question; queryset-must-stream-yes) are byte-identical. The real
+predicate's consumers are the same three sites, only shifted by guard
+insertions (list_field.py 891/895/1387 → 1333/1337/1829 — verified the 1829
+site pre-existed at 1387 in 5c62515a bytes; resource_policy.py:1216; local
+:458). No new consumer, no new spelling. Trigger unmet.
+
+**F11 — HOLDS.** 1 definition (`run_in_one_sync_boundary`, HEAD :465, body
+identical); all six composing consumers intact (schema.py import shifted 73→79
+by the ffce6f29 import expansion, call sites :346/:360/:373 same shape;
+permissions.py:734, orders/sets.py:831, filters/sets.py:3497,
+mutations/resolvers.py:1288, auth/mutations.py ×6 — all re-censused); the five
+direct `sync_to_async(` sites unchanged (types/resolvers.py:616/:689/:760,
+testing/client.py:471/:475 — both files' diffs, where any, do not touch these
+lines; full-package `sync_to_async(` census shows no other executable call).
+The schema.py/error-policy/consumers hunks add no boundary call. The
+testing/client.py `thread_sensitive` omission note stands (lines identical).
+
+**F12 rows — HOLD (all ten, with the two I-R1/I-R2/I-R6 supersessions standing
+as revisions, not reversions).** Every row's owner region has no hunk except
+the deferred-bake row, whose helper gained the exact-`bool` `negate` gate
+inside the same single body (f7192bfb :2637-2650) — the row's challenge (single
+`PROHIBITED_FILTER_KWARGS` site) still counts 1, and the new gate is a second
+axis landing in the same one definition, corroborating rather than disturbing
+it. Spot re-censuses: `models.Manager` still exactly 3 lines, all in-file
+(HEAD :305/:3526/:3849); `prepared_resolver_source` still composed by both
+flavors (connection.py:1762 in a MATCH file; list_field.py:1793/:1840);
+`_safe_routing_repr` production readers still only the routing arm (HEAD
+:3225-3228); `_snapshot_routing_intent` sole external consumer still list_field
+(:1369/:1397); `_GraphWalk` family byte-identical (region has no body hunk, so
+the "7 in-module callers" count is unchanged by construction);
+`_routing_hints_equal`, `_coerced_manager_queryset`, `SyncMisuseError` regions
+untouched. The `_safe_class_name` and `_prefetch_relation_target_or_none`
+rows stay superseded-by-rejection per I-R6/I-R1 (see below).
+
+### Iterations
+
+**I-R1/I-R2 (lookup-path rejection + family) — HOLD.** All five member bodies
+byte-identical (relations.py, plans.py, querysets.py resolver region, and
+connection.py MATCH/unchanged); both exclusions rest on unchanged bodies
+(utils/permissions.py MATCH, filters/base.py unchanged); neither trigger met
+(no accessor fallback/non-raising mode in `classify_path`, both literal-`"__"`
+sites identical). The family row, owner, and contract difference stand.
+
+**I-R3 (Manager-coercion file-local row) — HOLDS.** Population evidence
+re-derived: `models.Manager` at exactly the 3 in-file lines above; both entry
+points (`normalize_query_source` :305 arm, `_normalized_visibility_result`
+:3849 arm) and the one body (`_coerced_manager_queryset` :3526) untouched. The
+folder-item flag (least-margin file-local rule) is unaffected by the range.
+
+**I-R4 (F3 population restatement) — NEEDS REVISION (one more term).** Its two
+load-bearing facts re-verified mechanically at HEAD: `expected_routing` passed
+at exactly 1 of 5 seal calls (:2996 post-orderset; :2535/:3444/:3743/:3851 pass
+none) and `require_unevaluated=True` set only by `_ORDERSET_RESULT_POLICY`
+(HEAD :2813), which reaches the seal solely through :2996; the `policy=`
+calling census is complete (list_field.py:1522/:1575, walker.py:476,
+permissions.py:623/:705, plus `_DEFAULT` default). The (iv) declared-subsumption
+term is intact (post-orderset comment + shape map byte-identical; successor
+probe still reports that site `missing: ['alias']` with `dead: []`). What is new:
+with `_PREFETCH_CHILD_POLICY` in the source-policy set, the union model newly
+reports `_prepared_visibility_source` as `missing: ['alias']` too (successor
+probe: 2/6, both `dead: []`). That row is a pairing artifact, not a D5-class
+defect: the alias arm fires iff `require_shared_alias` AND `db is not None`
+(HEAD :3336-3340), the site always seals with `required_alias=None` (:3743),
+and the flag-setting policy's only production pairing is the walker's unrouted
+seed (`base_queryset(field.related_model)`, no `using=`) — under which alias
+cannot fire. Owed: term (v) — reachability per production (policy ×
+source-shape) pairing, not per-site union. The flip trigger is explicit: a
+production caller pairing a `require_shared_alias` policy with a routed source
+would owe that site a real `alias` arm.
+
+**I-R5 (`SyncMisuseError` file-local row) — HOLDS.** Marker still
+`(ConfigurationError, RuntimeError)` (:119, region untouched); siblings still
+`(GraphQLError, DjangoStrawberryFrameworkError)` (list_field.py:248,
+resource_policy.py:121 — both files' range hunks verified not to touch these
+declarations). Declarations-not-definitions reasoning unchanged.
+
+**I-R6 (`_safe_class_name` rejection) — HOLDS.** exceptions.py MATCH;
+querysets.py variant region untouched; the contracted difference (repr-dispatch
+vs degrade-to-metaclass-label at the sealed boundary) re-read and identical;
+trigger unmet (no such change in the MATCH file).
+
+**Enumeration completeness (I-R5's instrument) — NEEDS ONE-LINE REVISION.**
+HEAD recount by the same `ast.Module.body` instrument: 102 functions / 7
+classes / 24 constants = 133 names (was 134; the −1 is the retired
+`_UNRECOMPOSED_CHILD_POLICY`, which carried no unique rule — same licence as
+`_PREFETCH_CHILD_POLICY` minus the alias requirement — so no rule is orphaned
+and the "every other name resolves" closure stands with the count updated).
+
+### Defects
+
+**D1 — FIXED by fd39cac6 (owned). Judged against the record, fresh:** the
+defect was acceptance of a hook-routed prefetch child onto a divergent
+connection. The fix seals the walker child under `_PREFETCH_CHILD_POLICY`
+(walker.py:476, import :17), so any explicit `.using()` fails closed with
+`('alias', <alias>)` — measured live by my successor probe — while an unrouted
+child seals with `_db None` and inherits the parent's connection at fetch.
+This matches the sibling rule the record cites (consumer `Prefetch` under an
+unrouted parent meets the same policy with the same `None` outer alias in
+`_sealed_prefetch_related_lookups`, re-read). Threading `None` rather than the
+parent's alias, contra D1's prescription sentence, is correct against unchanged
+architecture: `optimizer/extension.py::_get_or_build_plan` serves cached plans
+from the cross-request instance `_plan_cache` (HEAD :1254-1336, file unchanged
+in range), so a baked-in per-parent alias would be served to the next request
+on another connection — the same-alias pin MUST refuse, and probe row A/E of
+the run-1 D1 verification (read as history) showed exactly that. The fix's 5
+live tests are present at HEAD (2 in test_products_visibility_api.py + 3 in
+test_multi_db.py, counted from `git show HEAD:`); walker.py is touched by
+fd39cac6 alone in range, so the verified bytes are the HEAD bytes. D-W2-b is
+untouched by the fix (same `reject_sliced=False` licence as before).
+
+**D2 — FIXED.** Glossary *Prefetch alias threading* (HEAD :1558) now reads
+`` `reject_sliced=False` in `_PREFETCH_CHILD_POLICY` `` (dfb95984); spec-034's
+live pin now reads `policy=_PREFETCH_CHILD_POLICY` (4d9f1c3d hunk verified).
+`allow_sliced` occurs zero times in the package + glossary at HEAD; remaining
+tree hits are archived-cycle prose (spec-003/spec-009/spec-045 + rationales,
+build records, this artifact's own history) covered by D2's historical carve-out,
+plus Django's unrelated `allow_sliced_subqueries_with_in` setting name (2 hits).
+
+**D3 — HOLDS OPEN, still routed to the maintainer.** Connection side byte-identical
+(:1828/:1865 still invoke `OrderSet.apply_*` with no snapshot/re-seal —
+inferred from MATCH, not re-read); list-field side same shape (freeze
+:1369/:1397, re-seal :1377/:1411, both colorings); the `require_unevaluated`
+prose still scopes itself to the list field (HEAD :2760-2771, carry bullet
+appended after it, original sentences identical). The f7192bfb carry axis does
+not touch the ambiguity (raw-list policy only; connection path identical).
+
+**D4 — FIXED by 5741eaa6.** The `(never `.all().using(alias)`)` clause is gone
+(HEAD :256-260); the body is identical (`manager.using(using).all() if using is
+not None else manager.all()`); the real reason (pass `using` at all) stays.
+probe_using_order.py re-ran with byte-identical output (`default manager:
+shard_b shard_b True True`), so the measurement that falsified the clause
+reproduces against the tree that dropped it.
+
+**D5 — FIXED by 5741eaa6 (all three rows + docstring).** Measured against the
+new tree, not the commit message: raw-list map now exactly
+type/table/untrusted (HEAD :3500-3522, `combined` arm deleted);
+prepared-source map now exactly type/table/untrusted/sliced/combined/projection
+(HEAD :3751+, `evaluated` + `routing` deleted); result-error map now exactly
+those six + `alias` (HEAD :3625-3675); raw-list docstring now enumerates all
+four switched-off codes including `combined` (HEAD :3494-3498). Successor probe
+confirms `dead: []` at all six sites with both permissions sites still OK
+(positive control intact) and the negative control intact (raw-list reaches
+exactly type/table/untrusted). The `fail_under = 100` blind-spot note stands as
+the reason the arms died silently.
+
+**D-W2-a — FIXED by 4d9f1c3d.** Constant deleted (zero `.py` hits HEAD-wide);
+both runner docstrings name `_PREFETCH_CHILD_POLICY` (HEAD :3901-3904,
+:4154-4156, re-read); the seal-policy test's dead row deleted and the import
+dropped (hunk verified). The delete-option the defect offered is what landed.
+
+**D-W2-b — HOLDS OPEN (non-blocking, as written).** The `reject_sliced` bullet
+premise ("the optimizer walker's nested-connection child, whose own gate
+degrades…", HEAD :2740-2748) is identical; gate consultation still exactly the
+three nested-connection paths (lateral_fetch.py:599, nested_planner.py:1239,
+single_parent_fetch.py:232 — all files unchanged) and never the plain planned
+list relation; the walker comment carries the same justification (:450-460).
+Pre-existing wording/guard-scope row, not a D1 regression — unchanged.
+
+### Probes
+
+- `dry-file-utils__querysets/probe_alias_policy.py`: NO LONGER RUNS
+  (`ImportError: _UNRECOMPOSED_CHILD_POLICY`, exit 1) — itself adjudication
+  evidence for F8/D1: the accepting policy it measured no longer exists.
+  Successor `dry-adjud-querysets-w2-r2/probe_alias_policy_r2.py` (read-only,
+  zero SQL): exit 0 — `_DEFAULT_SEAL_POLICY: defect=None sealed_db='shard_b'`,
+  `_PREFETCH_CHILD_POLICY: defect=('alias', 'shard_b')`, unrouted-under-prefetch
+  `defect=None sealed_db=None`. Rejects "the walker child still accepts a
+  routed hook result" and "an unrouted child is pinned by the seal".
+- `dry-file-utils__querysets/probe_using_order.py`: RUNS, output identical to
+  run-1 (`default manager: shard_b shard_b True True`, exit 0). D4's
+  measurement reproduces; the clause it falsified is gone.
+- `dry-file-utils__querysets-w2/probe_defect_arms.py`: NO LONGER RUNS
+  (`AttributeError: _UNRECOMPOSED_CHILD_POLICY`, exit 1) — evidence for F3/I-R4:
+  its hand-written `SOURCE_POLICIES` names the retired policy. Successor
+  `dry-adjud-querysets-w2-r2/probe_defect_arms_r2.py` (same model + AST reader,
+  `_PREFETCH_CHILD_POLICY` substituted; read-only): exit 0 — 2/6 mismatch, both
+  `dead: []`: post-orderset `missing: ['alias']` (the known I-R4 subsumption
+  artifact, unchanged) and prepared-source `missing: ['alias']` (new pairing
+  artifact, see I-R4). Negative control intact.
+
+### Pending execution (expectation, no verdict)
+
+- Entry 1 (`FAKESHOP_SHARDED=1 … -k prefetch`, D1's observable half): moot as
+  written — the leak it would demonstrate is fixed, and the owned fix carries
+  its own sharded refusal/inheritance/routed-parent rows plus a fail-without-fix
+  run that showed the leak on the reverted tree. The entry wants superseding by
+  those node ids, not re-running.
+- Entry 2 (focused gate run): still a valid gate request, unchanged.
+- Entry 3 (arms regression witness, expects `4/6`): instrument dead (see above);
+  successor shows `2/6` with both rows explained. The entry wants re-pointing at
+  the successor plus the I-R4 term-(v) note before anyone reads the number.
+
+### Census summary (all at HEAD)
+
+Enumeration 102/7/24 = 133 names · `_SealPolicy` 6 fields / 6 constants ·
+`_seal_or_defect` 5 call sites, 1 with `expected_routing` · `_defect_message` 6
+sites · `policy=` pass sites list_field ×2 + walker + permissions ×2 + default ·
+defect codes 9, order unchanged · message arms 8/3/6/7/5/6 across the six sites ·
+F1 3 defs · F4 2 · F5 2 (+7 internal calls) · F11 1 + 5 direct · F9 0 production
+readers · `models.Manager` 3 in-file sites · `is_async_only_iterable` 5
+consumers (list_field ×3, resource_policy, local) · `sync_pipeline_recourse` 3
+compositions · `run_in_one_sync_boundary` 6 consumer files · `allow_sliced` 0 in
+package+glossary · `_UNRECOMPOSED_CHILD_POLICY` 0 in `.py` · D1 live tests 2+3
+at HEAD. `FAKESHOP_SHARDED=1`/Postgres cells untouched (unauthorized), as in
+run-1.
+
+## Independent verification (Worker 2) — adjudication reconciliation (Phase B)
+
+Read AFTER Phase A was on disk: `### Adjudication pass 1 (run 2) — Worker 1`
+(artifact lines 2161–2674) and both probes in
+`docs/dry/temp-tests/dry-adjud-querysets-w1-r2/`. HEAD unmoved at `bfaee91d`;
+item diff vs `ITEM_BASELINE=1eb4ae4f` confirmed exactly two hunks (Status line
++ EOF append). Every difference below is reconciled explicitly; then the
+verdict.
+
+### Agreement (independently derived on both sides)
+
+- Hunk map: identical 26 old-line ranges (51 … 4121), all inside the same three
+  commits. Enumeration: 102/7/24 = 133 both sides (W1's 99+3 async split
+  verified: exactly the three named `^async def` at HEAD).
+- Per-item verdicts agree on all 12 findings, all 6 iterations and all 7
+  defect records: F1/F4/F5/F6/F7/F9/F10/F11/F12 CONFIRM (F10 with the corrected
+  3-site census both sides derived: 891/895/1387 → 1333/1337/1829); F2/F3/F8
+  REVISE (6 fields, 6 constants; gate population for the D5-fixed tree; member
+  now guarded); I-R1/R2/R3/R5/R6 CONFIRM; I-R4 REVISE with the same fifth
+  pairing-scope term and the same flip trigger (a production caller pairing a
+  `require_shared_alias` policy with a routed source owes the site an `alias`
+  arm); D1 fixed-owned, D2/D4/D5/D-W2-a fixed-concurrent, D3/D-W2-b open.
+- All 22 freshness hashes byte-identical to my independent hashes (18 plan rows
+  + 4 I-R exclusions).
+- Probes: both W1 successors re-run read-only by me with outputs identical to
+  W1's record AND to my own successors' (alias: default accepts / prefetch
+  rejects `('alias', 'shard_b')` / walker `policy=` keywords == exactly
+  `{_PREFETCH_CHILD_POLICY}`; arms: 2/6, zero dead, same two missing-alias rows,
+  negative control intact, exit 0). The AST `policy=` sweep additionally proves
+  no second walker policy pass exists.
+- Pending/plan notes: substance identical (entry 1 superseded by the 5 D1 node
+  ids owing a both-modes gate run; entry 3 re-pointed to a successor expecting
+  2/6; entry 2 unchanged). I endorse W1's two family-index rows
+  (`child-queryset-alias-inheritance` → `open`; `seal-defect-code-wording`
+  parenthetical refresh) for Worker 0.
+
+### Deltas reconciled (all immaterial to the verdict)
+
+1. F9 census wording: W1 "drifted from 16/11 by concurrent test edits" is
+   wrong as drift. Measured at `5c62515a` bytes: 10 asserts / 16 lines then
+   AND now (test_list_field 5 asserts, test_extension 5 asserts; only line
+   numbers shifted). The files changed around the readers; the reader census
+   did not drift — run-1's "16" counted lines, "11" miscounted asserts.
+   Correction recorded; both sides agree the conclusion never depended on the
+   count. Precise figure: 10 asserts / 16 lines, stable across the range.
+2. F2 `sql.Query` sweep: W1 "0 touches outside" vs my `lateral_fetch.py:82`
+   `sql.where` import note — a pattern difference, not a conflict: the import
+   is pre-existing (file unchanged in range) and not a Query touch under W1's
+   pattern. Agreed: no new site; my note stands as the conservative superset.
+3. C13 shape: W1 "one field plus its checks" vs my "one field + one check +
+   one rebuild-tail write" — agree count = 1; adopt mine as the more precise
+   shape for the family record.
+4. I-R4 site line: W1 :3001 (kwarg line) vs my :2996 (call line) — same call.
+   No conflict.
+5. D2: my `allow_sliced_subqueries_with_in` note (Django's own setting name,
+   rationale prose only) supplements W1's zero-hits claim, which is scoped to
+   package+glossary+spec-034 and holds. No conflict.
+6. Two successor-probe pairs exist (`dry-adjud-querysets-w1-r2/` +
+   `dry-adjud-querysets-w2-r2/`) with identical results. Worker 0 custody note:
+   keep one pair at closeout; either discharges F8/D1 and D5/I-R4/F3.
+
+### Verdict
+
+`Status: verified`. No `revision-needed` item: every W1 claim I re-derived
+agrees, the six deltas above are wording/precision with agreed resolutions,
+both W1 instruments re-run green under my hand, and the item diff is the two
+ledgered hunks. Worker 0 plan marking: keep `verified, pending execution` —
+entry 1's proof is pinned to the five D1 live node ids but still owes the
+gate run in both modes (sharded mode needs the maintainer's authorization); entries 2–3
+are gate requests. `FAKESHOP_SHARDED=1`/Postgres cells stay `unverified` as in
+run 1. No ruff/format run: `.md`-only edits; repo-wide auto-fix would rewrite
+110 dirty concurrent paths (same reason W1 recorded).
+
+### Adjudication pass 2 (run 2) — Worker 1
+
+Adjudication run: `0.0.15 2026-09-21-2`. Adjudication-1 verified this item
+at `bfaee91d`; HEAD is now `69a25369`, verified at dispatch
+(`69a253690002fdd413704a7879528c3ded363020`) and again unmoved at finish.
+Scoped freshness adjudication only: `bfaee91d..69a25369` holds three
+test/docs commits and zero package files (`git diff --name-only ...
+-- django_strawberry_framework/` prints nothing), so production bytes are
+identical and only fingerprinted TEST inputs can be stale. No production
+edits, no test edits, no new tracked files. Prior text above untouched;
+this section appends. Pre-existing dirt attribution: vs HEAD the artifact
+carries one 956-insertion / 0-deletion hunk, running from `### Adjudication
+pass 1 (run 2) — Worker 1` to the Phase-B verdict tail — exactly the
+adjudication-1 append the plan records (artifact lines 2161–3115). No
+foreign hunk; the item was not stopped.
+
+Method. Every claim below was verified against HEAD bytes via `git show
+HEAD:<path>`, `git rev-parse HEAD:<path>` and `git grep`, never against
+the working tree (which carries concurrent dirt) and never against a
+commit message. The target was not re-read end to end: the worktree file
+hashes to `96618fba…`, identical to the HEAD blob adjudication-1 verified,
+and MATCH inputs need no re-review under the same rule reconciliation 1
+applied. Target regions the probe model rests on (the `_SealPolicy`
+record, the seal's emit guards, the six arm shapes) were re-read at HEAD
+bytes to encode the successor instrument.
+
+#### Adjudication pass 2 (run 2) — fingerprints: 21 MATCH, 1 STALE
+
+All 22 adjudication-1 fingerprints re-hashed via `git rev-parse
+HEAD:<path>`. Twenty-one are byte-identical to the recorded values
+(querysets `96618fba…`, auth/mutations `dbe64995…`, routers `a18c5001…`,
+permissions `757dce34…`, connection `93e998f2…`, nested_fetch `4d8d37a7…`,
+types/resolvers `f3341e6a…`, write_values `d28587c7…`,
+rest_framework/resolvers `8024703e…`, write_transaction `eca9ad4d…`,
+mutations/permissions `54f770ae…`, utils/permissions `9889d6fe…`, walker
+`9b111ed9…`, filters/sets `4ab65a26…`, GLOSSARY `bc51debc…`, list_field
+`ce682d5f…`, resource_policy `647133d2…`, relations `7662b0bb…`, plans
+`cce98531…`, exceptions `e06b0b7f…`, filters/base `ba52351c…`). Exactly
+one is stale:
+
+`tests/utils/test_querysets.py`: `977a81df44b5cede99b2be9b8dcc5be76db0f03a`
+→ `6ce0bbc128f0febcbfb8a4837a2c169125d4d997` (landed clean; the worktree
+file hashes to the same blob). The stale set is exactly that one file —
+no other mismatch, so no finding reopens beyond the claims that cite it.
+
+#### Adjudication pass 2 (run 2) — the causing range (4 hunks, one commit)
+
+`git log bfaee91d..69a25369 -- tests/utils/test_querysets.py` names exactly
+one commit: `a01a2ab8 test: move the request-observable rows live and pin
+the cost each one claims`. Its diff on this file is 48 insertions / 18
+deletions in 4 hunks: (H1) module-docstring reword — the contract paragraph
+and the `coerce_field_value_or_none` paragraph replaced by live-tier
+pointers; (H2) four added imports (`seed_data`, `Apps`, `connection`,
+`CaptureQueriesContext`); (H3) `_proxy_target_apps = Apps([])` plus
+`apps = _proxy_target_apps` on the two proxy-target fixture models;
+(H4) two new tests (`test_proxy_target_fixtures_leave_category_relations_unchanged`,
+`test_proxy_target_fixtures_allow_category_deletion`) asserting only
+`Category._meta` registry facts and deletion-SQL facts. Net effect on
+later line numbers is +30 (5882 → 5912 lines; `def test_` count 313 → 315).
+
+#### Adjudication pass 2 (run 2) — F2 (CONFIRM; fingerprint refreshed)
+
+Oracle role intact. The three named inventory-oracle tests adjudication-1
+cited (`:5033, :5055, :5082`) exist at HEAD with byte-identical bodies at
+`:5063, :5085, :5112` (`test_unrendered_defect_code_says_so_instead_of_mislabelling`,
+`test_every_admitted_plain_container_has_a_rebuild_branch`,
+`test_bound_value_normalizers_mirror_the_inert_inventory` — the +30 shift
+is exactly the hunk net, verified by name). Both principle-9
+set-equality assertions are verbatim (`assert set(samples) ==
+set(_PLAIN_CONTAINER_TYPES)` at :5103; `assert set(_INERT_VALUE_TYPES) -
+{bool} == …` at :5123). No oracle was rewritten to read from its owner:
+H1/H2 add no oracle, H3 touches fixture registration only, and H4's two
+tests assert `Category` registry/deletion facts without importing any
+seal, coercion or policy symbol. Hunk-by-hunk unrelatedness: H1 is
+projection prose (cites live tiers, removes no contract); H2 supports H4
+only; H3/H4 are fixture hygiene whose assertions never name the module
+under review. Run-1's scene-setting "5760 lines, 309 tests" is history,
+not a live claim (the `def test_` count reproduces at neither endpoint —
+313 before, 315 after — so no verdict ever depended on 309); refreshed
+figures are 5912 lines / 315 def-tests. Conclusion (one owner) and
+definition counts unchanged. Fingerprint refreshed to `6ce0bbc1…` (full
+row under "freshness" below).
+
+#### Adjudication pass 2 (run 2) — every other claim citing the file (CONFIRM)
+
+- F3's legibility pin (`test_unrendered_defect_code_…`, run-1 line 301):
+  byte-identical at HEAD :5063, outside all hunks. The file is not in F3's
+  fingerprint set, so the landing reopens nothing; the citation stands.
+- Matrix axis 3 (the two inventory-agreement gates): both tests and both
+  quoted assertions verbatim at HEAD (:5085/:5112, :5103/:5123). CONFIRM.
+- F12 `_safe_routing_repr` readers: the test file still reads it (2 hits
+  at HEAD); the hunks add tests, never remove a reader. CONFIRM.
+- Matrix axis 5 / W2-trace media counts: history (see F2 for refreshed
+  figures); the file's oracle-medium role is unchanged. CONFIRM.
+- D1-fix history cites (the dirty-at-dispatch notes, the `:4956`
+  `_UNRECOMPOSED_CHILD_POLICY` reader): history. D-W2-a's holding
+  re-verified: zero hits for the retired constant in the file at HEAD.
+  No live claim affected. CONFIRM.
+- I-R1 (the `02e266df` tier-move note): about a prior commit, untouched
+  by this range. H3 isolates the same proxy-target fixtures with
+  `apps=` — fixture REGISTRATION, not resolver behavior; the production
+  fail-open-vs-raise contract (byte-identical file) and both
+  reconsideration triggers are untriggered. CONFIRM.
+- All remaining findings and iterations (F1/F4/F5/F6/F7/F8/F9/F10/F11,
+  F12's other rows, I-R2/R3/R4/R5/R6, D1–D5, D-W2-a/b): every input they
+  fingerprint is MATCH, and none cites the stale file outside already-
+  covered history. No re-review owed — the reconciliation-1 rule
+  (MATCH-only needs no re-review), applied again.
+
+#### Adjudication pass 2 (run 2) — freshness, refreshed to HEAD 69a25369
+
+F2 is the only finding fingerprinting the stale file. Its refreshed row:
+
+```text
+tests/utils/test_querysets.py                     6ce0bbc128f0febcbfb8a4837a2c169125d4d997
+```
+
+The other 21 rows stand as adjudication-1 recorded them (values listed
+under "fingerprints" above). No run-1 line was edited.
+
+#### Adjudication pass 2 (run 2) — `## Pending execution` (entries 1–2 CONFIRM, 3 REVISED)
+
+Entries 1–3 above stand as run-1/adjudication-1 history; state now:
+
+1. Entry 1 (superseded by the five D1 live node ids): CONFIRM. All five
+   resolve at HEAD (visibility :890/:914, multi_db :1514/:1539/:1556)
+   with byte-identical bodies — the landed visibility diff is +262/−1
+   with the lone deletion a module-docstring line, and `test_multi_db.py`
+   is untouched in range. The both-modes gate run is still owed, and the
+   sharded mode still needs the maintainer's word.
+2. Entry 2 (focused gate run over the three oracle suites): CONFIRM
+   unchanged. All three paths resolve at HEAD. The F9-exercise
+   expectation is intact: `is_async_queryset_adapter` still reads 7 + 9
+   = 16 lines across the two suites, exactly adjudication-1's
+   reconciled census (those files are not fingerprinted, so their
+   landing is gate-watch, never a trigger).
+3. Entry 3 (arms witness, re-pointed at a successor expecting 2/6):
+   REVISE the pointer, CONFIRM the expectation by re-derivation. Both
+   adjudication-1 successor scopes are gone (relocation), and the run-1
+   originals are gone with them — the `dry-file-utils__querysets[-w2]`
+   scopes now hold differently-named September-18 files, which were
+   left untouched and unopened. Nothing was trusted from the record
+   alone: the successor below re-derives the census from HEAD bytes.
+
+Successor probe (fresh scope, adjudication-2):
+`docs/dry/temp-tests/dry-adjud2-querysets-w1/probe_defect_arms_adjud2.py`
+— `uv run python` it. Pure AST over `git show HEAD:` bytes (no Django
+import, zero SQL, read-only); it asserts the four input blobs
+(querysets `96618fba…`, permissions `757dce34…`, walker `9b111ed9…`,
+list_field `ce682d5f…`), re-verifies both I-R4 load-bearing facts
+(expected_routing at exactly 1 of 5 seal calls; the walker /
+permissions / list_field `policy=` edges plus runner defaults
+flag-equal to `_DEFAULT_SEAL_POLICY`), reads all six arm sets from the
+AST (dict-literal plus the orderset `dict.fromkeys` shape), and keeps
+the negative control (raw-list reaches exactly type/table/untrusted).
+Output at HEAD: `sites with a mismatch: 2/6`, zero dead arms anywhere,
+arms 8/3/6/7/5/6 — the orderset-alias subsumption and the
+source-alias pairing artifact, negative control intact, exit 0. That
+reproduces adjudication-1's record digit for digit from independent
+bytes. `execution-verified` (re-derived-by-adjudication-2-W1). The
+gate should run this path and expect `2/6`; the two dead r2 paths stay
+dead. `uv run ruff check` + `ruff format --check` both pass scoped to
+the fresh scope dir.
+
+#### Adjudication pass 2 (run 2) — family index and ledger (nothing owed)
+
+Test-only change; every production input MATCH; every oracle intact and
+no definition count moved. All thirteen querysets family rows stand as
+adjudication-1 left them (W2-endorsed). No index-row change and no
+`## Owned changes` row is owed to Worker 0 — this pass lands no
+production edit, no test edit, and no tracked file besides this
+artifact's own append.
+
+#### Adjudication pass 2 (run 2) — item state
+
+Zero production edits, zero test edits, zero new tracked files. Untracked
+scratch created, all inside the fresh scope (other scopes untouched):
+`docs/dry/temp-tests/dry-adjud2-querysets-w1/probe_defect_arms_adjud2.py`.
+Item-scoped diff vs `ITEM_BASELINE=ebaa77237e42da28d5395bcb73292dd9a56d3ff5`
+covers only this artifact's append plus the `Status:` line (verified
+before finishing; the pre-existing dirt is the attributed adjudication-1
+append, and the probe scope is the authorized fresh scope).
+`uv run ruff check` / `ruff format --check` pass on the scope dir; no
+ruff on the `.md` artifact. The one authorized focused shared-tree pytest
+was not spent — every claim here is decided by HEAD-byte inspection plus
+the read-only AST probe. `FAKESHOP_SHARDED=1` and Postgres cells stay
+`unverified`. Concurrent dirt (package, tests, docs) left alone.
+
+## Independent verification (Worker 2) — adjudication-2
+
+Two-phase per the dispatch. Phase A (below, as recorded pre-read in
+`docs/dry/temp-tests/dry-adjud2-querysets-w2/phase_a_expectations.md`) was
+written BEFORE opening `### Adjudication pass 2 (run 2) — Worker 1`
+(artifact lines 3117–3303) and before opening
+`docs/dry/temp-tests/dry-adjud2-querysets-w1/`. Reconciliation + verdict
+follow it.
+
+### Phase A — expectations (recorded blind)
+
+Start HEAD: `69a253690002fdd413704a7879528c3ded363020` (recorded before any
+read). `ITEM_BASELINE=ebaa77237e42da28d5395bcb73292dd9a56d3ff5` resolves
+(`commit`). Scope `docs/dry/temp-tests/dry-adjud2-querysets-w2/` verified
+absent, then created by me. Method: HEAD-pinned bytes only — `git rev-parse
+HEAD:<path>`, `git show <commit>:<path>`, `git grep -n <symbol> <commit>`,
+`git diff <commit>..<commit>`. No execution: every Phase-A claim is static
+(hashes, diffs, greps), so no probe and no workspace was needed, and no
+execution-backed claim from the (relocated, unreplayable) run-2 scopes is
+relied on. Never imported `management/commands/inspect_django_type`.
+Working tree at Phase-A time: target and `tests/utils/test_querysets.py`
+both clean; only the artifact is dirty (W1's append, unread).
+
+22-hash re-verification at HEAD: 21 MATCH
+(`utils/querysets.py 96618fba…`, `auth/mutations.py dbe64995…`, `routers.py
+a18c5001…`, `permissions.py 757dce34…`, `connection.py 93e998f2…`,
+`optimizer/nested_fetch.py 4d8d37a7…`, `types/resolvers.py f3341e6a…`,
+`utils/write_values.py d28587c7…`, `rest_framework/resolvers.py 8024703e…`,
+`utils/write_transaction.py eca9ad4d…`, `mutations/permissions.py 54f770ae…`,
+`utils/permissions.py 9889d6fe…`, `optimizer/walker.py 9b111ed9…`,
+`filters/sets.py 4ab65a26…`, `docs/GLOSSARY.md bc51debc…`, `list_field.py
+ce682d5f…`, `resource_policy.py 647133d2…`, `utils/relations.py 7662b0bb…`,
+`optimizer/plans.py cce98531…`, `exceptions.py e06b0b7f…`, `filters/base.py
+ba52351c…` — each re-hashed by me to the full recorded blob), 1 STALE:
+`tests/utils/test_querysets.py`
+`977a81df44b5cede99b2be9b8dcc5be76db0f03a` →
+`6ce0bbc128f0febcbfb8a4837a2c169125d4d997`. Exactly the plan's
+Freshness-reconciliation-2 row. Expected hash action: refresh exactly that
+row; re-affirm the other 21.
+
+Causing range: exactly one commit (`git log
+bfaee91d..69a25369 -- tests/utils/test_querysets.py`), `a01a2ab8 test: move
+the request-observable rows live and pin the cost each one claims` (44
+files, all docs/examples/tests, zero package files). In
+`tests/utils/test_querysets.py` exactly 4 hunks, 48+/18- = net +30 (5882 →
+5912 lines). Added/removed `def test_` scan: 2 added, 0 removed, 0 renamed;
+no class added or removed.
+
+- Hunk 1 (`@@ -1,25 +1,16 @@`, docstring reword, net −9): replaces the
+  contract paragraph + the `coerce_field_value_or_none` paragraph with
+  live-tier pointers. Could touch F2's oracle role and the Matrix axis-5 /
+  W2-trace media description — but the docstring is test-file prose, not an
+  artifact claim, and the oracle role rests on test BODIES (the set-equality
+  assertions), untouched. Expected: **CONFIRM**. Note (not a demand): the
+  artifact's "5760 lines, 309 tests" is now 5912 lines / 315 `^def test_`
+  defs by my count — but it was ALREADY stale at `bfaee91d` (5882/313) and
+  adjudication-1 set precedent by leaving run-1 history untouched while
+  re-pinning only the oracle-test lines. Expected W1 to follow that
+  precedent; a revision of run-1 prose would contradict DRY.md.
+- Hunk 2 (`@@ -32,11 +23,14 @@`, imports, net +3): adds `seed_data`,
+  `Apps`, `connection`, `CaptureQueriesContext`. Pure support for hunk 4;
+  touches nothing recorded. Expected: **CONFIRM**.
+- Hunk 3 (`@@ -4688,12 +4682,16 @@`, `_proxy_target_apps` + proxy Meta,
+  net +4): fixture-registration isolation for the proxy-prefetch tests.
+  Neighboring test bodies are context-only. Could touch I-R1 (fail-open
+  tail) and F8/F2 (child-seal assertions) — but the production contract
+  (MATCH bytes) and both I-R1 triggers (`classify_path`, `relations.py`
+  MATCH) are untouched. Expected: **CONFIRM**.
+- Hunk 4 (`@@ -4716,6 +4714,38 @@`, holder Meta + 2 new tests, net +32):
+  `test_proxy_target_fixtures_leave_category_relations_unchanged` and
+  `test_proxy_target_fixtures_allow_category_deletion` assert
+  Django-registry/fixture facts, not expectations about any package rule —
+  not oracles of a finding; no definition count moves; oracle independence
+  unaffected. Expected: **CONFIRM**.
+
+Cross-cutting expectations. F2: owner/exclusivity/5-call-sites/9-codes rest
+on MATCH bytes → **CONFIRM**; the three oracle tests exist by name at HEAD
+with byte-identical bodies (all hunks end ~4751), shifted exactly +30 to
+`:5063` / `:5085` / `:5112` (verified via `git grep` at both commits);
+expected W1 to CONFIRM F2, refresh the hash to `6ce0bbc1…`, and re-pin the
+three oracle lines. F3: cited by `::name`, stable → **CONFIRM**, no
+revision. F1/F4/F5/F6/F7/F8/F9/F10/F11/F12, I-R1..I-R6, D1..D5, D-W2-a/b:
+all inputs MATCH, no hunk names their symbols → expected W1 CONFIRMs each;
+my spot re-derivations: F9 still 0 production readers with test-reader
+lines 9 + 7 = 16 IDENTICAL at both commits (the `test_extension.py` churn
+never touched them — out of scope regardless per the plan's basename
+sweep); F12 `_safe_routing_repr` production reader still only the seal's
+routing arm (`:3225-3228`), test readers still the same two files; I-R1
+triggers untriggered. Pending entries: 1 still owes the both-modes gate on
+the five D1 node ids (D1 live-file landing is gate-watch, not this
+adjudication); 2 still valid (file exists, +2 tests); 3 still `gate:`-typed
+(the successor path dangles post-relocation — Worker-0 custody, not a
+typing change). Expected all three statuses unchanged, no re-typing.
+Family rows / ledger: no production edit possible → expected W1 names no
+index change, no ledger row, no new family. Verdict expectation: `verified`
+(keeping `verified, pending execution`) with the one hash refreshed; any
+`revision-needed` would have to name a concrete moved claim, and I found
+none.
+
+### Phase B — reconciliation (every difference, explicitly)
+
+Read AFTER Phase A was on disk: `### Adjudication pass 2 (run 2) —
+Worker 1` (lines 3117–3303) and
+`docs/dry/temp-tests/dry-adjud2-querysets-w1/probe_defect_arms_adjud2.py`
+(read-only; then re-run read-only).
+
+Agreement (independently derived on both sides): 22-hash table identical
+(21 MATCH full blobs + the one stale row with the same before/after blobs);
+causing range identical (one commit `a01a2ab8`, 4 hunks, 48+/18-, H1–H4
+characters, net +30, 5882→5912 lines, 313→315 def-tests); F2 CONFIRM with
+the hash refreshed to `6ce0bbc1…` and the three oracle lines re-pinned to
+`:5063/:5085/:5112` with byte-identical bodies; "5760/309 is run-1 history"
+with the same precedent reasoning AND the same refreshed figures (5912/315,
+313 before); F3 + Matrix axis 3 + F12 readers + axis-5 media role + D1-fix
+history + I-R1 all CONFIRM with matching reasons (fixture REGISTRATION vs
+resolver behavior; `::name` citations stable); all remaining findings and
+iterations CONFIRM via the MATCH-only rule; family index + ledger: nothing
+owed. W1's extra pins (set-equality assertions verbatim at `:5103/:5123`,
+`_safe_routing_repr` 2 hits in the file, zero retired-constant hits) all
+re-verified by me via `git grep` at `69a25369` — each matches.
+
+Deltas reconciled (three, none verdict-affecting):
+
+1. Entry 3: I expected "status unchanged"; W1 REVISED the pointer while
+   CONFIRMing the type (`gate:`) and expectation (`2/6`). The revision was
+   owed, not scope creep: both adjudication-1 successor paths are dead
+   (relocation — confirmed: neither `dry-adjud-querysets-*-r2` scope exists,
+   and the `dry-file-utils__querysets[-w2]` scopes now hold
+   differently-named September-18 files, verified by names only, unopened),
+   so the entry-3 command pointed at nothing. W1 re-derived rather than
+   trusted: `probe_defect_arms_adjud2.py` is pure AST over `git show HEAD:`
+   bytes (no Django import, zero SQL), asserts the four input blobs
+   (`96618fba…`/`757dce34…`/`9b111ed9…`/`ce682d5f…` — all matching my hash
+   table), re-verifies both I-R4 load-bearing facts (routing at exactly 1
+   of 5 seal calls; walker/permissions/list_field `policy=` edges plus
+   runner defaults flag-equal to default), reads all six arm sets from the
+   AST (dict-literal plus the orderset `dict.fromkeys` shape), and keeps
+   the negative control. I re-ran it read-only: output identical to W1's
+   record (`sites with a mismatch: 2/6`, zero dead arms, arms 8/3/6/7/5/6,
+   same two missing-alias rows, negative control intact, exit 0), and
+   `uv run ruff check` + `ruff format --check` both pass scoped to W1's
+   scope dir. The `_django_patches` precedent (superseded replay command,
+   re-derived endorsement) covers exactly this shape. Endorsed:
+   entry 3 is `gate:` + live path + `2/6`, `execution-verified
+   (re-derived-by-adjudication-2-W1)`, doubly derived (W1 + my re-run).
+2. Entry 1: I expected "status unchanged / gate-watch"; W1 additionally
+   re-verified the five D1 node ids resolve at HEAD
+   (`:890/:914/:1514/:1539/:1556`) with byte-identical bodies, the
+   visibility diff at +262/−1 with the lone deletion a module-docstring
+   line, and `test_multi_db.py` untouched in range. Stronger evidence,
+   same verdict (both-modes gate still owed, sharded needs the maintainer's word). I
+   verified each sub-claim: the five `def` lines resolve as cited, the two
+   visibility hunks sit at docstring + old-line 326 (neither touches the
+   D1 bodies), the deletion extends a docstring sentence, and multi_db has
+   no numstat row. No gap — W1's confirmation subsumes my expectation.
+3. Entry 2: identical verdict (CONFIRM unchanged); W1's F9-exercise census
+   (7 + 9 = 16 lines) matches my independent re-census line for line, and
+   W1's "not fingerprinted → gate-watch" matches my out-of-scope reading.
+   No difference at all; recorded for completeness.
+
+Verification job. Item-diff scope: `git diff
+ebaa77237e42da28d5395bcb73292dd9a56d3ff5 -- <artifact>` is exactly two
+hunks — the `Status:` swap (the diff's sole deletion line) plus a purely
+additive 188-line EOF append (W1's record, read in full); prior text
+untouched, no foreign hunk. Corroboration vs HEAD: 1145+/1- = 956
+(attributed adjudication-1 append) + 188 (W1) + Status — exact. HEAD
+tripwire: `69a25369` at my start, mid-phase, and finish (recorded below) —
+unmoved throughout. AGENTS.md prose rules on the diff: no process
+provenance beyond the DRY.md-mandated role label in W1's own section
+header; citations in the adjudication-1-precedent form (raw `path:NN`
+allowed in `docs/dry/dry-*.md`, bare in-target symbol names with the
+artifact's subject file implicit); no tests added (the probe is untracked
+scratch at the DRY.md-mandated location); no cross-file links, so no link
+block owed; no CHANGELOG, no commit. Pending-execution typing: entry 1
+still the pinned `proof:` (five node ids, both-modes gate owed), entries
+2–3 `gate:` — types unchanged, commands live. Test authorization: one
+read-only W1-probe re-run (above); no pytest spent; no workspace built
+(nothing mutates source); `inspect_django_type` never imported.
+Sharded/Postgres cells stay `unverified` as typed. No ruff on the `.md`
+artifact (precedent: `.md`-only edits; my scope holds no `.py`).
+
+### Verdict
+
+`Status: verified`. Every W1 claim re-derived by me agrees; the three
+deltas are a re-pointing endorsement (entry 3), a subsuming confirmation
+(entry 1), and a non-difference (entry 2). Worker 0 plan marking: keep
+`verified, pending execution` — entry 1's proof still owes the gate run in
+both modes (sharded mode needs the maintainer's authorization); entries 2–3 are gate
+requests (entry 3 at the new live path expecting `2/6`). No family-row,
+ledger, or pending-entry change is owed to Worker 0 beyond that marking.
+Finish HEAD: `69a253690002fdd413704a7879528c3ded363020`, unmoved.
+
+### Adjudication pass 3 (run 3) — Worker 1
+
+Adjudication run: `0.0.15 2026-09-21-3`. Adjudication-2 verified this item
+at `69a25369`; HEAD is now `24e6b4d3` (`24e6b4d3e74b104779225cd6bbff713880bc48e3`,
+verified at dispatch and again unmoved at finish). Scoped freshness
+adjudication only, over the plan's 7 stale inputs of 22. No production
+edits, no test edits, no new tracked files. Prior text above untouched;
+this section appends. Pre-existing dirt attribution: vs HEAD the artifact
+carries one 1336-insertion / 0-deletion hunk — exactly the plan-recorded
+adjudication-1+2 appends. No foreign hunk; the item was not stopped.
+`ITEM_BASELINE=101a8d752b5a324021ffe0b923cf49270a7588c6` resolves.
+
+Method. All eleven causing commits were read as diffs, never as messages;
+only five touch a fingerprinted input (`fee87ac4` target/list_field/connection,
+`44712901` target/walker/glossary/tests, `c87f4f98` target/connection,
+`9350eb8d` resource_policy/glossary, `24e6b4d3` tests — each verified via
+`git log --oneline 69a25369..24e6b4d3 -- <path>`). The other six touch no
+fingerprinted input (`9fb725c8` tests/test_connection.py only, `3c53842f`
+live async rows + docs, `1f68871a` + fee87ac4's 8 lines on
+tests/test_list_field.py covered as a mention-check, `fa6d48f8` spec-034
+:444 + rationale :193 covered as a mention-check, `357e5487` KANBAN only,
+`ec0d21de` records + the artifact citation fix itself, which HEAD bytes
+carry as the record). Every claim below was verified against HEAD bytes
+via `git show HEAD:<path>`, `git rev-parse HEAD:<path>` and `git grep`,
+never against the working tree and never against a commit message.
+
+Target hunk map `69a25369..24e6b4d3` (10 hunks; old-line starts 2404, 2525,
+2742, 2796, 2979, 2997, 3041, 3136, 3898, 4152). Seven hunks are prose-only
+(docstring/comment; the identity probe proves executable-identity, see
+below). The executable inventory of the whole range is exactly: 7 new
+functions (`require_orderset_class`, `_apply_sidecar_sync/_async`,
+`apply_orderset_sync/_async`, `apply_filterset_sync/_async`), 1 new
+constant (`_LIST_RELATION_CHILD_POLICY`), 1 rename
+(`_ORDERSET_RESULT_POLICY` → `_SIDECAR_RESULT_POLICY`, def + its one use).
+Everything above old :2404 is byte-identical, so every cite below it keeps
+its line.
+
+Enumeration recount at HEAD (`ast.Module.body`, identity probe): 103 sync +
+6 async = 109 functions, 7 classes, 25 constants = 141 names (was 133; +7
+functions — 4 sync, 3 async — and +1 constant; the rename is count-neutral).
+New-name homes for the I-R5 closure (no rule orphaned): the seven sidecar
+functions → family `post-set-apply-result-validation` (the one seal body
+plus its thin entries; `fee87ac4`/`c87f4f98` landed the family's
+centralization concurrently — the family item verifies, it does not redo);
+`_LIST_RELATION_CHILD_POLICY` → `sealed-execution-queryset` (F2 census) and
+`child-queryset-alias-inheritance` (F8); `_SIDECAR_RESULT_POLICY` inherits
+every home `_ORDERSET_RESULT_POLICY` had (F2/F3/I-R4/D3).
+
+#### Adjudication pass 3 (run 3) — F1 (CONFIRM)
+
+Count stays 3. `auth/mutations.py` and `routers.py` are byte-identical
+(MATCH), and the disposal region (:160-230) sits above the first target
+hunk. The new `_apply_sidecar_sync/_async` consume `_dispose_sync_awaitable`
+by name — two more in-file consumers, not definitions — and the
+`ec0d21de`-fixed consumer citation (`apply_orderset_sync/_async`) reads
+correctly at HEAD. The second-axis challenge forces the same 3. Family
+`awaitable-refusal-and-disposal` unchanged.
+
+#### Adjudication pass 3 (run 3) — F2 (REVISE: counts and pins only)
+
+Still one owner. Exclusivity re-derived at HEAD: `models.QuerySet(`
+outside the target = 0 hits; `sql.Query` touches outside = only the
+pre-existing `lateral_fetch.py:82` import (file unchanged in range — the
+adjudication-1 delta-2 note stands); executable `object.__getattribute__` /
+`type.__getattribute__` / `inspect.getattr_static` outside = 0 (the one
+textual hit stays the pre-existing `converters.py:119` comment, file
+unchanged). `_seal_or_defect` still has exactly 5 call sites, all in-file
+(:2548, :3033, :3662, :3961, :4069; def :3260), with zero callers
+package-wide outside. The four planning readers are intact:
+`connection.py:1610` (was :1603, +7 import shift, same
+`source.query.is_sliced` read), `nested_fetch.py` 123/131/197,
+`predicates.py:165`, `extension.py:1161` (all three files unchanged in
+range). The defect-code set is still the same closed 9 in the same order
+(:3272-3274). What moves is the record's own census, as in adjudication-1:
+"the six policy constants" is now SEVEN (`_LIST_RELATION_CHILD_POLICY`
+added at :2835, `_SIDECAR_RESULT_POLICY` renamed at :2846 with identical
+flags — proven by the identity probe); `_SealPolicy` stays 6 fields. C13
+still forces 1 — the new child policy arrived as one constant differing on
+one axis, the worked-example shape. The three inventory-oracle tests exist
+with byte-identical bodies at :5076/:5098/:5125 (identity probe
+compares source segments at both commits; both principle-9 assertions
+verbatim at :5116/:5136). The *Sealed execution queryset* glossary
+projection (:1889) is untouched in range. Family `sealed-execution-queryset`
+unchanged.
+
+#### Adjudication pass 3 (run 3) — F3 (CONFIRM, re-pinned; population in I-R4)
+
+`_defect_message` still has exactly 6 call sites (`permissions.py:353`,
+`:412`, unchanged lines; target :3077, :3718, :3843, :3969) and the
+dispatcher itself (:3794) is executable-identical modulo nothing (outside
+all code hunks). `c87f4f98` rewords only the validator docstring
+(FilterSet-or-OrderSet wording) and the policy identifier; it changes no
+code set and no arm set — the arms probe re-derives 8/3/6/7/5/6 with zero
+dead arms. The rule F3 gates still holds at every site modulo the same two
+documented modelling artifacts (see I-R4). Finding stays
+gate-plus-declaration in family `seal-defect-code-wording`.
+
+#### Adjudication pass 3 (run 3) — F4 (CONFIRM)
+
+Count stays 2. The guard `connection.py::_guard_source_not_pre_sliced` is
+byte-identical at :1609-1632 (was :1602-1625; endpoint bytes verified
+equal), the seal's `sliced` arm is untouched code (:3547; the :3136 hunk is
+docstring-only, proven by the identity probe), and `nested_fetch.py` is
+MATCH including the contract difference. `_LIST_RELATION_CHILD_POLICY`
+keeps `reject_sliced` at its default — a consumer of the policy field,
+never a third definition (the same licence adjudication-1 applied to the
+retired constant). `44712901`'s licence narrowing is what D-W2-b becomes
+(see there). The family item's open question and the `GraphQLError` vs
+`ConfigurationError` proof it owes are unchanged.
+
+#### Adjudication pass 3 (run 3) — F5 (CONFIRM)
+
+Count stays 2, site lists unchanged. `types/resolvers.py`,
+`utils/write_values.py`, `rest_framework/resolvers.py` are all MATCH, so
+`_visible_related_object` (:395), its 7 call sites, and the
+`write_values.py:226` consumer are byte-identical. Target re-pins:
+`related_visibility_queryset_or_default` :4211, `visible_related_object`
+:4280 (both +220, bodies untouched — the range adds no hunk in their
+spans). The disprove-first question the family item owes is untouched by
+every causing commit.
+
+#### Adjudication pass 3 (run 3) — F6 (CONFIRM)
+
+Rejection stands. `coerce_field_value_or_none` (310-344) is above the first
+hunk, byte-identical; `_stringified` re-pins to :4232 with
+`stringified_pks_present` :4242 / `pks_all_present` :4266 (bodies
+untouched). `utils/write_transaction.py`, `utils/write_values.py`,
+`rest_framework/resolvers.py` are MATCH. The reconsideration trigger is
+untriggered: production callers are still only `visible_related_objects`
+(in-file :4346) and `write_values.py:313` (MATCH file, same
+`type_check_relation_id` routing). `keyset.py:384` is untouched in range
+(file absent from the range log). Contract difference byte-identical.
+
+#### Adjudication pass 3 (run 3) — F7 (CONFIRM)
+
+Rejection stands. `sync_pipeline_recourse` and `_RELAY_ASYNC_RECOURSE`
+(347-372) are above the first hunk; `mutations/permissions.py`,
+`utils/permissions.py`, `permissions.py` are MATCH (`_PERMISSION_ASYNC_RECOURSE`
+:50, `_GATE_ASYNC_RECOURSE` :59, `_ASYNC_RECOURSE` :136, same lines). The
+three `sync_pipeline_recourse` compositions sit in unchanged files
+(`mutations/resolvers.py:139`, `forms/resolvers.py:125`,
+`rest_framework/resolvers.py:201` — all absent from the range log).
+Reconsideration trigger untriggered.
+
+#### Adjudication pass 3 (run 3) — F8 (REVISE: guarded under two child seals)
+
+The two enforcement mechanisms are still 2 definitions, correctly counted:
+`base_queryset`'s `using` arm (body AST-identical, see the identity probe)
+and the seal's `require_shared_alias` arm (AST-identical at :3555-3560).
+Enforcement sites `permissions.py:692` and `filters/sets.py:2592` are in
+MATCH files, and `_sealed_prefetch_related_lookups` still threads the outer
+effective alias into the child seal (call at :2548 with `required_alias`
+and `_PREFETCH_CHILD_POLICY`; both hunks in that function are prose-only).
+What changed is the "one policy" line adjudication-1 recorded: the walker
+now seals under TWO child policies — `_LIST_RELATION_CHILD_POLICY` (the
+builder default, :420) and `_PREFETCH_CHILD_POLICY` (the
+`_build_connection_child_queryset` seam, :525, wired at :1619) — which the
+arms probe proves differ on `reject_sliced` and on nothing else, with
+`require_shared_alias=True` in both. The alias verdict therefore carries:
+an explicitly-routed child is still rejected under either seal by the
+identical arm, the seed is still unrouted (`base_queryset(field.related_model)`
+:457), and the plain-list call (:1035-1041) passes no policy, taking the
+default. The glossary projection cite re-pins to the re-rendered :1558
+sentence, which still names `reject_sliced=False` in
+`_PREFETCH_CHILD_POLICY` and now states the `_LIST_RELATION_CHILD_POLICY`
+split. Coupling to D1 stays discharged. Family
+`child-queryset-alias-inheritance` still owes its family item.
+
+#### Adjudication pass 3 (run 3) — F9 (CONFIRM)
+
+Still no production reader. HEAD census: the definition (:412, unchanged
+line) is the only package hit — zero across `django_strawberry_framework/`,
+`tests/` beyond the two suites, and `examples/`; not in any `__all__`, not
+re-exported. Test readers are 7 + 9 = 16 lines at BOTH commits
+(`test_list_field.py` 5 asserts + 2 imports, `test_extension.py` 9 lines):
+the `fee87ac4` 8-line hunk (import swap `_require_orderset_class` →
+`require_orderset_class` + message re-point) and the `1f68871a` hunk
+(`django_db(transaction=True)` + docstring) touch neither reader line nor
+any assert. `wrap_` consumers are still `list_field.py` (import :105 + 4
+call sites :1437/:1473/:1490/:1526, same shapes) and `extension.py:1145`
+(MATCH file); `unwrap_` still `extension.py:1142` (MATCH). The
+`resource_policy.py` diff (template/`_PACKAGE` split) adds no reader. The
+principle-11 decision with its oracle-shape entailment still belongs to
+family `async-only-queryset-row-adapter`.
+
+#### Adjudication pass 3 (run 3) — F10 (CONFIRM)
+
+Rejection stands; the contract difference is byte-identical. Connection
+sites re-pin to :1057/:1102 (still answer yes for a QuerySet) and :1582
+(still the union admission test) — same shapes, +7 import shift.
+`is_async_only_iterable` (:375) and its local consumer (:458) are above the
+first hunk. Composed consumers re-pin with identical shapes:
+`list_field.py` :1332/:1336/:1751 (the same three sites, −1/−1/−78),
+`resource_policy.py:1240` (was :1216, +24 from the template hunk plus the
+copy hunk). `list_field.py` holds no direct `AsyncIterable`/`AsyncIterator`
+reference at HEAD, and its `_safe_type_name` / `SyncMisuseError` /
+`_snapshot_routing_intent` / `_validate_post_orderset_result` /
+`_dispose_sync_awaitable` counts are all zero — the seal move left nothing
+behind. Reconsideration trigger untriggered.
+
+#### Adjudication pass 3 (run 3) — F11 (CONFIRM)
+
+Still 1 definition, same classification. `run_in_one_sync_boundary` (:465)
+is above the first hunk; all six consumer files still compose it by name,
+and the `schema.py` cites need no re-pin (import :79, calls :346/:360/:373 —
+the `9350eb8d` schema hunks are all 1-for-1 identifier swaps preserving
+every line number). The five direct `sync_to_async(...)` sites are in
+MATCH/unchanged files at identical lines, and the package-wide
+`sync_to_async(` census is identical at both commits (10 files, same
+counts), so no boundary call was added. Family `one-sync-boundary`
+unchanged.
+
+#### Adjudication pass 3 (run 3) — F12 (one row REVISED, rest CONFIRM + re-pins)
+
+- `_safe_routing_repr`: production readers still only the seal's routing arm
+  (:3443-3446, inside `_seal_or_defect`). 1 definition. CONFIRM.
+- `_GraphWalk` / `_WalkState` / `_walk_short_circuit` (826-900, above the
+  first hunk): byte-identical, "7 in-module callers" unchanged by
+  construction; the `converters.py:119` hit is still the pre-existing
+  comment. CONFIRM.
+- `_snapshot_routing_intent`: REVISED — it now has ZERO external consumers.
+  The two `list_field.py` call sites adjudication-1 cited were inside the
+  moved `_apply_orderset_*` bodies; the calls now live in-file at :3120 and
+  :3153 (the two `_apply_sidecar_*` seals), and the symbol has zero hits
+  outside the target module package-wide. Still 1 definition; the row's
+  consumer census is what changed.
+- `_routing_hints_equal`: reader still the seal (:3437). CONFIRM.
+- `_bake_deferred_filter_or_defect` + `_deferred_value_defect`: sole caller
+  still the seal (:3492); `PROHIBITED_FILTER_KWARGS` still single-sited
+  (import + floor mirror :101-108, one use :2673). CONFIRM.
+- `prepared_resolver_source` (:4462): still composed by both collection
+  flavors (`connection.py:1769`, `list_field.py:1715/:1762`, same shapes)
+  plus the two pre-existing in-file callers in the post-process twins
+  (:4517/:4539, below the last hunk, uncited until now). CONFIRM.
+- `_coerced_manager_queryset` and `SyncMisuseError`: see I-R3 / I-R5.
+
+#### Adjudication pass 3 (run 3) — I-R1 (CONFIRM)
+
+Rejection stands. `_prefetch_relation_target_or_none` (:2304) and
+`_reverse_relation_by_accessor_or_none` (:2354) are above the first hunk;
+`utils/relations.py`, `connection.py` (for this finding's mechanism table —
+the guard hunks touch no lookup-path line), `optimizer/plans.py` carry no
+relevant change, and the "count rises to 7" caveat stands with
+`_is_deterministic_order_name` re-pinned (def :823, call :955). The
+`02e266df` tier-move note is history. Both reconsideration triggers
+untriggered.
+
+#### Adjudication pass 3 (run 3) — I-R2 (CONFIRM)
+
+Family naming and both exclusions stand. `utils/permissions.py` and
+`filters/base.py` are MATCH, so the exclusion reasoning rests on unchanged
+bodies. No causing commit touches either file. Family
+`orm-lookup-path-resolution` unchanged.
+
+#### Adjudication pass 3 (run 3) — I-R3 (CONFIRM)
+
+Still file-local. `models.Manager` appears at exactly three lines
+package-wide, all in this file (:305, :3744, :4067 — count and file
+identical). `_coerced_manager_queryset` (:3744) and both entry points (the
+:305 `normalize_query_source` arm, the :4067
+`_normalized_visibility_result` arm) are intact. The flag to the `utils/`
+folder item stands.
+
+#### Adjudication pass 3 (run 3) — I-R4 (REVISE: five-policy set, same rows)
+
+Both load-bearing facts re-derived against the new tree by the successor
+arms probe, not inherited. (1) `expected_routing` is still passed at
+exactly 1 of the 5 seal calls (`_validate_post_orderset_result`, :3033);
+the other four (:2548, :3662, :3961, :4069) pass none — the new sidecar
+entries reach the seal through the validator, never directly. So `routing`
+is still unreachable at both visibility sites. (2) The complete `policy=`
+set reaching the runners is now FIVE: `_DEFAULT_SEAL_POLICY` (default),
+`_CASCADE_SEAL_POLICY` (`permissions.py:623`, `:705`),
+`_PREFETCH_CHILD_POLICY` (walker seam :525),
+`_LIST_RELATION_CHILD_POLICY` (walker default :420), and
+`_LIST_ARGUMENT_VISIBILITY_POLICY` (`list_field.py:1444`, `:1497`, plus the
+connection's `_sidecar_visibility_policy` at :1872/:1920, which the probe
+proves returns one of `_LIST_ARGUMENT_VISIBILITY_POLICY` /
+`_DEFAULT_SEAL_POLICY` — no new policy). None of the five sets
+`require_unevaluated` (still only `_SIDECAR_RESULT_POLICY`, still reaching
+the seal solely through :3033), so `evaluated` is still unreachable at
+both sites. The `SITES` table with that one addition is sound.
+
+`probe_defect_arms_adjud3.py` (fresh scope, same instrument, five-policy
+set) reports `sites with a mismatch: 2/6` with ZERO dead arms anywhere and
+arms 8/3/6/7/5/6 — digit-for-digit the adjudication-2 record. The two rows
+are the same two artifacts with the same reasons: (a)
+`_validate_post_orderset_result` — the KNOWN subsumption (comment intact at
+:3049-3059); (b) `_prepared_visibility_source` — the source-shape pairing
+artifact, now generalized: TWO flag-setting policies reach via the walker,
+and the sole production pairing for both is the unrouted
+`base_queryset` seed, under which `alias` cannot fire. The gate
+population's fifth term generalizes with it: source-shape pairings the
+coarse model cannot see must be recorded with the site, PER POLICY. The
+flip trigger generalizes likewise: a production caller pairing EITHER
+`require_shared_alias` policy with a routed source owes the site a real
+`alias` arm. Family `seal-defect-code-wording` stays gate-plus-declaration.
+
+#### Adjudication pass 3 (run 3) — I-R5 (CONFIRM)
+
+Still file-local with the population recorded. `SyncMisuseError` (119-139)
+is above the first hunk with unchanged bases; siblings keep
+(`list_field.py::ListArgumentError` :245, same bases;
+`resource_policy.py::ResourceLimitExceeded` :121, identical line — the
+template hunks sit below it). Declarations-not-definitions reasoning
+stands.
+
+#### Adjudication pass 3 (run 3) — I-R6 (CONFIRM)
+
+Rejection stands. `utils/querysets.py::_safe_class_name` (142-157) is above
+the first hunk; `exceptions.py` is MATCH, so the contract difference and
+the trigger rest on unchanged bodies at both owners.
+
+#### Adjudication pass 3 (run 3) — D1 (FIXED-owned; holding re-verified)
+
+Disposition: fixed (owned fix `fd39cac6`, in the ledger — not a concurrent
+fix). Verified at HEAD: the walker still seeds
+`base_queryset(field.related_model)` unrouted (:457) and now seals under
+`policy=policy` (:497) with `_LIST_RELATION_CHILD_POLICY` the default
+(:420) and `_PREFETCH_CHILD_POLICY` at the nested-connection seam (:525) —
+both carrying `require_shared_alias=True` (arms-probe-asserted), so the
+owned fix's verdict holds on BOTH paths. The seal arm deciding it is
+AST-identical to the execution-verified tree (identity probe). The five
+permanent live rows resolve at HEAD (visibility :890/:914, identical;
+multi_db :1594/:1619/:1636, +80 from `fee87ac4`) — see the Pending note;
+the both-modes gate run is still owed. `## Defects` routing note stays
+accurate.
+
+#### Adjudication pass 3 (run 3) — D2 (fixed-concurrent; holding re-verified)
+
+Disposition: concurrently fixed (unchanged). `allow_sliced` still has zero
+hits across the package, the glossary and spec-034 at HEAD. The glossary
+half still reads fixed: the re-rendered :1558 sentence keeps
+"`reject_sliced=False` in `_PREFETCH_CHILD_POLICY`" and adds the
+`_LIST_RELATION_CHILD_POLICY` split. The spec-034 half is intact: the
+"Verified dependency to protect" clause at :353 still reads
+`policy=_PREFETCH_CHILD_POLICY` with the nested-connection-concession
+sentence `44712901` left true, and `fa6d48f8` touched only :444 and the
+rationale's :193. Worker 0 homes the record, not new work.
+
+#### Adjudication pass 3 (run 3) — D3 (RESOLVED-fixed by fee87ac4 + c87f4f98)
+
+Disposition change: was ambiguous→the maintainer, now resolved by the maintainer's
+decision-in-code. `fee87ac4` moved the snapshot-plus-re-seal into
+`utils/querysets.py::apply_orderset_sync/_async` and routed the connection
+field's order arm through it; `c87f4f98` added `apply_filterset_sync/_async`
+over the shared `_apply_sidecar_sync/_async` and routed BOTH sidecar arms
+through the seal in BOTH pipelines (`connection.py:1876` / `:1924`), with
+the visibility seal under `_LIST_ARGUMENT_VISIBILITY_POLICY` exactly as the
+list field's argument path. The card-053 row records both halves
+discharged, noting the list field publishes no `filter:` — so no field
+runs an unsealed sidecar return. Dated correction to the HEAD record: the
+`ec0d21de` sentence in `### D3` ("the `FilterSet.apply_*` return is the
+half still unsealed at both") was true at its commit and is superseded by
+the later `c87f4f98`. Both contract sources the ambiguity cited are
+byte-identical (spec-050 Edge sentence at :2123; the
+`require_unevaluated` bullet still reasons from "the list field invoked
+that ordering method one step earlier" — a true instance, now an
+incomplete one; noted for the family item, not a defect). No consolidation
+ever depended on D3. Worker 0 homes the record.
+
+#### Adjudication pass 3 (run 3) — D4 (fixed-concurrent; measurement carries)
+
+Disposition: concurrently fixed (unchanged). The `base_queryset` docstring
+keeps the repaired wording and the body is AST-identical to the measured
+tree (identity probe) — the region sits above the first hunk. The run-1
+`probe_using_order.py` file did not survive the relocation (the run-1
+scopes hold September-18 files, left unopened per precedent), and this
+pass's fences forbid settings-backed execution, so the carry rests on
+byte-identity rather than a re-run: the exact bytes the
+adjudication-1 re-run measured are the HEAD bytes. Replayable via
+`uv run python docs/dry/temp-tests/dry-adjud3-querysets-w1/probe_byte_identity_adjud3.py`.
+Worker 0 homes the record.
+
+#### Adjudication pass 3 (run 3) — D5 (fixed-concurrent; zero dead re-derived)
+
+Disposition: concurrently fixed (unchanged), re-derived against the new
+tree. The arms probe reads all six arm sets from the AST at HEAD bytes:
+8/3/6/7/5/6 with zero dead arms anywhere — the D5 fix holds through the
+rename (the renamed policy keeps its flags; no arm dict was touched).
+Family `seal-defect-code-wording`; routing note stays accurate. Worker 0
+homes the record.
+
+Worker-2 D1-verification defects, observed (outside the F/D scope, one line
+each for Worker 0): D-W2-a is fixed and its holding re-verified — both
+runner docstrings name the walker's actual policies, now the pair
+(`_PREFETCH_CHILD_POLICY` / `_LIST_RELATION_CHILD_POLICY` at :4122 and
+:4375). D-W2-b is CONCURRENTLY FIXED by `44712901`: the exact premise it
+challenged ("Off one edge down", slice licence for a plain list relation
+with no gate) is restated at every site it named (`_SealPolicy` bullet,
+walker comment, both prefetch docstrings, both runner docstrings, glossary
+:1558), the plain-list child now seals under `_LIST_RELATION_CHILD_POLICY`
+and gets the typed `sliced` defect, and the nested-connection seam is the
+one place spending the licence. Worker 0 homes the record.
+
+#### Adjudication pass 3 (run 3) — probes re-run (replay info)
+
+The retained adjudication-2 arms probe was re-run read-only: it refuses
+this tree with its designed blob-tripwire (`AssertionError:
+('querysets', 'b68be0e3…')`, exit 1) — the pins work, and nothing below is
+trusted from the record alone. Both successors live ONLY in the fresh
+scope `docs/dry/temp-tests/dry-adjud3-querysets-w1/` (verified absent
+before creation; earlier scopes untouched); both read-only, zero SQL, no
+Django import (pure AST over `git show` bytes):
+
+- `uv run python docs/dry/temp-tests/dry-adjud3-querysets-w1/probe_defect_arms_adjud3.py`
+  → asserts the five input blobs, re-verifies both I-R4 load-bearing facts
+  (routing at exactly 1 of 5 seal calls; walker default + seam + permissions
+  + list_field + connection `policy=` edges; runner defaults flag-equal to
+  default), proves the child policies differ on `reject_sliced` alone and
+  the rename complete, reads all six arm sets, keeps the negative control.
+  Output: `sites with a mismatch: 2/6`, zero dead arms, arms 8/3/6/7/5/6,
+  exit 0. Discharges F3/I-R4/D5/F8. `execution-verified`
+  (re-derived-by-adjudication-3-W1).
+- `uv run python docs/dry/temp-tests/dry-adjud3-querysets-w1/probe_byte_identity_adjud3.py`
+  → AST-identity of `base_queryset`, the seal alias arm, and the five
+  prose-touched veteran functions (modulo the rename) across 69a25369..HEAD;
+  veteran policy flags identical +1/rename; the three oracle bodies
+  source-identical with re-pins :5076/:5098/:5125 and both assertions
+  verbatim at :5116/:5136; enumeration 103+6/7/25 = 141 with the seven
+  added functions named. Exit 0. Carries D4/F8/D1/F2 without re-execution,
+  each replayably.
+
+No source-mutating proof was needed (nothing here mutates source), so no
+disposable workspace was built. The one authorized focused shared-tree run
+was not spent (no pytest per this pass's fences). `FAKESHOP_SHARDED=1` and
+Postgres cells stay `unverified` except where `fd39cac6`'s own record
+already ran them in its workspaces.
+
+#### Adjudication pass 3 (run 3) — freshness, refreshed to HEAD 24e6b4d3
+
+`git rev-parse HEAD:<path>` for every input any finding fingerprints —
+all 22 re-hashed blind (containment: no extra mismatch beyond the plan's 7):
+
+```text
+django_strawberry_framework/utils/querysets.py    b68be0e337d178fc703ca1ac2ff4144c1fd766a5
+django_strawberry_framework/auth/mutations.py     dbe64995b87240b87a1d5119f46cc42c7cab646f
+django_strawberry_framework/routers.py            a18c5001471d4a937bb81d2ff41a2e442e7d2dad
+tests/utils/test_querysets.py                     183d52ba71b8324a4975e7e08515862af689dc98
+django_strawberry_framework/permissions.py        757dce34cecd7a249b2634947a771d4608808bfe
+django_strawberry_framework/connection.py         4894f90fb2963a44d25b0eabc649c67d04afa587
+django_strawberry_framework/optimizer/nested_fetch.py 4d8d37a7f52cf94d2916f17db3a8a21393e28d57
+django_strawberry_framework/types/resolvers.py    f3341e6a9f52659925762bce097033bac67e3b51
+django_strawberry_framework/utils/write_values.py d28587c7c8d9f0d25e0a01bf289a63d9c3291728
+django_strawberry_framework/rest_framework/resolvers.py 8024703ec0fb09758daeec0585e0065de1c61fc3
+django_strawberry_framework/utils/write_transaction.py eca9ad4d3f765964df05884e080eb3ea63190ca8
+django_strawberry_framework/mutations/permissions.py 54f770ae5aa1238327246cd2dcb141e8aac14965
+django_strawberry_framework/utils/permissions.py  9889d6fe2a24a6e4f17325cbe3fc1955c0a18cec
+django_strawberry_framework/optimizer/walker.py   e8d800052cc87ca77070290c4c2f396061259b81
+django_strawberry_framework/filters/sets.py       4ab65a26b0ccf56f7f40f4938282bba9690673d1
+docs/GLOSSARY.md                                  d3ef357c26ede6a5bd21d4290b394ade4eb987b4
+django_strawberry_framework/list_field.py         21380eb72364caef0da05ca3ee3f26c0134e3904
+django_strawberry_framework/resource_policy.py    4b69e974decbd45916bd55f444f4b5f86724a07a
+django_strawberry_framework/utils/relations.py    7662b0bb669c4dfba4a437f3b8f309357f718dca
+django_strawberry_framework/optimizer/plans.py    cce985319c8833f3660653327d3003f1f03655a5
+django_strawberry_framework/exceptions.py         e06b0b7f776e2f182bc9bfd9e2ee2836e660f55b
+django_strawberry_framework/filters/base.py       ba52351c284425336262ae6c2b82b262f6586fc0
+```
+
+Fifteen rows match their adjudication-2 values; exactly the seven plan-tabled
+rows are refreshed (target, connection, walker, list_field, resource_policy,
+GLOSSARY, tests). Every other row above re-affirms the corresponding
+adjudication-1/2 `Freshness` line for the re-derived conclusion; no run-1
+line was edited.
+
+#### Adjudication pass 3 (run 3) — `## Pending execution` (entries 1–3 re-stated)
+
+Entries 1–3 above stand as run-1/adjudication-1/2 history; state now:
+
+1. Entry 1 (superseded by the five D1 live node ids): CONFIRM. All five
+   resolve at HEAD — `test_products_visibility_api.py`
+   `test_planned_prefetch_child_may_not_pin_its_own_connection` :890 and
+   `test_planned_prefetch_child_still_serves_rows_when_the_hook_only_narrows`
+   :914 (file untouched in range, lines identical), `test_multi_db.py`
+   `test_planned_prefetch_child_cannot_route_itself_to_the_other_shard`
+   :1594, `test_planned_prefetch_child_inherits_an_unrouted_parents_connection`
+   :1619, `test_planned_prefetch_child_follows_a_routed_parent_onto_its_shard`
+   :1636 (+80 from `fee87ac4`'s connection-seal rows; the D1 bodies
+   themselves are outside those hunks). The both-modes gate run is still
+   owed, and the sharded mode still needs the maintainer's word. Recorded for the
+   gate; never triggered here.
+2. Entry 2 (focused gate run over the three oracle suites): CONFIRM
+   unchanged. All three paths resolve at HEAD. The F9-exercise expectation
+   is intact: `is_async_queryset_adapter` still reads 7 + 9 = 16 lines
+   across the two suites at both commits (those files are not fingerprinted,
+   so their landing is gate-watch, never a trigger).
+3. Entry 3 (arms witness, re-pointed at a successor expecting 2/6):
+   REVISE the pointer, CONFIRM the expectation by re-derivation. The
+   adjudication-2 successor path dangles by design (its blob pins refuse
+   this tree — tripwire verified above), so the entry-3 command pointed at
+   a probe that exits 1. The gate should run
+   `uv run python docs/dry/temp-tests/dry-adjud3-querysets-w1/probe_defect_arms_adjud3.py`
+   and expect `sites with a mismatch: 2/6` with zero dead arms and arms
+   8/3/6/7/5/6 (rows argued in I-R4 above). Still `gate:`-typed.
+
+#### Adjudication pass 3 (run 3) — mention-checks and gate-watch (verify, no widening)
+
+- `tests/test_list_field.py` oracle counts: `fee87ac4`'s hunk is an import
+  swap + docstring rename + the announced "Field target" message re-point
+  (8 lines); `1f68871a` adds `transaction=True` + docstring. Neither touches
+  a reader line or an assert — F9's 7 lines reproduce at both commits.
+- spec-034 `:353` call-shape cite: `fa6d48f8` re-pointed the spec's test
+  plan at :444 (and the rationale at :193) only; the :353 "Verified
+  dependency to protect" clause is byte-identical.
+- Gate-watch: `test_multi_db.py` changed in range (`fee87ac4` only, +82/−1
+  per its stat); the five D1 node ids resolve as recorded under entry 1.
+  `test_products_visibility_api.py` is untouched in range. No trigger —
+  the final gate re-runs them as already planned.
+- No other mismatch: the blind 22-table re-hash reproduced exactly the
+  plan's stale set, and the six non-touching commits were each verified to
+  touch no fingerprinted input.
+
+#### Adjudication pass 3 (run 3) — family index and ledger (nothing owed)
+
+No new family, no index-row change, no `## Owned changes` row. The
+`fee87ac4`/`c87f4f98` centralization landed inside the existing
+`post-set-apply-result-validation` owner (`_validate_post_orderset_result`
+and its module), so every family row keeps its owner; the family item
+verifies the concurrent move rather than redoing it. D3 and D-W2-b join
+D2/D4/D5/D-W2-a as closeout-homed records (fixes landed; Worker 0 homes
+the record-keeping, not new work). This pass lands no production edit, no
+test edit, and no tracked file besides this artifact's own append.
+
+#### Adjudication pass 3 (run 3) — item state
+
+Zero production edits, zero test edits, zero new tracked files. Untracked
+scratch created, all inside the fresh scope (other scopes untouched):
+`docs/dry/temp-tests/dry-adjud3-querysets-w1/probe_defect_arms_adjud3.py`
+and `.../probe_byte_identity_adjud3.py`. Item-scoped diff vs
+`ITEM_BASELINE=101a8d752b5a324021ffe0b923cf49270a7588c6` covers only this
+artifact's append plus the `Status:` line (verified before finishing; the
+pre-existing dirt is the attributed adjudication-1+2 append, and the probe
+scope is the authorized fresh scope). `uv run ruff check` /
+`ruff format --check` pass on the scope dir (format last; the COM812
+hand-comma is inside my own scope, no concurrent file touched); no ruff on
+the `.md` artifact. The one authorized focused shared-tree pytest was not
+spent — every claim here is decided by HEAD-byte inspection plus the two
+read-only AST probes. `FAKESHOP_SHARDED=1` and Postgres cells stay
+`unverified`. Concurrent dirt (package, tests, docs) left alone. HEAD
+`24e6b4d3` at start, mid-pass, and finish — unmoved throughout.
+
+## Independent verification (Worker 2) — adjudication-3
+
+Two-phase per the dispatch. Phase A (below, as recorded pre-read in
+`docs/dry/temp-tests/dry-adjud3-querysets-w2/phase_a_expectations.md`) was
+written BEFORE opening `### Adjudication pass 3 (run 3) — Worker 1`
+(artifact lines 3503–4042) and before opening
+`docs/dry/temp-tests/dry-adjud3-querysets-w1/`. Reconciliation + verdict
+follow it.
+
+### Phase A — expectations (recorded blind)
+
+Start HEAD: `24e6b4d3e74b104779225cd6bbff713880bc48e3` (recorded before any
+read). `ITEM_BASELINE=101a8d752b5a324021ffe0b923cf49270a7588c6` resolves.
+Scope `docs/dry/temp-tests/dry-adjud3-querysets-w2/` verified absent, then
+created by me. Method: HEAD-pinned bytes only — `git rev-parse
+<rev>:<path>`, `git show <rev>:<path>`, `git grep -n <pattern> <rev>`
+with both top-level and `**/` patterns (the latter alone misses top-level
+files — an instrument lesson, not a verdict change), `git diff
+69a25369..24e6b4d3`. Two read-only probes of my own (pure AST over `git
+show` bytes; no Django import, zero SQL, no pytest, no settings, no
+database). Never imported `management/commands/inspect_django_type`.
+
+22-hash re-verification at HEAD: 15 MATCH, 7 STALE —
+`utils/querysets.py b68be0e3…`, `tests/utils/test_querysets.py 183d52ba…`,
+`connection.py 4894f90f…`, `optimizer/walker.py e8d80005…`,
+`docs/GLOSSARY.md d3ef357c…`, `list_field.py 21380eb7…`,
+`resource_policy.py 4b69e974…` (full blobs in the probe; old pins exact in
+all 22 rows). Exactly the plan's reconciliation row. Causing range: the
+plan's 11 commits; per-file cause re-derived (querysets ← fee87ac4 /
+44712901 / c87f4f98, +251/−30 in 10 hunks at old 2404 … 4152; tests ←
+44712901 / 24e6b4d3; connection ← fee87ac4 / c87f4f98; walker ← 44712901;
+GLOSSARY ← 9350eb8d / 44712901; list_field ← fee87ac4; resource_policy ←
+9350eb8d). The `ec0d21de` artifact edit (3 hunks) read as the record per
+the plan; its citations re-verified against code.
+
+Per-finding expectations: F1 CONFIRM (3 defs; sidecars new consumers);
+F2 REVISE counts (7 constants, 6 fields; oracles :5076/:5098/:5125
+identical; enumeration 141 = 109/7/25); F3 CONFIRM (6 sites, zero dead);
+F4 CONFIRM (guard :1593 identical, count 2); F5/F6/F7 CONFIRM (symbols
+identical, triggers untriggered); F8 REVISE member line (two child
+policies, both alias-guarded); F9 CONFIRM (0 production, 16 test lines /
+10 asserts); F10 CONFIRM (bodies identical at :1057/:1102/:1582, :1240,
+:1332/:1336/:1751); F11 CONFIRM (6 consumers, schema.py cites untouched);
+F12 CONFIRM with `_snapshot_routing_intent` REVISED to zero external
+consumers (:3120/:3153 in-module) + `prepared_resolver_source` re-pinned
+(:1769, :1715/:1762, :4517/:4539); I-R1/R2/R3/R5/R6 CONFIRM; I-R4 REVISE
+(1-of-5 routing, FIVE runner policies, 2/6 zero dead); D1 FIXED holds
+(per-path pins; multi_db :1594/:1619/:1636 identical); D2 FIXED holds
+(`allow_sliced` 0; :1558; :353); D3 REVISE (HEAD-record FilterSet sentence
+false at HEAD — sealed at connection, list_field publishes no `filter:`;
+expected resolved-by-landing); D4/D5/D-W2-a FIXED holds; D-W2-b
+CONCURRENTLY FIXED by 44712901 (flip open→fixed). Mention-checks:
+test_list_field 8 lines touch import/docstring/match only; spec-034 :353
+intact (:444-only touch). Gate-watch: D1 node ids resolve with identical
+bodies; both-modes run still owed. Pending: entry 1 CONFIRM + re-pin
+(still `proof:`), entry 2 CONFIRM (still `gate:`), entry 3 REVISE pointer
+(old command red at HEAD, exit 1; successor must re-derive 2/6).
+Families: no new family expected (8 new names to `sealed-execution-queryset`);
+`seal-defect-code-wording` + `child-queryset-alias-inheritance`
+parenthetical refreshes; no ledger row. Verdict expectation: `verified`
+(keeping `verified, pending execution`).
+
+Probe outputs (own execution): `probe_spans_adjud3.py` → `enumeration:
+109 funcs + 7 classes + 25 consts = 141`, `ALL OK (23 checks)`, exit 0;
+`probe_arms_adjud3.py` → 5 seal calls with routing at `_validate` only, 6
+fields / 7 constants, all five policy edges re-verified, runner defaults
+flag-equal, `sites with a mismatch: 2/6` with zero dead arms (8/3/6/7/5/6)
+and the negative control intact, exit 0; adjudication-2 entry-3 probe
+re-run read-only → `AssertionError: ('querysets', 'b68be0e3…')`, exit 1.
+
+### Phase B — reconciliation (every difference, explicitly)
+
+Read AFTER Phase A was on disk: W1's record (lines 3503–4042) and both
+W1 probes (read in full, then re-run read-only — outputs identical to
+W1's record and, for the arms table, digit-for-digit identical to my own
+probe's: same 2/6, same counts, same two artifacts).
+
+Agreement (independently derived on both sides): the full 22-table
+identical (all full blobs match); the causing range identical (11 commits,
+same 5 touching with the same per-file attribution, same 6 non-touching
+with matching reasons); the target hunk map identical (10 hunks, same
+old-line starts, 7 prose-only, executable inventory 7+1+rename);
+enumeration identical (141 = 109/7/25, 6 async, same 7 added functions);
+F1/F3/F4/F5/F6/F7/F9/F10/F11 CONFIRM with matching counts, pins and
+reasons; F2 REVISE with the same 7-constant census and oracle re-pins;
+F8 REVISE with the same two-policy member line; F12 with the same
+snapshot revision and re-pins; I-R1/R2/R3/R5/R6 CONFIRM; I-R4 REVISE with
+the same 5-policy set and generalized source-shape reason; D1/D2/D4/D5 /
+D-W2-a FIXED holdings with matching pins; D3 resolved-by-landing with the
+`ec0d21de` sentence dated and superseded by `c87f4f98`; D-W2-b
+concurrently fixed by 44712901; entries 1–3 in the expected states
+(re-pin / CONFIRM / REVISED pointer to a re-derived 2/6 successor, types
+unchanged); mention-checks and gate-watch outcomes identical; no ledger
+row; fences respected.
+
+Deltas reconciled (ten, none verdict-affecting):
+
+1. New-name homes: I expected all 8 names under
+   `sealed-execution-queryset`; W1 assigns the 7 sidecar functions to the
+   pre-existing `post-set-apply-result-validation` (verified: the name
+   stands in run-1's record at line 1154) and the constant to F2/F8. Finer
+   and valid; "no new family" is consistent. Accepted.
+2. Index parentheticals: I expected Worker-0 refreshes for
+   `seal-defect-code-wording` (runner set 5) and
+   `child-queryset-alias-inheritance` (D-W2-b fixed); W1 records "no
+   index-row change". Ownership/files/holding/status genuinely unchanged,
+   so W1's mechanics are correct; the two parentheticals remain available
+   to Worker 0 from W1's record. Advisory below, not a W1 gap.
+3. W1's multi_db "+82/−1 per its stat" vs actual +81/−1 (82 is the stat's
+   total-changed column; fee87ac4-only confirmed). One-digit erratum in a
+   gate-watch note; node ids and bodies verified independently. Noted.
+4. W1's "(MATCH file)" for `extension.py`, which is fingerprinted by no
+   row — precisely "unchanged in range" (absent from the range log).
+   Wording imprecision, substance true. Noted.
+5. F1 direct callers: my probe pins 4 call lines
+   (`reject_async_in_sync_context` 1, `_disposed_awaitable` 1,
+   `_apply_sidecar_*` 1+1); W1's "citation reads correctly" is
+   transitively true. Precise set recorded here; no W1 change needed.
+6. `sql.Query` sweep: mine (capital-Q, adjudication-1's pattern) finds 0
+   outside; W1 additionally names the pre-existing lowercase
+   `lateral_fetch.py:82` import (verified real, file unchanged in range).
+   Complementary; same one-owner verdict.
+7. F4 anchors: W1 re-pins run-1's body sub-span (:1609–1632, endpoints
+   re-verified equal by me); I pinned the def (:1593) plus whole-body
+   identity. Same bytes, different anchors. Agreement.
+8. Matrix twin census 4→6 (new `_apply_sidecar` + `apply_filterset`
+   pairs): W1 does not state the census sentence, but its evidence
+   confirms the axis conclusion for the new pairs (executable-identity
+   modulo the rename; the async twins' extra arms are the same legitimate
+   coloring the moved bodies already carried), and run-1 census prose
+   stays history by precedent. Recorded here with evidence; accepted.
+9. Orderset message ("Field target …"): W1 covers the re-point in the
+   mention-checks; my probe additionally asserts prod + literal oracle
+   moved together with zero old-wording hits. Agreement.
+10. Card-053 row (KANBAN.md:334): verified — it records both halves
+    discharged and notes the list field publishes no `filter:`, exactly
+    as W1's D3 cites. Agreement.
+
+Verification job. Item-diff scope: `git diff
+101a8d752b5a324021ffe0b923cf49270a7588c6 -- <artifact>` is exactly two
+hunks — the `Status:` swap (the diff's sole deletion line) plus a purely
+additive 541-line EOF append (W1's record, read in full); prior text
+untouched, no foreign hunk. The window's other paths (target 4-line
+`__name__`→`_safe_class_name` hardening, bug_hunt ledger, plan,
+tests) are concurrent Worker-0/hunt bytes, out of item scope and left
+alone; the target hunk touches wording only and moves no verdict. HEAD
+tripwire: `24e6b4d3` at my start, mid-phase, and finish — unmoved
+throughout. AGENTS.md prose rules on the diff: no process provenance
+beyond DRY.md-mandated role/plan labels (`Worker 1`, `Worker 0 homes the
+record`, `the plan's 7`); zero hits for audit/sweep/restored/hardening/
+previously/grader/feedback; citations in the precedent form (raw `path:NN`
+allowed in `docs/dry/dry-*.md`, `path::Symbol` elsewhere); no tests added
+(the probes are untracked scratch at the DRY.md-mandated location); no
+cross-file links, so no link block owed; no CHANGELOG, no commit. Pending
+typing: entry 1 still the pinned `proof:`, entries 2–3 `gate:` — types
+unchanged, all three commands live. Test authorization: two own probes +
+two W1-probe re-runs + one retired-probe red confirmation, all read-only;
+no pytest spent; no workspace built (nothing mutates source);
+`inspect_django_type` never imported. Sharded/Postgres cells stay
+`unverified` as typed. `uv run ruff check` + `uv run ruff format --check`
+pass scoped to both adjudication-3 probe dirs (4 files); the layout
+script reports `Fixed 0 file(s)` on my scope. No `## Defects` entries:
+nothing found outside the adjudicated scope.
+
+### Verdict
+
+`Status: verified`. Every W1 claim re-derived by me agrees; the ten
+deltas are finer-or-equal evidence (1, 5–7, 9–10), Worker-0-closeout
+prose (2), noted errata (3–4), and a recorded-here observation (8). Worker
+0 plan marking: keep `verified, pending execution` — entry 1's proof
+still owes the gate run in both modes (sharded mode needs the maintainer's
+authorization); entries 2–3 are gate requests (entry 3 at W1's new live
+path expecting `2/6` with arms 8/3/6/7/5/6, doubly derived — W1 + my
+re-run — and triply witnessed counting my independent probe). No
+family-row, ledger, or pending-entry change is owed to Worker 0 beyond
+that marking; two parenthetical refreshes are available from W1's record
+should closeout want them (`seal-defect-code-wording`: runner set 4→5 +
+rename; `child-queryset-alias-inheritance`: D-W2-b fixed). No defects,
+no `## Defects` entries. Finish HEAD:
+`24e6b4d3e74b104779225cd6bbff713880bc48e3`, unmoved.
+
+### Scoped re-trace (run 7) — Worker 1
+
+Scoped run: `0.0.15 2026-09-28-7`. Adjudication-3 verified this item at
+`24e6b4d3`; HEAD is now `0c0537e2`
+(`0c0537e2dd94a2f5faf3468ad7ee9aa26b3acf62`, verified at start and again
+unmoved at finish). Prior text above untouched; this section appends. No
+production edits, no test edits, no new tracked files: a file-item re-trace
+owes none. `ITEM_BASELINE=8f8ca0fc05bba066755221150fe33d3b4d99a9bb` resolves;
+the item-scoped diff holds this append plus the `Status:` swap and nothing
+else. The target's worktree dirt (`8fc556d5`, hunt `truth.*` migration, ~540
+lines vs HEAD) is concurrent work outside the ledger and the cycle baseline;
+every claim below is traced at HEAD bytes (`3616927d`), never the worktree.
+
+Method. The artifact's recorded pins equal `5ee86193` bytes on 21 of 22
+inputs (verified blob by blob; the one exception is `filters/sets.py`, whose
+pin predates the range by one docstring commit — see the table), so the
+re-trace adjudicates `5ee86193..0c0537e2` per input, read as full diffs never
+as messages. The target drift is one commit (`982537c3`), 13 hunks, 63+/35-:
+(1) the `origin` thread through `_row_source_model` / `normalized_row_source`
+/ `_readable_queryset_state` / `_raw_list_source_message`; (2) new
+`_sentence_start` + single-sourced `_UNSEALABLE_STATE_CAUSES` with the three
+in-file untrusted arms recomposed onto it; (3) the `_SealPolicy`
+docstring widened from post-OrderSet to every post-sidecar result (both the
+`require_unevaluated` and the `reject_combined` bullets); (4) module-docstring
++ prefetch-docstring rewords and two provenance-word comment deletions. Every
+claim below was verified against HEAD bytes via `git show HEAD:<path>`,
+`git rev-parse HEAD:<path>` and `git grep`, plus four read-only pure-AST
+probes over `git show` bytes in `/tmp/stale7-probes/` (no Django import, zero
+SQL, nothing mutates source, so no workspace was built and no workspace run
+id exists). Regions outside the drift hunks are byte-identical to the bytes
+the artifact adjudicated; dispositions cite HEAD re-pins for every moved line.
+
+Enumeration recount at HEAD (`ast.Module.body`, probe): 104 sync + 6 async =
+110 functions, 7 classes, 25 + 1 = 26 constants = 143 names (was 141). Exactly
+two additions, zero removals, zero renames: `_sentence_start` (function) and
+`_UNSEALABLE_STATE_CAUSES` (constant). Homes proposed below; the I-R5 closure
+holds with two new rows.
+
+#### Scoped re-trace (run 7) — fingerprints: 11 MATCH, 1 STALE-plus-note, 10 STALE
+
+`git rev-parse HEAD:<path>` for all 22 inputs (recorded pin → HEAD):
+
+```text
+django_strawberry_framework/utils/querysets.py    b68be0e3… → 3616927d… STALE (982537c3: origin + causes + policy prose)
+django_strawberry_framework/auth/mutations.py     dbe64995… → d1a59c44… STALE (e6a33c46 module-docstring first line only)
+django_strawberry_framework/routers.py            a18c5001… → 7d5e4814… STALE (same, first line only)
+tests/utils/test_querysets.py                     183d52ba… → 73e7a6c2… STALE (982537c3 wording oracles + 4667db4f real-model fixtures)
+django_strawberry_framework/permissions.py        757dce34… → 72102cc0… STALE (982537c3: both untrusted arms onto the constant)
+django_strawberry_framework/connection.py         4894f90f… MATCH
+django_strawberry_framework/optimizer/nested_fetch.py 4d8d37a7… MATCH
+django_strawberry_framework/types/resolvers.py    f3341e6a… → 72d62dc4… STALE (982537c3: the one origin= caller, +3 lines)
+django_strawberry_framework/utils/write_values.py d28587c7… MATCH
+django_strawberry_framework/rest_framework/resolvers.py 8024703e… → 0d302782… STALE (e6a33c46 first line only)
+django_strawberry_framework/utils/write_transaction.py eca9ad4d… MATCH
+django_strawberry_framework/mutations/permissions.py 54f770ae… MATCH
+django_strawberry_framework/utils/permissions.py  9889d6fe… MATCH
+django_strawberry_framework/optimizer/walker.py   e8d80005… → 75f9c6b6… STALE (53a50bf7 name-memo + e1ba094e/e6a33c46 prose; child-seal region untouched)
+django_strawberry_framework/filters/sets.py       4ab65a26… → 993e887a… STALE-PLUS-NOTE (see below)
+docs/GLOSSARY.md                                  d3ef357c… → 3413edc3… STALE (4 hunks; sealed-queryset reword + dup-Status delete)
+django_strawberry_framework/list_field.py         21380eb7… MATCH
+django_strawberry_framework/resource_policy.py    4b69e974… MATCH
+django_strawberry_framework/utils/relations.py    7662b0bb… → 8dbc3fe6… STALE (instance_accessor docstring-only reword)
+django_strawberry_framework/optimizer/plans.py    cce98531… MATCH
+django_strawberry_framework/exceptions.py         e06b0b7f… MATCH
+django_strawberry_framework/filters/base.py       ba52351c… MATCH
+```
+
+`filters/sets.py` note: the recorded pin `4ab65a26` is the `24e6b4d3` blob,
+not the `5ee86193` blob (`722e0c77`). `29ddc0a8` (inside
+`24e6b4d3..5ee86193`, after adjudication-3) retouched two docstring lines in
+`FilterSet.apply_sync`'s trailer (`materialized` → `lazy`, :3357/:3396); the
+in-range hunk retouches one comment line (:1705). All three hunks are
+prose-only and touch neither F8's `:2592` edge (same line, same bytes) nor
+F11's consumer. Pin refreshed to `993e887a` with this correction; no finding
+moves on it.
+
+#### Scoped re-trace (run 7) — F1 (CONFIRM)
+
+Count stays 3. `auth/mutations.py:505-511` and `routers.py:279-285` are
+byte-identical at the same lines (each file's whole drift is its line-1
+docstring, 1+/1-, line count preserved); the disposal region
+(`_disposed_awaitable` :197, `_dispose_sync_awaitable` :219) sits below the
+target's :51 docstring hunk (+2 shift) and above every code hunk, bodies
+untouched. The new `_apply_sidecar_*` consumers F1 already counts are intact.
+The second-axis challenge forces the same 3. Family
+`awaitable-refusal-and-disposal` unchanged.
+
+#### Scoped re-trace (run 7) — F2 (CONFIRM, re-pinned; one new family-sweep candidate)
+
+Still one owner. Exclusivity re-derived at HEAD: `models.QuerySet(` outside
+the target = 0 hits; `sql.Query` touches outside = 0 (the only `models.sql`
+import stays the pre-existing `lateral_fetch.py:82` where-clause import, file
+unchanged in range); executable `object.__getattribute__` /
+`type.__getattribute__` / `inspect.getattr_static` outside = 0 (the one
+textual hit stays the pre-existing `converters.py:119` comment).
+`_seal_or_defect` still has exactly 5 call sites, all in-file (:3038 with
+`expected_routing`, :3672, :3992, :4097, :2550; def :3265), zero callers
+package-wide outside. `_SealPolicy` stays 6 fields with identical defaults;
+all 7 policy constants keep byte-identical flags (probe-read). The defect-code
+set is still the same closed 9 in the same order (prose :3277-3281). The
+`origin` thread adds a consumer parameter, not a definition (analysis in its
+own section below): the seal body, the policy record and every call shape keep
+their counts. The three inventory-oracle tests exist with AST-identical bodies
+at :5150/:5172/:5199 (+74 test-file shift, below every test hunk).
+`_GraphWalk` callers hold by byte-identity (no code hunk in :826-2700; the
+:2420 hunk is docstring-only, net 0).
+
+Re-pins: the four planning readers are `connection.py:1610` (MATCH file),
+`nested_fetch.py` 123/131/197 (MATCH), `predicates.py:165` (file absent from
+the range log, same statement), `extension.py:1188` (was :1161, +27, same
+`_result_cache` getattr). NEW for the family sweep: `extension.py:1237`
+(`if queryset.query.combinator: return queryset`, the 982537c3 combined
+passthrough) is a fifth `.query`-attribute read the run-1 sweep could not
+have seen; whether its input is already-sealed is the family item's question
+(F2 already routes that classification to the family — this names the new
+member, it does not answer it). The glossary projection moved with the code:
+*Sealed execution queryset* (:1893) now states the post-sidecar `evaluated`
+refusal, and the module + prefetch docstrings reword their cause lists onto
+the constant's vocabulary — production + projection moving together, the
+legitimate shape. Family `sealed-execution-queryset` unchanged.
+
+#### Scoped re-trace (run 7) — F3 (REVISE: arm sets identical, prose ownership moved)
+
+`_defect_message` still has exactly 6 call sites (probe-read with arm sets):
+target :3082 (8 arms: 7 shape codes via `dict.fromkeys` + `routing`),
+:3753 (3), :4000 (6), :3877 (7); `permissions.py:354` (5), `:412` (6) — counts
+8/3/6/7/5/6, digit-for-digit the adjudication-3 record, zero dead arms. The
+dispatcher itself (:3828) sits between drift hunks, body untouched. No code
+added, no arm added or removed, no site added: the F3 RULE (each site renders
+only the subset it can reach) holds exactly as recorded, and C12 still forces
+1 definition with 6 hand-revisited sites.
+
+What the drift moves is a wording sub-rule F3 never counted: the five
+`untrusted` arms (3 in-file + 2 permissions) each spelled their own cause
+list ("a foreign Query class, a foreign row iterable, or malformed
+deferred-filter state") plus per-site advice. Those five spellings are now one
+constant, `_UNSEALABLE_STATE_CAUSES` (:3733), with per-site subject + detail
+prefixes retained. The commit's own message states the consolidation ("The
+five untrusted seal messages listed three causes ... they now share
+_UNSEALABLE_STATE_CAUSES"). So: the seal-defect-code FAMILY gains a
+concurrently-consolidated member — the cause-list + advice text is now
+authored once in `utils/querysets.py` and composed by name (permissions.py
+imports it at :120). The family item verifies this move, it does not redo it;
+the gate it owes still gates arm SETS, now with the prose half already
+single-sourced. `seal-defect-code-wording` stays gate-plus-declaration, with
+the declaration half narrower than recorded.
+
+The consolidation arrived with independent oracles: six literal-substring
+assertions pin the constant's text without reading it — source arm
+(test_querysets.py:461), result arm (:753), raw-list arm
+(test_resource_policy.py:2153, plus its file-local tail "a result cache that
+is not an exact list"), root + edge arms (test_permissions.py:1228/:1419),
+and over the wire (test_list_field_api.py:2353). A seventh
+(tests/types/test_resolvers.py:1636) pins the origin lead. Finding stays in
+family `seal-defect-code-wording`.
+
+Refreshed fingerprints for this finding: `utils/querysets.py`
+`3616927de2bc8a7bead38f255ece8695064d5de0`, `permissions.py`
+`72102cc08e19689b61bbf8bb8697b7d86e4ec1a5`.
+
+#### Scoped re-trace (run 7) — F4 (CONFIRM)
+
+Count stays 2. `connection.py::_guard_source_not_pre_sliced` is in a MATCH
+file (byte-identical, same lines); the seal's `sliced` arm code is untouched
+(the only seal-body hunks are the two provenance-word comment deletions at
+:3494/:3504, which no finding cites); `nested_fetch.py` is MATCH including the
+reject-vs-degrade contract difference. All 7 policy constants keep their
+flags, so no third definition arrives via the licence axis. The family item's
+open question and the `GraphQLError` vs `ConfigurationError` proof it owes
+are unchanged.
+
+#### Scoped re-trace (run 7) — F5 (CONFIRM)
+
+Count stays 2, site lists unchanged. `types/resolvers.py::_visible_related_object`
+(:395) sits above that file's :533 hunk, body untouched; its 7 call sites are
+in unchanged regions; `utils/write_values.py` is MATCH (`:226` consumer
+intact); `rest_framework/resolvers.py:1447` is in the file's 1+/1- line-1-only
+drift, same line, same call shape. The `types/resolvers.py` drift (the
+`prefetch_origin` + `origin=` call at :538/:579, inside `_make_relation_resolver`)
+touches neither definition nor the seed-pin/coloring variation axes. Target
+re-pins: `related_visibility_queryset_or_default` :4239,
+`visible_related_object` :4308 (both +28, bodies below every code hunk). The
+disprove-first question the family item owes is untouched by every causing
+commit. Family `related-object-visibility-recheck` unchanged.
+
+#### Scoped re-trace (run 7) — F6 (CONFIRM)
+
+Rejection stands. `coerce_field_value_or_none` (def :312, +2) and `_stringified`
+(:4260, +28) with `stringified_pks_present` (:4270) / `pks_all_present` (:4294)
+are outside all code hunks; `utils/write_transaction.py`,
+`utils/write_values.py`, `rest_framework/resolvers.py` (line-1-only drift)
+carry no relevant change. The reconsideration trigger is untriggered:
+production callers are still only `visible_related_objects` (in-file :4374,
++28) and `write_values.py:313` (MATCH file, same `type_check_relation_id`
+routing). `keyset.py:384` is intact (file absent from the range log, same
+`field.to_python` statement). Contract difference byte-identical. Family
+`field-value-coercion` unchanged.
+
+#### Scoped re-trace (run 7) — F7 (CONFIRM)
+
+Rejection stands. `sync_pipeline_recourse` (:356, +2) and `_RELAY_ASYNC_RECOURSE`
+(:349, +2) are outside all code hunks with byte-identical literals;
+`mutations/permissions.py` and `utils/permissions.py` are MATCH;
+`permissions.py`'s `_ASYNC_RECOURSE` re-pins to :137 (+1 import line) with the
+same literal, and the drift hunks in that file (import + two untrusted arms +
+one docstring) never touch the recourse sentence or the four-clauses-differ
+reason. The three compositions keep identical shapes at
+`mutations/resolvers.py:142` (was :139, +3 from that file's own drift),
+`forms/resolvers.py:125`, `rest_framework/resolvers.py:201`. Reconsideration
+trigger (differ only in the subject noun) untriggered. Family
+`sync-boundary-recourse-wording` unchanged.
+
+#### Scoped re-trace (run 7) — F8 (CONFIRM, re-pinned)
+
+The two enforcement mechanisms are still 2 definitions, correctly counted:
+`base_queryset`'s `using` arm (body `manager.using(using).all() if using is
+not None else manager.all()` intact, :248) and the seal's
+`require_shared_alias` arm (untouched code). Enforcement sites:
+`permissions.py:691` (`using=state.alias`, -1), `filters/sets.py:2592`
+(`using=parent_db`, same line), `_sealed_prefetch_related_lookups` (seal call
+at :2550 with `required_alias` + `_PREFETCH_CHILD_POLICY` positional, +2; the
+:2420 hunk in that function is docstring-only). The walker still seals under
+the two child policies with `require_shared_alias=True` in both
+(probe-read flags): default `_LIST_RELATION_CHILD_POLICY` (:525), unrouted
+seed (:562), `policy=policy` (:602), nested-connection seam (:607 def, :630
+policy edge, wired at :1726), plain-list call taking the default (:1141).
+The glossary projection cite is intact (`Prefetch alias threading`, same
+sentence, same :1558). Coupling to D1 stays discharged. Family
+`child-queryset-alias-inheritance` still owes its family item.
+
+#### Scoped re-trace (run 7) — F9 (CONFIRM)
+
+Still no production reader. HEAD census (`git grep` over package + tests +
+examples): the definition (:414, +2) is the only package hit; test readers
+are 7 lines in `tests/test_list_field.py` + 9 in
+`tests/optimizer/test_extension.py` = 16 lines, the same count at both commits.
+`wrap_` consumers are still `list_field.py` only (MATCH file: import :105 + 4
+call sites :1437/:1473/:1490/:1526, same shapes) and `unwrap_` still
+`optimizer/extension.py` (re-pinned :1169/:1172, +27, same
+`(value, was_adapted)` shapes; that file's drift is the combined passthrough
++ cache lifecycle + first line, none of it in the adapter path). Not in any
+`__all__`, not re-exported (no `__all__` drift in range). The principle-11
+keep-or-delete decision with its oracle-shape entailment still belongs to
+family `async-only-queryset-row-adapter`.
+
+#### Scoped re-trace (run 7) — F10 (CONFIRM)
+
+Rejection stands; the contract difference is byte-identical (`connection.py`
+MATCH — both QuerySet-yes sites and the union admission test unchanged;
+`is_async_only_iterable` :377, +2, outside all code hunks). Composed consumers
+re-pin with identical shapes: `list_field.py` :1332/:1336/:1751 (MATCH file),
+`resource_policy.py:1240` (MATCH file, and its `:1051`
+`normalized_row_source(result)` default-origin call is the same pre-existing
+consumer). `list_field.py` holds no direct `AsyncIterable`/`AsyncIterator`
+reference at HEAD. Reconsideration trigger untriggered. Recorded under
+`async-only-queryset-row-adapter`, unchanged.
+
+#### Scoped re-trace (run 7) — F11 (REVISE: consumer files 6 → 5, conclusion stands)
+
+Still 1 definition, same direct-site classification — but the consumer census
+moves on a non-target hunk this re-derivation must report truthfully.
+`run_in_one_sync_boundary` (:467, +2) is outside all code hunks. The five
+direct `sync_to_async(...)` sites keep byte-identical shapes at
+`types/resolvers.py` :619/:692/:763 (+3 from that file's origin hunk) and
+`testing/client.py` :471/:475 (same lines; that file's whole drift is its
+line-1 docstring). Neither encodes the consumer-hook rule, as recorded. The
+package-wide `sync_to_async(` census is 10 files with identical per-file
+counts except `schema.py` 2 → 1, and that delta is prose-only (a docstring
+reword dropped one ``sync_to_async(`` mention; schema.py never held an
+executable direct call).
+
+What moves: `1b6a09b1` removed schema.py's `run_in_one_sync_boundary` import
+(:79) and all three calls (:346/:360/:373), replacing them with per-window
+private-thread machinery (`ThreadPoolExecutor`, `SyncToAsync`,
+`ThreadSensitiveContext`). At HEAD schema.py carries only a prose mention
+(:430). The remaining five consumer files still compose by name
+(`permissions.py:126` + call :733, `orders/sets.py:50` + call :831,
+`filters/sets.py:83` + call :3497, `mutations/resolvers.py:105` + call :1308,
+`auth/mutations.py:73` + calls). The new schema machinery is neither a second
+definition nor a new enforcement site of this rule: F11's contract is "a
+consumer-overridable sync hook runs in exactly one off-loop worker", while
+the window machinery answers per-window thread/connection isolation for
+completion-spanning transactions (different contract, different reasons to
+change — the same classification F11 already gives the pre-existing direct
+sites). C7 still forces 1 definition. Holding-family consequence for verified
+`one-sync-boundary` named below (consumer census record moved; verdict stands
+subject to Worker-0's routing).
+
+Refreshed fingerprints for this finding: `utils/querysets.py`
+`3616927de2bc8a7bead38f255ece8695064d5de0`, `types/resolvers.py`
+`72d62dc4ebfe90aa1ed13e6786c63f9d76873e59`.
+
+#### Scoped re-trace (run 7) — F12 (CONFIRM all live rows + re-pins)
+
+Superseded rows stay superseded (adjudicated under I-R1/I-R6, confirmed
+there). Every live row re-derived:
+
+- `_safe_routing_repr`: production readers still only the seal's routing arm
+  (:3448-3451, +5). 1 definition. CONFIRM.
+- `_GraphWalk` / `_WalkState` / `_walk_short_circuit` (defs :828/:843/:892,
+  +2): region byte-identical (no code hunk in :826-2700), caller count holds
+  by construction; the `converters.py:119` hit is still the pre-existing
+  comment. CONFIRM.
+- `_snapshot_routing_intent`: still ZERO external consumers — executable
+  callers only in-file at :3125/:3158 (was :3120/:3153, +5); package-wide
+  sweep finds nothing else. Still 1 definition. CONFIRM.
+- `_routing_hints_equal`: reader still the seal (:3442, +5). CONFIRM.
+- `_bake_deferred_filter_or_defect` + `_deferred_value_defect`: sole caller
+  still the seal (:3497, +5); `PROHIBITED_FILTER_KWARGS` still single-sited
+  (import + floor mirror :102-110, one use :2675, +2). The recorded challenge
+  still returns 1. CONFIRM.
+- `prepared_resolver_source` (def :4490, +28): still composed by both
+  collection flavors (`connection.py:1769`, `list_field.py:1715/:1762` — both
+  MATCH files) plus the two in-file post-process callers (:4545/:4567, +28).
+  CONFIRM.
+- `_coerced_manager_queryset` and `SyncMisuseError`: see I-R3 / I-R5.
+
+#### Scoped re-trace (run 7) — I-R1 (CONFIRM)
+
+Rejection stands. `_prefetch_relation_target_or_none` (:2306, +2) and
+`_reverse_relation_by_accessor_or_none` (:2356, +2) are above the first code
+hunk; the :2420 hunk is the NEXT function's docstring, as its `@@` header
+shows. `utils/relations.py`'s drift is an `instance_accessor` docstring-only
+reword (:700) — none of the mechanism bodies (`classify_path`,
+`_resolve_segment_field`, `_lenient_traverses_to_many`) is touched;
+`connection.py`, `optimizer/plans.py`, `list_field.py` are MATCH, so the
+five-body mechanism table, the contract difference and both reconsideration
+triggers rest on unchanged bodies, including the "count rises to 7" caveat
+(`_is_deterministic_order_name`, same lines).
+
+#### Scoped re-trace (run 7) — I-R2 (CONFIRM)
+
+Family naming and both exclusions stand. `utils/permissions.py` and
+`filters/base.py` are MATCH, so the exclusion reasoning rests on unchanged
+bodies. No causing commit touches either file. Family
+`orm-lookup-path-resolution` unchanged.
+
+#### Scoped re-trace (run 7) — I-R3 (CONFIRM)
+
+Still file-local. `models.Manager` appears at exactly three lines
+package-wide, all in this file (:307 `normalize_query_source` arm,
+:3778 `_coerced_manager_queryset` def, :4095 `_normalized_visibility_result`
+arm — count and file identical, re-pinned). Both entry points and the coercion
+body are intact; the flag to the `utils/` folder item stands.
+
+#### Scoped re-trace (run 7) — I-R4 (REVISE: same rows, wording half single-sourced)
+
+Both load-bearing facts re-derived against the new tree by AST probe, not
+inherited. (1) `expected_routing` is still passed at exactly 1 of the 5 seal
+calls (`_validate_post_orderset_result`, :3038); the other four (:2550, :3672,
+:3992, :4097) pass none — the origin thread adds parameters to the row-source
+call chain, never a seal call, and the sidecar entries still reach the seal
+through the validator. So `routing` is still unreachable at both visibility
+sites. (2) The complete `policy=` set reaching the runners is still FIVE:
+`_DEFAULT_SEAL_POLICY` (default), `_CASCADE_SEAL_POLICY`
+(`permissions.py:622`, `:704`), `_PREFETCH_CHILD_POLICY` (walker seam :630),
+`_LIST_RELATION_CHILD_POLICY` (walker default :525), and
+`_LIST_ARGUMENT_VISIBILITY_POLICY` (`list_field.py:1444`, `:1497`, plus the
+connection's `_sidecar_visibility_policy` — both MATCH files). None of the
+five sets `require_unevaluated` (still only `_SIDECAR_RESULT_POLICY`, still
+reaching the seal solely through :3038), so `evaluated` is still unreachable
+at both sites.
+
+Arm sets probe-read at all six sites: 8/3/6/7/5/6 with ZERO dead arms — the
+D5 fix holds through the recompose (only `untrusted` prose changed, no arm
+added or removed). The two mismatch artifacts keep their reasons: (a)
+`_validate_post_orderset_result` — the KNOWN subsumption (comment intact at
+:3054-3064, alias arm correctly absent); (b) `_prepared_visibility_source` —
+the source-shape pairing artifact, unchanged: the sole production pairing for
+both flag-setting policies is still the unrouted `base_queryset` seed (walker
+:562), under which `alias` cannot fire, and the flip trigger (a production
+caller pairing EITHER policy with a routed source) is untriggered. What the
+drift revises is the gate population's COST side: the family item no longer
+owes a prose-consolidation design — the cause-list text is already one
+constant — it gates arm sets against the five-policy + routing + alias-shape
++ declared-subsumption model and verifies the constant's composition. Family
+`seal-defect-code-wording` stays gate-plus-declaration.
+
+Refreshed fingerprints for this finding: `utils/querysets.py`
+`3616927de2bc8a7bead38f255ece8695064d5de0`, `permissions.py`
+`72102cc08e19689b61bbf8bb8697b7d86e4ec1a5`, `optimizer/walker.py`
+`75f9c6b65ed131913b30db541a5b09b31cc4b96a`.
+
+#### Scoped re-trace (run 7) — I-R5 (CONFIRM)
+
+Still file-local with the population recorded. `SyncMisuseError` (:121, +2)
+is outside all code hunks with unchanged bases (`ConfigurationError`,
+`RuntimeError`); both siblings keep their bases (`list_field.py` and
+`resource_policy.py` are MATCH files). Declarations-not-definitions reasoning
+stands.
+
+#### Scoped re-trace (run 7) — I-R6 (CONFIRM)
+
+Rejection stands. `utils/querysets.py::_safe_class_name` (:144, +2) is
+outside all code hunks; `exceptions.py` is MATCH, so the contract difference
+and the trigger rest on unchanged bodies at both owners.
+
+#### Scoped re-trace (run 7) — D1 (FIXED-owned; holding re-verified)
+
+Disposition: fixed (owned fix `fd39cac6`, in the ledger). Verified at HEAD:
+the walker still seeds `base_queryset(field.related_model)` unrouted (:562)
+and seals under `policy=policy` (:602) with `_LIST_RELATION_CHILD_POLICY` the
+default (:525) and `_PREFETCH_CHILD_POLICY` at the nested-connection seam
+(:630) — both carrying `require_shared_alias=True` (probe-asserted flags),
+so the owned fix's verdict holds on BOTH paths. The seal arm deciding it is
+untouched code (the seal-body hunks are comment-only). The walker drift
+(53a50bf7 name-memo region :261-450 plus prose) never enters the child-seal
+region. The five permanent live rows resolve at HEAD (visibility :1076/:1100,
+re-pinned; multi_db :1594/:1619/:1636, identical) — see the Pending note; the
+both-modes gate run is still owed. `## Defects` routing note stays accurate.
+
+#### Scoped re-trace (run 7) — D2 (fixed-concurrent; holding re-verified)
+
+Disposition: concurrently fixed (unchanged). `allow_sliced` still has zero
+hits across the package, the glossary and spec-034 at HEAD (re-swept). The
+glossary half keeps its fixed sentence (`Prefetch alias threading`, :1558,
+intact); the spec-034 half is untouched in range. Worker 0 homes the record,
+not new work.
+
+#### Scoped re-trace (run 7) — D3 (RESOLVED-fixed stands; prose note DISCHARGED by the drift)
+
+Disposition: resolved-by-landing (unchanged) — and the drift discharges the
+one open note adjudication-3 left. The `require_unevaluated` bullet
+(:2781-2795) no longer reasons from "the list field invoked that ordering
+method one step earlier": it now states the rule for every post-sidecar
+result (`_SIDECAR_RESULT_POLICY`) — a public `FilterSet.apply_*` or
+`OrderSet.apply_*` return, on the list field and the Relay connection alike.
+The "true instance, now an incomplete one" qualification is therefore gone;
+the prose matches the resolved state. The `reject_combined` bullet moved the
+same way ("on the list field and the Relay connection alike, wherever a list
+argument is active"). The glossary projection moved with the code (*Sealed
+execution queryset*, :1893, now states the post-sidecar `evaluated` refusal).
+No consolidation ever depended on D3. Worker 0 homes the record; the family
+item inherits no stale note.
+
+Refreshed fingerprints for this defect's record: `utils/querysets.py`
+`3616927de2bc8a7bead38f255ece8695064d5de0`, `docs/GLOSSARY.md`
+`3413edc36ccf2ab50d9e0f3c9d78cf1df75024cd`.
+
+#### Scoped re-trace (run 7) — D4 (fixed-concurrent; holding re-verified)
+
+Disposition: concurrently fixed (unchanged). The `base_queryset` docstring
+(:248-262, +2) keeps the repaired wording and the body is byte-identical to
+the measured tree (region outside all code hunks). No re-run needed or owed:
+the exact bytes adjudication-1 measured are the HEAD bytes. Worker 0 homes
+the record.
+
+#### Scoped re-trace (run 7) — D5 (fixed-concurrent; zero dead re-derived)
+
+Disposition: concurrently fixed (unchanged), re-derived against the new tree.
+The arms probe reads all six arm sets from the AST at HEAD bytes: 8/3/6/7/5/6
+with zero dead arms anywhere — the D5 fix holds through the rename (kept) and
+the recompose (prose-only). `_raw_list_source_message`'s docstring keeps the
+repaired enumeration (now correctly including `combined` among the
+switched-off codes). The fallback contract holds: any code the seal gains
+without an arm still renders as the framework defect `_defect_message` names
+— the raw-list site's `subject` argument changed wording (`f"The {name}
+{origin}"`) but the fallback body is untouched, and its oracle
+(`test_unrendered_defect_code_says_so_instead_of_mislabelling`, AST-identical
+at :5150) renders through the dispatcher directly, never through the site.
+Family `seal-defect-code-wording`; routing note stays accurate. Worker 0
+homes the record.
+
+Worker-2 D1-verification defects, observed (outside the F/D scope, one line
+each for Worker 0): D-W2-a is fixed and its holding re-verified — both runner
+docstrings name the walker's actual policy pair (`_PREFETCH_CHILD_POLICY` /
+`_LIST_RELATION_CHILD_POLICY` at :4148/:4150 and :4403). D-W2-b is fixed and
+its holding re-verified — the restated premises are intact (the `_SealPolicy`
+`reject_sliced` bullet untouched; the walker licence comments at :567/:577
+intact; the glossary sentence at :1558 intact). Worker 0 homes the records.
+
+#### Scoped re-trace (run 7) — O1 (observed, new): `_defect_message` says "never the wording"
+
+D4-class prose defect, minor, found while tracing the recompose. The
+`_defect_message` docstring (:3829-3843) states: "Each site owns its own prose
+... what is shared is the dispatch and the exhaustiveness, never the wording."
+That sentence was true when written; the drift shares the untrusted cause-list
++ advice wording across all five arms via `_UNSEALABLE_STATE_CAUSES`, whose
+own comment states the new rule ("the cause list and advice stay one text so
+no surface names fewer causes than the seal refuses"). A next author honoring
+"never the wording" would un-share the constant. Per the D4 rule (a wrong
+stated reason is worse than none), the sentence owes a one-clause repair
+(per-site subject + detail framing stays per-site; the cause list + advice is
+constant-owned). No behavior is affected; no consolidation depends on it.
+**Routes to:** `utils/querysets.py::_defect_message` docstring. Family
+`seal-defect-code-wording`. Needs a named owning card at closeout (Worker-0
+homes; I never edit the plan).
+
+Not a defect, recorded so Worker-2 sees it was considered:
+`_prepared_visibility_source`'s docstring still summarizes sealability as "(a
+plain `sql.Query`, a Django row iterable, a pending deferred filter in the
+exact shape Django writes)". That parenthetical is a positive summary, not the
+cause enumeration the constant owns, and no drift hunk touches it — it stands
+as written.
+
+#### Scoped re-trace (run 7) — enumeration: two new names, homes proposed
+
+- `_UNSEALABLE_STATE_CAUSES` (:3733) → adopt into family
+  `seal-defect-code-wording` (new index row; it IS the wording single-source:
+  5 executable arms + 1 import + 1 prose cite, zero test reads of the symbol
+  itself). Challenge: "an eighth unsealable cause must be named" → 1
+  definition (the constant) + 7 literal oracles move with it.
+- `_sentence_start` (:3724) → file-local: "capitalize a refusal lead without
+  touching the rest". Challenge: "a second refusal-lead shape must capitalize
+  differently" → 1 definition; readers are exactly the 4 in-file refusal sites
+  (:3620/:3718/:3752/:3769). No second site after the matrix (package-wide
+  sweep: no other capitalization helper for refusal leads; `str.capitalize`
+  would lowercase the rest and is the wrong primitive).
+- Matrix twin census stays 6 pairs: the drift adds one sync function and zero
+  async, so no new colored pair exists to compare.
+
+#### Scoped re-trace (run 7) — the `origin` thread: a consumer parameter, not a definition
+
+Judgment requested by the dispatch. The thread adds NO definition:
+`_row_source_model(state, origin)` (required positional),
+`normalized_row_source(value, *, origin=...)` (keyword, defaulted),
+`_readable_queryset_state(value, origin=...)` (defaulted),
+`_raw_list_source_message(defect, name, origin)` (required positional). The
+change challenge "a new origin must be named" forces ZERO definitions to move
+— a caller passes a string. There is exactly ONE non-default caller
+package-wide: `types/resolvers.py:579`
+(`normalized_row_source(cached, origin=prefetch_origin)`); every other
+production call site (`resource_policy.py:1051`, the in-file chain,
+`materialized_rows`' default read) and every test call site keeps the default.
+(The unrelated `origin=` hits — `FilterGenerationProvenance`,
+extension `_OriginAndModel`, `types/base.py` — are a different vocabulary with
+a different owner, excluded with reason.) F2's "distinct behavior" note (the
+raw-list rule asks who owns the slice, not who may see the rows) is confirmed
+and sharpened: the new `origin` docstring paragraph states the same split for
+refusal attribution (prefetch cache vs resolver return). No holding-family
+consequence beyond the `sealed-execution-queryset` consumer census gaining one
+member (named in the family section).
+
+#### Scoped re-trace (run 7) — probes (read-only; no workspace, no pytest)
+
+No source-mutating proof was needed (nothing here mutates source), so no
+disposable workspace was built and no workspace run id exists. No pytest was
+spent (not authorized; every claim is decided by HEAD-byte inspection). Four
+read-only pure-AST probes over `git show` bytes in `/tmp/stale7-probes/`
+(not in the repo; contents: `enumerate.py` → 141 = 103+6/7/25 at baseline,
+143 = 104+6/7/26 at HEAD, additions exactly `_sentence_start` +
+`_UNSEALABLE_STATE_CAUSES`; `arms.py` → 5 seal calls with routing at :3038
+only, 6 fields, 7 policies with identical flags; `arms2.py` → arm sets
+8/3/6/7/5/6; `oracles.py` → the three oracle bodies AST-identical across the
+range). Re-runnable by Worker-2 from the descriptions; nothing below is
+trusted from the record alone.
+
+#### Scoped re-trace (run 7) — `## Pending execution` (entries 1-3 re-stated)
+
+Entries 1-3 above stand as history; state now:
+
+1. Entry 1 (the five D1 live node ids): CONFIRM + re-pin. All five resolve at
+   HEAD — `test_products_visibility_api.py`
+   `test_planned_prefetch_child_may_not_pin_its_own_connection` :1076 and
+   `test_planned_prefetch_child_still_serves_rows_when_the_hook_only_narrows`
+   :1100 (file drifted, bodies outside the D1 hunks), `test_multi_db.py`
+   :1594/:1619/:1636 (identical lines). The both-modes gate run is still owed,
+   and the sharded mode still needs the maintainer's word. Still `proof:`-typed.
+2. Entry 2 (focused gate run over the three oracle suites): CONFIRM unchanged.
+   All three paths resolve at HEAD. The F9-exercise expectation is intact
+   (`is_async_queryset_adapter` still reads 7 + 9 = 16 lines across the two
+   suites). Still `gate:`-typed.
+3. Entry 3 (arms witness): the adjudication-3 successor path dangles by design
+   (its blob pins tripwire-refuse this tree — the pins work). The expectation
+   is re-derived HERE, not trusted: `sites with a mismatch: 2/6` with zero
+   dead arms and arms 8/3/6/7/5/6 (rows argued in I-R4 above). Still
+   `gate:`-typed. No successor probe was written: run-7 protocol retires new
+   `docs/dry/temp-tests/` scratch (legacy scopes are read-only evidence), and
+   a successor's home needs a Worker-0 decision — named below, not decided
+   here.
+
+#### Scoped re-trace (run 7) — family index and ledger consequences (Worker-0 routes; I never edit the plan)
+
+No `## Owned changes` row (zero production edits). Consequences, explicitly:
+
+1. `seal-defect-code-wording` (open): (a) the untrusted-arm PROSE consolidated
+   concurrently (5 spellings → 1 constant) — the family item verifies, it does
+   not redo; its gate still gates arm SETS; (b) adopt
+   `_UNSEALABLE_STATE_CAUSES` as an owned member (new index row proposed
+   above); (c) adopt the 7 new literal oracles (6 cause-list + 1 origin lead)
+   as the wording pins; (d) home O1 (the "never the wording" sentence).
+2. `sealed-execution-queryset` (open): (a) the family sweep gains a 5th
+   candidate `.query` read to classify (`extension.py:1237`, combined
+   passthrough); (b) the `normalized_row_source` consumer census gains the
+   types/resolvers prefetch caller (consumer, not a definition).
+3. `one-sync-boundary` (VERIFIED — flagging, not reopening): the consumer
+   census moved 6 → 5 files (`1b6a09b1` removed schema.py's import + 3 calls;
+   the replacement window machinery is classified above as neither definition
+   nor enforcement site). Definition count unchanged; the verified verdict
+   stands subject to Worker-0's call on whether the census move needs a
+   family-record note at closeout.
+4. `post-set-apply-result-validation` (open): D3's adjudication-3 prose note
+   is discharged — the family item inherits no stale note.
+5. `child-queryset-alias-inheritance`, `awaitable-refusal-and-disposal`,
+   `recomposition-illegal-source-rejection`, `related-object-visibility-recheck`,
+   `async-only-queryset-row-adapter`, `queryset-seed-and-model-read` (all
+   open): nothing moves (re-pins only).
+6. `field-value-coercion`, `sync-boundary-recourse-wording` (rejected):
+   rejections re-verified, triggers untriggered; nothing moves.
+7. New file-local row proposed: `_sentence_start` refusal-lead capitalization
+   (challenge + 4-reader census above); alternatively the wording family
+   adopts it — Worker-0's call.
+8. Entry-3 successor probe: needs a Worker-0 decision on where a read-only
+   successor lives under the retired-scratch rule (legacy scopes are
+   read-only; my `/tmp` probes are cited by content, not by path).
+
+#### Scoped re-trace (run 7) — item state
+
+Zero production edits, zero test edits, zero new tracked files. The
+item-scoped diff vs
+`ITEM_BASELINE=8f8ca0fc05bba066755221150fe33d3b4d99a9bb` holds this append plus
+the `Status:` swap (verified before finishing; the target's worktree dirt is
+the pre-existing hunt migration, untouched by me — worktree blob still
+`8fc556d5`). `uv run ruff check` / `ruff format` not run: no `.py` file was
+edited (the layout script's `.md` scaffold needs nothing — the append carries
+no cross-file links). No workspace built (nothing mutates source); the one
+authorized focused shared-tree pytest was not spent — every claim here is
+decided by HEAD-byte inspection plus the four read-only AST probes.
+`FAKESHOP_SHARDED=1` and Postgres cells stay `unverified`. Concurrent dirt
+left alone. HEAD `0c0537e2` at start and finish — unmoved throughout.
+
+## Independent verification (Worker-2) — stale7 re-trace
+
+Verdict: `verified`. Scoped run `0.0.15 2026-09-28-7`, HEAD
+`0c0537e2dd94a2f5faf3468ad7ee9aa26b3acf62` at start and finish, unmoved.
+Target HEAD blob `3616927d`, worktree `8fc556d5` (hunt dirt, concurrent work);
+every claim below traced at HEAD bytes via `git show HEAD:<path>`,
+`git rev-parse HEAD:<path>`, and `git grep`, plus read-only AST probes over
+`git show` bytes in `/tmp/w2-verify/` (cited by content; OS temp, rides with
+the scratch-custody closeout decision). No workspace built, no workspace run
+id exists, no pytest spent: nothing here mutates source and every claim is
+decided by HEAD-byte inspection. The dispatch brief already summarized W1's
+dispositions, so true blindness was unavailable; every number below was
+re-derived by my own commands, never trusted from W1's record.
+
+### Own trace (re-derived before reconciling)
+
+Drift hunks, own derivation. `git diff 5ee86193..0c0537e2 --
+django_strawberry_framework/utils/querysets.py` is one commit (`982537c3`),
+63+/35-: (1) the `origin` thread through `_row_source_model` (now `(state,
+origin)`) / `normalized_row_source` (now `(*, origin=...)`) /
+`_readable_queryset_state` (now `(value, origin=...)`) /
+`_raw_list_source_message` (now `(defect, name, origin)`) with new
+`_sentence_start`; (2) new `_UNSEALABLE_STATE_CAUSES` with the three in-file
+untrusted arms recomposed onto it; (3) the `_SealPolicy` docstring widened
+from post-OrderSet to every post-sidecar result (both the
+`require_unevaluated` and the `reject_combined` bullets); (4)
+module-docstring + prefetch-docstring rewords and two provenance-word comment
+deletions (`:3494`/:3504). Consumer files re-derived from the same range:
+`permissions.py` (import + two untrusted arms + one docstring),
+`types/resolvers.py` (+3 `prefetch_origin` lines + one `origin=` call),
+`schema.py` (`1b6a09b1` removed the `run_in_one_sync_boundary` import + 3
+calls), `optimizer/extension.py` (combined passthrough `:1237`), plus
+prose-only drifts. Regions outside these hunks are byte-identical to the
+adjudicated bytes.
+
+Per-finding expectations, own: CONFIRM F1 (3 definitions; both inline sites
+whole-drift-is-line-1, disposal region untouched), F2 (1 owner; exclusivity
+re-derived — `models.QuerySet(` outside 0, `sql.Query` touches outside 0,
+executable truth-reads outside 0; `_seal_or_defect` 5 in-file calls, zero
+outside; 6 policy fields, 7 constants with byte-identical flags; defect-code
+set same closed 9 in same order), F4 (2; MATCH file; seal `sliced` arm
+untouched), F5 (2; `types/resolvers.py` drift above the definition, seed/color
+axes untouched), F6 (rejection stands; trigger untriggered — production
+callers still the in-file `:4374` + `write_values.py:313`), F7 (rejection
+stands; recourse literals byte-identical), F8 (2 mechanisms; enforcement
+sites re-pinned, walker seals intact), F9 (no production reader; 9 + 7 = 16
+test lines), F10 (rejection stands; MATCH file), F12 (all live rows;
+superseded stay superseded), I-R1/R2/R3/R5/R6 (bodies unchanged, triggers
+untriggered), D1/D2/D4/D5 holdings; REVISE F3 (arm sets identical, prose
+authorship moved), I-R4 (rows stand, gate cost revised), F11 (consumer files
+6→5, conclusion stands), D3 (prose note discharged). New O1 is a real
+D4-class prose defect routing to
+`utils/querysets.py::_defect_message`.
+
+Three judgments the dispatch names, own answers. (1)
+`_UNSEALABLE_STATE_CAUSES` moves authorship only, not any definition count:
+C12 still forces 1 definition with 6 hand-revisited sites — the five
+spellings were per-site prose inside the message sites, never counted as five
+definitions, and are now 1 constant + 5 composers. (2) `origin` is a consumer
+parameter, not a definition: "a new origin must be named" forces zero
+definitions to move; exactly one non-default caller package-wide
+(`types/resolvers.py:579`); the unrelated `origin=` vocabularies
+(`FilterGenerationProvenance`, extension `_OriginAndModel`, `types/base.py`)
+are excluded with reason. (3) F11's 6→5 census moves nothing the verified
+`one-sync-boundary` verdict rests on: still 1 definition, still 5 direct
+`sync_to_async` sites with byte-identical shapes and the same
+different-contract classification, and the replacement window machinery
+(`ThreadPoolExecutor`/`SyncToAsync`/`ThreadSensitiveContext`) answers
+per-window thread/connection isolation, not the consumer-hook rule — neither
+a second definition nor a new enforcement site.
+
+Enumeration, own instrument (`ast.Module.body` assigns-only constants):
+baseline sync 103 + async 6 + classes 7 + const-assigns 25 = 141; HEAD sync
+104 + async 6 + classes 7 + const-assigns 26 = 143. Additions exactly
+`_sentence_start` + `_UNSEALABLE_STATE_CAUSES`; zero removals, zero renames
+— member-by-member delta AGREES. Homes: `_UNSEALABLE_STATE_CAUSES` into
+family `seal-defect-code-wording` (it IS the wording single-source; challenge
+"an eighth cause must be named" → 1 definition + 7 literal oracles);
+`_sentence_start` file-local ("capitalize a refusal lead without touching the
+rest"; readers exactly the 4 in-file sites `:3620`/`:3718`/`:3752`/`:3769`;
+`str.capitalize` lowercases the rest and is the wrong primitive).
+Matrix: no axis reopens beyond the drift scope — no new cross-flavor policy
+(the constant IS the consolidation), no new colored pair (one sync function,
+zero async added), no new ungated derived fact, no new round-trip half, no
+new medium (glossary moved with code, the legitimate shape), no new omission.
+
+### Reconciliation (every difference, explicitly)
+
+AGREE on all 12 findings, all 6 I-R rows, all 5 D holdings, O1, both
+enumeration homes, and the matrix. Zero differences of verdict or count. One
+trivial census note, immaterial: W1 counts "1 prose cite" for the constant; I
+find 2 (`querysets.py:2424` + `permissions.py:400` docstrings) alongside the
+5 executable arms + 1 import and zero test symbol-reads. No home, count, or
+verdict moves on it.
+
+### Fingerprints (own method: `git rev-parse HEAD:<path>`, never mixed)
+
+All 22 HEAD blobs re-derived and MATCH W1's table digit-for-digit:
+`querysets.py` `3616927d`, `auth/mutations.py` `d1a59c44`, `routers.py`
+`7d5e4814`, `tests/utils/test_querysets.py` `73e7a6c2`, `permissions.py`
+`72102cc0`, `connection.py` `4894f90f` MATCH, `nested_fetch.py` `4d8d37a7`
+MATCH, `types/resolvers.py` `72d62dc4`, `write_values.py` `d28587c7` MATCH,
+`rest_framework/resolvers.py` `0d302782`, `write_transaction.py` `eca9ad4d`
+MATCH, `mutations/permissions.py` `54f770ae` MATCH,
+`utils/permissions.py` `9889d6fe` MATCH, `walker.py` `75f9c6b6`,
+`filters/sets.py` `993e887a`, `GLOSSARY.md` `3413edc3`, `list_field.py`
+`21380eb7` MATCH, `resource_policy.py` `4b69e974` MATCH,
+`utils/relations.py` `8dbc3fe6`, `plans.py` `cce98531` MATCH,
+`exceptions.py` `e06b0b7f` MATCH, `filters/base.py` `ba52351c` MATCH. All 11
+MATCH files are byte-identical to `5ee86193` (own `git rev-parse
+5ee86193:<path>` comparison). Every STALE cause judged correct:
+`auth/mutations.py`/`routers.py`/`rest_framework/resolvers.py` each 1+/1-
+line-1 docstring; `tests/utils/test_querysets.py` 151+/77- over `982537c3`
+wording oracles + `4667db4f` fixtures; `permissions.py` import + 2 arms +
+docstring; `types/resolvers.py` +3/+1 origin call; `walker.py` name-memo
+(`53a50bf7`) + `e1ba094e`/`e6a33c46` prose with the child-seal statements
+byte-identical at `:525`/`:562`/`:602`/`:630`; `GLOSSARY.md` 4 hunks
+(sealed-queryset reword + dup-Status delete + 2 unrelated); `relations.py`
+`instance_accessor` docstring-only. The `filters/sets.py` pin correction is
+correct: recorded `4ab65a26` is the `24e6b4d3` blob, `5ee86193` holds
+`722e0c77`, `29ddc0a8` sits between with a 2-line docstring retouch, the
+in-range hunk is 1 comment line — all prose-only, F8's `:2592` edge and F11's
+consumer byte-identical. The 7 wording oracles verified at HEAD
+(`test_querysets.py:461`/`:753`, `test_permissions.py:1228`/`:1419`,
+`test_resource_policy.py:2153`+`:2155` tail, `test_list_field_api.py:2353`,
+origin lead `tests/types/test_resolvers.py:1636`); zero test reads of the
+constant symbol itself — independent oracles, correctly claimed.
+
+### Family-consequence judgments (Worker-0 routes on these)
+
+Endorse all eight: (1) `seal-defect-code-wording` — concurrent
+prose consolidation verified-not-redone, gate still gates arm SETS
+(8/3/6/7/5/6 re-derived with zero dead arms), constant + 7 oracles adopted,
+O1 homed here; (2) `sealed-execution-queryset` — `extension.py:1237` is a
+genuine 5th `.query`-read candidate for the family to classify (named, not
+answered), `types/resolvers.py:579` joins the consumer census; (3)
+`one-sync-boundary` (verified) — flagged-not-reopened is correct, census
+6→5 only, verdict stands subject to Worker-0's closeout-note call; (4)
+`post-set-apply-result-validation` — D3 note discharged, family inherits no
+stale prose; (5–6) all other open/rejected holdings stand with re-pins only;
+(7) `_sentence_start` file-local, wording-family adoption left to Worker-0's
+call; (8) entry-3 successor-probe home correctly deferred to Worker-0 (no new
+scratch written; retired-scratch rule honored).
+
+### Nothing-else-changed
+
+Window vs `ITEM_BASELINE=8f8ca0fc05bba066755221150fe33d3b4d99a9bb` holds
+exactly the plan (Worker-0's) plus this artifact — nothing to re-attribute.
+Prior sections untouched (diff vs baseline is the `Status:` swap plus the one
+621-line append; baseline artifact 4223 lines, now 4844 + this section). No
+production edit, no test edit, no plan edit, no new tracked file, zero `.py`
+touched (`--name-only -- '*.py'` empty) so no ruff run owed. Appended prose
+checked against AGENTS.md: `path::Symbol` cites present, `path:NN` confined
+to this per-cycle artifact (allowed), no process provenance, no cross-file
+links (no scaffold owed). No `(Worker-2)` defect beyond O1's endorsement
+(O1 stays W1's entry; no new `## Defects` row needed). `FAKESHOP_SHARDED=1`
+and pg cells stay `unverified`. Concurrent dirt left alone; no commit.
+
+### Index rows (narrow pass, run 7)
+
+Literal plan-index row texts for the 2 new run-7 enumeration members, transcribed
+from `#### Scoped re-trace (run 7) — enumeration: two new names, homes proposed`
+and items 1 and 7 of
+`#### Scoped re-trace (run 7) — family index and ledger consequences`
+(W2-endorsed under `## Independent verification (Worker-2) — stale7 re-trace`).
+Mechanical transcription only; Worker-0 owns the plan paste. Address
+`dry/dry-file-utils__querysets-stale7/consolidate`. No workspace run, no pytest,
+no `.py` touched, no ruff owed; no cross-file links, no scaffold owed.
+
+| Family | Owner | Files covered | Holding item | Status |
+|---|---|---|---|---|
+| Unsealable-state cause-list wording single-source | `utils/querysets.py::_UNSEALABLE_STATE_CAUSES` | `utils/querysets.py`, `permissions.py` | Family `seal-defect-code-wording` | open (it IS the wording single-source; challenge "an eighth unsealable cause must be named" → 1 definition + 7 literal oracles) |
+| Refusal-lead capitalization ("capitalize a refusal lead without touching the rest") | `utils/querysets.py::_sentence_start` | `utils/querysets.py` | File `utils/querysets.py` | file-local (challenge "a second refusal-lead shape must capitalize differently" → 1 definition; readers exactly the 4 in-file refusal sites; alternatively the wording family adopts it) |
+
+### Light confirmation (Worker-2) — index rows, run 7
+
+2/2 rows match their endorsed findings with no correction: row 1 adopts `utils/querysets.py::_UNSEALABLE_STATE_CAUSES` into family `seal-defect-code-wording` with files covered `utils/querysets.py` + `permissions.py` (the importing consumer) and the enumeration challenge "an eighth unsealable cause must be named" → 1 definition + 7 literal oracles; row 2 records `utils/querysets.py::_sentence_start` file-local with the single file, the enumeration challenge + 4-reader census, and the adoption-alternative parenthetical verbatim from item 7; append-only confirmed (the pre-confirm artifact measured exactly the plan-recorded 5018 lines / 329870 B with the 16-line EOF append under `### Index rows (narrow pass, run 7)` as its tail, so the Status swap + EOF append is the whole narrow-pass delta and every prior section stands untouched), the appended text meets AGENTS.md prose rules (`path::Symbol` cites, no process provenance beyond the DRY.md-mandated role labels, no cross-file links so no scaffold owed), and no `.py` was touched so no ruff run is owed — address `dry/dry-file-utils__querysets-stale7/verify-2`, no workspace runs, no pytest, no plan edit, no commit.
+
+## Run-8 scoped re-trace (Worker 1, REOPENED item s16)
+
+Run: 0.0.15 2026-09-30-8. Prior sections above are prior evidence only,
+preserved intact. This section re-traces HEAD bytes fresh, CONFIRMs or
+REVISEs every prior finding (run-7 CONFIRM set + REVISE F3/I-R4/F11/D3 +
+O1), scopes the drift delta, confirms the carried s11 seal-side exclusion
+and the `connection-order-ladder` composing tier from this file's side,
+and assigns the drift's new shape. Zero production edits; zero tracked
+files changed except this artifact.
+
+Method: probes `/tmp/s16/*.py` (`exec_identity2/3.py` per-node
+normalized-AST drift classifier, `target_census.py` enumeration,
+`seal_census.py` seal/policy/arm census, `reachability.py` entry-3 model),
+cited by content. All execution via `workspace.py run
+dry/querysets-retrace-s16/consolidate` (copy slot-2, synced 19:05:52Z,
+worktree bytes); git reads via `git -C <shared>` through the same runner
+(the copy carries no `.git`). The target is never imported (pure AST over
+`git show` bytes). No pytest.
+
+### Scope and fingerprints
+
+Drift base `0c0537e2`, HEAD `83998e08` (unmoved at close).
+
+- `0c0537e2:utils/querysets.py` blob `3616927d` (4575 lines, 143
+  members) -> `HEAD:utils/querysets.py` blob `392e50d0` (4866 lines,
+  158 def/class/assign nodes, 154 unique names). Committed delta
+  `0c0537e2..HEAD` on this target is exactly 6 commits: 2
+  behavior-bearing + 4 typing-only.
+- Behavior-bearing (each read end to end on this target): `5c5e32c5`
+  (combined `get_queryset` served as its pk set: `reject_combined` ->
+  `rewrite_combined`, `_LIST_ARGUMENT_VISIBILITY_POLICY` deleted,
+  `_RAW_LIST_SOURCE_POLICY` gains `rewrite_combined=False`, new
+  `_is_model_column` / `_combined_lost_property` /
+  `_pk_membership_query_or_defect` / `_COMBINED_WHAT`, seal arm order
+  `projection` before `combined`, 217+/68-), `10d2b9cd` (default-order
+  read consolidated: new `default_order` / `applied_order`,
+  `Combinable` import, 26+/1-).
+- Typing-only (every hunk verified: annotations, casts, `@overload`
+  stubs, `TYPE_CHECKING`, `@override`, `Generic` bases, one local
+  rename, docstring/prose; moves no rule ownership): `999a1aab`
+  (11 hunks + 1 docstring sentence documenting the existing
+  `coerce_field_value_or_none` fallthrough), `b20277fe` (~100 hunks;
+  the one local rename `queryset` -> `candidate`/`sealed` in
+  `_prepared_visibility_source` preserves data flow; the 4
+  `@overload` stubs and 6 `TypeVar`/`ParamSpec` shells are
+  declaration-only; `_SealedPrefetch` sits inside the
+  `TYPE_CHECKING` block so the `Prefetch[...]` subscription never
+  executes), `dfbea72b` (1 annotation line), `fef11e64` (2 casts
+  removed, 1 annotation, 1 reformat).
+- Worktree blob `cfc773ba` (4805 lines, 158 nodes) vs HEAD `392e50d0`:
+  222+/283-, 76 hunks (default context), every hunk the hunt's
+  `truth.*` introspection migration or its companion hardening (see
+  attribution below). No `## Owned changes` ledger row names this
+  file (section lines 1427-1501 checked; the one `querysets` hit is
+  the D1-fix row whose hunk is in `optimizer/walker.py`, landed as
+  `fd39cac6`). The trace reads HEAD bytes, never the dirty tree.
+- Pre-ff bytes `9aaaad5d` (`On (no branch): dry-0015 pre-ff snapshot`,
+  stash): target blob `8fc556d5` (4523 lines, 143 nodes: 103+6/7/27).
+  Its name-delta vs base is IDENTICAL to worktree-vs-HEAD
+  (`+_ROUTING_SCALAR_TYPES`, `+_routing_repr`, `-_safe_class_name`,
+  `-_safe_routing_repr`): the same hunt migration carried forward.
+  Read-only evidence, never applied.
+- `ITEM_BASELINE=85b01ebe470a0aeefcfd4a137be7046cc3259adf` (resolves;
+  before-copy pinned).
+
+Worktree dirt attribution (all 76 hunks grouped by content; all
+hunt-migration family, zero owned, zero concurrent-maintainer):
+
+- Mechanical `truth.*` migration (~62 hunks): introspection spellings
+  replaced by `truth.kind` (x60), `truth.name` (x22),
+  `truth.instance_state` (x15), `truth.is_subclass` (x8),
+  `truth.instance_dict` (x7), `truth.render` (x5),
+  `truth.static_attr` (x4), `truth.qualname`/`truth.mro`/
+  `truth.module`/`truth.class_dict` (x2 each), `truth.text`/
+  `truth.is_instance` (x1 each). Removed-line profile:
+  `__getattribute__` x33, `__dict__` x22, `repr(` x12, `issubclass`
+  x10, `type(` x10, `__name__` x5, `getattr` x4, `__module__`/
+  `__qualname__` x2, `__mro__`/`__repr__`/`__class__`/`__str__`/
+  `__getattr__` x1.
+- Migration roots (3 hunks): `from . import truth` (+ exceptions-import
+  narrowing dropping `_safe_arg_repr`/`_safe_type_name`); `from
+  django.core.exceptions import FieldDoesNotExist, ValidationError`;
+  `TYPE_CHECKING` `BaseIterable`.
+- Safe-render rework (4 hunks): local `_safe_class_name` deleted;
+  `_safe_routing_repr` -> `_routing_repr` + new
+  `_ROUTING_SCALAR_TYPES` (+ the 4 call-site swaps).
+- Exception narrowing (2 hunks): coerce `except Exception` ->
+  `(ValidationError, TypeError, ValueError, OverflowError)` with the
+  `DurationField`/`int(inf)` rationale reword; relation-target
+  `except Exception` -> `FieldDoesNotExist`.
+- Router-guard removal (1 hunk): `_snapshot_routing_intent`
+  try/except-`BaseException` -> bare `resolve` call.
+- Fallout (4 hunks): `_template_params_defect` signature reformat;
+  `_DIRECT_RHS_TRUSTED_MRO` frozenset -> tuple; combined-child
+  `cast` + comment; guard-history comment reworded timeless.
+
+### Drift delta — per-input freshness (22 STALE, 0 MATCH)
+
+Every fingerprinted input drifted (the typing wave touches the whole
+package). Each STALE input was re-derived at HEAD bytes via the
+per-node normalized-AST classifier (annotations, casts, overload
+stubs, `TYPE_CHECKING` blocks stripped; residuals hand-classified)
+plus targeted `git grep HEAD` censuses. HEAD blobs + causes +
+judgment:
+
+- `utils/querysets.py` `392e50d0` (`5c5e32c5 999a1aab b20277fe
+  10d2b9cd dfbea72b fef11e64`): the 6-commit delta above; every
+  finding re-derived below.
+- `auth/mutations.py` `72595bb1` (`dc0ae008 849f67bc 2915250d
+  b20277fe 999a1aab`): two inline `is_authenticated.close()` copies
+  became `auth/mutations.py::_close_unawaited` + 2 calls
+  (`2915250d`, outcome-identical: getattr-default-`None` + callable
+  check under the same `suppress(BaseException)`); `field_error`
+  import moved to `utils.errors`; register steps read
+  `backing_model_of(meta)`; `derive_register_fields` gains a
+  non-`str` `USERNAME_FIELD` guard (`dc0ae008`, register path, out of
+  F-scope); F11 boundary import + 6 calls intact. F1 REVISEd (see
+  below); the e1 consolidation is NOT in this tree (no commit, both
+  greps empty) — its owned form lives in worktree+snapshot only per
+  s6, so F1's 3-count persists at HEAD (flag for Worker-0).
+- `routers.py` `ef1e2038` (`fef11e64 dfbea72b b20277fe 999a1aab`):
+  EXEC-IDENTICAL (67-line drift is pure annotations/imports); the
+  inline dispose copy intact. F1's third definition stands.
+- `tests/utils/test_querysets.py` `3ff4094a` (`5c5e32c5` only): old
+  refusal tests replaced by pk-set rewrite tests; the 3 inventory
+  oracles byte-identical (`:5280` `:5302` `:5329`, set-equalities
+  `:5320` `:5340`); wording oracles `:461` `:753` intact.
+- `permissions.py` `d77c5050` (`dfbea72b b20277fe 999a1aab
+  5c5e32c5`): cascade combined arms recomposed onto `_COMBINED_WHAT`
+  (`:387` `:455`); `_validate_fields` pure local rename
+  (`requested` -> `entries`); renderer docstrings reworded. Arm sets
+  5/6 re-derived; 2 cascade `policy=_CASCADE_SEAL_POLICY` edges
+  (`:635` `:717`) intact.
+- `connection.py` `3d6dd424` (10 commits incl `5c5e32c5 10d2b9cd
+  dbf0a870 193f9946`): `_sidecar_visibility_policy` deleted;
+  `_finalize_queryset` recomposed onto `applied_order` (`:1730`);
+  `_sync`/`_async_connection_resolver` closure split (`fef11e64`);
+  `_guard_source_not_pre_sliced` byte-identical (def `:1648`, call
+  `:1030`, passed `:1817`); F10 shapes `:1097` `:1143` + union
+  admission `:1637` intact; prepared call `:1812` intact; order+filter
+  arms still route through `apply_orderset/filterset` (`:1907`
+  `:1954`). Last:0/page-arg drift is s1/s15 scope, untouched by
+  querysets findings.
+- `optimizer/nested_fetch.py` `304e2f3e` (typing only):
+  `Generic` bases + `plan` gains an unobservable `raise
+  NotImplementedError` (never instantiated); F4's
+  `unwindowable_child_queryset_reason` byte-identical.
+- `types/resolvers.py` `574e9768` (typing only): `_make_relation_resolver`
+  local rename (neutral); `_FieldResolver` alias; `_visible_related_object`
+  body byte-identical (def `:407`, 7 calls); direct sites `:642` `:715`
+  `:786`; origin caller `:602`; runner calls `:424` `:428` `:447` `:452`
+  (default policy).
+- `utils/write_values.py` `01a3318c` (typing only): 2 import
+  residuals; `type_check_relation_id` `:316` ->
+  `visible_related_objects` `:326` chain intact.
+- `rest_framework/resolvers.py` `420fc3ca` (typing only):
+  `meta.model` -> `backing_model_of(meta)` and `spec.nested_specs` ->
+  `_nested_specs_of(spec)` typing-driven restatements (new helper,
+  cited regions untouched); consumer `:1519`, composition `:227`
+  intact.
+- `utils/write_transaction.py` `c0a12b34` (typing only):
+  `canonical_pk` annotation-only; `_field_fingerprint` container
+  branch inverted (outcome-identical per `dfbea72b`). F6 stands.
+- `mutations/permissions.py` `f23eb540`, `utils/permissions.py`
+  `e2b46fd7` (typing only): 1 import residual each. F7 stands.
+- `optimizer/walker.py` `bdd9c2f1` (`fef11e64 b20277fe 999a1aab
+  5c5e32c5`): new `_hint_prefetch_over_pk_set` composing
+  `_pk_membership_query_or_defect` + `_COMBINED_WHAT` (`:1424`); new
+  `models.QuerySet(` construction `:1426` (consumer, not a second
+  sealing body — F2 REVISE note); `_apply_hint` routes through it;
+  `_relay_max_results_from_info` import rebinding (same object);
+  child-seal region re-pinned (default `:556`, seed `:594`
+  unrouted+cast, call `:629`, `policy=policy` `:635`, seam `:663`,
+  plain-list `:1188`, wiring `:1824`).
+- `filters/sets.py` `3d307402` (typing + `bbe54687` + `e37448e5`):
+  relation-identity profiles added (s9 scope); F8 edge byte-identical
+  at `:2707`; F11 call `:3628` intact.
+- `docs/GLOSSARY.md` `431ca7ba` (6 commits): cascade +
+  Sealed-execution-queryset terms reworded with the code; Prefetch
+  alias sentence intact at `:1560`. F8 projection holds.
+- `list_field.py` `77ddb86c` (9 commits): ZERO `policy=` left (both
+  runner calls `:1463` `:1509` take the default — I-R4 REVISE);
+  `_selected_ordering` model tier via `default_order` (`:1163`);
+  F10 sites `:1361` `:1365` `:1771`; wrap calls `:1466` `:1495`
+  `:1512` `:1541`; prepared calls `:1732` `:1782`; order arm routes
+  through `apply_orderset` (`:1474` `:1520`); visibility call hoisted
+  above the branch (s2-verified, same default policy).
+- `resource_policy.py` `47befb3f` (typing only): `@override` only on
+  `ResourceLimitExceeded` (bases intact); `check_deadline` local
+  rename. I-R5 stands.
+- `utils/relations.py` `72e7ff08` (typing only):
+  `validate_lookup_expr` unpack rewrite (outcome-identical, guards
+  prove non-empty; not a mechanism body); `classify_path` family
+  byte-identical. I-R1/I-R2 stand.
+- `optimizer/plans.py` `fdc4b1b0` (typing + `10d2b9cd`):
+  `effective_connection_order(cursor_field, query, model)` composes
+  `applied_order` (`:939` inside `:911`); `_consumer_prefetch_lookups`
+  and `_select_path_traversable` byte-identical;
+  `order_entry_name_and_direction` recomposed (s11-verified file, out
+  of F-scope).
+- `exceptions.py` `f27e1f91` (typing only): `@override` only.
+  `_safe_class_name` body byte-identical. I-R6 stands.
+- `filters/base.py` `e2e683a8` (typing + `57131b99` + `bbe54687`):
+  `_coerce_int_in_members` byte-identical (still composes
+  `coerce_field_value_or_none`, `:541`); GlobalID node-id composer
+  `:898` pre-existed at base (run-7's "three consumers" undercounted
+  by one — F6 REVISE corrects the census); new `_coerce_relation_identity`
+  composer `:1179`; new `meta.get_field(to_field_name)` `:1125` is a
+  single resolution, not a `__`-segment walk (I-R1 population
+  unaffected); `resolve_globalid_target_definition` byte-identical
+  (I-R2 exclusion holds); `get_model_field` is
+  `django_filters.utils` upstream, not a package mechanism body; F6
+  trigger untriggered (no `stringified_pks_present` caller outside
+  the file + `write_values.py:327`).
+
+### Enumeration at HEAD bytes
+
+`target_census.py` over HEAD bytes: 111 sync + 8 async + 7 classes +
+32 const-assigns = 158 nodes, 154 unique names (143 -> 154 unique;
++12 -1). The 4 node-count extras over unique names are the
+`@overload` stubs (`apply_type_visibility_sync` x3,
+`apply_type_visibility_async` x3: 2 stubs + impl each), which share
+their impl's name. Added unique names: `_COMBINED_WHAT`,
+`_combined_lost_property`, `_is_model_column`,
+`_pk_membership_query_or_defect`, `applied_order`, `default_order`
+(rule-bearing, homed below) + 6 `TypeVar`/`ParamSpec` shells
+(`_T _R _P _ModelT _RowT _RowT_co`, typing-only, no rules).
+Removed: `_LIST_ARGUMENT_VISIBILITY_POLICY` (zero `.py` hits
+package-wide at HEAD). `_SealedPrefetch` is `TYPE_CHECKING`-only
+(`:134-135` inside the block) and correctly absent from the count.
+Stash `8fc556d5`: 103+6/7/27 = 143. Worktree `cfc773ba`:
+110+8/7/33 = 158.
+
+Homes for the 6 rule-bearing names (no other new rule surface):
+
+- `default_order` / `applied_order` -> family
+  `connection-order-ladder`, composing tier (CONFIRMED from this
+  side; see below). No new index row (s11's row already adjusted).
+- `_is_model_column` / `_combined_lost_property` /
+  `_pk_membership_query_or_defect` -> family
+  `sealed-execution-queryset`: parts of the one seal body (the
+  rewrite the combined arm dispatches). No new row.
+- `_COMBINED_WHAT` -> adopt into family `seal-defect-code-wording`
+  like `_UNSEALABLE_STATE_CAUSES` (new index row below).
+
+### CONFIRM verdicts (18, each re-proved at HEAD bytes)
+
+- F4: `_guard_source_not_pre_sliced` byte-identical (`:1648` `:1030`
+  `:1817`); F2-adjacent contract difference (`nested_fetch.py`
+  degradation vs analyzability verdict) intact on untouched bodies.
+- F5: 2 named readers (`types/resolvers.py:407` body-identical, 7
+  calls `:651`-`:820`; `utils/querysets.py:4576`) + the default
+  (`:4504`) + the DRF consumer (`:1519`) all re-pinned; verbatim
+  `get_queryset` origin caller at `types/resolvers.py:602`.
+- F7: `sync_pipeline_recourse` untouched; compositions
+  `mutations/resolvers.py:207`, `forms/resolvers.py:142`,
+  `rest_framework/resolvers.py:227` intact; 4 recourse sentences
+  re-pinned (`:71` `:65` `:143` `:398` `:405` across the four homes);
+  trigger untriggered; "four clauses differ" regions untouched.
+- F8: walker edges re-pinned (`:556` `:594` `:629` `:635` `:663`
+  `:1188` `:1824`); licence comments `:596`-`:627` intact;
+  `using=parent_db` byte-identical at `filters/sets.py:2707`;
+  `using=state.alias` at `permissions.py:704`; glossary projection
+  `:1560`; trigger untriggered.
+- F9: 2 defs (`:432` `:463` re-pinned) + 2 wrap sites + 2 check sites
+  intact; production-reader census still zero (16 test lines only);
+  extension unwrap/wrap `:1214` `:1217` + `_result_cache` read
+  `:1233` + combinator passthrough `:1282` `:1286` re-pinned; union
+  admission `connection.py:1637` intact.
+- F10: 3 definitions + 3 test-only readers + 1 union admission
+  (`connection.py:1637`) re-pinned; shapes `connection.py:1097`
+  `:1143`, `list_field.py:1361` `:1365` `:1771` intact (plus
+  `# type: ignore[redundant-expr]` comments).
+- F12: all 9 rows re-verified — `_snapshot_routing_intent` (`:2985`)
+  callers exactly the 2 in-file (`:3201` `:3234`); `_safe_routing_repr`
+  (`:3047`) production readers the seal routing arm only
+  (`:3651`-`:3654`); `_routing_hints_equal` untouched (identity-only);
+  `_bake_deferred_filter_or_defect` (`:2697`) sole caller the seal
+  (`:3700`); `_prefetch_relation_target_or_none` bodies + twin-site
+  outcomes untouched; `_GraphWalk` region byte-identical (no code
+  hunk in range); `prepared_resolver_source` (`:4777`) callers
+  `list_field.py:1732` `:1782` + `connection.py:1812`;
+  `_coerced_manager_queryset` body + entry points untouched.
+- I-R1: five-body table byte-identical (`classify_path`,
+  `_lenient_traverses_to_many`, connection resolver, plans probe,
+  prefetch resolver — none in any drift residual); the new
+  `relation_identity_column` path resolves ONE field name
+  (`:1125`) via upstream `get_model_field`, not a `__`-segment
+  walk — outside the population.
+- I-R2: `resolve_globalid_target_definition` byte-identical
+  (registry graph, never `get_field`); the new `:1125` single
+  resolution is adjacent, not a walk.
+- I-R3: executable `models.Manager` reads still exactly the 3
+  in-file (`:355` `:4018` `:4338`); one new TEXTUAL hit,
+  `relay.py:296`, is a typing-wave annotation, not a
+  coercion/verdict (precision note on the record).
+- I-R5: twin impl signatures keep parity (`:4368` `:4664`: same
+  shape, `async_recourse` sync-only; the 4 overloads mirror it);
+  `SyncMisuseError` bases (`:144`) and `ListArgumentError` /
+  `ResourceLimitExceeded` bases intact; no new sync/async closure;
+  trigger untriggered.
+- I-R6: contract difference + trigger rest on two untouched bodies
+  (neither file's residuals touch them); trigger untriggered.
+- D1: fixed-verdict holds — child policies + seed re-pinned, all 5
+  live node ids resolve unmoved (`test_multi_db.py:1594` `:1619`
+  `:1636`, `test_products_visibility_api.py:1076` `:1100`).
+- D3: resolved-fixed holds — `require_unevaluated` post-sidecar
+  bullet intact, both sidecar arms still route through
+  `apply_orderset/filterset` (`connection.py:1907` `:1954`,
+  `list_field.py:1474` `:1520`); the run-7 spec-050 citation now
+  CONTRADICTS the behavior — recorded as O2 (new), the D3 verdict
+  itself stands.
+- D4: closed-empty stands (no second axle-reading spelling; the
+  package-wide order census below is the re-proof).
+- D5: arm sets re-derived executably (`reachability.py`):
+  8/3/7/6 in-file + 5/6 permissions, digit-for-digit the run-7
+  record; zero undeclared mismatches (the validator's
+  alias-subsumed-by-routing remains the one declared exception).
+- D-W2-a/D-W2-b: holdings intact — `_SealPolicy` bullets (incl.
+  `reject_sliced` axis + post-sidecar `require_unevaluated`),
+  walker licence comments `:596`-`:627`, glossary `:1560`.
+- O1: `_defect_message`'s "never the wording" sentence (`:4084`)
+  persists verbatim; the drift makes it doubly false (the
+  `untrusted` cause list AND the combined text are now shared).
+  Same owner, same one-clause repair (now covering both shared
+  texts).
+
+### REVISE verdicts (6)
+
+- F1-REVISED (site record; count stays 3): auth's two inline
+  `is_authenticated.close()` copies are now one named
+  `auth/mutations.py::_close_unawaited` (3 hits: def + 2 calls in
+  `_authenticated_actor_or_none`), outcome-identical under the same
+  suppression. Definitions at HEAD: `_dispose_sync_awaitable`
+  (owner) + `_close_unawaited` (auth suppression adapter) +
+  `routers.py` inline (byte-identical). Both challenge axes
+  re-discharged (async-generator/future shapes unchanged). FLAG for
+  Worker-0: the plan's e1 "migrated to consumers" record is NOT in
+  this tree (no such commit; `_disposed_awaitable` zero hits in
+  `auth/mutations.py` at HEAD); per s6 the consolidation lives in
+  worktree+snapshot only. F1's 3-count persists at HEAD.
+- F2-REVISED (new construction site, verdict stands): one new
+  `models.QuerySet(` site, `optimizer/walker.py:1426`, inside
+  `_hint_prefetch_over_pk_set` — it constructs around a query the
+  seal's own `_pk_membership_query_or_defect` rewrote (composed by
+  name, `:1419`), over trusted schema configuration
+  (documented in `_combined_lost_property`'s docstring). A consumer
+  of the seal's machinery, not a second sealing body. One owner
+  stands; the exclusivity record gains this classified site.
+  (Truth-read trio + `sql.Query` + hook-invocation censuses
+  unchanged: zero outside the file.)
+- F3-REVISED (combined arm recomposed; oracles re-pinned): the gate
+  (`combined` -> `rewrite_combined` flag + `_pk_membership` rewrite
+  + `_combined_lost_property` audit) stays owned; the six
+  declarations keep their shape with the `combined` arm now
+  composing `_COMBINED_WHAT` at 6 code sites (definition `:3973` +
+  `querysets.py:3149` `:4147` `:4268`, `permissions.py:387` `:455`,
+  `walker.py:1424`) + 2 prose cites. All 7 cause-list oracles
+  resolve (`test_querysets.py:461` `:753`,
+  `test_permissions.py:1269` `:1487`, `test_resource_policy.py:2153`,
+  `test_list_field_api.py:2357`); combined-wording oracles: 8
+  independent literal pins (6 live + 2 `test_connection.py`) plus
+  `_COMBINED_WHAT.format` compositions (which pin composition, not
+  wording). `reject_combined` zero hits package-wide.
+- F6-REVISED (composer census corrected + extended; rejection
+  stands): `coerce_field_value_or_none` (body untouched but the
+  `999a1aab` docstring sentence) now has FIVE call sites in four
+  files — `relay.py:191`, `write_values.py:126`,
+  `filters/base.py:541` (`_coerce_int_in_members`, byte-identical),
+  `filters/base.py:898` (GlobalID node-id; pre-existed at base, the
+  run-7 "three consumers" undercounted by one),
+  `filters/base.py:1179` (new `_coerce_relation_identity` chain).
+  "One owned translation, WHICH field stays at the caller" holds
+  over the larger census. Third contract re-pinned
+  (`keyset.py:402` `field.to_python`). Trigger untriggered
+  (sole `stringified_pks_present` callers: in-file `:4642` after
+  `:4620`'s model gate, `write_values.py:327` after `:316`'s
+  `type_check_relation_id`).
+- F11-REVISED (direct-site census 5 -> 7; verdict stands):
+  consumers still exactly the 5 files (imports + calls re-pinned;
+  `schema.py` has prose only, zero composition); direct
+  `sync_to_async(` sites gain `schema.py:406`
+  (`sync_to_async(window, ...)` + `:394` `async_to_sync(complete)`),
+  the completion-window machinery (per-window thread/connection
+  isolation for completion-spanning transactions — a different
+  contract from the consumer-hook rule, which RUNS INSIDE it per
+  `:355`). `async_to_sync` in `auth/mutations.py` (`:841` `:1049`)
+  pre-existed at base (reverse direction, outside the census then
+  and now). Neither a second definition nor a new enforcement
+  site — same verdict, revised census (the s20 family item judges
+  the window).
+- I-R4-REVISED (runner policy set 5 -> 4; rows/expectation hold):
+  `_LIST_ARGUMENT_VISIBILITY_POLICY` deleted;
+  `list_field.py` (`:1463` `:1509`) and `connection.py` (`:1900`
+  `:1947`) now take `_DEFAULT_SEAL_POLICY`. Complete runner set at
+  HEAD: default (list_field x2, connection x2, types/resolvers x4)
+  + `_CASCADE_SEAL_POLICY` (permissions x2) + walker child pair
+  (default `:556`, seam `:663`). `require_unevaluated` still set
+  solely by `_SIDECAR_RESULT_POLICY`, reaching the seal solely via
+  the validator (`:3104`, the one `expected_routing` of 5 seal
+  calls `:2608` `:3104` `:3897` `:4234` `:4340`); `evaluated`
+  unreachable at visibility sites, `routing` unreachable without
+  it. Canonical code order moved (`:3475`: `... -> projection ->
+  combined -> alias`); arms-per-site expectation 2/6 re-derived
+  executably with zero undeclared mismatches.
+
+### Carried cross-file items (fresh evidence from this file's side)
+
+- s11 seal-side exclusion CONFIRMED: `utils/querysets.py:3733` is
+  `state.get("_prefetch_related_lookups")` (a snapshot-`__dict__`-key
+  read feeding `_sealed_prefetch_related_lookups(lookups, ...)`,
+  which takes the lookups as a parameter and contains no attribute
+  spelling) and `:3806` is `sealed._prefetch_related_lookups =
+  sealed_prefetch` (a clone-write) — both inside `_seal_or_defect`,
+  both moving under seal contracts (snapshot discipline + clone
+  reproduction), not the `attached-prefetch-lookups-read` read
+  rule. Package-wide `_prefetch_related_lookups` census at HEAD is
+  exactly the s11 population: live reads `optimizer/plans.py:572`
+  (lenient) + `optimizer/walker.py:1432` (strict forward), the two
+  seal touches above, rest prose/def-name/comment. Rename-count-2
+  for the read rule re-proved.
+- `connection-order-ladder` composing tier CONFIRMED:
+  `default_order` (`:291`: model's ordering while default ordering
+  stands and is truthy) / `applied_order` (`:306`: explicit order
+  else that) own the explicit-else-default tier.
+  `model._meta.ordering` is read at exactly ONE package site
+  (`:304`, inside `default_order`); composers exactly three —
+  `optimizer/plans.py:939` (inside `effective_connection_order`),
+  `connection.py:1730`, `list_field.py:1163`; zero inline rebuilds
+  (`10d2b9cd` removed the connection tail's and nested planner's
+  hand rebuilds). Challenges from the owner side: "honor
+  `extra(order_by=)`" -> `applied_order` (1) + the list field's
+  deliberate non-consumer (documented in `_selected_ordering`);
+  "`ordering=None`/cleared handling" -> `default_order` (1).
+
+### Defects (run-8: O1 persisting, O2 new, zero target-behavior defects)
+
+- O1 (persists, strengthened): `_defect_message` `:4084` "never the
+  wording" now doubly false (see CONFIRM above). Same owner, same
+  one-clause repair extended to both shared texts.
+- O2 (new, observed): `docs/spec-050-list_field_arguments-0_0_15.md`
+  Edge sentences (`:2121` `:2123`) still pin the pre-`5c5e32c5`
+  refusal rule — "A combined queryset is rejected for any non-null
+  argument" and "must SEAL to a lazy, unsliced, model-row-shaped,
+  non-combined, same-model, same-route plain queryset" — but a
+  combinator is now SERVED as its pk set unless the rewrite fails
+  (`utils/querysets.py:3769` + `_COMBINED_WHAT`). `5c5e32c5`
+  updated spec-045 but not spec-050. Routes to the spec-050 owning
+  card (in-flight spec prose); note for family
+  `post-set-apply-result-validation`. Neither s1's nor s2's
+  artifact flags the spec itself (both quote the old rule text
+  only), so this is first-recorded here; Worker-0 dedups.
+- D-rows: D1 fixed-verdict holds, D3 resolved-fixed holds, D4
+  closed-empty stands, D5 8/3/6/7/5/6 + zero dead re-derived,
+  D-W2-a/D-W2-b holdings intact (see CONFIRM). No new
+  target-behavior defect.
+
+### Pending execution (3 entries, restated)
+
+1. D1's contract-source set lives in prose + 5 live node ids (all
+   resolve unmoved — see F8/D1) — no probe to re-run.
+2. Unchanged: no database/alias/dialect surface in this file's own
+   probes applies beyond entry 1 (read-only AST; `inapplicable by
+   construction` for the rest, judged sound).
+3. Arms-per-site expectation 2/6 re-derived executably at HEAD
+   (`reachability.py`: 8/3/7/6 in-file + 5/6 permissions, zero
+   undeclared mismatches under the declared-semantics model; the
+   validator's alias-subsumed-by-routing remains the one declared
+   exception).
+
+### Judgment
+
+Coverage complete: 143 -> 154 unique names, every member in a family
+row, file-local record, rejection, or the external row; the drift's
+6 rule-bearing names homed (2 + 3 into existing families, 1 new
+index row); typing shells (`@overload` x4, `TypeVar` x6,
+`TYPE_CHECKING` alias) carry no rules. 18 CONFIRM + 6 REVISE, each
+re-proved at HEAD bytes with fresh censuses; O1 persisting, O2 new;
+zero target-behavior defects. Zero-edit accepted: this artifact is
+the whole delta.
+
+### Item-scoped diff state
+
+Own run: this artifact only (append below the run-7
+light-confirmation; every prior section untouched). HEAD `83998e08`
+unmoved at close. All 22 cited HEAD blobs re-hashed identical at
+write time: `392e50d0 72595bb1 ef1e2038 3ff4094a d77c5050 3d6dd424
+304e2f3e 574e9768 01a3318c 420fc3ca c0a12b34 f23eb540 e2b46fd7
+bdd9c2f1 3d307402 431ca7ba 77ddb86c 47befb3f 72e7ff08 fdc4b1b0
+f27e1f91 e2e683a8` (input order as listed). No ruff/mypy owed
+(artifact `.md` only; probes `/tmp`-only). No cross-file links, no
+scaffold owed.
+
+## Index rows for Worker-0 (run-8)
+
+Mechanical transcription only; Worker-0 owns the plan paste. Address
+`dry/querysets-retrace-s16/consolidate`. No pytest, no `.py`
+touched, no ruff owed; no cross-file links, no scaffold owed.
+
+| Family | Owner | Files covered | Holding item | Status |
+|---|---|---|---|---|
+| Combined-queryset what-phrase wording single-source | `utils/querysets.py::_COMBINED_WHAT` | `utils/querysets.py`, `permissions.py`, `optimizer/walker.py` | Family `seal-defect-code-wording` | open (it IS the combined-text single-source; 1 definition + 6 code composers + 2 prose cites; challenge "a seventh combined-error site must name the what-phrase" -> compose, don't respell; 8 independent literal oracles pin the rendered text) |
+
+No other new rows: `default_order`/`applied_order` and the three
+combined-rewrite helpers are members of already-indexed families
+(`connection-order-ladder`, `sealed-execution-queryset`);
+`walker.py:1426` is a consumer, not a definition; the e1-divergence
+flag (F1-REVISED) proposes no row change.
+
+Status: ready-for-verification/1
+
+## Run-8 verification (Worker 2)
+
+Verdict: `verified`. Every W1 verdict row (18 CONFIRM + 6 REVISE) survives on
+my independent evidence; the 7 notes below are pin/citation precision, none
+moves a verdict. Prior sections untouched; the header swap above plus this
+append is the whole delta.
+
+Method. All execution via `workspace.py run dry/querysets-retrace-s16/verify`
+(copy slot-3, synced 19:50:02Z, fresh at every run; the copy carries no
+`.git`, so all git reads are `git -C <shared>` through the same runner).
+HEAD `83998e08` at start and finish, unmoved. Target never imported: pure AST
+over `git show` bytes plus `git grep` with directory pathspecs. Own probes in
+`/tmp/w2-run8/` (`probe_enum/drift/execid/execid2/residuals/seal/policy/f1/f2/
+f3/arms/oracle_ident`), cited by content. No pytest; read-only probes only.
+The dispatch brief summarized W1's dispositions, so true blindness was
+unavailable; every number below was re-derived by my own commands, never
+trusted from W1's record.
+
+Scope, re-derived. `0c0537e2..HEAD` on the target is exactly 6 commits:
+`5c5e32c5` (+217/-68, 23 `-U0` hunks, all at old :2813+ — policy record,
+constants, validator, sidecars, seal, message sites, one runner-docstring
+reword), `10d2b9cd` (+26/-1: `default_order`/`applied_order` +
+`Combinable` import), and 4 typing-only. My executable-identity probe
+(strips annotations, type params, `TYPE_CHECKING`, `@overload` stubs,
+`cast()`, docstrings; keys assigns by target name) reports zero normalized
+differences for `dfbea72b` and `fef11e64`, and exactly one residual each for
+`999a1aab` (`_seal_or_defect`: `rebuilt_query` -> `rewritten` + cast-back,
+outcome-identical) and `b20277fe` (`_prepared_visibility_source`:
+`queryset` -> `candidate`/`sealed` + cast, data flow preserved). 2
+behavior-bearing + 4 typing-only CONFIRMED by a different instrument.
+
+Enumeration, own instrument (`ast.Module.body`, assigns-only constants).
+Base: 104 sync + 6 async + 7 classes + 26 consts = 143 unique. HEAD: 111
+sync + 8 async + 7 classes + 32 consts = 158 nodes, 154 unique (+12 -1).
+Added: `_COMBINED_WHAT`, `_combined_lost_property`, `_is_model_column`,
+`_pk_membership_query_or_defect`, `applied_order`, `default_order` +
+6 `TypeVar`/`ParamSpec` shells. Removed: `_LIST_ARGUMENT_VISIBILITY_POLICY`
+(zero `.py` hits package-wide). The 4 node extras are the `@overload` stubs
+(3 defs each for the two visibility runners). `_SealedPrefetch` is
+`TYPE_CHECKING`-only and correctly absent. 143 -> 154 CONFIRMED. (Line
+counts 4574/4865 vs W1's 4575/4866: `splitlines` vs `wc -l`; immaterial.)
+
+CONFIRM rows, each re-proved (own pins): F4 (guard def :1648, direct call
+:1030, passed-as-guard :1817; body identical, def-line annotation only —
+note 2; `nested_fetch.py` degradation body identical), F5 (`:407` + 7 calls
+`:651`-`:820`, `:4504`, `:4576`, DRF `:1519`, origin caller `:602`), F7 (4
+sentences `:71` `:65` `:143` `:398`, compositions `:207` `:142` `:227),
+F8 (`:556` `:594` `:629` `:635` `:663` `:1188` `:1824`, licence comments,
+`:2707`, `permissions.py:704`, glossary `:1560`), F9 (def `:463` the only
+package hit; 7 + 9 = 16 test lines; wrap `:1466` `:1495` `:1512` `:1541`,
+unwrap/wrap `:1214` `:1217`, `:1233`, `:1282` `:1286`; `:432` pin — note 3),
+F10 (`:1097` `:1143` + union `:1637`, `list_field.py` zero direct refs,
+composers `:1361` `:1365` `:1771` + `resource_policy.py:1258`), F12 (all 9:
+snapshot `:2985` callers exactly `:3201` `:3234`; routing-repr readers only
+`:3651`-`:3654`; bake `:2697` sole caller `:3700`; prepared `:4777` callers
+`:1812` `:1732` `:1782` `:4832` `:4858`; `_GraphWalk` region has no behavior
+hunk — all `5c5e32c5` hunks sit at old :2813+), I-R1 (five-body table
+executable-identical — mechanism hunks are annotation/cast-only; `:1125` is
+a single `get_field` resolution; `get_model_field` is `django_filters`
+upstream), I-R2 (`resolve_globalid_target_definition` in no drift hunk),
+I-R3 (executable `models.Manager` exactly `:355` `:4018` `:4338`;
+`relay.py:296` is a variable annotation, not a verdict), I-R5 (twins `:4368`
+`:4664` parity with `async_recourse` sync-only, 4 overloads mirror it;
+bases intact; no new colored pair — the +2 async nodes are overload stubs),
+I-R6 (both bodies executable-identical), D1 (5 node ids resolve unmoved),
+D3 (post-sidecar bullet `:2845`-`:2847` intact; sidecar arms route through
+the shared seal `:1907` `:1954` + list field), D4 (repaired docstring, body
+`manager.using(using).all() if using is not None else manager.all()`
+intact — confirmed on direct evidence, note 5), D5 (arm sets 8/3/7/6 +
+5/6 re-derived by my own AST reader with zero dead arms; validator
+`fromkeys` 6 + `combined` + `routing`, alias-subsumption comment intact),
+D-W2-a/b (runner docstrings name the policy pair — the one `5c5e32c5`
+runner hunk is the combined-service docstring reword; walker licence
+comments, glossary `:1560`), O1 (`:4084` "never the wording" verbatim,
+now doubly false — cause list AND combined text shared).
+
+REVISE rows: F1 (auth `_close_unawaited` def `:528` + 2 calls `:599` `:602`,
+`getattr`-default-`None` + callable under the same `suppress(BaseException)`;
+`is_authenticated.close()` zero hits; routers inline `:324` intact; count
+stays 3 — and the e1 flag below), F2 (outside-target `models.QuerySet(`
+exactly 1: `walker.py:1426`, constructing around the seal's own
+`_pk_membership_query_or_defect` rewrite composed by name at `:1419` —
+a consumer, not a second sealing body; `sql.Query`/truth-read trio/`get_queryset`
+censuses re-derived: zero outside), F3 (def `:3973` + 6 code composers
+`:3149` `:4147` `:4268` `:387` `:455` `:1424` + 2 prose cites `:3117` `:409`;
+all 7 wording oracles resolve — `:461` `:753` `:1269` `:1487` `:2153`
+`:2357` + origin lead `:1636`; 8 combined literal pins re-derived: 6 live
++ 2 `test_connection.py`; test `.format` uses pin composition, not wording;
+`reject_combined` zero hits), F6 (5 call sites `:191` `:126` `:541` `:898`
+`:1179`; `:898` pre-existed at base `:840` — the run-7 undercount correction
+verified; `keyset.py:402`; trigger untriggered), F11 (composing consumers
+exactly 5 files — `consumers.py:1612` and `schema.py:355` are prose-only,
+the latter explicitly stating the boundary work runs INSIDE the window;
+direct sites 5 -> 7 per W1's per-call convention — note 4; `types` x3 +
+`testing` x2 shapes intact; auth `async_to_sync` pre-existed at base),
+I-R4 (runner set 5 -> 4: default (`list_field.py` zero `policy=`,
+connection `_sidecar_visibility_policy` deleted with zero hits,
+`types/resolvers.py` x4) + cascade x2 + walker pair; `require_unevaluated`
+solely `_SIDECAR_RESULT_POLICY`; seal calls `:2608` `:3104` `:3897` `:4234`
+`:4340` with `:3104` the one `expected_routing`; canonical order
+`projection` before `combined` at `:3475`; the pairing artifact holds —
+the flag-setting policies' sole production pairing into the source seal is
+the walker's unrouted `:594` seed; flip trigger untriggered).
+
+Entry-3 re-derivation. My own arm reader + policy census: 8/3/7/6 in-file +
+5/6 permissions, zero dead arms anywhere; the 2/6 expectation re-derived
+(validator alias = the one declared subsumption; prepared-source alias =
+the pairing artifact). The gate should expect `2/6` with zero undeclared
+mismatches.
+
+Carried items, fresh evidence: s11 seal-side exclusion CONFIRMED (`:3733`
+snapshot-key read into the parameterized seal helper, `:3806` clone-write,
+both inside `_seal_or_defect`; package-wide census exactly the s11
+population: `plans.py:572` lenient + `walker.py:1432` strict-forward live
+reads, rest prose/def-name/comment — rename-count-2 re-proved).
+`connection-order-ladder` composing tier CONFIRMED (`model._meta.ordering`
+at exactly one package site `:304`, inside `default_order`; composers
+exactly three — `plans.py:939` inside `effective_connection_order`,
+`connection.py:1730`, `list_field.py:1163`; zero inline rebuilds — the only
+residual match is a comparison, not a rebuild; both owner-side challenges
+discharge at 1 definition each with the list field's documented
+extra-ordering non-consumption).
+
+F1 flag adjudication. Verified: no "migrated to consumers" commit exists
+(`log --all --grep` empty); `_disposed_awaitable` has zero hits in
+`auth/mutations.py` at HEAD (package-wide only the def + 3 in-file
+callers); the worktree DOES carry the consolidation (`auth/mutations.py`
+imports it at `:75` and composes at `:529`). Per s6 it lives in
+worktree+snapshot only (snapshot `9aaaad5d`, target blob `8fc556d5`,
+verified to exist). Moves no verdict: the HEAD trace is the committed
+record and F1's 3-count persists there; e1 stands as the plan record for
+uncommitted work. No row change proposed or owed.
+
+O2, new: observation stands with corrected pins (note 1). Both stale Edge
+sentences verified at HEAD (`:2123` combined-rejected, `:2125`-`:2126`
+must-SEAL-non-combined); `5c5e32c5` touched spec-045 and no commit in range
+touched spec-050; s1's run-8 never mentions spec-050 and s2 cites it only
+as an unchanged fingerprint input — first-recorded here, Worker-0 dedups.
+Routing endorsed: spec-050 owning card (in-flight prose contradicting
+landed behavior at `utils/querysets.py:3769` + `_COMBINED_WHAT`), note for
+family `post-set-apply-result-validation`.
+
+Index row judgment. The 1 row is exact replacement text: family name
+parallels the run-7 cause-list row; owner/files/holding correct and
+complete (all 6 code composers across the 3 files covered); the parenthetical
+counts verified (1 + 6 + 2; 8 oracles); the challenge/trigger well-formed
+(a seventh site composes). "No other new rows" endorsed (ladder tier under
+s11's row, rewrite helpers inside the one seal body, `:1426` a consumer,
+e1 flag row-less).
+
+Worktree attribution, all 76 hunks (222+/283-, default context):
+mechanical `truth.*` migration with added/removed profiles digit-for-digit
+W1's table (`truth.kind` x60 down to `truth.text`/`truth.is_instance` x1;
+`__getattribute__` x33 down to the five x1 dunders), plus migration roots
+(`from . import truth`, the `FieldDoesNotExist, ValidationError` import,
+`BaseIterable`), safe-render rework (local `_safe_class_name` deleted,
+`_safe_routing_repr` -> `_routing_repr` + `_ROUTING_SCALAR_TYPES` + 4
+call-site swaps), exception narrowing (coerce 4-tuple exploded one-per-line
+with the `DurationField`/`int(inf)` rationale; relation-target
+`FieldDoesNotExist`), the `_snapshot_routing_intent` guard removal, and
+fallout (`_template_params_defect`, `_DIRECT_RHS_TRUSTED_MRO`
+frozenset->tuple, combined-child cast, timeless comment). Zero owned: the
+drift's 6 commits are maintainer fix/typing, none a DRY-owned change, and
+the dirt is uncommitted hunt migration. Name-delta vs HEAD identical in
+snapshot `8fc556d5` (same migration carried forward). Read-only evidence;
+nothing applied.
+
+Fingerprints, three states plus closeout. Base `0c0537e2` target
+`3616927d`; HEAD target `392e50d0`; worktree `cfc773ba`; snapshot
+`8fc556d5`. All 22 HEAD blobs re-hashed identical at write time
+(`392e50d0 72595bb1 ef1e2038 3ff4094a d77c5050 3d6dd424 304e2f3e 574e9768
+01a3318c 420fc3ca c0a12b34 f23eb540 e2b46fd7 bdd9c2f1 3d307402 431ca7ba
+77ddb86c 47befb3f 72e7ff08 fdc4b1b0 f27e1f91 e2e683a8`). Zero-edit vs
+`ITEM_BASELINE=85b01ebe…`: diff touches only this artifact (header swap +
+EOF append) and Worker-0's `dry-0_0_15.md`; `--name-only -- '*.py'`
+empty. The 3 inventory oracles are source-text identical across the drift
+(`:5150`->`:5280`, `:5172`->`:5302`, `:5199`->`:5329`).
+
+Shape. The header lines 3-4 are W1's authored run-8 stamp (`Status:
+ready-for-verification/1`, `Run: 0.0.15 2026-09-30-8`), transcribed by
+Worker-0 after the followup successor was admitted without edit tools; the
+vs-baseline diff is exactly that 2-line swap (the baseline's stale
+`verified` / `2026-09-17-1` lines) plus the 511-line EOF append, with every
+prior section untouched. The submission stands; this verification flips
+line 3 to `verified` and appends here.
+
+Precision notes (recorded, none verdict-affecting): (1) O2 pins read
+`:2123` + `:2125`-`:2126`, not `:2121` `:2123` (`:2121` is the slice
+bullet's continuation); the `:3041` test-plan checkbox
+("non-projection, non-combined…") is a third stale pin in the same spec
+the owning card should take with the two Edge sentences. (2)
+"Byte-identical" for guard/def/signature lines touched by the typing wave
+means body/executable-identical (annotations differ); every affected
+verdict rests on logic or prose, which is unchanged. (3) F9's `:432` pin
+resolves to docstring prose inside `is_async_only_iterable`, not a def;
+the trio defs re-pin around it and the zero-reader census is as stated.
+(4) F11's 7th direct site is the reverse-direction `async_to_sync` half of
+the window machinery — a per-call convention; per-site it is 5 -> 6 with
+the same verdict. (5) D4's cited "order census re-proof" is the ORDER BY
+ladder census, which does not prove the `using`/`all` question; the holding
+is confirmed on direct docstring+body evidence instead. (6) W1's s1/s2
+"both quote the old rule text" overstates (s1 silent, s2 cites as input);
+the material first-recorded claim holds. (7) The run-8 `## Pending
+execution` entry 1's "no probe to re-run" retires the entry-1 `proof:`
+type by prose rather than by gate run; Worker-0 should confirm the type
+change is intended at closeout.
+
+No new defects. `FAKESHOP_SHARDED=1`/Postgres cells stay `unverified`.
+No ruff run owed (artifact `.md` only, no cross-file links, no scaffold
+owed). No commit. Address `dry/querysets-retrace-s16/verify`.

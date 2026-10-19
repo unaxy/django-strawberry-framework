@@ -2038,8 +2038,10 @@ def _strawberry_patch_opted_out() -> Generator[None, None, None]:
     The patch installs from ``AppConfig.ready()``, long before any test runs, so
     setting the switch alone cannot un-install it - a row that only overrode the
     setting would prove nothing. The honest simulation restores upstream's own two
-    methods *and* sets the switch, so a stray ``apply()`` during the block stays a
-    no-op and what remains running is exactly what an opted-out consumer runs.
+    methods *and* sets the switch, so a stray ``apply()`` during the
+    block stays a no-op. The two multipart delegates stay installed: no row in
+    this block posts multipart, so they are unreachable here, and what the rows
+    observe is exactly what an opted-out consumer observes on the JSON-body path.
 
     The ``cross_web`` patch is deliberately left installed: it has its own
     ``{"cross_web": False}`` member, and it is what routes the sync transport's
@@ -2223,7 +2225,7 @@ def test_only_the_package_mount_answers_the_same_way_in_both_patch_states() -> N
       longer narrows encodings, so ``json.loads`` applies RFC 8259 auto-detection
       to the raw bytes and *accepts* the UTF-16 document. A consumer who
       deliberately mounts Strawberry's own view keeps Strawberry's own semantics -
-      the deliberate scope of the ownership split (spec-046), pinned
+      the deliberate scope of the ownership split (spec-046 Decision 9), pinned
       at the patch tier by
       ``test_patched_parse_json_leaves_upstreams_bytes_semantics_alone`` and
       recorded here as live behavior.

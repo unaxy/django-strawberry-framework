@@ -1,20 +1,21 @@
 """Public GraphQL scalars + the ``strawberry_config()`` schema-config factory.
 
 Today: ``BigInt`` (a package-custom scalar) and ``Upload`` (re-exported from
-Strawberry's built-in ``strawberry.file_uploads.scalars`` per
-spec-037). Unlike ``BigInt``, ``Upload`` is NOT registered in
+Strawberry's built-in ``strawberry.file_uploads.scalars`` per spec-037
+Decision 5). Unlike ``BigInt``, ``Upload`` is NOT registered in
 ``_PACKAGE_SCALAR_MAP``: Strawberry's built-in ``DEFAULT_SCALAR_REGISTRY``
 already owns it, so an ``Upload``-annotated field resolves in any schema.
 
 ``BigInt`` is a JSON-safe scalar typically used to map Django's 64-bit
 integer fields (``BigIntegerField``, ``PositiveBigIntegerField``). It is
-technically arbitrary-precision - serialized as a decimal string via Python
-``str(int_value)`` so values past GraphQL's signed 32-bit ``Int`` boundary
-survive transit without truncation. The strict parser and serializer keep the
-wire-level input and output sides symmetric (decimal string in, decimal string
-out), even though the in-Python accept-sets differ - the parser additionally
-accepts ``int`` for direct-call sites while the serializer rejects ``str`` so a
-schema cannot emit a value the parser would reject.
+technically arbitrary-precision - serialized as a decimal string
+(``int.__repr__`` of the accepted ``int``) so values past GraphQL's signed
+32-bit ``Int`` boundary survive transit without truncation. The strict parser
+and serializer keep the wire-level input and output sides symmetric (decimal
+string in, decimal string out), even though the in-Python accept-sets differ -
+the parser additionally accepts ``int`` for GraphQL bare-int literals and
+direct Python callers while the serializer rejects ``str`` so a schema cannot
+emit a value the parser would reject.
 """
 
 import re
@@ -26,7 +27,7 @@ from strawberry.file_uploads.scalars import UploadDefinition as _UploadDefinitio
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types.scalar import ScalarDefinition
 
-from .exceptions import _safe_arg_repr, _safe_attr, _safe_type_name
+from .utils import truth
 from .utils.typing import call_forwarded
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
 UploadDefinition: ScalarDefinition = _UploadDefinition
 
 # Re-export Strawberry's built-in ``Upload`` scalar (and its ``UploadDefinition``)
-# as the package's public upload scalar (spec-037). ``Upload`` is a
+# as the package's public upload scalar (spec-037 Decision 5). ``Upload`` is a
 # ``NewType("Upload", bytes)`` already present in Strawberry's
 # ``DEFAULT_SCALAR_REGISTRY``, so it resolves in every schema with NO
 # ``_PACKAGE_SCALAR_MAP`` entry - the deliberate contrast with the package-custom
@@ -74,30 +75,34 @@ def _parse_bigint(value: object) -> int:
         - non-decimal strings ("abc", "1.9", "1e3", "0x10")
         - None and other types
     """
-    if isinstance(value, bool):
-        # TRY004 is suppressed on the raise: this parser uniformly raises
-        # ValueError for every invalid BigInt input; bool is rejected here
+    if type(value) is int:
+        return int.__int__(value)
+    if truth.is_instance(value, bool):
+        # This parser uniformly raises ValueError (never TypeError) for every
+        # invalid BigInt input; bool is rejected here
         # (before the int check, since bool is an int subclass) as an invalid
         # *value*, matching the GraphQL scalar parse_value contract.
-        raise ValueError("BigInt does not accept boolean values")  # noqa: TRY004
-    if isinstance(value, int):
-        # Use the base descriptor so an int subclass cannot retain a hostile
-        # ``__int__`` implementation in the value handed to a resolver.
+        raise ValueError("BigInt does not accept boolean values")
+    if truth.is_instance(value, int):
+        # The base slot, so an int subclass's own ``__int__`` never decides the
+        # value handed to a resolver.
         return int.__int__(value)
-    if isinstance(value, str):
-        # Normalize str subclasses before regex and integer conversion so
-        # consumer-defined ``__int__`` / ``__str__`` methods cannot alter the
-        # accepted value or replace the scalar's ValueError contract.
-        plain_value = str.__str__(value)
-        if not _BIGINT_STRING_PATTERN.fullmatch(plain_value):
-            raise ValueError(
-                f"BigInt requires a plain ASCII decimal integer string "
-                f"(optional leading minus for non-zero, no leading zeroes, "
-                f"no underscores, no plus sign, no Unicode digits); got "
-                f"{_safe_arg_repr(value)}",
-            )
-        return int(plain_value)
-    raise ValueError(f"BigInt cannot parse {_safe_type_name(value)}")
+    if type(value) is str:
+        plain_value = value
+    elif truth.is_instance(value, str):
+        # Copied to an exact ``str`` before regex and integer conversion, so a
+        # subclass's ``__int__`` / ``__str__`` never decides the accepted value.
+        plain_value = truth.text(value)
+    else:
+        raise ValueError(f"BigInt cannot parse {truth.kind(value)}")
+    if not _BIGINT_STRING_PATTERN.fullmatch(plain_value):
+        raise ValueError(
+            f"BigInt requires a plain ASCII decimal integer string "
+            f"(optional leading minus for non-zero, no leading zeroes, "
+            f"no underscores, no plus sign, no Unicode digits); got "
+            f"{truth.render(value)}",
+        )
+    return int(plain_value)
 
 
 def _serialize_bigint(value: object) -> str:
@@ -114,16 +119,18 @@ def _serialize_bigint(value: object) -> str:
     permissive ``serialize=str`` would let a schema emit values the parser
     rejects, breaking the input/output symmetry contract.
     """
-    if isinstance(value, bool):
+    if type(value) is int:
+        return int.__repr__(value)
+    if truth.is_instance(value, bool):
         raise TypeError(f"BigInt cannot serialize bool value {value!r}")
-    if isinstance(value, int):
+    if truth.is_instance(value, int):
         # ``str(value)`` dispatches to a subclass's override. In CPython,
         # ``int.__str__`` inherits ``object.__str__`` which delegates to
-        # ``tp_repr`` (the subclass's ``__repr__``), so we normalize via
+        # ``tp_repr`` (the subclass's ``__repr__``), so the serializer normalizes via
         # ``int.__repr__`` to bypass consumer-supplied ``__repr__`` / ``__str__``
         # implementations and guarantee canonical decimal serialization.
         return int.__repr__(value)
-    raise TypeError(f"BigInt cannot serialize {_safe_type_name(value)}")
+    raise TypeError(f"BigInt cannot serialize {truth.kind(value)}")
 
 
 BigInt = NewType("BigInt", int)
@@ -152,10 +159,10 @@ def strawberry_config(
 
     The keyword-only ``extra_scalar_map`` lets consumers register their own
     scalars alongside the package defaults; collisions with package-defined
-    keys raise ``ValueError`` (per spec-025 Decision 4). A mapping that cannot
-    be materialized - or whose keys raise while being hashed or compared
-    against the package keys - is rejected with ``ValueError`` too: consumer
-    key code never replaces the factory's typed boundary. Every other keyword
+    keys raise ``ValueError`` (per spec-025 Decision 4). The mapping is copied
+    once with ``dict()``; that copy, and the collision check's hashing and
+    comparison of its keys, are the mapping's and the keys' own behaviour, and
+    whatever they raise propagates. Every other keyword
     argument in ``**config_kwargs`` is forwarded verbatim to
     ``StrawberryConfig(...)`` (e.g. ``auto_camel_case``, ``relay_max_results``).
     Passing ``scalar_map=`` directly is rejected with ``ValueError`` because
@@ -166,49 +173,25 @@ def strawberry_config(
         raise ValueError(
             "strawberry_config() owns scalar_map; pass consumer scalars with extra_scalar_map=...",
         )
-    try:
-        # ``dict`` deliberately retains Strawberry's permissive key/value
-        # contract, while materializing once gives each call an isolated
-        # map.  Materialization is only the FIRST dispatch into consumer key
-        # code, so the guard owns every later one too: the key-set
-        # intersection (``&``) and the merge into the fresh result dict
-        # re-hash the materialized keys and, on a hash collision, compare
-        # them - which runs a hostile key's ``__eq__`` even though ``dict()``
-        # itself succeeded.  A hostile mapping must not replace the promised
-        # factory boundary with its own arbitrary exception, whichever of
-        # these operations detonates it.
-        extra: dict[object, ScalarDefinition] = (
-            {} if extra_scalar_map is None else dict(extra_scalar_map)
-        )
-        collisions = _PACKAGE_SCALAR_MAP.keys() & extra.keys()
-        merged: dict[object, ScalarDefinition] = dict(_PACKAGE_SCALAR_MAP)
-        merged.update(extra)
-    except BaseException as exc:
-        raise ValueError(
-            "strawberry_config(extra_scalar_map=...) must be materializable with "
-            f"keys that hash and compare safely; got {_safe_arg_repr(extra_scalar_map)}.",
-        ) from exc
+    # ``dict`` deliberately retains Strawberry's permissive key/value contract,
+    # while materializing once gives each call an isolated map.
+    extra: dict[object, ScalarDefinition] = (
+        {} if extra_scalar_map is None else dict(extra_scalar_map)
+    )
+    # A collision is named by the PACKAGE definition it redeclares, so the
+    # message is built from framework-owned names only.
+    collisions = sorted(
+        definition.name for key, definition in _PACKAGE_SCALAR_MAP.items() if key in extra
+    )
+    merged: dict[object, ScalarDefinition] = dict(_PACKAGE_SCALAR_MAP)
+    merged.update(extra)
     if collisions:
         raise ValueError(
             "strawberry_config(extra_scalar_map=...) cannot redeclare package-defined scalars: "
-            f"{', '.join(sorted(_safe_scalar_map_key_label(k) for k in collisions))}. "
+            f"{', '.join(collisions)}. "
             "Define a Strawberry custom scalar of a different NewType / class "
             "to register under a separate key.",
         )
     # Forwarded verbatim: ``StrawberryConfig``'s dataclass fields vary across the uncapped
     # supported Strawberry range, so their keyword types cannot be pinned here.
     return call_forwarded(StrawberryConfig, (), {"scalar_map": merged, **config_kwargs})
-
-
-def _safe_scalar_map_key_label(key: object) -> str:
-    """Describe a collision key without trusting consumer-defined metadata."""
-    name = _safe_attr(key, "__name__")
-    # A ``__name__`` that is a ``str`` subclass is read through the base
-    # ``str`` slot (parity with ``exceptions.py::_safe_type_name``): handing
-    # the subclass onward would let its ``__str__`` / ``__format__`` run -
-    # and its ``__lt__`` under ``sorted()`` - while the collision message is
-    # assembled, replacing the factory's ValueError with an arbitrary
-    # consumer exception.
-    if isinstance(name, str):
-        return str.__str__(name)
-    return _safe_arg_repr(key)

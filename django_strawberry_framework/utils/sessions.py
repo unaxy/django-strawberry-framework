@@ -103,13 +103,9 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from django.utils.module_loading import import_string
 
 from django_strawberry_framework.conf import django_setting
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_type_name,
-    describe_value,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 
-from ._narrowing import is_str
+from . import truth
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -149,12 +145,12 @@ def scope_key(name: str) -> str:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class ScopeSingletonMessages:
-    """The four consumer-facing failures :func:`scope_singleton` can report.
+    """The consumer-facing failure :func:`scope_singleton` can report: a corrupted slot.
 
     Declared as DATA per call site rather than interleaved with the control
-    flow, because the wordings are genuinely per-surface (the auth boundary
+    flow, because the wording is genuinely per-surface (the auth boundary
     names the lock; the revalidation boundary names the actor state) while the
-    algorithm must not be. Making them a required field set also means a new
+    algorithm must not be. Making it a required field set also means a new
     failure mode added to the algorithm cannot be added at one call site and
     forgotten at the other: it is a field, so every site must answer it.
 
@@ -162,9 +158,6 @@ class ScopeSingletonMessages:
     type name of whatever was found in the slot).
     """
 
-    unreadable: str
-    unstorable: str
-    uninspectable: str
     corrupted: str
 
 
@@ -190,29 +183,20 @@ def scope_singleton(
       therefore atomic on the event loop, and two operations multiplexed on one
       connection cannot each create their own object - which for a lock would
       mean no serialization at all.
-    * **A corrupted slot is a typed error, never a silent replacement.** Every
-      read, store and type test is contained, because the scope is a mapping
-      other software also writes to: finding the wrong object there means
-      something else owns the key, and quietly overwriting it would trade a
-      loud configuration error for two systems sharing one slot.
+    * **A corrupted slot is a typed error, never a silent replacement.** The
+      scope is a mapping other software also writes to: finding the wrong
+      object there means something else owns the key, and quietly overwriting
+      it would trade a loud configuration error for two systems sharing one
+      slot. The found object is classified by its real class, so its
+      ``__class__`` attribute cannot claim the slot.
     """
-    try:
-        value = scope.get(key)
-    except BaseException as exc:
-        raise ConfigurationError(messages.unreadable) from exc
+    value = scope.get(key)
     if value is None:
         created = factory()
-        try:
-            scope[key] = created
-        except BaseException as exc:
-            raise ConfigurationError(messages.unstorable) from exc
+        scope[key] = created
         return created
-    try:
-        matches = isinstance(value, expect)
-    except BaseException as exc:
-        raise ConfigurationError(messages.uninspectable) from exc
-    if not matches:
-        raise ConfigurationError(messages.corrupted.format(actual=_safe_type_name(value)))
+    if not truth.is_instance(value, expect):
+        raise ConfigurationError(messages.corrupted.format(actual=truth.kind(value)))
     return value
 
 
@@ -224,13 +208,11 @@ def session_store_class() -> type[SessionBase]:
     callers named in the module docstring. The resolution goes through Django's
     own ``import_string``, so a consumer-authored engine subclass resolves
     identically to a shipped one. ``settings`` is read at CALL time, never
-    captured, so ``override_settings(SESSION_ENGINE=...)`` is honored. A
-    deployment-supplied engine is a string only if its real type is one (its
-    ``__class__`` is never read), and a hostile ``str`` subclass is flattened
-    through the base ``str`` slot before it reaches either interpolation below,
-    so a raising ``__format__`` / ``__repr__`` cannot replace the typed
-    ``ConfigurationError`` with an arbitrary consumer exception while the import
-    path or the rejection message is being assembled.
+    captured, so ``override_settings(SESSION_ENGINE=...)`` is honored. The
+    engine is accepted by its real class (a ``str`` or subclass; its
+    ``__class__`` is never read) and copied to an exact ``str`` before anything
+    else reads it, so the emptiness check, the import path and the rejection
+    message all see the string the deployment wrote.
     """
     try:
         engine = django_setting("SESSION_ENGINE")
@@ -243,20 +225,17 @@ def session_store_class() -> type[SessionBase]:
     ) as exc:
         raise ConfigurationError(
             "SESSION_ENGINE could not be read from settings "
-            f"({type(exc).__name__}); check settings.SESSION_ENGINE.",
+            f"({truth.name(type(exc))}); check settings.SESSION_ENGINE.",
         ) from exc
-    if not is_str(engine):
+    if not truth.is_instance(engine, str):
         raise ConfigurationError(
-            f"SESSION_ENGINE must be a string; got {describe_value(engine)}.",
+            f"SESSION_ENGINE must be a string; got {truth.describe(engine)}.",
         )
-    # ``engine`` came from the deployment and may be a ``str`` subclass whose
-    # dunders raise. ``str.__str__`` on a non-exact ``str`` returns a plain base
-    # copy without dispatching the subclass's ``__str__``, so the truthiness test
-    # and both f-string interpolations below (the import path here and the
-    # ``{engine!r}`` tail at the raise site) run through C slots that cannot run
-    # consumer code - the same guarantee ``describe_value`` gives the non-string
-    # rejection above.
-    engine = str.__str__(engine)
+    # A ``str`` subclass is copied to an exact ``str`` through the base slot, so
+    # the truthiness test below and both interpolations after it (the import
+    # path here and the ``{engine!r}`` tail at the raise site) read the base
+    # string content.
+    engine = truth.text(engine)
     if not engine:
         raise ConfigurationError(
             "SESSION_ENGINE must be a non-empty string; got empty value.",
@@ -275,7 +254,7 @@ def session_store_class() -> type[SessionBase]:
     ) as exc:
         raise ConfigurationError(
             f"Could not resolve SESSION_ENGINE {engine!r}'s SessionStore "
-            f"({type(exc).__name__}); check settings.SESSION_ENGINE.",
+            f"({truth.name(type(exc))}); check settings.SESSION_ENGINE.",
         ) from exc
 
 
@@ -286,9 +265,6 @@ def session_store_class() -> type[SessionBase]:
 _ACTOR_STATE_SCOPE_KEY = scope_key("connection_actor_state")
 
 _ACTOR_STATE_MESSAGES = ScopeSingletonMessages(
-    unreadable="The WebSocket revalidation state could not be read from the scope.",
-    unstorable="The WebSocket revalidation state could not be stored on the scope.",
-    uninspectable="The WebSocket revalidation state could not be inspected.",
     corrupted=(
         "The WebSocket revalidation state is corrupted; expected a "
         "ConnectionActorState, got {actual}."

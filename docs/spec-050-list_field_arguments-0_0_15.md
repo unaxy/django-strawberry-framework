@@ -556,7 +556,7 @@ Its `extensions` are stable:
 For numeric-domain failures, `reason` is `negative` or `over_ceiling`; both carry `value`
 and only the latter carries `ceiling`. A direct Python call that bypasses GraphQL coercion
 uses `non_integer` and a safe string value rendered by
-[`django_strawberry_framework/exceptions.py::describe_value`][exceptions].
+[`django_strawberry_framework/utils/truth.py::describe`][truth].
 `order_required` carries the rejected offset as `value`. The source-shape reason
 `queryset_required` carries neither `value` nor `ceiling`, because serializing an order input
 is not a stable wire contract. Pre-sliced querysets remain the shared sealed visibility
@@ -3168,7 +3168,6 @@ complete extension payload over HTTP.
 <!-- django_strawberry_framework/ -->
 [conf]: ../django_strawberry_framework/conf.py
 [connection]: ../django_strawberry_framework/connection.py
-[exceptions]: ../django_strawberry_framework/exceptions.py
 [execution-mode]: ../django_strawberry_framework/utils/execution_mode.py
 [list-field]: ../django_strawberry_framework/list_field.py
 [operation-state]: ../django_strawberry_framework/extensions/operation_state.py
@@ -3181,6 +3180,7 @@ complete extension payload over HTTP.
 [querysets]: ../django_strawberry_framework/utils/querysets.py
 [resource-policy]: ../django_strawberry_framework/resource_policy.py
 [schema]: ../django_strawberry_framework/schema.py
+[truth]: ../django_strawberry_framework/utils/truth.py
 [typing-utils]: ../django_strawberry_framework/utils/typing.py
 
 <!-- tests/ -->

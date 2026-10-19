@@ -38,7 +38,7 @@ import sys
 from collections.abc import Callable, Iterator
 from enum import Enum
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING
 
 import pytest
 import strawberry
@@ -93,6 +93,7 @@ from tests._idioms import ClassReadRaises, module_binding
 
 if TYPE_CHECKING:
     from django.db.models import Model
+    from django.db.models.expressions import Combinable
 
     from django_strawberry_framework.forms.inputs import FormClass
 
@@ -936,8 +937,8 @@ def test_multiple_choice_field_over_single_value_choice_column_is_refused() -> N
         build_form_input_class(form_class, operation_kind=CREATE)
 
 
-def test_choice_field_whose_valid_value_raises_is_refused_typed() -> None:
-    """A broken ``valid_value`` is a typed build error naming the form field."""
+def test_choice_field_whose_valid_value_raises_propagates_its_exception() -> None:
+    """A consumer ``valid_value`` that raises propagates its own exception from the build."""
 
     class BrokenChoiceField(forms.ChoiceField):
         @override
@@ -945,7 +946,7 @@ def test_choice_field_whose_valid_value_raises_is_refused_typed() -> None:
             raise RuntimeError("broken")
 
     form_class = _book_status_form(BrokenChoiceField(choices=_DESK_CHOICES))
-    with pytest.raises(ConfigurationError, match="valid_value raised RuntimeError: broken"):
+    with pytest.raises(RuntimeError, match="broken"):
         build_form_input_class(form_class, operation_kind=CREATE)
 
 
@@ -1714,51 +1715,13 @@ def test_honest_str_subclass_basis_name_still_builds() -> None:
     assert field_names == {"good"}
 
 
-def test_basis_diagnostic_survives_hostile_repr_key() -> None:
-    """The invalid-names diagnostic renders a hostile-``__repr__`` key typed.
-
-    The diagnostic is assembled by an f-string at the raise site, so a
-    hook-supplied non-``str`` key whose ``__repr__`` raises must not replace
-    the typed ``ConfigurationError`` with the repr's own exception (the
-    ``exceptions.py::describe_value`` failure mode - a rejection message cannot
-    fail on the value it is rejecting). The entry renders through
-    ``_safe_arg_repr`` as ``<unprintable T>`` instead.
-    """
-
-    class EvilRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("hostile repr")
-
-    with pytest.raises(ConfigurationError, match=r"invalid names.*EvilRepr"):
-        normalize_form_field_basis(_make_empty_form(), {EvilRepr(): forms.CharField()})
-
-
-def test_basis_diagnostic_typed_for_lying_isidentifier_str_subclass() -> None:
-    """A ``str`` subclass whose ``isidentifier`` raises is invalid, never raw.
-
-    The per-name interrogation sits inside the typed boundary: a name that
-    cannot even be asked ``isidentifier()`` is rejected by the same rule that
-    rejects non-identifiers (it is listed in the diagnostic), instead of
-    escaping ``_form_field_basis`` as a raw ``RuntimeError``.
-    """
-
-    class LyingStr(str):
-        @override
-        def isidentifier(self) -> NoReturn:
-            raise RuntimeError("hostile isidentifier")
-
-    with pytest.raises(ConfigurationError, match=r"invalid names.*'x'"):
-        normalize_form_field_basis(_make_empty_form(), {LyingStr("x"): forms.CharField()})
-
-
 @pytest.mark.parametrize("raised", _HOSTILE_CLASS_ERRORS)
 def test_basis_diagnostic_typed_for_hostile_class_value(raised: type[BaseException]) -> None:
     """A value whose ``__class__`` raises under ``isinstance`` is invalid, never raw.
 
-    The per-value interrogation sits inside the same typed boundary as the
-    per-name one: a value that cannot even be asked ``isinstance(value,
-    forms.Field)`` is listed under invalid fields, instead of escaping
+    The per-value check classifies the value by its real class
+    (``utils/truth.py::is_instance``), so a value whose ``__class__`` read raises is
+    listed under invalid fields without that read ever running, instead of escaping
     ``_form_field_basis`` as the raw exception.
     """
     with pytest.raises(ConfigurationError) as exc:
@@ -1783,55 +1746,6 @@ def test_basis_diagnostic_keeps_list_repr_for_benign_names() -> None:
     assert "['with space', '9lead']" in str(exc.value)
 
 
-def test_model_column_for_typed_on_hostile_meta_model() -> None:
-    """A raising ``_meta.model`` read fails loud typed, naming the form.
-
-    The corrupted-internals twin of the guarded ``base_fields`` read: a form
-    class whose ``_meta.model`` read raises is a clobbered class, so
-    ``_model_column_for`` raises the typed diagnostic instead of letting the
-    raw exception escape the schema-time build (or masking it as ``None``,
-    which would silently mis-type the field through the model-less table).
-    """
-
-    class BoomModelMeta:
-        @property
-        def model(self) -> NoReturn:
-            raise RuntimeError("hostile _meta.model")
-
-    class BoomModelForm:
-        _meta = BoomModelMeta()
-
-    with pytest.raises(ConfigurationError, match=r"BoomModelForm.*corrupted"):
-        _model_column_for(_as_form_class(BoomModelForm), "name")
-
-
-def test_model_column_for_typed_on_non_field_does_not_exist_get_field() -> None:
-    """A ``get_field`` raising something OTHER than ``FieldDoesNotExist`` is typed.
-
-    ``FieldDoesNotExist`` keeps its ``None`` return (the extra-field path); any
-    other raise is corrupted model internals and fails loud typed, naming the
-    form and the field.
-    """
-
-    def _boom(_name: str) -> NoReturn:
-        raise RuntimeError("hostile get_field")
-
-    def _missing(name: str) -> NoReturn:
-        raise FieldDoesNotExist(name)
-
-    boom_model = SimpleNamespace(_meta=SimpleNamespace(get_field=_boom))
-    boom_form = SimpleNamespace(_meta=SimpleNamespace(model=boom_model))
-    with pytest.raises(
-        ConfigurationError,
-        match=r"SimpleNamespace.*get_field raised RuntimeError",
-    ):
-        _model_column_for(_as_form_class(boom_form), "name")
-
-    missing_model = SimpleNamespace(_meta=SimpleNamespace(get_field=_missing))
-    missing_form = SimpleNamespace(_meta=SimpleNamespace(model=missing_model))
-    assert _model_column_for(_as_form_class(missing_form), "name") is None
-
-
 def test_resolve_target_column_reverse_m2m_and_non_concrete_fallback() -> None:
     class FakeReverseM2M:
         is_relation = True
@@ -1850,7 +1764,7 @@ def test_resolve_target_column_reverse_m2m_and_non_concrete_fallback() -> None:
         raise FieldDoesNotExist
 
     fake_model = SimpleNamespace(_meta=SimpleNamespace(get_field=_get_field))
-    fake_form = SimpleNamespace(_meta=SimpleNamespace(model=fake_model))
+    fake_form = type("FakeForm", (), {"_meta": SimpleNamespace(model=fake_model)})
 
     assert _model_column_for(_as_form_class(fake_form), "reverse_m2m") is None
     assert _model_column_for(_as_form_class(fake_form), "non_concrete") is None
@@ -1886,15 +1800,13 @@ def test_form_basis_content_identity_reraises_the_basis_typed_reject_verbatim() 
     assert "reading the field basis" not in str(excinfo.value)
 
 
-def test_form_basis_content_identity_types_a_raw_requiredness_read_failure() -> None:
-    """A raw non-typed escape from the identity walk still lands on the typed boundary.
+def test_form_basis_content_identity_propagates_a_raw_requiredness_read_failure() -> None:
+    """A field's raising ``required`` read is consumer behaviour; it propagates unchanged.
 
-    ``_form_field_basis`` validation only checks ``isinstance(field, forms.Field)``,
-    so a subclass whose ``required`` read raises passes validation and detonates
-    later inside the projection's per-field walk (``form_field_required`` reads
-    ``field.required``). The projection's containment owns that: the raw failure is
-    reported as the typed ``ConfigurationError`` naming the phase, chained from the
-    original - never a raw escape from cache-key assembly.
+    ``_form_field_basis`` validation only checks the field's real class, so a subclass
+    whose ``required`` read raises passes validation and raises later inside the
+    projection's per-field walk (``form_field_required`` reads ``field.required``); the
+    consumer's own exception reaches the caller, never a wrapped one.
     """
 
     class _HostileRequiredField(forms.Field):
@@ -1921,11 +1833,17 @@ def test_form_basis_content_identity_types_a_raw_requiredness_read_failure() -> 
     field = _HostileRequiredField()
     _HostileRequiredField.armed = True
 
-    with pytest.raises(ConfigurationError) as excinfo:
+    with pytest.raises(RuntimeError, match="hostile requiredness read"):
         _form_basis_content_identity(_PlainHostForm, {"confirm": field})
 
-    assert "reading the field basis for the input shape identity raised RuntimeError" in str(
-        excinfo.value,
+
+def test_basis_diagnostic_message_is_pinned() -> None:
+    """The invalid-basis diagnostic names the form and each invalid entry."""
+    form_cls = _make_empty_form()
+    with pytest.raises(ConfigurationError) as exc_info:
+        normalize_form_field_basis(form_cls, {"9lead": forms.CharField(), "ok": 3})
+    assert str(exc_info.value) == (
+        f"DjangoFormMutation for {form_cls.__name__} get_form_fields() must return "
+        "a mapping of string names to forms.Field instances; invalid names "
+        "['9lead'], invalid fields ['ok']."
     )
-    assert "hostile requiredness read" in str(excinfo.value)
-    assert isinstance(excinfo.value.__cause__, RuntimeError)

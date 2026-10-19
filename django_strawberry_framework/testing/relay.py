@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, cast
 
 from strawberry import relay
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_arg_repr
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.base import (
     _RELAY_NODE_GATE_INHERIT_TAIL,
@@ -52,16 +52,18 @@ from django_strawberry_framework.types.base import (
     STRING_GLOBALID_STRATEGIES,
     DjangoType,
 )
+from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.relay import (
     decode_global_id,
     encode_typename,
     published_node_type_name,
 )
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import optional_instance
 
 if TYPE_CHECKING:
     from strawberry.schema import Schema
 
-    from django_strawberry_framework.types.definition import DjangoTypeDefinition
 
 __all__ = ["decode_global_id", "global_id_for"]
 
@@ -83,25 +85,21 @@ def global_id_for(
     finalized non-Relay-Node types, and ``callable`` / ``custom`` strategies
     (see the module docstring for the full contract).
     """
-    # Bound before the ``try``: the gate below passes only when the ``try`` completed,
-    # which rebinds it to the class's own attribute.
-    definition: object = None
-    try:
-        # basedpyright: trust boundary: ``type_cls: type[object]`` is the public contract; the
-        # class check validates a test call that breaks it
-        is_django_type = isinstance(type_cls, type) and issubclass(type_cls, DjangoType)  # pyright: ignore[reportUnnecessaryIsInstance]
-        definition = getattr(type_cls, "__django_strawberry_definition__", None)
-        registered_definition = registry.get_definition(type_cls) if is_django_type else None
-        is_registered_own_definition = (
-            definition is not None
-            and definition is registered_definition
-            and getattr(definition, "origin", None) is type_cls
+    definition: DjangoTypeDefinition | None = None
+    is_registered_own_definition = False
+    if truth.is_subclass(type_cls, DjangoType):
+        # Registration writes this slot; the identity check below proves it is the canonical one.
+        definition = optional_instance(
+            truth.static_attr(type_cls, "__django_strawberry_definition__", None),
+            DjangoTypeDefinition,
         )
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        is_registered_own_definition = False
+        canonical = registry.get_definition(type_cls)
+        is_registered_own_definition = (
+            canonical is not None and definition is canonical and canonical.origin is type_cls
+        )
     if not is_registered_own_definition:
         raise ConfigurationError(
-            f"global_id_for: {_safe_arg_repr(type_cls)} is not a registered "
+            f"global_id_for: {truth.render(type_cls)} is not a registered "
             "DjangoType subclass; "
             "pass the DjangoType class whose emitted id you want to mint.",
         )

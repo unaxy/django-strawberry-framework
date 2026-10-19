@@ -72,13 +72,7 @@ from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types import Info
 from typing_extensions import override
 
-from .exceptions import (
-    ConfigurationError,
-    DjangoStrawberryFrameworkError,
-    _safe_arg_repr,
-    _safe_class_name,
-    describe_value,
-)
+from .exceptions import ConfigurationError, DjangoStrawberryFrameworkError
 from .registry import registry
 from .resource_policy import (
     _cleanup_rejected_async_iterable,
@@ -91,8 +85,8 @@ from .resource_policy import (
 )
 from .types import DjangoType
 from .types.base import _is_relay_shaped
+from .utils import truth
 from .utils._narrowing import (
-    is_class,
     is_list_or_tuple,
     is_set_or_frozenset,
     is_str,
@@ -100,7 +94,9 @@ from .utils._narrowing import (
     list_of,
     read_attr,
 )
+from .utils.connections import is_supplied
 from .utils.directives import validated_field_directives
+from .utils.errors import coded_error_extensions
 from .utils.execution_mode import async_execution, operation_is_async
 from .utils.input_values import UNSET
 from .utils.querysets import (
@@ -160,8 +156,9 @@ def _validate_djangotype_target(
 ) -> DjangoTypeDefinition:
     """Run the shared DjangoType-target constructor guards for a field factory.
 
-    Shared by ``DjangoListField`` and ``DjangoConnectionField`` (and any future
-    node field). ``field`` is the factory's public name
+    Shared by ``DjangoListField``, ``DjangoConnectionField``, and the Relay node
+    fields (via ``_validate_relay_djangotype_target``). ``field`` is the
+    factory's public name
     (e.g. ``"DjangoListField"``) interpolated into the ``ConfigurationError``
     messages so each factory's errors name itself. These constructor-site
     checks fail at the line that wrote ``<field>(...)`` rather than at
@@ -190,57 +187,37 @@ def _validate_djangotype_target(
     cannot mean different things to the list, connection and Relay node
     entry points.
 
-    Every deployment-supplied value in a rejection message renders through the
-    guarded helpers (``exceptions.py``): the non-class arm renders
-    ``_safe_arg_repr`` (the ``_validate_mutation_target`` parity spelling) and
-    the class arms render ``_safe_class_name``, so a hostile ``__repr__`` or a
-    metaclass ``__name__`` property that raises cannot detonate the message
-    assembly and replace the typed rejection with a raw ``RuntimeError``.
-
-    The class test asks the value's REAL type (``utils/_narrowing.py::is_class``),
-    not ``inspect.isclass``: ``isinstance`` falls back to a ``__class__`` read, so
-    a property that raises would escape raw and one that claims ``type`` would
-    carry a non-class into ``issubclass``. A proxy of a class is not a target
-    either way: the registry's definition names the proxied class as its
-    ``origin``, never the proxy.
-
-    The definition reads are contained: ``getattr``'s default suppresses only
-    ``AttributeError``, so a metaclass ``__getattr__`` raising anything else
-    would escape raw and the typed "not a registered DjangoType" rejection
-    would never exist, and the registry lookup hashes the target, which a
-    metaclass can make raise. A read that cannot be answered is a target that
-    cannot be PROVEN registered, so the failure is the same typed reject (fail
-    closed, matching ``forms/inputs.py::_model_column_for``'s posture). The
-    attribute is compared to the registry's object by identity before ``origin``
-    is read, so ``origin`` is only ever read off the registry's own definition,
-    never off a replacement object the attribute was reassigned to.
+    Every identity fact is read truthfully (``utils/truth.py``): the class and
+    subclass gates read the real metaclass chain and MRO, the definition
+    attribute is read from the real class namespaces without consulting the
+    metaclass, and the registry lookup is by identity. Rejection messages
+    render the target through ``truth.render`` / ``truth.name``.
+    A proxy of a class is not a target: the registry's definition names the
+    proxied class as its ``origin``, never the proxy. The attribute is compared
+    to the registry's object by identity before ``origin`` is read, so ``origin``
+    is only ever read off the registry's own definition, never off a replacement
+    object the attribute was reassigned to.
 
     Raises ``ConfigurationError`` on failure; returns the canonical
     ``DjangoTypeDefinition`` when every guard passes, so the Relay validator
-    consumes the SAME contained read instead of re-reading the attribute
-    directly (a stateful metaclass could answer the first guarded read and
-    detonate a second raw one). The caller runs any factory-specific guards
-    (e.g. the connection field's Relay-Node guard) AFTER this returns.
+    consumes the SAME read instead of reading the attribute a second time.
+    The caller runs any factory-specific guards (e.g. the connection field's
+    Relay-Node guard) AFTER this returns.
     """
-    if not is_class(target_type):
+    if not truth.is_type(target_type):
         raise ConfigurationError(
-            f"{field} requires a DjangoType class; got {_safe_arg_repr(target_type)}.",
+            f"{field} requires a DjangoType class; got {truth.render(target_type)}.",
         )
-    if not issubclass(target_type, DjangoType):
+    if not truth.is_subclass(target_type, DjangoType):
         raise ConfigurationError(
-            f"{field} requires a DjangoType subclass; got {_safe_class_name(target_type)}.",
+            f"{field} requires a DjangoType subclass; got {truth.name(target_type)}.",
         )
-    try:
-        definition: object = getattr(target_type, "__django_strawberry_definition__", None)
-        canonical = registry.get_definition(target_type)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        # Contained: a metaclass whose __getattr__ or __hash__ raises anything other
-        # than AttributeError must reach the typed rejection below, not escape raw.
-        definition = canonical = None
+    definition: object = truth.static_attr(target_type, "__django_strawberry_definition__", None)
+    canonical = registry.get_definition(target_type)
     if canonical is None or definition is not canonical or canonical.origin is not target_type:
         raise ConfigurationError(
-            f"{field} target {_safe_class_name(target_type)} is not a registered DjangoType. "
-            f"This usually means {_safe_class_name(target_type)}'s `Meta` is missing a `model` "
+            f"{field} target {truth.name(target_type)} is not a registered DjangoType. "
+            f"This usually means {truth.name(target_type)}'s `Meta` is missing a `model` "
             "declaration, or it inherits a definition from a parent without declaring its own `Meta`.",
         )
     if resolver is not None and not callable(resolver):
@@ -269,10 +246,17 @@ def _validate_relay_djangotype_target(
     The caller supplies the full ``relay_error_message`` so each factory keeps
     its own wording, and the same single definition read is returned onward so a
     factory can build its whole field from it without a second read.
+
+    Reconsideration triggers (Family ``relay-node-target-guard``): a new
+    Relay-shape arm (T-shape: ``types/base.py::_is_relay_shaped`` owns the
+    predicate), a registration-canonicality change (T-canonical: the base
+    ``_validate_djangotype_target`` owns the identity check), or a guard
+    reading ``DecodeResult`` statuses (T-lifecycle: row existence lives in
+    the ``types/relay.py`` resolve defaults, relation-target existence in
+    the finalizer audit - construction answers registered + shaped only).
     """
-    # The definition comes back from the base validator's ONE contained read;
-    # re-reading the attribute directly here would let a stateful metaclass
-    # answer the first (guarded, defaulted) read and detonate the second.
+    # The definition comes back from the base validator's one read; the Relay
+    # guard and the field build consume that same object.
     definition = _validate_djangotype_target(target_type, resolver, field=field)
     # The base validator proved ``definition.origin is target_type``.
     if not _is_relay_shaped(definition.origin, definition.interfaces):
@@ -291,7 +275,7 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
     other framework error).
 
     Every numeric value interpolated into the wording renders through
-    ``_safe_arg_repr``. For the ordinary ``int`` the boundary admits that is
+    ``truth.render``. For the ordinary ``int`` the boundary admits that is
     byte-identical to the value itself; what it closes is the direct call
     carrying an integer with more digits than CPython will convert to a string,
     which would raise ``ValueError`` from the f-string assembled at the raise
@@ -317,7 +301,9 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
         self.order_argument: str | None = order_argument
 
         if reason == "non_integer":
-            self.value: object = value if isinstance(value, str) else describe_value(value)
+            self.value: object = (
+                truth.text(value) if truth.is_instance(value, str) else truth.describe(value)
+            )
             msg = (
                 f"Invalid argument {argument!r} on {field}: expected a non-negative "
                 f"integer, got {self.value}."
@@ -326,12 +312,12 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
             self.value = value
             msg = (
                 f"Invalid argument {argument!r} on {field}: expected a non-negative "
-                f"integer, got {_safe_arg_repr(value)}."
+                f"integer, got {truth.render(value)}."
             )
         elif reason == "over_ceiling":
             self.value = value
             msg = (
-                f"Invalid argument {argument!r} on {field}: value {_safe_arg_repr(value)} "
+                f"Invalid argument {argument!r} on {field}: value {truth.render(value)} "
                 f"exceeds the maximum allowed ceiling of {ceiling}."
             )
         elif reason == "order_required":
@@ -342,7 +328,7 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
                 ordering_phrase = "via model 'Meta.ordering'"
             msg = (
                 f"Invalid argument {argument!r} on {field}: non-zero offset "
-                f"({_safe_arg_repr(value)}) requires an active ordering {ordering_phrase}."
+                f"({truth.render(value)}) requires an active ordering {ordering_phrase}."
             )
         elif reason == "queryset_required":
             self.value = value
@@ -350,23 +336,22 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
                 f"Invalid argument {argument!r} on {field}: an ordering argument "
                 "requires a QuerySet source."
             )
-        extensions: dict[str, object] = {
-            "code": "LIST_ARGUMENT_INVALID",
-            "argument": argument,
-            "reason": reason,
-        }
+        detail: dict[str, object] = {"argument": argument, "reason": reason}
         if self.value is not None:
-            extensions["value"] = self.value
+            detail["value"] = self.value
         if ceiling is not None:
-            extensions["ceiling"] = ceiling
+            detail["ceiling"] = ceiling
 
-        super().__init__(msg, extensions=extensions)
+        super().__init__(
+            msg,
+            extensions=coded_error_extensions("LIST_ARGUMENT_INVALID", **detail),
+        )
 
     @override
     def __reduce__(self) -> tuple[object, ...]:
         """Preserve constructor arguments and instance state across pickle roundtrips."""
         return (
-            self.__class__,
+            type(self),
             (
                 self.field,
                 self.argument,
@@ -375,7 +360,7 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
                 self.ceiling,
                 self.order_argument,
             ),
-            self.__dict__,
+            vars(self),  # truth: ok the exception's own pickle state, read by its own __reduce__
         )
 
 
@@ -402,25 +387,13 @@ def _published_wire_name(
     """
     try:
         raw_info = info._raw_info
-        parent_type = raw_info.parent_type
-        field_name = raw_info.field_name
     except AttributeError:
         return None
-    except Exception as exc:
-        raise ConfigurationError(
-            f"Failed to read the schema field for argument {parameter_name!r}: {exc}",
-        ) from exc
-    try:
-        published_args = graphql_fields(parent_type)[field_name].args
-        for wire_name, graphql_argument in published_args.items():
-            extensions: Mapping[str, object] = graphql_argument.extensions or {}
-            if extensions.get(GraphQLCoreConverter.DEFINITION_BACKREF) is arg_def:
-                return wire_name
-    except Exception as exc:
-        raise ConfigurationError(
-            f"Failed to read the published arguments for {parameter_name!r} on "
-            f"{_field_label(info)}: {exc}",
-        ) from exc
+    published_args = graphql_fields(raw_info.parent_type)[raw_info.field_name].args
+    for wire_name, graphql_argument in published_args.items():
+        extensions: Mapping[str, object] = graphql_argument.extensions or {}
+        if extensions.get(GraphQLCoreConverter.DEFINITION_BACKREF) is arg_def:
+            return wire_name
     raise ConfigurationError(
         f"Argument {parameter_name!r} on {_field_label(info)} has a definition but no "
         "published wire name in the executable schema.",
@@ -438,20 +411,11 @@ def _resolve_argument_wire_name(info: Info[object, object], parameter_name: str)
     """
     fallback = _DEFAULT_WIRE_NAMES.get(parameter_name, parameter_name)
     try:
-        # A consumer ``info_class`` can shadow the resolver with a raising descriptor.
+        # A direct-call stub carries no argument-definition resolver.
         get_arg_def = info.get_argument_definition
     except AttributeError:
         return fallback
-    except Exception as exc:
-        raise ConfigurationError(
-            f"Failed to read the argument-definition resolver for {parameter_name!r}: {exc}",
-        ) from exc
-    try:
-        arg_def = get_arg_def(parameter_name)
-    except Exception as exc:
-        raise ConfigurationError(
-            f"Failed to read the definition for argument {parameter_name!r}: {exc}",
-        ) from exc
+    arg_def = get_arg_def(parameter_name)
     if arg_def is None:
         return fallback
     published = _published_wire_name(info, arg_def, parameter_name)
@@ -491,7 +455,7 @@ def _normalize_list_arguments(
     the argument boundary and replacing the typed rejection with whatever that
     consumer hook raised. Everything that is not exactly an ``int`` -- ``bool``
     included, which is a subclass -- takes the ``non_integer`` arm and renders
-    through ``describe_value``.
+    through ``truth.describe``.
 
     Delegation guarantee:
         While offset and limit are validated here (integer type, non-negative, and limit
@@ -502,9 +466,9 @@ def _normalize_list_arguments(
         ``django_strawberry_framework/utils/querysets.py::require_orderset_class``
         at pipeline execution time.
     """
-    offset_supplied = offset is not None and offset is not UNSET
-    limit_supplied = limit is not None and limit is not UNSET
-    order_by_supplied = order_by is not None and order_by is not UNSET
+    offset_supplied = is_supplied(offset)
+    limit_supplied = is_supplied(limit)
+    order_by_supplied = is_supplied(order_by)
     any_argument_supplied = offset_supplied or limit_supplied or order_by_supplied
 
     norm_offset = None if not offset_supplied else offset
@@ -529,7 +493,7 @@ def _normalize_list_arguments(
                 field_name,
                 _resolve_argument_wire_name(info, "offset"),
                 reason="non_integer",
-                value=describe_value(norm_offset),
+                value=truth.describe(norm_offset),
             )
         if norm_offset < 0:
             raise ListArgumentError(
@@ -558,7 +522,7 @@ def _normalize_list_arguments(
                 field_name,
                 _resolve_argument_wire_name(info, "limit"),
                 reason="non_integer",
-                value=describe_value(norm_limit),
+                value=truth.describe(norm_limit),
             )
         if norm_limit < 0:
             raise ListArgumentError(
@@ -598,8 +562,7 @@ def _synthesized_list_signature(
     ``orderset_class`` is the field's ONE selected class, read from the single
     definition the target validator returned; the SDL published here and the
     class the resolver dispatches through are therefore the same object by
-    construction, and a stateful target metaclass has no second read to answer
-    differently.
+    construction.
     """
     params: list[inspect.Parameter] = [
         inspect.Parameter("root", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=None),
@@ -684,9 +647,10 @@ _APPROVED_ORDER_FUNCTIONS = frozenset(
     },
 )
 
-#: Aggregates under the same rule, listed because the shipped surface emits them:
+#: Aggregates under the same rule:
 #: ``orders/sets.py::OrderSet._resolve_order_expressions`` annotates ``Min`` /
-#: ``Max`` for a to-many ordering path, and a row count orders by ``Count``.
+#: ``Max`` for a to-many ordering path, and ``Count`` admits the row-count
+#: aggregate a consumer ordering may annotate.
 _APPROVED_ORDER_AGGREGATES = frozenset(
     {models.Count, models.Max, models.Min},
 )
@@ -939,8 +903,9 @@ def _is_deterministic_order_term(
     A node is therefore read through only when it is one of the forms this
     package names: a transparent composition
     (``_TRANSPARENT_ORDER_EXPRESSIONS``), a pure database function
-    (``_APPROVED_ORDER_FUNCTIONS``), one of the aggregates the shipped surface
-    emits (``_APPROVED_ORDER_AGGREGATES``), an ``F`` reference, or a ``Q``
+    (``_APPROVED_ORDER_FUNCTIONS``), an approved aggregate
+    (``_APPROVED_ORDER_AGGREGATES``: ``Min`` / ``Max`` the shipped surface emits,
+    ``Count`` a consumer ordering may annotate), an ``F`` reference, or a ``Q``
     predicate. Each of those is then certified only if every source expression
     it holds is, so an approved wrapper launders nothing:
     ``Coalesce(Random(), Random())`` is refused through its children. A readable
@@ -1216,29 +1181,18 @@ def _model_from_definition(definition: DjangoTypeDefinition) -> type[models.Mode
 
     Called exactly once per field, at construction. The value seeds the default
     resolver and pins both visibility seals, so the table the field queries and
-    the table those seals validate against are the same object by construction -
-    a stateful target metaclass has no second read through which to substitute
-    another model between the seed and the seal.
-
-    Fails LOUDLY for the same reason the sidecar read does: a definition whose
-    model cannot be read is a field that cannot be built, and a soft answer
-    would defer the failure to a request against an unknown table.
+    the table those seals validate against are the same object by construction:
+    there is no second read through which another model could be substituted
+    between the seed and the seal.
     """
-    try:
-        model = definition.model
-    except Exception as exc:
+    model = definition.model
+    # The canonical definition records a model class, but it is a mutable record
+    # reachable from the target's public class attribute; the check fails loud if
+    # that invariant is ever broken instead of seeding a resolver over a non-model.
+    if not truth.is_subclass(model, models.Model):
         raise ConfigurationError(
-            f"DjangoListField could not read the model from the definition of "
-            f"{_safe_class_name(getattr(definition, 'origin', definition))}: {exc}",
-        ) from exc
-    # basedpyright: trust boundary: the definition is a mutable record reachable from the
-    # target's public class attribute; the check fails loud instead of seeding a resolver over
-    # a non-model
-    if not (isinstance(model, type) and issubclass(model, models.Model)):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raise ConfigurationError(
-            f"DjangoListField target "
-            f"{_safe_class_name(getattr(definition, 'origin', definition))} has a definition "
-            f"whose model is not a Django model; got {_safe_arg_repr(model)}.",
+            f"DjangoListField target {truth.name(definition.origin)} has a definition "
+            f"whose model is not a Django model; got {truth.render(model)}.",
         )
     return model
 
@@ -1247,28 +1201,19 @@ def _orderset_class_from_definition(definition: DjangoTypeDefinition) -> type[Or
     """Read the target's declared ``Meta.orderset_class`` off its ONE definition read.
 
     Called exactly once per field, at construction, from the definition
-    ``_validate_djangotype_target`` returned. The read fails LOUDLY: a target
-    whose sidecar declaration cannot be read is a broken field, and answering
-    ``None`` would publish a schema without ``orderBy`` for a target that
-    declares one - a silent SDL change at the line that wrote the field.
+    ``_validate_djangotype_target`` returned, so the published ``orderBy``
+    argument and the dispatch come from one answer.
     """
-    try:
-        return definition.orderset_class
-    except Exception as exc:
-        raise ConfigurationError(
-            f"DjangoListField could not read Meta.orderset_class from the definition of "
-            f"{_safe_class_name(getattr(definition, 'origin', definition))}: {exc}",
-        ) from exc
+    return definition.orderset_class
 
 
 def _field_label(info: Info[object, object]) -> str:
-    """Return the resolver field label without allowing consumer descriptors to escape."""
-    try:
-        # A consumer ``info_class`` can shadow ``field_name`` with a descriptor that raises.
-        field_name = info.field_name
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
+    """Return the resolver field label, or ``"DjangoListField"`` when ``info`` names none."""
+    # A consumer ``info_class`` can shadow ``field_name`` with anything.
+    field_name = read_attr(info, "field_name", None)
+    if not truth.is_instance(field_name, str):
         return "DjangoListField"
-    return field_name or "DjangoListField"
+    return truth.text(field_name, "DjangoListField")
 
 
 def _resolver_root_and_info(
@@ -1359,7 +1304,7 @@ async def _handle_non_queryset_rejections_async(
 ) -> None:
     """Reject a non-queryset source, closing an async-only one on EVERY rejecting exit.
 
-    Decision 8 promises a rejected async-only source is never advanced and is
+    spec-050 Decision 8 promises a rejected async-only source is never advanced and is
     closed when possible, with the primary error keeping precedence. Building
     the rejection can itself fail (malformed schema metadata behind the wire
     name lookup), and that exit owes the same close: the source is being
@@ -1594,8 +1539,9 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
     Ordering contract (strictly ordered offset):
     A ``DjangoListField`` provides ordered-offset paging, NOT stable or repeatable
     pagination. An active order fixes the sort expression, not which of two tied rows
-    falls on either side of a page boundary. Unlike Relay connection fields, flat
-    lists do not inject a primary-key tiebreaker or ``DISTINCT``. Consumers wanting
+    falls on either side of a page boundary. Unlike Relay connection fields, which
+    close the order with a primary-key tiebreaker, flat lists inject no tiebreaker
+    and no ``DISTINCT``. Consumers wanting
     deterministic pagination across pages with duplicate values must add a unique
     final term to the ordering themselves.
 
@@ -1629,10 +1575,9 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
     if max_rows is not None:
         validate_collection_bound(max_rows, field="DjangoListField max_rows")
     validate_trusted_flag(trusted_max_rows, field="DjangoListField trusted_max_rows")
-    # ONE definition read for the whole field: the validator's contained read is
-    # what the signature, the SDL, the default seed, both visibility seals, and
-    # every resolver dispatch below run on, so a stateful target metaclass has no
-    # second read to answer differently.
+    # ONE definition read for the whole field: the validator's read is what the
+    # signature, the SDL, the default seed, both visibility seals, and every
+    # resolver dispatch below run on.
     definition = _validate_djangotype_target(target_type, resolver, field="DjangoListField")
     # The validator proved ``definition.origin is target_type``; the origin is the
     # typed spelling of the same class.
@@ -1641,7 +1586,7 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
     orderset_class = _orderset_class_from_definition(definition)
     directives = validated_field_directives("DjangoListField", directives)
 
-    # Factory-site async commitment (Decision 3; spec-020 Decision 2
+    # Factory-site async commitment (spec-020 Decision 3; spec-020 Decision 2
     # "Async-detection asymmetry - intentional, not a harmonization candidate"):
     # ``_default`` reads the operation's executor per call
     # (``utils/execution_mode.py::async_execution``) so the same factory output

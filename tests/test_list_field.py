@@ -15,9 +15,8 @@ under ``examples/fakeshop/test_query/README.md #"Live-first, both verdicts, and 
 What stays here, and why no live request can express it:
 
 Construction-time ``ConfigurationError`` never reaches a schema: non-class /
-non-DjangoType / unregistered / hostile-repr / hostile-metaclass / directives /
-``max_rows`` / ``trusted_max_rows`` / a definition that is not the registry's
-exact object.
+non-DjangoType / unregistered / directives / ``max_rows`` /
+``trusted_max_rows`` / a definition that is not the registry's exact object.
 
 Helper mechanics GraphQL ``Int`` coercion never supplies: exact-int rejection of
 subclasses, unprintable large ints, pickle / repr of ``ListArgumentError``,
@@ -143,9 +142,10 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
+from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import (
     _routing_hints_equal,
-    _safe_routing_repr,
+    _routing_repr,
     _snapshot_routing_intent,
     _validate_post_orderset_result,
     require_orderset_class,
@@ -175,20 +175,6 @@ def _as_strawberry_info(stand_in: object) -> Info[object, object]:
     # basedpyright: a deliberately partial or hostile info shape is the input under test; the
     # list-field helpers type info as a concrete Strawberry Info
     return stand_in  # pyright: ignore[reportReturnType]
-
-
-def _info_failing_on(attribute: str, error: Exception) -> Info[object, object]:
-    """Build a real ``Info`` whose read of ``attribute`` raises ``error``; every other read answers."""
-
-    class FailingInfo(Info[object, object]):
-        @override
-        def __getattribute__(self, name: str) -> object:
-            if name == attribute:
-                raise error
-            return object_result(super().__getattribute__, name)
-
-    built = make_info()
-    return FailingInfo(_raw_info=built._raw_info, _field=built._field)
 
 
 @pytest.fixture(autouse=True)
@@ -324,55 +310,9 @@ def test_djangolistfield_rejects_non_callable_resolver() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Hostile constructor seams (0.0.15 hunt). The guards' rejection messages
-# interpolate deployment-supplied values, so each render must be guarded, the
-# definition READ must be contained, and the ``directives=`` forward must
-# carry the same hostile-container containment every field factory now shares
-# (``utils/directives.py::validated_field_directives``) and
-# ``connection.py::DjangoConnectionField`` still inlines.
+# The ``directives=`` forward: every field factory shares
+# ``utils/directives.py::validated_field_directives``.
 # ---------------------------------------------------------------------------
-
-
-class _HostileRepr:
-    """A deployment value whose repr detonates."""
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("hostile __repr__ detonated")
-
-
-class _HostileNameMeta(type):
-    """A metaclass whose ``__name__`` read detonates.
-
-    CPython enforces a str ``__qualname__`` at class creation but NOT a
-    readable ``__name__``: the property shadows the ``type.__name__`` getset
-    descriptor in the metaclass MRO.
-    """
-
-    @property
-    @override
-    # basedpyright: the hostile shape under test, a ``__name__`` property whose read raises; the
-    # checker rejects any property overriding a base class attribute
-    def __name__(cls) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
-        raise RuntimeError("hostile __name__ detonated")
-
-
-class _DefinitionTrapMeta(type):
-    """A metaclass whose ``__getattr__`` raises a NON-AttributeError for the definition."""
-
-    def __getattr__(cls, name: str) -> NoReturn:
-        if name == "__django_strawberry_definition__":
-            raise RuntimeError("hostile definition read detonated")
-        raise AttributeError(name)
-
-
-class _ExplodingDirectives(tuple[object, ...]):
-    """A hostile directives sequence that raises mid-iteration."""
-
-    @override
-    def __iter__(self) -> Iterator[object]:
-        yield _ProbeTag()
-        raise ValueError("hostile iterator detonated midway")
 
 
 @_schema_directive(locations=[_DirectiveLocation.FIELD_DEFINITION], name="probeTag")
@@ -380,64 +320,6 @@ class _ProbeTag:
     """A REAL directive instance for the pass-through positive control."""
 
     marker: str = "probe"
-
-
-def test_djangolistfield_non_class_guard_survives_a_hostile_repr() -> None:
-    """The non-class arm renders through ``_safe_arg_repr`` (mutation-guard parity).
-
-    Pre-fix the raise-site f-string interpolated ``{target_type!r}`` directly,
-    so a hostile ``__repr__`` detonated the message assembly and the raw
-    RuntimeError replaced the promised typed rejection.
-    """
-    with pytest.raises(ConfigurationError, match="requires a DjangoType class"):
-        # basedpyright: the non-class value whose repr raises is the hostile input under test;
-        # DjangoListField types the parameter as type[object]
-        DjangoListField(_HostileRepr())  # pyright: ignore[reportArgumentType]
-
-
-def test_djangolistfield_non_djangotype_guard_survives_a_hostile_metaclass_name() -> None:
-    """The subclass arm renders through ``_safe_class_name``.
-
-    Pre-fix ``{target_type.__name__}`` detonated on a metaclass whose
-    ``__name__`` property raises.
-    """
-
-    class NotADjangoType(metaclass=_HostileNameMeta):
-        pass
-
-    with pytest.raises(ConfigurationError, match="requires a DjangoType subclass"):
-        DjangoListField(NotADjangoType)
-
-
-def test_djangolistfield_unregistered_guard_survives_a_hostile_metaclass_name() -> None:
-    """The own-class arm renders ``_safe_class_name`` for BOTH name interpolations.
-
-    Pre-fix ``{target_type.__name__}`` appeared twice in the message and either
-    read detonated the assembly.
-    """
-
-    class AbstractBase(DjangoType, metaclass=_HostileNameMeta):
-        pass
-
-    with pytest.raises(ConfigurationError, match="is not a registered DjangoType"):
-        DjangoListField(AbstractBase)
-
-
-def test_djangolistfield_definition_read_failure_is_typed_not_raw() -> None:
-    """A raising non-AttributeError from the definition read fails the typed reject.
-
-    ``getattr(target, name, None)`` suppresses only ``AttributeError``; pre-fix
-    a metaclass ``__getattr__`` raising anything else escaped raw instead of
-    reaching the "not a registered DjangoType" rejection (fail closed - a
-    read that cannot be answered is a target that cannot be PROVEN
-    registered).
-    """
-
-    class TrappedBase(DjangoType, metaclass=_DefinitionTrapMeta):
-        pass
-
-    with pytest.raises(ConfigurationError, match="is not a registered DjangoType"):
-        DjangoListField(TrappedBase)
 
 
 _RAISING_CLASS_ERRORS = [RuntimeError, TypeError, KeyboardInterrupt]
@@ -541,7 +423,7 @@ def test_djangolistfield_rejects_bare_bytes_directives() -> None:
 
 
 def test_djangolistfield_rejects_non_iterable_directives() -> None:
-    """A non-iterable detonated raw TypeError inside strawberry.field pre-fix."""
+    """A non-iterable ``directives=`` is a typed rejection, not a raw ``TypeError``."""
     with pytest.raises(
         ConfigurationError,
         match=r"DjangoListField directives could not be read",
@@ -549,15 +431,6 @@ def test_djangolistfield_rejects_non_iterable_directives() -> None:
         # basedpyright: the non-iterable directives value is the hostile input under test;
         # DjangoListField types the parameter as Sequence[object]
         DjangoListField(_directive_holder_type(), directives=42)  # pyright: ignore[reportArgumentType]
-
-
-def test_djangolistfield_rejects_hostile_iterator_directives() -> None:
-    """An iterator raising midway escaped raw ValueError pre-fix - now typed."""
-    with pytest.raises(
-        ConfigurationError,
-        match=r"DjangoListField directives could not be read",
-    ):
-        DjangoListField(_directive_holder_type(), directives=_ExplodingDirectives())
 
 
 def test_djangolistfield_passes_real_directive_instances_through() -> None:
@@ -795,7 +668,7 @@ def test_normalize_list_arguments_renders_an_unprintable_large_int_without_raisi
 
     ``sys.set_int_max_str_digits`` caps integer-to-string conversion, so an
     oversized value would detonate an f-string built at the raise site. The
-    over-ceiling arm renders through the guarded helper instead.
+    over-ceiling arm renders it through ``truth.render`` instead.
     """
     info = make_info(context={})
     arm_resource_budget(info.context, ResourcePolicy(max_list_rows=100))
@@ -1109,29 +982,17 @@ def test_the_capture_scope_opens_for_a_positive_offset_with_an_orderset() -> Non
 def test_list_field_reads_the_target_definition_once_and_dispatches_through_it() -> None:
     """The field's ONE definition read is at construction; nothing re-reads it afterwards.
 
-    The counter stays armed across all three phases a stateful target could
-    answer differently in - the factory call, schema construction, and a real
-    request - and the target is switched to a DECOY definition the moment the
-    accepted read is taken. The decoy names a different model and a different
-    ``OrderSet``, so any later read would be visible as rows of the wrong table
-    or a dispatch through the wrong sidecar.
+    The target's definition attribute is replaced by a DECOY the moment the
+    field is constructed, before schema construction and a real request. The
+    decoy names a different model and a different ``OrderSet``, so any later
+    read would be visible as rows of the wrong table or a dispatch through the
+    wrong sidecar.
 
     That matters concretely: the seed, both visibility seals, the published
     ``orderBy`` argument, and the class the resolver dispatches through all come
     from one object, so a later answer cannot move the field to another table or
     quietly change which ordering ran.
     """
-    reads: list[str] = []
-    state: dict[str, object] = {"armed": False, "decoy": None}
-
-    class CountingMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if state["armed"] and name == "__django_strawberry_definition__":
-                reads.append(name)
-                if state["decoy"] is not None:
-                    return state["decoy"]
-            return object_result(super().__getattribute__, name)
 
     class PublishedOrder(OrderSet):
         class Meta:
@@ -1166,7 +1027,7 @@ def test_list_field_reads_the_target_definition_once_and_dispatches_through_it()
         ) -> NoReturn:
             raise AssertionError("the field dispatched through a re-read OrderSet")
 
-    class CountedType(DjangoType, metaclass=CountingMeta):
+    class CountedType(DjangoType):
         class Meta:
             model = Item
             fields = ("id", "name")
@@ -1183,20 +1044,17 @@ def test_list_field_reads_the_target_definition_once_and_dispatches_through_it()
     target_item = services.seed_decoy_and_target_rows()["item"]
     decoy_names = set(Category.objects.values_list("name", flat=True))
 
-    state["armed"] = True
     field = DjangoListField(CountedType)
-    assert reads == ["__django_strawberry_definition__"]
 
     # From here the target answers with a definition for ANOTHER MODEL carrying
-    # another OrderSet: every later read is both counted and consequential.
-    state["decoy"] = DecoyTargetType.__django_strawberry_definition__
+    # another OrderSet: every later read is consequential.
+    CountedType.__django_strawberry_definition__ = DecoyTargetType.__django_strawberry_definition__
 
     @strawberry.type
     class Query:
         items: list[CountedType] = field
 
     schema = strawberry.Schema(query=Query)
-    assert reads == ["__django_strawberry_definition__"]
     assert "orderBy" in str(schema)
 
     result = schema.execute_sync(
@@ -1204,7 +1062,6 @@ def test_list_field_reads_the_target_definition_once_and_dispatches_through_it()
         context_value={"request": RequestFactory().get("/")},
     )
     assert result.errors is None, result.errors
-    assert reads == ["__django_strawberry_definition__"]
     assert result.data is not None
     returned = {json_at(row, "name") for row in json_list(result.data, "items")}
     assert target_item.name in returned
@@ -1223,17 +1080,6 @@ def test_a_consumer_resolver_list_field_also_reads_the_definition_only_at_constr
     and each of those must run on the construction-time read rather than asking
     the target again mid-request.
     """
-    reads: list[str] = []
-    state: dict[str, object] = {"armed": False, "decoy": None}
-
-    class CountingMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if state["armed"] and name == "__django_strawberry_definition__":
-                reads.append(name)
-                if state["decoy"] is not None:
-                    return state["decoy"]
-            return object_result(super().__getattribute__, name)
 
     class ResolverOrder(OrderSet):
         class Meta:
@@ -1255,7 +1101,7 @@ def test_a_consumer_resolver_list_field_also_reads_the_definition_only_at_constr
         ) -> NoReturn:
             raise AssertionError("the field dispatched through a re-read OrderSet")
 
-    class ResolverCountedType(DjangoType, metaclass=CountingMeta):
+    class ResolverCountedType(DjangoType):
         class Meta:
             model = Item
             fields = ("id", "name")
@@ -1275,10 +1121,10 @@ def test_a_consumer_resolver_list_field_also_reads_the_definition_only_at_constr
     def _all_items(_root: object, _info: object) -> QuerySet[Item]:
         return Item.objects.all()
 
-    state["armed"] = True
     field = DjangoListField(ResolverCountedType, resolver=_all_items)
-    assert reads == ["__django_strawberry_definition__"]
-    state["decoy"] = ResolverDecoyTargetType.__django_strawberry_definition__
+    ResolverCountedType.__django_strawberry_definition__ = (
+        ResolverDecoyTargetType.__django_strawberry_definition__
+    )
 
     @strawberry.type
     class Query:
@@ -1290,7 +1136,6 @@ def test_a_consumer_resolver_list_field_also_reads_the_definition_only_at_constr
         context_value={"request": RequestFactory().get("/")},
     )
     assert result.errors is None, result.errors
-    assert reads == ["__django_strawberry_definition__"]
     assert result.data is not None
     returned = {json_at(row, "name") for row in json_list(result.data, "items")}
     assert target_item.name in returned
@@ -1348,20 +1193,9 @@ def test_the_default_seed_and_both_visibility_seals_use_the_captured_model() -> 
     disagree about which table this resolution is over - the two seals of one
     call take one model by construction.
     """
-    reads: list[str] = []
-    state: dict[str, object] = {"armed": False, "decoy": None}
     seen_models: list[type] = []
 
-    class CountingMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if state["armed"] and name == "__django_strawberry_definition__":
-                reads.append(name)
-                if state["decoy"] is not None:
-                    return state["decoy"]
-            return object_result(super().__getattribute__, name)
-
-    class SealCountedType(DjangoType, metaclass=CountingMeta):
+    class SealCountedType(DjangoType):
         class Meta:
             model = Item
             fields = ("id", "name")
@@ -1386,9 +1220,10 @@ def test_the_default_seed_and_both_visibility_seals_use_the_captured_model() -> 
     target_item = services.seed_decoy_and_target_rows()["item"]
     decoy_names = set(Category.objects.values_list("name", flat=True))
 
-    state["armed"] = True
     field = DjangoListField(SealCountedType)
-    state["decoy"] = SealDecoyType.__django_strawberry_definition__
+    SealCountedType.__django_strawberry_definition__ = (
+        SealDecoyType.__django_strawberry_definition__
+    )
 
     @strawberry.type
     class Query:
@@ -1404,29 +1239,19 @@ def test_the_default_seed_and_both_visibility_seals_use_the_captured_model() -> 
     assert result.data is not None
     assert [json_at(row, "name") for row in json_list(result.data, "items")] == [target_item.name]
     assert services.DECOY_CATEGORY_NAME in decoy_names
-    assert reads == ["__django_strawberry_definition__"]
 
 
 @pytest.mark.django_db
-def test_list_field_rejects_a_target_whose_definition_hides_its_model() -> None:
-    """An unreadable or non-model ``definition.model`` fails at the factory line."""
-
-    class ExplodingDefinition:
-        origin = None
-
-        @property
-        def model(self) -> NoReturn:
-            raise RuntimeError("model read exploded")
-
-    with pytest.raises(ConfigurationError, match="could not read the model from the definition"):
-        # basedpyright: the definition whose model read raises is the hostile input under test;
-        # _model_from_definition types the parameter as DjangoTypeDefinition
-        _model_from_definition(ExplodingDefinition())  # pyright: ignore[reportArgumentType]
-
-    with pytest.raises(ConfigurationError, match="whose model is not a Django model"):
+def test_list_field_rejects_a_target_whose_definition_model_is_not_a_model() -> None:
+    """A non-model ``definition.model`` fails at the factory line."""
+    with pytest.raises(ConfigurationError) as exc_info:
         # basedpyright: the definition whose model is a string is the hostile input under test;
         # _model_from_definition types the parameter as DjangoTypeDefinition
         _model_from_definition(SimpleNamespace(origin=None, model="Item"))  # pyright: ignore[reportArgumentType]
+    assert str(exc_info.value) == (
+        "DjangoListField target NoneType has a definition whose model is not a Django "
+        "model; got 'Item'."
+    )
 
 
 @pytest.mark.parametrize(
@@ -1583,16 +1408,7 @@ def test_published_wire_name_rejects_malformed_schema_metadata() -> None:
     # 1. No ``_raw_info`` at all: a direct-call stub, so no published name.
     assert _published_wire_name(_as_strawberry_info(SimpleNamespace()), arg_def, "offset") is None
 
-    # 2. A ``_raw_info`` read that fails for any other reason is a broken schema.
-    exploding_info = _info_failing_on("_raw_info", RuntimeError("simulated raw-info failure"))
-
-    with pytest.raises(
-        ConfigurationError,
-        match="Failed to read the schema field for argument 'offset'",
-    ):
-        _published_wire_name(exploding_info, arg_def, "offset")
-
-    # 3. The field exists but no argument carries this definition back-reference.
+    # 2. The field exists but no argument carries this definition back-reference.
     other_def = SimpleNamespace(python_name="offset")
     field = GraphQLField(
         GraphQLInt,
@@ -1606,16 +1422,7 @@ def test_published_wire_name_rejects_malformed_schema_metadata() -> None:
     with pytest.raises(ConfigurationError, match="has a definition but no published wire name"):
         _published_wire_name(_as_strawberry_info(info), arg_def, "offset")
 
-    # 4. The parent type does not even publish the field.
-    raw_missing = SimpleNamespace(parent_type=parent, field_name="missing")
-    info_missing = SimpleNamespace(_raw_info=raw_missing, field_name="missing")
-    with pytest.raises(
-        ConfigurationError,
-        match="Failed to read the published arguments for 'offset'",
-    ):
-        _published_wire_name(_as_strawberry_info(info_missing), arg_def, "offset")
-
-    # 5. The matching back-reference returns the published key, whatever its spelling.
+    # 3. The matching back-reference returns the published key, whatever its spelling.
     field_ok = GraphQLField(
         GraphQLInt,
         args={
@@ -1708,44 +1515,10 @@ def test_resolver_call_context_accepts_strawberry_shape_and_rejects_unknown_inpu
         _resolver_root_and_info((root,), {})
 
 
-def test_field_and_orderset_metadata_reads_fail_closed() -> None:
-    class HostileDefinition:
-        @property
-        def orderset_class(self) -> NoReturn:
-            raise RuntimeError("unreadable sidecar")
-
-    class Target:
-        __django_strawberry_definition__ = HostileDefinition()
-
-    hostile_info = _info_failing_on("field_name", RuntimeError("unreadable field name"))
-    assert _field_label(hostile_info) == "DjangoListField"
+def test_field_label_falls_back_without_a_field_name() -> None:
+    assert _field_label(_as_strawberry_info(SimpleNamespace())) == "DjangoListField"
+    assert _field_label(_as_strawberry_info(SimpleNamespace(field_name=""))) == "DjangoListField"
     assert _field_label(make_info(field_name="items")) == "items"
-    # The sidecar read fails LOUDLY rather than answering None: publishing a
-    # schema without ``orderBy`` for a target that declares one would be a
-    # silent SDL change at the line that wrote the field.
-    with pytest.raises(ConfigurationError, match=r"could not read Meta\.orderset_class"):
-        # basedpyright: the definition whose orderset_class read raises is the hostile input under
-        # test; _orderset_class_from_definition types the parameter as DjangoTypeDefinition
-        _orderset_class_from_definition(Target.__django_strawberry_definition__)  # pyright: ignore[reportArgumentType]
-
-
-def test_argument_definition_metadata_reads_fail_closed() -> None:
-    hostile_info = _info_failing_on(
-        "get_argument_definition",
-        RuntimeError("unreadable argument metadata"),
-    )
-
-    with pytest.raises(ConfigurationError, match="argument-definition resolver"):
-        _resolve_argument_wire_name(hostile_info, "offset")
-
-    def raise_from_lookup(_name: str) -> NoReturn:
-        raise RuntimeError("unreadable argument definition")
-
-    with pytest.raises(ConfigurationError, match="definition for argument"):
-        _resolve_argument_wire_name(
-            _as_strawberry_info(SimpleNamespace(get_argument_definition=raise_from_lookup)),
-            "offset",
-        )
 
 
 async def test_list_field_rejected_async_iterator_cleanup_and_notes() -> None:
@@ -2308,8 +2081,8 @@ def test_list_field_post_orderset_validator_zero_consumer_dispatch() -> None:
     assert _routing_hints_equal({"key": poison}, {"key": poison}) is True
     assert _routing_hints_equal({"key": poison}, {"key": PoisonAttr()}) is False
 
-    # Safe routing repr avoids consumer __repr__
-    repr_str = _safe_routing_repr({"key": poison})
+    # A hint value renders by its real class and identity, never its own __repr__
+    repr_str = _routing_repr({"key": poison})
     assert "PoisonAttr at" in repr_str
 
     # None vs {} distinction preserved
@@ -2396,30 +2169,6 @@ def test_list_field_wire_name_resolution_falls_back_without_a_usable_definition(
     assert _resolve_argument_wire_name(_as_strawberry_info(info_no_schema), "offset") == "offset"
 
 
-def test_list_field_wire_name_resolution_surfaces_broken_schema_metadata() -> None:
-    """A definition whose published map cannot be read is a configuration error, not a fallback.
-
-    An absent map is a shape the framework tolerates; a map that blows up while
-    being read is a broken schema, and swallowing it would hide the breakage
-    behind a default argument name in every subsequent error message.
-    """
-
-    class ExplodingRawInfo:
-        @property
-        def parent_type(self) -> NoReturn:
-            raise RuntimeError("simulated parent-type failure")
-
-    info = SimpleNamespace(
-        _raw_info=ExplodingRawInfo(),
-        get_argument_definition=_python_named_argument,
-    )
-    with pytest.raises(
-        ConfigurationError,
-        match="Failed to read the schema field for argument 'order_by'",
-    ):
-        _resolve_argument_wire_name(_as_strawberry_info(info), "order_by")
-
-
 def test_require_orderset_class_rejects_a_target_without_one() -> None:
     """Ordering a target that declares no ``orderset_class`` is a configuration error.
 
@@ -2503,8 +2252,9 @@ async def test_list_field_rejected_async_iterator_is_closed_when_building_the_re
     """A failure while CONSTRUCTING the rejection still closes the async-only source.
 
     Once the record says the source must be rejected, the close is owed on every
-    exit: the primary error becomes whatever the error builder raised, and the
-    cleanup utility attaches its notes to that instead.
+    exit: the primary error becomes whatever the error builder raised (here the
+    argument-definition lookup's own exception, which propagates unchanged), and
+    the cleanup utility attaches its notes to that instead.
     """
 
     class InstrumentedAsyncSource:
@@ -2542,10 +2292,7 @@ async def test_list_field_rejected_async_iterator_is_closed_when_building_the_re
     )
 
     src_clean = InstrumentedAsyncSource()
-    with pytest.raises(
-        ConfigurationError,
-        match="Failed to read the definition for argument 'order_by'",
-    ):
+    with pytest.raises(RuntimeError, match="simulated definition lookup failure"):
         await _handle_non_queryset_rejections_async(
             src_clean,
             args_record,
@@ -2555,7 +2302,7 @@ async def test_list_field_rejected_async_iterator_is_closed_when_building_the_re
     assert src_clean.aclose_calls == 1
 
     src_fail = InstrumentedAsyncSource(fail_close=True)
-    with pytest.raises(ConfigurationError) as exc_fail:
+    with pytest.raises(RuntimeError, match="simulated definition lookup failure") as exc_fail:
         await _handle_non_queryset_rejections_async(
             src_fail,
             args_record,
@@ -2567,7 +2314,7 @@ async def test_list_field_rejected_async_iterator_is_closed_when_building_the_re
     assert any("DjangoListField iterator cleanup failed" in str(n) for n in notes)
 
     # A source that is not async-only owes no close on the same exit.
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(RuntimeError, match="simulated definition lookup failure"):
         await _handle_non_queryset_rejections_async([1, 2], args_record, _as_strawberry_info(info))
 
 
@@ -2716,12 +2463,11 @@ class _ArmedHashMeta(type):
         return type.__hash__(cls)
 
 
-def test_djangolistfield_registry_lookup_failure_is_typed_not_raw() -> None:
-    """A target the registry cannot be asked about cannot be PROVEN registered.
+def test_djangolistfield_registry_lookup_never_hashes_the_target() -> None:
+    """The registry finds a registered target by identity, never through its ``__hash__``.
 
-    The registry lookup hashes the target, so a metaclass ``__hash__`` that
-    raises is contained like the definition-attribute read beside it. The
-    failure is the same typed rejection.
+    A metaclass ``__hash__`` that raises is never run: the lookup compares the
+    class object itself, so a registered target is accepted while the hook is armed.
     """
 
     class HashedTarget(DjangoType, metaclass=_ArmedHashMeta):
@@ -2731,15 +2477,12 @@ def test_djangolistfield_registry_lookup_failure_is_typed_not_raw() -> None:
 
     _ArmedHashMeta.armed = True
     try:
-        with pytest.raises(ConfigurationError) as exc_info:
-            DjangoListField(HashedTarget)
+        _ = DjangoListField(HashedTarget)
+        definition = registry.get_definition(HashedTarget)
     finally:
         _ArmedHashMeta.armed = False
-    assert str(exc_info.value) == (
-        "DjangoListField target HashedTarget is not a registered DjangoType. "
-        "This usually means HashedTarget's `Meta` is missing a `model` declaration, or it "
-        "inherits a definition from a parent without declaring its own `Meta`."
-    )
+    assert definition is not None
+    assert definition is HashedTarget.__django_strawberry_definition__
 
 
 class _RaisingOriginDefinition:
@@ -2919,3 +2662,30 @@ async def test_a_list_field_refuses_a_synchronous_operation_inside_an_event_loop
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
     assert "await schema.execute" in str(result.errors[0])
     assert [str(warning.message) for warning in caught] == []
+
+
+@pytest.mark.parametrize("argument", ["offset", "limit", "order_by"])
+def test_normalize_list_arguments_treats_unset_as_omitted(
+    argument: str,
+    arm_resource_budget: Callable[[object, ResourcePolicy], None],
+) -> None:
+    """UNSET is inactive for the argument, exactly like None."""
+    context: dict[str, object] = {}
+    info = SimpleNamespace(context=context, schema=None)
+    arm_resource_budget(context, ResourcePolicy(max_list_rows=10))
+
+    record = _normalize_list_arguments(
+        "f",
+        _as_strawberry_info(info),
+        None,
+        trusted_max_rows=False,
+        **{argument: UNSET},
+    )
+
+    assert record == _ListArguments(
+        offset=None,
+        limit=None,
+        order_by=None,
+        order_by_supplied=False,
+        any_argument_supplied=False,
+    )

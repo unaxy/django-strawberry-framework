@@ -2,9 +2,14 @@
 
 Legal column shapes read real fakeshop fields: ``scalars.MediaSpecimen`` for
 the file/image rows (``attachment``, ``image``, the ``blank``-only
-``optional_attachment`` and the ``null``-only ``spare_image``),
+``optional_attachment`` and the ``null``-only ``spare_image``), and
 ``ScalarSpecimen`` / ``NullableScalarSpecimen`` for the text and scalar
-delegation rows, and ``library.Periodical`` for the ``BigAutoField`` pk.
+delegation rows. Primary-type relation resolution over HTTP lives in
+``examples/fakeshop/test_query/test_library_api.py``
+(``test_shelf_books_relation_resolves_to_primary_book_type_over_http``);
+``BigAutoField -> Int`` lives in
+``examples/fakeshop/test_query/test_scalars_api.py``
+(``test_scalar_specimen_id_maps_big_auto_pk_to_int``).
 
 The synthetic models that remain carry column shapes no fakeshop model can
 declare, because *exposing* each column on a ``DjangoType`` is what cannot be
@@ -20,20 +25,14 @@ which ``Book.circulation_status`` never reaches. The ``CharField`` /
 ``ImageField`` subclass owners model a legal consumer shape no fakeshop model
 carries; they pin the MRO walks in ``scalar_for_field`` and
 ``django_strawberry_framework/types/converters.py::_field_output_type_for``.
-
-Covered behavior:
-
-- enum generation + naming
-- registry caching keyed on ``(model, field_name)``
-- enum reuse across two ``DjangoType``s pointing at the same column
-- grouped-choices rejection on the read enum, and the same column's values listed flattened
-- a ``None``-valued choice (``Choices.__empty__`` or hand-declared) gets no member, on
-  the column enum, an ``ArrayField`` element and a ``null=True`` column's read and write
-- member-name sanitization (hyphens, leading digits, keywords)
-- ``null=True`` widening to exactly ``EnumType | None``
-
-Coverage knock-ons: these tests exercise ``convert_scalar``'s ``null``
-widening branch and ``registry.register_enum`` / ``get_enum``.
+This module also keeps the diagnostic labels, ``force_nullable``, and
+import-order primary-resolution traps that introspection of the shipped schema
+cannot phrase, and the choice-enum rules: registry caching keyed on
+``(model, field_name)``, grouped-choices rejection on the read enum beside the
+same column's values listed flattened, the ``BLANK`` member a blank-admitting
+column carries, and a ``None``-valued choice (``Choices.__empty__`` or
+hand-declared) getting no member on the column enum, an ``ArrayField`` element
+and a ``null=True`` column's read and write.
 """
 
 import datetime
@@ -45,7 +44,6 @@ from typing import TYPE_CHECKING, NoReturn, TypedDict, cast, get_args
 
 import pytest
 import strawberry
-from apps.library.models import Periodical
 from apps.products.models import Category, Item
 from apps.scalars.models import MediaSpecimen, NullableScalarSpecimen, ScalarSpecimen
 from django.db import connection, models
@@ -75,7 +73,6 @@ from django_strawberry_framework.types.converters import (
     DjangoImagePathType,
     DjangoImageType,
     _column_admits_empty_string,
-    _field_has_choices,
     _field_label,
     _field_output_type_for,
     _sanitize_member_name,
@@ -299,11 +296,6 @@ def test_grouped_choices_form_rejected(grouped_choice_field: "ConcreteField") ->
     ("choice_pairs", "expected_message"),
     [
         pytest.param(
-            None,
-            "declares choices but the sequence could not be read;",
-            id="none",
-        ),
-        pytest.param(
             ["a"],
             "declares a malformed choice 'a';",
             id="scalar-entry",
@@ -331,8 +323,8 @@ def test_build_enum_rejects_malformed_choice_pairs(
         build_enum_from_choices(choice_pairs, "FixtureTypeEnum", source_label="probe")  # pyright: ignore[reportArgumentType]
 
 
-def test_build_enum_diagnostics_survive_hostile_choice_values() -> None:
-    """Hostile choice string/repr methods cannot escape enum construction."""
+def test_build_enum_collision_message_runs_a_hostile_choice_repr() -> None:
+    """A colliding choice value is rendered by its own ``__repr__``, whose error propagates."""
 
     class HostileChoice:
         @override
@@ -343,7 +335,7 @@ def test_build_enum_diagnostics_survive_hostile_choice_values() -> None:
         def __repr__(self) -> str:
             raise RuntimeError("repr should not escape")
 
-    with pytest.raises(ConfigurationError, match="sanitize to the same enum member"):
+    with pytest.raises(RuntimeError, match="repr should not escape"):
         build_enum_from_choices(
             [("a", "A"), (HostileChoice(), "Hostile")],
             "FixtureTypeEnum",
@@ -351,14 +343,13 @@ def test_build_enum_diagnostics_survive_hostile_choice_values() -> None:
         )
 
 
-def test_scalar_for_field_diagnostics_survive_hostile_metadata() -> None:
-    """Unsupported fields with broken metadata still raise ConfigurationError.
+def test_scalar_for_field_label_runs_a_hostile_field_name_str() -> None:
+    """An unsupported field whose ``name`` cannot render propagates that render's error.
 
     A field of an unsupported class whose ``name`` raises from ``__str__`` and
-    ``__repr__`` is malformed metadata no fakeshop model can declare, and exposing it is
-    unbuildable; it alone drives the tolerant label fallbacks in
-    ``django_strawberry_framework/types/converters.py::_field_label`` inside the
-    ``django_strawberry_framework/types/converters.py::scalar_for_field`` raise.
+    ``__repr__`` is malformed metadata no fakeshop model can declare; the label in
+    ``django_strawberry_framework/types/converters.py::_field_label`` renders the name
+    through its own ``__str__``, which is consumer behaviour.
     """
 
     class HostileMetadata:
@@ -384,15 +375,15 @@ def test_scalar_for_field_diagnostics_survive_hostile_metadata() -> None:
     # basedpyright: the planted non-string field name is the hostile input under test;
     # django-stubs types the slot as str
     field.name = HostileMetadata()  # pyright: ignore[reportAttributeAccessIssue]
-    with pytest.raises(ConfigurationError, match="Unsupported Django field type"):
+    with pytest.raises(RuntimeError, match="str should not escape"):
         scalar_for_field(field)
 
 
-def test_convert_choices_to_enum_diagnostics_survive_hostile_truthiness(
+def test_convert_choices_to_enum_propagates_hostile_choices_truthiness(
     choice_fixture_model: type[models.Model],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A choices container with broken truthiness still raises ConfigurationError."""
+    """A choices container whose truthiness raises propagates that error."""
 
     class HostileChoices:
         def __bool__(self) -> bool:
@@ -400,11 +391,13 @@ def test_convert_choices_to_enum_diagnostics_survive_hostile_truthiness(
 
     field = _concrete_field(choice_fixture_model, "status")
     monkeypatch.setattr(field, "choices", HostileChoices())
-    with pytest.raises(ConfigurationError, match="Could not inspect choices"):
+    with pytest.raises(RuntimeError, match="bool should not escape"):
         convert_choices_to_enum(field, "FixtureType")
 
 
-def test_field_diagnostics_survive_unreadable_metadata_descriptors() -> None:
+def test_field_label_reads_the_model_name_truthfully() -> None:
+    """A model metaclass's ``__name__`` hook never runs; unreadable field attributes propagate."""
+
     class _HostileModelMeta(type):
         @override
         def __getattribute__(cls, name: str) -> object:
@@ -429,27 +422,30 @@ def test_field_diagnostics_survive_unreadable_metadata_descriptors() -> None:
         def name(self) -> NoReturn:
             raise RuntimeError("name exploded")
 
-    assert _field_label(_UnreadableModel()) == "<unbound>.field"
     assert _field_label(type("Field", (), {"model": _HostileModel, "name": "field"})()) == (
-        "<unbound>.field"
+        "_HostileModel.field"
     )
-    assert _field_label(_UnreadableName()) == "object.<unknown>"
+    with pytest.raises(RuntimeError, match="model exploded"):
+        _ = _field_label(_UnreadableModel())
+    with pytest.raises(RuntimeError, match="name exploded"):
+        _ = _field_label(_UnreadableName())
 
 
-def test_converter_wraps_unreadable_choices_and_nullability_metadata() -> None:
-    with pytest.raises(ConfigurationError, match="Could not inspect choices"):
-        _field_has_choices(_UnreadableAttributeField("choices", name="field"))
-    with pytest.raises(ConfigurationError, match="Could not inspect nullability"):
-        convert_scalar(_UnreadableAttributeField("null", name="field"), "OwnerType")
+def test_convert_scalar_propagates_unreadable_nullability_metadata() -> None:
+    """A field whose ``null`` read raises propagates that error from ``convert_scalar``."""
+    with pytest.raises(RuntimeError, match="null exploded"):
+        _ = convert_scalar(_UnreadableAttributeField("null", name="field"), "OwnerType")
 
 
-def test_choice_conversion_wraps_unrenderable_values_and_unreadable_field_metadata() -> None:
+def test_choice_conversion_propagates_unrenderable_values_and_unreadable_field_metadata() -> None:
+    """An unrenderable choice value and an unreadable ``field.model`` propagate their errors."""
+
     class _UnrenderableChoice:
         @override
         def __str__(self) -> str:
             raise RuntimeError("choice rendering exploded")
 
-    with pytest.raises(ConfigurationError, match="cannot be converted"):
+    with pytest.raises(RuntimeError, match="choice rendering exploded"):
         build_enum_from_choices(
             [(_UnrenderableChoice(), "label")],
             "FixtureEnum",
@@ -458,20 +454,22 @@ def test_choice_conversion_wraps_unrenderable_values_and_unreadable_field_metada
 
     unreadable_field = _UnreadableAttributeField("model", name="field", choices=[("a", "A")])
 
-    with pytest.raises(ConfigurationError, match="Could not inspect choices"):
+    with pytest.raises(RuntimeError, match="model exploded"):
         convert_choices_to_enum(unreadable_field, "FixtureType")
 
 
-def test_choice_enum_name_derivation_wraps_a_hostile_type_name(
+def test_choice_enum_name_derivation_propagates_a_hostile_type_name_format(
     choice_fixture_model: type[models.Model],
 ) -> None:
+    """A type name whose ``__format__`` raises propagates that error."""
+
     class _HostileTypeName:
         @override
         def __format__(self, spec: str) -> str:
             raise RuntimeError("type name formatting exploded")
 
     field = _concrete_field(choice_fixture_model, "status")
-    with pytest.raises(ConfigurationError, match="Could not derive an enum name"):
+    with pytest.raises(RuntimeError, match="type name formatting exploded"):
         # basedpyright: the unformattable type name is the hostile input under test;
         # convert_choices_to_enum types the parameter as str
         convert_choices_to_enum(field, _HostileTypeName())  # pyright: ignore[reportArgumentType]
@@ -726,20 +724,20 @@ def test_malformed_choice_inside_a_group_keeps_its_specific_message(
     [choice_column_values, choice_column_is_grouped],
     ids=["values", "is-grouped"],
 )
-def test_choice_column_readers_wrap_unreadable_choices(
+def test_choice_column_readers_propagate_an_unreadable_choices_error(
     choice_fixture_model: type[models.Model],
     monkeypatch: pytest.MonkeyPatch,
     read_column: Callable[["ConcreteField"], object],
 ) -> None:
-    """A choices container with broken truthiness raises the package error, not its own."""
+    """A choices container whose truthiness raises propagates its own exception unchanged."""
 
     class HostileChoices:
         def __bool__(self) -> bool:
-            raise RuntimeError("bool should not escape")
+            raise RuntimeError("choices truthiness exploded")
 
     field = _concrete_field(choice_fixture_model, "status")
     monkeypatch.setattr(field, "choices", HostileChoices())
-    with pytest.raises(ConfigurationError, match="Could not inspect choices"):
+    with pytest.raises(RuntimeError, match="choices truthiness exploded"):
         read_column(field)
 
 
@@ -1426,14 +1424,12 @@ def test_convert_scalar_binary_field_raises_unsupported() -> None:
 # BigInt scalar - package-internal contract tests
 #
 # The field-mapping introspection tests and the basic outbound/inbound
-# round-trip tests were migrated to live ``/graphql/`` coverage on the
-# scalars app (``examples/fakeshop/test_query/test_scalars_api.py``). What
-# remains here is unreachable from a real HTTP path:
+# round-trip tests live on the scalars app
+# (``examples/fakeshop/test_query/test_scalars_api.py``), including
+# ``BigAutoField -> Int``
+# (``test_scalar_specimen_id_maps_big_auto_pk_to_int``). What remains here
+# is unreachable from a real HTTP path:
 #
-# - ``test_big_auto_field_still_maps_to_int`` - sibling case asserting
-#   ``BigAutoField -> Int`` (NOT BigInt). The scalars app's id columns
-#   are also ``BigAutoField`` but the example schema doesn't introspect
-#   into the synthetic ``managed=False`` shape this test needs.
 # - Two BigInt edge tests with no wire shape of their own: a nullable
 #   ``BigInt`` argument given ``null`` (Strawberry strips it before the
 #   parser runs, so the claim is about what the RESOLVER receives), and a
@@ -1536,33 +1532,6 @@ class _FakeHStoreField(models.Field[object, object]):
     before declaring a DjangoType using this field; otherwise convert_scalar's
     HStore branch never dispatches.
     """
-
-
-def test_big_auto_field_still_maps_to_int() -> None:
-    """``BigAutoField`` stays mapped to ``Int`` (no current-day recourse for 2**31)."""
-    # The library app's ``default_auto_field`` gives every model a BigAutoField pk.
-    assert isinstance(Periodical._meta.pk, models.BigAutoField)
-
-    class PeriodicalType(DjangoType):
-        class Meta:
-            model = Periodical
-            fields = ("id",)
-
-    finalize_django_types()
-
-    @strawberry.type
-    class Query:
-        def _owner(self) -> Periodical:
-            return Periodical(id=1)
-
-        owner: Periodical = strawberry.field(resolver=_owner, graphql_type=PeriodicalType)
-
-    schema = strawberry.Schema(query=Query)
-    type_payload = _introspect_field_type(schema, "PeriodicalType", "id")
-    assert type_payload["kind"] == "NON_NULL"
-    terminal = _walk_introspected_type(type_payload)
-    assert terminal["kind"] == "SCALAR"
-    assert terminal["name"] == "Int"
 
 
 def test_bigint_in_input_position_with_null_via_schema_execution() -> None:
@@ -2496,44 +2465,6 @@ def test_consumer_assigned_strawberry_field_relation_survives_always_defer() -> 
     assert resolver_function(items_field).__qualname__.endswith("CategoryType.items")
 
 
-def test_relation_resolves_to_primary_type_when_target_model_has_multiple() -> None:
-    """A relation to a multi-type model resolves to the primary."""
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name")
-            primary = True
-
-    assert registry.get(Item) is ItemType
-
-    class AdminItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name")
-
-    assert registry.model_for_type(AdminItemType) is Item
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
-
-    finalize_django_types()
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def categories(self) -> list[CategoryType]:
-            return []
-
-    schema = strawberry.Schema(query=Query)
-    items_field_type = _introspect_field_type(schema, "CategoryType", "items")
-    terminal = _walk_introspected_type(items_field_type)
-    # The reverse FK resolves to the primary ItemType, not AdminItemType.
-    assert terminal["name"] == "ItemType"
-
-
 def test_relation_resolves_to_primary_when_secondary_registered_before_source_before_primary() -> (
     None
 ):
@@ -3012,3 +2943,24 @@ def test_consumer_imagefield_subclass_opts_in_to_the_image_sibling() -> None:
     assert convert_field_output(preview, "OwnerType", expose_filesystem_path=True) == (
         DjangoImagePathType | None
     )
+
+
+def test_unsupported_field_message_names_the_field_class_and_label() -> None:
+    """The unsupported-field rejection names the real field class and ``Model.field``."""
+
+    class _UnsupportedField(models.Field[object, object]):
+        pass
+
+    class _LabelOwner(models.Model):
+        weird = _UnsupportedField()
+
+        class Meta:
+            app_label = _unique_app_label("test_unsupported_label")
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        scalar_for_field(_concrete_field(_LabelOwner, "weird"))
+    assert str(exc_info.value) == (
+        "Unsupported Django field type '_UnsupportedField' on _LabelOwner.weird. "
+        "Add an entry to SCALAR_MAP or exclude this field via Meta.exclude."
+    )
+    assert _field_label(_UnsupportedField()) == "<unbound>.None"
