@@ -527,9 +527,11 @@ reportImportCycles = "none"
 reportUninitializedInstanceVariable = "none"
 # On everywhere; its remaining ignores are counted in `[tool.type-suppressions]` below.
 reportAny = "error"
-# The ratchet, off until their sites are fixed (turn one on to list them):
-# `reportUnannotatedClassAttribute` is on in the scripts/, root-file and package environments,
-# `reportUnusedCallResult` in those and the example project outside its tests.
+# Off by design for tests/ and the example project, on in the scripts/, root-file and package
+# environments below: `reportUnannotatedClassAttribute` (the flagged attributes are declarative
+# configuration a framework reads by name on classes nothing subclasses: `Meta`, admin options,
+# declared filters, migrations, `AppConfig`) and `reportUnusedCallResult` (also on for the example
+# project outside its tests; a test calls for side effects).
 reportUnannotatedClassAttribute = "none"
 reportUnusedCallResult = "none"
 
