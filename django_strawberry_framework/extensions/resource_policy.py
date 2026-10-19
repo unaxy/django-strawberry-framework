@@ -494,23 +494,15 @@ class _ValueBudget:
         What this cannot bound is ONE advance: a container whose ``__next__``
         blocks or runs forever before yielding anything is inside consumer code
         the framework has no seam under. Every advance after the first is what
-        this bounds, and a refusal to measure is a typed rejection of the bound
-        being measured rather than whatever the container raised.
+        this bounds; whatever the container's own iteration raises is its
+        behaviour, and propagates.
         """
         limit = require_instance(read_attr(self.policy, bound), int)
         collected: list[_MemberT] = []
-        try:
-            for member in members():
-                collected.append(member)
-                if len(collected) > limit:
-                    break
-        except Exception as exc:
-            raise ResourceLimitExceeded(
-                bound,
-                limit,
-                limit + 1,
-                "a value charges this bound by an amount the framework cannot measure",
-            ) from exc
+        for member in members():
+            collected.append(member)
+            if len(collected) > limit:
+                break
         return collected
 
     def begin_mutation_field(self) -> None:
@@ -924,15 +916,7 @@ class _ValueBudget:
             self.upload_count,
             "the request carries more files than the policy allows",
         )
-        try:
-            size = getattr(value, "size", None)
-        except Exception as exc:
-            raise ResourceLimitExceeded(
-                "max_upload_file_bytes",
-                self.policy.max_upload_file_bytes,
-                self.policy.max_upload_file_bytes + 1,
-                "an uploaded file does not report a usable size, so its bytes cannot be bounded",
-            ) from exc
+        size = getattr(value, "size", None)
         if type(size) is not int or size < 0:
             raise ResourceLimitExceeded(
                 "max_upload_file_bytes",

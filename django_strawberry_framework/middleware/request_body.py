@@ -43,7 +43,7 @@ The exemption is a lazily-evaluated object rather than the usual ``True`` for
 exactly that reason: whether the ordering is supplied by the chain is not known
 when a URLconf is imported, and a deployment must not have to state the same fact
 twice. It lives in ``_boundary_ordering.py``
-(``::_CsrfOrderingExemption``) together with the two marks, and it is ``False``
+(``::_CsrfOrderingExemption``) together with the marks, and it is ``False``
 for a request this middleware has actually run the boundary for - the narrow
 fact, and the load-bearing one, since that is the request whose body is proven
 measured. For every other request, including one whose callback this middleware
@@ -90,19 +90,13 @@ from django_strawberry_framework._boundary_ordering import (
     _BOUNDARY_MARKER,
     _BOUNDARY_METHOD,
     _BOUNDARY_MOUNT,
-    _BOUNDARY_PREPARED_VIEW,
     _boundary_middleware_request,
+    stamp_prepared_view,
 )
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils._narrowing import (
-    is_class,
-    is_dict,
-    is_str,
-    list_of,
-    read_attr,
-    require,
-)
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_str, list_of, require
 from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
 
 if TYPE_CHECKING:
@@ -250,7 +244,7 @@ class GraphQLRequestBodyBoundaryMiddleware:
             setup(request, *view_args, **view_kwargs)
             if not hasattr(view, "request"):
                 raise AttributeError(
-                    f"{type(view).__name__} instance has no 'request' attribute. "
+                    f"{truth.name(type(view))} instance has no 'request' attribute. "
                     "Did you override setup() and forget to call super()?",
                 )
         try:
@@ -261,19 +255,16 @@ class GraphQLRequestBodyBoundaryMiddleware:
                 status=exc.status_code,
                 content_type="text/plain",
             )
-        try:
-            mount = getattr(view_func, _BOUNDARY_MOUNT, None)
-        except Exception:  # noqa: BLE001 - an optional handoff cannot turn a completed boundary into a 500
-            mount = None
+        mount = truth.static_attr(view_func, _BOUNDARY_MOUNT, None)
         if mount is not None:
-            setattr(request, _BOUNDARY_PREPARED_VIEW, (mount, view))
+            stamp_prepared_view(request, mount, view)
         setattr(request, _BOUNDARY_ENFORCED, True)
         return None
 
 
 def _is_initkwargs(value: object) -> TypeIs[dict[str, object]]:
     """Whether ``value`` is a ``dict`` of keyword arguments: every key a ``str``."""
-    return is_dict(value) and all(is_str(key) for key in value)
+    return truth.is_instance(value, dict) and all(is_str(key) for key in value)
 
 
 def _package_view_instance(view_func: object) -> object:
@@ -310,11 +301,11 @@ def _package_view_instance(view_func: object) -> object:
     middleware can run either, and recognizing it would hand ``process_view`` the
     same uncontrolled failure the probe exists to remove. The name is reached
     through ``_boundary_ordering.py``, which is what lets the probe cost no import
-    of ``views.py``. One limit, stated rather than left to be discovered: an
-    attribute read consults the object's own attribute machinery, so a forged
-    ``view_class`` whose metaclass defines ``__getattr__``, or which carries a
-    descriptor under the probed name, still runs that code. Forging the marker is
-    outside the threat model either way, and the probe is here so that every
+    of ``views.py``. Every read the recognition performs is a truthful static
+    read (``utils/truth.py::static_attr``, ``is_type``, ``is_instance``): it
+    walks the real namespaces and never runs a ``__getattr__``, a metaclass
+    property or a descriptor, so the callback answers only with what it stores.
+    Forging the marker is outside the threat model either way, and the probe is here so that every
     outcome the recognition reaches is a controlled response - a refusal, a stamp,
     or a decline - not to defend against a forger. Running a boundary the
     recognition accepted is a different question: a boundary that raises anything
@@ -322,19 +313,6 @@ def _package_view_instance(view_func: object) -> object:
     identically for a package mount and for a forged class carrying a callable of
     the probed name, because a guard there would sit across the body cap's own
     errors.
-
-    Which is why every read the recognition performs is guarded: attribute
-    machinery of that kind can raise instead of answering, ``getattr``'s default
-    absorbs ``AttributeError`` alone, and ``process_view`` calls this function
-    outside any ``except``, so one unguarded read would leave the hook on an
-    exception of the forged object's choosing. A read that cannot be completed is
-    a question that cannot be answered, and the answer to that is ``None``: the
-    callback is declined and keeps the view-local arrangement, so the cap still
-    runs and what degrades is the CSRF class rather than the ordering. It masks
-    no misconfiguration of a *package* mount either, because a boundary read that
-    genuinely raises on a package class raises again in
-    ``views.py::_RequestBodyBoundaryMixin._enforce_request_boundary_once``, which
-    is exactly what a declined request goes on to run.
 
     The ``TypeError`` arm is therefore the answer being absent rather than a
     failure being swallowed: it is raised by the splat and by the class's own
@@ -347,28 +325,20 @@ def _package_view_instance(view_func: object) -> object:
     raises ``TypeError``. It hides no misconfiguration of a *package* mount,
     because Django's own ``as_view`` closure constructs the same class with the
     same kwargs for the same request, so a mount that genuinely cannot be built
-    still fails there - as it would with this middleware uninstalled. It stays
-    narrow for that reason while the reads above are guarded broadly: a class that
-    cannot be built from the kwargs it names is a determined answer, and a read
-    that raises is no answer at all. The class test (asked of the value's real type)
-    and the ``str``-keyed ``dict`` test stay ahead of the probe and the
-    construction, so the read is taken off a class rather than off an arbitrary
-    object - which narrows whose attribute machinery can run, a class's own
-    metaclass and descriptors rather than any object's ``__getattr__``, and does
-    not eliminate it - and so it is only ever a class that gets called. There is
-    deliberately no ``or {}`` default: an absent attribute means "not ours", never
-    "ours, with nothing configured".
+    still fails there - as it would with this middleware uninstalled. The
+    real-class test and the ``str``-keyed ``dict`` test stay ahead of the probe
+    and the construction, so it is only ever a class that gets called, with
+    keyword arguments it can be splatted with. There is deliberately no ``or {}``
+    default: an absent attribute means "not ours", never "ours, with nothing
+    configured".
     """
-    try:
-        if not getattr(view_func, _BOUNDARY_MARKER, False):
-            return None
-        view_class = read_attr(view_func, "view_class", None)
-        initkwargs = read_attr(view_func, "view_initkwargs", None)
-        if not is_class(view_class) or not _is_initkwargs(initkwargs):
-            return None
-        if not callable(getattr(view_class, _BOUNDARY_METHOD, None)):
-            return None
-    except Exception:  # noqa: BLE001 - a read that cannot answer has recognized nothing
+    if truth.static_attr(view_func, _BOUNDARY_MARKER, default=False) is not True:
+        return None
+    view_class = truth.static_attr(view_func, "view_class", None)
+    initkwargs = truth.static_attr(view_func, "view_initkwargs", None)
+    if not truth.is_type(view_class) or not _is_initkwargs(initkwargs):
+        return None
+    if not callable(truth.static_attr(view_class, _BOUNDARY_METHOD, None)):
         return None
     try:
         return object_result(view_class, **initkwargs)
@@ -396,11 +366,14 @@ def _require_boundary_before_csrf() -> None:
     boundary_index = csrf_index = None
     for index, path in enumerate(list_of(django_setting("MIDDLEWARE"))):
         entry = _import_entry(require(path, is_str))
-        if not isinstance(entry, type):
+        if not truth.is_type(entry):
             continue
-        if issubclass(entry, GraphQLRequestBodyBoundaryMiddleware) and boundary_index is None:
+        if (
+            truth.is_subclass(entry, GraphQLRequestBodyBoundaryMiddleware)
+            and boundary_index is None
+        ):
             boundary_index = index
-        elif issubclass(entry, CsrfViewMiddleware) and csrf_index is None:
+        elif truth.is_subclass(entry, CsrfViewMiddleware) and csrf_index is None:
             csrf_index = index
     if boundary_index is None or csrf_index is None or csrf_index > boundary_index:
         return

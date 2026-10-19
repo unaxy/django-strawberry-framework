@@ -1982,10 +1982,8 @@ def test_library_owned_scalars_share_one_cache_identity_across_requests() -> Non
 def test_freezer_lets_cancellation_propagate_rather_than_caching_it() -> None:
     """A ``BaseException`` from hostile type inspection is not absorbed into a key.
 
-    Ordinary failures degrade to an opaque identity so malformed consumer data
-    cannot abort a valid operation, but cancellation and process-control signals
-    are not cache outcomes -- swallowing one would convert an interrupted request
-    into a silent cache miss.
+    Cancellation and process-control signals are not cache outcomes -- swallowing
+    one would convert an interrupted request into a silent cache miss.
     """
 
     class CancellingMeta(type):
@@ -2004,67 +2002,38 @@ def test_freezer_lets_cancellation_propagate_rather_than_caching_it() -> None:
     class Interrupting(metaclass=InterruptingMeta):
         pass
 
-    # The safe-scalar membership test hashes ``type(value)``, so a hostile
-    # metaclass ``__hash__`` is the reachable entry point into this guard.
+    # The safe-scalar test compares ``type(value)`` by identity, but the container
+    # classification (``utils/_narrowing.py::is_mapping``, an ABC instance check)
+    # hashes it, so a hostile metaclass ``__hash__`` is reachable and propagates.
     with pytest.raises(asyncio.CancelledError):
         _hashable_variable_value(Cancelling())
     with pytest.raises(KeyboardInterrupt):
         _hashable_variable_value(Interrupting())
 
 
-def test_hashable_variable_value_safely_degrades_for_hostile_custom_values() -> None:
-    """Hostile custom-scalar values cannot abort plan-cache key construction."""
+def test_hashable_variable_value_never_hashes_a_custom_value() -> None:
+    """A custom-scalar value keys as an opaque token; its ``__hash__`` never runs."""
 
     class ExplodingHash:
         @override
         def __hash__(self) -> NoReturn:
             raise RuntimeError("hash boom")
 
+    for value in (ExplodingHash(), [ExplodingHash()]):
+        frozen = _hashable_variable_value(value)
+        assert isinstance(hash(frozen), int)
+
+
+def test_hashable_variable_value_container_iteration_error_propagates() -> None:
+    """A container a custom scalar returned is iterated on its own terms; its errors propagate."""
+
     class ExplodingItems(dict[str, object]):
         @override
         def items(self) -> NoReturn:
             raise RuntimeError("items boom")
 
-    class ExplodingIterator(list[object]):
-        @override
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("iter boom")
-
-    class HostileRepr:
-        @override
-        def __hash__(self) -> int:
-            return 1
-
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr boom")
-
-    class UnhashableMetaclass(type):
-        @override
-        def __eq__(cls, other: object) -> bool:
-            return cls is other
-
-        # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-        __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-    class UnhashableType(metaclass=UnhashableMetaclass):
-        @override
-        def __eq__(self, other: object) -> bool:
-            return self is other
-
-        # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-        __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-    values = (
-        ExplodingHash(),
-        ExplodingItems(value=1),
-        ExplodingIterator([1]),
-        {HostileRepr(): 1},
-        UnhashableType(),
-    )
-    for value in values:
-        frozen = _hashable_variable_value(value)
-        assert isinstance(hash(frozen), int)
+    with pytest.raises(RuntimeError, match="items boom"):
+        _hashable_variable_value(ExplodingItems(value=1))
 
 
 def test_build_cache_key_tolerates_unhashable_pagination_variable() -> None:
@@ -2334,44 +2303,19 @@ class _DetonatingEqObject:
     __hash__ = None  # pyright: ignore[reportAssignmentType]
 
 
-class _DetonatingReprObject:
-    @override
-    def __eq__(self, other: object) -> bool:
-        return False
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError(_END_DETONATION)
-
-    # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-    __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-
 @pytest.mark.parametrize(
     "hostile",
-    [
-        _DetonatingEqStr("bogus"),
-        _DetonatingReprStr("bogus"),
-        _DetonatingEqObject(),
-        _DetonatingReprObject(),
-    ],
-    ids=[
-        "eq-str-subclass",
-        "repr-str-subclass",
-        "eq-object",
-        "repr-object",
-    ],
+    [_DetonatingEqStr("bogus"), _DetonatingEqObject()],
+    ids=["eq-str-subclass", "eq-object"],
 )
 def test_strictness_hostile_dunder_values_raise_typed_valueerror(hostile: object) -> None:
-    """B3: a hostile strictness value is rejected typed, never dispatched into.
+    """A strictness value's ``__eq__`` never decides the typed rejection.
 
     The strictness boundary is construction-time consumer configuration with a
     promised ``ValueError``. The membership read compares ``str`` candidates
     through the base ``str`` slot and rejects non-``str`` candidates without an
-    equality probe, and the message renders through the guarded repr - so a
-    raising ``__eq__`` (reached through reflected comparison for a plain object)
-    or a raising ``__repr__`` cannot replace the typed rejection with the
-    value's own exception.
+    equality probe, so a raising ``__eq__`` (reached through reflected
+    comparison for a plain object) never runs.
     """
     with pytest.raises(ValueError, match="strictness must be") as exc_info:
         # basedpyright: the non-str strictness is the hostile input under test;
@@ -2418,6 +2362,12 @@ def test_strictness_non_str_lookalikes_raise_typed_valueerror(
         _ = DjangoOptimizerExtension(strictness=make())  # pyright: ignore[reportArgumentType]
     assert str(exc_info.value).startswith("strictness must be 'off', 'warn', or 'raise', got <")
     assert _END_DETONATION not in str(exc_info.value)
+
+
+def test_strictness_rejection_renders_the_value_through_its_own_repr() -> None:
+    """Rendering a rejected ``str`` subclass runs its own ``__repr__``, which propagates."""
+    with pytest.raises(RuntimeError, match=_END_DETONATION):
+        DjangoOptimizerExtension(strictness=_DetonatingReprStr("bogus"))
 
 
 def test_strictness_accepts_content_equal_str_subclass() -> None:

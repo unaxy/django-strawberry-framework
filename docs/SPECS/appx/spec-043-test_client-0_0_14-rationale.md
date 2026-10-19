@@ -246,8 +246,10 @@ Spec: [Decision 9][d9].
   disagree: `isdigit()` accepts superscripts `int()` rejects, and digit-like Unicode and very long
   decimal strings do not share `int()`'s acceptance domain, so a non-canonical index could be
   accepted where the emitted `object-path` segment could not name it.
-- **`{x!r}` in guard diagnostics.** A hostile `__repr__` on a consumer-supplied path or value would
-  escape the guard as a raw exception; `_safe_arg_repr` contains it.
+- **`{x!r}` in guard diagnostics.** Every package error message names a value through
+  `utils/truth.py::render`, which spells a builtin scalar through its own type's slot (an
+  oversized `int` reads `<unprintable int>` instead of raising) and renders any other value
+  through its own `__repr__`; a second spelling here would drift from it.
 
 ### Decision 10 — Mixin-first: `GraphQLTestMixin` composes over `TestClient`
 
@@ -327,9 +329,9 @@ convenience, the mixin's deprecated `_client` property shim, graphene's `TESTING
 default of `"/graphql"`) are the evidence the borrow decisions rest on; the decisions and the
 non-borrow list stay in the spec.
 
-**`_safe_arg_repr` is not a borrow.** Neither upstream contributes it; it is the package's own
-hostile-metadata containment helper from `django_strawberry_framework/exceptions.py`, which is why
-it sits in the spec's `## Helper-reuse obligations (DRY)` as D5 rather than in the borrowing list.
+**`utils/truth.py::render` is not a borrow.** Neither upstream contributes it; it is the package's
+own renderer for a value named in an error message, which is why it sits in the spec's
+`## Helper-reuse obligations (DRY)` as D5 rather than in the borrowing list.
 
 ### Risks and open questions — the preferred-answer / fallback weighing
 

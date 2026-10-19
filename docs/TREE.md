@@ -198,6 +198,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
 ├── _graphql_core_patches.py      # Defensive patch for graphql-core async-iterable list completion.
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
+├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
 ├── _strawberry_patches.py        # Defensive patches for upstream Strawberry bugs, applied at app load.
 ├── apps.py                       # Django ``AppConfig`` - registers the package and applies its upstream patches at app load.
@@ -296,16 +297,17 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 └── utils/    # Cross-cutting infrastructure shared across django-strawberry-framework subsystems.
     ├── _narrowing.py             # Narrowing predicates and typed base slots for values whose type is only ``object``.
     ├── _queryset_private.py      # Typed reads and writes of the ``QuerySet`` state Django keeps in private attributes.
-    ├── canonical.py              # Hostile-safe primitives for canonically reading consumer-controlled containers.
+    ├── canonical.py              # Primitives for canonically reading consumer-controlled containers.
     ├── connections.py            # Shared connection contracts for sidecars, fetch modes, offset cursors, windows, and page bounds.
     ├── context.py                # Shape-agnostic read / write / delete helpers for Strawberry's ``info.context``.
     ├── converters.py             # Fail-loud converter-dispatch skeleton shared by write-field and filter-input converters.
-    ├── directives.py             # Construction-time containment for the consumer-supplied ``directives=`` forward.
+    ├── directives.py             # Construction-time validation for the consumer-supplied ``directives=`` forward.
     ├── errors.py                 # Neutral ``FieldError`` / write-error constructors shared by every write flavor.
     ├── execution_mode.py         # Which GraphQL executor is driving this resolver, as a fact rather than a guess.
     ├── imports.py                # Import helpers for best-effort, loaded-only, strict, and guarded optional-dependency lookups.
     ├── input_values.py           # Set-input traversal substrate shared by the FilterSet and OrderSet families.
     ├── inputs.py                 # Generated-input construction and lifecycle primitives shared by set and write families.
+    ├── lazy.py                   # Django lazy-proxy unwrapping: the object a ``LazyObject`` stands for, before a type check.
     ├── operation_lease.py        # Revocable access to state that belongs to one operation.
     ├── permissions.py            # Shared permission traversal and Django/Channels request-context decoding.
     ├── policies.py               # Shared schema-construction policy normalization.
@@ -314,6 +316,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── relations.py              # Relation-shape helpers shared by converters, resolvers, the optimizer, and input selectors.
     ├── sessions.py               # The session-engine resolver and the connection actor lease, shared across the opt-in boundary.
     ├── strings.py                # GraphQL/Django naming helpers for case conversion and lookup-path flattening.
+    ├── truth.py                  # Truthful identity reads: facts about an object read from the interpreter, never asked of it.
     ├── typing.py                 # Async-callable detection and type-unwrapping helpers for Strawberry, Python, and GraphQL types.
     ├── write_transaction.py      # Write-transaction plumbing: the managed alias, alias pinning, row locks, and conflicts.
     └── write_values.py           # Neutral write-value primitives shared by the model, form, and serializer flavors.
@@ -332,6 +335,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
 ├── _graphql_core_patches.py      # Defensive patch for graphql-core async-iterable list completion.
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
+├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
 ├── _strawberry_patches.py        # Defensive patches for upstream Strawberry bugs, applied at app load.
 ├── apps.py                       # Django ``AppConfig`` - registers the package and applies its upstream patches at app load.
@@ -434,16 +438,17 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 └── utils/    # Cross-cutting infrastructure shared across django-strawberry-framework subsystems.
     ├── _narrowing.py             # Narrowing predicates and typed base slots for values whose type is only ``object``.
     ├── _queryset_private.py      # Typed reads and writes of the ``QuerySet`` state Django keeps in private attributes.
-    ├── canonical.py              # Hostile-safe primitives for canonically reading consumer-controlled containers.
+    ├── canonical.py              # Primitives for canonically reading consumer-controlled containers.
     ├── connections.py            # Shared connection contracts for sidecars, fetch modes, offset cursors, windows, and page bounds.
     ├── context.py                # Shape-agnostic read / write / delete helpers for Strawberry's ``info.context``.
     ├── converters.py             # Fail-loud converter-dispatch skeleton shared by write-field and filter-input converters.
-    ├── directives.py             # Construction-time containment for the consumer-supplied ``directives=`` forward.
+    ├── directives.py             # Construction-time validation for the consumer-supplied ``directives=`` forward.
     ├── errors.py                 # Neutral ``FieldError`` / write-error constructors shared by every write flavor.
     ├── execution_mode.py         # Which GraphQL executor is driving this resolver, as a fact rather than a guess.
     ├── imports.py                # Import helpers for best-effort, loaded-only, strict, and guarded optional-dependency lookups.
     ├── input_values.py           # Set-input traversal substrate shared by the FilterSet and OrderSet families.
     ├── inputs.py                 # Generated-input construction and lifecycle primitives shared by set and write families.
+    ├── lazy.py                   # Django lazy-proxy unwrapping: the object a ``LazyObject`` stands for, before a type check.
     ├── operation_lease.py        # Revocable access to state that belongs to one operation.
     ├── permissions.py            # Shared permission traversal and Django/Channels request-context decoding.
     ├── policies.py               # Shared schema-construction policy normalization.
@@ -453,6 +458,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── relations.py              # Relation-shape helpers shared by converters, resolvers, the optimizer, and input selectors.
     ├── sessions.py               # The session-engine resolver and the connection actor lease, shared across the opt-in boundary.
     ├── strings.py                # GraphQL/Django naming helpers for case conversion and lookup-path flattening.
+    ├── truth.py                  # Truthful identity reads: facts about an object read from the interpreter, never asked of it.
     ├── typing.py                 # Async-callable detection and type-unwrapping helpers for Strawberry, Python, and GraphQL types.
     ├── write_transaction.py      # Write-transaction plumbing: the managed alias, alias pinning, row locks, and conflicts.
     └── write_values.py           # Neutral write-value primitives shared by the model, form, and serializer flavors.
@@ -492,19 +498,20 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_public_types.py    # Script tests for the public-API type-completeness gate in ``scripts/check_public_types.py``.
 ├── test_check_spec_glossary.py   # Script tests for the spec terms-CSV glossary gate.
 ├── test_check_trailing_commas.py # Script tests for the ``source-layout`` gate in ``scripts/check_trailing_commas.py``.
+├── test_check_truthful_reads.py  # Script tests for the ``truthful-reads`` gate in ``scripts/check_truthful_reads.py``.
 ├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
 ├── test_ci_governance.py         # Governance tests for the CI workflow definitions.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
-├── test_consumers.py             # Hostile-input containment for the WebSocket consumer.
+├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
 ├── test_count_queries.py         # Script tests for the N+1 detector's verdict and comparison logic.
 ├── test_cross_web_patches.py     # Tests for the ``cross_web`` non-UTF-8 request-body patch.
 ├── test_definition_builder.py    # Smoke test proving the shared ``tests/_definition.py`` builder hands out what it promises.
 ├── test_django_patches.py        # Django patch tests for DB connection wrapping and multi-database safety.
 ├── test_error_policy.py          # ``ErrorPolicy`` construction, precedence, and install position.
-├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, hostile message args.
+├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
 ├── test_graphql_core_patches.py  # Install-lifecycle tests for the graphql-core ``complete_list_value`` residual-awaitable patch.
@@ -514,9 +521,11 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_lateral_pg_parity.py     # Postgres lateral-fetch tests for parity, SQL shape, cleanup, custom joins, adaptation, and index seeks.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
+├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
 ├── test_permissions.py           # Package-only cascade-permission pins that no live GraphQL request can express.
 ├── test_pg_explain_artifact_footer.py  # The PG EXPLAIN artifact carries a regenerable, valid link-definition footer.
 ├── test_predicate_pg_explain.py  # Postgres planner regression for the row-preserving to-many filter predicates.
+├── test_prepared_view_handoff.py # The prepared-view handoff's ignore arms.
 ├── test_prove_failability.py     # Script tests for the failability-proof runner's refusals and restore proof.
 ├── test_registry.py              # TypeRegistry and finalization tests for lookups, primaries, lifecycle callbacks, retries, and reset.
 ├── test_relation_fixtures.py     # Smoke tests proving the shared ``Rp*`` relation fixtures work end to end.
@@ -538,7 +547,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── _helpers.py               # Shared auth-test helpers hoisted out of the individual test modules.
 │   ├── conftest.py               # Shared fixtures for the auth test modules.
 │   ├── test_mutations.py         # Auth mutation tests for declaration and bind lifecycles, operations, registration, and permissions.
-│   ├── test_queries.py           # Current-user query tests for alias binding, visibility, permission gates, and sync/async resolution.
+│   ├── test_queries.py           # Current-user query tests for alias binding, permission gates, and sync/async resolution.
 │   └── test_sessions.py          # Transport classification, session pre-check, scope lock, and capability tests.
 ├── base/    # Frozen base tests for settings, initialization, version, logging, and public exports.
 │   ├── test_conf.py              # Package settings-reader tests for DJANGO_STRAWBERRY_FRAMEWORK.
@@ -620,7 +629,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_definition_order.py  # Declaration-order traps and Relay id-annotation rules no GraphQL request observes.
 │   ├── test_definition_order_schema.py  # Schema-build tests for definition-order-independent DjangoType finalization.
 │   ├── test_definition_relations.py  # DjangoTypeDefinition tests for related-target lookup, GraphQL naming, and Relay ID detection.
-│   ├── test_finalizer.py         # Finalizer malformed-state and hostile-metadata boundaries.
+│   ├── test_finalizer.py         # Finalizer malformed-state boundaries.
 │   ├── test_generic_foreign_key.py  # DjangoType tests for GenericForeignKey rejection and GenericRelation support.
 │   ├── test_relations.py         # PendingRelation tests for identity semantics, frozen fields and the sentinel annotation repr.
 │   ├── test_relay_interfaces.py  # DjangoType Relay interface tests for Node wiring and resolver contracts.
@@ -630,18 +639,19 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │       ├── lazy_relation_target_module.py  # Cross-module fixture holding the target of a ``strawberry.lazy`` relation override.
 │       └── shelf_module.py       # Cross-module fixture declaring ShelfType and ShelfFilter together.
 └── utils/    # Package tests for shared utility helpers.
-    ├── test_canonical.py         # Tests for the hostile-safe container read / ordering primitives (``utils/canonical.py``).
+    ├── test_canonical.py         # Tests for the container read / ordering primitives (``utils/canonical.py``).
     ├── test_connections.py       # Unit tests for the shared connection planner/resolver contracts.
     ├── test_context.py           # Tests for the shared request-context read / write / delete dispatch.
     ├── test_converters.py        # Tests for the shared fail-loud converter-dispatch skeleton (``utils/converters.py``).
-    ├── test_directives.py        # Tests for the shared field-directives containment (``utils/directives.py``).
+    ├── test_directives.py        # Tests for the shared field-directives validation (``utils/directives.py``).
     ├── test_error_keys.py        # Every write flavor keys a validator error to the GraphQL input field the client sent.
-    ├── test_errors.py            # Shared mutation-error constructors remain total over hostile metadata.
+    ├── test_errors.py            # Shared mutation-error constructors: leaf shapes, the Django mapper, the code vocabulary.
     ├── test_execution_mode.py    # ``utils/execution_mode.py`` - which GraphQL executor is driving this resolver.
     ├── test_imports.py           # Tests for the shared optional-import helpers (``utils/imports.py``).
     ├── test_init.py              # Package-init tests pinning the ``utils`` package's re-export surface.
     ├── test_input_values.py      # Tests for the neutral set-input traversal substrate (``utils/input_values.py``).
     ├── test_inputs.py            # Tests for the shared generated-input substrate (``utils/inputs.py``).
+    ├── test_lazy.py              # Tests for Django lazy-proxy unwrapping (``utils/lazy.py::unwrap_lazy_object``).
     ├── test_narrowing.py         # Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
     ├── test_permissions.py       # Tests for input permissions, relation-path gates, and Django/Channels request decoding.
     ├── test_policies.py          # ``utils/policies.py::resolve_policy`` - the shared schema-construction resolver.
@@ -651,6 +661,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
     ├── test_strings.py           # String utility tests for snake/camel/Pascal case conversion and Django lookup-path flattening.
+    ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
     ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry, Python, and GraphQL unwrapping.
     └── test_write_values.py      # Direct pins of write-value decode internals a GraphQL request cannot name.
 ```
@@ -735,6 +746,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_optimizer_auto_api.py    # Live ``/graphql/`` coverage for routed nested-fetch strategy selection.
 ├── test_products_api.py          # Live GraphQL HTTP tests for products reads, mutations, permissions, optimization, and request parsing.
 ├── test_products_visibility_api.py  # Live GraphQL proof that generated relations enforce target visibility themselves.
+├── test_relation_deadline_api.py # Live pins: the execution deadline stops nested single-object resolvers.
 ├── test_relations_async_api.py   # Live GraphQL proof that generated relations lazy-load and read prefetches in async.
 ├── test_resource_policy_api.py   # Live ``/graphql/`` execution-resource-policy acceptance tests.
 ├── test_scalars_api.py           # Live GraphQL HTTP tests for scalar wire formats, filtering, relations, and optimizer behavior.
@@ -775,19 +787,20 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_public_types.py    # Script tests for the public-API type-completeness gate in ``scripts/check_public_types.py``.
 ├── test_check_spec_glossary.py   # Script tests for the spec terms-CSV glossary gate.
 ├── test_check_trailing_commas.py # Script tests for the ``source-layout`` gate in ``scripts/check_trailing_commas.py``.
+├── test_check_truthful_reads.py  # Script tests for the ``truthful-reads`` gate in ``scripts/check_truthful_reads.py``.
 ├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
 ├── test_ci_governance.py         # Governance tests for the CI workflow definitions.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
-├── test_consumers.py             # Hostile-input containment for the WebSocket consumer.
+├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
 ├── test_count_queries.py         # Script tests for the N+1 detector's verdict and comparison logic.
 ├── test_cross_web_patches.py     # Tests for the ``cross_web`` non-UTF-8 request-body patch.
 ├── test_definition_builder.py    # Smoke test proving the shared ``tests/_definition.py`` builder hands out what it promises.
 ├── test_django_patches.py        # Django patch tests for DB connection wrapping and multi-database safety.
 ├── test_error_policy.py          # ``ErrorPolicy`` construction, precedence, and install position.
-├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, hostile message args.
+├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
 ├── test_graphql_core_patches.py  # Install-lifecycle tests for the graphql-core ``complete_list_value`` residual-awaitable patch.
@@ -797,9 +810,11 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_lateral_pg_parity.py     # Postgres lateral-fetch tests for parity, SQL shape, cleanup, custom joins, adaptation, and index seeks.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
+├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
 ├── test_permissions.py           # Package-only cascade-permission pins that no live GraphQL request can express.
 ├── test_pg_explain_artifact_footer.py  # The PG EXPLAIN artifact carries a regenerable, valid link-definition footer.
 ├── test_predicate_pg_explain.py  # Postgres planner regression for the row-preserving to-many filter predicates.
+├── test_prepared_view_handoff.py # The prepared-view handoff's ignore arms.
 ├── test_prove_failability.py     # Script tests for the failability-proof runner's refusals and restore proof.
 ├── test_registry.py              # TypeRegistry and finalization tests for lookups, primaries, lifecycle callbacks, retries, and reset.
 ├── test_relation_fixtures.py     # Smoke tests proving the shared ``Rp*`` relation fixtures work end to end.
@@ -822,7 +837,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── _helpers.py               # Shared auth-test helpers hoisted out of the individual test modules.
 │   ├── conftest.py               # Shared fixtures for the auth test modules.
 │   ├── test_mutations.py         # Auth mutation tests for declaration and bind lifecycles, operations, registration, and permissions.
-│   ├── test_queries.py           # Current-user query tests for alias binding, visibility, permission gates, and sync/async resolution.
+│   ├── test_queries.py           # Current-user query tests for alias binding, permission gates, and sync/async resolution.
 │   └── test_sessions.py          # Transport classification, session pre-check, scope lock, and capability tests.
 ├── base/    # Frozen base tests for settings, initialization, version, logging, and public exports.
 │   ├── test_conf.py              # Package settings-reader tests for DJANGO_STRAWBERRY_FRAMEWORK.
@@ -908,7 +923,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_definition_order.py  # Declaration-order traps and Relay id-annotation rules no GraphQL request observes.
 │   ├── test_definition_order_schema.py  # Schema-build tests for definition-order-independent DjangoType finalization.
 │   ├── test_definition_relations.py  # DjangoTypeDefinition tests for related-target lookup, GraphQL naming, and Relay ID detection.
-│   ├── test_finalizer.py         # Finalizer malformed-state and hostile-metadata boundaries.
+│   ├── test_finalizer.py         # Finalizer malformed-state boundaries.
 │   ├── test_generic_foreign_key.py  # DjangoType tests for GenericForeignKey rejection and GenericRelation support.
 │   ├── test_relations.py         # PendingRelation tests for identity semantics, frozen fields and the sentinel annotation repr.
 │   ├── test_relay_interfaces.py  # DjangoType Relay interface tests for Node wiring and resolver contracts.
@@ -918,18 +933,19 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │       ├── lazy_relation_target_module.py  # Cross-module fixture holding the target of a ``strawberry.lazy`` relation override.
 │       └── shelf_module.py       # Cross-module fixture declaring ShelfType and ShelfFilter together.
 └── utils/    # Package tests for shared utility helpers.
-    ├── test_canonical.py         # Tests for the hostile-safe container read / ordering primitives (``utils/canonical.py``).
+    ├── test_canonical.py         # Tests for the container read / ordering primitives (``utils/canonical.py``).
     ├── test_connections.py       # Unit tests for the shared connection planner/resolver contracts.
     ├── test_context.py           # Tests for the shared request-context read / write / delete dispatch.
     ├── test_converters.py        # Tests for the shared fail-loud converter-dispatch skeleton (``utils/converters.py``).
-    ├── test_directives.py        # Tests for the shared field-directives containment (``utils/directives.py``).
+    ├── test_directives.py        # Tests for the shared field-directives validation (``utils/directives.py``).
     ├── test_error_keys.py        # Every write flavor keys a validator error to the GraphQL input field the client sent.
-    ├── test_errors.py            # Shared mutation-error constructors remain total over hostile metadata.
+    ├── test_errors.py            # Shared mutation-error constructors: leaf shapes, the Django mapper, the code vocabulary.
     ├── test_execution_mode.py    # ``utils/execution_mode.py`` - which GraphQL executor is driving this resolver.
     ├── test_imports.py           # Tests for the shared optional-import helpers (``utils/imports.py``).
     ├── test_init.py              # Package-init tests pinning the ``utils`` package's re-export surface.
     ├── test_input_values.py      # Tests for the neutral set-input traversal substrate (``utils/input_values.py``).
     ├── test_inputs.py            # Tests for the shared generated-input substrate (``utils/inputs.py``).
+    ├── test_lazy.py              # Tests for Django lazy-proxy unwrapping (``utils/lazy.py::unwrap_lazy_object``).
     ├── test_narrowing.py         # Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
     ├── test_permissions.py       # Tests for input permissions, relation-path gates, and Django/Channels request decoding.
     ├── test_policies.py          # ``utils/policies.py::resolve_policy`` - the shared schema-construction resolver.
@@ -939,6 +955,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
     ├── test_strings.py           # String utility tests for snake/camel/Pascal case conversion and Django lookup-path flattening.
+    ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
     ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry, Python, and GraphQL unwrapping.
     └── test_write_values.py      # Direct pins of write-value decode internals a GraphQL request cannot name.
 ```

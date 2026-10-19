@@ -24,7 +24,7 @@ the bare class entry, mutation ``BEGIN`` / ``COMMIT``, and the enclosing
 ``ATOMIC_REQUESTS`` interval live in
 ``examples/fakeshop/test_query/test_debug_extension_api.py``.
 
-The suite runs with ``settings.DEBUG`` false, which is now the extension's
+The suite runs with ``settings.DEBUG`` false, which is the extension's
 fail-closed condition, so every case that expects a published payload declares
 the debug posture it exercises: ``override_settings(DEBUG=True)`` where the
 case is about the BARE CLASS entry's own semantics (fresh-per-operation
@@ -57,15 +57,17 @@ import logging
 import threading
 import warnings
 from collections import deque
-from collections.abc import AsyncIterator, Generator, Iterator
+from collections.abc import AsyncIterator, Generator, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from types import SimpleNamespace
-from typing import NoReturn
+from typing import NoReturn, SupportsIndex
 
 import pytest
 import pytest_django
 import strawberry
+from django.conf import settings as django_settings
+from django.core.exceptions import ImproperlyConfigured
 from django.db import connection, connections
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.test.utils import override_settings
@@ -150,7 +152,7 @@ class _BoomQuery:
 
 @pytest.fixture
 def default_wrapper() -> Iterator[BaseDatabaseWrapper]:
-    """The current thread's concrete ``default`` wrapper, flag restored after the test."""
+    """Yield the current thread's concrete ``default`` wrapper, restoring its flag after the test."""
     wrapper = connections["default"]
     original = wrapper.force_debug_cursor
     yield wrapper
@@ -304,6 +306,63 @@ def test_exception_collector_guards_filter_order_and_no_dedup() -> None:
     ]
     # A terminal explicitly raised GraphQLError is retained, not misclassified.
     assert rows[1]["excType"] == "<class 'graphql.error.graphql_error.GraphQLError'>"
+
+
+def test_collect_exceptions_serializes_only_the_first_25_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exception collection filters and caps BEFORE formatting tracebacks.
+
+    ``traceback.format_exception`` is the single most expensive call in the module, so the
+    collector walks ``result.errors`` once, keeps the first 25 ``original_error`` bearers in
+    order, and serializes only those. A hostile error beyond the cap never runs its
+    ``__str__``, so it cannot discard the admitted rows.
+    """
+    real_serialize = debug_module._serialize_exception
+    for total, expected in ((10, 10), (26, 25), (100, 25)):
+        errors = [
+            GraphQLError(f"outer {index}", original_error=ValueError(f"boom {index}"))
+            for index in range(total)
+        ]
+        calls: list[BaseException] = []
+
+        def _counting_serialize(
+            exception: BaseException,
+            _calls: list[BaseException] = calls,
+        ) -> _DebugExceptionRow:
+            _calls.append(exception)
+            return real_serialize(exception)
+
+        monkeypatch.setattr(debug_module, "_serialize_exception", _counting_serialize)
+        rows = _collect_exceptions(SimpleNamespace(errors=errors))
+
+        assert len(calls) == expected
+        assert [row["message"] for row in rows] == [f"boom {index}" for index in range(expected)]
+
+    class _HostileStrError(Exception):
+        @override
+        def __str__(self) -> str:
+            raise RuntimeError("__str__ refused")
+
+    hostile_errors = [
+        GraphQLError(f"outer {index}", original_error=ValueError(f"boom {index}"))
+        for index in range(99)
+    ]
+    hostile_errors.append(GraphQLError("outer hostile", original_error=_HostileStrError()))
+    hostile_calls: list[BaseException] = []
+
+    def _hostile_counting_serialize(
+        exception: BaseException,
+        _calls: list[BaseException] = hostile_calls,
+    ) -> _DebugExceptionRow:
+        _calls.append(exception)
+        return real_serialize(exception)
+
+    monkeypatch.setattr(debug_module, "_serialize_exception", _hostile_counting_serialize)
+    hostile_rows = _collect_exceptions(SimpleNamespace(errors=hostile_errors))
+
+    assert len(hostile_calls) == 25
+    assert [row["message"] for row in hostile_rows] == [f"boom {index}" for index in range(25)]
 
 
 def test_nested_original_error_chain_reaches_the_terminal_python_exception() -> None:
@@ -484,6 +543,66 @@ def test_query_log_slicing_suffix_clamp_and_rollover() -> None:
     log.append({"sql": "new after rollover", "time": "0.001"})
     assert len(log) == 5  # same length: the new row evicted an old one
     assert _query_log_entries_since(full_snapshot) == []
+
+
+def test_build_payload_serializes_at_most_100_new_log_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SQL drain is bounded at the row cap: at most 100 serializations per build.
+
+    The drain reads the earliest entries via indexed tail access over the clamped window and
+    stops once the cap is reached, so a deep stale log costs no full copy and an over-cap
+    operation pays no serialization beyond the admitted rows.
+    """
+
+    class _PullCountingDeque(deque[dict[str, str]]):
+        """A real deque counting iteration pulls and indexed reads."""
+
+        def __init__(self, iterable: Iterable[dict[str, str]] = ()) -> None:
+            super().__init__(iterable)
+            self.iter_pulls = 0
+            self.indexed_gets = 0
+
+        @override
+        def __iter__(self) -> Iterator[dict[str, str]]:
+            for item in super().__iter__():
+                self.iter_pulls += 1
+                yield item
+
+        @override
+        def __getitem__(self, index: SupportsIndex) -> dict[str, str]:
+            self.indexed_gets += 1
+            return super().__getitem__(index)
+
+    real_serialize = debug_module._serialize_sql_row
+    for total, expected in ((50, 50), (101, 100), (2000, 100)):
+        log = _PullCountingDeque(
+            [{"sql": f"SELECT {index}", "time": "0.001"} for index in range(total)],
+        )
+        wrapper = SimpleNamespace(vendor="sqlite", alias="default", queries_log=log)
+        snapshot = _ConnectionSnapshot(
+            database_connection=_as_connection(wrapper),
+            query_log_start=0,
+        )
+        calls: list[str] = []
+
+        def _counting_serialize(
+            database_connection: BaseDatabaseWrapper,
+            entry: dict[str, str],
+            _calls: list[str] = calls,
+        ) -> _DebugSQLRow:
+            _calls.append(entry["sql"])
+            return real_serialize(database_connection, entry)
+
+        monkeypatch.setattr(debug_module, "_serialize_sql_row", _counting_serialize)
+        payload = _build_payload([snapshot], SimpleNamespace(errors=None))
+
+        assert len(calls) == expected
+        assert [row["sql"] for row in payload["sql"]] == [
+            f"SELECT {index}" for index in range(expected)
+        ]
+        assert log.iter_pulls <= 100
+        assert log.indexed_gets <= 100
 
 
 # ---------------------------------------------------------------------------
@@ -1249,8 +1368,13 @@ def test_a_refused_acknowledgement_never_becomes_an_armed_extension() -> None:
         # DjangoDebugExtension types the parameter as bool
         extensions=[lambda: DjangoDebugExtension(allow_unsafe_production="false")],  # pyright: ignore[reportArgumentType]
     )
-    with pytest.raises(ConfigurationError, match="allow_unsafe_production"):
+    with pytest.raises(ConfigurationError) as excinfo:
         schema.execute_sync("{ ok }")
+    assert str(excinfo.value) == (
+        "DjangoDebugExtension(allow_unsafe_production=...) must be a bool; got str 'false'. "
+        "A truthy non-bool would arm the production disclosure, so it is refused rather "
+        "than interpreted."
+    )
 
 
 @override_settings(DEBUG=False)
@@ -1339,7 +1463,7 @@ def test_acknowledged_factory_restores_the_cursor_bracket_and_logs_no_warning(
 
 
 def _sql_row(sql: str) -> _DebugSQLRow:
-    """A wire-shaped SQL row whose ONLY string cost is ``sql`` (empty vendor/alias)."""
+    """Build a wire-shaped SQL row whose ONLY string cost is ``sql`` (empty vendor/alias)."""
     return {
         "vendor": "",
         "alias": "",
@@ -1351,7 +1475,7 @@ def _sql_row(sql: str) -> _DebugSQLRow:
 
 
 def _exception_row(message: str, stack: str = "") -> _DebugExceptionRow:
-    """A wire-shaped exception row whose string cost is ``message`` plus ``stack``."""
+    """Build a wire-shaped exception row whose string cost is ``message`` plus ``stack``."""
     return {"excType": "", "message": message, "stack": stack}
 
 
@@ -1598,6 +1722,48 @@ def test_deleted_debug_setting_is_an_inert_refusal(
     assert "allow_unsafe_production" in warnings[0].getMessage()
 
 
+def test_unconfigured_settings_is_an_inert_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An UNCONFIGURED settings proxy gets the inert refusal, not a crashed request.
+
+    Replacing the wrapped holder with one raising ``ImproperlyConfigured`` simulates a schema
+    answering outside a configured Django process: the gate must survive the second documented
+    settings failure the way it survives a deleted ``DEBUG``, leaving the operation's data
+    intact instead of coercing the escape into a synthetic error.
+    """
+
+    class _UnconfiguredSettings:
+        """A wrapped-settings stand-in raising ``ImproperlyConfigured`` on every read."""
+
+        def __getattr__(self, name: str) -> object:
+            raise ImproperlyConfigured(
+                f"Requested setting {name}, but settings are not configured.",
+            )
+
+    if "DEBUG" in django_settings.__dict__:
+        monkeypatch.delitem(django_settings.__dict__, "DEBUG")
+    monkeypatch.setattr(django_settings, "_wrapped", _UnconfiguredSettings())
+    schema = strawberry.Schema(query=_OkQuery, extensions=[DjangoDebugExtension])
+
+    with caplog.at_level(logging.WARNING, logger="django_strawberry_framework"):
+        result = schema.execute_sync("{ ok }")
+
+    # The operation itself is untouched and the payload is withheld.
+    assert result.errors is None
+    assert result.data == {"ok": "ok"}
+    assert "debug" not in (result.extensions or {})
+    assert debug_module._coordinator._active == {}
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == "django_strawberry_framework"
+    ]
+    assert len(warnings) == 1
+    assert "allow_unsafe_production" in warnings[0].getMessage()
+
+
 @pytest.mark.parametrize(
     "time",
     [
@@ -1643,8 +1809,8 @@ def test_a_nan_duration_costs_only_its_own_row_and_the_rest_keep_their_order(
     Three queries, the NaN in the MIDDLE, because that is the position the
     degrade's promise is actually about. A refusal raised out of a generator
     expression is caught outside the generator, so the rows logged AFTER the bad
-    one used to be abandoned with it and a single hostile duration silently
-    truncated the diagnostic from that point on. The row after it surviving, in
+    one would be abandoned with it and a single hostile duration would silently
+    truncate the diagnostic from that point on. The row after it surviving, in
     log order, is what says the guard is per-row.
     """
 

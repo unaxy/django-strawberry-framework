@@ -25,7 +25,7 @@ from typing import NewType
 
 import pytest
 import strawberry
-from apps.library.models import LendingDesk, Patron, PatronProfile, Venue
+from apps.library.models import Edition, LendingDesk, Patron, PatronProfile, Venue
 from apps.products.models import Category, Item
 from django.core.management import CommandError, call_command
 from django.db import models
@@ -44,6 +44,7 @@ from django_strawberry_framework.management.commands.inspect_django_type import 
     _sdl_type_name,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.types.base import _is_suppressed_relay_pk
 from tests._idioms import stub_module
 from tests.optimizer import _link_models
 
@@ -328,9 +329,10 @@ def _connection_row(text: str, field_name: str) -> str:
 def test_inspect_direct_relay_node_inheritance_suppresses_pk_row() -> None:
     """Direct ``class Foo(DjangoType, relay.Node)`` reports GlobalID! for the pk.
 
-    The inspect command must consume ``types/base.py::_is_relay_shaped`` (both
-    the ``Meta.interfaces`` arm covered by fakeshop ``BookType`` and this
-    direct-inheritance arm), not a Meta-only membership check. A naive
+    The inspect command must flow through the shared suppression verdict in
+    ``types/base.py`` (via ``_is_suppressed_relay_pk``) for both the
+    ``Meta.interfaces`` arm covered by fakeshop ``BookType`` and this
+    direct-inheritance arm, not a Meta-only membership check. A naive
     ``relay.Node in definition.interfaces`` would miss this spelling and fall
     through to a scalar / relation row for the pk.
     """
@@ -439,6 +441,150 @@ def test_inspect_mti_parent_link_pk_on_relay_type_reports_relation_row() -> None
     assert "relation: forward FK" in ptr_row
     assert "GlobalID!" not in ptr_row
     assert "relay.Node id" not in ptr_row
+
+
+def _mirror_check(type_cls: type[DjangoType], field_name: str, *, expected: bool) -> None:
+    """Assert the predictor matches the build-time record for one field.
+
+    The oracle compares the owner's verdict on the definition unpack against
+    the merged ``origin.__annotations__`` record (present vs absent) - so a
+    divergent edit at either call site fails while a behavior-preserving
+    hand copy still passes. A consumer-authored pk reads False/present: the
+    performer skips synthesis for it yet keeps the consumer annotation, so
+    the predictor must agree the field is not suppressed.
+    """
+    definition = type_cls.__django_strawberry_definition__
+    field = next(f for f in definition.selected_fields if f.name == field_name)
+    predicted = _is_suppressed_relay_pk(
+        definition.origin,
+        definition.interfaces,
+        definition.model,
+        field,
+        definition.consumer_authored_fields,
+    )
+    built_absent = field.name not in definition.origin.__annotations__
+    assert predicted is expected, f"{type_cls.__name__}.{field_name}: predictor {predicted}"
+    assert built_absent is expected, f"{type_cls.__name__}.{field_name}: built {built_absent}"
+
+
+def test_inspect_suppressed_pk_mirror_matches_synthesis() -> None:
+    """Predictor agrees with the build-time record on the covered population.
+
+    Mirror-consistency gate for Family ``relay-pk-suppression-read-mirror``:
+    ``_is_suppressed_relay_pk`` must equal the build-time fact (pk
+    name absent from ``origin.__annotations__``) for every selected field.
+    Population: Relay scalar pk (True/absent, both the default-``id`` and
+    the non-``id`` ``Edition.isbn_13`` spellings), non-Relay scalar pk
+    (False/present control), direct ``relay.Node`` inheritance
+    (True/absent), Relay + non-Relay relation pks
+    (``PatronProfile.patron``, False/present), and a consumer-authored
+    ``Edition.isbn_13`` override on a Relay-shaped type (False/present -
+    the performer keeps the consumer annotation, so the predictor must not
+    claim the interface row).
+    """
+
+    class MirrorRelayCategory(DjangoType):
+        class Meta:
+            model = Category
+            primary = True
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    class MirrorPlainCategory(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    finalize_django_types()
+    _mirror_check(MirrorRelayCategory, "id", expected=True)
+    _mirror_check(MirrorPlainCategory, "id", expected=False)
+    registry.clear()
+
+    class MirrorDirectCategory(DjangoType, relay.Node):
+        class Meta:
+            model = Category
+            primary = True
+            fields = ("id", "name")
+
+    class MirrorRelayCode(DjangoType):
+        class Meta:
+            model = Edition
+            primary = True
+            fields = ("isbn_13", "isbn_10")
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+    _mirror_check(MirrorDirectCategory, "id", expected=True)
+    _mirror_check(MirrorRelayCode, "isbn_13", expected=True)
+    registry.clear()
+
+    class MirrorConsumerRelayCode(DjangoType):
+        isbn_13: str
+
+        class Meta:
+            model = Edition
+            primary = True
+            fields = ("isbn_13", "isbn_10")
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+    _mirror_check(MirrorConsumerRelayCode, "isbn_13", expected=False)
+    registry.clear()
+
+    class MirrorRelTargetType(DjangoType):
+        class Meta:
+            model = Patron
+            primary = True
+            fields = ("id", "name")
+
+    assert registry.get(Patron) is MirrorRelTargetType
+
+    class MirrorRelayProfile(DjangoType):
+        class Meta:
+            model = PatronProfile
+            primary = True
+            fields = ("patron", "postal_code")
+            interfaces = (relay.Node,)
+
+    class MirrorPlainProfile(DjangoType):
+        class Meta:
+            model = PatronProfile
+            fields = ("patron", "postal_code")
+
+    finalize_django_types()
+    _mirror_check(MirrorRelayProfile, "patron", expected=False)
+    _mirror_check(MirrorPlainProfile, "patron", expected=False)
+
+
+def test_inspect_consumer_authored_pk_on_relay_type_reports_consumer_row() -> None:
+    """A consumer pk override on a Relay-shaped type renders its consumer row.
+
+    The performer skips auto-synthesis for any name in
+    ``consumer_authored_fields`` before the Relay-pk suppression check, so a
+    consumer ``isbn_13: str`` override keeps its annotation and the schema
+    exposes the consumer's type. The table must mirror that: the consumer
+    converter row, never the interface's GlobalID row.
+    """
+
+    class InspConsumerPkType(DjangoType):
+        isbn_13: str
+
+        class Meta:
+            model = Edition
+            fields = ("isbn_13", "isbn_10")
+            interfaces = (relay.Node,)
+
+    assert registry.get(Edition) is InspConsumerPkType
+
+    finalize_django_types()
+    out = StringIO()
+    call_command("inspect_django_type", "InspConsumerPkType", stdout=out)
+    text = out.getvalue()
+
+    pk_row = _connection_row(text, "isbn_13")
+    assert "GlobalID!" not in pk_row
+    assert "relay.Node id" not in pk_row
+    assert "consumer annotation (scalar)" in pk_row
 
 
 def test_inspect_uses_sdl_names_for_renamed_relation_and_consumer_enum() -> None:
@@ -569,3 +715,15 @@ def test_scalar_name_falls_back_to_dunder_name_for_definitionless_type() -> None
         pass
 
     assert _scalar_name(UnmappedCustomScalar) == "UnmappedCustomScalar"
+
+
+def test_scalar_name_reads_a_non_class_leafs_declared_name_or_its_text() -> None:
+    """A non-class leaf reports its stored ``__name__``, else its own text."""
+
+    class _Nameless:
+        @override
+        def __str__(self) -> str:
+            return "nameless-leaf"
+
+    assert _scalar_name(NewType("OpaqueId", str)) == "OpaqueId"
+    assert _scalar_name(_Nameless()) == "nameless-leaf"

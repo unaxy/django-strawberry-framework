@@ -45,11 +45,12 @@ from django.db import models
 from strawberry import relay
 from strawberry.utils.str_converters import to_camel_case
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_arg_repr
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar, scalar_for_field
 from django_strawberry_framework.types.relay import implements_relay_node
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.inputs import (
     FILE,
     RELATION_MULTI,
@@ -62,7 +63,6 @@ from django_strawberry_framework.utils.inputs import (
     name_set_input_type_name,
     normalize_field_name_sequence,
     optional_input_field,
-    pascalize_token,
     resolve_effective_fields,
 )
 from django_strawberry_framework.utils.relations import (
@@ -113,6 +113,19 @@ CREATE: str = "create"
 PARTIAL: str = "partial"
 
 
+def _operation_kind_display_word(operation_kind: str) -> str:
+    """Return the human-facing word for an input generator kind.
+
+    ``CREATE`` reads ``"create"``; any other kind (today only ``PARTIAL``)
+    reads ``"update"``. Single-sites the mapping both configuration-error
+    subjects use (the collision subject in
+    ``_reject_generated_input_collisions`` and the empty-input message in
+    ``build_mutation_input``), so a new generator kind updates one body
+    instead of two message sites.
+    """
+    return "create" if operation_kind == CREATE else "update"
+
+
 def _frozenset_of_attr_names(value: Iterable[str] | None, *, parameter: str) -> frozenset[str]:
     """Freeze ``value`` into a python-attr-name set, rejecting bare ``str`` / ``bytes``.
 
@@ -127,10 +140,10 @@ def _frozenset_of_attr_names(value: Iterable[str] | None, *, parameter: str) -> 
     mirroring ``utils/inputs.py::normalize_field_name_sequence``'s bare-string
     rejection for the ``fields`` / ``exclude`` sequences.
     """
-    if isinstance(value, (str, bytes)):
+    if truth.is_instance(value, str) or truth.is_instance(value, bytes):
         raise ConfigurationError(
             f"DjangoMutation input {parameter} must be a collection of python attribute "
-            f"names, not a bare string: {_safe_arg_repr(value)}. A bare string would "
+            f"names, not a bare string: {truth.render(value)}. A bare string would "
             "iterate as characters, silently matching no input attribute.",
         )
     return frozenset(value or ())
@@ -389,7 +402,7 @@ def editable_input_fields(
         by_name,
         fields=fields,
         exclude=exclude,
-        subject=f"DjangoMutation for {model.__name__}",
+        subject=f"DjangoMutation for {truth.name(model)}",
         seq_flavor="DjangoMutation",
         unknown_noun="non-editable or unknown field(s)",
         row_identity=row_identity,
@@ -434,7 +447,7 @@ def _carrier_backed_link_error(
     """
     carriers = ", ".join(link.carrier_attnames)
     targets = ", ".join(link.target_attnames)
-    related = link.targets[0].model.__name__
+    related = truth.name(link.targets[0].model)
     writable = [carrier.name for carrier in link.carriers if carrier.name in input_names]
     unwritable = [carrier.name for carrier in link.carriers if carrier.name not in input_names]
     if key == "exclude":
@@ -451,8 +464,8 @@ def _carrier_backed_link_error(
                 f" Its other carrier field(s) ({', '.join(unwritable)}) are not mutation inputs."
             )
     return ConfigurationError(
-        f"DjangoMutation for {model.__name__} declares `{key}` naming "
-        f"{model.__name__}.{name}, a ForeignObject that targets {related} ({targets}) "
+        f"DjangoMutation for {truth.name(model)} declares `{key}` naming "
+        f"{truth.name(model)}.{name}, a ForeignObject that targets {related} ({targets}) "
         f"through the carrier column(s) ({carriers}). It has no column of its own and "
         f"cannot be generated as a mutation input. {remedy}",
     )
@@ -576,6 +589,22 @@ def annotate_queryset_relation(
     return python_attr, annotation, related_model
 
 
+def relation_input_python_attr(field: ModelField) -> str:
+    """Return the generated input attr for a relation field (the 036 naming scheme).
+
+    Forward FK / OneToOne -> ``<field.name>_id``; M2M -> the plain field name.
+    Single-sourced so the generator (``relation_input_annotation``) and the
+    bind-time reverse index (``_relation_field_index``) spell the scheme once: the
+    class-creation validator (``mutations/sets.py::_expected_input_attr_names``)
+    and the relation-override lock already compose the generator by name, and the
+    index is the reverse half of the same grammar. A scheme change moves this one
+    body; both halves follow.
+    """
+    if getattr(field, "many_to_many", False):
+        return field.name
+    return f"{field.name}_id"
+
+
 def relation_input_annotation(
     field: ConcreteField,
     *,
@@ -605,7 +634,7 @@ def relation_input_annotation(
         related_primary_type,
         many=many,
     )
-    python_attr = field.name if many else f"{field.name}_id"
+    python_attr = relation_input_python_attr(field)
     graphql_name = graphql_camel_name(python_attr)
     return python_attr, graphql_name, annotation
 
@@ -637,7 +666,8 @@ def _relation_field_index(
     the same scheme the input was built from. The request-time decode does not
     rebuild this index; it rides the stashed specs + the Django-field map.
 
-    A forward FK / OneToOne is keyed by its ``<field>_id`` input attr. The guard
+    A forward FK / OneToOne is keyed by its ``<field>_id`` input attr (via
+    ``relation_input_python_attr``, the same body the generator composes). The guard
     requires a **concrete DB column** (``column is not None``) and a non-``None``
     ``related_model`` so a *virtual* relation - a ``GenericForeignKey`` reports
     ``is_relation=True`` with ``column=None`` and ``related_model=None`` - is
@@ -650,9 +680,9 @@ def _relation_field_index(
     for field in model._meta.get_fields():
         if getattr(field, "many_to_many", False):
             if is_forward_many_to_many(field):
-                m2m_by_name[field.name] = field
+                m2m_by_name[relation_input_python_attr(field)] = field
         elif is_forward_concrete_relation(field):
-            fk_by_attr[f"{field.name}_id"] = field
+            fk_by_attr[relation_input_python_attr(field)] = field
     return fk_by_attr, m2m_by_name
 
 
@@ -698,7 +728,7 @@ def mutation_input_field_specs(
             if django_field is None or getattr(django_field, "is_relation", False):
                 raise ConfigurationError(
                     f"DjangoMutation input field {python_name!r} does not map to a "
-                    f"concrete column of {model.__name__}.",
+                    f"concrete column of {truth.name(model)}.",
                 )
         # Past the guard above, a non-indexed attr resolved to a concrete non-relation
         # column, i.e. a ``Field`` (every reverse ``*Rel`` is a relation).
@@ -794,14 +824,6 @@ def model_column_input_annotation(
     )
 
 
-# ``_pascalize_token`` was promoted to ``utils/inputs.py::pascalize_token``
-# (spec-039): at three consumers (model + form + serializer) the injective
-# single-leading-capital token encoder graduated to the shared input-name machinery,
-# kept visibly distinct from ``pascal_case``. This alias preserves the historical
-# ``mutations/inputs.py::_pascalize_token`` import path.
-_pascalize_token = pascalize_token
-
-
 def mutation_input_type_name(
     model: type[models.Model],
     operation_kind: str,
@@ -825,7 +847,7 @@ def mutation_input_type_name(
     name and the create-vs-partial decision (``operation_kind != CREATE``).
     """
     return name_set_input_type_name(
-        model.__name__,
+        truth.name(model),
         is_partial=operation_kind != CREATE,
         effective_field_names=effective_field_names,
         full_field_names=full_field_names,
@@ -932,10 +954,10 @@ def _reject_generated_input_collisions(
     check_graphql_names: bool,
 ) -> None:
     """Fail loud when distinct model fields collapse to one generated input field."""
-    kind = "create" if operation_kind == CREATE else "update"
+    kind = _operation_kind_display_word(operation_kind)
     for message in iter_input_field_collisions(
         names,
-        subject=f"DjangoMutation {kind} input for {model.__name__}",
+        subject=f"DjangoMutation {kind} input for {truth.name(model)}",
         field_noun="model fields",
         rename_clause="Rename one of the model fields,",
         name_of=lambda spec: spec.model_field_name,
@@ -1042,9 +1064,9 @@ def build_mutation_input(
         # ``build_strawberry_input_class``'s ``empty_message`` seam like the
         # set-family factory's did: the construction site sees only the generated
         # triples and cannot know an override half is coming.
-        kind = "create" if operation_kind == CREATE else "update"
+        kind = _operation_kind_display_word(operation_kind)
         raise ConfigurationError(
-            f"DjangoMutation {kind} input for {model.__name__} has no fields; "
+            f"DjangoMutation {kind} input for {truth.name(model)} has no fields; "
             "Meta.fields / Meta.exclude narrowed the editable column set to empty "
             "(or the model declares no editable columns). A mutation input must "
             "define at least one field.",
@@ -1129,11 +1151,15 @@ def build_payload_type(
         }
     else:
         slot = object_slot if object_slot is not None else payload_object_slot(object_type)
-        # basedpyright: trust boundary: ``object_slot`` is a public parameter; the str check
-        # rejects a caller that breaks its ``str | None`` contract before ``isidentifier`` runs
-        if not isinstance(slot, str) or not slot.isidentifier() or slot in _RESERVED_PAYLOAD_ATTRS:  # pyright: ignore[reportUnnecessaryIsInstance]
+        # ``object_slot`` is a public parameter typed ``str | None``; the str check rejects a
+        # caller that breaks that contract before ``isidentifier`` runs
+        if (
+            not truth.is_instance(slot, str)
+            or not truth.text(slot).isidentifier()
+            or truth.text(slot) in _RESERVED_PAYLOAD_ATTRS
+        ):
             raise ConfigurationError(
-                f"object_slot {_safe_arg_repr(slot)} is not a usable payload object-field "
+                f"object_slot {truth.render(slot)} is not a usable payload object-field "
                 "name: it must be a valid Python identifier outside the reserved payload "
                 f"attributes {sorted(_RESERVED_PAYLOAD_ATTRS)!r}. Omit object_slot, or "
                 "pass payload_object_slot(object_type).",

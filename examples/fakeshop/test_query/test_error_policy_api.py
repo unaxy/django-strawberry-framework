@@ -376,8 +376,8 @@ def _failing_hook(
         _HOOK_FAILURE["build"] = _hook_exception
 
 
-#: Every hook and half a consumer extension can fail at where the failure escapes
-#: into upstream's own error conversion rather than into a located field error.
+#: The hook halves the witness can fail at, each escaping into upstream's own
+#: error conversion rather than into a located field error.
 HOOK_HALVES = (
     "validate-setup",
     "validate-teardown",
@@ -601,6 +601,13 @@ urlpatterns = [
         "ep-factory/",
         _probe_view(extensions=[_error_policy_factory, _FactoryHookWitness]),
     ),
+    path(
+        "ep-factory-limits/",
+        _probe_view(
+            extensions=[_error_policy_factory],
+            resource_policy={"max_document_tokens": _MAX_TOKENS},
+        ),
+    ),
     path(HOOK_MOUNTS["sync"].lstrip("/"), _probe_view(extensions=[_HookFailure])),
     path(HOOK_MOUNTS["async"].lstrip("/"), _probe_async_view(extensions=[_HookFailure])),
     path(
@@ -645,6 +652,7 @@ def _masked_error(
     assert error["message"] == DEFAULT_ERROR_POLICY.message, error
     correlation_id = json_str(error, "extensions", key)
     assert _CORRELATION_ID.fullmatch(correlation_id), correlation_id
+    assert set(json_object(error, "extensions")) == {key}, error
     return error
 
 
@@ -1037,10 +1045,8 @@ def test_the_sync_and_async_transports_produce_the_same_masked_entry() -> None:
 def test_debug_true_restores_the_original_message_end_to_end() -> None:
     """Under ``settings.DEBUG`` the policy is a pass-through, read at OPERATION time.
 
-    The local traceback is the reason the setting exists, and the gate is read per
-    operation rather than captured at construction - which this row proves
-    incidentally, since the schema is built while the override is already active
-    but the sibling rows above built theirs under the ambient ``DEBUG=False``.
+    The local traceback is the reason the setting exists, and the gate is read
+    per operation rather than captured at construction.
     """
     with _override_settings(**_DEBUG_PASS_THROUGH):
         _, payload = _post("/ep/", "{ boom }")
@@ -1115,7 +1121,7 @@ def test_a_written_exported_default_cannot_unmask_a_later_schema() -> None:
 
 @pytest.mark.django_db
 def test_the_explicit_opt_out_returns_the_original_message_under_debug_false() -> None:
-    """``error_policy={"enabled": False}`` is the recorded decision to own your own masking.
+    """``error_policy={"enabled": False}`` is a consumer's recorded decision to own its masking.
 
     Distinct from the ``DEBUG`` gate: this deployment is in production and has
     said so explicitly, which is the point - safety is not opt-in, but opting OUT
@@ -1280,10 +1286,11 @@ def test_an_exception_from_a_consumer_hook_is_masked_like_a_resolver_exception(
     A consumer extension raising a plain exception is exactly the resolver case
     one stack frame further out: the message is written by whatever raised, and
     the client is not the reader it was written for. The four halves are their
-    own rows because each escapes from a DIFFERENT place - the validation stage,
-    the execution stage, and the operation teardown the masking authority itself
-    unwinds behind - and a masked surface with a hole shaped like any one of them
-    looks identical to a correct one on every resolver row in this file.
+    own rows because each escapes from a different half - both halves of the
+    validation stage, execution setup, and the operation teardown the masking
+    authority itself unwinds behind - and a masked surface with a hole shaped
+    like any one of them looks identical to a correct one on every resolver row
+    in this file.
     """
     with _failing_hook(where):
         body, payload = _hook_request(color)
@@ -1384,4 +1391,91 @@ def test_a_hook_raising_a_graphql_error_keeps_its_own_message(where: str, color:
     error = json_object(payload, "errors", 0)
     assert error["message"] == _DELIBERATE_HOOK_MESSAGE, error
     assert json_at(error, "extensions", "code") == "CONSUMER_HOOK_REJECTION", error
+    assert "correlationId" not in json_object(error, "extensions"), error
+
+
+def _login_with_add_item(username: str = "staff_1") -> Client:
+    """Log in as ``username`` holding the products ``add_item`` model perm."""
+    user = User.objects.get(username=username)
+    user.user_permissions.add(
+        Permission.objects.get(codename="add_item", content_type__app_label="products"),
+    )
+    client = Client()
+    client.force_login(User.objects.get(pk=read_attr(user, "pk")))
+    return client
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("field", "input_name"),
+    [
+        ("createItem", "ItemInput"),
+        ("createItemViaForm", "ItemModelFormInput"),
+        ("createItemViaSerializer", "ItemSerializerInput"),
+    ],
+    ids=["model", "form", "serializer"],
+)
+def test_a_malformed_relation_globalid_is_masked_with_a_correlation_id(
+    field: str,
+    input_name: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A malformed relation ``GlobalID`` is an unexpected argument-conversion failure.
+
+    Relation inputs are typed ``GlobalID``, so a malformed value fails inside
+    Strawberry's argument conversion before any resolver runs, raising a plain
+    ``ValueError`` the structural classifier masks: the client reads the policy
+    message plus a correlation id (no code), the log carries the original under
+    the same id, and no row is written. All three write flavors share the one
+    input scalar, so they answer the same masked shape apart from ``path``
+    (and the fresh correlation id).
+    """
+    create_users(1)
+    seed_data(1)
+    caplog.set_level(logging.ERROR, logger=_PACKAGE_LOGGER)
+    client = _login_with_add_item()
+    marker = f"Malformed-{field}"
+
+    _, payload = _post(
+        "/graphql/",
+        f"mutation($d: {input_name}!) {{ {field}(data: $d) {{ "
+        "node { __typename } errors { field } } }",
+        variables={"d": {"name": marker, "categoryId": "not-a-valid-global-id"}},
+        client=client,
+    )
+    assert json_at(payload, "data") is None, payload
+    error = _masked_error(payload)
+    assert error["path"] == [field], error
+    assert "code" not in json_object(error, "extensions"), error
+    correlation_id = json_str(error, "extensions", "correlationId")
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == _PACKAGE_LOGGER and record.levelno == logging.ERROR
+    ]
+    assert len(records) == 1, caplog.records
+    assert correlation_id in records[0].getMessage()
+    assert records[0].exc_info is not None
+    assert isinstance(records[0].exc_info[1], ValueError)
+    assert not product_models.Item.objects.filter(name=marker).exists()
+
+
+@pytest.mark.django_db
+def test_a_refused_schema_still_bounds_an_over_budget_document_live() -> None:
+    """A refused schema answers an over-budget document with the resource code.
+
+    The refusal chain keeps the package's own resource extension, so the
+    pre-parse token scan still runs: a document past the ceiling is refused
+    with ``RESOURCE_LIMIT_EXCEEDED`` (bound detail included, no correlation
+    id) rather than with the configuration code a fitting document would get.
+    """
+    _, payload = _post("/ep-factory-limits/", "{ fine deliberate boomOther }")
+    assert json_at(payload, "data") is None, payload
+    assert len(json_list(payload, "errors")) == 1, payload
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE, error
+    assert str(_MAX_TOKENS) in json_str(error, "message"), error
+    assert json_at(error, "extensions", "bound") == "max_document_tokens", error
+    assert json_at(error, "extensions", "limit") == _MAX_TOKENS, error
     assert "correlationId" not in json_object(error, "extensions"), error

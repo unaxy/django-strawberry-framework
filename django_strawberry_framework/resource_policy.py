@@ -73,7 +73,8 @@ from graphql import GraphQLError
 from typing_extensions import override
 
 from .conf import resource_policy_setting
-from .exceptions import ConfigurationError, DjangoStrawberryFrameworkError, describe_value
+from .exceptions import ConfigurationError, DjangoStrawberryFrameworkError
+from .utils import truth
 from .utils._narrowing import read_attr
 from .utils.context import get_context_value, stash_on_context
 from .utils.errors import coded_error_extensions
@@ -167,14 +168,14 @@ class ResourceLimitExceeded(GraphQLError, DjangoStrawberryFrameworkError):  # py
     def __reduce__(self) -> tuple[object, ...]:
         """Preserve constructor arguments and instance state across pickle roundtrips."""
         return (
-            self.__class__,
+            type(self),
             (
                 self.bound,
                 self.limit,
                 self.charged,
                 self.detail,
             ),
-            self.__dict__,
+            self.__dict__,  # truth: ok the exception's own pickle state, read by its own __reduce__
         )
 
 
@@ -259,7 +260,7 @@ def _require_positive_int(value: object, label: str) -> None:
     """
     if type(value) is not int or value < 1:
         raise ConfigurationError(
-            f"{label} must be a positive integer; got {describe_value(value)}.",
+            f"{label} must be a positive integer; got {truth.describe(value)}.",
         )
     if value > MAX_RESOURCE_BOUND:
         raise ConfigurationError(
@@ -443,7 +444,7 @@ class ResourcePolicy:
                     continue
                 raise ConfigurationError(
                     "ResourcePolicy.execution_deadline_seconds must be None or a "
-                    f"positive number of seconds; got {describe_value(value)}.",
+                    f"positive number of seconds; got {truth.describe(value)}.",
                 )
             _require_positive_int(value, f"ResourcePolicy.{field.name}")
 
@@ -508,7 +509,6 @@ DEFAULT_RESOURCE_POLICY = ResourcePolicy()
 _PACKAGE_RESOURCE_POLICY = canonical_policy(
     DEFAULT_RESOURCE_POLICY,
     policy_cls=ResourcePolicy,
-    display_name="resource policy",
 )
 
 
@@ -704,7 +704,7 @@ def _operation_policy(policy: ResourcePolicy) -> ResourcePolicy:
     :func:`begin_resource_budget` retained a reference to, so the budget cannot
     be widened afterwards by writing the object that was passed in.
     """
-    return canonical_policy(policy, policy_cls=ResourcePolicy, display_name="resource policy")
+    return canonical_policy(policy, policy_cls=ResourcePolicy)
 
 
 def begin_resource_budget(context: object, policy: ResourcePolicy) -> _BudgetScope:
@@ -892,6 +892,8 @@ def _deadline_expired(deadline: object) -> bool | None:
     anything non-numeric is not a deadline at all and leaves the request
     running.
     """
+    if deadline is None:
+        return None
     if _is_builtin_number(deadline):
         try:
             return not math.isfinite(deadline) or time.monotonic() >= deadline
@@ -899,7 +901,9 @@ def _deadline_expired(deadline: object) -> bool | None:
             # ``isfinite`` overflows converting an integer too large for a
             # double, which is therefore an instant no comparison can place.
             return True
-    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+    if truth.is_instance(deadline, bool) or not (
+        truth.is_instance(deadline, int) or truth.is_instance(deadline, float)
+    ):
         return None
     return True
 
@@ -968,8 +972,9 @@ def check_deadline(info: object) -> None:
 
     The rejection reports the CONFIGURED budget, never the clock: ``limit`` is
     the policy's own ``execution_deadline_seconds`` and ``charged`` is one second
-    past it (the "exceeded an unmeasurable-in-integers budget" spelling this
-    module already uses for an upload whose size cannot be read). The monotonic
+    past it (the "exceeded an unmeasurable-in-integers budget" spelling the
+    admission walk already uses for an upload whose size cannot be read). The
+    monotonic
     deadline and the overrun are process-internal timings a client can neither
     act on nor verify, and a wire field named ``limit`` carrying a monotonic
     timestamp is worse than useless - it reads as a bound the deployment never
@@ -1259,29 +1264,20 @@ def _attach_cleanup_note(primary_error: BaseException, note: str) -> None:
     list, same traceback rendering) and is the only form that carries the
     diagnostic across the whole supported range.
 
-    The note is an attachment, never a failure of its own: a hostile note
-    surface on the primary error (an unreadable or unassignable ``__notes__``)
-    must not mask the error the caller is already propagating.
+    The existing notes are read from the error's own namespace; a value there
+    that is not a list (the note protocol's type) is replaced by a fresh list,
+    as ``add_note`` would refuse to extend it.
+
+    The note is an attachment, never a failure of its own: an unassignable
+    ``__notes__`` on the primary error (a read-only descriptor) must not mask
+    the error the caller is already propagating.
     """
+    notes = truth.static_attr(primary_error, "__notes__", None)
+    existing: list[object] = notes if truth.is_exact(notes, list) else []
     with contextlib.suppress(Exception):
-        notes = [*getattr(primary_error, "__notes__", ())]
-        notes.append(note)
         # ``setattr``, not an attribute write: 3.10's typeshed declares no ``__notes__``
         # (the attribute is 3.11+ API), and the floor check reads 3.10's.
-        setattr(primary_error, "__notes__", notes)  # noqa: B010
-
-
-def _is_cleanup_diagnostic(error: BaseException) -> bool:
-    """Say whether a cleanup failure may be demoted to a note on the primary error.
-
-    Only an ordinary ``Exception`` may. ``CancelledError``, ``KeyboardInterrupt``,
-    ``SystemExit`` and ``GeneratorExit`` are control signals addressed to the
-    task, not diagnostics about a source: demoting one would let a cancelled
-    request finish as an ordinary field error, reporting a completed operation
-    to a client whose task was torn down mid-cleanup. They keep precedence over
-    the primary error, which stays reachable as their ``__context__``.
-    """
-    return isinstance(error, Exception)
+        setattr(primary_error, "__notes__", [*existing, note])  # noqa: B010
 
 
 async def _close_async_iterator(
@@ -1302,8 +1298,12 @@ async def _close_async_iterator(
         close = getattr(iterator, "aclose", None)
         if close is not None:
             await close()
-    except BaseException as close_error:
-        if primary_error is None or not _is_cleanup_diagnostic(close_error):
+    except Exception as close_error:
+        # Only an ordinary failure may be demoted to a note: ``CancelledError``,
+        # ``KeyboardInterrupt``, ``SystemExit`` and ``GeneratorExit`` are control
+        # signals addressed to the task and bypass this arm by inheritance, taking
+        # precedence over the primary error (reachable as their ``__context__``).
+        if primary_error is None:
             raise
         _attach_cleanup_note(
             primary_error,
@@ -1336,9 +1336,7 @@ async def _cleanup_rejected_async_iterable(
     """
     try:
         iterator = aiter(iterable)
-    except BaseException as aiter_err:
-        if not _is_cleanup_diagnostic(aiter_err):
-            raise
+    except Exception as aiter_err:  # noqa: BLE001 - consumer code may raise anything
         _attach_cleanup_note(
             primary_error,
             f"{caller} iterator acquisition failed: {aiter_err!r}",
@@ -1562,7 +1560,7 @@ def validate_trusted_flag(declared: object, *, field: str) -> None:
     """
     if type(declared) is not bool:
         raise ConfigurationError(
-            f"{field} must be exactly True or False; got {describe_value(declared)}.",
+            f"{field} must be exactly True or False; got {truth.describe(declared)}.",
         )
 
 

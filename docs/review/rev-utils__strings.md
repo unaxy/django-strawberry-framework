@@ -1,7 +1,7 @@
 # Review: `django_strawberry_framework/utils/strings.py`
 
 Status: verified
-Run: 0.0.15 2026-09-24-1
+Run: 0.0.15 2026-09-28-3
 Path class: hot - the optimizer walker calls `snake_case` once per selection on every plan build (plan-cache miss, every non-cacheable request); every other helper runs at declaration, finalize or behind an upstream memo
 
 ## Implementation (Worker-2)
@@ -263,3 +263,118 @@ repo root and skips silently when paths do not match; rebuild pre-images with `p
 framing (folder item), `tests/optimizer/test_walker.py` provenance (walker item), the walker
 miss-path cost (walker item), `prove_failability.py`'s captured-log miscount, the mixed-case
 fakeshop fixture for `## Decisions`.
+
+### Implement pass 3
+
+Re-dispatch `Reopened` (run 0.0.15 2026-09-28-3). Run-1 implement passes 1-2
+stand (12 findings implemented, all three axes verified); this pass answers the
+three run-3 review passes, which all closed `no-findings`. Address
+`review/utils/strings.py/implement`; item scratch root
+`docs/review/temp-tests/utils__strings/`, mine
+`docs/review/temp-tests/utils__strings/implement/`.
+
+Attribution before editing: the target is dirty vs HEAD by exactly the
+concurrent truthful-reads switch (`991f7dad..5a4f4811`, 5 insertions, 3
+deletions: `from . import truth`, `isinstance` ->
+`truth.is_instance`, `_safe_type_name` -> `truth.kind` in
+`_plain_text`; the exact-`str` fast path byte-identical). `git diff e7942551 --
+<target>` is empty and `git show e7942551:<target>` is cmp-identical to the
+live file, so the concurrent edit predates ITEM_BASELINE and sits in none of
+this item's hunks. Per Baseline and ownership I touch only attributable hunks;
+with zero findings there is nothing to touch, so no stop was needed and no
+`.py`, test, or rendered file was edited. This entry is the pass's only write.
+
+Dispositions (verified by reading each record's run-3 section whole, incl.
+every Handoff, Cross-axis, and run-3 Review-pass-2 part, against the live
+target and neighbours):
+
+- **Performance - nothing to implement.** Run-3 record `Status: no-findings`:
+  High / Medium / Low all `None`. R1 (new: `+178 ns` subclass / `+346 ns`
+  error-branch truth cost) is a rejection on cold-only branches, and the five
+  run-1 rejections stand with triggers unchanged. Independently confirmed: the
+  walker still calls `snake_case` at exactly three sites (411, 769, 1421),
+  `truth.is_instance` is a Python MRO identity walk (structurally slower than
+  C `isinstance`, as R1 states), and the hot exact-`str` path returns before
+  either truth call.
+- **Mechanics - nothing to implement.** Run-3 record `Status: no-findings`:
+  High / Medium / Low all `None`; R1-R6 are rejections, R6's trigger fired
+  onto its plan card elsewhere. M1 verified intact by reading: zero
+  `snake_case(` in `types/` and `management/`, and
+  `types/base.py::DjangoType.__init_subclass__` still builds
+  `{f.name: FieldMeta.from_django_field(f) ...}` (line 634).
+- **Comments - nothing to implement.** Run-3 record `Status: no-findings`:
+  High / Medium / Low all `None`; target prose graded true, own test module
+  true except the two standing F8 texts. F8 stays `deferred` (Low;
+  `tests/utils/test_strings.py` is outside this item's diff, and its live
+  delta is concurrent work inside the item baseline, not this item's touch).
+  The routed leads (stale head claim in `tests/utils/test_inputs.py`, the
+  `utils/__init__.py` two-helper framing, narrative wording in other modules'
+  tests) belong to their owning items, all in this run's scope; none is in
+  this item's edit fence.
+
+Files changed: none. No production, test, or standing-doc file moved; the
+run-1 `## Owned changes` rows stand untouched.
+
+Before / after numbers: none owed. Zero findings means no Proof line asks for
+a number. The run-3 Performance figures (`review-20260928T202314-2c0073`:
+exact-`str` head-vs-live delta 0.2 ns, noise on identical bytecode;
+`review-20260928T202329-201d65`: strings 85 us self, zero child cost) are the
+reviewer's evidence, cited, not re-run: re-running a review measurement is not
+an implement number, and nothing here moves a bench figure.
+
+Permanent tests: none owed. No finding, no gate, no new behavior; the run-3
+records confirm the existing oracles still pin every target branch.
+
+Failability proofs: none owed. No gate relied on; no manifest written.
+
+Formatter result: not run. Zero `.py` paths touched, so `ruff check`,
+`ruff format`, `check_trailing_commas.py`, and `check_citations.py` have no
+input from this pass. This `.md` entry adds no cross-file link, so the link
+scaffold is unaffected. No module first line changed: no TREE.md render owed.
+
+Scratch paths and run ids: inspected (read-only) the reviewers' run-3
+scratch `docs/review/temp-tests/utils__strings/performance/` (inspect/,
+strings.json, probe_plain_text_ab.py, plain_text_ab.json, importtime.json),
+`.../mechanics/` (inspect/, strings.json, probe_truth_switch.py), and
+`.../comments/` (inspect/, strings.json, citations.json, docstring_claims.py).
+Wrote nothing under `docs/review/temp-tests/utils__strings/implement/` (no
+probe owed, directory not created). Workspace runs this pass: none (zero
+`workspace.py run` / `prove` invocations).
+
+Fingerprints (`git hash-object`, all read, none written except the artifact):
+`utils/strings.py` 5a4f481132f8; `utils/truth.py` d5c96bc8d191;
+`tests/utils/test_strings.py` 2a822a3fff; `optimizer/walker.py` d5759ef8533a;
+`types/base.py` dc67f084cbc9; `exceptions.py` 206e9f8d914f6;
+`utils/__init__.py` 1a4c2ec8bfd3; `rev-utils__strings.md` e1c6d8304d05 (before
+this entry); `rev-utils__strings.performance.md` 267d719d98f1;
+`rev-utils__strings.mechanics.md` ff46a6e9fbdd8;
+`rev-utils__strings.comments.md` 134b829f884d6; `review-0_0_15.md`
+b8178cff8b3c; `AGENTS.md` 6475a8cfb64f; `START.md` 983d16a2f3d6;
+`docs/review/REVIEW.md` 47ff82f1d52b; `docs/review/worker-2.md` b44e01dabc84.
+Package paths relative to `django_strawberry_framework/`. Every `.py` hash
+matches the run-3 records' Trace fingerprints.
+
+Proposed owned changes (this pass):
+
+| Path | Item | Axis | Symbols changed |
+|---|---|---|---|
+
+None. No tracked edit or new file landed this pass; the pass-1 and pass-2
+tables stand.
+
+Handoff: Read beyond the records: the live `_plain_text` body against
+`truth.is_instance` / `truth.kind` (MRO-identity walk; `kind` names by the
+real class), the walker's three `snake_case` sites plus the `_forward_names`
+memo shape named in the Performance handoff, the raw-key `field_map` build
+and the zero-`snake_case` `types/` + `management/` census, the item-baseline
+identity proof (`cmp` of `git show e7942551:<target>` vs live). Conclusions
+the dispositions do not state: the concurrent truth switch is behavior-equal
+for every real input on the hot path (byte-identical bytecode before the
+first truth call) and fail-closed for liar inputs (untyped `TypeError` ->
+documented `ConfigurationError`), concurring with all three records; the
+only judgments this pass adds are the attribution above and the
+F8-deferred standing. Open threads, none this item's: the `utils/inputs.py`
+stale-head lead and the `utils/` folder framing lead (both routed, in this
+run's scope); F8 deferred to `## Outcomes` again; sibling items run
+concurrently on the same dirty tree, so the next verifier must re-check the
+item-scoped diff hash before grading.

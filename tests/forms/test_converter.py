@@ -33,7 +33,6 @@ import strawberry
 from django import forms
 from django.db import models
 from strawberry.types.base import StrawberryOptional, get_object_definition
-from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.converter import (
@@ -256,20 +255,14 @@ def test_unknown_custom_field_subclass_raises() -> None:
     class CustomField(forms.Field):
         pass
 
-    with pytest.raises(ConfigurationError, match="Unsupported form field type 'CustomField'"):
-        convert_form_field(CustomField())
-
-
-def test_unknown_field_with_hostile_repr_still_raises_configuration_error() -> None:
-    """Formatting the unsupported-field diagnostic cannot replace its typed error."""
-
-    class HostileField(forms.Field):
-        @override
-        def __repr__(self) -> str:
-            raise KeyboardInterrupt("repr trap")
-
-    with pytest.raises(ConfigurationError, match="unprintable HostileField"):
-        convert_form_field(HostileField())
+    field = CustomField()
+    with pytest.raises(ConfigurationError) as excinfo:
+        convert_form_field(field)
+    assert str(excinfo.value) == (
+        f"Unsupported form field type 'CustomField' on form field {field!r}. "
+        "convert_form_field has no mapping for it and no supported ancestor; register a "
+        "supported base class, or supply a custom input_class field for it."
+    )
 
 
 def test_form_field_required_column_backed_variations() -> None:

@@ -35,6 +35,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER_REVERSED,
     WINDOW_TOTAL_COUNT,
     OptimizationPlan,
+    _consumer_prefetch_lookups,
     _consumer_projection,
     _flatten_select_related,
     _IndexedList,
@@ -481,6 +482,49 @@ class TestFlattenSelectRelated:
         assert _flatten_select_related("invalid") == set()
         assert _flatten_select_related(123) == set()
         assert _flatten_select_related([1, 2]) == set()
+
+
+class TestConsumerPrefetchLookups:
+    """``_consumer_prefetch_lookups`` reads attached lookups leniently.
+
+    A real queryset contributes its ``prefetch_related`` lookups as a list;
+    anything else contributes nothing, so a consumer-controlled
+    ``Prefetch.queryset`` that is not a queryset reconciles to no lookups
+    instead of raising. The queryset arm reads through the shared
+    ``queryset_prefetch_lookups`` owner, which holds the one spelling of
+    the Django-private attribute.
+    """
+
+    def test_attached_lookups_come_back_as_a_list(self) -> None:
+        qs = Item.objects.prefetch_related("entries")
+        assert _consumer_prefetch_lookups(qs) == ["entries"]
+
+    def test_queryset_without_prefetches_gives_an_empty_list(self) -> None:
+        assert _consumer_prefetch_lookups(Item.objects.all()) == []
+
+    @pytest.mark.parametrize(
+        "candidate",
+        [
+            object(),
+            SimpleNamespace(),
+            SimpleNamespace(_prefetch_related_lookups=None),
+            SimpleNamespace(_prefetch_related_lookups=("entries",)),
+        ],
+        ids=[
+            "plain-object",
+            "bare-namespace",
+            "none-valued-attribute",
+            "populated-attribute-unread",
+        ],
+    )
+    def test_non_queryset_inputs_give_an_empty_list(self, candidate: object) -> None:
+        """Only a real queryset's lookups are returned.
+
+        An unrelated object carrying an attribute of the same name is not
+        a queryset, so its attribute stays unread and the input reconciles
+        to no lookups instead of raising.
+        """
+        assert _consumer_prefetch_lookups(candidate) == []
 
 
 class TestDiffPlanForQueryset:

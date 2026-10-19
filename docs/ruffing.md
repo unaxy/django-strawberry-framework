@@ -100,8 +100,8 @@ e42952a5 (items 36-37), fa4182a9 (item 31), ee1a2367 (item 38) and 1cf08608 (ite
   `max-positional-args` 10): no new function may exceed the worst one, and lowering a threshold lists the functions
   above it
 - [x] 37. `# noqa` refactored away (410 to 302 lines): the package logger lives in the leaf module `_logger.py`, so
-  `__init__` needs no `E402`, and `debug_toolbar.py` keeps it only on its three toolbar imports; containment goes
-  through `exceptions.py::_safe_attr` / `_safe_call` / `_safe_predicate`, merged guards and `contextlib.suppress` on
+  `__init__` needs no `E402`, and `debug_toolbar.py` keeps it only on its three toolbar imports; identity reads go
+  through `utils/truth.py` instead of guarded attribute lookup, merged guards and `contextlib.suppress` on
   the two last-resort passes (`BLE001` 148 to 112); positional `id` parameters are `id_` and `DjangoNodeField` binds
   `id_` to the wire `id` through `strawberry.argument(name="id")` (`A002`); `pep8-naming.classmethod-decorators` names
   Django's `classonlymethod` (`N805`); one 3-arg `getattr` against `utils/typing.py::MISSING_ATTRIBUTE` replaces

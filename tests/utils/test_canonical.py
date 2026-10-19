@@ -1,11 +1,11 @@
-"""Tests for the hostile-safe container read / ordering primitives (``utils/canonical.py``).
+"""Tests for the container read / ordering primitives (``utils/canonical.py``).
 
 The module has two consumers - the set families' ``Meta.fields`` ordering
 (``utils/inputs.py::_sorted_meta_values``) and the write pipeline's pre-save
 drift fingerprint (``utils/write_transaction.py::_field_fingerprint``) - and both
 reach it only through their own gates. These tests exercise the primitives
 DIRECTLY, because the properties that matter (a subclass's overridden iteration
-never runs; a lying or raising ``__repr__`` never collapses or breaks an order)
+never runs; a lying ``__repr__`` never collapses an order)
 are properties of the primitive, not of either walk that consumes it. A test that
 could only reach them through a consumer would be testing the consumer's gate.
 No GraphQL document can observe those dunders; input SDL lives in
@@ -120,27 +120,7 @@ class _ConstantRepr:
 class _RaisingRepr:
     @override
     def __repr__(self) -> str:
-        raise RuntimeError("hostile __repr__ detonated")
-
-
-class _HostileStr(str):
-    """A ``str`` subclass that detonates the moment anything renders it."""
-
-    @override
-    def __str__(self) -> str:
-        raise RuntimeError("hostile __str__ detonated")
-
-    @override
-    def __format__(self, spec: str) -> str:
-        raise RuntimeError("hostile __format__ detonated")
-
-
-class _LyingStr(str):
-    """A ``str`` subclass whose ``__repr__`` hands back a hostile ``str`` subclass."""
-
-    @override
-    def __repr__(self) -> str:
-        return _HostileStr("forged")
+        raise RuntimeError("__repr__ detonated")
 
 
 def test_base_container_values_reads_a_plain_dicts_items() -> None:
@@ -238,7 +218,6 @@ def test_canonical_sort_key_totally_orders_mutually_unorderable_types() -> None:
         True,
         (1, 2),
         object(),
-        _LyingStr("real"),
     ]
 
     # Sorting a ROTATED permutation as well proves the order is a property of the
@@ -265,33 +244,7 @@ def test_canonical_sort_key_keeps_identical_reprs_distinct() -> None:
     assert canonical_sort_key(left) != canonical_sort_key(right)
 
 
-def test_canonical_sort_key_guards_a_raising_repr() -> None:
-    """A detonating ``__repr__`` yields a key instead of breaking the walk."""
-    value = _RaisingRepr()
-
-    key = canonical_sort_key(value)
-
-    assert isinstance(key, tuple)
-    assert key[0] == "<unprintable _RaisingRepr>"
-    assert key[1:] == (id(type(value)), id(value))
-
-
-def test_canonical_sort_key_flattens_a_str_subclass_repr_to_the_base_str() -> None:
-    """A ``__repr__`` returning a ``str`` SUBCLASS is stripped to base ``str``.
-
-    CPython hands a ``tp_repr`` result back unchanged when it is a ``str``
-    subclass. Carrying that object into the key would arm every later render of
-    the key - a sort comparison, an f-string in a diagnostic - with the
-    subclass's overridden ``__str__`` / ``__format__``. The key element is base
-    ``str``, so nothing of the consumer's runs after the guarded repr returns.
-    """
-    lying = _LyingStr("real")
-    assert isinstance(lying.__repr__(), _HostileStr)
-
-    rendered = canonical_sort_key(lying)[0]
-
-    assert type(rendered) is str
-    assert rendered == "forged"
-    # The proof the strip happened: rendering the key element is inert, while
-    # rendering what ``__repr__`` returned would detonate.
-    assert f"{rendered}" == "forged"
+def test_canonical_sort_key_repr_error_propagates() -> None:
+    """The first key part is the value's own ``__repr__``; what it raises propagates."""
+    with pytest.raises(RuntimeError, match="__repr__ detonated"):
+        canonical_sort_key(_RaisingRepr())

@@ -12,27 +12,28 @@ override is rejected, unknown keys are rejected naming the valid vocabulary, and
 a mapping is applied over the dataclass defaults. A mapping override is
 MATERIALIZED ONCE into a plain ``dict`` before
 anything reads it, so validation and construction see the same keys even when
-the mapping is stateful, one-shot, or otherwise hostile - a Mapping that
-diverges between passes, yields an unhashable key, or raises mid-iteration is
-a typed ``ConfigurationError``, never a raw ``TypeError`` / ``RuntimeError``
-leaking out of schema construction. The same holds for a value or key whose
-``__class__`` raises, and a ``str`` subclass key is compared and joined as its
-base ``str`` copy. Domain validation stays with the policy
+the mapping is stateful or one-shot; whatever the mapping's own iteration
+raises propagates as the deployment's error. A value or key is classified by
+its real class, never a ``__class__`` read, so one whose ``__class__`` raises or
+lies still reaches the typed rejection, and a ``str`` subclass key is compared
+and joined as its base ``str`` copy. Domain validation stays with the policy
 classes themselves (``__post_init__``), so an instance from any path was
 validated on the same terms.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import fields
 from typing import TYPE_CHECKING, TypeVar, cast
 
-from django_strawberry_framework.exceptions import ConfigurationError, describe_value
+from django_strawberry_framework.exceptions import ConfigurationError
 
-from ._narrowing import is_mapping, is_str
+from . import truth
+from .lazy import unwrap_lazy_object
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from _typeshed import DataclassInstance
 
@@ -61,11 +62,11 @@ def copy_policy(policy: PolicyT) -> PolicyT:
     schema-construction check on a per-field seam.
     """
     duplicate = object.__new__(type(policy))
-    duplicate.__dict__.update(policy.__dict__)
+    duplicate.__dict__.update(policy.__dict__)  # truth: ok framework-built canonical policy
     return duplicate
 
 
-def canonical_policy(policy: object, *, policy_cls: type[PolicyT], display_name: str) -> PolicyT:
+def canonical_policy(policy: object, *, policy_cls: type[PolicyT]) -> PolicyT:
     """Return a private, validated ``policy_cls`` built from ``policy``'s fields.
 
     ALWAYS a new object, never the one handed in, and the exact type is not a
@@ -89,36 +90,11 @@ def canonical_policy(policy: object, *, policy_cls: type[PolicyT], display_name:
     built with, never about the ones it carries now. Each field is therefore
     read once, here, and those values build an instance that validates them on
     the ordinary terms; the original is discarded and no seam downstream ever
-    calls it again. A read that raises is a typed ``ConfigurationError`` rather
-    than a raw error, because this runs at schema construction and a policy
-    that cannot be read is a deployment fault.
+    calls it again. A field read that raises is the subclass's own behaviour
+    and propagates.
     """
-    values: dict[str, object] = {}
-    reading = ""
-    try:
-        for field in fields(policy_cls):
-            reading = field.name
-            values[reading] = getattr(policy, reading)
-    except Exception as exc:
-        raise ConfigurationError(
-            f"The {display_name} could not be read: "
-            f"{policy_cls.__name__}.{reading} raised on access.",
-        ) from exc
+    values = {field.name: getattr(policy, field.name) for field in fields(policy_cls)}
     return policy_cls(**values)
-
-
-def _holds(test: Callable[..., bool], /, *args: object) -> bool:
-    """Return ``test(*args)``, or ``False`` when the test raises an ``Exception``.
-
-    A deployment-supplied policy value is classified by ``isinstance`` / ``Mapping``
-    checks that fall back to the value's ``__class__``, so a value whose ``__class__``
-    raises answers "not that kind" and reaches the typed rejection instead of leaking
-    its own exception out of schema construction.
-    """
-    try:
-        return test(*args)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        return False
 
 
 def _article(name: str) -> str:
@@ -155,24 +131,33 @@ def resolve_policy(
     thing :func:`canonical_policy` exists to prevent. A deployment that
     configures nothing gets the same guarantee as one that configures
     everything.
+
+    Either override may be a Django lazy proxy (``SimpleLazyObject``); it is
+    read as the object it wraps (``utils/lazy.py::unwrap_lazy_object``) before
+    any type check, so the factory runs once, here, at schema construction.
     """
-    if _holds(isinstance, explicit, policy_cls):
-        return canonical_policy(explicit, policy_cls=policy_cls, display_name=display_name)
-    overrides = explicit if explicit is not None else read_setting()
+    # Instances are recognised by their real class, never a ``__class__`` read;
+    # a Django lazy proxy is recognised as the object it wraps.
+    given = unwrap_lazy_object(explicit)
+    if truth.is_instance(given, policy_cls):
+        return canonical_policy(given, policy_cls=policy_cls)
+    overrides = given if given is not None else unwrap_lazy_object(read_setting())
     if overrides is None:
-        return canonical_policy(default, policy_cls=policy_cls, display_name=display_name)
-    if _holds(isinstance, overrides, policy_cls):
+        return canonical_policy(default, policy_cls=policy_cls)
+    if truth.is_instance(overrides, policy_cls):
         # An instance behind the SETTING slot is the same declaration the
         # explicit argument accepts - the two override sources are one ladder
         # with two spellings, so an instance from either is canonicalized on the
         # same terms. (Rejecting it here made the typed message name the policy
         # class as the received type while claiming it must be one.)
-        return canonical_policy(overrides, policy_cls=policy_cls, display_name=display_name)
-    if not _holds(is_mapping, overrides):
+        return canonical_policy(overrides, policy_cls=policy_cls)
+    # The mapping protocol is asked of the real class, so a value whose
+    # ``__class__`` raises or lies is the typed rejection below, never its own error.
+    if not issubclass(truth.class_of(overrides), Mapping):
         raise ConfigurationError(
-            f"The {display_name} must be {_article(policy_cls.__name__)} "
-            f"{policy_cls.__name__} or a mapping of {unit} names to values; "
-            f"got {describe_value(overrides)}.",
+            f"The {display_name} must be {_article(truth.name(policy_cls))} "
+            f"{truth.name(policy_cls)} or a mapping of {unit} names to values; "
+            f"got {truth.describe(overrides)}.",
         )
     # Materialize ONCE, and read only the plain copy afterwards. A ``Mapping``
     # may be stateful: validating unknown keys over one iteration and then
@@ -182,34 +167,26 @@ def resolve_policy(
     # ``TypeError`` instead of the typed rejection) or never see at all. One
     # consumption point is the same hardening ``conf.py::
     # upstream_patches_enabled`` applies to its own settings mapping.
-    try:
-        # ``_holds(is_mapping, ...)`` answered ``True`` above; the checker does not narrow through it.
-        plain = dict(cast("Mapping[object, object]", overrides))
-    except ConfigurationError:
-        raise
-    except Exception as exc:
-        raise ConfigurationError(
-            f"The {display_name} is not a valid {unit} mapping; iteration failed.",
-        ) from exc
-    # Key-type guard FIRST: an unhashable or non-string key must reach this
-    # typed rejection, not a bare ``TypeError`` from set membership or a
-    # ``sorted()`` over mixed unorderable names (the
-    # ``conf.py::upstream_patches_enabled`` key-guard precedent).
-    named: dict[str, object] = {}
-    for name, value in plain.items():
-        if not is_str(name):
+    # The real-class ``Mapping`` check above does not narrow for the checker.
+    plain = dict(cast("Mapping[object, object]", overrides))
+    # Key-type guard FIRST: a non-string key must reach this typed rejection,
+    # not a bare ``TypeError`` from a ``sorted()`` over mixed unorderable names
+    # (the ``conf.py::upstream_patches_enabled`` key-guard precedent). A string
+    # key is recognised by its real class.
+    for name in plain:
+        if not truth.is_instance(name, str):
             raise ConfigurationError(
-                f"The {display_name} {unit} names must be strings; got {describe_value(name)}.",
+                f"The {display_name} {unit} names must be strings; got {truth.describe(name)}.",
             )
-        # A ``str`` subclass key is copied through the base slot, so its ``__eq__`` /
-        # ``__lt__`` / ``__str__`` never run in the membership test, ``sorted`` or
-        # ``join`` below.
-        named[str.__str__(name)] = value
+    # Subclass keys are copied to the base ``str`` before anything compares or
+    # orders them, so the constructor below receives exact strings carrying
+    # the name the deployment wrote.
+    normalized = {truth.text(name): value for name, value in plain.items()}
     known = {field.name for field in fields(policy_cls)}
-    unknown = sorted(name for name in named if name not in known)
+    unknown = sorted(name for name in normalized if name not in known)
     if unknown:
         raise ConfigurationError(
             f"Unknown {display_name.replace(' ', '-')} {unit}(s): {', '.join(unknown)}. "
             f"Valid {unit}s: {', '.join(sorted(known))}.",
         )
-    return policy_cls(**named)
+    return policy_cls(**normalized)

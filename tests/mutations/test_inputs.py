@@ -77,6 +77,7 @@ from django_strawberry_framework import DjangoType, strawberry_config
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms import inputs as form_inputs
 from django_strawberry_framework.mutations import FieldError as FieldErrorFromPackage
+from django_strawberry_framework.mutations import inputs as mutation_inputs
 from django_strawberry_framework.mutations.inputs import (
     CREATE,
     EXCLUDED,
@@ -1140,13 +1141,18 @@ def test_build_empty_field_set_raises_configuration_error() -> None:
     one or more fields.`` The generator rejects it at the framework boundary first,
     naming the model.
     """
-    with pytest.raises(ConfigurationError, match="has no fields"):
+    with pytest.raises(ConfigurationError) as exc:
         build_mutation_input(
             product_models.Category,
             operation_kind=CREATE,
             primary_type=CategoryType,
             fields=(),
         )
+    assert str(exc.value) == (
+        "DjangoMutation create input for Category has no fields; Meta.fields / Meta.exclude "
+        "narrowed the editable column set to empty (or the model declares no editable "
+        "columns). A mutation input must define at least one field."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1857,3 +1863,14 @@ def test_build_payload_type_rejects_reserved_or_invalid_object_slot() -> None:
                 # build_payload_type types the parameter as str | None
                 object_slot=bad_slot,  # pyright: ignore[reportArgumentType]
             )
+
+
+# ---------------------------------------------------------------------------
+# Generator-kind display word (single-sited subject word)
+# ---------------------------------------------------------------------------
+
+
+def test_operation_kind_display_word_maps_create_and_partial() -> None:
+    """The generator-kind display word reads ``"create"`` / ``"update"``."""
+    assert mutation_inputs._operation_kind_display_word(CREATE) == "create"
+    assert mutation_inputs._operation_kind_display_word(PARTIAL) == "update"

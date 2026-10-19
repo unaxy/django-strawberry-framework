@@ -17,6 +17,7 @@ from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 
 from .conf import upstream_patches_enabled
+from .utils import truth
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -86,7 +87,7 @@ _COMPLETE_LIST_VALUE_ARITY = 6
 def _captured_upstream_method(owner: type[object] | None, name: str) -> object:
     if owner is None:
         return None
-    method = owner.__dict__.get(name)
+    method = truth.class_dict(owner).get(name)
     patch_owner = getattr(method, _PATCH_OWNER_ATTRIBUTE, None)
     if patch_owner == _PATCH_OWNER or (
         isinstance(patch_owner, str) and patch_owner.startswith("django_strawberry_framework.")
@@ -176,8 +177,8 @@ def _patched_complete_list_value(
         result,
     )
     if (
-        not upstream.is_iterable(result)
-        and isinstance(result, AsyncIterable)
+        isinstance(result, AsyncIterable)
+        and not upstream.is_iterable(result)
         and _is_awaitable(res, self)
     ):
         # Upstream's ``async_iterable_to_list`` is typed ``-> Any`` but returns the
@@ -205,7 +206,8 @@ setattr(
 def _patch_is_installed() -> bool:
     return (
         ExecutionContext is not None
-        and ExecutionContext.__dict__.get("complete_list_value") is _patched_complete_list_value
+        and truth.class_dict(ExecutionContext).get("complete_list_value")
+        is _patched_complete_list_value
     )
 
 

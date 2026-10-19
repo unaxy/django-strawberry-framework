@@ -28,14 +28,10 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 from django.db.models import Prefetch
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_attr,
-    _safe_predicate,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
-from django_strawberry_framework.utils.relations import safe_truthy
+from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 
 # The shared public strategy-selection type (and the validator it feeds) are
 # owned by ``nested_fetch`` beside ``NestedConnectionStrategy``. They are
@@ -52,7 +48,7 @@ from django_strawberry_framework.utils.relations import safe_truthy
 from .nested_fetch import StrategySelection, resolve_strategy
 
 # ``Prefetch`` is imported at runtime (not under ``TYPE_CHECKING``) because
-# ``_require_prefetch`` performs a guarded ``isinstance(..., Prefetch)`` validation;
+# ``_require_prefetch`` performs a real-class ``Prefetch`` validation;
 # the field annotation ``Prefetch | None`` is also string-deferred by
 # ``from __future__ import annotations``, but the runtime check is the
 # load-bearing surface here.
@@ -68,6 +64,10 @@ else:
     # ``Prefetch`` has no ``__class_getitem__`` at runtime: the hint stays the class.
     _PrefetchAny = Prefetch
 
+# ``Prefetch`` with its parameters solved, so the real-class check against it narrows
+# to a known type.
+_PREFETCH: type[_PrefetchAny] = Prefetch
+
 
 def _require_prefetch(obj: object) -> _PrefetchAny:
     """Return ``obj`` when it is a ``Prefetch``; else raise ``ConfigurationError``.
@@ -79,18 +79,19 @@ def _require_prefetch(obj: object) -> _PrefetchAny:
     legitimate "no prefetch object" default - without a factory-side
     check, ``prefetch(None)`` would become a silent no-op.
 
-    The test is ``isinstance``, so a ``Prefetch`` subclass and a lazy proxy of
-    a ``Prefetch`` (``SimpleLazyObject``) pass. It is guarded: a ``__class__``
-    read that raises answers "not a ``Prefetch``", so the rejection stays the
-    typed ``ConfigurationError``.
+    The check reads the value's real class (``truth.is_instance``), so a
+    ``Prefetch`` subclass passes and a value whose ``__class__`` read raises (or
+    claims ``Prefetch``) is the typed ``ConfigurationError``. A Django lazy proxy
+    of a ``Prefetch`` (``SimpleLazyObject``) is checked as the object it wraps
+    (``utils/lazy.py::unwrap_lazy_object``) and stored as handed in.
     """
-    if not _safe_predicate(isinstance, obj, Prefetch):
+    if not truth.is_instance(unwrap_lazy_object(obj), _PREFETCH):
         raise ConfigurationError(
             "OptimizerHint.prefetch(obj) requires a django.db.models.Prefetch "
-            f"instance; got {_safe_type_name(obj)}.",
+            f"instance; got {truth.kind(obj)}.",
         )
-    # The guarded ``isinstance`` above is the ``Prefetch`` proof; a ``bool`` from a
-    # helper carries no narrowing.
+    # The check above proves the wrapped object a ``Prefetch``; ``obj`` itself may be the
+    # lazy proxy standing for it, which the narrowing cannot follow.
     return cast("_PrefetchAny", obj)
 
 
@@ -105,14 +106,10 @@ def _require_strategy(name: object) -> StrategySelection:
     check, ``strategy(None)`` would become a silent no-op.
 
     The typed rejection is unconditional and owned by
-    ``nested_fetch.resolve_strategy`` itself: every read its dispatch makes of
-    the value is guarded there (the name-or-class test asks the real type and
-    never reads ``__class__``, content equality goes through the base ``str``
-    slot so neither ``__eq__`` nor ``__hash__`` dispatches, ``__repr__`` renders
-    through the guarded message helper, the ``plan`` attribute read absorbs a
-    raising descriptor), so a hostile selection value degrades to the typed
-    ``ConfigurationError`` and no raw exception can reach this boundary to
-    be contained. This factory check keeps only its own contract: an
+    ``nested_fetch.resolve_strategy`` itself: its name-or-class test asks the
+    real type and never reads ``__class__``, so a non-``str`` lookalike takes
+    the typed ``ConfigurationError``. This factory check keeps only its own
+    contract: an
     explicit ``None`` must reject here rather than resolve the
     ``NESTED_CONNECTION_STRATEGY`` setting the way ``resolve_strategy(None)``
     legitimately does.
@@ -120,7 +117,7 @@ def _require_strategy(name: object) -> StrategySelection:
     if name is None:
         raise ConfigurationError(
             "OptimizerHint.strategy(name) requires a strategy name ('windowed' | 'lateral' | 'auto') "
-            f"or a NestedConnectionStrategy instance; got {_safe_type_name(name)}.",
+            f"or a NestedConnectionStrategy instance; got {truth.kind(name)}.",
         )
     _ = resolve_strategy(name)
     # ``resolve_strategy`` raises for anything that is not a strategy selection.
@@ -274,19 +271,17 @@ def hint_is_skip(hint: OptimizerHint | None) -> bool:
 
     Centralises the hint-shape contract so callers (the walker, the
     schema audit) never duplicate the ``hint is OptimizerHint.SKIP or
-    hint.skip`` dispatch.  Defensively handles unexpected hint shapes by
-    returning ``False`` rather than raising ``AttributeError``, so the
-    schema audit can keep its "never raises" contract even if a future
-    hint surface lands that does not expose a ``.skip`` attribute.
+    hint.skip`` dispatch. A hint shape that does not carry ``.skip`` reads as
+    ``False`` rather than raising ``AttributeError``.
     """
-    # The walker usually receives concrete hint values from ``hints.items()``;
-    # the schema audit probes ``hints.get(field_name)`` for every exposed
-    # relation, so ``None`` is a normal "no hint configured" path there.
+    # The walker fetches per name via ``hints_map.get``; the schema audit
+    # probes ``hints.get(field_name)`` for every exposed relation, so ``None``
+    # is a normal "no hint configured" path.
     if hint is None:
         return False
     if hint is OptimizerHint.SKIP:
         return True
-    return safe_truthy(_safe_attr(hint, "skip"))
+    return bool(read_attr(hint, "skip", False))
 
 
 # Sentinel instance - must be created after the class body so the

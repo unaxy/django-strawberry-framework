@@ -99,7 +99,7 @@ def _seed_card_graph() -> tuple[models.Patron, models.Patron]:
     """Create one patron holding a card and one holding none.
 
     The absent-card row is what drives ``reverse_one_to_one_resolver``'s
-    ``except related_does_not_exist: return None`` arm; without it the test
+    ``except reverse_does_not_exist: return None`` arm; without it the test
     would only cover the present half.
     """
     with_card = models.Patron.objects.create(name="Patron With Card")

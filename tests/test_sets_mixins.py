@@ -18,9 +18,12 @@ empty-input no-ops live in ``examples/fakeshop/test_query/test_library_api.py``,
 ``test_kanban_api.py`` (``CardOrderInputType``).
 """
 
+import ast
+import copy
 import types
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import NoReturn
 
 import pytest
@@ -40,6 +43,7 @@ from django_strawberry_framework.filters.inputs import _field_specs as _filter_s
 from django_strawberry_framework.orders import OrderSet, RelatedOrder
 from django_strawberry_framework.orders.inputs import _field_specs as _order_specs
 from django_strawberry_framework.sets_mixins import (
+    RE_READABLE_FIELDS_HELP,
     ActiveInputPermissionAttrs,
     ActiveInputPermissionMixin,
     ClassBasedTypeNameMixin,
@@ -135,10 +139,28 @@ def test_apply_pipelines_remain_family_owned() -> None:
 
 
 def test_sets_mixins_all_exports_are_complete() -> None:
-    """``__all__`` names every public symbol. A request cannot prove absence of extras."""
+    """``__all__`` names every public symbol. A request cannot prove absence of extras.
+
+    The population is every public name the module's own top-level statements
+    bind (functions, classes, assignments), read from its source, so an
+    imported name such as ``TYPE_CHECKING`` is not mistaken for a definition and
+    a module-level constant is not missed for having no ``__module__``.
+    """
     assert "should_cache_expansion" in sm.__all__
     for symbol in sm.__all__:
         assert hasattr(sm, symbol), f"Symbol {symbol!r} in __all__ but not in sets_mixins"
+    module_defined: set[str] = set()
+    for node in ast.parse(Path(sm.__file__).read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            module_defined.add(node.name)
+        elif isinstance(node, ast.Assign):
+            module_defined.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            module_defined.add(node.target.id)
+    public = {name for name in module_defined if not name.startswith("_")}
+    assert "RE_READABLE_FIELDS_HELP" in public
+    missing = sorted(public - set(sm.__all__))
+    assert not missing, f"Public symbols missing from __all__: {missing}"
 
 
 def test_should_cache_expansion_gates_on_dict_and_unresolved_strings() -> None:
@@ -332,12 +354,12 @@ def test_related_set_target_mixin_hook_is_abstract_without_a_family_validator() 
 
 
 def test_related_set_target_mixin_gates_resolved_targets_at_the_seam() -> None:
-    """A family-supplied validator fires from ``_resolved_target`` on every read.
+    """A family-supplied validator fires from ``_resolved_target`` for every distinct value.
 
-    Regression pin for the BFS-enqueue lead: gate protection no longer depends
-    on a family property getter re-declaring the check inline. A hostile
-    resolved target is rejected at the shared seam, and the ``None``
-    placeholder passes through without consulting the validator.
+    Gate protection does not depend on a family property getter re-declaring
+    the check inline. A hostile resolved target is rejected at the shared
+    seam, and the ``None`` placeholder passes through without consulting the
+    validator.
     """
 
     class _FamilyTarget:
@@ -369,6 +391,72 @@ def test_related_set_target_mixin_gates_resolved_targets_at_the_seam() -> None:
     # The ``None`` placeholder skips the gate entirely (validator never sees it).
     assert _FutureFamily(None)._resolved_target() is None
     assert validated == [_FamilyTarget, _Hostile]
+
+
+def test_resolved_target_validates_each_distinct_value_once() -> None:
+    """Two reads validate once; substitution re-validates; failures retry; deepcopy keeps the memo.
+
+    The success-only identity memo: a repeat read of an identical slot value
+    returns it without re-firing the family gate, a substituted value
+    re-resolves and re-validates, and a failed value is never memoized so a
+    retry raises again. Classes survive ``deepcopy`` atomically, so a copied
+    memo stays valid.
+    """
+
+    class _MemoTarget:
+        pass
+
+    class _MemoOther:
+        pass
+
+    class _MemoHostile:
+        pass
+
+    validations: list[object] = []
+
+    class _MemoCounting(RelatedSetTargetMixin):
+        _target_attr = "_target"
+        _owner_attr = "bound_owner"
+
+        def __init__(self, target: object) -> None:
+            self._target = target
+
+        @override
+        def _validate_target(self, resolved: object) -> None:
+            validations.append(resolved)
+            if resolved is _MemoHostile:
+                raise ConfigurationError("memo hostile")
+
+    item = _MemoCounting(_MemoTarget)
+    assert item._resolved_target() is _MemoTarget
+    assert item._resolved_target() is _MemoTarget
+    assert validations == [_MemoTarget]
+
+    item._set_target(_MemoOther)
+    assert item._resolved_target() is _MemoOther
+    assert item._resolved_target() is _MemoOther
+    assert validations == [_MemoTarget, _MemoOther]
+
+    bad = _MemoCounting(_MemoHostile)
+    with pytest.raises(ConfigurationError, match="memo hostile"):
+        bad._resolved_target()
+    with pytest.raises(ConfigurationError, match="memo hostile"):
+        bad._resolved_target()
+    assert validations == [
+        _MemoTarget,
+        _MemoOther,
+        _MemoHostile,
+        _MemoHostile,
+    ]
+
+    clone = copy.deepcopy(item)
+    assert clone._resolved_target() is _MemoOther
+    assert validations == [
+        _MemoTarget,
+        _MemoOther,
+        _MemoHostile,
+        _MemoHostile,
+    ]
 
 
 def test_both_families_supply_their_own_target_validator() -> None:
@@ -790,9 +878,7 @@ def test_filter_normalizer_consumes_the_family_permission_traversal(
     The filter-side twin of
     ``test_order_normalizer_consumes_the_family_permission_traversal``: the
     normalizer drives ``iter_active_fields`` with ``cls._input_traversal()``, so
-    the grammar the apply path reads is the one ``_permission`` declares. This
-    replaces an assertion that a module-level singleton NAME was absent, which
-    any differently-named singleton would also have satisfied.
+    the grammar the apply path reads is the one ``_permission`` declares.
     """
     captured = {}
 
@@ -813,10 +899,10 @@ def test_filter_normalizer_consumes_the_family_permission_traversal(
 def test_filter_normalizer_honors_a_subclass_unset_sentinel_override() -> None:
     """An overridden ``_permission.traversal.unset_sentinel`` governs the apply path too.
 
-    The defect the derived config closes: ``_normalize_input`` used to read a
-    module-level singleton pinned to ``UNSET`` while the permission walkers read
-    ``_permission``, so a subclass narrowing the sentinel was GATED on one
-    grammar and FILTERED on another. Both sides now classify identically.
+    ``_normalize_input`` and the permission walkers classify through the same
+    derived config, so a subclass narrowing the sentinel is GATED and FILTERED
+    on one grammar.
+
     GraphQL omitted fields are always ``UNSET``; a custom Python sentinel
     cannot appear on the wire.
     """
@@ -853,7 +939,7 @@ def test_re_readable_gate_accepts_every_sized_collection() -> None:
     (``spec.keys()`` / ``spec.values()``), from a ``range``, or from a project
     container of their own: all of those hold their members, so the expansion
     re-runs to the same field names. Pinning the accepted set to
-    ``(dict, list, tuple, set, frozenset)`` rejected them for a property they
+    ``(dict, list, tuple, set, frozenset)`` would reject them for a property they
     have. Class-creation only; a request never sees the declaration object.
     """
 
@@ -888,13 +974,15 @@ def test_re_readable_gate_accepts_every_sized_collection() -> None:
 
 
 def test_re_readable_gate_rejects_one_shot_and_text_atoms() -> None:
-    """One-shot producers and text atoms are the two rejected shapes.
+    """One-shot producers, text atoms, and non-collections are the three rejected shapes.
 
     A generator / ``iter(...)`` / ``map`` object is exhausted by the first
     expansion; a ``str`` / ``bytes`` / ``bytearray`` / ``memoryview`` is a
     collection of CHARACTERS, not of field names, and satisfies ``Collection``
-    structurally, so it needs the explicit exclusion. Rejected at class
-    creation (``ConfigurationError``), never as a GraphQL error.
+    structurally, so it needs the explicit exclusion. Plain non-collections
+    (``123``, ``object()``, ``None``) fail the ``Collection`` check outright.
+    Rejected at class creation (``ConfigurationError``), never as a GraphQL
+    error.
     """
     rejected = (
         (name for name in ["code"]),
@@ -1247,3 +1335,81 @@ def test_a_longer_related_order_the_target_never_reaches_is_accepted() -> None:
         "genres",
         "genres_books",
     }
+
+
+def test_resolve_lazy_class_owner_scope_matrix() -> None:
+    """Owner scope decides attempt 2, never the outcome kind.
+
+    An owner that is not a class (``None``, ``0``) propagates the attempt-1
+    error; a class owner retries against its own module; absolute paths,
+    factories, classes, and ``None`` resolve without consulting scope.
+    """
+    resolve = LazyRelatedClassMixin().resolve_lazy_class
+    with pytest.raises(ImportError, match="No module named 'no'"):
+        resolve("no.such.module.TargetXYZ", None)
+    with pytest.raises(ImportError, match="No module named 'no'"):
+        # basedpyright: a non-class owner is the shape under test; the parameter is a class or None
+        resolve("no.such.module.TargetXYZ", 0)  # pyright: ignore[reportArgumentType]
+    assert resolve("OrderSet", OrderSet) is OrderSet
+    with pytest.raises(ImportError, match="django_strawberry_framework"):
+        resolve("no.such.module.TargetXYZ", OrderSet)
+
+    class HonestOrder(OrderSet):
+        pass
+
+    with pytest.raises(ImportError, match="test_sets_mixins"):
+        resolve("no.such.module.TargetXYZ", HonestOrder)
+    assert resolve("django_strawberry_framework.orders.OrderSet", None) is OrderSet
+    assert resolve(lambda: OrderSet, None) is OrderSet
+    assert resolve(OrderSet, None) is OrderSet
+    assert resolve(None, None) is None
+
+    def _factory() -> NoReturn:
+        raise RuntimeError("factory-boom")
+
+    with pytest.raises(RuntimeError, match="factory-boom"):
+        resolve(_factory, None)
+
+
+def test_re_readable_gate_message_is_pinned() -> None:
+    """The one-shot ``Meta.fields`` rejection message, byte for byte."""
+
+    class _Probe:
+        pass
+
+    one_shot = iter(["code"])
+    with pytest.raises(ConfigurationError) as excinfo:
+        require_re_readable_field_declaration(
+            _Probe,
+            one_shot,
+            subject="OrderSet",
+            accepted="'__all__' or a re-readable collection of field names",
+        )
+    assert str(excinfo.value) == (
+        f"OrderSet {_Probe.__qualname__}.Meta.fields must be '__all__' or a re-readable "
+        f"collection of field names; got list_iterator ({one_shot!r}). "
+        f"{RE_READABLE_FIELDS_HELP}"
+    )
+
+
+def test_collect_related_declarations_never_evaluates_a_lazy_class_body_value() -> None:
+    """A ``SimpleLazyObject`` class-body value is classified by its real class.
+
+    Collection never runs the lazy factory: the value is a plain attribute (not
+    a ``RelatedOrder``), and the factory's own exception surfaces only where the
+    consumer evaluates it.
+    """
+
+    def _factory() -> NoReturn:
+        raise RuntimeError("lazy factory failed")
+
+    class LazyBodyOrder(OrderSet):
+        helper = SimpleLazyObject(_factory)
+
+        class Meta:
+            model = Book
+            fields = ["title"]
+
+    assert "helper" not in LazyBodyOrder.related_orders
+    with pytest.raises(RuntimeError, match="lazy factory failed"):
+        str(LazyBodyOrder.helper)

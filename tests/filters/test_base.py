@@ -283,22 +283,17 @@ def test_integer_range_filter_passes_through_empty_value() -> None:
     assert f.filter(sentinel, None) is sentinel
 
 
-def test_integer_range_filter_lying_list_subclass_fails_closed() -> None:
-    """A ``list`` SUBCLASS whose ``__iter__`` raises fails closed to the unfiltered skip.
+def test_integer_range_filter_list_subclass_iteration_error_propagates() -> None:
+    """A ``list`` subclass's own ``__iter__`` exception propagates, never an unfiltered skip."""
 
-    The raise would detonate inside the ``list(value)`` materialization; the containment arm skips
-    instead (the GraphQL contract rejects the shape upstream) rather than leak the raw
-    ``RuntimeError``.
-    """
-
-    class Lying(list[object]):
+    class RaisingIter(list[object]):
         @override
         def __iter__(self) -> Iterator[object]:
-            raise RuntimeError("hostile __iter__ detonated")
+            raise RuntimeError("list subclass __iter__ raised")
 
-    sentinel = _RecordingQs()
     f = IntegerRangeFilter(field_name="signed_big", lookup_expr="range")
-    assert f.filter(sentinel, Lying([1, 2])) is sentinel
+    with pytest.raises(RuntimeError, match="list subclass __iter__ raised"):
+        f.filter(_RecordingQs(), RaisingIter([1, 2]))
 
 
 def test_integer_range_filter_applies_distinct_when_flagged() -> None:
@@ -1189,6 +1184,20 @@ def test_filter_wrong_model_rejected() -> None:
         _decode_and_validate_global_id(encoded, f)
 
 
+def test_filter_non_string_global_id_value_rejected_as_malformed() -> None:
+    """A non-string GlobalID value takes the malformed-payload route.
+
+    Only ``str`` (wire form) and ``relay.GlobalID`` objects decode; any
+    other value is the same malformed-payload class as bad base64, so the
+    caller observes the coded ``GLOBALID_INVALID`` rejection, never a raw
+    ``ValueError``.
+    """
+    f = GlobalIDFilter(field_name="id")
+    with pytest.raises(GraphQLError, match="not a valid GlobalID") as exc_info:
+        _decode_and_validate_global_id(42, f)
+    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+
+
 def test_related_filter_relation_branch_strategy_aware() -> None:
     """A relation-branch (target-definition) filter applies the target's strategy."""
     _definition(models.Genre, "GenreType", "model")
@@ -1604,16 +1613,12 @@ def test_related_filter_gate_passes_none_placeholder_through_bfs_enqueue() -> No
 
 
 # ---------------------------------------------------------------------------
-# Hostile filter-value shapes (fail-closed containment at the filter() seam).
+# Filter-value shapes outside the form contract, at the filter() seam.
 # ---------------------------------------------------------------------------
 
 
 def test_list_filter_scalar_value_is_a_coded_reject() -> None:
-    """A non-sized value under ``ListFilter`` raises the typed error, not a raw ``TypeError``.
-
-    A bare ``len(value)`` would leak ``TypeError: object of type 'int' has no len()``: the exact
-    sibling of the leak the GlobalID multiple-choice gate's own docstring documents as fixed.
-    """
+    """A scalar never reaches ``len()``: the shape gate rejects it with the coded error."""
     f = ListFilter(field_name="code")
     with pytest.raises(GraphQLError) as exc_info:
         f.filter(models.Shelf.objects.none(), 42)
@@ -1627,9 +1632,9 @@ def test_list_filter_one_shot_iterator_is_a_coded_reject() -> None:
 
 
 def test_list_filter_string_value_is_rejected_not_iterated_charwise() -> None:
-    """A string under an ``in`` lookup is rejected by the shape gate before iteration.
+    """A string under an ``in`` lookup is rejected before Django can iterate it char-wise.
 
-    Django would otherwise iterate it char-wise (``in: "26"`` compiling to ``IN ('2','6')``).
+    Char-wise iteration would compile ``in: "26"`` to ``IN ('2','6')``.
     """
     f = ListFilter(field_name="code", lookup_expr="in")
     with pytest.raises(GraphQLError):
@@ -1637,10 +1642,7 @@ def test_list_filter_string_value_is_rejected_not_iterated_charwise() -> None:
 
 
 def test_integer_in_filter_scalar_value_is_a_coded_reject() -> None:
-    """A scalar that bypasses form coercion raises the typed error in the coercion loop.
-
-    The loop would otherwise leak ``TypeError: 'int' object is not iterable``.
-    """
+    """A scalar that bypasses form coercion never reaches the coercion loop."""
     f = IntegerInFilter(field_name="lifetime_fines_cents")
     with pytest.raises(GraphQLError) as exc_info:
         f.filter(models.Shelf.objects.none(), 42)
@@ -1648,10 +1650,9 @@ def test_integer_in_filter_scalar_value_is_a_coded_reject() -> None:
 
 
 def test_integer_in_filter_string_value_is_rejected_not_iterated_charwise() -> None:
-    """A string value is rejected before the coercion loop iterates it char-by-char.
+    """A string value is rejected before the coercion loop could iterate it char-by-char.
 
-    ``in: "26"`` would otherwise coerce to ``[2, 6]``: a wrong-result membership, not just a raw
-    escape.
+    ``in: "26"`` would coerce to ``[2, 6]``, a wrong-result membership.
     """
 
     class PatronFilter(FilterSet):
@@ -1667,59 +1668,53 @@ def test_integer_in_filter_string_value_is_rejected_not_iterated_charwise() -> N
         f.filter(models.Shelf.objects.none(), "26")
 
 
-def test_globalid_multiple_choice_lying_list_subclass_is_a_coded_reject() -> None:
-    """A ``list`` SUBCLASS whose ``__iter__`` raises is a coded reject.
+def test_globalid_multiple_choice_list_subclass_iteration_error_propagates() -> None:
+    """A ``list`` subclass passes the shape gate; its own ``__iter__`` exception propagates."""
 
-    It passes the ``isinstance`` shape gate, then detonates inside ``list(value)``.
-    """
-
-    class Lying(list[object]):
+    class RaisingIter(list[object]):
         @override
         def __iter__(self) -> Iterator[object]:
-            raise RuntimeError("hostile __iter__ detonated")
+            raise RuntimeError("list subclass __iter__ raised")
 
     f = GlobalIDMultipleChoiceFilter(field_name="id")
-    with pytest.raises(GraphQLError) as exc_info:
-        f.filter(models.Shelf.objects.none(), Lying(["ShelfNode:1"]))
-    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+    with pytest.raises(RuntimeError, match="list subclass __iter__ raised"):
+        f.filter(models.Shelf.objects.none(), RaisingIter(["ShelfNode:1"]))
 
 
-def test_array_filter_hostile_emptiness_probe_is_a_coded_reject() -> None:
-    """A hostile ``__eq__`` in the ``value in EMPTY_VALUES`` probe is a coded reject.
+def test_array_filter_emptiness_probe_propagates_the_value_eq_error() -> None:
+    """``value in EMPTY_VALUES`` compares through the value's own ``__eq__``.
 
-    ``value in EMPTY_VALUES`` evaluates ``value == ...``; the raise is converted, not left raw.
+    Whatever that ``__eq__`` raises propagates.
     """
 
-    class Hostile:
+    class RaisingEq:
         @override
         def __eq__(self, other: object) -> bool:
-            raise RuntimeError("hostile __eq__ detonated")
+            raise RuntimeError("value __eq__ raised")
 
         @override
         def __ne__(self, other: object) -> bool:
-            raise RuntimeError("hostile __ne__ detonated")
+            raise RuntimeError("value __ne__ raised")
 
         @override
         def __hash__(self) -> int:
             return 0
 
     f = ArrayFilter(field_name="tags")
-    with pytest.raises(GraphQLError) as exc_info:
-        f.filter(models.Shelf.objects.none(), Hostile())
-    assert exc_info.value.extensions == {"code": "FILTER_INVALID"}
+    with pytest.raises(RuntimeError, match="value __eq__ raised"):
+        f.filter(models.Shelf.objects.none(), RaisingEq())
 
 
-def test_integer_range_filter_hostile_value_skips_without_detonating() -> None:
-    """The shape check runs BEFORE any value probe, so a hostile ``__eq__`` never detonates.
+def test_integer_range_filter_non_sequence_skips_without_comparing() -> None:
+    """The shape check is the only emptiness probe, so a non-sequence skips uncompared.
 
-    The value takes the documented pass-through skip instead of detonating in a
-    ``value in EMPTY_VALUES`` probe, which this filter does not run.
+    The value takes the pass-through skip and its ``__eq__`` never runs.
     """
 
-    class Hostile:
+    class RaisingEq:
         @override
         def __eq__(self, other: object) -> bool:
-            raise RuntimeError("hostile __eq__ detonated")
+            raise RuntimeError("value __eq__ raised")
 
         @override
         def __hash__(self) -> int:
@@ -1727,26 +1722,31 @@ def test_integer_range_filter_hostile_value_skips_without_detonating() -> None:
 
     qs = models.Shelf.objects.none()
     f = IntegerRangeFilter(field_name="lifetime_fines_cents")
-    assert f.filter(qs, Hostile()) is qs
+    assert f.filter(qs, RaisingEq()) is qs
 
 
-def test_decode_global_id_hostile_repr_still_raises_the_coded_error() -> None:
-    """A hostile ``__repr__`` in a malformed payload still raises the coded error.
+def test_related_filter_gate_rejection_message_is_pinned() -> None:
+    """The target-gate rejection names the owner, the declaration and the target kind."""
 
-    The malformed-payload message interpolates the rejected value; the guarded repr fallback renders
-    ``<unprintable ...>`` instead of letting a ``RuntimeError`` replace the promised coded
-    ``GraphQLError``.
-    """
+    class Owner(FilterSet):
+        # basedpyright: the non-FilterSet target is the hostile input under test; RelatedFilter
+        # types the parameter as _FilterSetTarget
+        rel = RelatedFilter(_PlainClassTarget, field_name="shelves")  # pyright: ignore[reportArgumentType]
 
-    class Hostile:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("hostile __repr__ detonated")
+        class Meta:
+            model = models.Branch
+            fields = ["id"]
 
-    with pytest.raises(GraphQLError) as exc_info:
-        _decode_and_validate_global_id(Hostile(), GlobalIDFilter(field_name="id"))
-    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
-    assert "unprintable" in str(exc_info.value)
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = Owner.related_filters["rel"].filterset
+    assert str(exc_info.value) == (
+        f"{Owner.__qualname__} declares RelatedFilter 'shelves' targeting "
+        "_PlainClassTarget, which is not a FilterSet subclass. "
+        "RelatedFilter targets must resolve to a FilterSet subclass (a class, "
+        "an import-path string, or a zero-arg factory returning one); "
+        "an OrderSet or unrelated class cannot filter a relation branch. "
+        "Declare the branch with a FilterSet or remove it."
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -195,9 +195,10 @@ def test_pascal_case_or_raise_raises_on_empty_and_delegates_on_valid() -> None:
 )
 def test_string_helpers_reject_non_string_inputs(helper: Callable[[str], object]) -> None:
     """Malformed helper inputs fail with the package's typed configuration error."""
-    with pytest.raises(ConfigurationError, match="must be a string"):
+    with pytest.raises(ConfigurationError) as exc:
         # basedpyright: a non-string input is the bad value the helper must reject
         helper(42)  # pyright: ignore[reportArgumentType]
+    assert str(exc.value) == "String helper input must be a string; got int."
 
 
 @pytest.mark.parametrize(

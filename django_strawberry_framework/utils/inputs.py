@@ -38,33 +38,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar, cast, final
 
 import strawberry
-from django.utils.functional import LazyObject, empty
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_predicate,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 
-from ._narrowing import (
-    call_method,
-    dict_items,
-    is_dict,
-    is_frozenset,
-    is_list,
-    is_mapping,
-    is_set,
-    is_set_or_frozenset,
-    is_str,
-    is_tuple,
-    list_of,
-    read_attr,
-)
+from . import truth
+from ._narrowing import dict_items, is_mapping, list_of
 from .canonical import base_container_values, canonical_sort_key
 from .imports import import_attr_if_importable
 from .input_values import UNSET
+from .lazy import unwrap_lazy_object
 
 # ``utils/strings.py`` is the owner of ``graphql_camel_name``;
 # re-imported here (the ``as`` form marks the explicit re-export) so existing
@@ -103,7 +86,7 @@ if TYPE_CHECKING:
         def graphql_name(self) -> str: ...
 
     class _WritableSetMeta(Protocol):
-        """A consumer class ``Meta`` whose ``fields`` the synonym rule reads and writes back."""
+        """A consumer class ``Meta`` whose ``fields`` the synonym write-back sets."""
 
         fields: object
 
@@ -297,19 +280,20 @@ def emit_set_input_field_triples(
         prior_attr = seen_attr.get(python_attr)
         if prior_attr is not None:
             raise ConfigurationError(
-                f"{set_cls.__qualname__}: members {prior_attr!r} and {top_name!r} both "
-                f"generate the input attribute {python_attr!r} (Django path separators "
-                "flatten to '_'), so one would silently overwrite the other in the "
-                "generated input type. Rename one member or drop one via "
+                f"{truth.qualname(set_cls)}: members {prior_attr!r} and "
+                f"{top_name!r} both generate the input attribute {python_attr!r} (Django "
+                "path separators flatten to '_'), so one would silently overwrite the "
+                "other in the generated input type. Rename one member or drop one via "
                 "Meta.fields / Meta.exclude.",
             )
         prior_graphql = seen_graphql.get(graphql_name)
         if prior_graphql is not None:
             raise ConfigurationError(
-                f"{set_cls.__qualname__}: members {prior_graphql!r} and {top_name!r} both "
-                f"generate the GraphQL input field name {graphql_name!r} under package "
-                "camel-casing, so one would silently overwrite the other in the generated "
-                "input type. Rename one member or drop one via Meta.fields / Meta.exclude.",
+                f"{truth.qualname(set_cls)}: members {prior_graphql!r} and "
+                f"{top_name!r} both generate the GraphQL input field name {graphql_name!r} "
+                "under package camel-casing, so one would silently overwrite the other "
+                "in the generated input type. Rename one member or drop one via "
+                "Meta.fields / Meta.exclude.",
             )
         seen_attr[python_attr] = top_name
         seen_graphql[graphql_name] = top_name
@@ -545,18 +529,23 @@ def _sorted_meta_values(value: object) -> list[object]:
 
     The read and the ordering are ``utils/canonical.py``'s
     (``base_container_values`` / ``canonical_sort_key``), shared with the write
-    pipeline's drift fingerprint; what stays here is the metadata-flavored
-    rejection wording.
+    pipeline's drift fingerprint.
     """
-    try:
-        return sorted(base_container_values(value), key=canonical_sort_key)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Generated set metadata contains an unreadable {_safe_type_name(value)} container.",
-        ) from exc
+    return sorted(base_container_values(value), key=canonical_sort_key)
+
+
+# The builtin unordered containers ``Meta.fields`` shapes are canonicalized from.
+_UNORDERED_TYPES = (set, frozenset)
+
+
+def _is_one_of(value: object, classes: tuple[type[object], ...]) -> bool:
+    """Whether ``value``'s real class subclasses one of ``classes`` (no ``__class__`` read)."""
+    return any(truth.is_instance(value, cls) for cls in classes)
 
 
 FILTERSET_FIELDS_ALIAS = "filter_fields"
+
+_META_ABSENT = object()
 
 
 def resolve_set_meta_fields(
@@ -572,82 +561,65 @@ def resolve_set_meta_fields(
     only when the caller should populate ``fields`` from the synonym.
 
     This is the one fingerprint both set families apply to a class ``Meta``.
-    Presence uses ``hasattr`` so inherited Meta attributes count -- the
-    ``FilterSetMetaclass`` contract: a ``__dict__`` read would promote
-    ``filter_fields`` onto a subclass Meta that inherits ``fields``.
+    Each key is read as declared through the real MRO (``truth.static_attr``),
+    so inherited Meta attributes count -- the ``FilterSetMetaclass`` contract:
+    a ``__dict__`` read would promote ``filter_fields`` onto a subclass Meta
+    that inherits ``fields``.
     Write-back is ``promote_set_meta_fields`` (class Meta copies onto
     ``.fields`` and leaves the consumer alias in place). Expansion reads
     ``read_set_meta_fields`` (resolve + plain text + canonicalize, no mutation).
     """
     if source is None:
         return None, False
-    if hasattr(source, "fields"):
-        # ``hasattr`` answered just above; the checker does not narrow on it.
-        return cast("_WritableSetMeta", source).fields, False
-    if fields_alias is not None and hasattr(source, fields_alias):
-        return getattr(source, fields_alias), True
+    fields = truth.static_attr(source, "fields", _META_ABSENT)
+    if fields is not _META_ABSENT:
+        return fields, False
+    if fields_alias is not None:
+        alias_fields = truth.static_attr(source, fields_alias, _META_ABSENT)
+        if alias_fields is not _META_ABSENT:
+            return alias_fields, True
     return None, False
 
 
 def canonicalize_set_meta_fields(fields: object) -> object:
     """Return unordered ``Meta.fields`` shapes in a process-stable order.
 
-    ``set`` / ``frozenset`` become ``repr``-sorted lists so class-Meta expansion
-    is identical across ``PYTHONHASHSEED``. Dict-shaped lookup
+    ``set`` / ``frozenset`` become lists sorted by the canonical key so
+    class-Meta expansion is identical across ``PYTHONHASHSEED``. Dict-shaped
+    lookup
     bags keep key insertion order and sort set-valued lookup lists. Ordered
-    ``list`` / ``tuple`` and scalar ``"__all__"`` pass through unchanged, and so
-    does a value whose ``__class__`` cannot be read, which the re-readable gate
-    then rejects.
+    ``list`` / ``tuple`` and scalar ``"__all__"`` pass through unchanged. Each
+    shape is decided by the value's real class; any other value passes through
+    to the family's typed declaration gate.
     """
-    if _safe_predicate(is_set_or_frozenset, fields):
+    if _is_one_of(fields, _UNORDERED_TYPES):
         return _sorted_meta_values(fields)
-    if _safe_predicate(is_dict, fields):
-        # The guarded test answered ``True`` just above; the checker does not narrow through it.
+    if truth.is_instance(fields, dict):
         return {
-            key: (
-                _sorted_meta_values(value)
-                if _safe_predicate(is_set_or_frozenset, value)
-                else value
-            )
-            for key, value in dict_items(cast("dict[object, object]", fields))
+            key: (_sorted_meta_values(value) if _is_one_of(value, _UNORDERED_TYPES) else value)
+            for key, value in base_container_values(fields)
         }
     return fields
 
 
-def _is_member_container(value: object) -> bool:
-    """Return whether ``value`` is a ``list`` / ``tuple`` / ``set`` / ``frozenset`` (subclasses included)."""
-    return is_list(value) or is_tuple(value) or is_set_or_frozenset(value)
-
-
-def _lazy_target(value: object) -> object:
-    """Return the object a Django ``LazyObject`` proxy (a ``SimpleLazyObject``) stands for.
-
-    Any other value comes back unchanged, and a proxy whose target is itself a
-    proxy is followed to the first object that is not one. The test reads the
-    real type, which the proxy cannot answer for (it forwards ``__class__``), and
-    each target is set up once the way Django sets it up on first use. A proxy
-    passes every ``isinstance`` test its target passes, yet a base slot
-    (``list.__iter__``, ``dict.items``) refuses it, so a reader that branches on
-    the container kind and then reads through the base slot reads the target
-    instead.
-    """
-    while issubclass(type(value), LazyObject):
-        # ``_wrapped`` / ``_setup`` are Django's own unwrap protocol (``empty`` until first use).
-        if read_attr(value, "_wrapped") is empty:
-            _ = call_method(value, "_setup")
-        value = read_attr(value, "_wrapped")
-    return value
+# The builtin containers whose members ``plain_set_meta_fields`` rebuilds as the same kind.
+_MEMBER_CONTAINER_TYPES = (
+    list,
+    tuple,
+    set,
+    frozenset,
+)
 
 
 def _plain_name(value: object) -> object:
     """Return a ``str`` subclass as the plain base ``str`` it spells; any other value unchanged.
 
-    Both tests read the real type (``type`` / ``utils/_narrowing.py::is_str``), so an
+    Both tests read the real class (``truth.is_exact`` / ``truth.is_instance``), so an
     exact ``str`` comes back as the same object and no consumer dunder runs.
     """
-    if type(value) is str or not is_str(value):
+    if truth.is_exact(value, str) or not truth.is_instance(value, str):
         return value
-    return str.__str__(value)
+    return truth.text(value)
 
 
 @final
@@ -704,12 +676,12 @@ def plain_set_meta_fields(fields: object) -> object:
 
     A lazy declaration (a ``SimpleLazyObject`` around any of these shapes, at the
     top or as a lookup list) is read as the object it stands for
-    (``_lazy_target``) and comes back as that object or its plain copy, so every
+    (``utils/lazy.py::unwrap_lazy_object``) and comes back as that object or its plain copy, so every
     later reader sees the real container kind.
     """
-    fields = _lazy_target(fields)
-    if _safe_predicate(is_dict, fields):
-        pairs = base_container_values(cast("dict[object, object]", fields))
+    fields = unwrap_lazy_object(fields)
+    if truth.is_instance(fields, dict):
+        pairs = base_container_values(fields)
         plain_pairs = tuple(
             (_plain_name(key), plain_set_meta_fields(lookups)) for key, lookups in pairs
         )
@@ -720,17 +692,17 @@ def plain_set_meta_fields(fields: object) -> object:
         ):
             return fields
         return dict(plain_pairs)
-    if _safe_predicate(_is_member_container, fields):
+    if _is_one_of(fields, _MEMBER_CONTAINER_TYPES):
         members = base_container_values(fields)
         plain = tuple(_plain_name(member) for member in members)
         if _unchanged(members, plain):
             return fields
-        if _safe_predicate(is_frozenset, fields):
+        if truth.is_instance(fields, frozenset):
             return frozenset(plain)
-        if _safe_predicate(is_set, fields):
+        if truth.is_instance(fields, set):
             return set(plain)
-        return plain if _safe_predicate(is_tuple, fields) else list(plain)
-    if not is_str(fields) and _safe_predicate(isinstance, fields, Collection):
+        return plain if truth.is_instance(fields, tuple) else list(plain)
+    if not truth.is_instance(fields, str) and issubclass(truth.class_of(fields), Collection):
         members = tuple(cast("Collection[object]", fields))
         plain = tuple(_plain_name(member) for member in members)
         return fields if _unchanged(members, plain) else _PlainNames(plain)
@@ -851,8 +823,7 @@ def pascalize_token(name: str) -> str:
 
     Promoted here from ``mutations/inputs.py`` (spec-039 kept it sited there at
     two consumers; at three - model + form + serializer - it graduates to the shared
-    input-name machinery, kept visibly distinct from ``pascal_case``). The old
-    ``mutations/inputs.py::_pascalize_token`` name remains as an import alias.
+    input-name machinery, kept visibly distinct from ``pascal_case``).
     """
     if not name:
         return ""
@@ -970,44 +941,49 @@ def normalize_field_name_sequence(
     masking a malformed declaration), failing loud naming the repeated field(s).
     ``label`` names which key (``fields`` / ``exclude``) is at fault; ``flavor``
     names the mutation base(s) in the message (e.g. ``"DjangoMutation"`` or
-    ``"DjangoFormMutation / DjangoModelFormMutation"``). A value whose ``__class__``
-    cannot be read is neither a string nor a set, so it meets the readable-sequence
-    rejection; an entry is a name only if its real type is a string.
+    ``"DjangoFormMutation / DjangoModelFormMutation"``).
+
+    Strings, unordered containers and string entries are recognised by their
+    real class; a value ``list()`` cannot iterate (its ``TypeError``) takes the
+    readable-sequence rejection. A lazy whole value is judged as the object it
+    stands for (``utils/lazy.py::unwrap_lazy_object``), so a lazy string is the
+    bare-string refusal and a lazy list the list, never one name per character.
     """
+    value = unwrap_lazy_object(value)
     if value is None:
         return None
-    if _safe_predicate(isinstance, value, str):
+    if truth.is_instance(value, str):
         raise ConfigurationError(
             f"{flavor} Meta.fields / Meta.exclude must be a sequence of field "
-            f"names, not a bare string: {_safe_arg_repr(value)}.",
+            f"names, not a bare string: {truth.render(value)}.",
         )
-    if _safe_predicate(is_set_or_frozenset, value):
+    if _is_one_of(value, _UNORDERED_TYPES):
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be an ordered sequence of field name "
-            f"strings (a list or tuple), not an unordered {type(value).__name__}: "
-            f"{_safe_arg_repr(value)}. A set's iteration order varies between "
+            f"strings (a list or tuple), not an unordered {truth.kind(value)}: "
+            f"{truth.render(value)}. A set's iteration order varies between "
             "processes, which would make the generated input type names and SDL "
             "field order nondeterministic.",
         )
     try:
         entries = list_of(value)
-    except BaseException as exc:
+    except TypeError as exc:
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be a readable sequence of field name strings; "
-            f"got {_safe_type_name(value)}.",
+            f"got {truth.kind(value)}.",
         ) from exc
     names: list[str] = []
     non_strings: list[object] = []
     for name in entries:
-        if is_str(name):
-            names.append(str.__str__(name) if type(name) is not str else name)
+        if truth.is_instance(name, str):
+            names.append(truth.text(name))
         else:
             non_strings.append(name)
     if non_strings:
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be a sequence of field name strings; "
             "got non-string entry(ies): "
-            f"[{', '.join(_safe_arg_repr(name) for name in non_strings)}].",
+            f"[{', '.join(truth.render(name) for name in non_strings)}].",
         )
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     if duplicates:
@@ -1217,12 +1193,7 @@ def build_strawberry_input_class(
     annotations: dict[str, object] = {}
     namespace: dict[str, object] = {"__annotations__": annotations}
     seen_graphql_names: dict[object, str] = {}
-    try:
-        specs = tuple(field_specs)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Generated input {name!r} field specifications could not be read.",
-        ) from exc
+    specs = tuple(field_specs)
     if not specs and empty_message is not None:
         # The zero-field guard belongs at the CONSTRUCTION site, not only at the
         # callers: Strawberry rejects an empty input object at ``Schema(...)``
@@ -1239,22 +1210,22 @@ def build_strawberry_input_class(
     for index, field_spec in enumerate(specs):
         try:
             python_attr, annotation, raw_kwargs = field_spec
-        except BaseException as exc:
+        except (TypeError, ValueError) as exc:
             raise ConfigurationError(
                 "Generated input field specifications must contain "
                 f"(python_attr, annotation, field_kwargs) triples; entry {index} is "
-                f"{_safe_type_name(field_spec)}.",
+                f"{truth.kind(field_spec)}.",
             ) from exc
         try:
             kwargs: dict[str, object] = (
                 dict(dict_items(raw_kwargs))
-                if isinstance(raw_kwargs, dict)
+                if truth.is_mapping_dict(raw_kwargs)
                 else ({} if raw_kwargs is None else dict(raw_kwargs))
             )
-        except BaseException as exc:
+        except (TypeError, ValueError) as exc:
             raise ConfigurationError(
                 "Generated input field kwargs must be a mapping; "
-                f"entry {index} contains {_safe_type_name(raw_kwargs)}.",
+                f"entry {index} contains {truth.kind(raw_kwargs)}.",
             ) from exc
         if python_attr in annotations:
             raise ConfigurationError(
@@ -1263,13 +1234,13 @@ def build_strawberry_input_class(
             )
         requested_name = kwargs.get("name")
         field_description = kwargs.pop("description", None)
-        if (requested_name is not None and not isinstance(requested_name, str)) or (
-            field_description is not None and not isinstance(field_description, str)
+        if (requested_name is not None and not truth.is_instance(requested_name, str)) or (
+            field_description is not None and not truth.is_instance(field_description, str)
         ):
             raise ConfigurationError(
                 f"Generated input {name!r} field {python_attr!r} takes a string name and "
-                f"description; got {_safe_type_name(requested_name)} and "
-                f"{_safe_type_name(field_description)}.",
+                f"description; got {truth.kind(requested_name)} and "
+                f"{truth.kind(field_description)}.",
             )
         graphql_name = (
             requested_name if requested_name is not None else graphql_camel_name(python_attr)
@@ -1360,7 +1331,7 @@ def duplicate_name_message(
     The one skeleton behind every generated-input name collision: ``{name!r} is
     {verb} by two distinct {family_label} classes: A vs B. Rename one
     {rename_noun} so its class-derived input type name is unique.`` - with the
-    two ``__module__``.``__qualname__`` interpolations spelled once. The pinned
+    two ``truth.label`` (``module.qualname``) interpolations spelled once. The pinned
     per-site wording stays byte-stable via the threaded nouns
     (``materialize_generated_input_class`` passes ``verb="materialized"`` +
     ``family_label="<family> input"``; ``GeneratedInputArgumentsFactory``
@@ -1369,8 +1340,8 @@ def duplicate_name_message(
     """
     return (
         f"{name!r} is {verb} by two distinct {family_label} classes: "
-        f"{existing.__module__}.{existing.__qualname__} vs "
-        f"{claimant.__module__}.{claimant.__qualname__}. Rename one {rename_noun} "
+        f"{truth.label(existing)} vs "
+        f"{truth.label(claimant)}. Rename one {rename_noun} "
         "so its class-derived input type name is unique."
     )
 
@@ -1482,40 +1453,38 @@ def build_lazy_input_annotation(
     literal outside the call) so the ForwardRef wrapping holds.
 
     ``TypeError`` for ANY other argument, including one whose ``__class__`` raises or
-    claims a class it is not and one whose ``repr`` raises; a lazy proxy of a set class is
-    judged by the class it proxies.
+    claims a class it is not (the test reads the real class, ``truth.is_subclass``); a
+    lazy proxy of a set class is judged, and recorded, as the class it proxies
+    (``utils/lazy.py::unwrap_lazy_object``).
     """
-    # ``set_class`` is only read as a class once the guarded ``isinstance`` below answers ``True``.
-    set_type = cast("type[_FactorySetT]", set_class)
-    if not (
-        _safe_predicate(isinstance, set_class, type)
-        and _safe_predicate(issubclass, set_type, expected_base)
-    ):
+    set_class = unwrap_lazy_object(set_class)
+    if not truth.is_subclass(set_class, expected_base):
         raise TypeError(
-            f"{helper_spelling} requires {expected_label} subclass; got {_safe_arg_repr(set_class)}",
+            f"{helper_spelling} requires {expected_label} subclass; got {truth.render(set_class)}",
         )
-    ledger.add(set_type)
-    return Annotated[input_type_name_for(set_type), strawberry.lazy(module_path)]
+    ledger.add(set_class)
+    return Annotated[input_type_name_for(set_class), strawberry.lazy(module_path)]
 
 
 def iter_set_subclasses(root: type[_SetT]) -> list[type[_SetT]]:
     """Return every concrete subclass of ``root`` (depth-first, dedup by identity).
 
-    Uses ``type.__subclasses__()`` which only yields LIVE subclasses;
+    Uses ``type.__subclasses__`` (the base slot, so a metaclass override never
+    runs; dedup by ``id``) which only yields LIVE subclasses;
     garbage-collected definitions silently drop. That is the correct contract
     for a test-isolation clear -- a definition that has already been collected
     has no binding state to reset.
     """
-    seen: set[type[_SetT]] = set()
+    seen: set[int] = set()
     result: list[type[_SetT]] = []
-    stack: list[type[_SetT]] = list(root.__subclasses__())
+    stack = list(type.__subclasses__(root))  # truth: ok base type slot, no dispatch
     while stack:
         cls = stack.pop()
-        if cls in seen:
+        if id(cls) in seen:
             continue
-        seen.add(cls)
+        seen.add(id(cls))
         result.append(cls)
-        stack.extend(cls.__subclasses__())
+        stack.extend(type.__subclasses__(cls))  # truth: ok base type slot, no dispatch
     return result
 
 
@@ -1602,10 +1571,10 @@ def clear_generated_input_namespace(
             # ``delattr`` on the subclass so an inherited default (the set
             # base's ``_owner_definition = None``) is restored rather than
             # masked. Each attribute is removed only when set directly on the
-            # subclass (``in subclass.__dict__``) so a subclass that never had
+            # subclass (its own real namespace) so a subclass that never had
             # a binding tolerates the clear.
             for attr in binding_attrs:
-                if attr in subclass.__dict__:
+                if attr in truth.class_dict(subclass):
                     delattr(subclass, attr)
 
 
@@ -1665,14 +1634,15 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
         # factory -- reject it (its caches would be the family's, not its own).
         # Identity scan, not ``not in``: ``tuple.__contains__`` over the bases would
         # dispatch a consumer metaclass ``__eq__`` on a mixin listed before the factory.
-        if not any(base is GeneratedInputArgumentsFactory for base in cls.__bases__):
-            parent = cls.__bases__[0]
+        bases = truth.bases(cls)
+        if not any(base is GeneratedInputArgumentsFactory for base in bases):
+            parent = bases[0]
             raise TypeError(
-                f"{parent.__name__} does not support subclassing "
-                f"(attempted by {cls.__name__!r}): its class-level caches are shared "
-                "mutable dicts a subclass would inherit rather than isolate, silently "
-                "cross-contaminating builds. Extend it by composition (wrap an "
-                "instance), not inheritance.",
+                f"{truth.name(parent)} does not support subclassing "
+                f"(attempted by {truth.render(truth.name(cls))}): its class-level "
+                "caches are shared mutable dicts a subclass would inherit rather than "
+                "isolate, silently cross-contaminating builds. Extend it by composition "
+                "(wrap an instance), not inheritance.",
             )
 
     def __init__(self, set_class: type[_FactorySetT]) -> None:
@@ -1708,12 +1678,12 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
         Collision detection raises when two distinct sets claim the same name.
         """
         pending: list[type[_FactorySetT]] = [self.set_class]
-        seen: set[type[_FactorySetT]] = set()
+        seen: set[int] = set()
         while pending:
             set_cls = pending.pop(0)
-            if set_cls in seen:
+            if id(set_cls) in seen:
                 continue
-            seen.add(set_cls)
+            seen.add(id(set_cls))
 
             target_name = set_input_type_name(set_cls)
             existing_owner = self._collision_registry.get(target_name)
@@ -1735,7 +1705,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
             if target_name not in self.input_object_types:
                 self._build_class_type(set_cls)
 
-            related_map: object = getattr(set_cls, self._related_attr, {}) or {}
+            related_map: object = truth.static_attr(set_cls, self._related_attr, {}) or {}
             if is_mapping(related_map):
                 for related in related_map.values():
                     # A related declaration's target property admits only ``None`` or the
@@ -1746,13 +1716,17 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
                         None,
                     )
                     # ``Related*(None, ...)`` placeholder -- skip silently.
-                    if target is not None and target not in seen:
+                    if target is not None and id(target) not in seen:
                         pending.append(target)
 
     def _build_class_type(self, set_cls: type[_FactorySetT]) -> None:
         """Build the root input class for ``set_cls`` and stash it in the cache."""
         type_name = set_input_type_name(set_cls)
-        owner_definition = getattr(set_cls, "_owner_definition", None)
+        # ``_owner_definition`` is the finalizer-bound ``DjangoTypeDefinition`` slot.
+        owner_definition = cast(
+            "DjangoTypeDefinition | None",
+            truth.static_attr(set_cls, "_owner_definition", None),
+        )
         triples = self._build_input_triples(set_cls, type_name, owner_definition)
         # A set whose Layer-4 expansion is empty -- an ``OrderSet`` with an empty /
         # omitted ``Meta.fields`` and no active ``RelatedOrder``, or a related
@@ -1769,7 +1743,8 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
             type_name,
             triples,
             empty_message=(
-                f"{self._factory_label}: {self._family_label} {set_cls.__qualname__} "
+                f"{self._factory_label}: {self._family_label} "
+                f"{truth.qualname(set_cls)} "
                 f"generates the GraphQL input type {type_name!r} with no fields. "
                 "Strawberry rejects a zero-field input object at schema build "
                 f"('Input Object type {type_name} must define one or more fields'). "

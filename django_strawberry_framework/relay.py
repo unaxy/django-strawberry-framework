@@ -67,9 +67,11 @@ from .list_field import _validate_relay_djangotype_target
 from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
 from .types.relay import _NODE_TYPE_HINT_ATTR, decode_global_id, published_node_type_name
+from .utils import truth
 from .utils.directives import validated_field_directives
 from .utils.errors import GLOBALID_INVALID_ERROR_CODE, coded_error_extensions
 from .utils.execution_mode import async_execution
+from .utils.lazy import unwrap_lazy_object
 from .utils.querysets import (
     base_queryset,
     coerce_field_value_or_none,
@@ -155,17 +157,23 @@ def _decode_or_graphql_error(
 def _node_id_slot(
     resolved_type: type[_RelayDjangoType],
 ) -> tuple[str, ModelField | None]:
-    """Resolve a Relay type's id slot to ``(id_attr, concrete field or None)``.
+    """Resolve a Relay type's id slot to ``(id_attr, get_field result or None)``.
 
-    The single statement of "which concrete model column backs the GlobalID id
-    slot" shared by the READ coercer (``_coerce_pk_or_none``, which needs the
-    field to coerce against) and the WRITE pk-mapper (``_resolve_real_pk``,
-    which needs the attr name to filter on plus its concreteness):
+    The single statement of "which model attribute backs the GlobalID id slot"
+    shared by the READ coercer (``_coerce_pk_or_none``, which needs the field to
+    coerce against), the WRITE pk-mapper (``_resolve_real_pk``, which needs the
+    attr name to filter on plus its concreteness), and the batched set mapper
+    (``_resolve_real_pks_batched``, which reuses these same precomputed slots):
     ``resolved_type.resolve_id_attr()`` names the slot - the literal ``"pk"``
     maps to ``model._meta.pk``, any other value resolves through
-    ``model._meta.get_field`` - and a consumer ``relay.NodeID[...]`` over a
-    NON-concrete attr yields ``None`` (no column to coerce or filter on; both
-    consumers fall through with the raw literal, the pre-032 behavior).
+    ``model._meta.get_field`` - and the three non-concrete shapes each take
+    their own path: a name that is no model field at all
+    (``FieldDoesNotExist``) yields ``None`` (no column to coerce or filter on;
+    all consumers fall through with the raw literal, the pre-032 behavior); a
+    reverse relation yields its ``Rel`` object, which the coercer maps to
+    ``None`` (read: ``null`` with no query; write: ``UNCOERCIBLE_PK``); a
+    non-concrete forward field (e.g. ``GenericForeignKey``) yields the field
+    object and the raw literal flows onward to the filter.
     """
     id_attr = resolved_type.resolve_id_attr()
     model = model_for(resolved_type)
@@ -177,7 +185,12 @@ def _node_id_slot(
         return id_attr, None
 
 
-def _coerce_pk_or_none(resolved_type: type[_RelayDjangoType], node_id: object) -> object:
+def _coerce_pk_or_none(
+    resolved_type: type[_RelayDjangoType],
+    node_id: object,
+    *,
+    slot: tuple[str, ModelField | None] | None = None,
+) -> object:
     """Coerce ``node_id`` to the resolution field's Python type; ``None`` if uncoercible.
 
     ``decode_global_id`` validates payload SHAPE only, so a well-formed
@@ -203,11 +216,14 @@ def _coerce_pk_or_none(resolved_type: type[_RelayDjangoType], node_id: object) -
     with no single-column ``to_python``). Coercing against ``_meta.pk`` there
     would mis-type the value (``"007"`` -> ``7`` -> filters ``code=7``
     !=``"007"``) or spuriously reject an existing row. The slot-to-field
-    mapping (including a NodeID attr that is not a concrete model field, which
+    mapping (including a NodeID attr naming no model field at all, which
     skips coercion and passes the raw string) is the shared
-    ``_node_id_slot`` rule.
+    ``_node_id_slot`` rule. ``slot`` threads one precomputed rule value through
+    the per-type call paths (the batch loop, the write decode) so the slot is
+    computed once per type instead of once per id; when omitted the slot is
+    resolved here.
     """
-    field = _node_id_slot(resolved_type)[1]
+    field = slot[1] if slot is not None else _node_id_slot(resolved_type)[1]
     if field is None:
         return node_id
     return coerce_field_value_or_none(field, node_id)
@@ -286,6 +302,7 @@ def _resolve_real_pk(
     coerced_id: object,
     *,
     using: str | None = None,
+    slot: tuple[str, ModelField | None] | None = None,
 ) -> object:
     """Map a coerced NodeID-attr value to the model's real primary key.
 
@@ -312,11 +329,14 @@ def _resolve_real_pk(
     transaction alias; when omitted, an active mutation write pipeline supplies its
     pinned alias, while standalone decode callers retain the default-manager behavior.
     The default (``id_attr == "pk"``: the coerced value
-    already IS the pk) and a NodeID over a non-concrete attr (no column to
+    already IS the pk) and a NodeID naming no model field at all (no column to
     filter - the ``_node_id_slot`` fall-through ``_coerce_pk_or_none`` shares)
-    both return the value unchanged with no query.
+    both return the value unchanged with no query. ``slot`` threads the
+    write decode's precomputed ``_node_id_slot`` value through so the slot is
+    computed once per decode instead of twice; when omitted the slot is
+    resolved here.
     """
-    id_attr, field = _node_id_slot(resolved_type)
+    id_attr, field = slot if slot is not None else _node_id_slot(resolved_type)
     if id_attr == "pk" or field is None:
         return coerced_id
     if using is None:
@@ -326,7 +346,6 @@ def _resolve_real_pk(
         # NodeID -> real-pk lookup cannot fall back to the router's default read
         # database. Standalone callers have no pipeline and keep the historical
         # default-manager behavior.
-
         pipeline = current_write_pipeline()
         using = None if pipeline is None else pipeline.alias
     return (
@@ -335,6 +354,102 @@ def _resolve_real_pk(
         .values_list("pk", flat=True)
         .first()
     )
+
+
+def _decode_and_coerce(
+    value: object,
+    expected_model: type[models.Model],
+    slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]],
+    *,
+    schema: Schema | None = None,
+) -> DecodeResult:
+    """Decode + model-check + coerce a typed ``GlobalID`` WITHOUT the real-pk lookup.
+
+    The query-free half of ``decode_model_global_id`` shared by the single-id
+    primitive and the batched set decode
+    (``utils/write_values.py::decode_visible_relation_ids``): decode the value
+    via ``decode_global_id`` (shape-only, under ``schema``, the executing
+    schema whose published type names a ``type``-strategy slot carries), verify the resolved type's model
+    **is** ``expected_model``, and coerce ``node_id`` through the resolved
+    type's id field via ``_coerce_pk_or_none`` (the SAME coercer the node field
+    uses, so an uncoercible literal never reaches the ORM as a raw
+    ``ValueError``).
+
+    Returns a :class:`DecodeResult` whose ``pk`` is the COERCED id-attr value -
+    NOT yet the real primary key - when ``status is GlobalIDDecode.OK`` (the
+    caller maps it through ``_resolve_real_pk`` / ``_resolve_real_pks_batched``,
+    where a value matching no row becomes ``UNCOERCIBLE_PK``); every other
+    status is final. ``slots`` memoizes the ``_node_id_slot`` rule value per
+    type across the set so the slot is computed once per type instead of once
+    per id (the single-id primitive passes a fresh dict per call).
+    """
+    try:
+        resolved_type, node_id = decode_global_id(value, schema=schema)
+    except Exception:  # noqa: BLE001 - consumer code may raise anything
+        return DecodeResult(GlobalIDDecode.DECODE_FAILED, None, None)
+    if model_for(resolved_type) is not expected_model:
+        return DecodeResult(GlobalIDDecode.WRONG_MODEL, None, resolved_type)
+    slot = slots.get(resolved_type)
+    if slot is None:
+        slot = _node_id_slot(resolved_type)
+        slots[resolved_type] = slot
+    pk = _coerce_pk_or_none(resolved_type, node_id, slot=slot)
+    if pk is None:
+        return DecodeResult(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
+    return DecodeResult(GlobalIDDecode.OK, pk, resolved_type)
+
+
+def _resolve_real_pks_batched(
+    pending: list[tuple[type[_RelayDjangoType], object]],
+    slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]],
+    *,
+    using: str | None = None,
+) -> list[object]:
+    """Map coerced NodeID-attr values to real pks with one query per ``(type, id_attr)``.
+
+    The batched sibling of ``_resolve_real_pk`` composing the set decode's
+    mapping step: ``pending`` carries one ``(resolved_type, coerced)`` pair per
+    ``_decode_and_coerce``-``OK`` member, ``slots`` the same memoized
+    ``_node_id_slot`` values the decode half used. The default (``id_attr ==
+    "pk"``) and non-field (no column) shapes pass through with no query, exactly
+    like the single primitive; every other group resolves in ONE
+    ``id_attr__in`` query whose first match per value wins (the single
+    primitive's ``.first()`` semantics). A value matching no row maps to
+    ``None``, which the caller reports as the SAME ``UNCOERCIBLE_PK``
+    not-found surface the single primitive yields; visibility is enforced
+    downstream as there (no existence leak). ``using`` pins the mapping queries
+    to a caller-owned transaction alias, recovered from the active mutation
+    write pipeline when omitted, exactly like the single primitive.
+    """
+    results: list[object] = [None] * len(pending)
+    groups: dict[tuple[type[_RelayDjangoType], str], list[int]] = {}
+    for index, (resolved_type, _coerced) in enumerate(pending):
+        id_attr, field = slots[resolved_type]
+        if id_attr == "pk" or field is None:
+            results[index] = pending[index][1]
+            continue
+        groups.setdefault((resolved_type, id_attr), []).append(index)
+    if not groups:
+        return results
+    if using is None:
+        pipeline = current_write_pipeline()
+        using = None if pipeline is None else pipeline.alias
+    for (resolved_type, id_attr), indices in groups.items():
+        # The default manager itself, or the queryset its ``using()`` pins to ``using``.
+        manager: models.Manager[models.Model] | models.QuerySet[models.Model]
+        manager = model_for(resolved_type)._default_manager
+        if using is not None:
+            manager = manager.using(using)
+        pairs: list[tuple[object, object]] = list(
+            manager.filter(**{f"{id_attr}__in": [pending[i][1] for i in indices]}).values_list(
+                id_attr,
+                "pk",
+            ),
+        )
+        for i in indices:
+            wanted = pending[i][1]
+            results[i] = next((pk for attr, pk in pairs if attr == wanted), None)
+    return results
 
 
 def decode_model_global_id(
@@ -346,17 +461,22 @@ def decode_model_global_id(
 ) -> DecodeResult:
     """Decode a typed ``GlobalID`` against ``expected_model``, non-raising.
 
-    The single source of the mutation typed-id contract the root ``id:`` decode
-    (``coerce_lookup_id``) and the relation ``<field>_id`` decode
-    (``_decode_relation_id_set``) both consume: decode the value via
-    ``decode_global_id`` (shape-only, under ``schema`` - the executing schema
-    whose published type names a ``type``-strategy slot carries; every write
-    path threads it from its resolver ``info``), verify the resolved type's model **is**
-    ``expected_model``, and coerce ``node_id`` through the resolved type's id field
-    via ``_coerce_pk_or_none`` (the SAME coercer the node field uses, so an
-    uncoercible literal never reaches the ORM as a raw ``ValueError``). The
+    The single-id entry of the mutation typed-id contract the root ``id:``
+    decode (``mutations/resolvers.py::coerce_lookup_id``) and the relation
+    ``<field>_id`` single decode
+    (``utils/write_values.py::type_check_relation_id``) both consume; the
+    batched set decode (``utils/write_values.py::decode_visible_relation_ids``)
+    shares the decode/coerce half (``_decode_and_coerce``) with the batched pk
+    mapping beside it: decode the value via ``decode_global_id`` (shape-only,
+    under ``schema`` - the executing schema whose published type names a
+    ``type``-strategy slot carries; every write path threads it from its
+    resolver ``info``), verify the resolved type's model **is**
+    ``expected_model``, and coerce ``node_id`` through the resolved type's id
+    field via ``_coerce_pk_or_none`` (the SAME coercer the node field uses, so
+    an uncoercible literal never reaches the ORM as a raw ``ValueError``). The
     coerced value is then mapped to the model's real primary key via
-    ``_resolve_real_pk`` (pinned to ``using`` when supplied): unlike the READ node field - which filters
+    ``_resolve_real_pk`` (pinned to ``using`` when supplied): unlike the READ
+    node field - which filters
     ``{id_attr: value}`` and never needs the pk - every WRITE consumer here uses the
     result as an actual pk (``get(pk=...)`` / ``pk__in`` / FK-M2M assignment), so a
     consumer ``id: relay.NodeID[...]`` over a non-pk column must be resolved to the
@@ -364,17 +484,20 @@ def decode_model_global_id(
     whose :class:`GlobalIDDecode` status the caller maps to its own error surface
     (this helper never raises a ``GraphQLError`` - the node-field raising behavior
     stays in the node field).
+
+    Reconsideration triggers (Family ``typed-globalid-decode``): a write ``id``
+    decode bypassing this primitive (T-pipeline), a fifth ``GlobalIDDecode``
+    status (T-status: both status mappers add arms), or a new GlobalID wire
+    shape (T-shape: ``decode_global_id`` owns the parse).
     """
-    try:
-        resolved_type, node_id = decode_global_id(value, schema=schema)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        return DecodeResult(GlobalIDDecode.DECODE_FAILED, None, None)
-    if model_for(resolved_type) is not expected_model:
-        return DecodeResult(GlobalIDDecode.WRONG_MODEL, None, resolved_type)
-    pk = _coerce_pk_or_none(resolved_type, node_id)
-    if pk is None:
-        return DecodeResult(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
-    real_pk = _resolve_real_pk(resolved_type, pk, using=using)
+    slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]] = {}
+    intermediate = _decode_and_coerce(value, expected_model, slots=slots, schema=schema)
+    if intermediate.status is not GlobalIDDecode.OK:
+        return intermediate
+    # An ``OK`` result always carries the decoded type (``_decode_and_coerce``).
+    resolved_type = cast("type[_RelayDjangoType]", intermediate.resolved_type)
+    slot = slots[resolved_type]
+    real_pk = _resolve_real_pk(resolved_type, intermediate.pk, using=using, slot=slot)
     if real_pk is None:
         return DecodeResult(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
     return DecodeResult(GlobalIDDecode.OK, real_pk, resolved_type)
@@ -423,8 +546,11 @@ def _interleave(
 
 
 def _has_len(rows: Iterable[object]) -> TypeIs[_SizedRows]:
-    """Return whether a ``resolve_nodes`` row iterable answers ``len()``."""
-    return hasattr(rows, "__len__")
+    """Return whether a ``resolve_nodes`` row iterable answers ``len()``.
+
+    Asked of the row iterable's real class, so an instance ``__getattr__`` never runs.
+    """
+    return truth.own_attr(type(rows), "__len__") is not None
 
 
 def _check_nodes_result(
@@ -452,7 +578,7 @@ def _check_nodes_result(
         result = list(result)
     if len(result) != len(node_ids):
         raise ConfigurationError(
-            f"{resolved_type.__name__}.resolve_nodes returned {len(result)} row(s) for "
+            f"{truth.name(resolved_type)}.resolve_nodes returned {len(result)} row(s) for "
             f"{len(node_ids)} requested id(s); a resolve_nodes override must return a list "
             "input-ordered and 1:1 with node_ids (None for missing) - the "
             "_resolve_nodes_default / _order_nodes shape.",
@@ -478,19 +604,20 @@ def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _No
     instances are shallow-copied before stamping so a consumer that reuses
     the same ORM object in another field or request cannot retain a routing
     hint for the earlier refetch. A consumer ``resolve_node(s)`` override
-    may return a non-model object that rejects copying or attribute writes
+    may return a non-model object that rejects attribute writes
     (``__slots__``); the stamp is best-effort there - such objects fall back
-    to the pre-032 isinstance behavior.
+    to the ``isinstance`` behavior. A Django lazy proxy (a ``resolve_node``
+    override returning ``request.user``) is unwrapped first, so the row it
+    stands for is the one copied and stamped, never the shared proxied object.
     """
     if node is None:
         return node
-    definition = getattr(resolved_type, "__django_strawberry_definition__", None)
+    # A lazy proxy stands in for the object it wraps, so the unwrapped row is still a ``_NodeT``.
+    node = cast("_NodeT", unwrap_lazy_object(node))
+    definition = truth.static_attr(resolved_type, "__django_strawberry_definition__", None)
     model = getattr(definition, "model", None)
-    if isinstance(model, type) and isinstance(node, model):
-        try:
-            node = copy.copy(node)
-        except (AttributeError, TypeError, copy.Error):
-            return node
+    if truth.is_type(model) and truth.is_instance(node, model):
+        node = copy.copy(node)
     with contextlib.suppress(AttributeError):
         setattr(node, _NODE_TYPE_HINT_ATTR, resolved_type)
     return node
@@ -543,11 +670,11 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
     """
     if target_type is not None:
         _validate_node_target(target_type, field="DjangoNodeField")
-    # Contain the directives forward BEFORE the declaration ledger is appended: a
+    # Validate the directives BEFORE the declaration ledger is appended: a
     # rejected construction must not leave a phantom entry behind the finalize-time
     # no-Node-types check. See ``utils/directives.py::validated_field_directives`` -
-    # Strawberry consumes the iterable lazily, so a bare string builds a field out of
-    # characters and a hostile iterator escapes raw at schema build / SDL render.
+    # Strawberry consumes the iterable lazily, so a bare string would build a field
+    # out of characters; the gate materializes it here, at the declaring line.
     directives = validated_field_directives("DjangoNodeField", directives)
     _node_fields_declared.append("DjangoNodeField")
 
@@ -560,7 +687,7 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
         # BEFORE the resolver runs, so malformed ids would never reach the package.
         id_: Annotated[strawberry.ID, strawberry.argument(name="id")],
     ) -> object:
-        # The cooperative deadline (spec-047) before the decode: a refetch is a
+        # The cooperative deadline (spec-047 Decision 9) before the decode: a refetch is a
         # visibility-scoped query, and the decode is the step that makes one
         # inevitable.
         check_deadline(info)
@@ -582,10 +709,10 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
         # Mode first: an async override called before a refusal leaves its coroutine unawaited.
         is_async = async_execution()
         result = resolved.resolve_node(node_id, info=info, required=False)
-        if not is_async:
+        if not is_async and inspect.isawaitable(result):
             result = reject_async_in_sync_context(
                 result,
-                owner=resolved.__name__,
+                owner=truth.name(resolved),
                 method="resolve_node",
                 context="Relay refetch",
                 recourse=_SYNC_RESOLVER_RECOURSE,
@@ -660,7 +787,7 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
     """
     if target_type is not None:
         _validate_node_target(target_type, field="DjangoNodesField")
-    # Same containment and same ordering rationale as ``DjangoNodeField``'s.
+    # Same validation and same ordering rationale as ``DjangoNodeField``'s.
     directives = validated_field_directives("DjangoNodesField", directives)
     _node_fields_declared.append("DjangoNodesField")
 
@@ -671,9 +798,9 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
         ids: list[strawberry.ID],
     ) -> object:
         if not ids:
-            # Zero database access (spec Edge cases).
+            # Zero database access (spec-032 Edge cases, the nodes(ids: []) rule).
             return []
-        # The cooperative deadline (spec-047), after the empty-list short
+        # The cooperative deadline (spec-047 Decision 9), after the empty-list short
         # circuit so a request that asks for nothing is never rejected for it,
         # and before the batch decode that leads to one query per decoded type.
         check_deadline(info)
@@ -691,8 +818,13 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
         # Iterable[str])``); the coercion only gates.
         groups: dict[type[_RelayDjangoType], list[str]] = {}
         positions: list[tuple[type[_RelayDjangoType], int] | None] = []
+        slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]] = {}
         for resolved, node_id in decoded:
-            if _coerce_pk_or_none(resolved, node_id) is None:
+            slot = slots.get(resolved)
+            if slot is None:
+                slot = _node_id_slot(resolved)
+                slots[resolved] = slot
+            if _coerce_pk_or_none(resolved, node_id, slot=slot) is None:
                 positions.append(None)
                 continue
             node_ids = groups.setdefault(resolved, [])
@@ -731,16 +863,18 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
         per_type: dict[type[_RelayDjangoType], list[object]] = {}
         for resolved_type, node_ids in groups.items():
             result = resolved_type.resolve_nodes(info=info, node_ids=node_ids, required=False)
-            result = reject_async_in_sync_context(
+            # The guard reads ``owner`` only to refuse an awaitable, so the name is built for
+            # that one value and the success path builds none.
+            rows = reject_async_in_sync_context(
                 result,
-                owner=resolved_type.__name__,
+                owner=truth.name(resolved_type) if inspect.isawaitable(result) else "",
                 method="resolve_nodes",
                 context="Relay refetch",
                 recourse=_SYNC_RESOLVER_RECOURSE,
             )
             per_type[resolved_type] = [
                 _stamp_node_type(resolved_type, node)
-                for node in _check_nodes_result(resolved_type, result, node_ids)
+                for node in _check_nodes_result(resolved_type, rows, node_ids)
             ]
         return _interleave(positions, per_type)
 

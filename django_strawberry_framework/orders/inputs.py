@@ -28,12 +28,9 @@ from typing import TYPE_CHECKING, cast
 import strawberry
 from django.db.models import F
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_str, list_of, read_attr, require
 from django_strawberry_framework.utils.input_values import RELATED, iter_active_fields
 from django_strawberry_framework.utils.inputs import (
@@ -57,9 +54,10 @@ if TYPE_CHECKING:
     from .sets import OrderSet
 
 # Domain-local aliases for the shared generated-input substrate (the mechanics
-# are single-sited in ``utils/inputs.py``). Tests and
-# ``factories.py`` import these spec-028 Decision 9 names from this module, so
-# they stay addressable here.
+# are single-sited in ``utils/inputs.py``). Tests import all five from this
+# module; ``orders/__init__.py`` takes ``_input_type_name_for``; ``FieldSpec``
+# and ``_input_type_name_for`` are also read intra-module -- so the names
+# stay addressable here.
 FieldSpec = GeneratedInputFieldSpec
 build_input_class = build_strawberry_input_class
 _camel_case = graphql_camel_name
@@ -182,12 +180,12 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     ``ForeignObject`` links, in model field order; it excludes reverse
     relations, M2M managers, ``GenericRelation`` and ``GenericForeignKey``.
     """
-    meta = read_attr(model, "_meta", None)
+    meta = truth.static_attr(model, "_meta", None)
     get_fields = read_attr(meta, "get_fields", None)
     if meta is None or not callable(get_fields):
         raise ConfigurationError(
             f"Expected a Django Model class with '_meta.get_fields()'; "
-            f"got {_safe_type_name(model)} ({_safe_arg_repr(model)}).",
+            f"got {truth.kind(model)} ({truth.render(model)}).",
         )
     return [
         require(read_attr(f, "name"), is_str)
@@ -291,9 +289,10 @@ def normalize_input_value(
 
     The function consumes the Strawberry input dataclass (post-
     deserialization, post-Strawberry-type-coercion) and produces a flat
-    ``[(field_path, Ordering | None), ...]`` list. ``None`` directions
-    are preserved -- the apply pipeline filters them in its
-    ``direction.resolve(...)`` comprehension. Per spec-028 Decision 13:
+    ``[(field_path, Ordering | None), ...]`` list. Per spec-028 Decision 5 (the
+    list-shaped argument), Decision 8 steps 6/7 (active-input-only scope,
+    the nested-``RelatedOrder`` walk, term-less pass-through), and Edge
+    cases (the null-direction no-op):
 
     - top-level ``list[<T>OrderInputType] | None`` -> recurse on each
       element and concatenate.
@@ -352,10 +351,10 @@ def normalize_input_value(
             # Leaf -- ``raw_value`` is an ``Ordering`` member (``None`` was
             # already skipped as inactive by the classifier).
             if not isinstance(field.raw_value, Ordering):
-                owner_name = getattr(orderset_cls, "__qualname__", _safe_arg_repr(orderset_cls))
+                owner_name = truth.qualname(orderset_cls)
                 raise ConfigurationError(
                     f"OrderSet {owner_name} received invalid order direction "
-                    f"{_safe_arg_repr(field.raw_value)} for field {field.python_attr!r}; "
+                    f"{truth.render(field.raw_value)} for field {field.python_attr!r}; "
                     f"expected an Ordering enum member.",
                 )
             result.append((field.spec.django_source_path, field.raw_value))

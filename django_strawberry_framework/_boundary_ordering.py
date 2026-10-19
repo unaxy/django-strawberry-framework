@@ -59,6 +59,8 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
+from .utils._narrowing import is_exact_pair, read_attr
+
 if TYPE_CHECKING:
     from django.http import HttpRequest
 
@@ -93,6 +95,40 @@ _BOUNDARY_PREPARED_VIEW = "graphql_request_body_boundary_prepared_view"
 #: module. A class carrying no callable of this name is not one whose boundary that
 #: middleware can run, whatever else it carries.
 _BOUNDARY_METHOD = "_enforce_request_boundary"
+
+
+def stamp_prepared_view(request: HttpRequest, mount: object, view: object) -> None:
+    """Stamp ``(mount token, prepared view instance)`` on the request.
+
+    The pack half of the prepared-view handoff. The caller holds the
+    ``mount is not None`` gate and calls this only past it: a callback
+    carrying no mount takes no stamp, and its request keeps the
+    view-local arrangement. The token itself is minted per mount by
+    ``views.py::_boundary_view``, never here.
+    :func:`consume_prepared_view` is the matching unpack half: exact
+    2-tuple, own-token match, consumed exactly once.
+    """
+    setattr(request, _BOUNDARY_PREPARED_VIEW, (mount, view))
+
+
+def consume_prepared_view(request: HttpRequest, mount: object) -> object | None:
+    """Consume the prepared view stamped for this mount, if it carries it.
+
+    The unpack half of the prepared-view handoff. The stamp is honored
+    only when it is an exact 2-tuple whose first slot is this mount's
+    own token, and it is deleted as it is read so no second callback
+    can inherit it. Anything else - no stamp, a malformed stamp, a
+    stamp for another mount - answers ``None``, and the caller
+    dispatches a fresh instance. The handoff is an optimization, so a
+    declined stamp degrades to the view-local arrangement, never to an
+    error.
+    """
+    prepared = read_attr(request, _BOUNDARY_PREPARED_VIEW, None)
+    if not is_exact_pair(prepared) or prepared[0] is not mount:
+        return None
+    delattr(request, _BOUNDARY_PREPARED_VIEW)
+    return prepared[1]
+
 
 #: The request the boundary middleware is currently handling, or ``None`` outside
 #: any such request - the one fact :class:`_CsrfOrderingExemption` needs that the

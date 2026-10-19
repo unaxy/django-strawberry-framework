@@ -4,8 +4,9 @@ Covers ``django_strawberry_framework/rest_framework/inputs.py`` (the generation
 substrate):
 
 - ``get_serializer_for_schema`` discovery from a no-arg ``serializer_class()`` +
-  ``.fields`` (the loud-rejection guard wraps the LAZY ``.fields`` read, proven by a
-  kwarg-requiring serializer AND a ``self.context``-reading ``get_fields()``);
+  ``.fields`` (a ``get_fields()`` reading a missing ``self.context`` key is a
+  ``ConfigurationError`` naming the override; a kwarg-requiring constructor and any
+  other ``get_fields()`` failure propagate as themselves);
 - the two generated inputs: ``<Serializer>Input`` (create; requiredness from
   ``field.required``) and ``<Serializer>PartialInput`` (every field optional);
 - ``read_only`` / ``HiddenField`` dropped, ``Meta.fields`` / ``Meta.exclude``
@@ -89,7 +90,7 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
 )
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_choices_to_enum
-from django_strawberry_framework.utils._narrowing import dict_of, require_instance
+from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import InputFieldSpec, normalize_field_name_sequence
 from tests._idioms import (
@@ -283,38 +284,59 @@ def test_get_serializer_for_schema_reads_fields() -> None:
     assert isinstance(discovered["name"], serializers.CharField)
 
 
-def test_kwarg_requiring_serializer_rejected_loudly() -> None:
-    """A serializer whose ``__init__`` requires a kwarg is rejected under default discovery."""
+def test_request_reading_get_fields_is_configuration_error_naming_the_override() -> None:
+    """A ``get_fields()`` reading ``self.context["request"]`` names the schema-time override.
 
-    class KwargSer(serializers.Serializer[object]):
-        email = serializers.EmailField()
-
-        def __init__(self, *, user: object) -> None:
-            super().__init__()
-            self.user = user
-
-    with pytest.raises(ConfigurationError, match="schema-time field set"):
-        get_serializer_for_schema(KwargSer)
-
-
-def test_context_reading_get_fields_rejected_at_fields_access() -> None:
-    """A serializer whose ``get_fields()`` reads ``self.context`` raises at ``.fields`` access.
-
-    Proves the guard wraps ``.fields`` materialization, not ``serializer_class()``:
-    construction succeeds (no kwargs), but ``.fields`` -> ``get_fields()`` reads
-    ``self.context`` which is unset under no-arg discovery, raising there.
+    Construction succeeds (no kwargs), but ``.fields`` -> ``get_fields()`` runs at
+    schema build, where no request exists and the context is empty, so the read
+    raises ``KeyError``. Discovery re-raises it as a ``ConfigurationError`` that
+    says what to change, chained to the original ``KeyError``.
     """
 
-    class CtxSer(serializers.Serializer[object]):
+    class RequestSer(serializers.Serializer[object]):
         @override
         def get_fields(self) -> dict[str, DRFField]:
-            _ = dict_of(self.context)["tenant"]  # raises at .fields access, not construction
+            _ = dict_of(self.context)["request"]  # raises at .fields access, not construction
             return {}
 
-    # Construction itself does NOT raise (proves the guard is not on the constructor).
-    CtxSer()
-    with pytest.raises(ConfigurationError, match="schema-time field set"):
-        get_serializer_for_schema(CtxSer)
+    RequestSer()
+    with pytest.raises(ConfigurationError) as excinfo:
+        get_serializer_for_schema(RequestSer)
+    assert str(excinfo.value) == (
+        "Could not materialize the schema-time field set for serializer 'RequestSer': "
+        "KeyError: 'request'. The default discovery constructs the serializer with no args "
+        "and reads `.fields` at schema build, where no request exists and the serializer "
+        "context is empty; a serializer whose get_fields() reads the request or other "
+        "context must override get_serializer_for_schema() to return a stable, "
+        "request-independent field map."
+    )
+    cause = excinfo.value.__cause__
+    assert type(cause) is KeyError
+    assert cause.args == ("request",)
+
+
+def test_non_key_error_from_get_fields_propagates_from_default_discovery() -> None:
+    """Any other ``get_fields()`` failure is the serializer's own and propagates as itself."""
+
+    class BrokenSer(serializers.Serializer[object]):
+        @override
+        def get_fields(self) -> NoReturn:
+            raise RuntimeError("get_fields exploded")
+
+    with pytest.raises(RuntimeError, match="get_fields exploded"):
+        get_serializer_for_schema(BrokenSer)
+
+
+def test_kwarg_requiring_constructor_error_propagates_from_default_discovery() -> None:
+    """A serializer whose constructor requires kwargs raises its own error at construction."""
+
+    class KwargSer(serializers.Serializer[object]):
+        def __init__(self, *, tenant: object) -> None:
+            super().__init__()
+            self.tenant = tenant
+
+    with pytest.raises(TypeError, match="tenant"):
+        get_serializer_for_schema(KwargSer)
 
 
 def test_schema_hook_stable_field_map_generates_input() -> None:
@@ -1940,12 +1962,17 @@ def test_nested_config_key_not_in_effective_set_raises() -> None:
     class Parent(serializers.Serializer[object]):
         detail = child()
 
-    with pytest.raises(ConfigurationError, match="not in the effective input set"):
+    with pytest.raises(ConfigurationError) as exc:
         build_serializer_input_class(
             Parent,
             operation_kind="create",
             nested_configs={"ghost": NestedSerializerConfig()},
         )
+    assert str(exc.value) == (
+        "SerializerMutation for Parent declares nested_fields for 'ghost', which is not in "
+        "the effective input set (unknown, read-only, or narrowed away by Meta.fields / "
+        "Meta.exclude)."
+    )
 
 
 def test_nested_config_key_naming_scalar_raises() -> None:
@@ -2136,24 +2163,6 @@ def test_fingerprint_skips_read_only_nested_serializer() -> None:
     assert fingerprint[0][0] == "name"
 
 
-def test_fingerprint_wraps_nested_fields_error_as_configuration_error() -> None:
-    """An OPTED-IN nested serializer whose ``.fields`` cannot be read is a clear ConfigurationError."""
-
-    class RaisingWritableChild(serializers.Serializer[object]):
-        @override
-        def get_fields(self) -> NoReturn:
-            raise RuntimeError("cannot read no-arg")
-
-    class Parent(serializers.Serializer[object]):
-        child = RaisingWritableChild()  # writable + opted in -> reached by the fingerprint
-
-    with pytest.raises(ConfigurationError, match="Could not materialize the nested serializer"):
-        serializer_schema_fingerprint(
-            dict(bound_fields(Parent())),
-            nested_configs={"child": NestedSerializerConfig()},
-        )
-
-
 def test_fingerprint_unopted_nested_raising_child_is_shallow_not_materialized() -> None:
     """An UNOPTED nested field is NOT descended into - a raising ``get_fields()`` is never read.
 
@@ -2276,33 +2285,92 @@ def test_fingerprint_propagates_deep_nested_configuration_error_unwrapped() -> N
     assert str(exc.value) == "a specific deep nested config error"
 
 
-def test_nested_serializer_fields_access_exception_raises_configuration_error() -> None:
-    """A nested serializer whose get_fields() raises raw KeyError raises ConfigurationError."""
+_NESTED_REQUEST_READ_MESSAGE = (
+    "Could not read .fields from nested serializer 'RequestChild' under no-arg construction: "
+    "KeyError: 'request'. Nested serializer fields are read at schema build, where no request "
+    "exists and the serializer context is empty. A nested serializer opted in via "
+    "Meta.nested_fields must expose a stable, request-independent no-arg .fields (override "
+    "get_serializer_for_schema() on the mutation to return a stable field map)."
+)
 
-    class CtxChild(serializers.Serializer[object]):
+
+def _request_reading_nested_parent() -> type[serializers.Serializer[object]]:
+    """A parent serializer whose nested child's ``get_fields()`` reads ``self.context["request"]``."""
+
+    class RequestChild(serializers.Serializer[object]):
         @override
         def get_fields(self) -> dict[str, DRFField]:
-            user = require_instance(dict_of(self.context)["user"], str)
-            return {"a": serializers.CharField(default=user)}
+            user = read_attr(dict_of(self.context)["request"], "user")
+            return {"a": serializers.CharField(default=str(user))}
 
     class Parent(serializers.Serializer[object]):
-        child = CtxChild()
+        child = RequestChild()
 
+    return Parent
+
+
+def test_nested_request_reading_get_fields_is_configuration_error_from_input_build() -> None:
+    """The input build names the override for a nested ``get_fields()`` reading the request.
+
+    The field walk reports the failure under the nested field's name.
+    """
     with pytest.raises(ConfigurationError) as exc:
+        build_serializer_input_class(
+            _request_reading_nested_parent(),
+            operation_kind="create",
+            nested_configs={"child": NestedSerializerConfig()},
+        )
+    assert str(exc.value) == f"child: {_NESTED_REQUEST_READ_MESSAGE}"
+
+
+def test_nested_request_reading_get_fields_is_configuration_error_from_fingerprint() -> None:
+    """The determinism fingerprint reads the nested fields through the same path and message."""
+    parent = _request_reading_nested_parent()
+    with pytest.raises(ConfigurationError) as exc:
+        serializer_inputs.serializer_schema_fingerprint(
+            dict(bound_fields(parent())),
+            nested_configs={"child": NestedSerializerConfig()},
+        )
+    assert str(exc.value) == _NESTED_REQUEST_READ_MESSAGE
+    cause = exc.value.__cause__
+    assert type(cause) is KeyError
+    assert cause.args == ("request",)
+
+
+def test_read_nested_serializer_fields_chains_the_key_error() -> None:
+    """The typed error carries the original ``KeyError`` as its cause."""
+    child = bound_fields(_request_reading_nested_parent()())["child"]
+    assert isinstance(child, serializers.Serializer)
+    with pytest.raises(ConfigurationError) as exc:
+        serializer_inputs.read_nested_serializer_fields(child)
+    assert str(exc.value) == _NESTED_REQUEST_READ_MESSAGE
+    cause = exc.value.__cause__
+    assert type(cause) is KeyError
+    assert cause.args == ("request",)
+
+
+def test_nested_serializer_non_key_error_propagates_from_build_and_fingerprint() -> None:
+    """A nested ``get_fields()`` failure other than ``KeyError`` propagates as itself."""
+
+    class BrokenChild(serializers.Serializer[object]):
+        @override
+        def get_fields(self) -> NoReturn:
+            raise RuntimeError("nested get_fields exploded")
+
+    class Parent(serializers.Serializer[object]):
+        child = BrokenChild()
+
+    with pytest.raises(RuntimeError, match="nested get_fields exploded"):
         build_serializer_input_class(
             Parent,
             operation_kind="create",
             nested_configs={"child": NestedSerializerConfig()},
         )
-    # The WHOLE message, never its prefix: the closing instruction sentence is the one
-    # text the determinism fingerprint, this input build, and the schema-time ownership
-    # walk all publish, so a prefix match would let one site's tail drift unseen.
-    assert str(exc.value) == (
-        "child: Could not read .fields from nested serializer 'CtxChild' under no-arg "
-        "construction: KeyError: 'user'. A nested serializer opted in via "
-        "Meta.nested_fields must expose a stable, request-independent no-arg .fields "
-        "(override get_serializer_for_schema() on the mutation to return a stable field map)."
-    )
+    with pytest.raises(RuntimeError, match="nested get_fields exploded"):
+        serializer_inputs.serializer_schema_fingerprint(
+            dict(bound_fields(Parent())),
+            nested_configs={"child": NestedSerializerConfig()},
+        )
 
 
 def test_normalize_nested_serializer_configs_rejects_non_mapping() -> None:
@@ -2327,51 +2395,31 @@ def _normalize_mapping(value: object) -> object:
 
 
 @pytest.mark.parametrize(
-    ("check", "message"),
-    [
-        (
-            _require_mapping,
-            (
-                "SerializerMutation M.Meta.nested_fields must be a mapping of "
-                "{field_name: NestedSerializerConfig}; got <ClassReadRaises>."
-            ),
-        ),
-        (
-            _require_config,
-            (
-                "SerializerMutation M.Meta.nested_fields['child'] must be a NestedSerializerConfig; "
-                "got <ClassReadRaises>."
-            ),
-        ),
-        (
-            _normalize_mapping,
-            (
-                "nested_configs must be a mapping of {field_name: NestedSerializerConfig}; "
-                "got <ClassReadRaises>."
-            ),
-        ),
-    ],
+    "check",
+    [_require_mapping, _require_config, _normalize_mapping],
     ids=["nested-fields-mapping", "nested-config-value", "nested-configs-normalizer"],
 )
 @pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_nested_config_class_read_that_raises_is_typed(
+def test_nested_config_class_read_that_raises_propagates(
     check: Callable[[object], object],
-    message: str,
     escape: type[BaseException],
 ) -> None:
-    """A ``__class__`` read that raises (any ``BaseException``) answers "not a mapping" / "not a config"."""
-    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+    """The class test is a plain ``isinstance``: a ``__class__`` read that raises propagates.
+
+    The value's own ``__class__`` property is consumer code, so what it raises (any
+    ``BaseException``) escapes as itself rather than being rewrapped.
+    """
+    with pytest.raises(escape, match="hostile __class__ boom"):
         check(ClassReadRaises(escape, "hostile __class__ boom"))
 
 
-def test_nested_config_normalizer_leaves_an_unreadable_value_for_the_typed_rejection() -> None:
-    """The normalizer passes a value it cannot class-test through for the per-entry rejection."""
+def test_nested_config_normalizer_propagates_an_unreadable_value() -> None:
+    """The normalizer's per-entry class test propagates a ``__class__`` read that raises."""
     hostile = ClassReadRaises(message="hostile __class__ boom")
-    # basedpyright: the hostile entry is the input under test; the parameter is typed as a mapping
-    # of NestedSerializerConfig values
-    normalized = normalize_nested_serializer_configs({"child": hostile})  # pyright: ignore[reportArgumentType]
-    assert normalized is not None
-    assert normalized["child"] is hostile
+    with pytest.raises(RuntimeError, match="hostile __class__ boom"):
+        # basedpyright: the hostile entry is the input under test; the parameter is typed as a
+        # mapping of NestedSerializerConfig values
+        normalize_nested_serializer_configs({"child": hostile})  # pyright: ignore[reportArgumentType]
 
 
 def test_nested_config_checks_accept_faithful_lazy_proxies() -> None:

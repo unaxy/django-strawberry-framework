@@ -1,7 +1,7 @@
 # Review · Mechanics: `django_strawberry_framework/utils/strings.py`
 
 Status: verified
-Run: 0.0.15 2026-09-24-1
+Run: 0.0.15 2026-09-28-3
 
 ## Trace
 
@@ -350,3 +350,241 @@ with per-target `reverse_patch` against one diff file works). The attack probe l
 copy and `<root>/verify-mechanics-1/`; it is not a permanent test. Open: the `FieldMeta` docstring
 gap above; the plan's fixture decision (a fakeshop mixed-case model) would let both new nodes and
 the async/connection/SKIP shapes move live. `--show-capture=no` was needed in both manifests.
+
+## Review pass 2 (run 0.0.15 2026-09-28-3)
+
+Baselines: CYCLE_BASELINE=6ac698704402240b954f95072bed4639354ab831 ITEM_BASELINE=e79425515bb25b376f330ac50d46d9615b9aad19
+
+Run-1 sections above stand. The live target is dirty w/ concurrent work; what this pass read
+is fingerprinted below. The live-vs-HEAD diff in the target is exactly the truthful-reads
+switch in `django_strawberry_framework/utils/strings.py::_plain_text`
+(`isinstance` -> `django_strawberry_framework/utils/truth.py::is_instance`,
+`_safe_type_name` -> `django_strawberry_framework/utils/truth.py::kind`, plus
+`from . import truth`); `git show e7942551:.../strings.py` is byte-identical to the live
+file, so the item baseline already contains it.
+
+### Trace (pass 2)
+
+- Whole live target read; orientation `review_inspect.py` into
+  `docs/review/temp-tests/utils__strings/mechanics/inspect/` + `strings.json` (leads only).
+- Caller populations re-derived (`rg` over the package): `snake_case` 3 sites, all in
+  `django_strawberry_framework/optimizer/walker.py` (411, 769, 1421); M1 intact
+  (`django_strawberry_framework/types/base.py::DjangoType.__init_subclass__` still builds
+  `{f.name: ...}`, every reader indexes the raw Django name, zero `snake_case` in
+  `types/` or `management/`); `graphql_camel_name` / `pascal_case` /
+  `pascal_case_or_raise` / `flatten_lookup_path` callers the same families as run 1;
+  `_plain_text` has no caller outside the target.
+- Contract sources re-read: `django_strawberry_framework/utils/truth.py` (`is_instance`,
+  `kind`, `text`, `_scalar_repr` bodies + module scope section),
+  `django_strawberry_framework/exceptions.py` (whole; `_safe_type_name` deleted, zero hits
+  package-wide incl. tests/examples/scripts; `docs/` hits only in archived/per-cycle
+  artifacts), `scripts/check_truthful_reads.py` tier-1/2 scope (TR001-TR008, TR101-TR105),
+  live `tests/utils/test_strings.py` oracles (hostile-subclass, round-trip, `__x`-token,
+  cache-controls, exact-message rejection), `django_strawberry_framework/utils/__init__.py`
+  (unchanged), `docs/README.md` + `docs/GLOSSARY.md` (no pin on the helper message).
+- Sibling records: performance header moved to run 3 `no-findings`, no appended body yet
+  (no new Handoff/Cross-axis to absorb); comments still run 1. Neither names a Mechanics gap.
+- Runs at `review/utils/strings.py/mechanics`, package digest
+  `sha256:c9db5de2...0eae97c9`: `review-20260928T202550-57acb1` (probe
+  `mechanics/probe_truth_switch.py` by absolute path, fresh copy, exit 0, six rows +
+  `PROBE OK`); `review-20260928T202607-4d6c17`
+  (`pytest tests/utils/test_strings.py --no-cov -q`, 41 passed).
+- Cells: default only. Sharded and pg inapplicable by construction: pure `str -> str`,
+  imports `functools`, `collections.abc`, `exceptions`, `truth` only; `truth` is
+  stdlib-only; no connection, alias or dialect decision. The verifier judges.
+- Fingerprints (`git hash-object`): `utils/strings.py` 5a4f481132f8; `utils/truth.py`
+  d5c96bc8d191; `utils/imports.py` 291ecedd30c7; `utils/__init__.py` 1a4c2ec8bfd3;
+  `exceptions.py` 206e9f8d914f6; `types/base.py` dc67f084cbc9; `types/finalizer.py`
+  b9d8acb2b942; `management/commands/inspect_django_type.py` bb63204cca61;
+  `optimizer/walker.py` d5759ef8533a; `types/resolvers.py` 640905c63f46;
+  `utils/querysets.py` 8fc556d582b3; `utils/write_values.py` 72f132f07d2b;
+  `utils/write_transaction.py` 4a83f43dfd89; `tests/utils/test_strings.py` 2a822a3fff;
+  `scripts/check_truthful_reads.py` 3c7ad51154d4. (`imports.py`, `__init__.py`
+  identical to run 1.)
+
+### Findings (pass 2)
+
+High: none. Medium: none. Low: none.
+
+### Rejected (pass 2)
+
+- **R1: the twin predicate divergence is not a missing guard.** The target twin now
+  rejects via `truth.is_instance` while
+  `django_strawberry_framework/utils/imports.py::_plain_text` still passes through via
+  `isinstance`. No contract source establishes truth predicates for the pass-through
+  twin: the gate flags neither (`isinstance(x, str)` is outside TR101, which covers
+  `isinstance(x, type)` report-only), and the behaviors differ only for `__class__`
+  liars, where both fail loud (target: `ConfigurationError`; twin: `TypeError` from
+  the `str.__str__` slot, shown in this pass). Reopens on a gate/contract row
+  requiring truth predicates in pass-through normalization, or a silent divergence.
+- **R2: `str.__str__` siblings are one primitive, not one rule.** Full population:
+  the target, the imports twin,
+  `django_strawberry_framework/utils/querysets.py::_normalized_str`,
+  `django_strawberry_framework/utils/write_values.py::raw_choice_value`, and the
+  `django_strawberry_framework/utils/truth.py::text` str branch (which is itself the
+  `str.__str__` primitive plus a render fallback, so the target cannot consolidate
+  behind it without changing its reject-non-string half). Contracts differ per site
+  (reject / pass through / unconditional / render); every site predates
+  CYCLE_BASELINE, so run 1's "third copy appears" trigger has not fired. DRY change
+  challenge "change how a `str` subclass is copied to exact `str`": the shared
+  fragment is one CPython slot expression with no independently changeable rule.
+  Reopens if the normalization grows a second step (owner: the `utils/` folder
+  Mechanics pass).
+- **R3: edge-underscore slicing in `pascal_case` + `graphql_camel_name`.** Two sites,
+  no third (`rg` over the package); a two-line slicing idiom, not a rule with its own
+  reasons to change (`head, *rest = parts` beside it likewise). Reopens on a third
+  site or semantic growth.
+- **R4: `type(value) is str` beside `truth.is_exact`.** The inline form is the
+  primitive the helper wraps; routing the hot path through the helper would add a
+  frame for no contract, and the gate does not flag `type() is`. Reopens if the gate
+  requires it.
+- **R5 (carried): the `__x` marker branch.** Unchanged; maintainer contract, still
+  pinned by `tests/utils/test_strings.py::test_graphql_camel_name_round_trips_normalized_snake_case`.
+  Trigger unchanged.
+- **R6 (carried, trigger fired elsewhere): generated input names vs
+  `auto_camel_case`.** Run 1's trigger fired as plan card TODO-BETA-077; owned there.
+  The target's contract is unaffected (the helper still just camelizes; callers pin).
+
+Looks-for discharged `none`: rule at a caller instead of its owner (M1 intact per
+Trace; normalization owned by `_plain_text`; identity reads owned by `truth.py`);
+policy in an adapter / mechanism in a policy layer (pure mechanism; the typed
+rejection is its documented contract); contract sources vs body (message identical
+for every real input, exact-message oracle pins `got int.`; the `_plain_text`
+docstring stays true: real subclasses still normalize, liars are truthfully
+non-strings; no README/GLOSSARY pin on the message); branch no real path reaches
+(every target branch pinned by the oracles above plus the empty-stem tests, bar
+R5); mode flag (none); state in two places (cache grafts unchanged from run 1;
+`truth` slot bindings are immutable module constants); dependency direction
+(leaf-to-leaf into stdlib-only `truth`, no cycle possible, proven by the
+fresh-interpreter direct import in run `review-20260928T202550-57acb1` and the
+suite import order in run `review-20260928T202607-4d6c17`; no `TYPE_CHECKING` in
+the target; the `exceptions.py` module-scope warning does not apply inside
+`utils/`); `django.conf.settings` at import (none); `__all__` (five names, all
+defined, star-import clean, re-exports unchanged); sync/async twins (none).
+
+### Cross-axis (pass 2, for Performance / Comments)
+
+None. No finding on another axis.
+
+Handoff (pass 2): Read beyond the record: the whole `truth.py` render/text path
+(`text` copies str subclasses through the base slot but renders non-strings
+through their own `__str__`, which is why R2's consolidation is impossible, not
+just unwarranted), the gate's tier scopes, the `str.__str__` sites in
+`querysets.py` / `write_values.py` / `write_transaction.py` (all pre-baseline),
+the live `field_map` build and readers, every `docs/` hit for `_safe_type_name`
+(all archived/per-cycle prose, none standing). Conclusions the rejections do not
+state: the switch preserves behavior for every real input and fails closed for
+the one changed input class (liar: untyped `TypeError` -> typed
+`ConfigurationError`, unpinned by any oracle); the probe's hostile-object row
+shows the rejection path runs zero consumer code. Open threads, none this
+item's: (1) Performance may re-measure `_plain_text` (`truth.is_instance` adds a
+frame plus an MRO scan on the hot path) — their call, not a Mechanics finding;
+(2) R6's card owns the naming-config question; (3) Comments has not posted run 3
+— the `_plain_text` docstring needs no change from this switch. Scratch kept:
+`docs/review/temp-tests/utils__strings/mechanics/` (`probe_truth_switch.py`,
+`strings.json`, `inspect/`).
+
+## Verification (Mechanics) pass 2
+
+Verify pass 2, address `review/utils/strings.py/verify-mechanics-2`, copy
+synced fresh from the shared tree, package digest
+`sha256:c9db5de2...0eae97c9` (= the run-3 reviewer's digest). Run-1 sections
+above stand; nothing below rewrites them. Item diff
+`docs/review/temp-tests/utils__strings/diff/pass-3.diff` (0 bytes, by design:
+Implement pass 3 landed zero paths).
+
+Step 1: `git diff e79425515bb25b376f330ac50d46d9615b9aad19 --
+django_strawberry_framework/utils/strings.py` is empty, hash-equal to
+pass-3.diff; the live target (`5a4f481132f8`) matches every run-3 Trace
+fingerprint. The tree did not move under the pass. No report to Worker-0
+owed.
+
+Proof lines: none exist for this pass. Run 3 closed `no-findings` on all
+three axes, so no run-3 Proof line was written; the run-1 Proof lines belong
+to a closed run (several oracles moved since, e.g. the mixed-case stand-ins
+now live in `test_query/`) and were not treated as expectations. The live
+mixed-case rows re-run below are an attack, judged on current-state merit
+only.
+
+Reviewer numbers reproduced, each from its recorded command at my address:
+
+- Probe `mechanics/probe_truth_switch.py` (run-3 run
+  `review-20260928T202550-57acb1`), re-run by absolute path as
+  `review-20260928T204331-4db96d`: exit 0, six rows (`exact-str`,
+  `hostile-subclass`, `non-string`, `class-input`, `liar`,
+  `hostile-object`) + `PROBE OK`, `truth shared True`. Reproduced.
+- `pytest tests/utils/test_strings.py --no-cov -q` (run-3 run
+  `review-20260928T202607-4d6c17`), re-run as
+  `review-20260928T204346-7e5064`: 41 passed. Reproduced.
+
+Whole-diff reading through Mechanics: the item diff is empty, so there is no
+hunk to read, no owner change to grade, no symbol moved or renamed (no
+`--cited-by` population), and no behavior delta to preserve. Behavior
+preservation needs no revert proof when no production hunk exists.
+
+Attacks on the current state (pass, no new problem):
+
+- M1 intact, re-derived in the shared tree: `snake_case\(` over
+  `django_strawberry_framework/types` + `management/` prints 0 lines; the
+  walker still reverses at exactly three sites (411, 769, 1421);
+  `types/base.py:634` still builds `{f.name:
+  FieldMeta.from_django_field(f) ...}`. Matches the run-3 census.
+- Live mixed-case oracles (the M1 shapes at their current home), run
+  `review-20260928T204446-b0a465` in my copy: the scalar, forward-FK and
+  reverse-relation nodes of
+  `examples/fakeshop/test_query/test_library_shapes_api.py`, 5 passed
+  (two rows parametrized over `distributor_count`). The raw-key contract
+  holds end to end over `/graphql`.
+- R1 twin divergence, verified by reading (the reviewer's stated evidence):
+  `utils/imports.py:56` tests `isinstance(value, str)` (`str`, not `type`),
+  which is outside TR101's scope (`scripts/check_truthful_reads.py`
+  flags only `isinstance(x, type)`, tier-2 report-only), so the gate flags
+  neither twin; a `__class__` liar takes the twin's `str.__str__` slot and
+  fails loud with `TypeError`. Both halves of the rejection hold.
+
+Disputes: none recorded. Implement pass 3 carries no `disputed:` line on
+any axis.
+
+Test tier and failability: no change exists to fail this pass, so no tier
+judgment and no `prove` manifest are owed. The oracles that would pin a
+future change are named above (41 package-tier rows + the live mixed-case
+rows).
+
+Lint gates (`--check` forms only): Worker-2 ran none this pass (zero paths
+touched), so the per-path gates have no input; stated, not run. The
+tree-wide rename-rot gate was run: `uv run python
+scripts/check_citations.py --check` exits 0, `OK: 1297 citations resolve
+(1105 in 477 .py files, 192 in KANBAN.md)`.
+
+Cells: default only. Sharded and pg `inapplicable by construction`,
+concurred: the target is pure `str -> str`, importing `functools`,
+`collections.abc`, `exceptions` and stdlib-only `truth`; no connection,
+alias or dialect decision. The live-attack rows ran in the default cell of
+my copy.
+
+Verdict: verified. Zero findings, zero rejections overturned, zero new gaps.
+
+Fingerprints (`git hash-object`, 12 chars; every `.py` equals the run-3
+Trace prints): `utils/strings.py` 5a4f481132f8; `utils/truth.py`
+d5c96bc8d191; `utils/imports.py` 291ecedd30c7; `utils/__init__.py`
+and `exceptions.py` not re-read (no run-3 Mechanics claim turns on them);
+`types/base.py` dc67f084cbc9; `optimizer/walker.py`
+d5759ef8533a; `tests/utils/test_strings.py` 2a822a3fff;
+`examples/fakeshop/test_query/test_library_shapes_api.py` c46f5605448d;
+`scripts/check_truthful_reads.py` 3c7ad51154d4; reviewer probe
+`mechanics/probe_truth_switch.py` 48e354108acf. Own scratch
+`docs/review/temp-tests/utils__strings/verify-mechanics-2/` created; no
+probe owed (the reviewer's probe re-ran by absolute path), so it holds no
+files. Runs: `review-20260928T204331-4db96d`,
+`review-20260928T204346-7e5064`, `review-20260928T204446-b0a465`.
+
+Handoff: Read beyond this section: the run-3 Trace fingerprints (all match,
+so the concurrent truth switch is the only live-vs-HEAD delta and it sits
+inside the item baseline), the imports twin body, the TR101 emitter, the
+live mixed-case node bodies. Conclusions not stated above: the empty diff
+makes every run-3 rejection self-standing (no fix could have invalidated a
+trigger); the one trigger that fired (R6 onto its plan card) is owned
+elsewhere. Open threads, none this item's: the `utils/inputs.py` stale-head
+lead and the `utils/` folder framing lead (both routed, in this run's
+scope); F8 deferred again. No production code or test was edited; the only
+write is this section plus the `Status:` line.

@@ -10,8 +10,9 @@ classified).
 ``request_from_info`` (``utils/permissions.py::request_from_info``) resolves a
 Django ``HttpRequest`` or a ``ChannelsRequestAdapter``; this module classifies
 that object into ONE explicit transport mode before any credential or session
-work. Classification begins with an ``isinstance`` check against
-``ChannelsRequestAdapter`` rather than sniffing for scope-like attributes,
+work. Classification begins with a real-class check (``utils/truth.py::is_instance``,
+on the object a Django lazy proxy wraps: ``utils/lazy.py::unwrap_lazy_object``)
+against ``ChannelsRequestAdapter`` rather than sniffing for scope-like attributes,
 because the adapter's ``__getattr__`` delegation
 (``utils/permissions.py::ChannelsRequestAdapter.__getattr__``) makes
 attribute-presence checks unreliable. Only once the request is known to be an
@@ -24,15 +25,16 @@ The module also owns:
 
 * the missing-session pre-check (``adapter.session is None`` -- and the Django
   request whose ``SessionMiddleware`` never ran -- becomes an actionable,
-  transport-specific configuration error instead of a downstream
-  ``None.cycle_key()`` ``AttributeError``);
+  transport-specific configuration error instead of a raw downstream failure
+  (a missing ``session`` attribute on Django, ``channels.auth``'s ``ValueError``
+  when the scope has no ``session`` key));
 * the per-scope ``asyncio.Lock`` primitive and its single acquisition helper that
   the login / logout state machines serialize their same-scope mutations under;
 * the session-engine capability answers (login is unsupported on any WebSocket;
   logout is unsupported on a signed-cookie-engine WebSocket) the later stages
   gate on. They are built on ``utils/sessions.py::session_store_class``, imported
   below: the engine expression stays single-sited, but it is single-sited
-  OUTSIDE this package, because its other caller
+  OUTSIDE the ``auth`` subpackage, because its other caller
   (``consumers.py::_refreshed_actor``, which reloads a WebSocket connection's
   session during the per-operation actor revalidation - spec-046 Decision 11)
   must not import ``auth`` at all. ``auth/__init__.py`` eagerly imports
@@ -54,12 +56,10 @@ from django.contrib.sessions.backends.signed_cookies import (
 )
 from django.http import HttpRequest
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.imports import CHANNELS_FLOOR, require_optional_module
+from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from django_strawberry_framework.utils.sessions import (
     ScopeSingletonMessages,
@@ -78,9 +78,11 @@ if TYPE_CHECKING:
 # The single channels-ABSENT install hint for the auth transport (mirrors
 # ``routers.py::_CHANNELS_INSTALL_HINT`` but keyed to this feature so hint strings
 # stay single-sited at their owner, per ``utils/imports.py``). A Channels-shaped
-# context can only reach this module through ``request_from_info``'s duck-typed
-# adapter, so if it arrives without the optional dependency the classification
-# raises this rather than swallowing the failure into a later ``AttributeError``.
+# context reaches this boundary as a real-class ``ChannelsRequestAdapter`` (built
+# by ``request_from_info`` or directly), so if it arrives without the optional
+# dependency the classification raises this actionable error at the boundary
+# rather than letting the failure surface later as a hint-less ``ImportError`` at
+# the ``channels.auth`` import.
 _CHANNELS_INSTALL_HINT = (
     "A Channels request scope reached the auth session boundary, but channels is not "
     f"installed. Install it with `pip install 'channels>={CHANNELS_FLOOR}'` (the package's "
@@ -93,16 +95,10 @@ _CHANNELS_INSTALL_HINT = (
 _SCOPE_LOCK_KEY = scope_key("auth_session_lock")
 
 # The per-scope lazy singleton itself is ``utils/sessions.py::scope_singleton``
-# (shared with the WebSocket revalidation state, which had the same
-# read / create-with-no-await / validate-or-fail-closed body); only these four
-# wordings are the auth boundary's own.
+# (shared with the WebSocket revalidation state, which shares the same
+# read / create-with-no-await / validate-or-fail-closed body); only the
+# corrupted-slot wording is the auth boundary's own.
 _SCOPE_LOCK_MESSAGES = ScopeSingletonMessages(
-    unreadable="The auth session boundary could not read the Channels request scope.",
-    unstorable="The auth session boundary could not store the per-scope session lock.",
-    uninspectable=(
-        "The auth session boundary requires an asyncio.Lock per scope, but the "
-        "stored value could not be inspected."
-    ),
     corrupted=(
         "The auth session boundary requires an asyncio.Lock per scope, but got a "
         "{actual}; the per-scope lock is corrupted."
@@ -139,8 +135,12 @@ def require_channels() -> ModuleType:
 def classify_transport(request: object) -> Transport:
     """Resolve the ``request_from_info`` result to one explicit ``Transport`` mode.
 
-    Begins with ``isinstance(request, ChannelsRequestAdapter)`` (attribute-presence
-    sniffing is unreliable under the adapter's ``__getattr__`` delegation). A
+    Begins with ``truth.is_instance`` against ``ChannelsRequestAdapter``, applied
+    to the ``unwrap_lazy_object`` candidate (attribute-presence sniffing is
+    unreliable under the adapter's ``__getattr__`` delegation). A Django
+    lazy proxy is classified as the object it wraps
+    (``utils/lazy.py::unwrap_lazy_object``); any other object is classified by its
+    real class, so a stand-in that only forwards ``__class__`` is rejected. A
     recognized adapter first forces the ``channels`` soft dependency through
     ``require_channels()`` -- a Channels-shaped context that reached this boundary
     without the dependency is a loud, actionable ``ImportError``, never a swallowed
@@ -149,73 +149,26 @@ def classify_transport(request: object) -> Transport:
     object, and every missing / unrecognized scope type, is rejected with an
     actionable ``ConfigurationError``.
     """
-    try:
-        is_channels = isinstance(request, ChannelsRequestAdapter)
-    except BaseException as exc:
-        raise ConfigurationError(
-            "The auth session boundary could not classify the request transport (got "
-            f"{_safe_type_name(request)}); expected a Django HttpRequest or a Strawberry "
-            "Channels request adapter.",
-        ) from exc
-    if is_channels:
+    candidate = unwrap_lazy_object(request)
+    if truth.is_instance(candidate, ChannelsRequestAdapter):
         _ = require_channels()
-        adapter = request
-        try:
-            scope = adapter.scope
-        except BaseException as exc:
-            raise ConfigurationError(
-                "The auth session boundary could not read the Channels request scope.",
-            ) from exc
-        try:
-            scope_type = scope.get("type")
-        except BaseException as exc:
-            raise ConfigurationError(
-                "The auth session boundary could not read the Channels request scope's `type`.",
-            ) from exc
-        try:
-            is_http = scope_type == "http"
-        except BaseException as exc:
-            raise ConfigurationError(
-                "The auth session boundary received a Channels request scope with an "
-                f'unsupported `type` ({_safe_arg_repr(scope_type)}); expected `"http"` or '
-                '`"websocket"`. Serve GraphQL over HTTP through DjangoGraphQLView in your '
-                "URLconf, and over WebSocket through DjangoGraphQLProtocolRouter, so the scope "
-                "carries a recognized protocol type.",
-            ) from exc
-        if is_http:
+        scope_type = candidate.scope.get("type")
+        if type(scope_type) is str and scope_type == "http":
             return Transport.CHANNELS_HTTP
-        try:
-            is_websocket = scope_type == "websocket"
-        except BaseException as exc:
-            raise ConfigurationError(
-                "The auth session boundary received a Channels request scope with an "
-                f'unsupported `type` ({_safe_arg_repr(scope_type)}); expected `"http"` or '
-                '`"websocket"`. Serve GraphQL over HTTP through DjangoGraphQLView in your '
-                "URLconf, and over WebSocket through DjangoGraphQLProtocolRouter, so the scope "
-                "carries a recognized protocol type.",
-            ) from exc
-        if is_websocket:
+        if type(scope_type) is str and scope_type == "websocket":
             return Transport.CHANNELS_WEBSOCKET
         raise ConfigurationError(
             "The auth session boundary received a Channels request scope with an "
-            f'unsupported `type` ({_safe_arg_repr(scope_type)}); expected `"http"` or '
+            f'unsupported `type` ({truth.render(scope_type)}); expected `"http"` or '
             '`"websocket"`. Serve GraphQL over HTTP through DjangoGraphQLView in your '
             "URLconf, and over WebSocket through DjangoGraphQLProtocolRouter, so the scope "
             "carries a recognized protocol type.",
         )
-    try:
-        is_django = isinstance(request, HttpRequest)
-    except BaseException as exc:
-        raise ConfigurationError(
-            "The auth session boundary could not classify the request transport (got "
-            f"{_safe_type_name(request)}); expected a Django HttpRequest or a Strawberry "
-            "Channels request adapter.",
-        ) from exc
-    if is_django:
+    if truth.is_instance(candidate, HttpRequest):
         return Transport.DJANGO_HTTP
     raise ConfigurationError(
         "The auth session boundary could not classify the request transport (got "
-        f"{_safe_type_name(request)}); expected a Django HttpRequest or a Strawberry "
+        f"{truth.kind(request)}); expected a Django HttpRequest or a Strawberry "
         "Channels request adapter.",
     )
 
@@ -227,20 +180,15 @@ def require_session(request: object, transport: Transport) -> SessionBase:
     attribute, and a Channels adapter over a scope with no ``SessionMiddleware``
     exposes ``session`` as ``None`` (``ChannelsRequestAdapter.session``); both
     collapse to ``getattr(request, "session", None) is None`` here. Without this
-    pre-check the absence surfaces downstream as a raw ``None.cycle_key()``
-    ``AttributeError`` during the native login/logout; the pre-check converts it
-    into a transport-specific configuration error. The message keeps the substring
+    pre-check the absence surfaces downstream as a raw failure during the native
+    login/logout (a missing ``session`` attribute on Django, ``channels.auth``'s
+    ``ValueError`` when the scope has no ``session`` key); the pre-check converts
+    it into a transport-specific configuration error. The message keeps the
+    substring
     ``"session"`` (the failed-login byte-compatible envelope promise does not cover
     this configuration error, so its wording is otherwise free).
     """
-    try:
-        session: object = getattr(request, "session", None)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"The auth session boundary has no session for the {transport.value} transport; "
-            "install Django's SessionMiddleware (and, for Channels, wrap the scope in "
-            "AuthMiddlewareStack) so login/logout can mutate a real session.",
-        ) from exc
+    session: object = getattr(request, "session", None)
     if session is None:
         raise ConfigurationError(
             f"The auth session boundary has no session for the {transport.value} transport; "
@@ -261,23 +209,11 @@ def _require_mutable_scope(adapter: ChannelsRequestAdapter) -> MutableChannelsSc
     communicator; it must fail loudly rather than silently fall back to an
     unserialized path (which would drop the same-scope mutation guarantee).
     """
-    try:
-        scope = adapter.scope
-    except BaseException as exc:
-        raise ConfigurationError(
-            "The auth session boundary could not read the Channels request scope.",
-        ) from exc
-    try:
-        is_mutable = isinstance(scope, MutableMapping)
-    except BaseException as exc:
+    scope = adapter.scope
+    if not isinstance(scope, MutableMapping):
         raise ConfigurationError(
             "The auth session boundary requires a mutable Channels scope to serialize "
-            "same-scope session mutations, but the scope kind could not be inspected.",
-        ) from exc
-    if not is_mutable:
-        raise ConfigurationError(
-            "The auth session boundary requires a mutable Channels scope to serialize "
-            f"same-scope session mutations, but got a {_safe_type_name(scope)}; real ASGI "
+            f"same-scope session mutations, but got a {truth.kind(scope)}; real ASGI "
             "scopes are dictionaries. Do not route auth through an immutable scope.",
         )
     return scope
@@ -316,21 +252,8 @@ async def scope_session_lock(
         expect=asyncio.Lock,
         messages=_SCOPE_LOCK_MESSAGES,
     )
-    try:
-        _ = await lock.acquire()
-    except ConfigurationError:
-        raise
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:
-        raise ConfigurationError(
-            "The auth session boundary's per-scope session lock could not be acquired.",
-        ) from exc
-    try:
+    async with lock:
         yield lock
-    finally:
-        if lock.locked():
-            lock.release()
 
 
 def uses_signed_cookie_sessions() -> bool:
@@ -344,42 +267,27 @@ def uses_signed_cookie_sessions() -> bool:
     signed-cookie store so a deployment subclassing that engine (which shares its
     no-server-side-record limitation) is recognized too.
     """
-    try:
-        store_cls = session_store_class()
-    except ConfigurationError:
-        raise
-    except BaseException as exc:
-        raise ConfigurationError(
-            "The auth session boundary could not resolve the session store class.",
-        ) from exc
-    try:
-        return issubclass(store_cls, SignedCookieSessionStore)
-    except BaseException as exc:
-        raise ConfigurationError(
-            "The auth session boundary could not inspect the session store class "
-            f"({type(exc).__name__}); check settings.SESSION_ENGINE.",
-        ) from exc
+    return truth.is_subclass(session_store_class(), SignedCookieSessionStore)
 
 
 def login_supported(transport: Transport) -> bool:
-    """Whether ``login`` can truthfully establish a durable session on ``transport``.
+    """Return whether ``login`` can truthfully establish a durable session on ``transport``.
 
     Login is unsupported on ANY WebSocket regardless of engine: an established
     WebSocket cannot send the replacement session cookie login's key rotation
     produces, so it could only authenticate the in-memory scope while silently
-    failing to establish a reusable browser session (auth plan root cause 3).
+    failing to establish a reusable browser session.
     """
     return transport is not Transport.CHANNELS_WEBSOCKET
 
 
 def logout_supported(transport: Transport) -> bool:
-    """Whether ``logout`` can truthfully invalidate the session on ``transport``.
+    """Return whether ``logout`` can truthfully invalidate the session on ``transport``.
 
     Logout is supportable everywhere except a signed-cookie-engine WebSocket:
     server-side engines invalidate by deleting the record (no new cookie needed),
     but a signed-cookie WebSocket has no server-side record to revoke and cannot
-    delete or replace the browser cookie over an established socket (auth plan root
-    cause 3).
+    delete or replace the browser cookie over an established socket.
     """
     if transport is Transport.CHANNELS_WEBSOCKET:
         return not uses_signed_cookie_sessions()

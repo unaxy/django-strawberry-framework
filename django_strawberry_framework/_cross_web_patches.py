@@ -200,6 +200,7 @@ import inspect
 from typing import TYPE_CHECKING, cast
 
 from .conf import upstream_patches_enabled
+from .utils import truth
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -234,7 +235,7 @@ def _captured_upstream_body_getter() -> "_BodyGetter | None":
     """
     if DjangoHTTPRequestAdapter is None:
         return None
-    descriptor = DjangoHTTPRequestAdapter.__dict__.get("body")
+    descriptor = truth.class_dict(DjangoHTTPRequestAdapter).get("body")
     if not isinstance(descriptor, property) or descriptor.fget is None:
         return None
     if getattr(descriptor.fget, _PATCH_OWNER_ATTRIBUTE, None) == _PATCH_OWNER:
@@ -340,7 +341,7 @@ def _patch_is_installed() -> bool:
     """Return ``True`` iff ``DjangoHTTPRequestAdapter.body`` points at our patched getter."""
     if DjangoHTTPRequestAdapter is None:
         return False
-    descriptor = DjangoHTTPRequestAdapter.__dict__.get("body")
+    descriptor = truth.class_dict(DjangoHTTPRequestAdapter).get("body")
     return isinstance(descriptor, property) and descriptor.fget is _patched_body
 
 

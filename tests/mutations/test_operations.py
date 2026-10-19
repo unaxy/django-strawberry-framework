@@ -10,7 +10,6 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import CREATE, PARTIAL
@@ -30,12 +29,6 @@ from django_strawberry_framework.mutations.operations import (
     operation_takes_data,
     operation_takes_id,
 )
-
-
-class _HostileRepr:
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("HostileRepr exploded")
 
 
 def test_mutation_operation_descriptor_immutability() -> None:
@@ -133,14 +126,11 @@ def test_derived_mappings_and_sets() -> None:
 
 
 def test_non_delete_operation_error_formatting() -> None:
-    """non_delete_operation_error formats ConfigurationError and contains hostile reprs."""
+    """non_delete_operation_error formats the shared create/update-only reject."""
     err = non_delete_operation_error("DjangoModelFormMutation", "ItemMutation", "delete")
     assert isinstance(err, ConfigurationError)
-    assert (
+    assert str(err) == (
         "DjangoModelFormMutation ItemMutation.Meta.operation must be one of ['create', 'update']; "
-        "got 'delete'." in str(err)
+        "got 'delete'. (This flavor has no delete pipeline - declare a 036 DjangoMutation with "
+        "operation='delete' instead.)"
     )
-
-    hostile_err = non_delete_operation_error("SerializerMutation", "OrderMutation", _HostileRepr())
-    assert isinstance(hostile_err, ConfigurationError)
-    assert "<unprintable _HostileRepr>" in str(hostile_err)

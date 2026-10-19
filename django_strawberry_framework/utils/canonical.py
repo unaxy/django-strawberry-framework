@@ -1,4 +1,4 @@
-"""Hostile-safe primitives for canonically reading consumer-controlled containers.
+"""Primitives for canonically reading consumer-controlled containers.
 
 Two subsystems reduce arbitrary consumer data to a canonical form: the set
 families' unordered ``Meta.fields`` ordering
@@ -20,10 +20,9 @@ a walk stops being trustworthy:
   slots; a value outside that set has no base slot to read, so it is refused with
   a typed ``ConfigurationError`` rather than iterated on the consumer's terms.
 * **Ordering.** Unordered containers must be sorted to fingerprint
-  deterministically, and a bare ``repr`` sort key runs a consumer ``__repr__``:
-  one that raises breaks the walk with an untyped exception, and one that returns
-  a CONSTANT collapses distinct values onto one sort key - and, for the drift
-  path, onto one fingerprint.
+  deterministically, and a bare ``repr`` sort key that returns a CONSTANT
+  collapses distinct values onto one sort key - and, for the drift path, onto
+  one fingerprint.
 
 Both defects are fail-OPEN on a security check, which is why the reads live here
 rather than being spelled per walk.
@@ -33,20 +32,12 @@ from __future__ import annotations
 
 from typing import TypeVar, overload
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 
+from . import truth
 from ._narrowing import (
     dict_items,
     frozenset_iter,
-    is_dict,
-    is_frozenset,
-    is_list,
-    is_set,
-    is_tuple,
     list_iter,
     set_iter,
     tuple_iter,
@@ -88,33 +79,33 @@ def base_container_values(value: object) -> tuple[object, ...]:
     the refusal fires only for a future caller that widened its gate without
     deciding how an arbitrary iterable should be read.
     """
-    if is_dict(value):
+    if truth.is_instance(value, dict):
         return tuple(dict_items(value))
-    if is_set(value):
+    if truth.is_instance(value, set):
         return tuple(set_iter(value))
-    if is_frozenset(value):
+    if truth.is_instance(value, frozenset):
         return tuple(frozenset_iter(value))
-    if is_list(value):
+    if truth.is_instance(value, list):
         return tuple(list_iter(value))
-    if is_tuple(value):
+    if truth.is_instance(value, tuple):
         return tuple(tuple_iter(value))
     raise ConfigurationError(
-        f"Cannot canonically read a {_safe_type_name(value)} value: only the built-in "
+        f"Cannot canonically read a {truth.kind(value)} value: only the built-in "
         "dict / set / frozenset / list / tuple containers (and their subclasses) have a "
         "base iterator that consumer code cannot override.",
     )
 
 
 def canonical_sort_key(value: object) -> tuple[str, int, int]:
-    """Return a TOTAL, hostile-repr-safe ordering key for a consumer value.
+    """Return a TOTAL ordering key for a consumer value.
 
     Three parts, in order of decreasing usefulness and increasing reliability:
-    a guarded ``repr`` (``_safe_arg_repr`` never raises and never dispatches a
-    lying ``__str__`` on the result), then the type's identity, then the value's
-    identity. The last two make the key total - two values whose guarded reprs
-    collide still order deterministically - which is what a bare ``repr`` key
-    cannot promise: a ``__repr__`` returning a constant would otherwise let
-    structurally different values sort as equal, and a fingerprint built on that
-    ordering would collide.
+    ``truth.render`` (the builtin slot for a builtin scalar, the value's own
+    ``__repr__`` otherwise, whose exceptions propagate), then the type's
+    identity, then the value's identity. The last two make the key total - two
+    values whose reprs collide still order deterministically - which is what a
+    bare ``repr`` key cannot promise: a ``__repr__`` returning a constant would
+    otherwise let structurally different values sort as equal, and a
+    fingerprint built on that ordering would collide.
     """
-    return (_safe_arg_repr(value), id(type(value)), id(value))
+    return (truth.render(value), id(type(value)), id(value))

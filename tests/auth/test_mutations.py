@@ -90,6 +90,7 @@ from django_strawberry_framework.auth import mutations as auth_mutations
 from django_strawberry_framework.auth.mutations import (
     _auth_declarations,
     _declared_auth_surface,
+    _make_permission_holder,
     _register_decode_step,
     _register_write_step,
     _sync_bridged_async_body,
@@ -186,7 +187,10 @@ def _unique_app_label() -> str:
 def _declared_holder(surface: str) -> auth_mutations._SealedAuthHolderMeta:
     """The ledger's permission holder for a fixed auth ``surface`` (never the register rider)."""
     holder = _declared_auth_surface(surface)
-    assert isinstance(holder, auth_mutations._SealedAuthHolderMeta)
+    assert holder is not None
+    # At run time a holder is a bare ``DjangoMutationMetaclass`` class; the register rider is
+    # the one ledger entry that subclasses ``DjangoMutation``.
+    assert not issubclass(holder, DjangoMutation)
     return holder
 
 
@@ -522,16 +526,14 @@ def test_auth_permission_holder_snapshot_is_sealed() -> None:
 def test_auth_permission_holder_head_is_sealed() -> None:
     """A synthesized holder's ``_mutation_meta`` head is write-once.
 
-    ``_SealedAuthHolderMeta`` mirrors the write-flavor metaclass guard: a
+    The holder rides the write-flavor metaclass guard (``DjangoMutationMetaclass``): a
     ``has_permission`` hook receives the holder, so an unguarded head would let
     one request swap the fixed surface's validated record for a hook-chosen
     namespace - the persistent cross-request bypass class. Synthesis is the one
     honored write; rebinding and deletion raise ``ConfigurationError``.
     """
     logout_mutation()
-    holder = _declared_auth_surface("logout")
-    assert holder is not None
-    assert isinstance(holder, auth_mutations._SealedAuthHolderMeta)
+    holder = _declared_holder("logout")
     original = holder._mutation_meta
     with pytest.raises(ConfigurationError, match="sealed and cannot be rebound"):
         # basedpyright: the rebind of the sealed head is the rejected operation under test; the
@@ -704,8 +706,26 @@ def test_ambiguous_user_primary_raises_the_set_meta_primary_message() -> None:
 
     del UserA, UserB
     login_mutation()
-    with pytest.raises(ConfigurationError, match="multiple registered DjangoTypes"):
+    with pytest.raises(ConfigurationError) as excinfo:
         bind_auth_mutations()
+    assert str(excinfo.value) == (
+        "auth login_mutation() declared, but the user model User has multiple registered "
+        "DjangoTypes and no declared primary; set Meta.primary = True on one of them so the "
+        "auth user type is unambiguous."
+    )
+
+
+def test_sealed_holder_rebind_message_names_the_holder() -> None:
+    """A rebind of a holder's sealed ``_mutation_meta`` names the holder class."""
+    holder = _make_permission_holder("login", "Login", ())
+    with pytest.raises(ConfigurationError) as excinfo:
+        # basedpyright: the rebind of the sealed head is the write under test; the holder
+        # declares ``_mutation_meta`` as the auth snapshot type
+        holder._mutation_meta = None  # pyright: ignore[reportAttributeAccessIssue]
+    assert str(excinfo.value) == (
+        "Login._mutation_meta is sealed and cannot be rebound; the validated "
+        "authorization snapshot is captured once at class creation."
+    )
 
 
 def test_logout_only_schema_binds_with_no_user_type_and_no_orphan_payloads() -> None:
@@ -723,7 +743,7 @@ def test_logout_only_schema_binds_with_no_user_type_and_no_orphan_payloads() -> 
 
 @pytest.mark.django_db
 def test_logout_with_lazy_none_or_modeless_actor_is_anonymous() -> None:
-    """Hostile actor shapes with no ``is_authenticated`` collapse logout to anonymous ``ok: false``.
+    """Actor shapes with no ``is_authenticated`` classify logout as anonymous ``ok: false``.
 
     A live ``/graphql/`` request always carries ``AuthenticationMiddleware``'s
     ``AnonymousUser`` or a real user; these shapes (a ``SimpleLazyObject``
@@ -759,106 +779,32 @@ def test_logout_with_lazy_none_or_modeless_actor_is_anonymous() -> None:
     assert custom_res.data["logout"] == {"ok": False, "errors": []}
 
 
-# --- Hostile is_authenticated VALUE truthiness -----------------------------------
+class _RaisingIsAuthenticatedUser:
+    """A user-like actor whose ``is_authenticated`` property raises."""
 
-
-class _BoolRaisingValue:
-    """An ``is_authenticated`` value whose ``bool()`` raises (the documented five)."""
-
-    def __init__(self, exc: BaseException) -> None:
-        self._exc = exc
-
-    def __bool__(self) -> bool:
-        raise self._exc
-
-
-class _LenOnlyRaiser:
-    """A sequence-style value: truthiness rides ``__len__``, which raises."""
-
-    def __init__(self, exc: BaseException) -> None:
-        self._exc = exc
-
-    def __len__(self) -> int:
-        raise self._exc
-
-
-class _HostileValueUser:
-    """A user-like actor whose ``is_authenticated`` attribute holds a hostile value."""
-
-    def __init__(self, value: object) -> None:
-        self.is_authenticated = value
-
-
-@pytest.mark.parametrize(
-    "raised",
-    [
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-        IndexError,
-    ],
-    ids=[
-        "type",
-        "value",
-        "attribute",
-        "key",
-        "index",
-    ],
-)
-def test_hostile_is_authenticated_value_truthiness_collapses_to_anonymous(
-    raised: type[Exception],
-) -> None:
-    """A hostile is_authenticated VALUE whose truthiness raises collapses to anonymous.
-
-    The fourth hostile surface beside the descriptor read and the legacy-callable
-    call: the final truthiness evaluation is contained too, so a value whose
-    ``__bool__`` / ``__len__`` raises never escapes as a top-level error out of
-    the logout ``ok`` capture or ``me``.
-    The same five shapes collapse to anonymous (fail-closed), while any other
-    exception still propagates (the documented asymmetry: a DatabaseError is
-    never hidden as anonymous).
-    """
-    request = _session_request()
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    request.user = _HostileValueUser(_BoolRaisingValue(raised("truthiness boom")))  # pyright: ignore[reportAttributeAccessIssue]
-    assert auth_mutations._authenticated_actor_or_none(request) is None
-    # The len-only form: truthiness rides ``__len__`` when ``__bool__`` is absent.
-    request2 = _session_request()
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    request2.user = _HostileValueUser(_LenOnlyRaiser(raised("len boom")))  # pyright: ignore[reportAttributeAccessIssue]
-    assert auth_mutations._authenticated_actor_or_none(request2) is None
+    @property
+    def is_authenticated(self) -> bool:
+        raise TypeError("is_authenticated failed")
 
 
 @pytest.mark.django_db
-def test_logout_with_hostile_is_authenticated_value_never_false_success() -> None:
-    """A hostile is_authenticated VALUE on the LIVE logout surface: contained capture, fail-closed teardown.
+def test_logout_propagates_a_raising_is_authenticated_before_any_teardown() -> None:
+    """The actor's ``is_authenticated`` is consumer behaviour: its exception propagates.
 
-    Two layers on the live logout surface: the ``ok`` CAPTURE is
-    contained by ``_authenticated_actor_or_none`` (the hostile truthiness
-    collapses to anonymous, so ``ok`` is False - never a false ``ok: true``),
-    but Django's native ``auth.logout`` re-reads ``user.is_authenticated``
-    truthiness itself before its flush (upstream ``logout``), so the hostile
-    value surfaces as a top-level teardown error exactly like a raising
-    ``user_logged_out`` receiver. The resolver's fail-closed treatment holds:
-    no success payload, and the compensation anonymizes the local actor.
+    The ``ok`` capture reads it before any session mutation, so the raise ends the
+    field with the original error, no success payload, and the session untouched.
     """
     schema = _login_logout_schema()
     request = _session_request()
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    request.user = _HostileValueUser(_BoolRaisingValue(TypeError("truthiness boom")))  # pyright: ignore[reportAttributeAccessIssue]
-    request.session["logout_residue"] = "must be flushed"
+    # basedpyright: the non-user object planted on request.user is the input under test;
+    # django-stubs types the slot as AbstractBaseUser | AnonymousUser
+    request.user = _RaisingIsAuthenticatedUser()  # pyright: ignore[reportAttributeAccessIssue]
+    request.session["logout_residue"] = "must survive"
     request.session.save()
     res = schema.execute_sync(_LOGOUT_Q, context_value=request)
-    assert res.errors is not None  # no false ``{ok: true}`` success payload
+    assert res.errors is not None
     assert isinstance(res.errors[0].original_error, TypeError)
-    assert isinstance(request.user, AnonymousUser)  # the compensation anonymized the actor
-    # The crash precedes Django's flush, so nothing was invalidated and the
-    # payload never claims it was (no false clean-state claim).
-    assert request.session.get("logout_residue") == "must be flushed"
+    assert request.session.get("logout_residue") == "must survive"
 
 
 def test_login_only_bind_emits_no_orphan_logout_payload() -> None:
@@ -950,7 +896,7 @@ def test_bridged_async_body_is_a_real_coroutine_function() -> None:
 
 
 def test_auth_field_dispatch_splits_sync_and_async_resolver_bodies() -> None:
-    """``_make_auth_field`` picks the sync body vs the async body by ``in_async_context``."""
+    """``_make_auth_field`` picks the sync body vs the async body by ``async_execution``."""
     sync_calls: list[dict[str, object]] = []
     async_calls: list[dict[str, object]] = []
 
@@ -2159,7 +2105,7 @@ def _assert_login_fully_compensated(request: HttpRequest) -> None:
 def test_login_payload_construction_failure_is_execution_error_session_untouched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Row 5 (the one justified mock): a payload build after authenticate never mutates the session."""
+    """The one justified mock: a payload build after authenticate never mutates the session."""
     create_users(1)
 
     schema = _login_logout_schema()
@@ -2183,10 +2129,10 @@ def test_login_payload_construction_failure_is_execution_error_session_untouched
 )
 @pytest.mark.django_db
 def test_login_backend_selection_failure_compensates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Row 6: multi-backend + a stripped ``user.backend`` -> login-time ``ValueError`` + compensation.
+    """Multi-backend + a stripped ``user.backend`` -> login-time ``ValueError`` + compensation.
 
     ``authenticate`` always annotates ``user.backend``; the annotation is removed
-    test-side (real-object manipulation, per Stage 0) after a REAL authenticate so
+    test-side (real-object manipulation) after a REAL authenticate so
     ``_get_backend_from_user`` raises. The cycle already persisted an empty row; the
     compensating flush deletes it and the actor stays anonymous.
     """
@@ -2210,7 +2156,7 @@ def test_login_backend_selection_failure_compensates(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.django_db
 def test_login_session_cycle_failure_keeps_actor_anonymous_and_surfaces_original() -> None:
-    """Row 7: a session-store outage during rotation -> no success, actor anonymous, error observable."""
+    """A session-store outage during rotation -> no success, actor anonymous, error observable."""
     create_users(1)
     schema = _login_logout_schema()
     request = _request_with_store(_CycleCreateRaises())
@@ -2224,7 +2170,7 @@ def test_login_session_cycle_failure_keeps_actor_anonymous_and_surfaces_original
 
 @pytest.mark.django_db
 def test_login_explicit_save_failure_compensates() -> None:
-    """Row 9: the explicit in-resolver ``save`` failing -> compensation, no candidate actor remains."""
+    """The explicit in-resolver ``save`` failing -> compensation, no candidate actor remains."""
     create_users(1)
     schema = _login_logout_schema()
     request = _request_with_store(_ExplicitSaveRaises())
@@ -2235,7 +2181,7 @@ def test_login_explicit_save_failure_compensates() -> None:
 
 @pytest.mark.django_db
 def test_login_cleanup_failure_retains_primary_and_chains_cleanup() -> None:
-    """Row 12: a raising signal (primary) plus a raising ``delete`` (cleanup) retains the primary.
+    """A raising signal (primary) plus a raising ``delete`` (cleanup) retains the primary.
 
     The cleanup failure is chained onto it.
     """
@@ -2253,19 +2199,20 @@ def test_login_cleanup_failure_retains_primary_and_chains_cleanup() -> None:
 
 
 @pytest.mark.django_db
-def test_login_cleanup_cancellation_retains_primary_and_chains_cleanup() -> None:
-    """A cancellation during compensation cannot replace the establishment failure."""
+def test_login_cleanup_cancellation_propagates_with_the_primary_as_context() -> None:
+    """A cancellation during compensation propagates; the establishment failure rides as context."""
     create_users(1)
-    schema = _login_logout_schema()
+    user = get_user_model().objects.get(username="staff_1")
+    user.backend = _MODEL_BACKEND
     request = _request_with_store(_DeleteCancelled())
-    with _raising_login_receiver():
-        res = _login_exec(schema, request)
-    assert res.errors is not None
-    primary = res.errors[0].original_error
+    with (
+        _raising_login_receiver(),
+        pytest.raises(asyncio.CancelledError, match="delete cancelled") as excinfo,
+    ):
+        auth_mutations._django_http_login_establish(request, user)
+    primary = excinfo.value.__context__
     assert isinstance(primary, RuntimeError)
     assert "login-signal boom" in str(primary)
-    assert isinstance(primary.__context__, asyncio.CancelledError)
-    assert "delete cancelled" in str(primary.__context__)
 
 
 # --- WebSocket login rejection (before authenticate) --------------------------
@@ -2326,9 +2273,10 @@ def _channels_router(schema: strawberry.Schema) -> ProtocolTypeRouter:
     Django ASGI application (spec-046 Decision 2), so it serves GraphQL over
     WebSocket only and cannot be the harness for a Channels-HTTP auth round trip.
 
-    The Channels-HTTP auth surface is shipped: ``auth/sessions.py``'s
-    ``Transport.CHANNELS_HTTP`` arm serves any consumer who mounts Strawberry's
-    ``GraphQLHTTPConsumer`` themselves, which is precisely the shape composed here.
+    The Channels-HTTP auth surface is still shipped: ``auth/sessions.py``'s
+    ``Transport.CHANNELS_HTTP`` arm serves any consumer mounting Strawberry's
+    ``GraphQLHTTPConsumer`` themselves - the shape composed here - so every
+    assertion below tests the shipped surface through this file's harness.
     """
     graphql_path = r"^graphql/?$"
     return ProtocolTypeRouter(
@@ -2632,22 +2580,22 @@ async def test_channels_http_login_cleanup_failure_retains_primary_and_chains_cl
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_channels_http_login_cleanup_cancellation_retains_primary_and_chains_cleanup() -> (
+async def test_channels_http_login_cleanup_cancellation_propagates_with_the_primary_as_context() -> (
     None
 ):
-    """The native Channels compensation has the same primary-error guarantee."""
+    """The native Channels compensation lets a cleanup-time cancellation out the same way."""
     await _acreate_users(1)
     user = await get_user_model().objects.aget(username="staff_1")
     store = _DeleteCancelled()
     adapter = _channels_adapter(store=store)
     with (
         _raising_login_receiver(),
-        pytest.raises(RuntimeError, match="login-signal boom") as excinfo,
+        pytest.raises(asyncio.CancelledError, match="async session delete cancelled") as excinfo,
     ):
         await auth_mutations._channels_http_login_establish(adapter, store, user)
-    primary = excinfo.value
-    assert isinstance(primary.__context__, asyncio.CancelledError)
-    assert "async session delete cancelled" in str(primary.__context__)
+    primary = excinfo.value.__context__
+    assert isinstance(primary, RuntimeError)
+    assert "login-signal boom" in str(primary)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2735,10 +2683,11 @@ def test_sync_django_http_login_leaves_session_modified_for_the_cookie() -> None
 # These package tests own the logout rows a live fakeshop `/graphql/` request
 # cannot drive: the Channels HTTP round trip + anonymous residue flush (real
 # HttpCommunicator), the real WebSocket server-side logout + reconnect-with-old-cookie
-# invalidation, the signed-cookie WebSocket rejection before mutation, and
-# SessionStore ``delete`` failure injection a ``django.test.Client`` cannot carry.
-# The Django HTTP authenticated/anonymous round trip and a raising
-# ``user_logged_out`` receiver live in
+# invalidation, the signed-cookie WebSocket rejection before mutation,
+# SessionStore ``delete`` failure injection a ``django.test.Client`` cannot
+# carry, and the raising-receiver in-process verdicts (local-actor anonymization
+# beside the surviving row). The Django HTTP authenticated/anonymous round trip
+# and the raising-receiver wire verdicts live in
 # ``examples/fakeshop/test_query/test_auth_api.py``.
 #
 # The logout document these rows send is `_LOGOUT_Q`, the same one the Django HTTP
@@ -2793,7 +2742,7 @@ def _establish_authenticated_django_session(
 def test_django_logout_signal_failure_no_ok_and_actor_anonymized() -> None:
     """Logout row: a raising ``user_logged_out`` receiver -> no ok, actor anonymous.
 
-    The receiver fires BEFORE ``flush`` (Stage 0), so the durable row is NOT
+    The receiver fires BEFORE ``flush``, so the durable row is NOT
     invalidated - and the resolver never falsely claims it was (no ok payload; the
     error propagates as a top-level GraphQL error).
     """

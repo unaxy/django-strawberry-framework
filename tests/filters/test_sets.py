@@ -7,7 +7,8 @@ the spec-027 Decision 4 owner-aware Relay-vs-scalar conditional in
 (`apply_sync` / `apply_async` / `apply` + the five named helpers).
 
 Empty-filter, ``FILTER_INVALID``, nested ``check_<field>_permission`` denial,
-and EXISTS SQL live in ``test_library_api.py`` / ``test_products_api.py``.
+EXISTS SQL, and Relay-relation ``isNull`` Boolean vs GlobalID-list ``exact``
+live in ``test_library_api.py`` / ``test_products_api.py``.
 This file keeps generation provenance, capability gates, permission
 call-count, the apply dispatcher, and query-object routing -- internals a
 response cannot show.
@@ -40,7 +41,12 @@ from apps.glossary import models as glossary_models
 from apps.kanban import filters as kanban_filters
 from apps.kanban import models as kanban_models
 from apps.library import models as library_models
-from apps.library.filters import BookFilter, LoanFilter, PatronFilter
+from apps.library.filters import (
+    BookFilter,
+    LoanFilter,
+    PatronFilter,
+    _validate_email_must_have_at_sign,
+)
 from apps.library.filters_genre import GenreFilter
 from apps.products import services
 from apps.products.models import Category, Item
@@ -48,6 +54,7 @@ from apps.scalars import models as scalar_models
 from asgiref.sync import sync_to_async
 from django import forms
 from django.apps import apps
+from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import FieldError
 from django.db import connection, models, transaction
@@ -7586,6 +7593,31 @@ def test_evaluate_logic_tree_caps_recursion_depth() -> None:
     assert "_MAX_LOGIC_DEPTH" in str(excinfo.value)
 
 
+def test_evaluate_logic_tree_caps_a_non_int_knob_at_the_neutral_default() -> None:
+    """A non-int ``_MAX_LOGIC_DEPTH`` knob caps at the neutral default, typed.
+
+    The filter enforcement sites resolve their budget through the shared
+    check, which honors a declared int and takes the neutral default for
+    anything else: depth past the default raises the shared typed
+    sentence instead of failing on the comparison.
+    """
+
+    class CategoryFilter(FilterSet):
+        # basedpyright: the wrong-typed knob is the misconfiguration under test
+        _MAX_LOGIC_DEPTH = "10"  # pyright: ignore[reportAssignmentType]
+
+        class Meta:
+            model = Category
+            fields = {"name": ["exact"]}
+
+    with pytest.raises(ConfigurationError, match="nesting exceeded"):
+        CategoryFilter._evaluate_logic_tree(
+            Category.objects.all(),
+            {"and": [{"name": "x"}]},
+            _depth=FilterSet._MAX_LOGIC_DEPTH + 1,
+        )
+
+
 @pytest.mark.django_db
 def test_evaluate_logic_tree_skips_inactive_or_arms() -> None:
     """``or: [real, None|UNSET]`` must equal ``or: [real]``, not widen to all rows.
@@ -7637,7 +7669,7 @@ def test_evaluate_logic_tree_and_direct_branch_treat_inactive_values_as_identity
 def test_collect_nested_visibility_querysets_async_caps_recursion_depth() -> None:
     """``_collect_nested_visibility_querysets_async`` raises past ``_MAX_LOGIC_DEPTH``.
 
-    Third site of the shared ``_raise_logic_depth_exceeded`` helper -- the async
+    Third site of the shared ``_assert_logic_depth`` binding -- the async
     pre-walker enforces the same depth cap as ``_run_permission_checks`` and
     ``_evaluate_logic_tree``, surfacing the identical typed error rather than
     silently bottoming out into a Python ``RecursionError``.
@@ -8037,6 +8069,211 @@ def test_normalize_input_operator_bag_exact_resolves_explicit_suffixed_key() -> 
     Category.objects.create(name="bar")
     qs = WeirdCategoryFilter(data=data, queryset=Category.objects.all()).qs
     assert list(qs) == [c1]
+
+
+def test_normalize_input_declared_head_rejects_a_lookup_it_does_not_hold() -> None:
+    """A bag lookup a declared head does not hold raises instead of reusing its form key.
+
+    ``custom`` is a declared ``icontains`` filter: its own head, holding the one
+    ``i_contains`` lookup. ``starts_with`` has no filter under that head, so a
+    bag naming it raises rather than writing a second value into the ``custom``
+    form key, where the last write would silently win and drop a predicate the
+    caller believes is applied. Inactive entries do not count: a
+    partially-supplied bag still normalizes to the one active value.
+    """
+
+    @dataclasses.dataclass
+    class _CustomBag:
+        i_contains: object = None
+        starts_with: object = None
+
+    class DeclaredCategoryFilter(FilterSet):
+        custom = CharFilter(field_name="name", lookup_expr="icontains")
+
+        class Meta:
+            model = Category
+            fields = {"name": ["exact"]}
+
+    with pytest.raises(
+        ConfigurationError,
+        match="filter input field 'custom' has no 'starts_with' lookup",
+    ):
+        DeclaredCategoryFilter._normalize_input(
+            {"custom": _CustomBag(i_contains="foo", starts_with="f")},
+        )
+    # One active lookup plus one inactive entry keeps the scalar shape.
+    data = DeclaredCategoryFilter._normalize_input(
+        {"custom": _CustomBag(i_contains="foo", starts_with=UNSET)},
+    )
+    assert data == {"custom": "foo"}
+
+
+@pytest.mark.django_db
+def test_normalize_input_overlap_head_binds_named_generated_lookup() -> None:
+    """A foreign single lookup over an overlap head binds the generated key.
+
+    When a declared filter shares its head with generated lookups, the
+    operator-bag attrs still map to their own django-filter lookups: a bag
+    naming only ``icontains`` applies ``name__icontains`` rather than
+    reinterpreting the value under the declared ``exact`` key.
+    """
+
+    @dataclasses.dataclass
+    class _OverlapBag:
+        exact: object = None
+        i_contains: object = None
+
+    class OverlapCategoryFilter(FilterSet):
+        name = CharFilter(field_name="name", lookup_expr="exact")
+
+        class Meta:
+            model = Category
+            fields = {"name": ["exact", "icontains"]}
+
+    data = OverlapCategoryFilter._normalize_input(
+        {"name": _OverlapBag(exact=UNSET, i_contains="Zulu")},
+    )
+    assert data == {"name__icontains": "Zulu"}
+
+
+@pytest.mark.django_db
+def test_normalize_input_overlap_head_mapping_binds_named_generated_lookup() -> None:
+    """The mapping twin of the overlap binding: same generated key."""
+
+    class OverlapMappingFilter(FilterSet):
+        name = CharFilter(field_name="name", lookup_expr="exact")
+
+        class Meta:
+            model = Category
+            fields = {"name": ["exact", "icontains"]}
+
+    data = OverlapMappingFilter._normalize_input({"name": {"i_contains": "Zulu"}})
+    assert data == {"name__icontains": "Zulu"}
+
+
+@pytest.mark.django_db
+def test_overlap_head_named_lookup_matches_django_filter_twin() -> None:
+    """Rows through an overlap head equal the suffixed-key twin rows."""
+
+    class OverlapTwinFilter(FilterSet):
+        name = CharFilter(field_name="name", lookup_expr="exact")
+
+        class Meta:
+            model = Category
+            fields = {"name": ["exact", "icontains"]}
+
+    c1 = Category.objects.create(name="Zulu")
+    c2 = Category.objects.create(name="Zulu-Extended")
+    twin = OverlapTwinFilter(
+        data={"name__icontains": "Zulu"},
+        queryset=Category.objects.all(),
+    )
+    assert twin.form.is_valid()
+    assert sorted(twin.qs.values_list("pk", flat=True)) == [c1.pk, c2.pk]
+    got = OverlapTwinFilter.apply_sync(
+        {"name": {"i_contains": "Zulu"}},
+        Category.objects.all(),
+        _make_info(),
+    )
+    assert sorted(got.values_list("pk", flat=True)) == [c1.pk, c2.pk]
+
+
+@pytest.mark.django_db
+def test_normalize_input_overlap_head_declared_lookup_keeps_declared_key() -> None:
+    """The declared filter's own lookup still binds the declared key.
+
+    The generated-key binding covers only lookups the declared filter does
+    not own; the declared lookup keeps its single form key.
+    """
+
+    @dataclasses.dataclass
+    class _OverlapBag:
+        exact: object = None
+        i_contains: object = None
+
+    class OverlapOwnFilter(FilterSet):
+        name = CharFilter(field_name="name", lookup_expr="exact")
+
+        class Meta:
+            model = Category
+            fields = {"name": ["exact", "icontains"]}
+
+    data = OverlapOwnFilter._normalize_input(
+        {"name": _OverlapBag(exact="Zulu", i_contains=UNSET)},
+    )
+    assert data == {"name": "Zulu"}
+
+
+@pytest.mark.django_db
+def test_apply_sync_permission_denial_precedes_form_validation() -> None:
+    """A denied gate surfaces even when the form input is also invalid.
+
+    Permission checks run before form validation: the denial raises for an
+    anonymous request while the same input yields ``FILTER_INVALID`` once
+    the gate passes.
+    """
+
+    class GateFirstFilter(FilterSet):
+        email_must_have_at_sign = CharFilter(field_name="email", method="filter_x")
+
+        class Meta:
+            model = library_models.Patron
+            fields = {"name": ["exact"]}
+
+        def __init__(
+            self,
+            data: QueryDict | dict[str, object] | None = None,
+            queryset: QuerySet[django_models.Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+            email_filter = self.filters.get("email_must_have_at_sign")
+            if email_filter is not None:
+                email_filter.field.validators.append(_validate_email_must_have_at_sign)
+
+        def filter_x(
+            self,
+            queryset: QuerySet[library_models.Patron],
+            _name: str,
+            value: str,
+        ) -> QuerySet[library_models.Patron]:
+            return queryset.filter(email=value)
+
+        def check_name_permission(self, request: object) -> None:
+            user = read_attr(request, "user", None)
+            if not user or not read_attr(user, "is_staff"):
+                raise GraphQLError("gate-first-nope")
+
+    library_models.Patron.objects.create(name="P", email="p@x.io")
+    staff_user = User.objects.create_user(username="s4", password="p", is_staff=True)
+
+    class _Context:
+        def __init__(self, req: HttpRequest) -> None:
+            self.request = req
+
+    class _Info:
+        def __init__(self, ctx: _Context) -> None:
+            self.context = ctx
+
+    anon_request, staff_request = HttpRequest(), HttpRequest()
+    staff_request.user = staff_user
+    bad = {"name": {"exact": "P"}, "email_must_have_at_sign": "no-at-sign"}
+    with pytest.raises(GraphQLError, match="gate-first-nope"):
+        GateFirstFilter.apply_sync(
+            bad,
+            library_models.Patron.objects.all(),
+            _Info(_Context(anon_request)),
+        )
+    with pytest.raises(GraphQLError) as exc_info:
+        GateFirstFilter.apply_sync(
+            bad,
+            library_models.Patron.objects.all(),
+            _Info(_Context(staff_request)),
+        )
+    assert exc_info.value.extensions is not None
+    assert exc_info.value.extensions.get("code") == "FILTER_INVALID"
 
 
 @pytest.mark.django_db
@@ -9255,23 +9492,6 @@ def test_normalize_input_rejects_scalar_logical_elements() -> None:
         CategoryFilter._normalize_input({"or_": ["name"]})
     with pytest.raises(ConfigurationError, match="must be a mapping or filter-input"):
         CategoryFilter._normalize_input({"and_": [42]})
-
-
-def test_normalize_input_rejects_scalar_logical_element_with_hostile_repr() -> None:
-    """A malformed logical element cannot replace its typed error via ``__repr__``."""
-
-    class CategoryFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
-
-    class HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr should never escape")
-
-    with pytest.raises(ConfigurationError, match="must be a mapping or filter-input"):
-        CategoryFilter._normalize_input({"or_": [HostileRepr()]})
 
 
 @pytest.mark.django_db
@@ -11711,7 +11931,12 @@ def test_positive_controls_unchanged_converts_replacement_preserved() -> None:
 
 @pytest.mark.django_db
 def test_relation_isnull_stays_boolean_m2m() -> None:
-    """A to-many M2M ``isnull`` under a Relay target is a BooleanFilter, not a GlobalID."""
+    """A to-many M2M ``isnull`` under a Relay target is a BooleanFilter, not a GlobalID.
+
+    Wire shape (Boolean SDL, ``true``/``false`` filtering, string rejection)
+    lives in
+    ``test_library_api.py::test_relay_relation_isnull_is_boolean_not_globalid_list_over_http``.
+    """
     _register_relay(library_models.Genre)
 
     class BookFilter(FilterSet):
@@ -11726,7 +11951,12 @@ def test_relation_isnull_stays_boolean_m2m() -> None:
 
 @pytest.mark.django_db
 def test_relation_isnull_stays_boolean_fk() -> None:
-    """A forward-FK ``isnull`` under a Relay target is a BooleanFilter, not a GlobalID."""
+    """A forward-FK ``isnull`` under a Relay target is a BooleanFilter, not a GlobalID.
+
+    No shipped fakeshop FK target is a Relay node (``ShelfType`` is not
+    ``relay.Node``); the M2M wire sibling is
+    ``test_library_api.py::test_relay_relation_isnull_is_boolean_not_globalid_list_over_http``.
+    """
     _register_relay(library_models.Shelf)
 
     class BookFilter(FilterSet):
@@ -11737,44 +11967,6 @@ def test_relation_isnull_stays_boolean_fk() -> None:
     leaf = BookFilter.get_filters()["shelf__isnull"]
     assert isinstance(leaf, BooleanFilter)
     assert not isinstance(leaf, GlobalIDFilter)
-
-
-@pytest.mark.django_db
-def test_relation_isnull_filters_correctly_no_500() -> None:
-    """End-to-end: a Relay-target relation ``isnull`` filters rows instead of raising.
-
-    A ``GlobalIDMultipleChoiceFilter`` leaf would compile a boolean ``isnull`` input
-    as a list-shaped GlobalID predicate and raise ``ValueError`` at bind. The
-    BooleanFilter compiles the null test correctly (the
-    to-many path routes it row-preservingly through the correlated ``EXISTS`` adapter,
-    which the pk-correlated inner root compiles the null semantics inside).
-    """
-    _register_relay(library_models.Genre)
-
-    class BookFilter(FilterSet):
-        class Meta:
-            model = library_models.Book
-            fields = {"genres": ["isnull"]}
-
-    genre = library_models.Genre.objects.create(name="G")
-    shelf = _library_shelf()
-    with_genre = library_models.Book.objects.create(title="with", shelf=shelf)
-    with_genre.genres.add(genre)
-    library_models.Book.objects.create(title="without", shelf=shelf)
-
-    result_true = BookFilter(
-        data={"genres__isnull": True},
-        queryset=library_models.Book.objects.order_by("id"),
-        request=HttpRequest(),
-    ).qs
-    assert set(result_true.values_list("title", flat=True)) == {"without"}
-
-    result_false = BookFilter(
-        data={"genres__isnull": False},
-        queryset=library_models.Book.objects.order_by("id"),
-        request=HttpRequest(),
-    ).qs
-    assert set(result_false.values_list("title", flat=True)) == {"with"}
 
 
 class _ConsumerBooleanFilter(BooleanFilter):
@@ -16409,3 +16601,42 @@ def test_enum_member_value_survives_copy_and_pickle(clone: Callable[[object], ob
     assert len(where) == 1
     assert isinstance(where[0], Lookup)
     assert read_attr(where[0], "rhs") == ""
+
+
+def test_visibility_unresolved_model_less_child_names_unresolved() -> None:
+    """A model-less child filterset degrades the target label to ``<unresolved>``."""
+
+    class OrphanFilter(FilterSet):
+        class Meta:
+            model = None
+            fields = {"code": ["exact"]}
+
+    class BranchFilter(FilterSet):
+        orphans = RelatedFilter(OrphanFilter, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        BranchFilter._derive_related_visibility_querysets_sync(
+            {"orphans": {"code": "x"}},
+            info=None,
+        )
+    assert "<unresolved>" in str(excinfo.value)
+
+
+def test_logical_branch_container_rejection_message_is_pinned() -> None:
+    """The logical-branch container rejection names the set, the key and the kind."""
+
+    class CategoryFilter(FilterSet):
+        class Meta:
+            model = Category
+            fields = {"name": ["exact"]}
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        CategoryFilter._run_permission_checks({"or_": {"name": "foo"}}, request=HttpRequest())
+    assert str(exc_info.value) == (
+        f"FilterSet {CategoryFilter.__qualname__}: logical branch 'or' takes a "
+        "list of filter inputs, got a dict. Wrap the clauses as 'or: [{...}]'."
+    )

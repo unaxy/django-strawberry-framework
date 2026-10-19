@@ -966,8 +966,6 @@ which walks every dotted path and rejects at the source:
   Unicode and very long decimal strings do not share `int()`'s acceptance
   domain, so an index the emitted `object-path` segment could not name is
   refused;
-- an **array whose length cannot be read**, so a hostile `__len__` cannot
-  replace the guard with a raw exception escape;
 - a **missing key** at a mapping level;
 - a **value that cannot be descended into** (neither array nor mapping);
 - a **non-`None` value at the resolved path**.
@@ -978,9 +976,10 @@ JSON arrays, so both array flavors carry indexed placeholders alike. Every
 guard is an explicit `raise AssertionError` (not the base's bare
 `assert variables is not None`), so all of them hold under `python -O` and
 share one type for `pytest.raises(AssertionError)`. Every diagnostic renders
-consumer-supplied paths and values through [`exceptions.py`][exceptions]
-`::_safe_arg_repr` rather than `{x!r}`, so a hostile `__repr__` cannot escape a
-guard as a raw exception (D5).
+consumer-supplied paths and values through `utils/truth.py::render` rather
+than `{x!r}`: a builtin scalar is spelled through its own type's slot (an
+oversized `int` reads `<unprintable int>` instead of raising), and any other
+value renders through its own `__repr__`, which is that value's behaviour (D5).
 
 The builder is **owned, not inherited** (Decision 5 ground 2): with the path
 explicit in the public contract it needs none of the base's folder-key
@@ -1151,8 +1150,8 @@ Reuse is named per item, and deliberate *non*-reuse carries its reason.
   (Decision 11).
 - [ ] **D5** — every guard diagnostic in the owned builder and the placeholder
   walker renders consumer-supplied paths and values through
-  [`exceptions.py`][exceptions] `::_safe_arg_repr`, never `{x!r}` — the
-  package's hostile-metadata containment helper (Decision 9).
+  `utils/truth.py::render`, never `{x!r}` — the package's one renderer for a
+  value named in an error message (Decision 9).
 - [ ] **D-N1** (non-reuse) — the client does **not** route through
   [`request_from_info`][glossary-request-from-info]: that helper decodes
   resolver-context shapes server-side; this module *originates* HTTP requests
@@ -1368,10 +1367,6 @@ the transport error:**
       over the digit-like spellings `int()` and `str.isdigit()` disagree on,
       with `::test_files_placeholder_out_of_range_list_index_raises` for the
       range leg;
-    - the unreadable array length —
-      `::test_files_placeholder_hostile_len_container_fails_closed`,
-      parametrized over `list` and `tuple`, asserting the uniform
-      `AssertionError` and that the hostile exception's text does not escape;
     - the non-descendable value —
       `::test_files_placeholder_cannot_descend_into_a_scalar_raises`,
       including a case past the first segment;
@@ -1392,11 +1387,6 @@ the transport error:**
       `::test_files_key_shadowing_a_reserved_envelope_field_raises`,
       parametrized over `operations`, `map`, and both (which also pins the
       sorted rendering of the offending names);
-    - `_safe_arg_repr` containment of a hostile consumer `__repr__` on the
-      placeholder value
-      (`::test_files_placeholder_hostile_repr_keeps_assertion_error_boundary`)
-      and on the `files=` key
-      (`::test_files_placeholder_hostile_repr_key_keeps_assertion_error_boundary`);
     - the transport is selected by presence, not truthiness —
       `::test_clients_preserve_an_explicit_falsy_transport` (both colors),
       `::test_async_client_defaults_to_djangos_async_transport` (the async
@@ -1582,7 +1572,6 @@ fallback weighing is in the [rationale][rationale-risks].
 
 <!-- django_strawberry_framework/ -->
 [conf]: ../../django_strawberry_framework/conf.py
-[exceptions]: ../../django_strawberry_framework/exceptions.py
 [init]: ../../django_strawberry_framework/__init__.py
 [testing-init]: ../../django_strawberry_framework/testing/__init__.py
 

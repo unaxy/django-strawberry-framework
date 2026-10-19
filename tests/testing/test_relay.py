@@ -14,7 +14,7 @@ type would rewrite every GlobalID for that type), the ``schema=`` mint under a
 type-renaming converter (the live rows in
 ``examples/fakeshop/test_query/test_globalid_naming_api.py`` read emitted ids
 off the wire, never through this helper), ``callable`` / ``custom`` /
-unfinalized / non-Node / stale-registry / hostile-input refusals, the
+unfinalized / non-Node / stale-registry / non-class refusals, the
 Phase-3-stamped-unfinalized gate, ``decode_global_id`` identity re-export, and
 int/str/UUID round-trips through the helper (kanban UUID types are non-Relay).
 """
@@ -262,21 +262,10 @@ def test_global_id_for_non_node_raises() -> None:
     # Step-1a branch: an input that is not a DjangoType subclass at all.
     with pytest.raises(ConfigurationError) as excinfo:
         global_id_for(object, 1)
-    assert "not a registered DjangoType subclass" in str(excinfo.value)
-
-
-def test_global_id_for_non_node_hostile_repr_keeps_configuration_error_boundary() -> None:
-    """A malformed input's broken ``repr`` cannot replace the typed rejection."""
-
-    class _HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    with pytest.raises(ConfigurationError, match="not a registered DjangoType subclass"):
-        # basedpyright: the instance with a raising repr is the hostile input under test;
-        # global_id_for types the parameter as type[object]
-        global_id_for(_HostileRepr(), 1)  # pyright: ignore[reportArgumentType]
+    assert str(excinfo.value) == (
+        "global_id_for: <class 'object'> is not a registered DjangoType subclass; "
+        "pass the DjangoType class whose emitted id you want to mint."
+    )
 
 
 def test_global_id_for_rejects_inherited_or_stale_definitions() -> None:
@@ -341,20 +330,6 @@ def test_public_decode_round_trip_primary_and_type_name() -> None:
     assert decode_global_id(global_id_for(type_type, 7)) == (type_type, "7")
     # The public name IS the internal dispatch (re-export, not a wrapper).
     assert testing_relay.decode_global_id is types_relay.decode_global_id
-
-
-def test_global_id_for_hostile_getattr_keeps_configuration_error_boundary() -> None:
-    """An input whose __getattr__ raises is handled cleanly and raises ConfigurationError."""
-
-    class _HostileGetattrMeta(type):
-        def __getattr__(cls, name: str) -> object:
-            raise RuntimeError("attribute access exploded")
-
-    class _HostileClass(metaclass=_HostileGetattrMeta):
-        pass
-
-    with pytest.raises(ConfigurationError, match="not a registered DjangoType subclass"):
-        global_id_for(_HostileClass, 1)
 
 
 def test_global_id_for_accepts_various_id_types_and_round_trips() -> None:

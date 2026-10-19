@@ -1,7 +1,7 @@
 """Live GraphQL HTTP tests for what one operation's extensions may be answered from.
 
-Two claims a package-only schema cannot make, both reached from a resolver
-holding ``info.schema`` in a real request and read back off the wire:
+Four claims a package-only schema cannot make, each reached from a real request and read
+back off the wire:
 
 - what enforces the NEXT request is the schema's own configuration, and nothing
   a resolver can reach through ``info.schema`` - not the accepted entries, not
@@ -183,8 +183,8 @@ def _raise_sentinel() -> NoReturn:
     raise RuntimeError(SENTINEL)
 
 
-#: Every factory shape short of an ordinary extension instance, and the reason
-#: the package logs for refusing it.
+#: The factory shapes short of an ordinary extension instance that this ladder
+#: mounts, and the reason the package logs for refusing each.
 _LADDER_FACTORIES = {
     "raises": (_raise_sentinel, "raised"),
     "not-an-extension": (partial(object), "not a SchemaExtension instance"),
@@ -814,7 +814,7 @@ def test_a_refused_schema_still_bounds_the_document_it_refuses(document: str) ->
     assert rejected.errors[0]["extensions"]["code"] == RESOURCE_LIMIT_ERROR_CODE
 
 
-#: Every ``operationName`` a client can put in a request body, including the
+#: Every string ``operationName`` a client can put in a request body, including the
 #: ones no document can carry. A refused schema discarded the document the name
 #: was written against, so the name selects nothing and every one of these has
 #: to come back in the same envelope.

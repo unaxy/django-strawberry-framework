@@ -38,21 +38,20 @@ from django_filters import (
 )
 from django_filters import RangeFilter as _DjangoRangeFilter
 from django_filters.filters import BaseCSVFilter
+from django_filters.filterset import FilterSetOptions
 from django_filters.utils import get_model_field
 from strawberry import relay
 
 from django_strawberry_framework.conf import hide_flat_filters_setting
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.types.converters import scalar_for_field
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     enum_value,
     is_list_or_tuple,
+    optional_instance,
     read_attr,
 )
 from django_strawberry_framework.utils.converters import MRO_CONTINUE, convert_with_mro
@@ -105,8 +104,6 @@ _input_type_name_for = set_input_type_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-
-    from django_filters.filterset import FilterSetOptions
 
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.inputs import SetInputNamespace
@@ -300,7 +297,7 @@ def _pascal_case(name: str) -> str:
     return pascal_case_or_raise(
         name,
         make_error=lambda bad: ConfigurationError(
-            f"_pascal_case received {_safe_arg_repr(bad)} which contains no word "
+            f"_pascal_case received {truth.render(bad)} which contains no word "
             "characters; rename the RangeFilter's `field_name=` so its "
             "name has at least one alphanumeric token.",
         ),
@@ -384,8 +381,8 @@ def _relation_identity_annotation(
     column = relation_identity_column(model_field)
     if column is None:
         raise ConfigurationError(
-            f"{_safe_type_name(filter_instance)} on {_safe_arg_repr(filter_instance)} names "
-            f"{_safe_arg_repr(getattr(filter_instance, 'field_name', None))}, which is not a "
+            f"{truth.kind(filter_instance)} on {truth.render(filter_instance)} names "
+            f"{truth.render(getattr(filter_instance, 'field_name', None))}, which is not a "
             "relation to a model on its FilterSet; name a relation key in Meta.fields, or "
             "filter the related row's own fields through a RelatedFilter.",
         )
@@ -417,10 +414,10 @@ def _model_choice_identity_annotation(
     """
     column = model_choice_identity_column(filter_instance, model_field)
     if column is None:
-        owner = filterset_cls.__name__ if filterset_cls is not None else "FilterSet"
+        owner = truth.name(filterset_cls) if filterset_cls is not None else "FilterSet"
         raise ConfigurationError(
-            f"{owner}: {_safe_type_name(filter_instance)} on "
-            f"{_safe_arg_repr(getattr(filter_instance, 'field_name', None))} has no model "
+            f"{owner}: {truth.kind(filter_instance)} on "
+            f"{truth.render(getattr(filter_instance, 'field_name', None))} has no model "
             "queryset (its queryset is callable or unset) and its field_name names no "
             "relation on the FilterSet model, so there is no column to type its input "
             "from. Pass a model queryset, or point field_name at a relation.",
@@ -452,7 +449,7 @@ def _choice_enum_from_filter(
 
     if model_field is None or not getattr(model_field, "choices", None):
         raise ConfigurationError(
-            f"ChoiceFilter on {_safe_arg_repr(filter_instance)} is not backed by a Django "
+            f"ChoiceFilter on {truth.render(filter_instance)} is not backed by a Django "
             "`Choices`-derived enum; wrap the choices through "
             "`django.db.models.TextChoices` / `IntegerChoices` or register a "
             "custom scalar via `SCALAR_MAP`.",
@@ -512,8 +509,8 @@ def _element_annotation(
 # Array / Range already matched, so normalize returns ``MRO_CONTINUE`` and
 # falls through to ChoiceFilter / the catch-all. Last entry is ``object`` (the
 # original ``else``): convert's method-filter / ``isnull`` / scalar arm,
-# normalize's unwrap. A duck-typed non-``Filter`` still reaches that arm so
-# hostile-``__repr__`` diagnostics stay typed ``ConfigurationError``.
+# normalize's unwrap. A duck-typed non-``Filter`` still reaches that arm, so a
+# malformed filter object is rejected with a typed ``ConfigurationError``.
 _FILTER_INPUT_KIND_TYPES: tuple[type[object] | tuple[type[object], ...], ...] = (
     GlobalIDMultipleChoiceFilter,
     GlobalIDFilter,
@@ -548,7 +545,7 @@ def _unexpected_filter_dispatch(obj: object) -> ConfigurationError:
     contract if a handler returns ``MRO_CONTINUE`` all the way through.
     """
     return ConfigurationError(
-        f"internal: filter input dispatch reached fallthrough for {_safe_arg_repr(obj)}",
+        f"internal: filter input dispatch reached fallthrough for {truth.render(obj)}",
     )
 
 
@@ -628,7 +625,7 @@ def convert_filter_to_input_annotation(
         method = read_attr(matched, "method", None)
         if method is not None and form_field is None:
             raise ConfigurationError(
-                f"Filter(method={_safe_arg_repr(method)}) on {_safe_arg_repr(matched)} exposes no "
+                f"Filter(method={truth.render(method)}) on {truth.render(matched)} exposes no "
                 "form field; declare an explicit `Filter(method=..., field_class=...)` "
                 "or wrap the method on a typed filter primitive.",
             )
@@ -683,8 +680,7 @@ def normalize_input_value(
       ``ChoiceFilter`` is ``IS NULL``). A GlobalID is kept in its base64
       wire form (not pre-decoded to a bare ``node_id``) so the bound filter
       can validate its ``type_name`` before decoding;
-    - a ``list`` (for ``GlobalIDMultipleChoiceFilter`` / ``ListFilter`` /
-      ``ArrayFilter``) when ``django-filter`` consumes a list;
+    - a ``list`` when ``django-filter`` consumes a list;
     - a ``dict[str, Any]`` patch the caller merges into the form-data
       dict when the filter consumes more than one positional form-data
       key (``RangeFilter`` -> ``{<field>_0, <field>_1}``).
@@ -781,8 +777,7 @@ def _require_list_container(
 ) -> list[object] | tuple[object, ...]:
     """Fail loud when a list-consuming normalize arm receives another container.
 
-    ``GlobalIDMultipleChoiceFilter`` / ``BaseCSVFilter`` (``in`` / ``range``)
-    / ``ListFilter`` / ``ArrayFilter`` normalize by iterating ``raw_value``.
+    The list-consuming normalize arms iterate ``raw_value``.
     The schema declares every such input as a GraphQL list, so the wire can
     only deliver a list; the reachable non-list shapes are direct-Python
     ``apply_sync`` caller mistakes. Iterating one would splat it: a
@@ -796,9 +791,9 @@ def _require_list_container(
     """
     if not is_list_or_tuple(raw_value):
         raise ConfigurationError(
-            f"{filter_instance.__class__.__name__} consumes a list of values for its "
+            f"{truth.kind(filter_instance)} consumes a list of values for its "
             f"{filter_instance.field_name!r} input, but received a non-list container "
-            f"({_safe_type_name(raw_value)} {_safe_arg_repr(raw_value)}) for the {shape}; "
+            f"({truth.kind(raw_value)} {truth.render(raw_value)}) for the {shape}; "
             "send a list (the GraphQL schema already rejects this shape over the wire).",
         )
     return raw_value
@@ -883,7 +878,7 @@ def _build_range_input_class(
     that build no schema) keeps the unqualified ``<Field>RangeInputType`` name.
     """
     field_name = getattr(filter_instance, "field_name", "field") or "field"
-    prefix = filterset_cls.__name__ if filterset_cls is not None else ""
+    prefix = truth.name(filterset_cls) if filterset_cls is not None else ""
     cls_name = f"{prefix}{_pascal_case(field_name)}RangeInputType"
     return build_input_class(
         cls_name,
@@ -941,9 +936,9 @@ def _normalize_range_value(
     items = iter_input_items(raw_value)
     if items is None or any(name not in _RANGE_AXES for name, _ in items):
         raise ConfigurationError(
-            f"{_safe_type_name(filter_instance)} consumes a range input with only "
+            f"{truth.kind(filter_instance)} consumes a range input with only "
             f"'start' / 'end' axes for its {base!r} input, but received "
-            f"{_safe_type_name(raw_value)} {_safe_arg_repr(raw_value)}; send a mapping or "
+            f"{truth.kind(raw_value)} {truth.render(raw_value)}; send a mapping or "
             "input object with 'start' / 'end' (the GraphQL schema already rejects this "
             "shape over the wire).",
         )
@@ -1060,7 +1055,11 @@ def _group_filters_by_head(
     ``(head, lookup)`` slot would leave one unreachable from the generated
     input, so that raises.
     """
-    declared_filters = getattr(filterset_cls, "declared_filters", {})
+    # django-filter's metaclass stores ``declared_filters`` as the name-keyed declared map.
+    declared_filters = cast(
+        "Mapping[str, Filter]",
+        truth.static_attr(filterset_cls, "declared_filters", {}),
+    )
     grouped: OrderedDict[str, OrderedDict[str, FormKeyedFilter]] = OrderedDict()
     for filter_name, filter_instance in all_filters.items():
         # Skip expanded RelatedFilter entries (e.g., `self_link__self_link`
@@ -1068,7 +1067,7 @@ def _group_filters_by_head(
         # `RelatedFilter` forward-ref already exposes the same target;
         # the expanded duplicate would otherwise reach the leaf branch
         # and trip the `ChoiceFilter` guard.
-        if "__" in filter_name and isinstance(filter_instance, RelatedFilter):
+        if "__" in filter_name and truth.is_instance(filter_instance, RelatedFilter):
             continue
         lookup_expr = filter_instance.lookup_expr
         if filter_name in declared_filters or _is_expanded_declared_filter(filter_instance):
@@ -1084,7 +1083,7 @@ def _group_filters_by_head(
         prior = bag.get(lookup_token)
         if prior is not None:
             raise ConfigurationError(
-                f"{filterset_cls.__qualname__}: filters {prior[0]!r} and {filter_name!r} "
+                f"{truth.qualname(filterset_cls)}: filters {prior[0]!r} and {filter_name!r} "
                 f"both bind the {lookup_token!r} lookup of input field {head!r}, so one "
                 "would be unreachable from the generated input. Rename one filter or "
                 "drop one via Meta.fields / Meta.exclude.",
@@ -1105,7 +1104,11 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
     if cached is not None and cached.source is all_filters:
         return cached
     heads = _group_filters_by_head(filterset_cls, all_filters)
-    declared_filters = getattr(filterset_cls, "declared_filters", {})
+    # django-filter's metaclass stores ``declared_filters`` as the name-keyed declared map.
+    declared_filters = cast(
+        "Mapping[str, Filter]",
+        truth.static_attr(filterset_cls, "declared_filters", {}),
+    )
     by_input_attr: dict[str, Mapping[str, FormKeyedFilter]] = {}
     gate_paths: dict[str, str] = {}
     for head, bag in heads.items():
@@ -1130,7 +1133,7 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
         prior_head = alias_heads.setdefault(input_attr, head)
         if prior_head != head:
             raise ConfigurationError(
-                f"{filterset_cls.__qualname__}: filters {prior_head!r} and {head!r} both "
+                f"{truth.qualname(filterset_cls)}: filters {prior_head!r} and {head!r} both "
                 f"generate the input attribute {input_attr!r} (Django path separators "
                 "flatten to '_'), so one would be unreachable. Rename one filter or "
                 "drop one via Meta.fields / Meta.exclude.",
@@ -1159,7 +1162,12 @@ def _build_input_fields(
     paths, one bag attr per lookup the table holds. Populates ``_field_specs``
     for the active-field walk and the permission gates.
     """
-    related_filters = filterset_cls.related_filters
+    # The metaclass stores ``related_filters`` from
+    # ``sets_mixins.py::collect_related_declarations`` (``RelatedFilter`` only).
+    related_filters = cast(
+        "Mapping[str, RelatedFilter]",
+        truth.static_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
+    )
     lookup_table = filter_lookup_table(filterset_cls)
 
     # ``HIDE_FLAT_FILTERS`` (default ``False``, the default of
@@ -1285,7 +1293,7 @@ def _model_field_for_filter(
     missing hop -- is preserved unchanged.
     """
     # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
-    meta: FilterSetOptions | None = getattr(filterset_cls, "_meta", None)
+    meta = optional_instance(truth.static_attr(filterset_cls, "_meta", None), FilterSetOptions)
     model: type[models.Model] | None = getattr(meta, "model", None)
     if model is None:
         return None

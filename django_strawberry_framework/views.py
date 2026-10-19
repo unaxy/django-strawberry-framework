@@ -96,19 +96,15 @@ from django_strawberry_framework._boundary_ordering import (
     _BOUNDARY_ENFORCED,
     _BOUNDARY_MARKER,
     _BOUNDARY_MOUNT,
-    _BOUNDARY_PREPARED_VIEW,
     _CSRF_ORDERING_EXEMPTION,
+    consume_prepared_view,
 )
+from django_strawberry_framework._multipart import _MULTIPART_CONTROL_FIELDS
 from django_strawberry_framework._request_body import body_exceeds_limit
 from django_strawberry_framework.conf import django_setting, max_request_body_bytes_setting
-from django_strawberry_framework.exceptions import ConfigurationError, describe_value
-from django_strawberry_framework.utils._narrowing import (
-    is_awaitable,
-    is_exact_pair,
-    is_str,
-    read_attr,
-    require,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_awaitable, is_str, read_attr, require
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
 
@@ -164,12 +160,6 @@ _JSON_PARSE_REASON = "Unable to parse request body as JSON"
 #: ``content_params``).
 _MULTIPART_CONTENT_TYPE = "multipart/form-data"
 
-#: The two GraphQL-multipart form fields that carry a JSON control document, as
-#: named by the multipart request specification and read by upstream's
-#: ``parse_multipart`` on both transports. Everything else in the form is a file
-#: payload Django's upload handlers own.
-_MULTIPART_CONTROL_FIELDS = ("operations", "map")
-
 #: U+FFFD REPLACEMENT CHARACTER, written as an escape to keep this file ASCII.
 #: Django decodes non-file multipart fields with ``errors="replace"``, so every
 #: byte sequence it could not decode arrives as exactly this character - which is
@@ -210,7 +200,7 @@ def _resolved_max_request_body_bytes(value: object) -> int | None:
     then evaluate consumer code INSIDE this boundary and escape it with a raw
     exception in place of the promised ``ConfigurationError``.
 
-    The ``got`` tail is rendered by ``exceptions.py::describe_value`` rather than
+    The ``got`` tail is rendered by ``utils/truth.py::describe`` rather than
     interpolated directly, because the f-string runs at the RAISE SITE: a
     negative integer too large to convert to a string (CPython 3.11+ refuses
     beyond ``sys.get_int_max_str_digits()``) reaches the ``value <= 0`` arm and
@@ -225,7 +215,7 @@ def _resolved_max_request_body_bytes(value: object) -> int | None:
     if type(value) is not int or value <= 0:
         raise ConfigurationError(
             f"max_request_body_bytes must be a positive int of bytes or None to disable "
-            f"the package request-body cap; got {describe_value(value)}.",
+            f"the package request-body cap; got {truth.describe(value)}.",
         )
     return value
 
@@ -473,11 +463,10 @@ def _boundary_view(upstream_view: Callable[..., object]) -> Callable[..., object
 
         Its dispatch is sync on one view and returns a coroutine on the other.
         """
-        prepared = read_attr(request, _BOUNDARY_PREPARED_VIEW, None)
-        if not is_exact_pair(prepared) or prepared[0] is not mount:
+        prepared = consume_prepared_view(request, mount)
+        if prepared is None:
             return None
-        delattr(request, _BOUNDARY_PREPARED_VIEW)
-        return require(read_attr(prepared[1], "dispatch"), callable)
+        return require(read_attr(prepared, "dispatch"), callable)
 
     # The arm follows the callback Django will call, never ``view_is_async``: that
     # reads the HTTP handlers, and ``AsyncGraphQLView`` defines none - its
@@ -1186,8 +1175,8 @@ class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context
         upstream_view = super().as_view(**initkwargs)
         if not is_marked_coroutine_function(upstream_view):
             raise ConfigurationError(
-                f"{cls.__qualname__}.as_view() needs a coroutine view callback, but the "
-                f"as_view it extends returned {describe_value(upstream_view)}; keep "
+                f"{truth.qualname(cls)}.as_view() needs a coroutine view callback, but the "
+                f"as_view it extends returned {truth.describe(upstream_view)}; keep "
                 "AsyncGraphQLView.as_view's coroutine marking on the callback.",
             )
         return _boundary_view(upstream_view)

@@ -38,18 +38,11 @@ from typing import TYPE_CHECKING, Final, NoReturn, cast
 
 from strawberry.types.unset import UnsetType
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_attr, _safe_type_name
+from django_strawberry_framework.exceptions import ConfigurationError
 
-from ._narrowing import (
-    dict_get,
-    dict_items,
-    is_dict,
-    is_list,
-    is_mapping,
-    is_str,
-    list_iter,
-    read_attr,
-)
+from . import truth
+from ._narrowing import dict_get, is_mapping, read_attr
+from .canonical import base_container_values
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -91,21 +84,22 @@ LEAF = "leaf"
 def _field_name(value: object, *, input_value: object) -> str:
     """Normalize one input key or reject it before lookup/permission dispatch.
 
-    The key's real type decides (``is_str``): a ``__class__`` property can neither
-    claim ``str`` for an object the base ``str`` slot refuses nor raise out of the check.
+    The key's real type decides (``truth.is_instance``): a ``__class__`` property can
+    neither claim ``str`` for an object the base ``str`` slot refuses nor raise out of
+    the check.
     """
-    if not is_str(value):
+    if not truth.is_instance(value, str):
         raise ConfigurationError(
             "Set input field names must be strings; received an invalid field name in an "
-            f"input of type {_safe_type_name(input_value)}.",
+            f"input of type {truth.kind(input_value)}.",
         )
-    return str.__str__(value)
+    return truth.text(value)
 
 
 def _walk_error(input_value: object, detail: str) -> ConfigurationError:
     """Build a typed, safe traversal error for malformed consumer input."""
     return ConfigurationError(
-        f"Could not traverse set input of type {_safe_type_name(input_value)}: {detail}.",
+        f"Could not traverse set input of type {truth.kind(input_value)}: {detail}.",
     )
 
 
@@ -122,33 +116,18 @@ def iter_input_items(input_value: object) -> list[tuple[str, object]] | None:
     ``utils/permissions.py`` so the existing
     ``from ..utils.permissions import iter_input_items`` consumers keep working.
     """
-    if is_dict(input_value):
-        pairs = dict_items(input_value)
+    if truth.is_instance(input_value, dict):
+        pairs = base_container_values(input_value)
         return [(_field_name(name, input_value=input_value), value) for name, value in pairs]
-    try:
-        dataclass_fields: object = getattr(input_value, "__dataclass_fields__", None)
-    except BaseException as exc:
-        raise _walk_error(input_value, "its dataclass metadata could not be read") from exc
+    dataclass_fields: object = truth.static_attr(input_value, "__dataclass_fields__")
     if dataclass_fields is None:
         return None
     if not is_mapping(dataclass_fields):
-        raise ConfigurationError(
-            "Could not traverse set input of type "
-            f"{_safe_type_name(input_value)}: its dataclass metadata is not a mapping.",
-        )
-    try:
-        names = tuple(dataclass_fields)
-    except BaseException as exc:
-        raise _walk_error(input_value, "its dataclass fields could not be enumerated") from exc
-    items: list[tuple[str, object]] = []
-    for name in names:
-        field_name = _field_name(name, input_value=input_value)
-        try:
-            value = read_attr(input_value, field_name)
-        except BaseException as exc:
-            raise _walk_error(input_value, "a dataclass field value could not be read") from exc
-        items.append((field_name, value))
-    return items
+        raise _walk_error(input_value, "its dataclass metadata is not a mapping")
+    return [
+        (field_name, read_attr(input_value, field_name))
+        for field_name in (_field_name(name, input_value=input_value) for name in dataclass_fields)
+    ]
 
 
 def input_field_value(input_value: object, name: str) -> object:
@@ -161,12 +140,9 @@ def input_field_value(input_value: object, name: str) -> object:
     composes this with ``is_inactive_value`` instead of re-spelling the sniff.
     """
     field_name = _field_name(name, input_value=input_value)
-    if is_dict(input_value):
+    if truth.is_instance(input_value, dict):
         return dict_get(input_value, field_name)
-    try:
-        return getattr(input_value, field_name, None)
-    except BaseException as exc:
-        raise _walk_error(input_value, "a field value could not be read") from exc
+    return getattr(input_value, field_name, None)
 
 
 #: ``strawberry.UNSET``, typed as the instance it is. Strawberry annotates its sentinel ``Any``
@@ -249,8 +225,8 @@ def set_traversal_depth_cap(set_cls: object) -> int:
     the logical-branch walk and the permission walk, which is how one budget came
     to be enforced with two vocabularies.
     """
-    declared = getattr(set_cls, "_MAX_LOGIC_DEPTH", None)
-    return declared if isinstance(declared, int) else DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
+    declared = truth.static_attr(set_cls, "_MAX_LOGIC_DEPTH")
+    return declared if truth.is_instance(declared, int) else DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
 
 
 def raise_set_traversal_depth_exceeded(
@@ -268,22 +244,19 @@ def raise_set_traversal_depth_exceeded(
     so the sentence is shared and only the three words that name WHICH walk hit
     the cap are per-caller.
 
-    The label is read defensively: ``__qualname__`` is an ordinary attribute a
-    metaclass can make hostile, and a walk that already decided to fail must not
-    fail differently while naming the class that failed. That guard existed on
-    only one of the two copies.
+    The label is the set's qualname read from the interpreter
+    (``truth.qualname``), so naming the class that failed cannot itself fail.
     """
     cap = set_traversal_depth_cap(set_cls)
-    qualname = _safe_attr(set_cls, "__qualname__")
-    # The base ``str`` slot strips a ``str`` subclass before its ``__str__`` / ``__format__``
-    # can run inside the message below; ``is_str`` asks the real type, which a ``__class__``
-    # property cannot restate.
-    label = str.__str__(qualname) if is_str(qualname) else _safe_type_name(set_cls)
+    # The slot can hold a ``str`` subclass (``cls.__qualname__ = StrSub(...)``); ``truth.text``
+    # copies it through the base ``str`` slot so its ``__str__`` / ``__format__`` never run
+    # inside the message below.
+    label = truth.text(truth.qualname(set_cls))
     if subject:
         label = f"{subject} {label}"
     cap_detail = (
         f"_MAX_LOGIC_DEPTH={cap}"
-        if getattr(set_cls, "_MAX_LOGIC_DEPTH", None) is not None
+        if truth.static_attr(set_cls, "_MAX_LOGIC_DEPTH") is not None
         else f"the maximum traversal depth ({cap})"
     )
     raise ConfigurationError(
@@ -311,14 +284,13 @@ def assert_set_traversal_depth(
 
 
 class RelatedDeclarationError(Exception):
-    """A set's related-declaration attribute could not be read, or is not a mapping.
+    """A set's related-declaration attribute is not a mapping.
 
     An internal signal, never surfaced: :func:`related_declaration_mapping`
     raises it and every caller translates it into that caller's own
     ``ConfigurationError`` prose (the permission walker names the declaring
-    class and attribute; the input traversal names the input type). The
-    ``kind`` distinguishes the two rejections, and ``__cause__`` carries the
-    original failure so a translated error can chain it.
+    class and attribute; the input traversal names the input type). ``kind``
+    is ``"not_mapping"`` and ``value`` carries the rejected declaration.
     """
 
     def __init__(self, kind: str, value: object = None) -> None:
@@ -332,7 +304,7 @@ def related_declaration_mapping(owner: object, related_attr: str) -> Mapping[obj
     """Read a set's related-declaration attribute and prove it is a mapping.
 
     The shared front half of every related-branch traversal: read the attribute
-    without trusting a descriptor to behave, treat an absent or ``None``
+    from the class's real namespaces (``truth.static_attr``), treat an absent or ``None``
     declaration as "no related fields", and reject anything that is not a
     ``Mapping`` before a caller starts indexing it. The permission walker and
     the neutral input traversal both need exactly this and had it written out
@@ -340,18 +312,13 @@ def related_declaration_mapping(owner: object, related_attr: str) -> Mapping[obj
     to be added in both places.
 
     What stays per-caller is what each does with the mapping - the permission
-    walker materializes it through the UNBOUND ``dict.items`` (a hostile
-    ``items`` override must not run inside an authorization walk), while the
-    traversal reads membership lazily and words a hostile ``__contains__`` /
-    ``__getitem__`` failure per operation. Those are different contracts, not a
-    missed merge.
+    walker materializes it through the UNBOUND ``dict.items`` (an ``items``
+    override must not run inside an authorization walk), while the traversal
+    reads membership lazily. Those are different contracts, not a missed merge.
 
     Raises :class:`RelatedDeclarationError` for the caller to translate.
     """
-    try:
-        related: object = getattr(owner, related_attr, None)
-    except BaseException as exc:
-        raise RelatedDeclarationError("unreadable") from exc
+    related: object = truth.static_attr(owner, related_attr)
     if related is None:
         return {}
     if not is_mapping(related):
@@ -385,22 +352,19 @@ def iter_active_fields(
     ``_apply_related_constraints`` own it). Leaf shape (operator bags, ranges,
     directions) is the consumer's business too; this walker only marks the kind.
     """
-    try:
-        unset_sentinel = config.unset_sentinel
-        handle_top_level_list = config.handle_top_level_list
-    except BaseException as exc:
-        raise _walk_error(input_value, "the traversal configuration could not be read") from exc
+    unset_sentinel = config.unset_sentinel
+    handle_top_level_list = config.handle_top_level_list
     if is_inactive_value(input_value, unset_sentinel=unset_sentinel):
         return
-    if handle_top_level_list and is_list(input_value):
-        elements = list_iter(input_value)
+    if handle_top_level_list and truth.is_instance(input_value, list):
+        elements = base_container_values(input_value)
         for element in elements:
             if is_inactive_value(element, unset_sentinel=unset_sentinel):
                 continue
-            if is_list(element) or iter_input_items(element) is None:
+            if truth.is_instance(element, list) or iter_input_items(element) is None:
                 raise ConfigurationError(
                     "Order input list elements must be mapping or dataclass values; "
-                    f"received {_safe_type_name(element)}.",
+                    f"received {truth.kind(element)}.",
                 )
             yield from iter_active_fields(set_cls, element, config)
         return
@@ -409,59 +373,20 @@ def iter_active_fields(
         return
     try:
         related = related_declaration_mapping(set_cls, config.related_attr)
-    except RelatedDeclarationError as exc:
-        if exc.kind == "not_mapping":
-            raise ConfigurationError(
-                "Could not traverse set input of type "
-                f"{_safe_type_name(input_value)}: related-field declarations are not a mapping.",
-            ) from exc.__cause__
-        raise _walk_error(
-            input_value,
-            "the related-field declarations could not be read",
-        ) from exc.__cause__
-    except BaseException as exc:
-        # Reading the attribute NAME off ``config`` dispatches consumer code too
-        # (``related_attr`` is an ordinary attribute read, and the traversal
-        # config is a public dataclass a test double may replace), and the
-        # shared helper only contains the CLASS-side read. This arm restores
-        # the containment the walker has always had around the whole
-        # declaration read: any other failure is the same walk failure, worded
-        # identically and chained to the exception that caused it.
-        raise _walk_error(
-            input_value,
-            "the related-field declarations could not be read",
-        ) from exc
+    except RelatedDeclarationError:
+        raise _walk_error(input_value, "related-field declarations are not a mapping") from None
     for python_attr, raw_value in items:
         if is_inactive_value(raw_value, unset_sentinel=unset_sentinel):
             continue
-        try:
-            # Every class is a valid probe: an identity lookup by a wider key is sound, so
-            # the family's map is read through its class-keyed view.
-            spec = cast(
-                "Mapping[tuple[type[object], str], GeneratedInputFieldSpec]",
-                config.field_specs,
-            ).get((set_cls, python_attr))
-            is_logic = python_attr in config.logic_keys
-        except BaseException as exc:
-            raise _walk_error(input_value, "field provenance could not be resolved") from exc
-        if is_logic:
+        # Every class is a valid probe: an identity lookup by a wider key is sound, so
+        # the family's map is read through its class-keyed view.
+        spec = cast(
+            "Mapping[tuple[type[object], str], GeneratedInputFieldSpec]",
+            config.field_specs,
+        ).get((set_cls, python_attr))
+        if python_attr in config.logic_keys:
             yield ActiveField(python_attr, raw_value, spec, LOGIC)
+        elif python_attr in related:
+            yield ActiveField(python_attr, raw_value, spec, RELATED, related[python_attr])
         else:
-            try:
-                is_related = python_attr in related
-            except BaseException as exc:
-                raise _walk_error(
-                    input_value,
-                    "related-field declarations could not be checked",
-                ) from exc
-            if not is_related:
-                yield ActiveField(python_attr, raw_value, spec, LEAF)
-                continue
-            try:
-                related_obj = related[python_attr]
-            except BaseException as exc:
-                raise _walk_error(
-                    input_value,
-                    "a related-field declaration could not be read",
-                ) from exc
-            yield ActiveField(python_attr, raw_value, spec, RELATED, related_obj)
+            yield ActiveField(python_attr, raw_value, spec, LEAF)

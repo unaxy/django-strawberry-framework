@@ -41,7 +41,7 @@ triggers the collection pipeline, which:
 import inspect
 import re
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import (
     TYPE_CHECKING,
@@ -60,29 +60,18 @@ from strawberry import relay
 from strawberry.relay.types import NodeIDPrivate
 from strawberry.types.auto import StrawberryAuto
 from strawberry.types.field import StrawberryField
+from strawberry.types.object_type import StrawberryObjectDefinition
 from typing_extensions import override
 
 from django_strawberry_framework.conf import RELAY_GLOBALID_STRATEGY_KEY
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_predicate,
-    _safe_text,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.keyset import validate_cursor_field_references
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.hints import OptimizerHint
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.utils._narrowing import (
-    class_dict,
-    is_abstract_set,
-    is_class,
-    is_dict,
-    is_list_or_tuple,
-    is_mapping,
-    is_str,
-)
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import dict_of, list_of, optional_instance
+from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 from django_strawberry_framework.utils.typing import is_async_callable
 
@@ -103,7 +92,6 @@ if TYPE_CHECKING:
     from .definition import GlobalIDStrategy
 
 _SidecarT = TypeVar("_SidecarT")
-_T = TypeVar("_T")
 
 DEFERRED_META_KEYS: frozenset[str] = frozenset(
     {"aggregate_class", "fields_class", "search_fields"},
@@ -153,25 +141,28 @@ RELATION_SHAPE_VALUES: frozenset[str] = frozenset({"list", "connection", "both"}
 # (``resource_policy.py::bounded_rows``) rather than unbounded.
 DEFAULT_RELATION_SHAPE = "connection"
 
-# The Relay-Node-gate lead-in shared by the three ``Meta``-key gates
-# (``Meta.connection``, ``Meta.globalid_strategy``, ``Meta.relation_shapes``).
-# The connection / globalid gates append ``_RELAY_NODE_GATE_INHERIT_TAIL``;
-# the relation_shapes gate appends the spec-pinned "or remove the key."
-# (spec-032 Decision 7). One literal, three compose sites - the
-# ``_INTERFACES_SHAPE_ERROR_LEAD_IN`` precedent.
+# The Relay-Node-gate lead-in: every ``Meta``-key gate composes this one
+# literal by name, as does ``global_id_for`` in ``testing/relay.py`` - the
+# ``_INTERFACES_SHAPE_ERROR_LEAD_IN`` precedent. Every gate appends
+# ``_RELAY_NODE_GATE_INHERIT_TAIL`` but the relation_shapes gate, which
+# appends the spec-pinned "or remove the key." (spec-032 Decision 7).
 _RELAY_NODE_GATE_LEAD = "requires a Relay-Node-shaped type; add `relay.Node` to `Meta.interfaces`"
-# The tail shared by the connection / globalid gates here and ``global_id_for``
-# in ``testing/relay.py``: byte-identical at three compose sites (3rd-copy
-# hoist, spec-032 integration pass). The ``_validate_relation_shapes`` gate's
-# "or remove the key." tail and the parenthesized fifth-guard variants in
-# ``relay.py`` / ``connection.py`` are a different byte shape and stay inline.
+# The tail appended beside the lead-in by every gate but the relation_shapes
+# gate, and by ``global_id_for`` in ``testing/relay.py``: byte-identical at
+# every compose site (spec-032 integration pass). The
+# ``_validate_relation_shapes`` gate's "or remove the key." tail and the
+# parenthesized fifth-guard variants in ``relay.py`` / ``connection.py`` are
+# a different byte shape and stay inline.
 _RELAY_NODE_GATE_INHERIT_TAIL = "or inherit `relay.Node` directly."
 
 # The valid string-strategy set and the package default are the single source
-# of truth for the GlobalID-encoding strategy vocabulary: ``_validate_meta`` /
-# ``_validate_globalid_strategy`` here, the encoder, and the
-# decode-shape enforcement all reference these names rather than re-typing the
-# literals (spec-031 Decisions 4/5/6). ``callable``
+# of truth for the CONFIGURABLE GlobalID-encoding strategy vocabulary: the
+# ``Meta`` / setting validators here, the precedence resolver, and the testing
+# mint gate read these names rather than re-typing the literals (spec-031
+# Decisions 4/5/6). The encoder, the decode-shape enforcement, and the
+# strategy-aware filter read the payload-shape memberships in ``types/relay.py``
+# instead - vocabulary (what may be declared) vs shapes (what each strategy
+# emits / accepts) are separate contracts sharing an extension today. ``callable``
 # strategies are validated separately (arity + sync-ness), so they are not part
 # of the string set.
 STRING_GLOBALID_STRATEGIES: frozenset[str] = frozenset({"model", "type", "type+model"})
@@ -194,10 +185,10 @@ def _validate_set_sidecar(
     short-circuit; this owns only the subclass check and the
     ``must be {article} {expected.__name__} subclass`` wording.
     """
-    if not (is_class(sidecar_class) and issubclass(sidecar_class, expected)):
+    if not truth.is_subclass(sidecar_class, expected):
         raise ConfigurationError(
-            f"{model.__name__}.Meta.{meta_key} must be {article} {expected.__name__} subclass; "
-            f"got {_safe_arg_repr(sidecar_class)}",
+            f"{truth.name(model)}.Meta.{meta_key} must be {article} {truth.name(expected)} subclass; "
+            f"got {truth.render(sidecar_class)}",
         )
     return sidecar_class
 
@@ -291,15 +282,17 @@ def _validate_connection(
     """
     if connection is None:
         return None
-    if not _guarded_narrow(connection, is_dict):
+    connection = unwrap_lazy_object(connection)
+    model_name = truth.name(model)
+    if not truth.is_instance(connection, dict):
         raise ConfigurationError(
-            f"{model.__name__}.Meta.connection must be a dict; got {_safe_arg_repr(connection)}",
+            f"{model_name}.Meta.connection must be a dict; got {truth.render(connection)}",
         )
     unknown = [key for key in connection if key != "total_count"]
     if unknown:
-        unknown_labels = sorted(_safe_arg_repr(key) for key in unknown)
+        unknown_labels = sorted(truth.render(key) for key in unknown)
         raise ConfigurationError(
-            f"{model.__name__}.Meta.connection has unknown sub-keys: "
+            f"{model_name}.Meta.connection has unknown sub-keys: "
             f"[{', '.join(unknown_labels)}]. "
             "Only 'total_count' is recognized in 0.0.9.",
         )
@@ -307,16 +300,16 @@ def _validate_connection(
     # own exact name, holding the bool it was proven to be.
     options: dict[str, bool] = {}
     if "total_count" in connection:
-        total_count = connection["total_count"]
-        if not _guarded_isinstance(total_count, bool):
+        total_count = unwrap_lazy_object(connection["total_count"])
+        if not truth.is_exact(total_count, bool):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.connection['total_count'] must be a bool; "
-                f"got {_safe_arg_repr(total_count)}",
+                f"{model_name}.Meta.connection['total_count'] must be a bool; "
+                f"got {truth.render(total_count)}",
             )
         options["total_count"] = total_count
     if not relay_shaped:
         raise ConfigurationError(
-            f"{model.__name__}.Meta.connection {_RELAY_NODE_GATE_LEAD} "
+            f"{model_name}.Meta.connection {_RELAY_NODE_GATE_LEAD} "
             f"{_RELAY_NODE_GATE_INHERIT_TAIL}",
         )
     return options
@@ -324,7 +317,21 @@ def _validate_connection(
 
 def _is_str_tuple(entries: tuple[object, ...]) -> "TypeIs[tuple[str, ...]]":
     """Return whether every entry of ``entries`` is a ``str``."""
-    return all(_guarded_isinstance(entry, str) for entry in entries)
+    return all(truth.is_instance(entry, str) for entry in entries)
+
+
+def _unwrapped_entries(value: object) -> tuple[object, ...]:
+    """Return the entries of a ``Meta`` collection, each Django lazy proxy unwrapped.
+
+    The caller has proved ``value`` iterable by its real class; it is read through
+    ``list_of``, which iterates it exactly as a loop over it would.
+
+    A real-class test ignores the ``__class__`` a ``SimpleLazyObject`` forwards, so an entry
+    proxying a valid value is read as the object it stands for
+    (``utils/lazy.py::unwrap_lazy_object``) before the gate tests it, as the collection
+    itself is.
+    """
+    return tuple(unwrap_lazy_object(entry) for entry in list_of(value))
 
 
 def _validate_cursor_field(
@@ -348,29 +355,20 @@ def _validate_cursor_field(
     """
     if value is None:
         return None
-    if _guarded_isinstance(value, str) or not _guarded_narrow(value, _is_sequence):
-        raise ConfigurationError(
-            f"{model.__name__}.Meta.cursor_field must be a non-empty non-string "
-            f"sequence of order strings; got {_safe_arg_repr(value)}",
-        )
-    try:
-        entries: tuple[object, ...] = tuple(value)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"{model.__name__}.Meta.cursor_field must be a non-empty non-string "
-            f"sequence of order strings; got {_safe_arg_repr(value)}",
-        ) from exc
+    value = unwrap_lazy_object(value)
+    owner = f"{truth.name(model)}.Meta.cursor_field"
+    is_sequence = not truth.is_instance(value, str) and issubclass(truth.class_of(value), Sequence)
+    # ``is_sequence`` read the value's real class as a ``Sequence``.
+    entries = _unwrapped_entries(value) if is_sequence else ()
     if not entries or not _is_str_tuple(entries):
         raise ConfigurationError(
-            f"{model.__name__}.Meta.cursor_field must be a non-empty non-string "
-            f"sequence of order strings; got {_safe_arg_repr(value)}",
+            f"{owner} must be a non-empty non-string sequence of order strings; "
+            f"got {truth.render(value)}",
         )
-    owner = f"{model.__name__}.Meta.cursor_field"
     _ = validate_cursor_field_references(entries, owner=owner)
     if not relay_shaped:
         raise ConfigurationError(
-            f"{model.__name__}.Meta.cursor_field {_RELAY_NODE_GATE_LEAD} "
-            f"{_RELAY_NODE_GATE_INHERIT_TAIL}",
+            f"{owner} {_RELAY_NODE_GATE_LEAD} {_RELAY_NODE_GATE_INHERIT_TAIL}",
         )
     return entries
 
@@ -404,31 +402,35 @@ def _validate_relation_shapes(
     """
     if value is None:
         return None
-    if not _guarded_narrow(value, is_dict):
+    value = unwrap_lazy_object(value)
+    model_name = truth.name(model)
+    if not truth.is_instance(value, dict):
         raise ConfigurationError(
-            f"{model.__name__}.Meta.relation_shapes must be a dict mapping relation "
-            f"field names to shapes; got {_safe_arg_repr(value)}",
+            f"{model_name}.Meta.relation_shapes must be a dict mapping relation "
+            f"field names to shapes; got {truth.render(value)}",
         )
     shapes: dict[str, str] = {}
-    for key, shape in value.items():
-        if not _guarded_isinstance(key, str):
+    for raw_key, raw_shape in value.items():
+        key = unwrap_lazy_object(raw_key)
+        shape = unwrap_lazy_object(raw_shape)
+        if not truth.is_instance(key, str):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.relation_shapes keys must be relation field "
-                f"name strings; got {_safe_arg_repr(key)}.",
+                f"{model_name}.Meta.relation_shapes keys must be relation field "
+                f"name strings; got {truth.render(key)}.",
             )
         # The ``str`` test comes first so an unhashable value (e.g. ``{"items":
         # ["both"]}``) raises the configured ConfigurationError rather than
         # leaking ``TypeError: unhashable type`` from the set membership.
-        if not _guarded_isinstance(shape, str) or shape not in RELATION_SHAPE_VALUES:
+        if not truth.is_instance(shape, str) or shape not in RELATION_SHAPE_VALUES:
             raise ConfigurationError(
-                f"{model.__name__}.Meta.relation_shapes[{_safe_arg_repr(key)}] "
-                f"got unknown shape {_safe_arg_repr(shape)}; valid shapes are "
+                f"{model_name}.Meta.relation_shapes[{truth.render(key)}] "
+                f"got unknown shape {truth.render(shape)}; valid shapes are "
                 f"{sorted(RELATION_SHAPE_VALUES)}.",
             )
         shapes[key] = shape
     if not relay_shaped:
         raise ConfigurationError(
-            f"{model.__name__}.Meta.relation_shapes {_RELAY_NODE_GATE_LEAD} or remove the key.",
+            f"{model_name}.Meta.relation_shapes {_RELAY_NODE_GATE_LEAD} or remove the key.",
         )
     return shapes
 
@@ -466,8 +468,8 @@ def _validate_globalid_strategy(
     must NOT be ``async def`` (an opaque ``TypeError`` / coroutine per request is
     promoted to a build-time ``ConfigurationError``); any other type raises.
 
-    ``model`` selects the error framing: a model names the offending type via
-    ``model.__name__``; ``None`` names ``RELAY_GLOBALID_STRATEGY``. ``source``
+    ``model`` selects the error framing: a model names the offending type by
+    its class name; ``None`` names ``RELAY_GLOBALID_STRATEGY``. ``source``
     selects the gate: ``"meta"`` (the default) enforces the Relay-Node-shape
     gate; ``"setting"`` skips it (the per-type gate already ran at type
     creation, so the setting path passes ``relay_shaped=True`` and
@@ -475,17 +477,18 @@ def _validate_globalid_strategy(
     """
     if value is None:
         return None
+    value = unwrap_lazy_object(value)
     is_meta = source == "meta"
     # Only the setting path (``source="setting"``) passes ``model=None``.
     subject = (
-        f"{model.__name__}.Meta.globalid_strategy"
+        f"{truth.name(model)}.Meta.globalid_strategy"
         if model is not None
         else RELAY_GLOBALID_STRATEGY_KEY
     )
-    if _guarded_isinstance(value, str):
+    if truth.is_instance(value, str):
         if value not in STRING_GLOBALID_STRATEGIES:
             raise ConfigurationError(
-                f"{subject} got unknown strategy {_safe_arg_repr(value)}; "
+                f"{subject} got unknown strategy {truth.render(value)}; "
                 f"valid strategies are {sorted(STRING_GLOBALID_STRATEGIES)} or a callable.",
             )
         normalized: GlobalIDStrategy = value
@@ -495,7 +498,7 @@ def _validate_globalid_strategy(
     else:
         raise ConfigurationError(
             f"{subject} must be one of {sorted(STRING_GLOBALID_STRATEGIES)} or a callable; "
-            f"got {_safe_arg_repr(value)}.",
+            f"got {truth.render(value)}.",
         )
     # The Relay-Node-shape gate is a ``Meta``-only concern (the setting path's
     # per-type gate already ran at type creation); mirrors
@@ -521,29 +524,20 @@ def _validate_globalid_callable(subject: str, value: Callable[..., object]) -> N
     the caller untouched; the per-call non-``str`` return guard lives in the
     install closure.
     """
-    try:
-        async_callable = is_async_callable(value)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"{subject} callable encoder could not be inspected. Expected "
-            "`(type_cls, model, root) -> str`.",
-        ) from exc
-    if async_callable:
+    if is_async_callable(value):
         raise ConfigurationError(
             f"{subject} callable encoder must be sync; "
             f"got an `async def`. Expected `(type_cls, model, root) -> str`.",
         )
+    # ``inspect.signature`` documents ``ValueError`` (no signature available)
+    # and ``TypeError`` (unsupported object); ``bind`` documents ``TypeError``
+    # (the positional triple does not fit).
     try:
         _ = inspect.signature(value).bind(*_GLOBALID_CALLABLE_PARAMS)
     except (TypeError, ValueError) as exc:
         raise ConfigurationError(
             f"{subject} callable encoder must accept "
             f"`(type_cls, model, root) -> str`; got an incompatible signature ({exc}).",
-        ) from exc
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"{subject} callable encoder could not be inspected. Expected "
-            "`(type_cls, model, root) -> str`.",
         ) from exc
 
 
@@ -570,7 +564,7 @@ def _has_node_id_marker(hint: object) -> bool:
     if typing.get_origin(hint) is not Annotated:
         return False
     args: tuple[object, ...] = typing.get_args(hint)
-    return any(isinstance(arg, NodeIDPrivate) for arg in args)
+    return any(truth.is_instance(arg, NodeIDPrivate) for arg in args)
 
 
 def _id_annotation_is_relay_node_id(cls: "type[DjangoType]") -> bool:
@@ -611,8 +605,8 @@ def _id_annotation_is_relay_node_id(cls: "type[DjangoType]") -> bool:
     than a misleading ``False`` return.
     """
     raw = cls.__annotations__["id"]
-    if isinstance(raw, str):
-        return bool(_NODEID_STRING_RE.search(raw))
+    if truth.is_instance(raw, str):
+        return bool(_NODEID_STRING_RE.search(truth.text(raw)))
     return _has_node_id_marker(raw)
 
 
@@ -627,66 +621,27 @@ def _is_relay_shaped(cls: "type[DjangoType]", interfaces: tuple[type[object], ..
     annotation-synthesis-time); centralizing the predicate keeps the
     Relay-shape contract single-sited.
     """
-    # Callers pass a class and its interfaces, which ``_validate_interfaces`` admitted only as
-    # interface classes.
-    return any(issubclass(i, relay.Node) for i in interfaces) or issubclass(cls, relay.Node)
-
-
-def _guarded_isinstance(value: object, cls: "type[_T] | tuple[type[_T], ...]") -> "TypeIs[_T]":
-    """Return ``isinstance(value, cls)``, or ``False`` when answering it raises.
-
-    The test every ``Meta`` shape gate applies to a consumer-supplied value. ``isinstance``
-    falls back to a ``__class__`` read when the real type does not match, and a ``__class__``
-    that raises is not an instance of anything, so the gate's rejection stays the typed
-    ``ConfigurationError``. Subclasses and faithful proxies (``SimpleLazyObject``) still
-    pass, exactly as under a bare ``isinstance``; a ``BaseException`` is absorbed too
-    (``exceptions.py::_safe_predicate``), the posture ``_meta_attr`` already takes.
-    """
-    return _safe_predicate(isinstance, value, cls)
-
-
-def _guarded_narrow(value: object, predicate: "Callable[[object], TypeIs[_T]]") -> "TypeIs[_T]":
-    """Return ``predicate(value)``, or ``False`` when the predicate raises.
-
-    ``_guarded_isinstance`` for the container narrowings (``utils/_narrowing.py::is_dict``,
-    ``is_mapping``, ``is_list_or_tuple``, ``is_abstract_set`` and ``_is_sequence``), which
-    keep their element types ``object`` where a bare ``isinstance`` would leave them
-    ``Unknown``.
-    """
-    return _safe_predicate(predicate, value)
-
-
-def _is_sequence(value: object) -> "TypeIs[Sequence[object]]":
-    """Return whether ``value`` is a ``collections.abc.Sequence``, its elements ``object``."""
-    return isinstance(value, Sequence)
-
-
-def _guarded_issubclass(value: type[object], cls: type[_T]) -> "TypeIs[type[_T]]":
-    """Return ``issubclass(value, cls)``, or ``False`` when answering it raises.
-
-    ``issubclass`` raises ``TypeError`` for a value that passed ``isinstance(value, type)``
-    through a ``__class__`` that claims ``type`` without being a class.
-    """
-    return _safe_predicate(issubclass, value, cls)
+    return any(truth.is_subclass(i, relay.Node) for i in interfaces) or truth.is_subclass(
+        cls,
+        relay.Node,
+    )
 
 
 def _meta_attr(meta: object, key: str, default: object = None) -> object:
-    """Read one ``Meta`` attribute, containing hostile attribute access.
+    """Read one declared ``Meta`` attribute (inherited ``Meta`` bases included).
 
-    ``getattr(meta, key, default)`` only swallows ``AttributeError``; a Meta
-    class with a metaclass ``__getattr__`` that raises anything else leaks the
-    raw exception out of ``DjangoType.__init_subclass__``. The containment
-    policy is the one ``_normalize_fields_spec`` applies to hostile iteration:
-    every ``Meta`` attribute read routes through here so the failure surfaces
-    as ``ConfigurationError`` instead.
+    The value is read from the real namespaces of ``meta``'s MRO, so no
+    metaclass ``__getattr__`` / ``__getattribute__`` or descriptor runs; a
+    declared value comes back exactly as the class body stored it, with one
+    exception: a ``staticmethod`` wrapper comes back as the function it wraps,
+    which is what reading the attribute off the class returns. The wrapper is
+    recognised by its exact builtin class, so its ``__func__`` slot is the
+    interpreter's own and no consumer code runs to read it.
     """
-    try:
-        return getattr(meta, key, default)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Meta.{key} could not be read from the Meta class: "
-            f"{_safe_type_name(exc)}: {_safe_text(exc)}.",
-        ) from exc
+    value = truth.static_attr(meta, key, default)
+    if truth.is_exact(value, staticmethod):
+        return value.__func__
+    return value
 
 
 def _is_auto_annotation(annotation: object) -> bool:
@@ -713,9 +668,15 @@ def _is_auto_annotation(annotation: object) -> bool:
     recognized - resolving those would require evaluating the annotation
     against the defining module's namespace, which PEP 563 exists to avoid.
     """
+    # ``strawberry.auto`` is ``Annotated[Any, StrawberryAuto()]``; Strawberry's
+    # own ``StrawberryAuto`` metaclass ``__instancecheck__`` recognizes that
+    # alias, so the protocol check stays ``isinstance``.
     if isinstance(annotation, StrawberryAuto):
         return True
-    return isinstance(annotation, str) and annotation in ("auto", "strawberry.auto")
+    return truth.is_instance(annotation, str) and truth.text(annotation) in (
+        "auto",
+        "strawberry.auto",
+    )
 
 
 class DjangoType:
@@ -744,17 +705,23 @@ class DjangoType:
         # ``test_has_custom_get_queryset_inherits_through_abstract_base_without_meta``.
         has_custom_get_queryset = _detect_custom_get_queryset(cls)
         cls._is_default_get_queryset = not has_custom_get_queryset
-        meta: object = cls.__dict__.get("Meta")
+        # The class's own namespace, read from the interpreter: an inherited
+        # ``Meta`` does not make an intermediate base concrete.
+        meta: object = truth.class_dict(cls).get("Meta")
         if meta is None:
             return
+        # Identity facts about ``cls`` are read once, here, from the
+        # interpreter; every message below names the class by this value.
+        type_name = truth.name(cls)
         if registry.is_finalized():
             raise ConfigurationError(
-                f"finalize_django_types() already ran; cannot register {cls.__name__} "
+                f"finalize_django_types() already ran; cannot register {type_name} "
                 "after finalization. Call registry.clear() first if this is a test.",
             )
         validated = _validate_meta(cls, meta)
-        fields = _select_fields(validated.model, validated.fields_spec, validated.exclude_spec)
-        _validate_optimizer_hints(validated.optimizer_hints, fields, model=validated.model)
+        model = validated.model
+        fields = _select_fields(model, validated.fields_spec, validated.exclude_spec)
+        _validate_optimizer_hints(validated.optimizer_hints, fields, model=model)
 
         field_map = {f.name: FieldMeta.from_django_field(f) for f in fields}
         consumer_annotations = dict(cls.__annotations__)
@@ -765,15 +732,14 @@ class DjangoType:
         # the final ``{**synthesized, **consumer_annotations}`` merge), so a
         # non-string key would raise raw ``TypeError``/``KeyError`` from those
         # walks. The string-keys contract is validated HERE, once, at the
-        # collection boundary - the same contain-hostile-input-at-the-gate
-        # policy as ``_normalize_fields_spec``.
+        # collection boundary, so the walks below see only field names.
         annotation_keys: Iterable[object] = consumer_annotations
         non_string_annotation_keys = sorted(
-            _safe_arg_repr(key) for key in annotation_keys if not is_str(key)
+            truth.render(key) for key in annotation_keys if not truth.is_instance(key, str)
         )
         if non_string_annotation_keys:
             raise ConfigurationError(
-                f"{cls.__name__}: class annotations must have string names; got non-string "
+                f"{type_name}: class annotations must have string names; got non-string "
                 f"keys [{', '.join(non_string_annotation_keys)}]. Annotation keys are field names; "
                 "non-string keys cannot be synthesized or exposed.",
             )
@@ -798,7 +764,7 @@ class DjangoType:
         unselected_auto = sorted(auto_annotated_fields - selected_field_names)
         if unselected_auto:
             raise ConfigurationError(
-                f"{cls.__name__}: fields annotated `auto` but not selected in Meta.fields: "
+                f"{type_name}: fields annotated `auto` but not selected in Meta.fields: "
                 f"{unselected_auto}. `auto` declares an already-selected field's type as "
                 "model-inferred; it does not add fields. Add the name to Meta.fields (or "
                 'Meta.fields = "__all__"), or remove the annotation.',
@@ -833,7 +799,7 @@ class DjangoType:
         )
         if assigned_auto:
             raise ConfigurationError(
-                f"{cls.__name__}: fields both annotated `auto` and assigned a "
+                f"{type_name}: fields both annotated `auto` and assigned a "
                 f"strawberry.field: {assigned_auto}. `auto` means model-inferred type and "
                 "cannot combine with an assigned resolver. Use `name: <type> = "
                 "strawberry.field(...)` for a typed resolver override, or drop the "
@@ -859,7 +825,7 @@ class DjangoType:
         )
         relay_shaped = _is_relay_shaped(cls, validated.interfaces)
         _validate_nullability_override_targets(
-            model=validated.model,
+            model=model,
             selected_fields=fields,
             consumer_authored_fields=consumer_authored_fields,
             relay_shaped=relay_shaped,
@@ -867,24 +833,24 @@ class DjangoType:
             required_overrides=validated.required_overrides,
         )
         _validate_filesystem_path_targets(
-            model=validated.model,
+            model=model,
             selected_fields=fields,
             consumer_authored_fields=consumer_authored_fields,
             filesystem_path_fields=validated.filesystem_path_fields,
         )
         _validate_relation_shape_targets(
-            model=validated.model,
+            model=model,
             relation_shapes=validated.relation_shapes,
             selected_fields=fields,
             field_map=field_map,
             consumer_authored_fields=consumer_authored_fields,
         )
         if relay_shaped:
-            has_id_assignment = isinstance(cls.__dict__.get("id"), StrawberryField)
+            has_id_assignment = truth.is_instance(truth.class_dict(cls).get("id"), StrawberryField)
             has_id_annotation = "id" in cls.__annotations__
             if has_id_assignment:
                 raise ConfigurationError(
-                    f"{cls.__name__}: cannot override the id field on a "
+                    f"{type_name}: cannot override the id field on a "
                     "relay.Node-shaped type with an assigned strawberry.field. "
                     "Use @classmethod resolve_id for a custom id resolver, "
                     "id: relay.NodeID[<pk_type>] for a custom id annotation, "
@@ -898,7 +864,7 @@ class DjangoType:
                 )
             if has_id_annotation and not _id_annotation_is_relay_node_id(cls):
                 raise ConfigurationError(
-                    f"{cls.__name__}: cannot override the id field on a "
+                    f"{type_name}: cannot override the id field on a "
                     "relay.Node-shaped type without using strawberry.relay.NodeID[...]. "
                     "The Relay interface supplies id: GlobalID! - declare the id "
                     "field via relay.NodeID[<pk_type>] if you need a different id "
@@ -907,7 +873,7 @@ class DjangoType:
         synthesized, pending = _build_annotations(
             cls,
             fields,
-            source_model=validated.model,
+            source_model=model,
             consumer_authored_fields=consumer_authored_fields,
             interfaces=validated.interfaces,
             nullable_overrides=validated.nullable_overrides,
@@ -940,12 +906,7 @@ class DjangoType:
             globalid_strategy=validated.globalid_strategy,
             relation_shapes=validated.relation_shapes,
         )
-        registry.register_with_definition(
-            validated.model,
-            cls,
-            definition,
-            primary=validated.primary,
-        )
+        registry.register_with_definition(model, cls, definition, primary=validated.primary)
         for pending_relation in pending:
             registry.add_pending_relation(pending_relation)
         cls.__annotations__ = {**synthesized, **consumer_annotations}
@@ -1013,24 +974,28 @@ class DjangoType:
         """
         # Only a subclass that declares ``Meta`` carries a definition; an
         # abstract base without one answers from its own stamped ``ClassVar``.
-        definition = cast(
-            "DjangoTypeDefinition | None",
-            getattr(cls, "__django_strawberry_definition__", None),
+        definition = optional_instance(
+            truth.static_attr(cls, "__django_strawberry_definition__"),
+            DjangoTypeDefinition,
         )
         if definition is None:
-            return not cls._is_default_get_queryset
+            return not truth.static_attr(cls, "_is_default_get_queryset", default=True)
         return definition.has_custom_get_queryset
 
 
 def _detect_custom_get_queryset(cls: object) -> bool:
-    """Return whether ``cls`` or an intermediate base overrides ``get_queryset``."""
+    """Return whether ``cls`` or an intermediate base overrides ``get_queryset``.
+
+    Walks the real MRO and each base's real namespace, so the answer is what
+    the class bodies declared.
+    """
     # Any object is answered: a non-class, or a class outside ``DjangoType``, overrides nothing.
-    if not (isinstance(cls, type) and issubclass(cls, DjangoType)):
+    if not truth.is_subclass(cls, DjangoType):
         return False
-    for base in cls.__mro__:
+    for base in truth.mro(cls):
         if base is DjangoType:
             break
-        if "get_queryset" in base.__dict__:
+        if "get_queryset" in truth.class_dict(base):
             return True
     return False
 
@@ -1039,30 +1004,25 @@ def _normalize_fields_spec(value: object) -> tuple[str, ...] | Literal["__all__"
     """Normalize ``Meta.fields`` for storage on ``DjangoTypeDefinition``."""
     if value is None:
         return value
-    if _guarded_isinstance(value, str):
-        if value == "__all__":
+    value = unwrap_lazy_object(value)
+    if truth.is_instance(value, str):
+        if truth.text(value) == "__all__":
             return "__all__"
         raise ConfigurationError(
             "Meta.fields must be '__all__' or a non-string sequence of field names",
         )
-    if not _guarded_narrow(value, _is_sequence):
+    if not issubclass(truth.class_of(value), Sequence):
         raise ConfigurationError(
             "Meta.fields must be '__all__' or a non-string sequence of field names",
         )
-    try:
-        entries: tuple[object, ...] = tuple(value)
-    except BaseException as exc:
-        raise ConfigurationError(
-            "Meta.fields must be '__all__' or a non-string sequence of field names",
-        ) from exc
-    names: list[str] = []
-    for entry in entries:
-        if not _guarded_isinstance(entry, str):
-            raise ConfigurationError(
-                f"Meta.fields must contain field name strings; got {_safe_arg_repr(entry)}",
-            )
-        names.append(entry)
-    return tuple(names)
+    # The real-class check above proved a ``Sequence``.
+    entries = _unwrapped_entries(value)
+    if _is_str_tuple(entries):
+        return entries
+    invalid = next(entry for entry in entries if not truth.is_instance(entry, str))
+    raise ConfigurationError(
+        f"Meta.fields must contain field name strings; got {truth.render(invalid)}",
+    )
 
 
 def _normalize_sequence_spec(value: object, key: str = "exclude") -> tuple[str, ...] | None:
@@ -1084,26 +1044,22 @@ def _normalize_sequence_spec(value: object, key: str = "exclude") -> tuple[str, 
     """
     if value is None:
         return None
-    if _guarded_isinstance(value, str) or not (
-        _guarded_narrow(value, _is_sequence) or _guarded_narrow(value, is_abstract_set)
+    value = unwrap_lazy_object(value)
+    if truth.is_instance(value, str) or not issubclass(
+        truth.class_of(value),
+        (Sequence, AbstractSet),
     ):
         raise ConfigurationError(
             f"Meta.{key} must be a non-string sequence or set of field names",
         )
-    try:
-        entries: tuple[object, ...] = tuple(value)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Meta.{key} must be a non-string sequence or set of field names",
-        ) from exc
-    names: list[str] = []
-    for entry in entries:
-        if not _guarded_isinstance(entry, str):
-            raise ConfigurationError(
-                f"Meta.{key} must contain field name strings; got {_safe_arg_repr(entry)}",
-            )
-        names.append(entry)
-    return tuple(names)
+    # The real-class check above proved a ``Sequence`` or ``AbstractSet``.
+    entries = _unwrapped_entries(value)
+    if _is_str_tuple(entries):
+        return entries
+    invalid = next(entry for entry in entries if not truth.is_instance(entry, str))
+    raise ConfigurationError(
+        f"Meta.{key} must contain field name strings; got {truth.render(invalid)}",
+    )
 
 
 def _consumer_assigned_fields(
@@ -1150,12 +1106,12 @@ def _consumer_assigned_fields(
     """
     relation_assigned: set[str] = set()
     scalar_assigned: set[str] = set()
-    namespace = class_dict(cls)
+    namespace = truth.class_dict(cls)
     for field in fields:
         if field.name not in namespace:
             continue
         value = namespace[field.name]
-        if _guarded_isinstance(value, StrawberryField):
+        if truth.is_instance(value, StrawberryField):
             if field.is_relation:
                 relation_assigned.add(field.name)
             else:
@@ -1163,7 +1119,7 @@ def _consumer_assigned_fields(
             continue
         kind = "relation" if field.is_relation else "scalar"
         raise ConfigurationError(
-            f"{cls.__name__}.{field.name} shadows a Django {kind} field with an unsupported "
+            f"{truth.name(cls)}.{field.name} shadows a Django {kind} field with an unsupported "
             "class attribute. Use a type annotation for type overrides, or use "
             "strawberry.field(resolver=...) / @strawberry.field for resolver overrides.",
         )
@@ -1175,25 +1131,29 @@ def _meta_optimizer_hints(meta: object, model: type[models.Model]) -> dict[str, 
 
     Centralizes the shape guard used across ``__init_subclass__`` and the
     validators so non-mapping declarations fail before hint keys or
-    values are inspected.
+    values are inspected. The non-mapping rejection names the value's kind
+    (``utils/truth.py::kind``): an instance by its real class, a class by its
+    own name (``got Category.``), never by its metaclass.
     """
-    value = _meta_attr(meta, "optimizer_hints")
+    value = unwrap_lazy_object(_meta_attr(meta, "optimizer_hints"))
     if value is None:
         return {}
-    if not _guarded_narrow(value, is_mapping):
+    if not issubclass(truth.class_of(value), Mapping):
         raise ConfigurationError(
-            f"{model.__name__}.Meta.optimizer_hints must be a mapping of field names to OptimizerHint "
-            f"instances, got {type(value).__name__}.",
+            f"{truth.name(model)}.Meta.optimizer_hints must be a mapping of field names to OptimizerHint "
+            f"instances, got {truth.kind(value)}.",
         )
-    # One pass over the consumer mapping: the keys checked are the keys returned.
+    # The real-class check above proved a ``Mapping``. One pass over a plain copy of the
+    # consumer mapping: the keys checked are the keys returned.
     hints: dict[str, object] = {}
-    for key, hint in dict(value).items():
-        if not _guarded_isinstance(key, str):
+    for raw_key, hint in dict_of(value).items():
+        key = unwrap_lazy_object(raw_key)
+        if not truth.is_instance(key, str):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.optimizer_hints keys must be field name strings; "
-                f"got {_safe_arg_repr(key)}.",
+                f"{truth.name(model)}.Meta.optimizer_hints keys must be field name strings; "
+                f"got {truth.render(key)}.",
             )
-        hints[key] = hint
+        hints[key] = unwrap_lazy_object(hint)
     return hints
 
 
@@ -1215,7 +1175,10 @@ def _format_unknown_fields_error(
     their validators calls).  Centralizing the format keeps the
     consumer-visible error shape consistent across typo-guard sites.
     """
-    return f"{model.__name__}.Meta.{attr} names unknown fields: {unknown}. Available: {sorted(available)}."
+    return (
+        f"{truth.name(model)}.Meta.{attr} names unknown fields: {unknown}. "
+        f"Available: {sorted(available)}."
+    )
 
 
 _INTERFACES_SHAPE_ERROR_LEAD_IN = (
@@ -1231,7 +1194,7 @@ def _interfaces_shape_error(model: type[models.Model], got_suffix: str) -> str:
     long lead-in defined in ``_INTERFACES_SHAPE_ERROR_LEAD_IN``; this
     helper localizes the wording so the two sites cannot drift.
     """
-    return f"{model.__name__}.{_INTERFACES_SHAPE_ERROR_LEAD_IN}, got {got_suffix}."
+    return f"{truth.name(model)}.{_INTERFACES_SHAPE_ERROR_LEAD_IN}, got {got_suffix}."
 
 
 # Decision-8 remediation tail shared by all six named rejections: every
@@ -1312,28 +1275,30 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
     helper only validates the shape and contents of the
     ``Meta.interfaces`` tuple itself.
     """
-    raw = _meta_attr(meta, "interfaces")
+    raw = unwrap_lazy_object(_meta_attr(meta, "interfaces"))
     if raw is None:
         return ()
-    if _guarded_isinstance(raw, str):
+    if truth.is_instance(raw, str):
         raise ConfigurationError(_interfaces_shape_error(model, "a string"))
-    if is_class(raw):
+    if truth.is_type(raw):
         # Consumer-declared entries stay unproven until the loop below checks each one.
         entries: tuple[object, ...] = (raw,)
-    elif _guarded_narrow(raw, is_list_or_tuple):
-        entries = tuple(raw)
+    elif truth.is_instance(raw, tuple) or truth.is_instance(raw, list):
+        # The real-class check above proved a ``tuple`` or ``list``.
+        entries = _unwrapped_entries(raw)
     else:
-        raise ConfigurationError(_interfaces_shape_error(model, type(raw).__name__))
+        raise ConfigurationError(_interfaces_shape_error(model, truth.name(truth.class_of(raw))))
     if entries == ():
         return ()
+    model_name = truth.name(model)
     seen_ids: set[int] = set()
     duplicates: list[str] = []
     interfaces: list[type[object]] = []
     for entry in entries:
-        if _guarded_isinstance(entry, str):
+        if truth.is_instance(entry, str):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.interfaces must contain interface classes, "
-                f"not strings (got {_safe_arg_repr(entry)}). Lazy/forward-reference interface lookup is "
+                f"{model_name}.Meta.interfaces must contain interface classes, "
+                f"not strings (got {truth.render(entry)}). Lazy/forward-reference interface lookup is "
                 "deferred (no current spec home).",
             )
         # Named-helper rejection (spec-032 Decision 8). Runs BEFORE the
@@ -1343,36 +1308,38 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
         for helper, label, description in _RELAY_NON_INTERFACE_HELPERS:
             if entry is helper:
                 raise ConfigurationError(
-                    f"{model.__name__}.Meta.interfaces entry {label} is "
+                    f"{model_name}.Meta.interfaces entry {label} is "
                     f"{description}. {_RELAY_NON_INTERFACE_REMEDIATION}",
                 )
-        if not is_class(entry):
+        if not truth.is_type(entry):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.interfaces must contain interface classes, "
-                f"got {_safe_arg_repr(entry)}.",
+                f"{model_name}.Meta.interfaces must contain interface classes, "
+                f"got {truth.render(entry)}.",
             )
-        if issubclass(entry, DjangoType):
+        if truth.is_subclass(entry, DjangoType):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.interfaces may not contain DjangoType or "
-                f"DjangoType subclasses (got {entry.__name__}). DjangoType is not a "
+                f"{model_name}.Meta.interfaces may not contain DjangoType or "
+                f"DjangoType subclasses (got {truth.name(entry)}). DjangoType is not a "
                 "Strawberry interface.",
             )
-        definition: object = getattr(entry, "__strawberry_definition__", None)
-        if definition is None or not getattr(definition, "is_interface", False):
+        definition: object = truth.static_attr(entry, "__strawberry_definition__")
+        if not (
+            truth.is_instance(definition, StrawberryObjectDefinition) and definition.is_interface
+        ):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.interfaces entry {entry.__name__} is not a "
+                f"{model_name}.Meta.interfaces entry {truth.name(entry)} is not a "
                 "Strawberry interface. Use @strawberry.interface or one of the "
                 "strawberry.relay interface classes.",
             )
         entry_id = id(entry)
         if entry_id in seen_ids:
-            duplicates.append(entry.__name__)
+            duplicates.append(truth.name(entry))
         else:
             seen_ids.add(entry_id)
         interfaces.append(entry)
     if duplicates:
         raise ConfigurationError(
-            f"{model.__name__}.Meta.interfaces contains duplicate entries: {sorted(duplicates)}.",
+            f"{model_name}.Meta.interfaces contains duplicate entries: {sorted(duplicates)}.",
         )
     return tuple(interfaces)
 
@@ -1414,10 +1381,13 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     gate needs can see direct ``relay.Node`` inheritance, not only the declared
     ``Meta.interfaces`` tuple.
 
-    Every shape gate tests a consumer value through a guarded test (``_guarded_isinstance``,
-    ``_guarded_issubclass``, ``_guarded_narrow``) or a real-type one (``is_str``, ``is_class``),
+    Every shape gate tests a consumer value by its real class (``utils/truth.py::is_instance``,
+    ``is_subclass``, ``is_exact``, ``class_of``), never through its ``__class__`` attribute,
     so a value whose ``__class__`` read raises is rejected with the same ``ConfigurationError``
-    as any other malformed value.
+    as any other malformed value. A Django lazy proxy (``SimpleLazyObject``) of a valid value
+    is unwrapped first (``utils/lazy.py::unwrap_lazy_object``) and passes as the value itself;
+    ``Meta.name`` and ``Meta.description`` are the exception, read as text through the base
+    ``str`` slot, which refuses a proxy.
 
     Validation order:
 
@@ -1456,59 +1426,56 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
         ConfigurationError: any of the above violations.
 
     """
-    model = _meta_attr(meta, "model")
+    model = unwrap_lazy_object(_meta_attr(meta, "model"))
     if model is None:
         raise ConfigurationError("Meta.model is required")
-    if not _guarded_isinstance(model, type) or not _guarded_issubclass(model, models.Model):
+    if not truth.is_subclass(model, models.Model):
         raise ConfigurationError("Meta.model must be a Django model class")
+    model_name = truth.name(model)
 
     raw_name = _meta_attr(meta, "name")
     if raw_name is not None:
-        if not is_str(raw_name):
+        if not truth.is_instance(raw_name, str):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.name must be a non-empty string; "
-                f"got {_safe_arg_repr(raw_name)}.",
+                f"{model_name}.Meta.name must be a non-empty string; got {truth.render(raw_name)}.",
             )
-        name = str.__str__(raw_name)
+        name = truth.text(raw_name)
         if not name:
             raise ConfigurationError(
-                f"{model.__name__}.Meta.name must be a non-empty string; got an empty name.",
+                f"{model_name}.Meta.name must be a non-empty string; got an empty name.",
             )
         if not _GRAPHQL_NAME_RE.fullmatch(name) or name.startswith("__"):
             raise ConfigurationError(
-                f"{model.__name__}.Meta.name must be a valid GraphQL name; "
-                f"got {_safe_arg_repr(name)}.",
+                f"{model_name}.Meta.name must be a valid GraphQL name; got {truth.render(name)}.",
             )
     else:
         name = None
 
     raw_description = _meta_attr(meta, "description")
     description: str | Promise | None
-    if raw_description is None or _guarded_isinstance(raw_description, Promise):
+    if raw_description is None or truth.is_instance(raw_description, Promise):
         # A lazy translation string stays lazy until finalize, which renders it once.
         description = raw_description
-    elif is_str(raw_description):
+    elif truth.is_instance(raw_description, str):
         # A str subclass's own ``__str__`` is consumer code; keep the plain text it holds.
-        description = str.__str__(raw_description)
+        description = truth.text(raw_description)
     else:
         raise ConfigurationError(
-            f"{model.__name__}.Meta.description must be a string or a lazy translation "
-            f"string; got {_safe_arg_repr(raw_description)}.",
+            f"{model_name}.Meta.description must be a string or a lazy translation "
+            f"string; got {truth.render(raw_description)}.",
         )
 
-    # ``meta.__dict__`` (this class's OWN keys only, no MRO walk) is
-    # deliberate for the typo-guard below (the ``deferred`` / ``unknown``
-    # checks): an unsupported key is flagged only when THIS ``Meta``
-    # declares it, so a base ``Meta``'s already-validated keys are not
-    # re-flagged on every subclass. This is the intentional counterpart to
-    # the MRO-walking ``getattr`` check just below; the two differ on
-    # purpose -- do not "unify" them.
-    declared = {k for k in meta.__dict__ if not k.startswith("_")}
+    # ``meta``'s OWN namespace (no MRO walk) is deliberate for the typo-guard
+    # below (the ``deferred`` / ``unknown`` checks): an unsupported key is
+    # flagged only when THIS ``Meta`` declares it, so a base ``Meta``'s
+    # already-validated keys are not re-flagged on every subclass. This is the
+    # intentional counterpart to the MRO-walking ``_meta_attr`` check just
+    # below; the two differ on purpose -- do not "unify" them.
+    declared = {k for k in truth.class_dict(meta) if not k.startswith("_")}
 
-    # Use the MRO-walking ``_meta_attr`` (``getattr`` semantics inside)
-    # rather than ``meta.__dict__`` membership so a child Meta inheriting
-    # ``fields`` from a base Meta still trips the mutual-exclusion check
-    # when it declares ``exclude`` (and vice versa). ``fields = None``
+    # Use the MRO-walking ``_meta_attr`` rather than own-namespace membership
+    # so a child Meta inheriting ``fields`` from a base Meta still trips the
+    # mutual-exclusion check when it declares ``exclude`` (and vice versa). ``fields = None``
     # (or ``exclude = None``) remains "unset" - matches
     # ``_normalize_fields_spec``'s treatment of ``None`` and the broader
     # convention that an explicit ``None`` means "no preference".
@@ -1517,8 +1484,8 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     if has_fields and has_exclude:
         raise ConfigurationError("Meta.fields and Meta.exclude are mutually exclusive")
 
-    primary = _meta_attr(meta, "primary", default=False)
-    if not _guarded_isinstance(primary, bool):
+    primary = unwrap_lazy_object(_meta_attr(meta, "primary", default=False))
+    if not truth.is_exact(primary, bool):
         raise ConfigurationError("Meta.primary must be a bool")
 
     deferred = sorted(declared & DEFERRED_META_KEYS)
@@ -1577,7 +1544,7 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     both_sets_collision = sorted(nullable_overrides & required_overrides)
     if both_sets_collision:
         raise ConfigurationError(
-            f"{model.__name__}.Meta names {both_sets_collision} in both "
+            f"{model_name}.Meta names {both_sets_collision} in both "
             "nullable_overrides and required_overrides; a field cannot be both "
             "forced-nullable and forced-required.",
         )
@@ -1676,10 +1643,10 @@ def _validate_optimizer_hints(
                 available=selected_relation_names,
             ),
         )
-    bad_values = sorted(k for k, v in hints.items() if not _guarded_isinstance(v, OptimizerHint))
+    bad_values = sorted(k for k, v in hints.items() if not truth.is_instance(v, OptimizerHint))
     if bad_values:
         raise ConfigurationError(
-            f"optimizer_hints values must be OptimizerHint instances, "
+            "optimizer_hints values must be OptimizerHint instances, "
             f"got non-OptimizerHint for: {bad_values}",
         )
 
@@ -1792,8 +1759,9 @@ def _validate_nullability_override_targets(
         attr="nullable_overrides/required_overrides",
         targets=targets,
         excluded_error=lambda excluded: (
-            f"{model.__name__}.Meta nullable_overrides/required_overrides name fields not in "
-            f"the selected set: {excluded}. The override targets a field that will not appear "
+            f"{truth.name(model)}.Meta nullable_overrides/required_overrides name fields not in "
+            f"the selected set: {excluded}. "
+            "The override targets a field that will not appear "
             "in the GraphQL type (excluded via Meta.exclude or absent from a subset Meta.fields); "
             "select the field or drop the override."
         ),
@@ -1802,21 +1770,21 @@ def _validate_nullability_override_targets(
     for name in sorted_targets:
         if name in consumer_authored_fields:
             raise ConfigurationError(
-                f"{model.__name__}.Meta nullable_overrides/required_overrides names "
-                f"consumer-authored field {_safe_arg_repr(name)}; a consumer annotation or strawberry.field "
+                f"{truth.name(model)}.Meta nullable_overrides/required_overrides names "
+                f"consumer-authored field {truth.render(name)}; a consumer annotation or strawberry.field "
                 "assignment already controls its nullability. Drop the override and control "
                 "nullability through the annotation instead.",
             )
         if name == relay_pk_name:
             raise ConfigurationError(
-                f"{model.__name__}.Meta nullable_overrides/required_overrides names the "
-                f"Relay-Node-suppressed pk {_safe_arg_repr(name)}; the pk's nullability is the relay.Node "
+                f"{truth.name(model)}.Meta nullable_overrides/required_overrides names the "
+                f"Relay-Node-suppressed pk {truth.render(name)}; the pk's nullability is the relay.Node "
                 "interface's contract (id: GlobalID!), not the column's, and cannot be overridden.",
             )
         if selected_by_name[name].is_relation:
             raise ConfigurationError(
-                f"{model.__name__}.Meta nullable_overrides/required_overrides names relation "
-                f"field {_safe_arg_repr(name)}; nullability overrides apply to non-relation "
+                f"{truth.name(model)}.Meta nullable_overrides/required_overrides names relation "
+                f"field {truth.render(name)}; nullability overrides apply to non-relation "
                 "model fields only "
                 "(scalar columns and file/image output objects). Relation-field "
                 "nullability override is deferred (see spec-029 Decision 10).",
@@ -1869,8 +1837,9 @@ def _validate_filesystem_path_targets(
         attr="filesystem_path_fields",
         targets=set(filesystem_path_fields),
         excluded_error=lambda excluded: (
-            f"{model.__name__}.Meta filesystem_path_fields names fields not in the selected "
-            f"set: {excluded}. The opt-in targets a field that will not appear in the GraphQL "
+            f"{truth.name(model)}.Meta filesystem_path_fields names fields not in the selected "
+            f"set: {excluded}. "
+            "The opt-in targets a field that will not appear in the GraphQL "
             "type (excluded via Meta.exclude or absent from a subset Meta.fields); select the "
             "field or drop the opt-in."
         ),
@@ -1878,14 +1847,14 @@ def _validate_filesystem_path_targets(
     for name in sorted_targets:
         if name in consumer_authored_fields:
             raise ConfigurationError(
-                f"{model.__name__}.Meta filesystem_path_fields names consumer-authored field "
-                f"{_safe_arg_repr(name)}; a consumer annotation or strawberry.field assignment already owns "
+                f"{truth.name(model)}.Meta filesystem_path_fields names consumer-authored field "
+                f"{truth.render(name)}; a consumer annotation or strawberry.field assignment already owns "
                 "that field's output type, so the opt-in would have no effect. Drop the opt-in "
                 "and expose the path from the consumer resolver instead.",
             )
         if _field_output_type_for(selected_by_name[name]) is None:
             raise ConfigurationError(
-                f"{model.__name__}.Meta filesystem_path_fields names {_safe_arg_repr(name)}, which is not a "
+                f"{truth.name(model)}.Meta filesystem_path_fields names {truth.render(name)}, which is not a "
                 "FileField or ImageField column. The filesystem-path opt-in applies only to "
                 "file/image columns, whose output object is the only place a path field exists.",
             )
@@ -1935,8 +1904,9 @@ def _validate_relation_shape_targets(
         attr="relation_shapes",
         targets=set(relation_shapes),
         excluded_error=lambda excluded: (
-            f"{model.__name__}.Meta.relation_shapes names fields not in the selected set: "
-            f"{excluded}. The entry targets a field that will not appear in the GraphQL type "
+            f"{truth.name(model)}.Meta.relation_shapes names fields not in the selected set: "
+            f"{excluded}. "
+            "The entry targets a field that will not appear in the GraphQL type "
             "(excluded via Meta.exclude or absent from a subset Meta.fields); select the field "
             "or drop the entry."
         ),
@@ -1944,7 +1914,7 @@ def _validate_relation_shape_targets(
     for name in sorted_targets:
         if not selected_by_name[name].is_relation:
             raise ConfigurationError(
-                f"{model.__name__}.Meta.relation_shapes names non-relation field {_safe_arg_repr(name)}; "
+                f"{truth.name(model)}.Meta.relation_shapes names non-relation field {truth.render(name)}; "
                 "only many-side relations (reverse FK, forward/reverse M2M) can take a "
                 "connection shape.",
             )
@@ -1956,14 +1926,14 @@ def _validate_relation_shape_targets(
             else:
                 shape = "forward ForeignObject"
             raise ConfigurationError(
-                f"{model.__name__}.Meta.relation_shapes names single-valued relation {_safe_arg_repr(name)} "
+                f"{truth.name(model)}.Meta.relation_shapes names single-valued relation {truth.render(name)} "
                 f"({shape}); there is nothing to paginate. Only many-side "
                 "relations (reverse FK, forward/reverse M2M) can take a connection shape.",
             )
         if name in consumer_authored_fields:
             raise ConfigurationError(
-                f"{model.__name__}.Meta.relation_shapes names consumer-authored relation "
-                f"{_safe_arg_repr(name)}; a consumer annotation or strawberry.field assignment owns that "
+                f"{truth.name(model)}.Meta.relation_shapes names consumer-authored relation "
+                f"{truth.render(name)}; a consumer annotation or strawberry.field assignment owns that "
                 "field's shape (spec-032 Decision 7). Drop the entry, or remove the override "
                 "to let the framework synthesize the relation's shape.",
             )
@@ -2045,6 +2015,56 @@ def _select_fields(
 _NO_FIELD_NAMES: frozenset[str] = frozenset()
 
 
+def _is_suppressed_relay_pk(
+    cls: "type[DjangoType]",
+    interfaces: tuple[type[object], ...],
+    source_model: type[models.Model],
+    field: "ModelField",
+    consumer_authored_fields: frozenset[str],
+) -> bool:
+    """Return whether ``field`` loses its synthesized annotation to Relay suppression.
+
+    Single owner of the Relay-pk suppression decision, read by both the
+    ``_build_annotations`` synthesis loop and the ``inspect_django_type``
+    predictor, so the two cannot drift. Suppressed iff the field is a
+    NON-relation pk on a Relay-Node-shaped type that the consumer did not
+    author. The checks run relation-first (a relation pk keeps its
+    auto-synthesized annotation and finalize resolves it to the target
+    type), then the consumer exemption (a consumer override keeps its
+    annotation, so the predictor falls through to the consumer row), then
+    the Relay-shape gate (``_is_relay_shaped``: ``Meta.interfaces`` holding
+    a ``relay.Node`` subclass, or direct ``class Foo(DjangoType,
+    relay.Node)`` inheritance - checked with ``issubclass`` per entry, so
+    a consumer ``CustomNode(relay.Node)`` interface counts), then the
+    pk-identity read.
+
+    The pk identity is ``source_model._meta.pk.name`` - the Django field
+    NAME, not the column attname. For a relation primary key
+    (``OneToOneField(primary_key=True)``) those differ (``name="user"`` vs
+    ``attname="user_id"``) and the comparison is against ``field.name``;
+    naming the read ``pk_attname`` would invite reuse in a
+    ``getattr(root, pk_attname)`` context, which would lazy-load the
+    related row for a relation pk.
+
+    Without suppression a Relay-shaped consumer would land in Phase 3
+    ``strawberry.type(...)`` decoration with both the synthesized ``id:
+    int`` and the interface-supplied ``id: GlobalID!`` and the schema build
+    would blow up with ``NodeIDAnnotationError``.
+
+    Reconsideration triggers: T-population (a new suppressed member extends
+    this body; both callers follow); T-identity (a pk-identity change lands
+    on the ``_meta.pk.name`` read); T-exemption (a new suppression
+    exemption lands here, never as a second predicate at a caller).
+    """
+    if field.is_relation:
+        return False
+    if field.name in consumer_authored_fields:
+        return False
+    if not _is_relay_shaped(cls, interfaces):
+        return False
+    return field.name == source_model._meta.pk.name
+
+
 def _build_annotations(
     cls: type[DjangoType],
     fields: "tuple[ModelField, ...]",
@@ -2091,7 +2111,7 @@ def _build_annotations(
             name).
         fields: The Meta-filtered list of Django field objects.
         source_model: The Django model the type wraps. Used to resolve the
-            primary-key attname when ``relay.Node`` suppression is active.
+            primary-key name when ``relay.Node`` suppression is active.
         consumer_authored_fields: Names of fields whose annotation /
             ``StrawberryField`` assignment is owned by the consumer. The
             synthesized annotation is skipped for these names so consumer
@@ -2131,39 +2151,13 @@ def _build_annotations(
     """
     annotations: dict[str, object] = {}
     pending: list[PendingRelation] = []
-    # Suppress the synthesized scalar ``id`` annotation whenever the type will
-    # participate in the Relay ``Node`` interface - either through
-    # ``Meta.interfaces`` (the canonical path; includes both ``relay.Node``
-    # directly and any ``@strawberry.interface`` that subclasses it) or
-    # through direct inheritance (``class Foo(DjangoType, relay.Node)``).
-    # Without these branches a Strawberry-native consumer would land in
-    # Phase 3 ``strawberry.type(...)`` decoration with both the synthesized
-    # ``id: int`` and the interface-supplied ``id: GlobalID!`` and the schema
-    # build would blow up with ``NodeIDAnnotationError``.
-    #
-    # The interfaces tuple is checked with ``issubclass`` per entry rather
-    # than an exact ``relay.Node in interfaces`` membership test:
-    # ``_validate_interfaces`` guarantees every entry is a Strawberry
-    # interface class, and a consumer subclass like
-    # ``@strawberry.interface class CustomNode(relay.Node)`` is the
-    # canonical way to extend Relay-Node behavior.
-    suppress_pk_annotation = _is_relay_shaped(cls, interfaces)
-    # ``pk_name`` (not ``pk_attname``): ``_meta.pk.name`` is the Django
-    # field NAME, not the column attname. For a relation primary key
-    # (``OneToOneField(primary_key=True)``) those differ - ``name="user"``
-    # vs. ``attname="user_id"`` - and the comparison below is against
-    # ``field.name`` so the NAME is what's needed. Naming it ``pk_attname``
-    # would invite a future reader to reuse it in a
-    # ``getattr(root, pk_attname)`` context, which would lazy-load the
-    # related row for a relation pk.
-    pk_name = source_model._meta.pk.name if suppress_pk_annotation else None
     for field in fields:
         if field.is_relation:
             if field.name in consumer_authored_fields:
                 continue
             if getattr(field, "related_model", None) is None:
                 raise ConfigurationError(
-                    f"{source_model.__name__}.{field.name} is a GenericForeignKey or other "
+                    f"{truth.name(source_model)}.{field.name} is a GenericForeignKey or other "
                     "relation without a concrete related model. It cannot be auto-mapped to "
                     "a single GraphQL type. Exclude it via Meta.exclude, or supply an "
                     "explicit annotation or resolver.",
@@ -2197,7 +2191,13 @@ def _build_annotations(
                 # collection. Relation override symmetry: see the
                 # ``field.is_relation`` branch above.
                 continue
-            if suppress_pk_annotation and field.name == pk_name:
+            if _is_suppressed_relay_pk(
+                cls,
+                interfaces,
+                source_model,
+                field,
+                consumer_authored_fields,
+            ):
                 # ``relay.Node`` supplies ``id: GlobalID!`` via the interface;
                 # dropping the synthesized scalar annotation here keeps the
                 # Strawberry surface clean. The pk field stays in ``fields``
@@ -2232,7 +2232,7 @@ def _build_annotations(
             annotations[field.name] = convert_field_output(
                 # Every ``ForeignObjectRel`` is a relation, so a non-relation entry is a column.
                 cast("ConcreteField", field),
-                cls.__name__,
+                truth.name(cls),
                 force_nullable=force_nullable,
                 expose_filesystem_path=field.name in filesystem_path_fields,
             )

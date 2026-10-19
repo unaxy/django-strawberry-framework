@@ -54,7 +54,7 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
   - [ ] `clear()` also clears `_primaries`.
   - [ ] Tests in `tests/test_registry.py`:
     - [ ] `test_register_two_types_same_model_without_primary_allows_both_in_types_for` — verifies multi-storage works; `types_for(Model)` returns both in registration order.
-    - [ ] `test_register_second_type_for_same_model_no_longer_raises_collision` — verifies a second type for an already-mapped model does not raise in the no-primary case (see [Decision 3](#decision-3--register-signature-and-collision-rules)).
+    - [ ] `test_register_second_type_for_same_model_does_not_raise` — verifies a second type for an already-mapped model does not raise in the no-primary case (see [Decision 3](#decision-3--register-signature-and-collision-rules)).
     - [ ] `test_register_same_type_twice_is_idempotent` — calling `register(Model, T)` twice does not duplicate the entry in `_types[Model]`.
     - [ ] `test_register_primary_flag_sets_primary_for` — single type with `primary=True` populates `_primaries`.
     - [ ] `test_register_two_primaries_for_same_model_raises_configuration_error` — second `register(Model, T2, primary=True)` after `register(Model, T1, primary=True)` raises with message containing the attempted class name, the model name, and `"is already the primary type"`.
@@ -359,7 +359,7 @@ def _audit_primary_ambiguity(multi_type_models: tuple[type[models.Model], ...]) 
     ]
     if not offenders:
         return
-    offenders.sort(key=lambda entry: _safe_class_name(entry[0]))
+    offenders.sort(key=lambda entry: truth.name(entry[0]))
     raise ConfigurationError(_format_ambiguity_error(offenders))
 ```
 

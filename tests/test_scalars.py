@@ -7,8 +7,8 @@ in ``tests/types/test_converters.py``.
 
 What stays here, and why no live request can express it:
 
-- hostile ``int`` / ``str`` subclasses and unprintable objects (no GraphQL
-  argument can carry a Python subclass);
+- ``int`` / ``str`` subclasses normalized to the canonical wire value (no
+  GraphQL argument can carry a Python subclass);
 - serializer rejection of non-int Python objects (the ORM never hands
   ``bool`` / ``float`` / ``str`` / ``Decimal`` to ``_serialize_bigint``);
 - ``_parse_bigint`` on a Python ``bool`` / ``float`` / ``None`` (GraphQL
@@ -20,7 +20,8 @@ What stays here, and why no live request can express it:
   kwargs forwarding);
 - ``Upload`` as Strawberry's built-in re-export, absent from the package
   scalar map, resolving under a plain ``StrawberryConfig`` with no package
-  map (fakeshop always passes ``strawberry_config()``).
+  map (a schema-build pin: it asserts on SDL text, identical in-process and
+  over HTTP).
 """
 
 import subprocess
@@ -40,7 +41,6 @@ from django_strawberry_framework import BigInt, strawberry_config
 from django_strawberry_framework.scalars import (
     Upload,
     _parse_bigint,
-    _safe_scalar_map_key_label,
     _serialize_bigint,
 )
 from django_strawberry_framework.scalars import Upload as UploadFromScalars
@@ -76,6 +76,14 @@ def test_bigint_int_subclasses_are_normalized_before_serialization() -> None:
         def __str__(self) -> str:
             return hex(self)
 
+    class _HostileStr(str):
+        def __int__(self) -> int:
+            raise RuntimeError("int exploded")
+
+        @override
+        def __str__(self) -> str:
+            return "forged"
+
     value = _HostileInt(7)
     parsed = _parse_bigint(value)
     assert parsed == 7
@@ -87,6 +95,16 @@ def test_bigint_int_subclasses_are_normalized_before_serialization() -> None:
     assert parsed_hex == 255
     assert type(parsed_hex) is int
     assert _serialize_bigint(hex_val) == "255"
+
+    # The parser's subclass-``str`` leg copies through the base slot, so the
+    # forged ``__str__`` never decides the accepted value; the serializer
+    # rejects ``str`` subclasses like every other ``str``.
+    hostile_str = _HostileStr("7")
+    parsed_str = _parse_bigint(hostile_str)
+    assert parsed_str == 7
+    assert type(parsed_str) is int
+    with pytest.raises(TypeError):
+        _serialize_bigint(hostile_str)
 
 
 def test_bigint_serialize_rejects_bool() -> None:
@@ -147,18 +165,38 @@ def test_bigint_rejects_python_float() -> None:
 def test_bigint_rejects_none() -> None:
     """The BigInt parser still rejects ``None`` handed to it directly.
 
-    Strawberry strips ``null`` before calling ``parse_value`` for nullable inputs,
-    so this code path is reachable only through (a) non-nullable inputs where
-    Strawberry catches ``None`` before ``_parse_bigint`` runs and (b) direct
-    unit-test calls. Tested for defense in depth so a future reader doesn't
-    try to remove the parser's ``None`` check as "unreachable".
+    Strawberry strips ``null`` before calling ``parse_value`` for nullable
+    inputs and rejects ``None`` before ``_parse_bigint`` runs for non-nullable
+    ones, so this code path is reachable only through direct unit-test calls.
+    Tested for defense in depth so a future reader doesn't try to remove the
+    parser's ``None`` check as "unreachable".
     """
     with pytest.raises(ValueError, match="BigInt cannot parse NoneType"):
         _parse_bigint(None)
 
 
+def test_bigint_rejection_messages_are_pinned() -> None:
+    """The honest rejection messages, byte for byte."""
+    assert _parse_bigint("-12") == -12
+    with pytest.raises(ValueError, match="plain ASCII decimal integer string") as parse_info:
+        _parse_bigint("01")
+    assert str(parse_info.value) == (
+        "BigInt requires a plain ASCII decimal integer string (optional leading minus "
+        "for non-zero, no leading zeroes, no underscores, no plus sign, no Unicode "
+        "digits); got '01'"
+    )
+    with pytest.raises(ValueError, match=r"^BigInt cannot parse object$"):
+        _parse_bigint(object())
+    with pytest.raises(TypeError, match=r"^BigInt cannot serialize Decimal$"):
+        _serialize_bigint(Decimal(1))
+
+
 def test_bigint_rejection_messages_survive_hostile_values() -> None:
-    """Malformed scalar values cannot replace typed errors while formatting a message."""
+    """A hostile type-name hook or ``str`` subclass dunder never decides a typed rejection.
+
+    The rejected value's kind is read from the interpreter, so a metaclass
+    ``__name__`` hook never runs and the message names the real class.
+    """
 
     class _HostileTypeMeta(type):
         @override
@@ -183,12 +221,10 @@ def test_bigint_rejection_messages_survive_hostile_values() -> None:
             raise RuntimeError("str exploded")
 
     assert _parse_bigint(_HostileString("7")) == 7
-    with pytest.raises(ValueError, match="BigInt cannot parse object"):
+    with pytest.raises(ValueError, match=r"^BigInt cannot parse _HostileObject$"):
         _parse_bigint(_HostileObject())
-    with pytest.raises(TypeError, match="BigInt cannot serialize object"):
+    with pytest.raises(TypeError, match=r"^BigInt cannot serialize _HostileObject$"):
         _serialize_bigint(_HostileObject())
-    with pytest.raises(ValueError, match="unprintable _HostileString"):
-        _parse_bigint(_HostileString("bad"))
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +280,15 @@ def test_package_import_does_not_emit_strawberry_deprecation_warning() -> None:
 
 
 def test_strawberry_config_returns_strawberry_config_instance() -> None:
-    """The no-arg call returns a ``StrawberryConfig`` instance (Decision 2)."""
+    """The no-arg call returns a ``StrawberryConfig`` instance (spec-025 Decision 2)."""
     assert isinstance(strawberry_config(), StrawberryConfig)
 
 
 def test_strawberry_config_default_scalar_map_includes_bigint() -> None:
-    """The default ``scalar_map`` carries the package-defined ``BigInt`` ScalarDefinition (Decision 3)."""
+    """The default ``scalar_map`` carries the package-defined ``BigInt`` ScalarDefinition.
+
+    Pinned by spec-025 Decision 3.
+    """
     cfg = strawberry_config()
     assert BigInt in cfg.scalar_map
     assert isinstance(cfg.scalar_map[BigInt], ScalarDefinition)
@@ -270,8 +309,8 @@ def test_strawberry_config_accepts_empty_extra_scalar_map() -> None:
     assert BigInt in cfg.scalar_map
 
 
-def test_strawberry_config_rejects_unmaterializable_extra_scalar_map() -> None:
-    """A mapping failure is reported as the helper's typed configuration error."""
+def test_strawberry_config_mapping_failure_propagates() -> None:
+    """The copy of ``extra_scalar_map`` is the mapping's own behaviour; its errors propagate."""
 
     class _BrokenMapping(Mapping[object, ScalarDefinition]):
         @override
@@ -286,11 +325,7 @@ def test_strawberry_config_rejects_unmaterializable_extra_scalar_map() -> None:
         def __len__(self) -> int:
             return 1
 
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    with pytest.raises(ValueError, match=r"must be materializable.*unprintable _BrokenMapping"):
+    with pytest.raises(RuntimeError, match="getitem exploded"):
         strawberry_config(extra_scalar_map=_BrokenMapping())
 
 
@@ -318,14 +353,12 @@ def test_strawberry_config_extra_scalar_map_does_not_mutate_caller_dict() -> Non
     assert caller_dict == before
 
 
-def test_scalar_collision_label_falls_back_when_class_name_metadata_is_unreadable() -> None:
-    """A key whose ``__name__`` read raises is labelled by its guarded ``repr``.
+def test_scalar_map_key_with_unreadable_name_metadata_is_never_asked_for_it() -> None:
+    """A key whose ``__name__`` read raises builds a config without that read running.
 
-    ``_safe_scalar_map_key_label`` prefers ``__name__`` because a ``NewType`` /
-    scalar class reads best by name, but consumer metadata is never trusted to
-    be readable: an unreadable ``__name__`` falls back to the guarded repr
-    rather than propagating the consumer's exception out of the collision
-    message.
+    A collision is named by the PACKAGE definition it redeclares, so consumer key
+    metadata is never read while the map is merged: an unreadable ``__name__``
+    on a non-colliding key cannot escape the factory.
     """
 
     class _HostileNameMeta(type):
@@ -338,29 +371,28 @@ def test_scalar_collision_label_falls_back_when_class_name_metadata_is_unreadabl
     class _HostileName(metaclass=_HostileNameMeta):
         pass
 
-    label = _safe_scalar_map_key_label(_HostileName)
-    assert label.startswith("<class '")
-    assert "_HostileName" in label
+    definition = strawberry.scalar(name="HostileNamed", serialize=str, parse_value=str)
+    config = strawberry_config(extra_scalar_map={_HostileName: definition})
+    assert config.scalar_map[_HostileName] is definition
 
 
 def test_strawberry_config_collision_with_package_scalar_raises_value_error() -> None:
-    """Collision with a package-defined scalar key raises ``ValueError`` (Decision 4)."""
+    """Collision with a package-defined scalar key raises ``ValueError`` (spec-025 Decision 4)."""
     alt_def = strawberry.scalar(name="AltBigInt", serialize=str, parse_value=int)
     with pytest.raises(ValueError, match="cannot redeclare") as excinfo:
         strawberry_config(extra_scalar_map={BigInt: alt_def})
-    message = str(excinfo.value)
-    assert "BigInt" in message
-    assert "cannot redeclare" in message
+    assert str(excinfo.value) == (
+        "strawberry_config(extra_scalar_map=...) cannot redeclare package-defined scalars: "
+        "BigInt. Define a Strawberry custom scalar of a different NewType / class to "
+        "register under a separate key."
+    )
 
 
 def test_strawberry_config_collision_message_survives_hostile_key() -> None:
     """A key that aliases a package scalar cannot break collision reporting.
 
-    Which of the two aliasing keys survives the key-set intersection is a
-    CPython set-implementation detail, so the guarded label is pinned directly
-    on ``_safe_scalar_map_key_label`` and the factory assertion stays
-    order-independent: the alias is detected as a collision and the message
-    renders, instead of the hostile ``__repr__`` escaping the factory.
+    The alias is detected as a collision, and the message names the PACKAGE
+    definition it redeclares, so the hostile key's ``__repr__`` never runs.
     """
 
     class _HostileKey:
@@ -376,25 +408,18 @@ def test_strawberry_config_collision_message_survives_hostile_key() -> None:
         def __repr__(self) -> str:
             raise RuntimeError("repr exploded")
 
-    hostile = _HostileKey()
-    assert _safe_scalar_map_key_label(hostile) == "<unprintable _HostileKey>"
-
     custom_def = strawberry.scalar(name="HostileKey", serialize=str, parse_value=str)
     with pytest.raises(ValueError, match="cannot redeclare") as excinfo:
-        strawberry_config(extra_scalar_map={hostile: custom_def})
-    assert "cannot redeclare" in str(excinfo.value)
+        strawberry_config(extra_scalar_map={_HostileKey(): custom_def})
+    assert "cannot redeclare package-defined scalars: BigInt." in str(excinfo.value)
 
 
-def test_strawberry_config_hostile_key_eq_raising_is_contained() -> None:
-    """A key whose ``__eq__`` raises cannot escape the factory's ValueError boundary.
+def test_strawberry_config_hostile_key_eq_error_propagates() -> None:
+    """A key whose ``__eq__`` raises during the collision check propagates its own error.
 
-    ``dict()`` materialization is only the FIRST dispatch into consumer key
-    code: the collision-check intersection (``keys() & keys()``) and the merge
-    into the fresh result dict re-hash the materialized keys and, on a hash
-    collision with a package key, compare them - running a hostile ``__eq__``
-    that materialization never reached. The guard owns every key-dispatch
-    operation, so the promised boundary holds however the hostile key
-    detonates (spec-025 Decision 4 containment).
+    The collision check's hashing and comparison of the copied keys are the
+    keys' own behaviour (spec-025 Decision 4), so a raising ``__eq__`` on a
+    key that hashes like a package key surfaces unchanged.
     """
 
     class _ExplodingEqKey:
@@ -411,46 +436,8 @@ def test_strawberry_config_hostile_key_eq_raising_is_contained() -> None:
             return "<ExplodingEqKey>"
 
     custom_def = strawberry.scalar(name="ExplodingEq", serialize=str, parse_value=str)
-    with pytest.raises(ValueError, match="must be materializable") as excinfo:
+    with pytest.raises(RuntimeError, match="eq exploded"):
         strawberry_config(extra_scalar_map={_ExplodingEqKey(): custom_def})
-    # The RuntimeError from ``__eq__`` is chained as ``__cause__``, never
-    # propagated as the factory's own exception.
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
-    assert "hash and compare safely" in str(excinfo.value)
-
-
-def test_safe_scalar_map_key_label_normalizes_str_subclass_name() -> None:
-    """A ``__name__`` that is a ``str`` subclass is returned as a plain ``str``.
-
-    Handing the subclass onward would let its ``__str__`` / ``__format__`` run
-    - and its ``__lt__`` under ``sorted()`` - while the collision message is
-    assembled, replacing the factory's ``ValueError`` with an arbitrary
-    consumer exception (the same normalization ``exceptions.py::_safe_type_name``
-    applies to its own labels).
-    """
-
-    class _NameStr(str):
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("str exploded")
-
-        @override
-        def __format__(self, fmt: str) -> str:
-            raise RuntimeError("format exploded")
-
-        @override
-        def __lt__(self, other: object) -> bool:
-            raise RuntimeError("lt exploded")
-
-    class _Key:
-        __name__ = _NameStr("Poisoned")
-
-    label = _safe_scalar_map_key_label(_Key())
-    assert type(label) is str
-    assert label == "Poisoned"
-    # Even a multi-element sorted()/join over such labels cannot dispatch the
-    # subclass's dunders.
-    assert ", ".join(sorted([label, "AAA"])) == "AAA, Poisoned"
 
 
 def test_strawberry_config_independent_call_returns_independent_instance() -> None:
@@ -511,7 +498,7 @@ def test_strawberry_config_combines_extra_scalar_map_and_config_kwargs() -> None
 
 
 def test_strawberry_config_rejects_scalar_map_kwarg() -> None:
-    """``scalar_map=`` is structurally rejected regardless of payload (Error shapes)."""
+    """``scalar_map=`` is structurally rejected regardless of payload (spec-025 Error shapes)."""
     with pytest.raises(ValueError, match="owns scalar_map") as excinfo_empty:
         strawberry_config(scalar_map={})
     message_empty = str(excinfo_empty.value)
@@ -548,7 +535,7 @@ def test_upload_is_importable_from_top_level_scalars_module() -> None:
 
 
 def test_strawberry_config_scalar_map_excludes_upload() -> None:
-    """The package ``scalar_map`` carries ``BigInt`` but NOT ``Upload`` (Decision 5).
+    """The package ``scalar_map`` carries ``BigInt`` but NOT ``Upload`` (spec-037 Decision 5).
 
     ``Upload`` is absent from ``_PACKAGE_SCALAR_MAP`` because Strawberry's built-in
     ``DEFAULT_SCALAR_REGISTRY`` already owns it; only the package-custom ``BigInt``

@@ -87,8 +87,9 @@ Spec: [Lookup-path flattening][spec-003-flattening].
 `lookup_paths` recurses to arbitrary depth because B8 diffs every nested level, and it is kept
 separate from resolver keys because the two answer different questions. Reads of Django's private
 `_prefetch_related_lookups` go through one named reader,
-`django_strawberry_framework/optimizer/plans.py::_consumer_prefetch_lookups`, so one call site depends
-on that contract.
+`utils/_queryset_private.py::queryset_prefetch_lookups`, with
+`optimizer/plans.py::_consumer_prefetch_lookups` as the lenient plans adapter, so one call site
+depends on that contract.
 
 ## Resolver sentinel keys
 

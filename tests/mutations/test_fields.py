@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
-from typing import NoReturn
 
 import pytest
 import strawberry
@@ -197,19 +196,35 @@ def test_non_class_target_raises_at_construction() -> None:
         DjangoMutationField(object())  # pyright: ignore[reportArgumentType]
 
 
-def test_hostile_non_class_target_repr_still_raises_configuration_error() -> None:
-    """A rejected target's repr cannot replace the construction-time configuration error."""
+def test_classmethod_protocol_members_are_read_from_the_class_namespace() -> None:
+    """A class carrying the protocol as plain functions still passes the protocol probe.
 
-    class HostileTarget:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr boom")
+    ``resolve_sync`` / ``resolve_async`` / ``input_type_name`` are normally
+    ``classmethod`` objects in the class namespace; a plain function in their place
+    is callable too, so the target reaches the own-``Meta`` check instead of the
+    not-a-mutation reject.
+    """
 
-    with pytest.raises(ConfigurationError, match="DjangoMutationField") as exc:
-        # basedpyright: the non-class value whose repr raises is the hostile input under test;
-        # DjangoMutationField types the parameter as WriteMutationClass
-        DjangoMutationField(HostileTarget())  # pyright: ignore[reportArgumentType]
-    assert "unprintable" in str(exc.value)
+    class PlainProtocol:
+        _mutation_meta = None
+        input_module_path = INPUTS_MODULE_PATH
+
+        def resolve_sync(self, info: object) -> None:
+            del info
+            raise AssertionError("never called")
+
+        def resolve_async(self, info: object) -> None:
+            del info
+            raise AssertionError("never called")
+
+        def input_type_name(self, meta: object) -> None:
+            del meta
+            raise AssertionError("never called")
+
+    with pytest.raises(ConfigurationError, match="abstract base"):
+        # basedpyright: a class carrying the protocol as plain functions is the input under
+        # test; DjangoMutationField types the parameter as WriteMutationClass
+        DjangoMutationField(PlainProtocol)  # pyright: ignore[reportArgumentType]
 
 
 def test_abstract_base_target_raises_at_construction() -> None:
@@ -268,8 +283,13 @@ def test_inherited_meta_target_rejected_at_construction() -> None:
     registry.clear()
     assert CreateItemRedeclared._mutation_meta is not None
     assert CreateItemRedeclared not in iter_mutations()
-    with pytest.raises(ConfigurationError, match="current registry lifecycle"):
+    with pytest.raises(ConfigurationError) as exc:
         DjangoMutationField(CreateItemRedeclared)
+    assert str(exc.value) == (
+        "DjangoMutationField target CreateItemRedeclared is not registered for finalization "
+        "in the current registry lifecycle. Declare the mutation after the most recent "
+        "registry.clear()."
+    )
 
 
 class _ByNameMutationMetaclass(DjangoMutationMetaclass):
@@ -541,24 +561,6 @@ def test_bare_string_or_bytes_directives_raise_at_construction(bare: str | bytes
 
     with pytest.raises(ConfigurationError, match="directives must be a sequence"):
         DjangoMutationField(CreateItem, directives=bare)
-
-
-def test_hostile_directives_iterator_raises_at_construction() -> None:
-    """An iterator that raises midway fails as ConfigurationError, never ValueError."""
-    _declare_item_primaries()
-    CreateItem, _, _ = _operation_mutations()
-
-    class HostileDirectives(tuple[object, ...]):
-        @override
-        def __iter__(self) -> Iterator[object]:
-            return self
-
-        def __next__(self) -> NoReturn:
-            raise ValueError("boom")
-
-    with pytest.raises(ConfigurationError, match="directives could not be read") as exc:
-        DjangoMutationField(CreateItem, directives=HostileDirectives())
-    assert isinstance(exc.value.__cause__, ValueError)
 
 
 def test_non_iterable_directives_raise_configuration_error() -> None:

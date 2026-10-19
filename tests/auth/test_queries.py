@@ -1,12 +1,16 @@
-"""Current-user query tests for alias binding, visibility, permission gates, and sync/async resolution.
+"""Current-user query tests for alias binding, permission gates, and sync/async resolution.
 
 The ``current_user`` residue a live fakeshop request cannot drive: the
 ``CurrentUserAlias`` namespace lifecycle (the ``make_input_namespace`` trio +
 its pre-bind ``register_subsystem_clear`` row), the surface-keyed
 current-user-only bind (its no-``UserType`` arm + no orphan payloads), the
-gated-anonymous ``GraphQLError`` and its exact denial string, hostile
-``is_authenticated`` containment, and the async lazy-user forcing inside the
-one ``sync_to_async`` boundary. The live ``me`` behavior (authenticated /
+one-declaration conflict error, the sync/async dispatch counting, the
+mapping-context request shape, the absent-user arms (the Channels adapter
+shape, a lazy ``None``, a custom actor), the bare-string ``directives``
+rejection, the gated-anonymous ``GraphQLError`` and its exact denial string,
+the legacy callable and awaitable ``is_authenticated`` forms plus a raising
+one's propagation, and the async lazy-user forcing inside the one
+``sync_to_async`` boundary. The live ``me`` behavior (authenticated /
 anonymous / no-``AuthenticationMiddleware`` / hide-everyone ``get_queryset``
 skip / ``me: UserType`` SDL / unplanned relation under ``strictness="raise"``)
 is earned in
@@ -15,20 +19,19 @@ is earned in
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Coroutine, Iterable, Iterator
 from contextlib import AbstractContextManager
-from typing import NoReturn
 from unittest import mock
 
 import pytest
 import strawberry
 from django.contrib.auth.models import User
 from django.contrib.sessions.middleware import SessionMiddleware
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpResponse
 from django.test import RequestFactory
 from django.utils.functional import SimpleLazyObject
 from strawberry import relay
-from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema, DjangoType, finalize_django_types
 from django_strawberry_framework.auth import current_user
@@ -118,7 +121,7 @@ class _FakeChannelsRequest:
 
 
 def _channels_context(scope: dict[str, object]) -> dict[str, _FakeChannelsRequest]:
-    """A Strawberry-Channels mapping context (spec-041) that resolves to the adapter."""
+    """Build a Strawberry-Channels mapping context (spec-041) that resolves to the adapter."""
     return {"request": _FakeChannelsRequest(scope)}
 
 
@@ -185,10 +188,10 @@ def test_sync_me_dispatch_never_enters_the_async_boundary(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_async_me_dispatch_awaits_the_native_async_body_exactly_once(
+async def test_async_me_dispatch_awaits_the_bridged_async_body_exactly_once(
     sync_boundary_spy: list[Callable[..., object]],
 ) -> None:
-    """``await schema.execute`` ``me`` awaits the native async body exactly once."""
+    """``await schema.execute`` ``me`` awaits the bridged async body exactly once."""
     schema = _me_schema()
     user = await User.objects.acreate_user(username="me_async", password="pw-9x-strong")
     res = await schema.execute(_ME_Q, context_value=_session_request(user))
@@ -221,7 +224,7 @@ def test_me_is_null_not_a_crash_when_the_request_user_is_absent() -> None:
     ``tests/utils/test_permissions.py`` pins ``.user`` -> ``None`` there).
     The no-``AuthenticationMiddleware`` Django HTTP arm lives in
     ``examples/fakeshop/test_query/test_auth_api.py``. Remaining arms here are
-    the Channels adapter plus hostile actor shapes a live request cannot mint.
+    the Channels adapter plus actor shapes a live request cannot mint.
     """
     schema = _me_schema()
 
@@ -257,139 +260,27 @@ def test_me_is_null_not_a_crash_when_the_request_user_is_absent() -> None:
 
 
 @pytest.mark.django_db
-def test_hostile_user_descriptor_raising_collapses_to_anonymous_null() -> None:
-    """Hostile ``request.user`` / ``is_authenticated`` raising TypeError/ValueError collapses to ``null``.
+def test_a_raising_is_authenticated_propagates_to_the_error_policy() -> None:
+    """The user model's ``is_authenticated`` is consumer behaviour: its exception propagates.
 
-    Exception containment (hunt 0.0.14): a hostile descriptor or a hostile
-    ``is_authenticated`` that raises ``TypeError`` / ``ValueError`` /
-    ``AttributeError`` / ``KeyError`` / ``IndexError`` must not escape as an
-    unhandled top-level error. Those shapes collapse to anonymous (``None``) -
-    a fail-closed nullable return - while any other exception (e.g. a
-    ``DatabaseError`` from a ``SimpleLazyObject`` that hits the DB) is left to
-    propagate.
+    It is never collapsed to anonymous ``null``; the field errors, and the
+    schema's error policy masks the unexpected exception on the wire.
     """
 
-    class HostileRequest(HttpRequest):
+    class RaisingIsAuth:
         @property
-        @override
-        # basedpyright: the hostile shape under test, a ``user`` property whose read raises; the
-        # checker rejects any property overriding a base class attribute
-        def user(self) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-            raise TypeError("hostile user getter")
+        def is_authenticated(self) -> bool:
+            raise ValueError("is_authenticated failed")
 
     schema = _me_schema()
-    hostile_req = HostileRequest()
-    hostile_req.method = "POST"
-    res = schema.execute_sync(_ME_Q, context_value=hostile_req)
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["me"] is None
-
-    class HostileIsAuth:
-        @property
-        def is_authenticated(self) -> NoReturn:
-            raise ValueError("hostile is_authenticated")
-
     req = RequestFactory().post("/graphql/")
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    req.user = HostileIsAuth()  # pyright: ignore[reportAttributeAccessIssue]
-    res2 = schema.execute_sync(_ME_Q, context_value=req)
-    assert res2.errors is None, res2.errors
-    assert res2.data is not None
-    assert res2.data["me"] is None
-
-    # Hunt 0.0.15 - the hostile TRUTHINESS surface: a value whose ``__bool__``
-    # / ``__len__`` raises is the fourth contained shape (the read succeeds;
-    # the classification's ``if is_authenticated:`` evaluation raises).
-    class _BoolRaisingValue:
-        def __bool__(self) -> bool:
-            raise ValueError("hostile truthiness")
-
-    class _LenOnlyRaiser:
-        def __len__(self) -> int:
-            raise TypeError("hostile len truthiness")
-
-    class HostileBoolValueUser:
-        def __init__(self) -> None:
-            self.is_authenticated = _BoolRaisingValue()
-
-    class HostileLenValueUser:
-        def __init__(self) -> None:
-            self.is_authenticated = _LenOnlyRaiser()
-
-    bool_req = RequestFactory().post("/graphql/")
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    bool_req.user = HostileBoolValueUser()  # pyright: ignore[reportAttributeAccessIssue]
-    bool_res = schema.execute_sync(_ME_Q, context_value=bool_req)
-    assert bool_res.errors is None, bool_res.errors
-    assert bool_res.data is not None
-    assert bool_res.data["me"] is None
-
-    len_req = RequestFactory().post("/graphql/")
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    len_req.user = HostileLenValueUser()  # pyright: ignore[reportAttributeAccessIssue]
-    len_res = schema.execute_sync(_ME_Q, context_value=len_req)
-    assert len_res.errors is None, len_res.errors
-    assert len_res.data is not None
-    assert len_res.data["me"] is None
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_async_hostile_truthiness_collapses_to_anonymous_null() -> None:
-    """Async parity for the fourth contained shape (hunt 0.0.15).
-
-    The async body bridges to the SAME sync body inside the ONE
-    ``sync_to_async`` boundary, so the hostile-truthiness containment must hold
-    identically there: a value whose ``__bool__`` / ``__len__`` raises after a
-    successful read classifies the request as anonymous and resolves ``me`` to
-    ``null``, never an unhandled top-level error.
-    """
-
-    class _BoolRaisingValue:
-        def __bool__(self) -> bool:
-            raise TypeError("hostile async truthiness")
-
-    class _LenOnlyRaiser:
-        def __len__(self) -> int:
-            raise ValueError("hostile async len truthiness")
-
-    schema = _me_schema()
-
-    bool_req = RequestFactory().post("/graphql/")
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    bool_req.user = type("U", (), {"is_authenticated": _BoolRaisingValue()})()  # pyright: ignore[reportAttributeAccessIssue]
-    res = await schema.execute(_ME_Q, context_value=bool_req)
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["me"] is None
-
-    len_req = RequestFactory().post("/graphql/")
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    len_req.user = type("U", (), {"is_authenticated": _LenOnlyRaiser()})()  # pyright: ignore[reportAttributeAccessIssue]
-    res2 = await schema.execute(_ME_Q, context_value=len_req)
-    assert res2.errors is None, res2.errors
-    assert res2.data is not None
-    assert res2.data["me"] is None
-
-
-def test_current_user_hostile_directives_raise_configuration_error() -> None:
-    """A hostile ``directives`` iterable or a bare string must raise ``ConfigurationError``."""
-
-    class HostileIter(tuple[object, ...]):
-        @override
-        def __iter__(self) -> NoReturn:
-            raise ValueError("hostile directives")
-
-    with pytest.raises(ConfigurationError):
-        current_user(directives=HostileIter())
-
-    with pytest.raises(ConfigurationError):
-        current_user(directives="oops")
+    # basedpyright: the non-user object planted on request.user is the input under test;
+    # django-stubs types the slot as AbstractBaseUser | AnonymousUser
+    req.user = RaisingIsAuth()  # pyright: ignore[reportAttributeAccessIssue]
+    res = schema.execute_sync(_ME_Q, context_value=req)
+    assert res.errors is not None
+    assert res.errors[0].message == "An unexpected error occurred."
+    assert res.errors[0].path == ["me"]
 
 
 def _legacy_callable_user(outcome: Callable[[], object]) -> AbstractContextManager[object]:
@@ -398,8 +289,8 @@ def _legacy_callable_user(outcome: Callable[[], object]) -> AbstractContextManag
     ``mock.patch.object`` deletes the shadowing attribute on exit because the
     real one is inherited from ``AbstractBaseUser``, so the model class is left
     exactly as found. Patching the real model (rather than substituting a duck
-    object) is what keeps the authenticated arm serializable: the ``me`` field's
-    return type is the concrete ``UserT``, and GraphQL rejects anything else.
+    object) keeps the authenticated arm serializable: the ``me`` field's return
+    type is the concrete ``UserT``.
     """
 
     def _is_authenticated(_self: object) -> object:
@@ -409,87 +300,37 @@ def _legacy_callable_user(outcome: Callable[[], object]) -> AbstractContextManag
 
 
 @pytest.mark.django_db
-def test_legacy_callable_is_authenticated_is_called_and_authenticates() -> None:
-    """A legacy ``is_authenticated()`` returning true resolves to the actor, not ``null``."""
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [(True, {"username": "legacy"}), (False, None)],
+    ids=["true-authenticates", "false-is-anonymous"],
+)
+def test_legacy_callable_is_authenticated_is_called_and_its_result_classifies(
+    *,
+    outcome: bool,
+    expected: dict[str, str] | None,
+) -> None:
+    """A legacy ``is_authenticated()`` is called; a bound method's truthiness never classifies."""
     User.objects.create_user(username="legacy", password="pw")
     schema = _me_schema()
     req = RequestFactory().post("/graphql/")
     req.user = User.objects.get(username="legacy")
 
-    with _legacy_callable_user(lambda: True):
+    with _legacy_callable_user(lambda: outcome):
         res = schema.execute_sync(_ME_Q, context_value=req)
 
     assert res.errors is None, res.errors
     assert res.data is not None
-    assert res.data["me"]["username"] == "legacy"
-
-
-@pytest.mark.django_db
-def test_legacy_callable_is_authenticated_returning_false_is_anonymous() -> None:
-    """A legacy ``is_authenticated()`` returning false is the anonymous ``null``."""
-    User.objects.create_user(username="legacy-off", password="pw")
-    schema = _me_schema()
-    req = RequestFactory().post("/graphql/")
-    req.user = User.objects.get(username="legacy-off")
-
-    with _legacy_callable_user(lambda: False):
-        res = schema.execute_sync(_ME_Q, context_value=req)
-
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["me"] is None
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "raised",
-    [
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-        IndexError,
-    ],
-    ids=[
-        "type",
-        "value",
-        "attribute",
-        "key",
-        "index",
-    ],
-)
-def test_legacy_callable_is_authenticated_raising_collapses_to_anonymous_null(
-    raised: type[Exception],
-) -> None:
-    """A legacy ``is_authenticated()`` raising any of the five shapes collapses to ``null``.
-
-    The CALL is a third hostile surface alongside the ``request.user`` and
-    ``user.is_authenticated`` reads: a pre-1.10 callable that raises must not
-    escape as an unhandled top-level error carrying the hostile message.
-    """
-    User.objects.create_user(username="legacy-hostile", password="pw")
-    schema = _me_schema()
-    req = RequestFactory().post("/graphql/")
-    req.user = User.objects.get(username="legacy-hostile")
-
-    def _raise() -> NoReturn:
-        raise raised("hostile is_authenticated()")
-
-    with _legacy_callable_user(_raise):
-        res = schema.execute_sync(_ME_Q, context_value=req)
-
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["me"] is None
+    assert res.data["me"] == expected
 
 
 @pytest.mark.django_db
 def test_awaitable_is_authenticated_is_closed_and_read_as_anonymous() -> None:
     """A NON-callable awaitable ``is_authenticated`` is closed and read as anonymous.
 
-    A pending coroutine is neither true nor false; leaving it unawaited would
-    also leak a "never awaited" warning out of the resolver. The helper closes
-    it and classifies the request as anonymous.
+    A pending coroutine is neither true nor false (and is truthy, so reading it
+    as a flag would authenticate); leaving it unawaited would also leak a
+    "never awaited" warning out of the resolver.
     """
 
     async def _pending() -> bool:  # closed, never awaited
@@ -509,7 +350,7 @@ def test_awaitable_is_authenticated_is_closed_and_read_as_anonymous() -> None:
     assert res.errors is None, res.errors
     assert res.data is not None
     assert res.data["me"] is None
-    # Closed by the helper: awaiting a closed coroutine is a RuntimeError.
+    # Closed by the helper: resuming a closed coroutine is a RuntimeError.
     with pytest.raises(RuntimeError):
         coro.send(None)
 
@@ -540,6 +381,73 @@ def test_legacy_callable_returning_an_awaitable_is_closed_and_read_as_anonymous(
     assert len(captured) == 1
     with pytest.raises(RuntimeError):
         captured[0].send(None)
+
+
+@pytest.mark.django_db
+def test_future_is_authenticated_is_cancelled_and_read_as_anonymous() -> None:
+    """A Future ``is_authenticated`` is cancelled and read as anonymous.
+
+    The seam composes the package's one awaitable disposal
+    (``utils/querysets.py::_disposed_awaitable``): a coroutine is closed (the
+    rows above), a future is cancelled rather than left pending, and the
+    request classifies anonymous either way.
+    """
+    loop = asyncio.new_event_loop()
+    future = loop.create_future()
+
+    class _FutureIsAuth:
+        is_authenticated = future
+
+    try:
+        schema = _me_schema()
+        req = RequestFactory().post("/graphql/")
+        # basedpyright: the non-user object planted on request.user is the input under test;
+        # django-stubs types the slot as AbstractBaseUser | AnonymousUser
+        req.user = _FutureIsAuth()  # pyright: ignore[reportAttributeAccessIssue]
+        res = schema.execute_sync(_ME_Q, context_value=req)
+        assert res.errors is None, res.errors
+        assert res.data is not None
+        assert res.data["me"] is None
+        assert future.cancelled() is True
+    finally:
+        loop.close()
+
+
+@pytest.mark.django_db
+def test_custom_awaitable_is_authenticated_is_refused_without_dispatching_close() -> None:
+    """An exotic awaitable ``is_authenticated`` is anonymous; its ``close`` never runs.
+
+    The shared disposal releases only coroutines and futures - a custom
+    awaitable's ``close`` is consumer code the refusal must not run.
+    """
+    closed: list[bool] = []
+
+    class _CustomAwaitable:
+        def __await__(self) -> Iterator[None]:
+            return iter(())
+
+        def close(self) -> None:
+            closed.append(True)
+
+    class _CustomAwaitableIsAuth:
+        is_authenticated = _CustomAwaitable()
+
+    schema = _me_schema()
+    req = RequestFactory().post("/graphql/")
+    # basedpyright: the non-user object planted on request.user is the input under test;
+    # django-stubs types the slot as AbstractBaseUser | AnonymousUser
+    req.user = _CustomAwaitableIsAuth()  # pyright: ignore[reportAttributeAccessIssue]
+    res = schema.execute_sync(_ME_Q, context_value=req)
+    assert res.errors is None, res.errors
+    assert res.data is not None
+    assert res.data["me"] is None
+    assert closed == []
+
+
+def test_current_user_bare_string_directives_raise_configuration_error() -> None:
+    """A bare string ``directives`` value is rejected, never iterated character-wise."""
+    with pytest.raises(ConfigurationError):
+        current_user(directives="oops")
 
 
 @pytest.mark.django_db

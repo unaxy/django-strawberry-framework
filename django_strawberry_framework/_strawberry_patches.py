@@ -176,9 +176,11 @@ defined but never called anywhere in the installed package at 0.322.2 or
 
 The two GET sites are therefore shielded: :func:`apply` also installs
 :func:`_patched_parse_query_params`, a source-pinned reimplementation
-of upstream's ``parse_query_params`` whose two nested parses call the
-captured ``_original_parse_json`` directly, restoring exact upstream
-GET semantics while the wrapper keeps hardening the seven
+of upstream's ``parse_query_params`` whose two nested parses call
+:func:`_translated_parse_json`, keeping the envelope guard off the GET
+path while the shared translator still owns gap 1's error channel;
+upstream's per-param handling keeps ownership of validity there while
+the wrapper keeps hardening the seven
 body/multipart sites. Because the shield is a *reimplementation* rather
 than a delegating wrapper, ``_validate_upstream_shape`` pins the
 superseded upstream body source (the reimplementer's contract
@@ -384,6 +386,7 @@ import textwrap
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 
 from .conf import upstream_patches_enabled
+from .utils import truth
 from .utils._narrowing import is_dict, is_list
 
 if TYPE_CHECKING:
@@ -499,7 +502,7 @@ def _captured_upstream_method(owner: type[object] | None, name: str) -> object:
     """
     if owner is None:
         return None
-    method = owner.__dict__.get(name)
+    method = truth.class_dict(owner).get(name)
     if getattr(method, _PATCH_OWNER_ATTRIBUTE, None) == _PATCH_OWNER:
         return getattr(method, _PATCH_ORIGINAL_ATTRIBUTE, None)
     return method
@@ -777,8 +780,8 @@ def _patched_parse_json(
     remaining map-specific structural errors), and deliberately kept OFF the two GET
     sites inside
     ``parse_query_params``, which :func:`_patched_parse_query_params`
-    routes through the captured original so upstream's own per-param
-    handling keeps ownership there. Both views inherit the single
+    routes through the shared translator instead of the guard, so upstream's
+    own per-param handling keeps ownership of validity there. Both views inherit the single
     ``BaseView`` method, so one install covers sync and async. Every
     other outcome - a successful object / well-typed-array parse, or any
     other exception - is passed through untouched.
@@ -799,7 +802,7 @@ def _patched_parse_query_params(
     self: "_AnyBaseView",
     params: "QueryParams",
 ) -> "dict[str, object]":
-    """Source-pinned reimplementation of ``BaseView.parse_query_params``.
+    """Reimplement ``BaseView.parse_query_params`` with the nested parses routed around the envelope guard.
 
     Byte-for-byte upstream semantics (the superseded body is pinned as
     ``_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE``) except that the two nested
@@ -968,12 +971,14 @@ def _patch_is_installed() -> bool:
     """
     return (
         BaseView is not None
-        and BaseView.__dict__.get("parse_json") is _patched_parse_json
-        and BaseView.__dict__.get("parse_query_params") is _patched_parse_query_params
+        and truth.class_dict(BaseView).get("parse_json") is _patched_parse_json
+        and truth.class_dict(BaseView).get("parse_query_params") is _patched_parse_query_params
         and SyncBaseHTTPView is not None
-        and SyncBaseHTTPView.__dict__.get("parse_multipart") is _patched_sync_parse_multipart
+        and truth.class_dict(SyncBaseHTTPView).get("parse_multipart")
+        is _patched_sync_parse_multipart
         and AsyncBaseHTTPView is not None
-        and AsyncBaseHTTPView.__dict__.get("parse_multipart") is _patched_async_parse_multipart
+        and truth.class_dict(AsyncBaseHTTPView).get("parse_multipart")
+        is _patched_async_parse_multipart
     )
 
 

@@ -1629,7 +1629,7 @@ def test_connection_child_seam_still_admits_a_sliced_hook_result() -> None:
         SlicedItemType,
         info,
         has_custom_qs=True,
-        target_model=Item,
+        target_definition=SlicedItemType.__django_strawberry_definition__,
     )
     assert admitted.query.is_sliced
     assert unwindowable_child_queryset_reason(admitted) is not None
@@ -1639,7 +1639,64 @@ def test_connection_child_seam_still_admits_a_sliced_hook_result() -> None:
             SlicedItemType,
             info,
             has_custom_qs=True,
-            target_model=Item,
+            target_definition=SlicedItemType.__django_strawberry_definition__,
+        )
+    assert "returned a sliced queryset (rows 0:1)" in str(excinfo.value)
+
+
+def test_child_builder_spends_the_passed_definition_not_a_class_reread() -> None:
+    """The child seal validates against the passed definition's model.
+
+    ``_build_child_queryset`` reads the seal-validation model off the
+    ``target_definition`` its caller resolved, never a second read of the
+    target class. A class whose carried definition names another table must
+    not move the seal: the sliced Item hook result is still the typed
+    ``sliced`` defect on the list path and still admitted on the connection
+    seam.
+    """
+    field = FieldMeta.from_django_field(Category._meta.get_field("items"))
+    info = make_info()._raw_info
+
+    class DivergedItemType:
+        # The carried definition disagrees with the passed one: the threat
+        # the one-definition rule exists for. The seal follows the passed
+        # definition, so this names a table the hook never queries.
+        __django_strawberry_definition__ = SimpleNamespace(model=Category)
+
+        @classmethod
+        def has_custom_get_queryset(cls) -> bool:
+            return True
+
+        @classmethod
+        def get_queryset(
+            cls,
+            queryset: QuerySet[Item],
+            info: strawberry.Info,
+            **kwargs: object,
+        ) -> QuerySet[Item]:
+            del info, kwargs
+            return queryset.order_by("pk")[:1]
+
+    diverged = _as_definitionless_django_type(DivergedItemType)
+    # basedpyright: a definition carrying only the ``model`` slot the child builder reads is the
+    # input under test; the builder types the parameter as DjangoTypeDefinition
+    resolved: DjangoTypeDefinition = SimpleNamespace(model=Item)  # pyright: ignore[reportAssignmentType]
+    admitted = _build_connection_child_queryset(
+        field,
+        diverged,
+        info,
+        has_custom_qs=True,
+        target_definition=resolved,
+    )
+    assert admitted.query.is_sliced
+    assert unwindowable_child_queryset_reason(admitted) is not None
+    with pytest.raises(ConfigurationError) as excinfo:
+        _build_child_queryset(
+            field,
+            diverged,
+            info,
+            has_custom_qs=True,
+            target_definition=resolved,
         )
     assert "returned a sliced queryset (rows 0:1)" in str(excinfo.value)
 
@@ -1671,7 +1728,7 @@ def test_child_hook_without_resolve_info_fails_loudly() -> None:
             HookedItemType,
             None,
             has_custom_qs=True,
-            target_model=Item,
+            target_definition=HookedItemType.__django_strawberry_definition__,
         )
     assert calls == []
 

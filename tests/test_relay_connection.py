@@ -37,6 +37,7 @@ from django.db import models as djmodels
 from django.db.models import ForeignObjectRel
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Lower
+from django.db.models.manager import Manager
 from django.http import HttpRequest
 from django.test.utils import CaptureQueriesContext
 from strategy_schemas import make_django_type
@@ -890,6 +891,48 @@ def test_fast_path_single_query(
     assert all(
         len(json_list(g, "booksConnection", "edges")) == 2 for g in json_list(result.data, "objs")
     )
+
+
+@pytest.mark.django_db
+def test_windowed_fast_path_constructs_no_fallback_queryset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A served window constructs no related-manager queryset on the fast path.
+
+    The relation resolver hands windowed rows to ``resolve_connection`` with a
+    fallback factory that builds ``genre.books.all()`` only when the fallback
+    runs; a served page never calls it, so a windowed request over four parents
+    constructs zero querysets.
+    """
+    branch = Branch.objects.create(name="central")
+    shelf = Shelf.objects.create(code="A1", branch=branch)
+    for gi in range(4):
+        genre = Genre.objects.create(name=f"g{gi}")
+        for title in ("a", "b", "c"):
+            book = Book.objects.create(title=f"g{gi}-{title}", shelf=shelf)
+            book.genres.add(genre)
+
+    schema = _genres_list_schema(optimizer=True)
+    calls: list[int] = []
+    original_all = Manager[djmodels.Model].all
+
+    def counting_all(self: Manager[djmodels.Model]) -> djmodels.QuerySet[djmodels.Model]:
+        if isinstance(getattr(self, "instance", None), Genre):
+            calls.append(1)
+        return original_all(self)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Manager, "all", counting_all)
+        result = _exec(
+            schema,
+            "{ objs { name booksConnection(first: 2) { edges { node { title } } } } }",
+        )
+    assert result.data is not None
+    assert len(json_list(result.data, "objs")) == 4
+    assert all(
+        len(json_list(g, "booksConnection", "edges")) == 2 for g in json_list(result.data, "objs")
+    )
+    assert len(calls) == 0
 
 
 @pytest.mark.django_db

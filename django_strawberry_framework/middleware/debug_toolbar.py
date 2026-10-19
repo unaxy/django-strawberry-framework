@@ -66,6 +66,7 @@ from django.utils.encoding import force_str
 from strawberry.django.views import BaseView
 from typing_extensions import override
 
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import call_method, is_dict
 from django_strawberry_framework.utils.imports import require_optional_module
 
@@ -258,16 +259,17 @@ class DebugToolbarMiddleware(_DebugToolbarMiddleware):
 
         ``view_class`` is the attribute Django's ``View.as_view()`` sets on the
         returned callable (and ``functools.wraps``-copying decorators such as
-        ``ensure_csrf_cookie`` preserve). The ``isinstance(view, type)`` guard
-        in front of ``issubclass`` is the module's first deliberate divergence
-        from upstream (spec-042 Decision 7): this middleware runs for ALL
-        global traffic, and a non-class ``view_class`` attached by an unrelated
-        decorator would make a bare ``issubclass`` raise ``TypeError`` and 500
-        the request. No ``super()`` chain: the stock toolbar middleware defines
-        no ``process_view`` hook to preserve.
+        ``ensure_csrf_cookie`` preserve). Both reads are truthful
+        (``utils/truth.py::static_attr`` / ``is_subclass``), the module's first
+        deliberate divergence from upstream (spec-042 Decision 7): this
+        middleware runs for ALL global traffic, and a non-class ``view_class``
+        attached by an unrelated decorator answers ``False`` where a bare
+        ``issubclass`` would raise ``TypeError`` and 500 the request. No
+        ``super()`` chain: the stock toolbar middleware defines no
+        ``process_view`` hook to preserve.
         """
-        view = getattr(view_func, "view_class", None)
-        setattr(request, _IS_GRAPHIQL, isinstance(view, type) and issubclass(view, BaseView))
+        view = truth.static_attr(view_func, "view_class", None)
+        setattr(request, _IS_GRAPHIQL, truth.is_subclass(view, BaseView))
 
     @override
     def _postprocess(

@@ -101,11 +101,12 @@ from django.db.models.fields.reverse_related import ForeignObjectRel
 
 from .exceptions import ConfigurationError
 from .registry import registry
+from .utils import truth
 
 # ``apply_type_visibility_sync`` runs a target's ``get_queryset`` and rejects an
 # async hook with ``SyncMisuseError`` (the coroutine closed first); the cascade
 # reuses it as the per-edge probe so the package keeps ONE sync-misuse site
-# (Decision 10). The runner is also the shared sealed visibility boundary:
+# (spec-034 Decision 10). The runner is also the shared sealed visibility boundary:
 # it owns the hook-result shape / concrete-table / alias contract (Manager
 # coercion, sealing into a framework-owned plain QuerySet rebuilt from validated
 # query state, alias pinned at construction, explicit cross-alias rejection),
@@ -277,15 +278,15 @@ def _validate_fields(model: type[models.Model], fields: Iterable[str] | None) ->
     known-but-non-cascadable names raise ``ConfigurationError`` naming the
     offending entry, the model, and the cascadable set. A cascadable name whose
     target lacks a registered type validates clean here and is skipped by the
-    walk's per-edge gate (Decision 9).
+    walk's per-edge gate (spec-034 Decision 9).
     """
     if fields is None:
         return None
-    if isinstance(fields, str):
+    if truth.is_instance(fields, str):
         raise ConfigurationError(
             f"apply_cascade_permissions fields= must be a non-string iterable of "
-            f"field names, not the bare string {fields!r}; wrap it in a list "
-            f"(fields=[{fields!r}]).",
+            f"field names, not the bare string {truth.render(fields)}; wrap it in a list "
+            f"(fields=[{truth.render(fields)}]).",
         )
     try:
         # ``list`` (not ``set``) first: a non-iterable (``fields=1``) raises here,
@@ -296,15 +297,15 @@ def _validate_fields(model: type[models.Model], fields: Iterable[str] | None) ->
     except TypeError as exc:
         raise ConfigurationError(
             f"apply_cascade_permissions fields= must be a non-string iterable of "
-            f"field names; got {fields!r}.",
+            f"field names; got {truth.render(fields)}.",
         ) from exc
-    # basedpyright: trust boundary: ``fields`` is the public ``Iterable[str]`` contract of
-    # ``apply_cascade_permissions``; this validates a caller breaking it
-    non_strings = [entry for entry in entries if not isinstance(entry, str)]  # pyright: ignore[reportUnnecessaryIsInstance]
+    # ``fields`` is the public ``Iterable[str]`` contract of ``apply_cascade_permissions``;
+    # this validates a caller breaking it
+    non_strings = [entry for entry in entries if not truth.is_instance(entry, str)]
     if non_strings:
         raise ConfigurationError(
             f"apply_cascade_permissions fields= entries must be field-name strings; "
-            f"got non-string entries {non_strings!r}.",
+            f"got non-string entries {truth.render(non_strings)}.",
         )
     requested: set[str] = set(entries)
     plan = _edge_plan(model)
@@ -312,7 +313,7 @@ def _validate_fields(model: type[models.Model], fields: Iterable[str] | None) ->
     if unsupported:
         raise ConfigurationError(
             f"apply_cascade_permissions fields={sorted(unsupported)!r} on "
-            f"{model.__name__} have no single-column cascade semantics: a "
+            f"{truth.name(model)} have no single-column cascade semantics: a "
             f"GenericForeignKey or a ForeignObject that is not a ForeignKey cannot "
             f"be composed as a visibility subquery. Select a real backing FK edge "
             f"where it has one (for a GFK, the content_type edge) or drop the entry.",
@@ -322,7 +323,7 @@ def _validate_fields(model: type[models.Model], fields: Iterable[str] | None) ->
     if unknown:
         raise ConfigurationError(
             f"apply_cascade_permissions fields={sorted(unknown)!r} on "
-            f"{model.__name__} are not cascadable; the cascadable edges are "
+            f"{truth.name(model)} are not cascadable; the cascadable edges are "
             f"{sorted(cascadable)!r}.",
         )
     return requested
@@ -353,20 +354,20 @@ def _root_error_renderer(
     change fails closed). The reachable codes are therefore ``type``,
     ``table``, ``untrusted``, ``sliced`` and ``combined``.
     """
-    name = cls.__name__
 
     def _render(code: str, detail: str) -> str:
+        name = truth.name(cls)
         return _defect_message(
             {
                 "type": (
-                    f"apply_cascade_permissions requires a QuerySet of {model.__name__} "
+                    f"apply_cascade_permissions requires a QuerySet of {truth.name(model)} "
                     f"rows for {name}; got {detail}. Pass the "
                     f"get_queryset hook's queryset (a Manager needs .all(); a list has "
                     f"no lazy query to compose into)."
                 ),
                 "table": (
                     f"apply_cascade_permissions for {name} requires a QuerySet "
-                    f"over {model.__name__}'s concrete table; got a {detail} queryset."
+                    f"over {truth.name(model)}'s concrete table; got a {detail} queryset."
                 ),
                 "untrusted": (
                     f"apply_cascade_permissions for {name} got a root queryset that "
@@ -381,7 +382,7 @@ def _root_error_renderer(
                 ),
                 "combined": (
                     f"apply_cascade_permissions for {name} got a combined root queryset; "
-                    + _COMBINED_WHAT.format(model=model.__name__, detail=detail)
+                    + _COMBINED_WHAT.format(model=truth.name(model), detail=detail)
                 ),
             },
             (code, detail),
@@ -413,10 +414,10 @@ def _edge_error_renderer(
     ``reject_sliced`` and ``rewrite_combined`` surface the sliced shape and the
     combined shapes ``_validated_target_subquery`` cannot re-project.
     """
-    edge = f"{field.model.__name__}.{field.name}"
-    name = target_type.__name__
 
     def _render(code: str, detail: str) -> str:
+        edge = f"{truth.name(field.model)}.{field.name}"
+        name = truth.name(target_type)
         return _defect_message(
             {
                 "type": (
@@ -428,7 +429,7 @@ def _edge_error_renderer(
                     f"{name}.get_queryset returned a {detail} "
                     f"queryset for the cascade subquery on "
                     f"{edge}, which targets "
-                    f"{field.related_model.__name__}; the subquery must stay on the "
+                    f"{truth.name(field.related_model)}; the subquery must stay on the "
                     f"target's concrete table (proxy siblings are compatible, MTI "
                     f"children are not)."
                 ),
@@ -449,7 +450,7 @@ def _edge_error_renderer(
                 "combined": (
                     f"{name}.get_queryset returned a combined queryset for the cascade "
                     f"subquery on {edge}; "
-                    + _COMBINED_WHAT.format(model=field.related_model.__name__, detail=detail)
+                    + _COMBINED_WHAT.format(model=truth.name(field.related_model), detail=detail)
                 ),
                 "alias": (
                     f"{name}.get_queryset returned a queryset on alias "
@@ -509,17 +510,17 @@ def _validated_target_subquery(
     """
     if target_qs.query.distinct_fields:
         raise ConfigurationError(
-            f"{target_type.__name__}.get_queryset returned a queryset with "
+            f"{truth.name(target_type)}.get_queryset returned a queryset with "
             f"field-specific distinct({', '.join(map(repr, target_qs.query.distinct_fields))}) "
-            f"for the cascade subquery on {field.model.__name__}.{field.name}; "
+            f"for the cascade subquery on {truth.name(field.model)}.{field.name}; "
             f"the cascade re-projects the subquery to the edge's target column, "
             f"which would change which rows DISTINCT ON keeps.",
         )
     if target_qs.query.group_by is not None:
         raise ConfigurationError(
-            f"{target_type.__name__}.get_queryset returned a grouped "
+            f"{truth.name(target_type)}.get_queryset returned a grouped "
             f"(aggregate-annotated) queryset for the cascade subquery on "
-            f"{field.model.__name__}.{field.name}; re-projecting a grouped "
+            f"{truth.name(field.model)}.{field.name}; re-projecting a grouped "
             f"queryset changes its GROUP BY and can widen the visible set. "
             f"Return plain rows and let the cascade project the edge's target "
             f"column.",
@@ -538,9 +539,9 @@ def _validated_target_subquery(
         # differently-named annotation (never re-projected) is unaffected.
         source = "annotate(...)" if attname in target_qs.query.annotations else "extra(select=...)"
         raise ConfigurationError(
-            f"{target_type.__name__}.get_queryset returned a queryset whose "
+            f"{truth.name(target_type)}.get_queryset returned a queryset whose "
             f"{source} alias shadows the {attname!r} column for the cascade "
-            f"subquery on {field.model.__name__}.{field.name}; re-projecting to "
+            f"subquery on {truth.name(field.model)}.{field.name}; re-projecting to "
             f"{attname!r} would select the alias expression, not the model "
             f"column. Return plain rows and let the cascade project the edge's "
             f"target column.",
@@ -550,7 +551,7 @@ def _validated_target_subquery(
 
 def _cycle_error(state: _TraversalState, cls: type[DjangoType]) -> ConfigurationError:
     """Build the path-rich fail-closed cycle error for re-entry into ``cls``."""
-    path = " -> ".join((*state.path, cls.__name__))
+    path = " -> ".join((*state.path, truth.name(cls)))
     return ConfigurationError(
         f"apply_cascade_permissions detected a cascade visibility cycle: {path}. "
         f"A recursive cascade graph fails closed (a silently broken cycle would "
@@ -567,7 +568,7 @@ def apply_cascade_permissions(
 ) -> models.QuerySet[_M, _R]:
     """Narrow ``queryset`` so each forward relation respects its target visibility.
 
-    Call from inside a ``DjangoType.get_queryset`` (Decision 5). Walks ``cls``'s
+    Call from inside a ``DjangoType.get_queryset`` (spec-034 Decision 5). Walks ``cls``'s
     model single-column concrete forward FK / OneToOne edges (MTI parent links
     included), resolves each edge's target type through the registry primary
     lookup, runs that type's ``get_queryset`` against the target model's
@@ -580,7 +581,7 @@ def apply_cascade_permissions(
     (``QuerySet[M, R]`` in, ``QuerySet[M, R]`` out); never evaluates, reorders,
     or projects the caller's queryset -- pure ``.filter(...)`` composition, so
     the ``__in`` subqueries compile into the caller's single ``SELECT`` and add
-    zero query round-trips (Decision 7).
+    zero query round-trips (spec-034 Decision 7).
 
     Args:
         cls: the owning ``DjangoType`` (its ``.model`` is the walk root).
@@ -589,7 +590,7 @@ def apply_cascade_permissions(
         info: the Strawberry resolver ``info`` (threaded into each target hook).
         fields: optional iterable of model field names scoping the walk to those
             edges; ``None`` walks every cascadable edge, ``[]`` cascades nothing.
-            A bare string raises (Decision 9).
+            A bare string raises (spec-034 Decision 9).
 
     Raises:
         ConfigurationError: a malformed ``queryset`` (non-``QuerySet`` /
@@ -611,7 +612,7 @@ def apply_cascade_permissions(
         SyncMisuseError: a target type's ``get_queryset`` is ``async def``. The
             async twin ``aapply_cascade_permissions`` wraps this same sync walk, so
             it raises identically -- the recourse is to make the target hook sync,
-            or pass ``fields=`` to skip the async-hooked edge (Decision 10).
+            or pass ``fields=`` to skip the async-hooked edge (spec-034 Decision 10).
 
     """
     model = model_for(cls)
@@ -639,7 +640,7 @@ def apply_cascade_permissions(
         # Preflight: fail before any visibility hook runs. A full walk cannot
         # compose these edges and must not silently skip them.
         raise ConfigurationError(
-            f"apply_cascade_permissions cannot walk every edge of {model.__name__}: "
+            f"apply_cascade_permissions cannot walk every edge of {truth.name(model)}: "
             f"forward relation(s) {sorted(plan.unsupported)!r} have no "
             f"single-column cascade semantics (a GenericForeignKey or a ForeignObject "
             f"that is not a ForeignKey cannot be composed as a visibility subquery, and "
@@ -653,7 +654,7 @@ def apply_cascade_permissions(
     else:
         if queryset.db != state.alias:
             raise ConfigurationError(
-                f"apply_cascade_permissions nested walk for {cls.__name__} runs on "
+                f"apply_cascade_permissions nested walk for {truth.name(cls)} runs on "
                 f"alias {queryset.db!r} but the root cascade is pinned to "
                 f"{state.alias!r}; a cascade cannot compose cross-database "
                 f"subqueries.",
@@ -696,6 +697,7 @@ def _walk(
     exception. ``names_to_walk`` is ``None`` for the full walk or a validated
     edge-name set for the ``fields=`` scoped walk.
     """
+    conditions: list[Q] = []
     for field in _edge_plan(model).cascadable:
         if names_to_walk is not None and field.name not in names_to_walk:
             continue
@@ -705,7 +707,7 @@ def _walk(
         base = base_queryset(field.related_model, using=state.alias)
         edge_state = dataclasses.replace(
             state,
-            path=(*state.path, f"{cls.__name__}.{field.name}"),
+            path=(*state.path, f"{truth.name(cls)}.{field.name}"),
         )
         edge_token = _cascade_state.set(edge_state)
         try:
@@ -723,7 +725,11 @@ def _walk(
         condition = Q(**{f"{field.name}__in": subquery})
         if field.null:
             condition |= Q(**{f"{field.name}__isnull": True})
-        queryset = queryset.filter(condition)
+        conditions.append(condition)
+    # One `.filter` call: a per-edge call would re-clone the earlier edges'
+    # subqueries on every iteration, so compose once after the walk.
+    if conditions:
+        queryset = queryset.filter(*conditions)
     return queryset
 
 
@@ -733,7 +739,7 @@ async def aapply_cascade_permissions(
     info: object,
     fields: Iterable[str] | None = None,
 ) -> models.QuerySet[_M, _R]:
-    """Async twin of ``apply_cascade_permissions`` -- the same walk, off the event loop.
+    """Run the ``apply_cascade_permissions`` walk off the event loop.
 
     Wraps the single sync walk in ``run_in_one_sync_boundary`` so blocking
     consumer-hook work (permission-table reads inside a target type's
@@ -742,7 +748,7 @@ async def aapply_cascade_permissions(
     context, so it never leaks back into the calling async task. An
     ``async def`` target hook still raises ``SyncMisuseError`` (no awaiting
     context inside the thread); narrow with ``fields=`` to skip an
-    async-hooked edge (Decision 10).
+    async-hooked edge (spec-034 Decision 10).
     """
     return await run_in_one_sync_boundary(
         apply_cascade_permissions,

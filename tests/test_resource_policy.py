@@ -148,7 +148,6 @@ from tests._execution import make_execution_context
 from tests._idioms import (
     ClaimsClassBase,
     ClassReadRaises,
-    UnreadableStateQuerySet,
     is_object_list,
     pickle_roundtrip,
     saved_pk,
@@ -397,10 +396,9 @@ def test_an_instance_through_the_setting_slot_resolves_on_the_same_terms(
     A ``ResourcePolicy`` behind ``RESOURCE_POLICY`` is the same declaration the
     ``DjangoSchema(resource_policy=...)`` argument accepts, so it is admitted -
     and, being admitted, it is duplicated rather than enforced in place: a
-    module-level settings object outlives every schema built from it. (Probed by
-    the hunt: rejecting it here produced a typed message naming
-    ``ResourcePolicy`` as the received type while claiming the value must be a
-    ``ResourcePolicy``.)
+    module-level settings object outlives every schema built from it. (Rejecting
+    it here would produce a typed message naming ``ResourcePolicy`` as the
+    received type while claiming the value must be a ``ResourcePolicy``.)
     """
     policy = ResourcePolicy(max_depth=3)
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RESOURCE_POLICY": policy}
@@ -1132,13 +1130,12 @@ def test_bounded_rows_bounds_a_mapping_shaped_result(
 ) -> None:
     """A MAPPING-shaped result is bounded via ``islice``, never a raw ``KeyError``.
 
-    A mapping answers a slice subscript with ``KeyError`` on interpreters where
-    slices hash - a plain ``dict`` there, and a dict subclass whose
-    ``__getitem__`` guards its keys everywhere - so the unsliceable fallback
-    must absorb ``KeyError`` alongside ``TypeError``. The alternative was a raw
-    ``KeyError`` escaping a collection resolver exactly because the result was a
-    shape nobody anticipated, which is the same "bound silently stops applying"
-    failure the fallback exists to prevent.
+    A mapping is never subscripted: the shape is classified by exact type, so a
+    mapping - and a ``dict`` subclass whose ``__getitem__`` guards its keys -
+    is counted into a fresh list via ``islice``. No ``KeyError`` can escape a
+    collection resolver from a subscript that never runs, which is the same
+    "bound silently stops applying" failure the classification exists to
+    prevent.
     """
 
     class _GuardedDict(dict[str, object]):
@@ -1351,45 +1348,6 @@ async def test_bounded_rows_async_preserves_source_errors_when_cleanup_fails() -
     # The source error stays primary AND the masked cleanup failure rides along as
     # a note -- the half that separates this from a plain re-raise.
     assert any("cleanup failed" in note for note in _notes(caught.value))
-
-
-async def test_bounded_rows_async_survives_a_hostile_notes_list_on_the_source_error() -> None:
-    """A hostile non-iterable ``__notes__`` on the source error must not mask it.
-
-    The cleanup failure is attached as a note so the source error stays primary;
-    the attachment is a diagnostic, so a hostile note surface (an int where the
-    note protocol wants a list) must be swallowed rather than replace the source
-    error with the attachment's own ``TypeError``. The assertion inspects the
-    caught error's own attributes rather than ``pytest.raises(match=...)``:
-    pytest's matcher stringifies ``__notes__`` too, so handing it this hostile
-    surface would detonate the matcher, not the seam under test. A dedicated
-    error class keeps ``pytest.raises`` narrow without a ``match``.
-    """
-
-    class SourceError(ValueError):
-        pass
-
-    class HostileNotesRows:
-        def __aiter__(self) -> HostileNotesRows:
-            return self
-
-        async def __anext__(self) -> NoReturn:
-            error = SourceError("source failed")
-            # basedpyright: the non-list __notes__ is the hostile input under test; typeshed types
-            # __notes__ as list[str]
-            error.__notes__ = 42  # pyright: ignore[reportAttributeAccessIssue]
-            raise error
-
-        async def aclose(self) -> NoReturn:
-            raise RuntimeError("cleanup failed")
-
-    with pytest.raises(SourceError) as caught:
-        await bounded_rows_async(HostileNotesRows(), SimpleNamespace(context={}))
-    assert str(caught.value) == "source failed"
-    # The hostile surface itself survived untouched: the containment swallowed
-    # its own TypeError without ever writing over the source error's notes.
-    # Read through getattr: 3.10's typeshed declares no ``__notes__``.
-    assert getattr(caught.value, "__notes__", None) == 42
 
 
 async def test_bounded_rows_async_hostile_notes_property_getter_does_not_mask_the_source() -> None:
@@ -2448,24 +2406,6 @@ def test_a_value_that_only_claims_to_be_a_queryset_cannot_reach_the_slice(
     assert bounded_rows(claimant, info) == [0, 1]
 
 
-def test_a_queryset_subclass_whose_state_is_unreadable_is_refused(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """State is read through ``object.__getattribute__``, and that read can still fail.
-
-    A class is free to define ``__dict__`` as a descriptor that raises, and the
-    rebuild has nothing to read there. The bound fails closed rather than
-    letting the raw exception out of a collection resolver.
-    """
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        bounded_rows(UnreadableStateQuerySet[Category](model=Category), info)
-    assert "instance state is unreadable" in str(excinfo.value)
-
-
 def test_a_queryset_subclass_without_a_model_class_is_refused(
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
@@ -3465,24 +3405,6 @@ def test_a_custom_mapping_is_measurable_at_the_largest_bound_a_policy_admits() -
     )
 
 
-def test_a_container_that_cannot_be_read_is_refused_rather_than_raised() -> None:
-    """A member the framework cannot obtain is unmeasurable, which is a refusal."""
-
-    class _Unreadable(list[object]):
-        @override
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("iteration exploded")
-
-    with pytest.raises(ResourceLimitExceeded) as caught:
-        _charge(
-            "query T($p: JSON) { blob(payload: $p) }",
-            {"p": _Unreadable([1, 2])},
-            policy=ResourcePolicy(max_container_width=4),
-        )
-    assert caught.value.bound == "max_container_width"
-    assert caught.value.charged == 5
-
-
 def test_a_container_whose_length_raises_is_still_measured() -> None:
     """The width comes from the members, so a raising ``__len__`` is never consulted.
 
@@ -4183,20 +4105,6 @@ def test_a_buffer_that_advertises_its_own_byte_count_is_measured_anyway() -> Non
     assert caught.value.charged == 10
 
 
-def test_an_upload_size_descriptor_that_raises_is_rejected() -> None:
-    class BrokenUpload:
-        @property
-        def size(self) -> NoReturn:
-            raise RuntimeError("size unavailable")
-
-    with pytest.raises(ResourceLimitExceeded) as caught:
-        _charge(
-            "query U($f: Upload!) { stash(document: $f) }",
-            {"f": BrokenUpload()},
-        )
-    assert caught.value.bound == "max_upload_file_bytes"
-
-
 def test_a_measurable_upload_is_charged_its_bytes() -> None:
     _charge("query U($f: Upload!) { stash(document: $f) }", {"f": SimpleNamespace(size=10)})
     with pytest.raises(ResourceLimitExceeded) as caught:
@@ -4365,12 +4273,10 @@ def test_a_policy_subclass_is_replaced_by_an_exact_instance_at_schema_constructi
         _LiesAfterValidating.armed = False
 
 
-def test_a_policy_whose_bound_cannot_be_read_is_a_typed_configuration_error() -> None:
-    """A read that raises during canonicalization is a deployment fault, named as one."""
-    with pytest.raises(ConfigurationError) as caught:
+def test_a_policy_whose_bound_read_raises_propagates_that_error() -> None:
+    """A subclass field read is the subclass's own code: its exception propagates."""
+    with pytest.raises(RuntimeError, match="hostile read detonated"):
         DjangoSchema(query=_Probe, resource_policy=object.__new__(_UnreadablePolicy))
-
-    assert "max_list_rows" in str(caught.value)
 
 
 def test_the_armed_budget_is_not_the_policy_the_caller_armed_it_with() -> None:
@@ -4462,8 +4368,10 @@ def test_a_mirror_holding_a_policy_subclass_reads_back_as_the_package_default() 
 # ---------------------------------------------------------------------------
 # A copied context is not an armed one
 #
-# Live sibling: a background task cannot raise the row bound a request was
-# admitted under, on ``/iso-budget/``.
+# Live sibling:
+# ``test_a_worker_that_outlived_a_request_is_bounded_and_published_for_itself``
+# on ``/iso-survivor/`` (``test_extension_isolation_api.py``): a background task
+# reads its own context, not the budget of the request it outlived.
 # ---------------------------------------------------------------------------
 
 

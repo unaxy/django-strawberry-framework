@@ -10,8 +10,9 @@ close two upstream gaps that otherwise surface as unhandled ``500``s:
 1. ``json.loads`` on ``bytes`` raises ``UnicodeDecodeError`` when the
    bytes are not decodable under the encoding it detects, and that is a
    ``ValueError`` rather than a ``JSONDecodeError``, so it escapes
-   upstream's ``except`` and becomes a ``500``. The wrapper translates it
-   into the same ``HTTPException(400, ...)`` Strawberry already raises for
+   upstream's ``except`` and becomes a ``500``; a pathologically nested
+   document likewise escapes as ``RecursionError``. The wrapper translates
+   both into the same ``HTTPException(400, ...)`` Strawberry already raises for
    malformed JSON.
 2. A body that is not a GraphQL-over-HTTP envelope is rejected with
    ``HTTPException(400, ...)``: a top-level JSON *scalar*, or a JSON
@@ -34,8 +35,8 @@ leaving accepted multipart behavior and non-structural consumer failures alone.
 Because gap 2's scalar guard is a request-*body* contract enforced from
 a generic JSON helper, ``apply()`` also installs
 :func:`_patched_parse_query_params` - a source-pinned reimplementation
-of ``BaseView.parse_query_params`` routing its two nested parses through
-the captured original ``parse_json`` - so the guard never fires on
+of ``BaseView.parse_query_params`` routing its two nested parses around
+the guard through the shared gap-1 translator - so the guard never fires on
 upstream's GET ``variables`` / ``extensions`` parses, where upstream has
 its own precise per-param handling (``null`` -> ``None`` -> the request
 executes; a scalar -> a per-param 400). Every wire-observable outcome of
@@ -43,12 +44,12 @@ both gap 2's envelope guard and the shield - rejected scalar and
 non-object-batch bodies, object / null / malformed / scalar GET params,
 and the RecursionError 400 on a nested body or GET param - is earned
 over real HTTP in ``examples/fakeshop/test_query/test_products_api.py``.
-The POST body ``{not json`` is
+The POST-body ``{not json`` row lives in
 ``examples/fakeshop/test_query/test_transport_api.py``.
 The rows here pin the parse semantics that have no wire shape of their
 own (the falsy skip, the well-typed batch handed on to upstream's own
-validator), the UnicodeDecodeError ``__cause__`` a live JSON 400 cannot
-isolate from the view's own decode, multipart structural vs
+validator), the ``__cause__`` values for UnicodeDecodeError and RecursionError
+a live JSON 400 cannot isolate from the view's own decode, multipart structural vs
 non-structural translation, the full install lifecycle, and the
 reimplementer's body pin.
 

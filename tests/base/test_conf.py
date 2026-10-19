@@ -2,7 +2,7 @@
 
 The ``Settings`` class internals a GraphQL request cannot express: lazy
 django-backed load, singleton ``reload_settings`` identity, dunder probes,
-``dispatch_uid`` idempotence, hostile-shape containment, and the thin reader
+``dispatch_uid`` idempotence, wrong-shape rejection, and the thin reader
 helpers' Python return values. Request-shaped consequences of keys a query
 can turn live in ``examples/fakeshop/test_query/test_transport_api.py`` (body
 cap, a non-mapping project dict on GET, ``None`` as empty settings,
@@ -18,8 +18,7 @@ have no live pin. Constructor precedence lives in
 request; its limit and validation rows live in ``tests/filters/test_sets.py``.
 """
 
-import builtins
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from types import MappingProxyType
 from typing import NoReturn
 from unittest import mock
@@ -420,6 +419,32 @@ def test_single_parent_fast_path_setting_is_an_unvalidated_toggle(
     assert single_parent_fast_path_setting() == "yes"  # truthy -> enables, no raise.
 
 
+def test_setting_reader_helpers_return_wrong_typed_values_verbatim(
+    settings: pytest_django.Settings,
+) -> None:
+    """The thin readers hand back wrong-typed values unchanged; consumers coerce or validate.
+
+    The single-parent toggle's verbatim rows live in
+    ``test_single_parent_fast_path_setting_is_an_unvalidated_toggle``; this row
+    pins the other five readers. A wrong-typed value surfaces downstream
+    (``resolve_strategy`` / ``_resolved_max_request_body_bytes`` /
+    ``_validated_globalid_setting`` / the ``bool()`` coercion in
+    ``_build_input_fields``), never here.
+    """
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {
+        "NESTED_CONNECTION_STRATEGY": 5,
+        "TESTING_ENDPOINT": None,
+        "HIDE_FLAT_FILTERS": 1,
+        "RELAY_GLOBALID_STRATEGY": 5,
+        "MAX_REQUEST_BODY_BYTES": "1024",
+    }
+    assert nested_connection_strategy_setting() == 5
+    assert testing_endpoint_setting() is None
+    assert hide_flat_filters_setting() == 1
+    assert relay_globalid_strategy_setting() == 5
+    assert max_request_body_bytes_setting() == "1024"
+
+
 # ---------------------------------------------------------------------------
 # Live sync when django.conf mutates without setting_changed
 # ---------------------------------------------------------------------------
@@ -567,34 +592,47 @@ def test_explicit_settings_instance_ignores_django_delattr(
 
 
 # ---------------------------------------------------------------------------
-# Defensive hardening: hostile inputs must become ConfigurationError
+# Wrong shapes reject typed; hostile metadata never runs; iteration errors propagate
 # ---------------------------------------------------------------------------
 
 
-def test_normalize_hostile_isinstance_raises_configurationerror() -> None:
-    """``isinstance(value, Mapping)`` raising must be contained as ``ConfigurationError``."""
-    with pytest.raises(ConfigurationError, match="must be a mapping"):
-        conf._normalize_user_settings(ClassReadRaises(message="hostile __class__ boom"))
+def test_setting_rejection_messages_are_pinned(settings: pytest_django.Settings) -> None:
+    """The honest rejection messages, byte for byte."""
+    with pytest.raises(ConfigurationError) as normalize_info:
+        conf._normalize_user_settings("bad")
+    assert str(normalize_info.value) == (
+        "`DJANGO_STRAWBERRY_FRAMEWORK` must be a mapping or None; got str."
+    )
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"django": "no"}}
+    with pytest.raises(ConfigurationError) as value_info:
+        upstream_patches_enabled("django")
+    assert str(value_info.value) == "`APPLY_UPSTREAM_PATCHES['django']` must be a bool; got str."
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {1: False}}
+    with pytest.raises(ConfigurationError) as key_info:
+        upstream_patches_enabled("django")
+    assert str(key_info.value) == (
+        "`APPLY_UPSTREAM_PATCHES` keys must be dependency name strings; got 1."
+    )
 
 
-def test_normalize_hostile_iter_raises_configurationerror() -> None:
-    """``dict(value)`` raising must be contained as ``ConfigurationError``."""
+def test_normalize_mapping_iteration_error_propagates() -> None:
+    """``dict(value)`` runs the mapping's own iteration; what it raises propagates."""
 
-    class HostileIter(Mapping[str, object]):
+    class RaisingIter(Mapping[str, object]):
         @override
         def __getitem__(self, key: str) -> int:
             return 1
 
         @override
         def __iter__(self) -> NoReturn:
-            raise RuntimeError("hostile __iter__ boom")
+            raise RuntimeError("iteration boom")
 
         @override
         def __len__(self) -> int:
             return 1
 
-    with pytest.raises(ConfigurationError, match="must be a mapping"):
-        conf._normalize_user_settings(HostileIter())
+    with pytest.raises(RuntimeError, match="iteration boom"):
+        conf._normalize_user_settings(RaisingIter())
 
 
 def test_normalize_hostile_iter_raising_configurationerror_propagates() -> None:
@@ -617,39 +655,19 @@ def test_normalize_hostile_iter_raising_configurationerror_propagates() -> None:
         conf._normalize_user_settings(HostileConfigError())
 
 
-def test_normalize_dict_subclass_hostile_getitem_is_sanitized() -> None:
-    """A ``dict`` subclass with hostile ``__getitem__`` is copied into a plain ``dict``."""
+def test_normalize_dict_subclass_is_copied_to_a_plain_dict() -> None:
+    """A ``dict`` subclass is copied into a plain ``dict`` whose lookup is the base one."""
 
-    class HostileDict(dict[str, object]):
+    class OverridingDict(dict[str, object]):
         @override
         def __getitem__(self, key: str) -> NoReturn:
-            raise RuntimeError("hostile boom")
+            raise RuntimeError("override ran")
 
-    d = HostileDict({"A": 1})
-    # _normalize should copy, neutralizing the hostile descriptor
+    d = OverridingDict({"A": 1})
     normalized = conf._normalize_user_settings(d)
     assert type(normalized) is dict
     assert normalized["A"] == 1
-    s = Settings(d)
-    # Lookup must succeed via the sanitized copy, not raise RuntimeError
-    assert s.A == 1
-
-
-def test_settings_getattr_hostile_lookup_becomes_configurationerror() -> None:
-    """A non-``KeyError`` lookup failure via ``__getattr__`` must become ``ConfigurationError``."""
-
-    class HostileLookup(dict[object, object]):
-        @override
-        def __getitem__(self, key: object) -> NoReturn:
-            raise RuntimeError("hostile lookup boom")
-
-    s = Settings.__new__(Settings)
-    # Bypass _normalize sanitization to exercise the __getattr__ containment directly
-    s._user_settings = HostileLookup({"OTHER": 1})
-    s._live_source = conf._LIVE_UNSET
-    s._django_backed = False
-    with pytest.raises(ConfigurationError, match="lookup of 'MISSING' failed"):
-        _ = s.MISSING
+    assert Settings(d).A == 1
 
 
 def test_upstream_patches_enabled_liar_bool_is_not_bool() -> None:
@@ -699,44 +717,32 @@ def test_upstream_patches_enabled_liar_bool_is_not_bool() -> None:
         upstream_patches_enabled("django")
 
 
-def test_upstream_patches_enabled_hostile_isinstance_becomes_configurationerror() -> None:
-    """``isinstance(configured, Mapping)`` raising must be contained."""
-    s = Settings({"APPLY_UPSTREAM_PATCHES": ClassReadRaises(message="hostile __class__ boom")})
+def test_upstream_patches_mapping_iteration_error_propagates() -> None:
+    """The one copy of the toggle mapping runs its own iteration; what it raises propagates."""
 
-    with (
-        mock.patch.object(conf, "settings", s),
-        pytest.raises(ConfigurationError, match="bool or a mapping"),
-    ):
-        upstream_patches_enabled("django")
-
-
-def test_upstream_patches_enabled_hostile_iter_becomes_configurationerror() -> None:
-    """``dict(configured)`` raising during mapping copy must be contained."""
-
-    class HostileIter(Mapping[str, object]):
+    class RaisingIter(Mapping[str, object]):
         @override
         def __getitem__(self, key: str) -> bool:
             return True
 
         @override
         def __iter__(self) -> NoReturn:
-            raise RuntimeError("hostile __iter__ boom")
+            raise RuntimeError("iteration boom")
 
         @override
         def __len__(self) -> int:
             return 1
 
-    s = Settings({"APPLY_UPSTREAM_PATCHES": HostileIter()})
-
+    s = Settings({"APPLY_UPSTREAM_PATCHES": RaisingIter()})
     with (
         mock.patch.object(conf, "settings", s),
-        pytest.raises(ConfigurationError, match="iteration failed"),
+        pytest.raises(RuntimeError, match="iteration boom"),
     ):
         upstream_patches_enabled("django")
 
 
 def test_upstream_patches_enabled_hostile_key_isinstance_becomes_configurationerror() -> None:
-    """``isinstance(name, str)`` raising on a hostile key must be contained."""
+    """A key whose ``__class__`` read raises is classified by its real class and rejected."""
     # Need a mapping whose key is hostile; dict() will preserve that key object
     hostile_key = ClassReadRaises(message="hostile __class__ boom")
 
@@ -753,41 +759,14 @@ def test_upstream_patches_enabled_hostile_key_isinstance_becomes_configurationer
         upstream_patches_enabled("django")
 
 
-def test_upstream_patches_enabled_hostile_iteration_generic_becomes_configurationerror(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Any unexpected exception during mapping validation must be contained."""
-    s = Settings({"APPLY_UPSTREAM_PATCHES": {"django": True}})
-
-    real_set = builtins.set
-
-    def hostile_set(*args: Iterable[object], **kwargs: object) -> set[object]:
-        # Only sabotage the specific set(plain) call inside the function:
-        # it is called with a dict containing the dependency names.
-        # Avoid breaking pytest's own set() calls on other dicts.
-        if args and isinstance(args[0], dict) and "django" in args[0]:
-            raise RuntimeError("hostile set boom")
-        return real_set(*args, **kwargs)
-
-    monkeypatch.setattr(builtins, "set", hostile_set)
-    with (
-        mock.patch.object(conf, "settings", s),
-        pytest.raises(ConfigurationError, match="iteration failed"),
-    ):
-        upstream_patches_enabled("django")
-
-
 def test_normalize_hostile_metaclass_name_property_contained() -> None:
     """A hostile metaclass ``__name__`` must not replace the typed rejection.
 
     The non-mapping rejection assembles its message with the received
     value's type name at the raise site - before any exception object
-    exists - so a metaclass whose ``__name__`` property raises used to
-    escape the f-string as a raw ``RuntimeError``, destroying the promised
-    ``ConfigurationError`` (the same failure class
-    ``exceptions.describe_value`` documents for ``got {...}`` tails). The
-    guarded ``_safe_type_name`` renderer degrades the unreadable name to
-    its ``"object"`` last resort instead.
+    exists. That name is read from the interpreter (``truth.kind``), so a
+    metaclass whose ``__name__`` property raises never runs and the message
+    names the real class.
     """
 
     class BadMeta(type):
@@ -801,9 +780,9 @@ def test_normalize_hostile_metaclass_name_property_contained() -> None:
     class Evil(metaclass=BadMeta):
         pass
 
-    with pytest.raises(ConfigurationError, match="must be a mapping or None; got object"):
+    with pytest.raises(ConfigurationError, match="must be a mapping or None; got Evil"):
         conf._normalize_user_settings(Evil())
-    with pytest.raises(ConfigurationError, match="must be a mapping or None; got object"):
+    with pytest.raises(ConfigurationError, match="must be a mapping or None; got Evil"):
         # basedpyright: the object whose class __name__ raises is the hostile input under test;
         # Settings types the parameter as Mapping[str, object] | None
         Settings(Evil())  # pyright: ignore[reportArgumentType]

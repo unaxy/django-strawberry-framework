@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeGuard, cast,
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
+from django.db.models import Field
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.reverse_related import ForeignObjectRel
 
@@ -15,16 +16,18 @@ from django_strawberry_framework.exceptions import (
     ConfigurationError,
     LookupValidationError,
     PathResolutionError,
-    _safe_attr,
-    _safe_type_name,
 )
-from django_strawberry_framework.utils._narrowing import is_class, is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import is_class, is_list_or_tuple, read_attr
 from django_strawberry_framework.utils.typing import MISSING_ATTRIBUTE
+
+from . import truth
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence, Sized
 
+    from django.db.models.expressions import Col
     from django.db.models.lookups import Lookup, Transform
+    from django.db.models.options import Options
     from django.db.models.query_utils import PathInfo
     from typing_extensions import TypeIs
 
@@ -51,12 +54,10 @@ __all__ = [
     "non_pk_relation_key_attname",
     "order_column_paths",
     "path_traverses_to_many",
-    "relation_attr",
     "relation_bool",
     "relation_kind",
     "relation_link",
     "relation_name",
-    "safe_truthy",
     "validate_lookup_expr",
 ]
 
@@ -79,89 +80,31 @@ MANY_SIDE_RELATION_KINDS: frozenset[RelationKind] = frozenset(
 )
 
 
-def safe_truthy(value: object) -> bool:
-    """Ask a value for its truth, treating a raising truth test as false.
+def relation_bool(field: object, name: str, *, default: bool = False) -> bool:
+    """Read one relation flag off a Django field (or ``FieldMeta``), requiring a ``bool``.
 
-    Containing the READ is only half a never-raises boundary: the read hands
-    back whatever it found, so every ``if`` / ``or`` / ``not`` applied to that
-    result is a second escape route one frame later. A double whose ``__bool__``
-    raises would otherwise break the contract after the read itself was safely
-    contained.
+    An absent or ``None`` flag takes ``default``; any other non-``bool`` is
+    malformed metadata and a configuration error, so a truthy non-bool never
+    silently passes for ``True``.
     """
-    try:
-        return bool(value)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return False
-
-
-def relation_attr(
-    field: object,
-    name: str,
-    default: object = MISSING_ATTRIBUTE,
-    *,
-    lenient: bool = False,
-) -> object:
-    """Read relation metadata without allowing consumer objects to escape raw errors.
-
-    ``lenient`` selects the FAILURE POLICY, and it is the only axis on which the
-    package's two relation-reading surfaces differ. Strict (the default) turns an
-    unreadable attribute into a typed ``ConfigurationError``, because a schema
-    built on metadata that cannot be read is a configuration the consumer must
-    fix. Lenient returns ``default`` instead, for the optimizer's join taxonomy,
-    whose whole contract is that it never raises: it classifies a relation to
-    decide a FETCH STRATEGY, and an unclassifiable relation must degrade to the
-    unplanned path rather than fail the request.
-
-    The two policies stay genuinely different - they can and do answer
-    differently for the same malformed field. The lenient one IS the package's
-    single contained read (``_safe_attr``), which the join taxonomy also calls
-    directly, so lenient relation reads have one body rather than two parallel
-    families that drift.
-    """
-    if lenient:
-        return _safe_attr(field, name, default)
-    try:
-        return getattr(field, name, default)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Could not read relation metadata {name!r} from {_safe_type_name(field)}.",
-        ) from exc
-
-
-def relation_bool(
-    field: object,
-    name: str,
-    *,
-    default: bool = False,
-    lenient: bool = False,
-) -> bool:
-    """Read one relation flag under the strict or lenient policy.
-
-    Strict rejects a non-``bool`` outright (malformed metadata is a
-    configuration error, and a truthy non-bool must not silently pass for
-    ``True``). Lenient answers with :func:`safe_truthy`, guarding both the read
-    and the truth test, because the taxonomy has no way to surface an error.
-    """
-    value = relation_attr(field, name, default, lenient=lenient)
-    if lenient:
-        return safe_truthy(value)
+    value: object = getattr(field, name, default)
     if value is None:
         value = default
     if type(value) is not bool:
         raise ConfigurationError(
-            f"Relation metadata {name!r} on {_safe_type_name(field)} must be a bool; "
-            f"got {_safe_type_name(value)}.",
+            f"Relation metadata {name!r} on {truth.kind(field)} must be a bool; "
+            f"got {truth.kind(value)}.",
         )
     return value
 
 
 def relation_name(field: object, name: str) -> str | None:
-    """Read an optional GenericRelation field-name slot without dispatching errors."""
-    value = relation_attr(field, name, None)
+    """Read an optional GenericRelation field-name slot, requiring a ``str`` or ``None``."""
+    value = read_attr(field, name, None)
     if value is not None and type(value) is not str:
         raise ConfigurationError(
-            f"Relation metadata {name!r} on {_safe_type_name(field)} must be a string or "
-            f"None; got {_safe_type_name(value)}.",
+            f"Relation metadata {name!r} on {truth.kind(field)} must be a string or "
+            f"None; got {truth.kind(value)}.",
         )
     return value
 
@@ -217,8 +160,8 @@ def relation_kind(field: object) -> RelationKind:
       with ``auto_created=True``). Cardinality-wise this collapses into
       the many-side for plan building today, but the descriptor itself
       is conceptually distinct from a forward M2M and is named so
-      consumers (and the registry's typed ``PendingRelation`` sentinel)
-      can disambiguate.
+      kind readers (``optimizer/field_meta.py::FieldMeta``) can
+      disambiguate.
     - ``"reverse_one_to_one"`` - the reverse side of a
       ``OneToOneField`` (Django's ``OneToOneRel`` descriptor:
       ``one_to_one=True`` + ``auto_created=True`` + ``concrete=False``).
@@ -276,10 +219,7 @@ def relation_kind(field: object) -> RelationKind:
 
 def is_many_side_relation_kind(kind: RelationKind | None) -> bool:
     """Return ``True`` for relation kinds represented as GraphQL lists."""
-    try:
-        return kind in MANY_SIDE_RELATION_KINDS
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return False
+    return kind in MANY_SIDE_RELATION_KINDS
 
 
 @dataclass(frozen=True)
@@ -333,16 +273,16 @@ def _resolve_segment_field(model: type[models.Model], segment: str) -> ModelFiel
     anywhere in a path behaves like that pk field. Any other unresolvable
     segment surfaces as ``FieldDoesNotExist`` for the caller to convert into a
     typed ``PathResolutionError`` (this includes a hidden reverse relation
-    declared ``related_name="+"``, whose reverse name ``get_field`` rejects).
+    declared ``related_name="+"``, whose reverse name ``get_field`` rejects). A
+    ``model`` with no ``_meta`` (a ``Meta.model`` that is not a Django model)
+    names no field either.
     """
-    try:
-        if segment == "pk":
-            return model._meta.pk
-        return model._meta.get_field(segment)
-    except FieldDoesNotExist:
-        raise
-    except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
-        raise FieldDoesNotExist(segment) from None
+    meta: Options[models.Model] | None = getattr(model, "_meta", None)
+    if meta is None:
+        raise FieldDoesNotExist(segment)
+    if segment == "pk":
+        return meta.pk
+    return meta.get_field(segment)
 
 
 def _is_traversable_relation(field: object) -> TypeGuard[_TraversableRelationLike]:
@@ -354,19 +294,9 @@ def _is_traversable_relation(field: object) -> TypeGuard[_TraversableRelationLik
     instead of the typed error, so ``path_infos`` is touched ONLY after this
     returns ``True``.
     """
-    try:
-        if not relation_bool(field, "is_relation"):
-            return False
-        return getattr(field, "path_infos", MISSING_ATTRIBUTE) is not MISSING_ATTRIBUTE
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+    if not relation_bool(field, "is_relation"):
         return False
-
-
-def _checked_path_infos(path_infos: Sequence[PathInfo]) -> Sequence[PathInfo]:
-    """Return ``path_infos`` when it is a non-empty ``list`` / ``tuple``, else raise ``ValueError``."""
-    if type(path_infos) not in (list, tuple) or not path_infos:
-        raise ValueError("relation path_infos is empty or malformed")
-    return path_infos
+    return getattr(field, "path_infos", MISSING_ATTRIBUTE) is not MISSING_ATTRIBUTE
 
 
 def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
@@ -389,6 +319,20 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     ``_classify_path_cached`` layers a bounded ``lru_cache`` over it for the
     hot ``path_traverses_to_many`` path, keyed on the hashable,
     definition-time-stable ``(model, field_path)`` pair.
+
+    Four other ``_meta`` path walkers share the split-and-``get_field``
+    mechanism under different contracts and stay separate:
+    ``optimizer/plans.py::_resolve_order_path_field`` answers the terminal
+    concrete column or ``None`` for cursor anchoring;
+    ``plans.py::_select_path_traversable`` answers traversability under a
+    consumer projection for prune decisions;
+    ``utils/querysets.py::_prefetch_relation_target_or_none`` answers the
+    terminal model or ``None`` (fail-open, with the default ``<model>_set``
+    accessor spelling) for prefetch sealing;
+    ``list_field.py::_resolve_order_field_path`` answers ``(field, related
+    opts)`` or ``None`` for ordering-term certification. A caller needing
+    another walker's answer, or this classifier gaining an accessor-name
+    fallback or a non-raising mode, reopens the question.
     """
     if type(field_path) is not str:
         raise PathResolutionError(model, field_path, field_path) from None
@@ -409,18 +353,15 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
         if is_relation:
             if not _is_traversable_relation(field):
                 raise PathResolutionError(current, field_path, segment)
-            try:
-                path_infos = _checked_path_infos(field.path_infos)
-                last_path = path_infos[-1]
-                target_model = last_path.to_opts.model
-                many_side = False
-                for path_info in path_infos:
-                    if relation_bool(path_info, "m2m"):
-                        many_side = True
-                        break
-                kind = relation_kind(field)
-            except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
-                raise PathResolutionError(current, field_path, segment) from None
+            path_infos = field.path_infos
+            # The class is tested off a local so the check leaves ``path_infos`` typed as
+            # the relation declares it rather than as a bare ``list`` / ``tuple``.
+            infos_class = type(path_infos)
+            if (infos_class is not list and infos_class is not tuple) or not path_infos:
+                raise PathResolutionError(current, field_path, segment)
+            target_model = path_infos[-1].to_opts.model
+            many_side = any(relation_bool(path_info, "m2m") for path_info in path_infos)
+            kind = relation_kind(field)
             hops.append(
                 RelationPathHop(
                     segment=segment,
@@ -461,8 +402,8 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[Lookup[
     final lookup (e.g. ``"icontains"``, ``"date__year__gte"``, ``"exact"``,
     ``"isnull"``).
 
-    The walk advances an EXPRESSION cursor (the terminal, then successive
-    transform instances). For each non-final part the cursor's
+    The walk advances an EXPRESSION cursor (the terminal's column, then
+    successive transform instances). For each non-final part the cursor's
     ``get_transform`` must resolve a transform; the cursor advances to that
     transform bound to the previous cursor, so validation of the next part runs
     against the transform's own output field - NEVER re-validated against the
@@ -472,11 +413,16 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[Lookup[
     ending on a transform compiles as ``transform + exact``), accepted only
     when the transform's output field supports ``exact``.
 
-    Both concrete Django fields and Django relation descriptors (verified
-    empirically against ``ManyToManyField`` / ``ManyToOneRel`` / ``OneToOneRel``
-    / ``ForeignKey``: all expose ``get_lookup`` returning ``RelatedIsNull`` /
-    ``RelatedExact`` / ``RelatedIn``) answer ``get_lookup`` / ``get_transform``
-    directly, so the walk uses the cursor's own methods uniformly.
+    A ``Field`` terminal (scalar or forward relation) starts the walk at its
+    column, ``Field.cached_col``: the ``Col`` whose output field is the
+    terminal itself, which is where Django's own ``Query.build_lookup`` starts.
+    The column answers ``get_lookup`` / ``get_transform`` through that output
+    field, and a transform that declares no ``output_field`` of its own
+    (``Lower``, a ``JSONField`` key) resolves one from the column, so
+    ``lower__icontains`` and ``a__b`` validate exactly as Django compiles them.
+    A reverse ``ForeignObjectRel`` has no column; it starts the walk as itself,
+    answering ``get_lookup`` / ``get_transform`` through its forward field
+    (``RelatedIsNull`` / ``RelatedExact`` / ``RelatedIn``).
 
     Returns the resolved final lookup CLASS (the trailing-transform case
     returns the ``exact`` lookup class) - cheap and useful to callers.
@@ -494,35 +440,22 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[Lookup[
     for part in parts:
         if not part:
             raise LookupValidationError(terminal, lookup_expr, part)
-    cursor: ModelField | Transform = terminal
+    cursor: Col | Transform | models.ForeignObjectRel = (
+        terminal.cached_col if truth.is_instance(terminal, Field) else terminal
+    )
     # ``str.split`` always yields at least one part, so the final part always exists.
     *transform_parts, final_part = parts
     for part in transform_parts:
-        try:
-            transform = cursor.get_transform(part)
-        except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
-            raise LookupValidationError(terminal, lookup_expr, part) from None
+        transform = cursor.get_transform(part)
         if transform is None:
             raise LookupValidationError(terminal, lookup_expr, part)
-        try:
-            cursor = transform(cursor)
-        except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
-            raise LookupValidationError(terminal, lookup_expr, part) from None
-    try:
-        lookup = cursor.get_lookup(final_part)
-    except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
-        raise LookupValidationError(terminal, lookup_expr, final_part) from None
+        cursor = transform(cursor)
+    lookup = cursor.get_lookup(final_part)
     if lookup is not None:
         return lookup
-    try:
-        transform = cursor.get_transform(final_part)
-    except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
-        raise LookupValidationError(terminal, lookup_expr, final_part) from None
+    transform = cursor.get_transform(final_part)
     if transform is not None:
-        try:
-            exact = transform(cursor).get_lookup("exact")
-        except BaseException:  # noqa: BLE001 - rewrapped as the typed rejection
-            raise LookupValidationError(terminal, lookup_expr, final_part) from None
+        exact = transform(cursor).get_lookup("exact")
         if exact is not None:
             return exact
     raise LookupValidationError(terminal, lookup_expr, final_part)
@@ -548,16 +481,16 @@ def _lenient_traverses_to_many(model: type[models.Model], field_path: str) -> bo
     current = model
     for segment in segments:
         try:
-            field = current._meta.get_field(segment)
-            if not relation_bool(field, "is_relation"):
-                return False
-            if is_many_side_relation_kind(relation_kind(field)):
-                return True
-            # ``Field.related_model`` checks the app registry is ready, so it is a resolved
-            # model class or ``None`` (``GenericForeignKey`` declares ``None``).
-            related: type[models.Model] | None = getattr(field, "related_model", None)
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
+            field = _resolve_segment_field(current, segment)
+        except FieldDoesNotExist:
             return False
+        if not relation_bool(field, "is_relation"):
+            return False
+        if is_many_side_relation_kind(relation_kind(field)):
+            return True
+        # ``Field.related_model`` checks the app registry is ready, so it is a resolved
+        # model class or ``None`` (``GenericForeignKey`` declares ``None``).
+        related: type[models.Model] | None = getattr(field, "related_model", None)
         if related is None:
             return False
         current = related
@@ -618,16 +551,14 @@ def _traverses_to_many(
 
     ONE body for both arms of :func:`path_traverses_to_many`: the hashable arm
     passes the cached classifier, the unhashable arm passes the uncached one.
-    The ladder itself - strict answer, lenient walk on ``PathResolutionError``,
-    ``False`` on anything else - is the contract a 32-path matrix pins, and it
-    must not be able to differ between the two arms.
+    The ladder itself - strict answer, lenient walk on ``PathResolutionError`` -
+    is the contract a 32-path matrix pins, and it must not be able to differ
+    between the two arms.
     """
     try:
         return classify(model, field_path).first_many_index is not None
     except PathResolutionError:
         return _lenient_traverses_to_many(model, field_path)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return False
 
 
 @lru_cache(maxsize=2048)
@@ -670,9 +601,9 @@ def path_traverses_to_many(model: type[models.Model], field_path: str) -> bool:
     subsystems.
     """
     try:
-        _ = hash(model)
-        _ = hash(field_path)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+        _ = hash((model, field_path))
+    except TypeError:
+        # An unhashable test double cannot key the cache; answer uncached.
         return _traverses_to_many(classify_path, model, field_path)
     return _path_traverses_to_many_cached(model, field_path)
 
@@ -704,12 +635,8 @@ def is_forward_many_to_many(field: object) -> bool:
     ``ManyToManyField`` is ``concrete`` (equivalently, not ``auto_created``);
     the reverse accessor is ``auto_created`` and not ``concrete``.
 
-    Single-sited here so the predicate cannot drift across the write surfaces
-    that select editable / attestable M2M fields - the model-mutation input
-    generator (``mutations/inputs.py::editable_input_fields``), the
-    relation-field index (``mutations/inputs.py::_relation_field_index``),
-    and the DRF attestation filter
-    (``rest_framework/resolvers.py::_attestable_m2m_fields``). ``getattr``
+    Single-sited here so the predicate cannot drift across the write
+    surfaces that select editable / attestable M2M fields. ``getattr``
     defaults defend against field shapes that omit a flag, matching
     ``relation_kind``'s read contract. Over a model field, ``True`` narrows it to
     the forward ``ManyToManyField`` (a concrete ``Field``, never a reverse rel).
@@ -761,21 +688,16 @@ def is_forward_concrete_relation(field: object) -> bool:
     or reverse relation from being misclassified by the FK index or by ModelForm
     backing-column resolution.
 
-    Every read is contained, so a descriptor with hostile metadata fails closed
-    to ``False`` instead of dispatching its own exception into the caller. Over a
-    model field, ``True`` narrows it to the forward FK / OneToOne ``Field``.
+    Over a model field, ``True`` narrows it to the forward FK / OneToOne ``Field``.
     """
-    try:
-        if not relation_bool(field, "is_relation"):
-            return False
-        if relation_kind(field) != "forward_single":
-            return False
-        return (
-            getattr(field, "column", None) is not None
-            and getattr(field, "related_model", None) is not None
-        )
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+    if not relation_bool(field, "is_relation"):
         return False
+    if relation_kind(field) != "forward_single":
+        return False
+    return (
+        getattr(field, "column", None) is not None
+        and getattr(field, "related_model", None) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -818,18 +740,18 @@ class RelationLink:
         return tuple(field.attname for field in self.targets)
 
 
-def _link_field_tuple(value: object, *, lenient: bool) -> tuple[ConcreteField, ...] | None:
+def _link_field_tuple(value: object) -> tuple[ConcreteField, ...] | None:
     """Return ``value`` as a tuple of column fields, or ``None`` when it is not one."""
     if not is_list_or_tuple(value):
         return None
     fields = tuple(value)
     for field in fields:
-        if type(relation_attr(field, "attname", None, lenient=lenient)) is not str:
+        if type(getattr(field, "attname", None)) is not str:
             return None
     return cast("tuple[ConcreteField, ...]", fields)
 
 
-def relation_link(field: object, *, lenient: bool = False) -> RelationLink:
+def relation_link(field: object) -> RelationLink:
     """Return the column pairs of the link ``field`` is, or is the reverse of.
 
     The one reader of "which columns join this relation". A forward
@@ -846,49 +768,37 @@ def relation_link(field: object, *, lenient: bool = False) -> RelationLink:
 
     Shapes that carry no pairs, and malformed ones (unequal or empty sides, a
     member without a string ``attname``), answer the empty ``RelationLink``.
-    ``lenient`` selects :func:`relation_attr`'s failure policy for a read that
-    raises: strict raises ``ConfigurationError``, lenient answers empty.
     """
     link = field
-    carriers = relation_attr(field, "local_related_fields", None, lenient=lenient)
-    if carriers is None and relation_bool(field, "many_to_many", lenient=lenient):
-        link, _target_side = m2m_through_link_fields(field, lenient=lenient)
+    carriers: object = getattr(field, "local_related_fields", None)
+    if carriers is None and relation_bool(field, "many_to_many"):
+        link, _target_side = m2m_through_link_fields(field)
         if link is None:
             return RelationLink()
-        carriers = relation_attr(link, "local_related_fields", None, lenient=lenient)
+        carriers = getattr(link, "local_related_fields", None)
     elif carriers is None:
-        link = relation_attr(field, "field", None, lenient=lenient)
+        link = read_attr(field, "field", None)
         if link is None:
             return RelationLink()
-        carriers = relation_attr(link, "local_related_fields", None, lenient=lenient)
-    carrier_fields = _link_field_tuple(carriers, lenient=lenient)
-    target_fields = _link_field_tuple(
-        relation_attr(link, "foreign_related_fields", None, lenient=lenient),
-        lenient=lenient,
-    )
+        carriers = getattr(link, "local_related_fields", None)
+    carrier_fields = _link_field_tuple(carriers)
+    target_fields = _link_field_tuple(getattr(link, "foreign_related_fields", None))
     if not carrier_fields or target_fields is None or len(carrier_fields) != len(target_fields):
         return RelationLink()
     return RelationLink(carriers=carrier_fields, targets=target_fields)
 
 
-def m2m_through_model(field: object, *, lenient: bool = False) -> type[models.Model] | None:
+def m2m_through_model(field: object) -> type[models.Model] | None:
     """Return the M2M join table: ``field.through`` (rel side) or ``remote_field.through``."""
-    through = relation_attr(field, "through", None, lenient=lenient)
+    through: object = getattr(field, "through", None)
     if through is None:
-        through = relation_attr(
-            relation_attr(field, "remote_field", None, lenient=lenient),
-            "through",
-            None,
-            lenient=lenient,
-        )
+        through = getattr(getattr(field, "remote_field", None), "through", None)
     # A relation's ``through`` slot holds the join-table model class.
     return cast("type[models.Model] | None", through)
 
 
 def m2m_through_link_fields(
     field: object,
-    *,
-    lenient: bool = False,
 ) -> tuple[ForeignKeyField | None, ForeignKeyField | None]:
     """Return the M2M through table's (source-side FK, target-side FK) for one M2M hop.
 
@@ -898,30 +808,22 @@ def m2m_through_link_fields(
     scanning through-model FKs by target would be ambiguous. ``field`` is either
     the forward field (the source owns it) or the ``ManyToManyRel`` (the source
     is the target; the sides swap). ``(None, None)`` when the through model or
-    the naming API is missing; a through model whose field lookup raises is a
-    ``ConfigurationError`` under the strict policy and ``(None, None)`` under
-    the lenient one.
+    the naming API is missing.
     """
-    forward_field = relation_attr(field, "field", None, lenient=lenient)
-    if not safe_truthy(forward_field):
+    # Either the relation's own forward field or ``field`` itself.
+    forward_field: object = getattr(field, "field", None)
+    if not forward_field:
         forward_field = field
-    through = m2m_through_model(field, lenient=lenient)
-    source_name = relation_attr(forward_field, "m2m_field_name", None, lenient=lenient)
-    target_name = relation_attr(forward_field, "m2m_reverse_field_name", None, lenient=lenient)
+    through = m2m_through_model(field)
+    source_name: object = getattr(forward_field, "m2m_field_name", None)
+    target_name: object = getattr(forward_field, "m2m_reverse_field_name", None)
     if through is None or not callable(source_name) or not callable(target_name):
         return None, None
-    try:
-        through_meta = through._meta
-        # ``m2m_field_name`` / ``m2m_reverse_field_name`` name the through table's
-        # two ``ForeignKey`` columns.
-        source_fk = cast("ForeignKeyField", through_meta.get_field(cast("str", source_name())))
-        target_fk = cast("ForeignKeyField", through_meta.get_field(cast("str", target_name())))
-    except BaseException as exc:
-        if lenient:
-            return None, None
-        raise ConfigurationError(
-            f"Could not resolve the M2M through-table foreign keys of {_safe_type_name(field)}.",
-        ) from exc
+    through_meta = through._meta
+    # ``m2m_field_name`` / ``m2m_reverse_field_name`` name the through table's
+    # two ``ForeignKey`` columns.
+    source_fk = cast("ForeignKeyField", through_meta.get_field(cast("str", source_name())))
+    target_fk = cast("ForeignKeyField", through_meta.get_field(cast("str", target_name())))
     if forward_field is field:
         return source_fk, target_fk
     return target_fk, source_fk
@@ -1059,32 +961,27 @@ def instance_accessor(field: object) -> str:
     the Phase-2 relation resolvers' ``getattr``, the spec-032 synthesized
     relation connections, and the optimizer's prefetch lookup paths.
     """
-    precomputed = relation_attr(field, "accessor_name", None)
+    precomputed = read_attr(field, "accessor_name", None)
     if precomputed is not None:
         if type(precomputed) is not str:
             raise ConfigurationError(
-                f"Relation accessor metadata on {_safe_type_name(field)} must be a string; "
-                f"got {_safe_type_name(precomputed)}.",
+                f"Relation accessor metadata on {truth.kind(field)} must be a string; "
+                f"got {truth.kind(precomputed)}.",
             )
         return precomputed
-    get_accessor_name = relation_attr(field, "get_accessor_name", None)
+    get_accessor_name = read_attr(field, "get_accessor_name", None)
     if get_accessor_name is not None:
         if not callable(get_accessor_name):
             raise ConfigurationError(
-                f"Relation accessor metadata on {_safe_type_name(field)} must be callable.",
+                f"Relation accessor metadata on {truth.kind(field)} must be callable.",
             )
-        try:
-            accessor_name = get_accessor_name()
-        except BaseException as exc:
-            raise ConfigurationError(
-                f"Could not resolve relation accessor on {_safe_type_name(field)}.",
-            ) from exc
+        accessor_name = get_accessor_name()
     else:
-        accessor_name = relation_attr(field, "name")
+        accessor_name = read_attr(field, "name", MISSING_ATTRIBUTE)
     if type(accessor_name) is not str:
         raise ConfigurationError(
-            f"Resolved relation accessor on {_safe_type_name(field)} must be a string; "
-            f"got {_safe_type_name(accessor_name)}.",
+            f"Resolved relation accessor on {truth.kind(field)} must be a string; "
+            f"got {truth.kind(accessor_name)}.",
         )
     return accessor_name
 
@@ -1101,12 +998,6 @@ def has_composite_pk(model: type[models.Model]) -> bool:
     same way for registered types and the walker's unregistered fallback
     map.
     """
-    try:
-        meta = model._meta
-        # Django 5.2+ ``Options.pk_fields`` is a list of fields; older Django lacks it.
-        pk_fields: Sized | None = getattr(meta, "pk_fields", None)
-        return pk_fields is not None and len(pk_fields) > 1
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Could not read composite-primary-key metadata from {_safe_type_name(model)}.",
-        ) from exc
+    # Django 5.2+ ``Options.pk_fields`` is a list of fields; older Django lacks it.
+    pk_fields: Sized | None = getattr(model._meta, "pk_fields", None)
+    return pk_fields is not None and len(pk_fields) > 1

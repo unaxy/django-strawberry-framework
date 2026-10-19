@@ -60,16 +60,17 @@ from django_strawberry_framework.management.commands._imports import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import _PACKAGE_SCALAR_MAP
-from django_strawberry_framework.types.base import DjangoType, _is_relay_shaped
+from django_strawberry_framework.types.base import DjangoType, _is_suppressed_relay_pk
 from django_strawberry_framework.types.converters import SCALAR_MAP, _field_output_type_for
-from django_strawberry_framework.utils._narrowing import is_str, require
+from django_strawberry_framework.types.definition import DjangoTypeDefinition
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_str, optional_instance, require
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 
 if typing.TYPE_CHECKING:
     from strawberry.types.base import WithStrawberryObjectDefinition
 
     from django_strawberry_framework.optimizer.field_meta import FieldMeta
-    from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
 _GLOBAL_ID_GRAPHQL_TYPE = "GlobalID!"
@@ -162,18 +163,17 @@ class Command(BaseCommand):
 
         type_name = str(options["type"])
         target = self._resolve_type(type_name, name_converter)
-        if not (isinstance(target, type) and issubclass(target, DjangoType)):
+        if not truth.is_subclass(target, DjangoType):
             raise CommandError(f"{type_name} is not a DjangoType subclass")
 
         # ``DjangoType`` declares the attribute; the package's registration writes it.
-        definition: DjangoTypeDefinition | None = getattr(
-            target,
-            "__django_strawberry_definition__",
-            None,
+        definition = optional_instance(
+            truth.static_attr(target, "__django_strawberry_definition__", None),
+            DjangoTypeDefinition,
         )
         if definition is None:
             raise CommandError(
-                f"{target.__name__} is not a registered DjangoType "
+                f"{truth.name(target)} is not a registered DjangoType "
                 "(an abstract or no-Meta base never registers a definition)",
             )
         if definition.finalized is False:
@@ -200,7 +200,7 @@ class Command(BaseCommand):
         """
         matches: list[type[DjangoType]] = []
         for type_cls, definition in registry.iter_definitions():
-            surfaces = (_sdl_type_name(type_cls, definition, name_converter), type_cls.__name__)
+            surfaces = (_sdl_type_name(type_cls, definition, name_converter), truth.name(type_cls))
             if name in surfaces:
                 matches.append(type_cls)
         if not matches:
@@ -210,12 +210,8 @@ class Command(BaseCommand):
             )
         if len(matches) > 1:
             candidates = "\n".join(
-                f"  - {type_cls.__module__}.{type_cls.__qualname__} "
-                f"(model {getattr(registry.model_for_type(type_cls), '__name__', '?')})"
-                for type_cls in sorted(
-                    matches,
-                    key=lambda type_cls: f"{type_cls.__module__}.{type_cls.__qualname__}",
-                )
+                f"  - {truth.label(type_cls)} (model {_model_name(registry.model_for_type(type_cls))})"
+                for type_cls in sorted(matches, key=truth.label)
             )
             raise CommandError(
                 f"{name} is ambiguous - {len(matches)} registered types share this name.\n"
@@ -235,7 +231,7 @@ class Command(BaseCommand):
         # name (custom ``NameConverter`` + ``Meta.name``), not the Python class
         # ``__name__`` - so it matches the schema surface the operator inspects.
         sdl_name = _sdl_type_name(definition.origin, definition, name_converter)
-        title = f"{sdl_name}  (model: {model.__module__}.{model.__qualname__})"
+        title = f"{sdl_name}  (model: {truth.label(model)})"
         self.stdout.write(title)
         header = (
             f"  {'field':<20} {'django field type':<20} "
@@ -249,7 +245,7 @@ class Command(BaseCommand):
                 field,
                 scalar_namer,
             )
-            django_field_type = type(field).__name__
+            django_field_type = truth.name(type(field))
             self.stdout.write(
                 f"  {field.name:<20} {django_field_type:<20} "
                 f"{graphql_type:<32} {nullable:<10} {converter}",
@@ -283,7 +279,16 @@ class Command(BaseCommand):
         3. Only then do the auto-synthesized relation / scalar branches apply.
         """
         field_meta = definition.field_map[field.name]
-        if self._is_suppressed_relay_pk(definition, field):
+        # Suppressed-first dispatch is safe for a consumer-authored pk: the
+        # owner answers the consumer-override case, so it reads False here
+        # and the row falls through to the consumer branch below.
+        if _is_suppressed_relay_pk(
+            definition.origin,
+            definition.interfaces,
+            definition.model,
+            field,
+            definition.consumer_authored_fields,
+        ):
             return _GLOBAL_ID_GRAPHQL_TYPE, "no", _RELAY_PK_CONVERTER
         if field.name in definition.consumer_authored_fields:
             return self._consumer_authored_row(definition, field, scalar_namer)
@@ -291,34 +296,6 @@ class Command(BaseCommand):
             return self._relation_row(definition, field, field_meta, scalar_namer)
         # Not a relation, so a concrete column: reverse ``ForeignObjectRel``s are relations.
         return self._scalar_row(definition, typing.cast("ConcreteField", field), scalar_namer)
-
-    @staticmethod
-    def _is_suppressed_relay_pk(definition: "DjangoTypeDefinition", field: "ModelField") -> bool:
-        """Return whether ``field`` is the Relay-Node-suppressed primary key.
-
-        On a Relay-Node-shaped type a NON-relation pk ``continue``s past
-        ``convert_scalar`` (the interface supplies ``id: GlobalID!``), so it is
-        absent from ``origin.__annotations__`` and must not be indexed there.
-        A RELATION pk is never suppressed: ``_build_annotations`` routes every
-        relation field through its relation branch BEFORE the pk-suppression
-        check, so a relation pk (``OneToOneField(primary_key=True)``, an MTI
-        parent link) keeps its auto-synthesized annotation and finalize
-        resolves it to the target type - the schema surface shows the relation,
-        not the interface's ``id: GlobalID!``. Checking ``field.is_relation``
-        first mirrors that branch order, so the command reports the relation
-        row the schema actually builds instead of a GlobalID row Strawberry
-        never emits for it. Shape uses the shared
-        ``types/base.py::_is_relay_shaped`` predicate - the same gate
-        ``_build_annotations`` used when it suppressed the pk - so a
-        Meta-declared ``relay.Node``, a ``CustomNode(relay.Node)`` interface,
-        and direct ``class Foo(DjangoType, relay.Node)`` inheritance stay in
-        lockstep with synthesis.
-        """
-        if field.is_relation:
-            return False
-        if not _is_relay_shaped(definition.origin, definition.interfaces):
-            return False
-        return field.name == definition.model._meta.pk.name
 
     @classmethod
     def _relation_row(
@@ -403,11 +380,7 @@ class Command(BaseCommand):
         list form was deliberately dropped.
         """
         scalar_namer = scalar_namer or _scalar_name
-        # ``cast``: ``handle`` refused an unfinalized type, and finalization is
-        # what attaches ``origin.__strawberry_definition__``.
-        finalized_origin = typing.cast("type[WithStrawberryObjectDefinition]", definition.origin)
-        strawberry_fields = finalized_origin.__strawberry_definition__.fields
-        field_type = next(sf.type for sf in strawberry_fields if sf.python_name == generated)
+        field_type = _strawberry_field_type(definition, generated)
         graphql_type = _render_strawberry_type(field_type, scalar_namer)
         kind = field_meta.relation_kind
         converter = f"relation: {_RELATION_KIND_LABELS.get(kind, kind)} (connection-only)"
@@ -433,7 +406,7 @@ class Command(BaseCommand):
         # using the single shared MRO walk so the ordering can never drift.
         output_type = _field_output_type_for(field)
         if output_type is not None:
-            return graphql_type, nullable, f"convert_field_output -> {output_type.__name__}"
+            return graphql_type, nullable, f"convert_field_output -> {truth.name(output_type)}"
         # ``choice enum`` for a choice field; otherwise name the SCALAR_MAP row
         # that fired - the matched MRO ancestor (Decision 4) - so a consumer
         # subclass of a supported field reports the ancestor row (e.g.
@@ -467,14 +440,10 @@ class Command(BaseCommand):
         time - so it raises ``CommandError`` with a concrete recovery hint instead.
         """
         scalar_namer = scalar_namer or _scalar_name
-        # ``cast``: ``handle`` refused an unfinalized type, and finalization is
-        # what attaches ``origin.__strawberry_definition__``.
-        finalized_origin = typing.cast("type[WithStrawberryObjectDefinition]", definition.origin)
-        strawberry_fields = finalized_origin.__strawberry_definition__.fields
-        field_type = next(sf.type for sf in strawberry_fields if sf.python_name == field.name)
+        field_type = _strawberry_field_type(definition, field.name)
         if field_type is UNRESOLVED:
             raise CommandError(
-                f"{definition.origin.__name__}.{field.name} is a consumer-authored field whose "
+                f"{truth.name(definition.origin)}.{field.name} is a consumer-authored field whose "
                 "annotation is an unresolved Strawberry forward reference; "
                 "finalize_django_types() does not force forward-reference resolution. Pass "
                 "--schema <your project schema dotted path> so the schema is constructed (which "
@@ -485,6 +454,22 @@ class Command(BaseCommand):
         nullable = _consumer_nullable(field_type)
         converter = _consumer_converter_label(definition, field.name)
         return graphql_type, nullable, converter
+
+
+def _strawberry_field_type(definition: "DjangoTypeDefinition", python_name: str) -> object:
+    """Return the finalized Strawberry field type for ``python_name``.
+
+    Reads the finalized ``origin.__strawberry_definition__.fields`` record
+    and returns the ``.type`` of the field named ``python_name``. Both
+    callers name fields finalization necessarily attached (the synthesized
+    connection sibling, the consumer override), so a missing name raises
+    ``StopIteration`` rather than degrading to a guessed type.
+    """
+    # ``cast``: ``handle`` refused an unfinalized type, and finalization is
+    # what attaches ``origin.__strawberry_definition__``.
+    finalized_origin = typing.cast("type[WithStrawberryObjectDefinition]", definition.origin)
+    strawberry_fields = finalized_origin.__strawberry_definition__.fields
+    return next(sf.type for sf in strawberry_fields if sf.python_name == python_name)
 
 
 def _yes_no(*, value: bool) -> str:
@@ -515,8 +500,8 @@ def _matched_scalar_key(field: "ModelField") -> str:
     unreachable for a finalized type.
     """
     return next(
-        (klass.__name__ for klass in type(field).__mro__ if klass in SCALAR_MAP),
-        type(field).__name__,
+        (truth.name(klass) for klass in truth.mro(type(field)) if klass in SCALAR_MAP),
+        truth.name(type(field)),
     )
 
 
@@ -625,12 +610,18 @@ def _sdl_type_name(
     # clean unfinalized-type diagnostic.
     # Only ``strawberry.type`` (``strawberry/types/object_type.py::_process_type``)
     # writes this class-dict key, and it writes a ``StrawberryObjectDefinition``.
-    strawberry_definition: StrawberryObjectDefinition | None = type_cls.__dict__.get(
-        "__strawberry_definition__",
+    strawberry_definition = optional_instance(
+        truth.class_dict(type_cls).get("__strawberry_definition__"),
+        StrawberryObjectDefinition,
     )
     if strawberry_definition is None:
         return definition.graphql_type_name
     return _converter_type_name(name_converter, strawberry_definition)
+
+
+def _model_name(model: object) -> str:
+    """Return the registered model's class name for the ambiguity listing, or ``?`` if none."""
+    return truth.name(model) if truth.is_type(model) else "?"
 
 
 def _scalar_name(
@@ -654,7 +645,7 @@ def _scalar_name(
     mapped = _GRAPHQL_SCALAR_NAMES.get(scalar)
     if mapped is not None:
         return mapped
-    strawberry_type = getattr(scalar, "__strawberry_definition__", None)
+    strawberry_type = truth.static_attr(scalar, "__strawberry_definition__", None)
     if strawberry_type is None:
         strawberry_type = getattr(scalar, "_scalar_definition", None)
     if strawberry_type is None and isinstance(
@@ -668,8 +659,12 @@ def _scalar_name(
     ):
         strawberry_type = scalar
     if strawberry_type is not None:
-        return _converter_type_name(name_converter, strawberry_type)
-    return getattr(scalar, "__name__", None) or str(scalar)
+        # Both slots hold Strawberry definitions, and the ``isinstance`` arm admits only those.
+        return _converter_type_name(name_converter, typing.cast("StrawberryType", strawberry_type))
+    if truth.is_type(scalar):
+        return truth.name(scalar)
+    declared = truth.static_attr(scalar, "__name__", None)
+    return declared if type(declared) is str and declared else truth.text(scalar)
 
 
 def _render_annotation(annotation: object, scalar_namer: _ScalarNamer = _scalar_name) -> str:

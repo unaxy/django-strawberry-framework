@@ -1,11 +1,11 @@
 """Tests for the neutral set-input traversal substrate (``utils/input_values.py``).
 
-Dict-vs-dataclass walks, UNSET identity, and hostile iterators are not a
-document. Filter and order input on the wire live in
+Dict-vs-dataclass walks, UNSET identity, and base-slot container reads are not
+a document. Filter and order input on the wire live in
 ``examples/fakeshop/test_query/test_library_api.py``.
 """
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from typing import NoReturn
 
 import pytest
@@ -206,18 +206,6 @@ def test_dict_subclass_overrides_cannot_replace_the_shared_walk() -> None:
     assert input_field_value(value, "name") == "x"
 
 
-def test_malformed_dataclass_metadata_fails_closed_with_configuration_error() -> None:
-    """An unreadable ``__dataclass_fields__`` is a typed traversal error, not a raw one."""
-
-    class _HostileMetadata:
-        @property
-        def __dataclass_fields__(self) -> dict[str, object]:
-            raise RuntimeError("hostile metadata")
-
-    with pytest.raises(ConfigurationError, match="dataclass metadata could not be read"):
-        iter_input_items(_HostileMetadata())
-
-
 def test_non_string_input_keys_fail_closed_before_permission_dispatch() -> None:
     """Input field names must be strings; a non-string key is refused at the walk."""
     with pytest.raises(ConfigurationError, match="field names must be strings"):
@@ -260,56 +248,22 @@ def test_nested_order_lists_fail_closed_instead_of_recursing_or_no_oping() -> No
         list(iter_active_fields(_Set, [[{"title": "x"}]], config))
 
 
-def test_hostile_field_spec_mapping_fails_closed_with_configuration_error() -> None:
-    """A field-spec mapping that cannot answer a lookup aborts the walk with a typed error."""
-
-    class _HostileMap(dict[tuple[type[FilterSet], str], GeneratedInputFieldSpec]):
-        @override
-        def get(self, key: tuple[type[FilterSet], str], default: object = None) -> NoReturn:
-            raise RuntimeError("hostile field-spec lookup")
-
-    class _Set:
-        related_orders = {}
-
-    config = SetInputTraversal(
-        field_specs=_HostileMap(),
-        related_attr="related_orders",
-        handle_top_level_list=True,
-    )
-    with pytest.raises(ConfigurationError, match="field provenance could not be resolved"):
-        list(iter_active_fields(_Set, [{"title": "x"}], config))
-
-
-def test_dataclass_metadata_must_be_an_enumerable_mapping() -> None:
-    """``__dataclass_fields__`` must be a mapping and must enumerate without raising."""
+def test_dataclass_metadata_must_be_a_mapping() -> None:
+    """``__dataclass_fields__`` that is not a mapping is a typed traversal error."""
 
     class _NotAMapping:
         __dataclass_fields__ = ("name",)
 
-    class _UnreadableMapping(Mapping[str, object]):
-        @override
-        def __getitem__(self, key: str) -> object:
-            raise KeyError(key)
-
-        @override
-        def __iter__(self) -> Iterator[str]:
-            raise RuntimeError("hostile field enumeration")
-
-        @override
-        def __len__(self) -> int:
-            return 1
-
-    class _UnreadableDataclass:
-        __dataclass_fields__ = _UnreadableMapping()
-
-    with pytest.raises(ConfigurationError, match="metadata is not a mapping"):
+    with pytest.raises(ConfigurationError) as excinfo:
         iter_input_items(_NotAMapping())
-    with pytest.raises(ConfigurationError, match="dataclass fields could not be enumerated"):
-        iter_input_items(_UnreadableDataclass())
+    assert str(excinfo.value) == (
+        "Could not traverse set input of type _NotAMapping: its dataclass metadata is not a "
+        "mapping."
+    )
 
 
-def test_dataclass_and_object_field_read_failures_are_typed() -> None:
-    """Both the dataclass walk and the single-field read report their own typed failure."""
+def test_dataclass_and_object_field_read_failures_propagate() -> None:
+    """A field value read is consumer code; what it raises reaches the caller unchanged."""
 
     class _UnreadableDataclass:
         __dataclass_fields__ = {"name": object()}
@@ -325,14 +279,14 @@ def test_dataclass_and_object_field_read_failures_are_typed() -> None:
                 raise RuntimeError("hostile object field")
             return object_result(super().__getattribute__, name)
 
-    with pytest.raises(ConfigurationError, match="dataclass field value could not be read"):
+    with pytest.raises(RuntimeError, match="hostile dataclass field"):
         iter_input_items(_UnreadableDataclass())
-    with pytest.raises(ConfigurationError, match=r": a field value could not be read"):
+    with pytest.raises(RuntimeError, match="hostile object field"):
         input_field_value(_UnreadableObject(), "name")
 
 
-def test_active_field_configuration_and_related_metadata_fail_closed() -> None:
-    """An unreadable traversal config, or unreadable/non-mapping related declarations, raise."""
+def test_active_field_configuration_reads_propagate_and_related_reads_are_truthful() -> None:
+    """A raising traversal config propagates; a metaclass hook never runs on the related read."""
 
     class _UnreadableConfig:
         @property
@@ -358,63 +312,29 @@ def test_active_field_configuration_and_related_metadata_fail_closed() -> None:
     class _UnreadableSet(metaclass=_HostileSetMeta):
         pass
 
-    with pytest.raises(ConfigurationError, match="configuration could not be read"):
+    with pytest.raises(RuntimeError, match="hostile traversal config"):
         # basedpyright: each unreadable traversal config is the hostile input under test;
         # iter_active_fields types the parameter as SetInputTraversal
         list(iter_active_fields(object, {"name": "x"}, _UnreadableConfig()))  # pyright: ignore[reportArgumentType]
-    with pytest.raises(ConfigurationError, match="configuration could not be read"):
+    with pytest.raises(RuntimeError, match="hostile unset_sentinel"):
         # basedpyright: each unreadable traversal config is the hostile input under test;
         # iter_active_fields types the parameter as SetInputTraversal
         list(iter_active_fields(object, {"name": "x"}, _UnreadableSentinelConfig()))  # pyright: ignore[reportArgumentType]
 
     config = SetInputTraversal(field_specs={}, related_attr="related_orders")
-    with pytest.raises(ConfigurationError, match="related-field declarations could not be read"):
-        list(iter_active_fields(_UnreadableSet, {"name": "x"}, config))
+    fields = list(iter_active_fields(_UnreadableSet, {"name": "x"}, config))
+    assert [(field.python_attr, field.kind) for field in fields] == [("name", LEAF)]
+
+
+def test_active_field_related_declarations_must_be_a_mapping() -> None:
+    """Non-mapping related declarations abort the walk with a typed error."""
 
     class _InvalidSet:
         related_orders = []
 
+    config = SetInputTraversal(field_specs={}, related_attr="related_orders")
     with pytest.raises(ConfigurationError, match="declarations are not a mapping"):
         list(iter_active_fields(_InvalidSet, {"name": "x"}, config))
-
-
-def test_active_field_related_mapping_operations_fail_closed() -> None:
-    """Membership and lookup on a related-declaration mapping each fail as typed errors."""
-
-    class _UnreadableContains(Mapping[str, object]):
-        @override
-        def __getitem__(self, key: str) -> object:
-            return object()
-
-        @override
-        def __iter__(self) -> Iterator[str]:
-            return iter(("name",))
-
-        @override
-        def __len__(self) -> int:
-            return 1
-
-        @override
-        def __contains__(self, key: object) -> bool:
-            raise RuntimeError("hostile membership")
-
-    class _UnreadableGetitem(_UnreadableContains):
-        @override
-        def __contains__(self, key: object) -> bool:
-            return True
-
-        @override
-        def __getitem__(self, key: str) -> object:
-            raise RuntimeError("hostile related lookup")
-
-    config = SetInputTraversal(field_specs={}, related_attr="related_orders")
-    contains_set = type("ContainsSet", (), {"related_orders": _UnreadableContains()})
-    lookup_set = type("LookupSet", (), {"related_orders": _UnreadableGetitem()})
-
-    with pytest.raises(ConfigurationError, match="declarations could not be checked"):
-        list(iter_active_fields(contains_set, {"name": "x"}, config))
-    with pytest.raises(ConfigurationError, match="declaration could not be read"):
-        list(iter_active_fields(lookup_set, {"name": "x"}, config))
 
 
 def test_active_field_list_skips_inactive_elements_and_accepts_none_related_mapping() -> None:
@@ -569,8 +489,12 @@ def test_related_declaration_mapping_rejects_non_mappings(bad: object) -> None:
     assert excinfo.value.kind == "not_mapping"
 
 
-def test_related_declaration_mapping_wraps_an_unreadable_class_attribute() -> None:
-    """A class attribute read that raises is wrapped, chaining the original cause."""
+def test_related_declaration_mapping_never_runs_a_metaclass_getattribute() -> None:
+    """The declaration is read from the class's real namespaces, so a hostile hook never runs.
+
+    A metaclass ``__getattribute__`` that raises for the attribute is not consulted: the
+    class declares nothing under that name, so it has no related fields.
+    """
 
     class _HostileMeta(type):
         @override
@@ -582,19 +506,14 @@ def test_related_declaration_mapping_wraps_an_unreadable_class_attribute() -> No
     class _Set(metaclass=_HostileMeta):
         pass
 
-    with pytest.raises(RelatedDeclarationError) as excinfo:
-        related_declaration_mapping(_Set, "related_orders")
-    assert excinfo.value.kind == "unreadable"
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert related_declaration_mapping(_Set, "related_orders") == {}
 
 
-def test_iter_active_fields_contains_a_hostile_config_related_attr_read() -> None:
-    """The traversal config's attribute NAME read is contained like every other read.
+def test_iter_active_fields_propagates_a_hostile_config_related_attr_read() -> None:
+    """The traversal config's attribute NAME read is consumer code; what it raises propagates.
 
-    ``related_declaration_mapping`` contains the class-side read; the config-side
-    ``related_attr`` read dispatches consumer code too (the config is a public
-    dataclass a test double may replace), and the walker must type its failure
-    like the rest of the walk instead of letting it escape raw.
+    The config is a public dataclass a test double may replace; its ``related_attr``
+    property's exception reaches the caller unchanged, like any other consumer hook's.
     """
 
     class _HostileConfig:
@@ -605,10 +524,7 @@ def test_iter_active_fields_contains_a_hostile_config_related_attr_read() -> Non
         def related_attr(self) -> NoReturn:
             raise RuntimeError("hostile config related_attr")
 
-    with pytest.raises(
-        ConfigurationError,
-        match="related-field declarations could not be read",
-    ):
+    with pytest.raises(RuntimeError, match="hostile config related_attr"):
         # basedpyright: the config whose related_attr raises is the hostile input under test;
         # iter_active_fields types the parameter as SetInputTraversal
         list(iter_active_fields(object, {"name": "x"}, _HostileConfig()))  # pyright: ignore[reportArgumentType]
@@ -647,8 +563,13 @@ def test_assert_set_traversal_depth_enforces_the_declared_budget() -> None:
         _MAX_LOGIC_DEPTH = 4
 
     assert_set_traversal_depth(_Set, 4, branch="related-branch", input_noun="related")
-    with pytest.raises(ConfigurationError, match=r"_Set: related-branch nesting exceeded"):
+    with pytest.raises(ConfigurationError) as excinfo:
         assert_set_traversal_depth(_Set, 5, branch="related-branch", input_noun="related")
+    assert str(excinfo.value) == (
+        "test_assert_set_traversal_depth_enforces_the_declared_budget.<locals>._Set: "
+        "related-branch nesting exceeded _MAX_LOGIC_DEPTH=4. Flatten the related input or "
+        "split into multiple queries."
+    )
 
 
 def test_assert_set_traversal_depth_words_knobless_sets_with_the_default_sentence() -> None:
@@ -709,7 +630,7 @@ def test_depth_cap_error_label_survives_a_str_subclass_qualname(subject: str) ->
 def test_depth_cap_error_label_survives_a_qualname_whose_class_read_raises(
     raised: type[BaseException],
 ) -> None:
-    """The label asks the real type, so a ``__class__`` that raises falls back to the type name."""
+    """The label is the interpreter's qualname: the metaclass's ``__qualname__`` answer never runs."""
 
     class _HostileMeta(type):
         @override
@@ -724,13 +645,14 @@ def test_depth_cap_error_label_survives_a_qualname_whose_class_read_raises(
     with pytest.raises(ConfigurationError) as excinfo:
         assert_set_traversal_depth(_Set, 2, branch="logical-branch", input_noun="filter")
     assert str(excinfo.value) == (
-        "_Set: logical-branch nesting exceeded _MAX_LOGIC_DEPTH=1. Flatten the "
+        "test_depth_cap_error_label_survives_a_qualname_whose_class_read_raises.<locals>._Set: "
+        "logical-branch nesting exceeded _MAX_LOGIC_DEPTH=1. Flatten the "
         "filter input or split into multiple queries."
     )
 
 
 def test_depth_cap_error_label_reads_qualname_defensively() -> None:
-    """A hostile ``__qualname__`` read falls back to the safe type name without escaping."""
+    """A hostile ``__qualname__`` hook never runs: the label is read from the interpreter."""
 
     class _HostileMeta(type):
         @override

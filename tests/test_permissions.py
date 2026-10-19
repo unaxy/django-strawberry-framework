@@ -20,7 +20,8 @@ shapes; ``fields=`` scoping (shipped hooks pass ``fields=None`` or a fixed
 subset); SQL-shape of sealed cascade internals a live capture cannot uniquely
 show; thread / task ``ContextVar`` isolation; the async ``aapply`` off-loop
 contract; identity-hook default-manager composition over products types
-(every products type declares a custom ``get_queryset``); mixed-actor
+(the four root products types declare custom ``get_queryset`` hooks;
+``ItemHoldType`` is identity but no cascading edge targets it); mixed-actor
 cascade-then-gate composition (anonymous-narrowed queryset + staff
 ``apply_sync``) that one HTTP request cannot split.
 ``strictness="raise"`` cascade silence is live
@@ -65,6 +66,7 @@ import uuid
 from collections.abc import Callable, Generator, Iterator
 from types import SimpleNamespace
 from typing import Literal, NoReturn, TypeAlias
+from unittest import mock
 
 import pytest
 import pytest_django
@@ -105,14 +107,17 @@ from django_strawberry_framework.orders import Ordering, OrderSet
 from django_strawberry_framework.permissions import (
     SyncMisuseError,
     _cascade_state,
+    _edge_error_renderer,
     _edge_plan,
     _is_cascadable_edge,
     _is_unsupported_forward_edge,
+    _root_error_renderer,
     _validate_fields,
     aapply_cascade_permissions,
     apply_cascade_permissions,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import call_method, is_tuple, read_attr
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_query,
@@ -140,7 +145,7 @@ def _isolate_registry() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _assert_contextvar_clean() -> Iterator[None]:
-    """The traversal-state var must be reset to ``None`` after every test.
+    """Assert the traversal-state var reset to ``None`` after every test.
 
     A test that leaves ``_cascade_state`` set would leak stale traversal state
     into the next test sharing the context - the same request-isolation property
@@ -208,10 +213,10 @@ def _cascade_only(
     qs: models.QuerySet[models.Model],
     info: object,
 ) -> models.QuerySet[models.Model]:
-    """A hook that cascades and nothing else - the pure re-entrant shape.
+    """Cascade and nothing else - the pure re-entrant hook shape.
 
     Shared by the cycle fixtures (ring / diamond / self) and the transitive-chain
-    tests; each used to define a local copy of this exact body.
+    tests.
     """
     return apply_cascade_permissions(cls, qs, info)
 
@@ -876,9 +881,10 @@ def test_identity_hook_targets_compose_default_manager(
     ``test_library_inheritance_api.py::test_signage_on_a_city_less_branch_is_hidden_by_the_proxy_default_manager``).
     Every registered target now contributes a subquery - and the subqueries
     still compile into the caller's single ``SELECT``, so identity composition
-    adds zero query round-trips. Every shipped products type declares a custom
-    ``get_queryset``, so no live products request carries two identity-hook
-    targets on one root; the custom-hook HTTP twin is
+    adds zero query round-trips. The four root products types declare custom
+    ``get_queryset`` hooks, so no live products request carries two
+    identity-hook targets on one root (``ItemHoldType`` is identity but no
+    cascading edge targets it); the custom-hook HTTP twin is
     ``test_cascade_query_count_fixed``.
     """
     _make_type("IdentItemType", Item)  # identity default - no get_queryset override
@@ -900,6 +906,77 @@ def test_identity_hook_targets_compose_default_manager(
     # identity subqueries (unfiltered default managers) preserve every row.
     with django_assert_num_queries(1):
         assert list(result) == [entry]
+
+
+@contextlib.contextmanager
+def _count_filter_calls() -> Generator[list[int], None, None]:
+    """Yield a list collecting one entry per ``QuerySet.filter`` call in the block."""
+    calls: list[int] = []
+    real_filter = models.QuerySet[models.Model].filter
+
+    def _counting(
+        self: models.QuerySet[models.Model],
+        *args: object,
+        **kwargs: object,
+    ) -> models.QuerySet[models.Model]:
+        calls.append(1)
+        return real_filter(self, *args, **kwargs)
+
+    with mock.patch.object(models.QuerySet, "filter", _counting):
+        yield calls
+
+
+def test_two_edge_cascade_issues_a_single_filter_call() -> None:
+    """A 2-edge cascade composes both conditions through one ``.filter`` call.
+
+    The walk accumulates the per-edge ``Q`` objects and narrows once after the
+    loop, so the earlier edges' subqueries are cloned exactly once instead of
+    once per further edge. The composed SQL stays pinned by
+    ``test_identity_hook_targets_compose_default_manager``.
+    """
+    _make_type("CountItemType", Item)  # identity defaults - composition only
+    _make_type("CountPropertyType", Property)
+    entry_type = _make_type("CountEntryType", Entry, primary=False)
+    finalize_django_types()
+
+    base = Entry.objects.all()
+    with _count_filter_calls() as calls:
+        result = apply_cascade_permissions(entry_type, base, _INFO)
+    assert len(calls) == 1
+    assert str(result.query).count("IN (SELECT") == 2
+
+
+def test_zero_edge_root_issues_no_filter_call() -> None:
+    """A root with no walked edges issues no ``.filter`` call at all.
+
+    ``Category`` carries no forward FK, so the walk composes nothing; the empty
+    condition list must not turn into a pointless bare ``.filter()`` clone.
+    """
+    category_type = _make_type("CountCategoryType", Category)
+    finalize_django_types()
+
+    base = Category.objects.all()
+    with _count_filter_calls() as calls:
+        apply_cascade_permissions(category_type, base, _INFO)
+    assert calls == []
+
+
+def test_error_renderers_build_without_naming_calls() -> None:
+    """Both error-renderer factories build while ``truth.name`` raises.
+
+    The ``truth.name(...)`` / edge-label computations live inside the ``_render``
+    closures (defect path only); construction on the happy path pays no naming
+    cost. Rendered prose stays pinned by the defect-path tests.
+    """
+    item_type = _make_type("LazyItemType", Item)
+    entry_type = _make_type("LazyEntryType", Entry, primary=False)
+    finalize_django_types()
+
+    field = Entry._meta.get_field("item")
+    assert _is_cascadable_edge(field)
+    with mock.patch.object(truth, "name", side_effect=AssertionError("named at construction")):
+        _root_error_renderer(entry_type, Entry)
+        _edge_error_renderer(item_type, field, "default")
 
 
 @pytest.mark.django_db
@@ -1901,21 +1978,20 @@ def test_fields_valid_but_unregistered_target_accepted() -> None:
 def test_fields_bare_string_raises() -> None:
     """``fields="item"`` (a bare string) raises before any name lookup (spec-034 Decision 9).
 
-    Without the ``isinstance(fields, str)`` guard the walk would validate ``'i'``,
-    ``'t'``, ``'e'``, ``'m'`` as field names and surface a misleading "'i' is not
-    cascadable" - the guard names the non-string-iterable requirement instead.
+    Without the bare-string guard the walk would validate ``'i'``, ``'t'``,
+    ``'e'``, ``'m'`` as field names and surface a misleading "'i' is not
+    cascadable" - the guard names the non-string-iterable requirement and the
+    bracket fix instead, byte for byte.
     """
     entry_type = _make_type("BareStrEntryType", Entry, primary=False)
     finalize_django_types()
 
     with pytest.raises(ConfigurationError) as excinfo:
         apply_cascade_permissions(entry_type, Entry.objects.all(), _INFO, fields="item")
-    message = str(excinfo.value)
-    # Names the non-string-iterable requirement and the bracket fix...
-    assert "non-string iterable" in message
-    assert "['item']" in message or '["item"]' in message
-    # ...and does NOT surface a misleading per-character ``'i'`` lookup.
-    assert "'i'" not in message
+    assert str(excinfo.value) == (
+        "apply_cascade_permissions fields= must be a non-string iterable of field names, "
+        "not the bare string 'item'; wrap it in a list (fields=['item'])."
+    )
 
 
 def test_fields_non_iterable_raises_configuration_error() -> None:
@@ -2043,7 +2119,7 @@ def test_sync_helper_raises_syncmisuseerror_on_async_target_hook() -> None:
 async def test_aapply_runs_walk_off_event_loop() -> None:
     """``aapply_cascade_permissions`` runs the sync walk via ``sync_to_async`` (spec-034 Decision 10).
 
-    Assert the walk executes and the ``ContextVar`` seen-set installed inside the
+    Assert the walk executes and the ``ContextVar`` traversal state installed inside the
     worker (asgiref ``copy_context``) does not leak back into the awaiting task -
     ``_cascade_state.get()`` stays ``None`` in the async caller after the await.
     """
@@ -2066,7 +2142,7 @@ async def test_aapply_runs_walk_off_event_loop() -> None:
     result = await aapply_cascade_permissions(entry_type, Entry.objects.all(), _INFO)
     # The walk composed a constraint (the cascade ran off the loop)...
     assert "IN (SELECT" in str(result.query)
-    # ...and the worker-thread seen-set did NOT leak back into the awaiting task.
+    # ...and the worker-thread traversal state did NOT leak back into the awaiting task.
     assert _cascade_state.get() is None
 
 
@@ -2288,7 +2364,7 @@ def _exclude_private(
     qs: models.QuerySet[models.Model],
     info: object,
 ) -> models.QuerySet[models.Model]:
-    """The recurring cascading hook: row-narrow ``is_private=False`` then cascade.
+    """Row-narrow ``is_private=False``, then cascade.
 
     Re-declared locally, matching its sibling hooks above rather than sharing one
     cross-file fixture. The hook ignores ``info`` (it narrows unconditionally), so any
@@ -2298,7 +2374,7 @@ def _exclude_private(
 
 
 def _gate_info(*, is_staff: bool) -> SimpleNamespace:
-    """``info``-shaped stub carrying ``info.context.request`` with a ``user``.
+    """Build an ``info``-shaped stub carrying ``info.context.request`` with a ``user``.
 
     The gate resolves the request through ``utils/permissions.py::request_from_info``
     (``info.context.request``); ``check_name_permission`` keys on ``user.is_staff``.
@@ -2329,8 +2405,7 @@ class _StaffOnlyCategoryOrder(OrderSet):
     ``_normalize_input`` is overridden to emit the flat ``[(path, direction)]`` shape
     directly (the ``tests/orders/test_sets.py`` ``_NoneDirectionSyncOrder`` precedent)
     so the apply pipeline produces a deterministic ``order_by`` without standing up
-    the ``OrderArgumentsFactory`` input class (whose module-global ``_field_specs`` /
-    factory caches this file's autouse fixtures do not clear). The gate's
+    the ``OrderArgumentsFactory`` input class. The gate's
     active-input walk falls back to the python-attr token, so ``check_name_permission``
     still fires on a ``{"name": ...}`` input.
     """

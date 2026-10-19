@@ -141,20 +141,26 @@ class TestPrefetchFactory:
 
     @pytest.mark.parametrize(
         "make",
-        [
-            lambda: _PrefetchSubclass("items"),
-            lambda: SimpleLazyObject(lambda: Prefetch("items")),
-            lambda: mock.Mock(spec=Prefetch),
-        ],
-        ids=["prefetch-subclass", "lazy-proxy", "spec-mock"],
+        [lambda: _PrefetchSubclass("items"), lambda: SimpleLazyObject(lambda: Prefetch("items"))],
+        ids=["prefetch-subclass", "lazy-proxy"],
     )
     def test_prefetch_subclass_and_proxies_accepted(self, make: Callable[[], object]) -> None:
-        """The ``Prefetch`` test is ``isinstance``: a subclass and a faithful proxy pass as is."""
+        """A subclass and a Django lazy proxy of a ``Prefetch`` pass and are stored as is."""
         obj = make()
-        # basedpyright: each object answers isinstance(obj, Prefetch) without being typed as one
+        # basedpyright: each object is a Prefetch (or stands for one) without being typed as one
         assert OptimizerHint.prefetch(obj).prefetch_obj is obj  # pyright: ignore[reportArgumentType]
         # basedpyright: as above, through direct construction
         assert OptimizerHint(prefetch_obj=obj).prefetch_obj is obj  # pyright: ignore[reportArgumentType]
+
+    @pytest.mark.parametrize(
+        "route",
+        [_prefetch_through_factory, _prefetch_through_constructor],
+        ids=["factory", "direct"],
+    )
+    def test_prefetch_spec_mock_rejected(self, route: Callable[[object], OptimizerHint]) -> None:
+        """A ``Mock(spec=Prefetch)`` only claims ``Prefetch`` through ``__class__``: rejected."""
+        with pytest.raises(ConfigurationError, match="got Mock"):
+            _ = route(mock.Mock(spec=Prefetch))
 
 
 class TestStrategyFactory:
@@ -241,22 +247,20 @@ class TestStrategyFactory:
             # types the parameter as StrategySelection
             OptimizerHint.strategy(WindowedPrefetchStrategy)  # pyright: ignore[reportArgumentType]
 
-    def test_strategy_hostile_selection_values_stay_typed(self) -> None:
-        """A hostile selection value cannot replace the typed strategy rejection.
+    def test_strategy_str_subclass_selection_values_match_by_content(self) -> None:
+        """A ``str`` subclass selection value is matched by content, rendered by its own repr.
 
-        The typed contract is owned by ``resolve_strategy`` itself: its
-        reads of the value are guarded (content comparison goes through the
-        base ``str`` slot, so neither ``__eq__`` nor ``__hash__`` runs, the
-        message renders through ``_safe_arg_repr``, and a raising ``plan``
-        attribute reads as "not a strategy"), so a hostile value degrades to
-        the typed ``ConfigurationError`` raised directly - no raw exception
-        escapes, and the hint boundary needs no containment.
+        The typed contract is owned by ``resolve_strategy`` itself: the
+        ``__eq__`` check reads through the base ``str`` slot and the registry is
+        scanned without hashing, so neither override decides the verdict. A
+        ``__repr__`` override is the consumer's own rendering and what it raises
+        propagates.
         """
 
         class HostileRepr(str):
             @override
             def __repr__(self) -> str:
-                raise RuntimeError("repr should never run")
+                raise RuntimeError("hostile repr")
 
         class HostileEq(str):
             @override
@@ -272,6 +276,17 @@ class TestStrategyFactory:
             def __hash__(self) -> NoReturn:
                 raise RuntimeError("hash should never run")
 
+        # An unknown name raises the typed rejection; a ``__hash__`` override never runs.
+        with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
+            OptimizerHint.strategy(HostileHash("winowed"))
+        with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
+            OptimizerHint(nested_strategy=HostileHash("winowed"))
+        # Rendering the unknown name runs the value's own ``__repr__``, which propagates.
+        with pytest.raises(RuntimeError, match="hostile repr"):
+            OptimizerHint.strategy(HostileRepr("winowed"))
+        with pytest.raises(RuntimeError, match="hostile repr"):
+            OptimizerHint(nested_strategy=HostileRepr("winowed"))
+
         class HostilePlan(NestedConnectionStrategy):
             name = "hostile"
 
@@ -282,17 +297,11 @@ class TestStrategyFactory:
             @override
             def __getattribute__(self, name: str) -> object:
                 if name == "plan":
-                    raise RuntimeError("plan read should never run")
+                    raise RuntimeError("plan read failed")
                 return object_result(super().__getattribute__, name)
 
-        # Unknown names raise the unknown-name rejection rendered safely.
-        for hostile in (HostileRepr("winowed"), HostileHash("winowed")):
-            with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
-                OptimizerHint.strategy(hostile)
-            with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
-                OptimizerHint(nested_strategy=hostile)
-        # A raising ``plan`` read means "not a strategy", typed the same way.
-        with pytest.raises(ConfigurationError, match="must be a strategy name"):
+        # A consumer strategy's ``plan`` read runs untouched; what it raises propagates.
+        with pytest.raises(RuntimeError, match="plan read failed"):
             OptimizerHint.strategy(HostilePlan())
         # Content decides through the base ``str`` slot: a hostile ``__eq__``
         # can neither force a false AUTO_STRATEGY match nor break a valid name.
@@ -502,10 +511,19 @@ class TestInvalidStatesRejected:
 
 
 class TestSkipPredicate:
-    """``hint_is_skip`` keeps schema-audit dispatch fail-closed."""
+    """``hint_is_skip`` answers the skip directive for every hint shape."""
 
-    def test_hostile_skip_shapes_return_false(self) -> None:
-        """Unexpected hint objects cannot break a never-raise schema audit."""
+    def test_skip_shapes(self) -> None:
+        """``None`` and a shape without ``.skip`` are not skips; ``SKIP`` is."""
+        assert hint_is_skip(None) is False
+        assert hint_is_skip(OptimizerHint.SKIP) is True
+        assert hint_is_skip(OptimizerHint.select_related()) is False
+        # basedpyright: a shape without ``.skip`` is the input under test; hint_is_skip types
+        # the parameter as OptimizerHint | None
+        assert hint_is_skip(object()) is False  # pyright: ignore[reportArgumentType]
+
+    def test_hostile_skip_shapes_propagate(self) -> None:
+        """A hint whose ``skip`` read or truth test raises lets that error through."""
         # ``OptimizerHint.__post_init__`` reads ``skip``, so the hostile read arms only once
         # construction is done.
         armed = False
@@ -514,17 +532,19 @@ class TestSkipPredicate:
             @override
             def __getattribute__(self, name: str) -> object:
                 if armed and name == "skip":
-                    raise RuntimeError("skip should never run")
+                    raise RuntimeError("skip read failed")
                 return object_result(super().__getattribute__, name)
 
         class HostileBoolean:
             def __bool__(self) -> bool:
-                raise RuntimeError("bool should never run")
+                raise RuntimeError("bool failed")
 
         hostile_attribute = HostileAttribute()
         armed = True
         hostile_value = OptimizerHint()
         object.__setattr__(hostile_value, "skip", HostileBoolean())
 
-        assert hint_is_skip(hostile_attribute) is False
-        assert hint_is_skip(hostile_value) is False
+        with pytest.raises(RuntimeError, match="skip read failed"):
+            hint_is_skip(hostile_attribute)
+        with pytest.raises(RuntimeError, match="bool failed"):
+            hint_is_skip(hostile_value)

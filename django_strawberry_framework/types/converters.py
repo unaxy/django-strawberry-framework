@@ -24,10 +24,10 @@ Public surface:
   deployment metadata and is off the default output on purpose (spec-048
   Decision 1).
 - ``FIELD_OUTPUT_TYPE_MAP`` - module-level ``dict[type[models.Field], type]``
-  mapping ``ImageField`` (before ``FileField`` so the MRO walk hits it first)
-  and ``FileField`` to their output object. Consulted only by
-  ``convert_field_output`` and ``resolvers._attach_file_resolvers`` (via the
-  shared ``_field_output_type_for`` MRO walk); never by ``scalar_for_field``.
+  mapping ``ImageField`` (listed before ``FileField`` by most-specific-first
+  convention; the MRO walk, not dict order, decides the hit) and
+  ``FileField`` to their output object. Consulted only through the shared
+  ``_field_output_type_for`` MRO walk; never by ``scalar_for_field``.
 - ``convert_scalar(field, type_name)`` - scalar columns
   (``CharField`` -> ``str`` etc.). Walks ``type(field).__mro__`` against
   ``SCALAR_MAP``, then delegates to ``convert_choices_to_enum`` when
@@ -67,28 +67,23 @@ import re
 import uuid
 from enum import Enum, EnumMeta
 from types import GenericAlias
-from typing import TYPE_CHECKING, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Literal, TypeGuard, TypeVar, cast
 
 import strawberry
 from django.db import models
 from django.db.models.fields.files import FieldFile, ImageFieldFile
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_attr,
-    _safe_text,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import BigInt
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_iterable, is_list_or_tuple
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.strings import pascal_case
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
 
     from django.contrib.postgres.fields import ArrayField, HStoreField
     from typing_extensions import Never, TypeForm
@@ -295,11 +290,12 @@ SCALAR_MAP: "dict[type[ConcreteField], TypeForm[object]]" = {
 
 # Read-output-only file/image map, kept OFF the shared SCALAR_MAP /
 # ``scalar_for_field`` filter-input path (spec-037 Decision 3). ImageField is
-# listed BEFORE FileField (a superclass) so the ``_field_output_type_for`` MRO
-# walk resolves an ``ImageField`` -- and consumer ImageField subclasses -- to
-# ``DjangoImageType`` rather than falling through to ``DjangoFileType``,
-# exactly as ``PositiveBigIntegerField`` resolves to ``BigInt`` before
-# ``IntegerField`` in SCALAR_MAP.
+# listed before FileField (a superclass) by most-specific-first convention;
+# the ``_field_output_type_for`` MRO walk -- not dict order -- resolves an
+# ``ImageField`` (and consumer ImageField subclasses) to ``DjangoImageType``
+# rather than falling through to ``DjangoFileType``, exactly as
+# ``PositiveBigIntegerField`` resolves to ``BigInt`` before ``IntegerField``
+# in SCALAR_MAP although listed after it.
 FIELD_OUTPUT_TYPE_MAP: "dict[type[ConcreteField], type[DjangoFileType]]" = {
     models.ImageField: DjangoImageType,
     models.FileField: DjangoFileType,
@@ -320,6 +316,17 @@ FILESYSTEM_PATH_OUTPUT_TYPE_MAP: dict[type[DjangoFileType], type[DjangoFileType]
 _CHOICE_ENTRY_LENGTH = 2
 
 _NON_IDENT = re.compile(r"\W+", flags=re.ASCII)
+
+
+class _Missing(Enum):
+    """The one-member type of ``_MISSING``, so an ``is`` check narrows it away."""
+
+    MISSING = "missing"
+
+
+# A class-map miss, distinct from every value a map can hold.
+_MISSING: Final = _Missing.MISSING
+_V = TypeVar("_V")
 _GRAPHQL_RESERVED_ENUM_VALUES = frozenset(
     {"false", "null", "true"},
 )
@@ -343,11 +350,10 @@ _HSTORE_FIELD_CLS = cast(
 
 
 def _field_label(field: object) -> str:
-    """Return ``Model.field`` for diagnostics, tolerating malformed field metadata."""
-    model = _safe_attr(field, "model")
-    model_name = _safe_attr(model, "__name__", "<unbound>")
-    field_name = _safe_attr(field, "name", "<unknown>")
-    return f"{_safe_text(model_name, '<unbound>')}.{_safe_text(field_name, '<unknown>')}"
+    """Return ``Model.field`` for diagnostics; an unbound field reads ``<unbound>``."""
+    model = getattr(field, "model", None)
+    model_name = truth.name(model) if truth.is_type(model) else "<unbound>"
+    return f"{model_name}.{truth.text(getattr(field, 'name', '<unknown>'), '<unknown>')}"
 
 
 def array_element_field(field: object) -> "ConcreteField | None":
@@ -358,17 +364,27 @@ def array_element_field(field: object) -> "ConcreteField | None":
     (``convert_scalar``), so its element choices live on ``base_field``, never on the
     array column itself.
     """
-    if _ARRAY_FIELD_CLS is not None and isinstance(field, _ARRAY_FIELD_CLS):
+    if _ARRAY_FIELD_CLS is not None and truth.is_instance(field, _ARRAY_FIELD_CLS):
         return field.base_field
     return None
 
 
-def _field_has_choices(field: "ConcreteField") -> bool:
-    """Read a field's choices flag without leaking hostile metadata errors."""
-    try:
-        return bool(field.choices)
-    except BaseException as exc:
-        raise ConfigurationError(f"Could not inspect choices for {_field_label(field)}.") from exc
+def _class_map_lookup(
+    mapping: "Mapping[type[ConcreteField], _V]",
+    field: object,
+) -> "_V | Literal[_Missing.MISSING]":
+    """Return the ``mapping`` value for the first class in ``field``'s real MRO that keys it.
+
+    Keys are matched by identity, never by the class's ``__hash__`` / ``__eq__``,
+    so a field class cannot claim another class's entry. ``_MISSING`` when no
+    class in the MRO is a key.
+    """
+    entries = tuple(mapping.items())
+    for klass in truth.mro(truth.class_of(field)):
+        for key, value in entries:
+            if key is klass:
+                return value
+    return _MISSING
 
 
 def scalar_for_field(field: "ModelField") -> "TypeForm[object]":
@@ -384,11 +400,11 @@ def scalar_for_field(field: "ModelField") -> "TypeForm[object]":
     It does NOT apply choice substitution or null widening; callers layer those
     on (``convert_scalar`` does; filter inputs handle choices separately).
     """
-    for klass in type(field).__mro__:
-        if klass in SCALAR_MAP:
-            return SCALAR_MAP[klass]
+    scalar = _class_map_lookup(SCALAR_MAP, field)
+    if scalar is not _MISSING:
+        return scalar
     raise ConfigurationError(
-        f"Unsupported Django field type {_safe_arg_repr(_safe_type_name(field))} on "
+        f"Unsupported Django field type {truth.render(truth.kind(field))} on "
         f"{_field_label(field)}. Add an entry to "
         "SCALAR_MAP or exclude this field via Meta.exclude.",
     )
@@ -471,12 +487,7 @@ def convert_scalar(
     # reads ``effective_null`` so the override applies uniformly across the
     # ArrayField / HStoreField / choice / scalar branches without per-branch
     # override logic.
-    try:
-        effective_null = field.null if force_nullable is None else force_nullable
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Could not inspect nullability for {_field_label(field)}.",
-        ) from exc
+    effective_null = field.null if force_nullable is None else force_nullable
     # Sentinel-guarded ``ArrayField`` dispatch runs **before** the MRO walk
     # so a subclass-of-``models.Field`` test double does not accidentally
     # match a parent in ``SCALAR_MAP``. The recursive call into
@@ -492,7 +503,7 @@ def convert_scalar(
             raise ConfigurationError(
                 f"Nested ArrayField on {_field_label(field)} is not supported.",
             )
-        if _field_has_choices(field):
+        if field.choices:
             raise ConfigurationError(
                 f"ArrayField on {_field_label(field)} declares choices on the outer "
                 f"field; outer-array choices are ambiguous at the GraphQL boundary. Declare choices "
@@ -505,8 +516,8 @@ def convert_scalar(
     # posture: outer-``choices`` rejection (HStore stores
     # ``dict[str, str | None]`` with no enum-able GraphQL shape), then
     # return ``strawberry.scalars.JSON`` widened on ``effective_null``.
-    if _HSTORE_FIELD_CLS is not None and isinstance(field, _HSTORE_FIELD_CLS):
-        if _field_has_choices(field):
+    if _HSTORE_FIELD_CLS is not None and truth.is_instance(field, _HSTORE_FIELD_CLS):
+        if field.choices:
             raise ConfigurationError(
                 f"HStoreField on {_field_label(field)} declares choices; "
                 f"HStore stores a dict[str, str | None] with no enum-able shape at the "
@@ -520,7 +531,7 @@ def convert_scalar(
     # the MRO, so consumer subclasses of a supported field resolve to the
     # parent's scalar and an unsupported field raises ``ConfigurationError``.
     py_type: object = scalar_for_field(field)
-    if _field_has_choices(field):
+    if field.choices:
         py_type = convert_choices_to_enum(field, type_name)
     if effective_null:
         # A ``SCALAR_MAP`` value or generated enum is a runtime annotation.
@@ -535,13 +546,10 @@ def _field_output_type_for(field: "ModelField") -> type[DjangoFileType] | None:
     ``scalar_for_field`` walks ``SCALAR_MAP`` -- so an ``ImageField`` (and any
     consumer ``ImageField`` subclass) resolves to ``DjangoImageType`` before
     ``FileField`` is reached -- and returns ``None`` for a non-file column. The
-    single MRO-walk site shared by ``convert_field_output`` (this module) and
-    ``resolvers._attach_file_resolvers``, so the map walk is written once.
+    single MRO-walk site, so the map walk is written once.
     """
-    for klass in type(field).__mro__:
-        if klass in FIELD_OUTPUT_TYPE_MAP:
-            return FIELD_OUTPUT_TYPE_MAP[klass]
-    return None
+    output_type = _class_map_lookup(FIELD_OUTPUT_TYPE_MAP, field)
+    return None if output_type is _MISSING else output_type
 
 
 def convert_field_output(
@@ -736,21 +744,15 @@ def build_enum_from_choices(
     members: dict[str, object] = {}
     collisions: dict[str, list[object]] = {}
     for value, _label in normalized_pairs:
-        try:
-            member = _sanitize_member_name(value, enum_name=enum_name)
-        except BaseException as exc:
-            raise ConfigurationError(
-                f"{source_label} choice value {_safe_arg_repr(value)} cannot be converted to "
-                "a GraphQL enum member name.",
-            ) from exc
+        member = _sanitize_member_name(value, enum_name=enum_name)
         if member in members:
             collisions.setdefault(member, [members[member]]).append(value)
         else:
             members[member] = value
     if collisions:
         details = ", ".join(
-            f"{_safe_arg_repr(member)} from values "
-            f"[{', '.join(sorted(_safe_arg_repr(value) for value in vals))}]"
+            f"{truth.render(member)} from values "
+            f"[{', '.join(sorted(truth.render(value) for value in vals))}]"
             for member, vals in sorted(collisions.items())
         )
         raise ConfigurationError(
@@ -773,29 +775,30 @@ def _is_choice_group(label: object) -> TypeGuard[list[object] | tuple[object, ..
     load-bearing distinction: in the grouped form the first slot is the human-readable group
     name (a string), so testing it produces a false negative.
     """
-    return isinstance(label, (list, tuple))
+    return issubclass(truth.class_of(label), (list, tuple))
 
 
 def _unpack_choice_entry(entry: object, *, source_label: str) -> tuple[object, object]:
     """Return one choice entry as its ``(value, label)`` pair, refusing a malformed entry."""
-    if isinstance(entry, (str, bytes)):
+    malformed = truth.is_instance(entry, str) or truth.is_instance(entry, bytes)
+    value: object = None
+    label: object = None
+    if not malformed:
+        if is_iterable(entry):
+            # Two-name unpacking documents exactly these two failures: an
+            # iterable whose ``__iter__`` yields no iterator (``TypeError``) and
+            # a wrong-length entry (``ValueError``).
+            try:
+                value, label = entry
+            except (TypeError, ValueError):
+                malformed = True
+        else:
+            malformed = True
+    if malformed:
         raise ConfigurationError(
-            f"{source_label} declares a malformed choice {_safe_arg_repr(entry)}; "
+            f"{source_label} declares a malformed choice {truth.render(entry)}; "
             "choices must be a flat sequence of (value, label) pairs.",
         )
-    if not is_iterable(entry):
-        raise ConfigurationError(
-            f"{source_label} declares a malformed choice {_safe_arg_repr(entry)}; "
-            "choices must be a flat sequence of (value, label) pairs.",
-        )
-    try:
-        # A choice entry is consumer-declared, so unpacking it IS the pair check.
-        value, label = entry
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"{source_label} declares a malformed choice {_safe_arg_repr(entry)}; "
-            "choices must be a flat sequence of (value, label) pairs.",
-        ) from exc
     return value, label
 
 
@@ -807,8 +810,8 @@ def _normalize_choice_pairs(
 ) -> list[tuple[object, object]]:
     """Return a choice sequence as flat ``(value, label)`` pairs, rejecting every malformed form.
 
-    Steps 1 and 2 of ``build_enum_from_choices`` (unreadable / empty sequence, a malformed entry,
-    Django's grouped-choices form), shared with ``choice_column_values`` so a column's listed
+    Steps 1 and 2 of ``build_enum_from_choices`` (an empty sequence, a malformed entry, Django's
+    grouped-choices form), shared with ``choice_column_values`` so a column's listed
     values are read through the same checks, with the same messages, as its enum.
 
     ``flatten_groups`` answers "which values does the column list?" rather than "can the read
@@ -823,13 +826,7 @@ def _normalize_choice_pairs(
     ``BLANK`` member where it admits ``""``. The test is identity, so a declared ``""`` and an
     ``IntegerChoices`` ``0`` stay. A sequence holding nothing but such pairs is empty.
     """
-    try:
-        pairs = tuple(choice_pairs)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"{source_label} declares choices but the sequence could not be read; choices must be "
-            "a non-empty flat sequence of (value, label) pairs.",
-        ) from exc
+    pairs = tuple(choice_pairs)
     normalized_pairs: list[tuple[object, object]] = []
     for entry in pairs:
         value, label = _unpack_choice_entry(entry, source_label=source_label)
@@ -854,7 +851,7 @@ def _normalize_choice_pairs(
     if not value_pairs:
         only_empty = (
             ", holding only the empty option "
-            f"{', '.join(_safe_arg_repr(label) for label in empty_labels)} (a None value labels "
+            f"{', '.join(truth.render(label) for label in empty_labels)} (a None value labels "
             "the empty option and is never a member)"
             if empty_labels
             else ""
@@ -873,7 +870,7 @@ def _insert_blank_pair(
 ) -> None:
     """Prepend ``("", "")`` when ``include_blank`` is set and no declared value is ``""``."""
     if include_blank and not any(
-        isinstance(value, str) and value == "" for value, _label in normalized_pairs
+        truth.is_instance(value, str) and value == "" for value, _label in normalized_pairs
     ):
         normalized_pairs.insert(0, ("", ""))
 
@@ -903,14 +900,8 @@ def choice_column_pairs(field: "ConcreteField") -> list[tuple[object, object]]:
     its own enum through ``build_enum_from_choices``
     (``forms/inputs.py::_form_choice_annotation``).
     """
-    try:
-        choices = field.choices
-        include_blank = _column_admits_empty_string(field)
-        choice_source = choices or []
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Could not inspect choices for {_field_label(field)}.",
-        ) from exc
+    include_blank = _column_admits_empty_string(field)
+    choice_source = field.choices or []
     pairs = _normalize_choice_pairs(
         choice_source,
         source_label=_field_label(field),
@@ -935,13 +926,7 @@ def choice_column_is_grouped(field: "ConcreteField") -> bool:
     An entry is a group when its second slot holds the group's inner pairs (``_is_choice_group``);
     a malformed entry is no group here and is refused by whichever check reads it next.
     """
-    entries: tuple[object, ...]
-    try:
-        entries = tuple(field.choices or [])
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Could not inspect choices for {_field_label(field)}.",
-        ) from exc
+    entries: tuple[object, ...] = tuple(field.choices or [])
     return any(
         is_list_or_tuple(entry)
         and len(entry) == _CHOICE_ENTRY_LENGTH
@@ -973,32 +958,15 @@ def convert_choices_to_enum(field: "ConcreteField", type_name: str) -> type[Enum
             ``build_enum_from_choices``).
 
     """
-    try:
-        model = field.model
-        field_name = field.name
-        choices = field.choices
-        include_blank = _column_admits_empty_string(field)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Could not inspect choices for {_field_label(field)}.",
-        ) from exc
-
+    model = field.model
+    field_name = field.name
     cached = registry.get_enum(model, field_name)
     if cached is not None:
         return cached
 
-    try:
-        enum_name = f"{type_name}{pascal_case(field_name)}Enum"
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Could not derive an enum name for {_field_label(field)}.",
-        ) from exc
-    try:
-        choice_source = choices or []
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Could not inspect choices for {_field_label(field)}.",
-        ) from exc
+    enum_name = f"{type_name}{pascal_case(field_name)}Enum"
+    choice_source = field.choices or []
+    include_blank = _column_admits_empty_string(field)
     enum_cls = build_enum_from_choices(
         choice_source,
         enum_name,

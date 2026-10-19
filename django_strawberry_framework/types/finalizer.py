@@ -23,9 +23,9 @@ decoration touches a consumer-facing class:
   Relay interface expects. ``_synthesize_relation_connections`` then attaches
   the ``<field>_connection`` siblings for eligible many-side relations per
   ``Meta.relation_shapes`` (spec-032 Decision 6) before the sidecar binding
-  runs. ``_bind_filtersets`` then runs four ordered
-  subpasses (bind owners, expand filtersets, materialize input classes,
-  reject orphan ``filter_input_type`` references) per spec-027 Decision 6
+  runs. ``_bind_filtersets`` then runs ordered subpasses (bind owners,
+  expand filtersets, reject orphan ``filter_input_type`` references,
+  materialize input classes) per spec-027 Decision 6
   - every subpass MUST complete across all wired types
   before the next subpass starts so cross-filterset references resolve
   against bound owners regardless of registration order. Runs before
@@ -58,13 +58,7 @@ from strawberry import relay
 from strawberry.types.field import StrawberryField
 from strawberry.utils.str_converters import to_camel_case
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_attr,
-    _safe_class_name,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.keyset import validate_cursor_field_columns
 from django_strawberry_framework.optimizer import logger
 from django_strawberry_framework.registry import (
@@ -72,9 +66,10 @@ from django_strawberry_framework.registry import (
     iter_subsystem_clears,
     registry,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
-    class_dict,
     list_of,
+    optional_instance,
     read_attr,
     require_instance,
 )
@@ -84,6 +79,7 @@ from django_strawberry_framework.utils.typing import object_result
 
 from .base import DEFAULT_RELATION_SHAPE
 from .converters import resolved_relation_annotation
+from .definition import DjangoTypeDefinition
 from .relay import (
     _accepts_model_label_decode,
     _check_composite_pk_for_relay_node,
@@ -100,16 +96,18 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from django.db import models
+    from django.db.models.options import Options
     from strawberry.types.fields.resolver import StrawberryResolver
 
+    from django_strawberry_framework.filters.base import RelatedFilter
     from django_strawberry_framework.filters.sets import FilterSet
     from django_strawberry_framework.optimizer.field_meta import FieldMeta
+    from django_strawberry_framework.orders.base import RelatedOrder
     from django_strawberry_framework.orders.sets import OrderSet
     from django_strawberry_framework.utils.inputs import GeneratedInputArgumentsFactory
     from django_strawberry_framework.utils.typing import ModelField
 
     from .base import DjangoType
-    from .definition import DjangoTypeDefinition
     from .relations import PendingRelation
 
 # The sidecar family one phase-2.5 binding pass runs over: every hook in one
@@ -117,66 +115,23 @@ if TYPE_CHECKING:
 _SetT = TypeVar("_SetT", bound="type[FilterSet | OrderSet]")
 
 
-def _safe_qualified_class_name(value: object) -> str:
-    """Return ``module.qualname`` without trusting consumer class metadata."""
-    module = _safe_attr(value, "__module__")
-    if isinstance(module, str):
-        try:
-            module_label = str(module)
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            module_label = _safe_type_name(value)
-    else:
-        module_label = _safe_arg_repr(module)
-    qualified = _safe_class_name(value, qualified=True)
-    return f"{module_label}.{qualified}" if module_label else qualified
-
-
-def _safe_field_label(value: object) -> str:
-    """Render a field label plainly when it is a normal string."""
-    if isinstance(value, str):
-        try:
-            return str(value)
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            return _safe_type_name(value)
-    return _safe_arg_repr(value)
-
-
-def _safe_str(value: object) -> str:
-    """Render ``str(value)`` without allowing hostile diagnostics to escape."""
-    try:
-        return str(value)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return _safe_arg_repr(value)
-
-
 def _annotation_names(type_cls: type[DjangoType]) -> tuple[str, ...]:
-    """Snapshot and validate a type's annotation keys before GraphQL conversion."""
-    try:
-        annotations = type_cls.__annotations__
-        # A metaclass can inject non-string keys into a consumer class's annotations.
-        names = tuple(list_of(annotations))
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"Cannot finalize {_safe_class_name(type_cls)}: its annotations could not be read. "
-            f"{_safe_type_name(exc)}.",
-        ) from exc
-    invalid = next((name for name in names if not isinstance(name, str)), None)
+    """Snapshot and validate a type's annotation keys before GraphQL conversion.
+
+    A key is accepted by its real type (``str`` or a subclass) and copied to an
+    exact ``str`` through the base slot, so a subclass's own dunders never run
+    while the surface is built.
+    """
+    # A metaclass can inject non-string keys into a consumer class's annotations, which
+    # typeshed types as string-keyed, so each key is read as the ``object`` it may be.
+    names = tuple(list_of(type_cls.__annotations__))
+    invalid = next((name for name in names if not truth.is_instance(name, str)), None)
     if invalid is not None:
         raise ConfigurationError(
-            f"Cannot finalize {_safe_class_name(type_cls)}: annotation keys must be field-name "
-            f"strings; got {_safe_arg_repr(invalid)}.",
+            f"Cannot finalize {truth.name(type_cls)}: annotation keys must be field-name "
+            f"strings; got {truth.render(invalid)}.",
         )
-    normalized: list[str] = []
-    for name in names:
-        try:
-            normalized.append(str(name))
-        except BaseException as exc:  # noqa: PERF203
-            raise ConfigurationError(
-                f"Cannot finalize {_safe_class_name(type_cls)}: annotation key "
-                f"{_safe_arg_repr(name)} could not be rendered as a field name. "
-                f"{_safe_type_name(exc)}.",
-            ) from exc
-    return tuple(normalized)
+    return tuple(truth.text(name) for name in names)
 
 
 def _format_unresolved_targets_error(unresolved: list[PendingRelation]) -> str:
@@ -189,9 +144,9 @@ def _format_unresolved_targets_error(unresolved: list[PendingRelation]) -> str:
     are renamed or supplemented, update the formatters together.
     """
     lines = [
-        f"  - {_safe_class_name(pending.source_model)}."
-        f"{_safe_field_label(pending.field_name)} -> "
-        f"{_safe_class_name(pending.related_model)} (no registered DjangoType)"
+        f"  - {truth.name(pending.source_model)}."
+        f"{truth.text(pending.field_name)} -> "
+        f"{truth.name(pending.related_model)} (no registered DjangoType)"
         for pending in unresolved
     ]
     body = "\n".join(lines)
@@ -216,7 +171,7 @@ def _format_ambiguity_error(
     spec-018 #"test_finalize_ambiguity_error_message_contains_actionable_fix").
     """
     parts = [
-        f"  {_safe_class_name(model)}: {', '.join(_safe_class_name(t) for t in types)}"
+        f"  {truth.name(model)}: {', '.join(truth.name(t) for t in types)}"
         for model, types in offenders
     ]
     body = "\n".join(parts)
@@ -257,7 +212,7 @@ def _audit_primary_ambiguity(multi_type_models: tuple[type[models.Model], ...]) 
     ]
     if not offenders:
         return
-    offenders.sort(key=lambda entry: _safe_class_name(entry[0]))
+    offenders.sort(key=lambda entry: truth.name(entry[0]))
     raise ConfigurationError(_format_ambiguity_error(offenders))
 
 
@@ -279,11 +234,13 @@ def _field_surface_names(type_cls: type[DjangoType]) -> dict[str, str]:
     over default camel-casing.
     """
     inherited_surface: dict[str, str] = {}
-    for base in reversed(type_cls.__mro__[1:]):
-        definition = read_attr(base, "__strawberry_definition__", None)
+    for base in reversed(truth.mro(type_cls)[1:]):
+        definition = truth.static_attr(base, "__strawberry_definition__", None)
         if definition is None:
             continue
         for field in list_of(read_attr(definition, "fields")):
+            # Strawberry declares ``python_name`` as ``str``, but its getter answers ``None``
+            # for a field no name has been assigned to.
             python_name = read_attr(field, "python_name")
             graphql_name = read_attr(field, "graphql_name")
             label = python_name if python_name is not None else graphql_name
@@ -298,8 +255,8 @@ def _field_surface_names(type_cls: type[DjangoType]) -> dict[str, str]:
     for name in _annotation_names(type_cls):
         own_surface[name] = to_camel_case(name)
 
-    for name, value in class_dict(type_cls).items():
-        if not isinstance(value, StrawberryField):
+    for name, value in truth.class_dict(type_cls).items():
+        if not truth.is_instance(value, StrawberryField):
             continue
         own_surface[name] = (
             str(value.graphql_name) if value.graphql_name is not None else to_camel_case(name)
@@ -345,7 +302,7 @@ def _audit_field_surface(type_cls: type[DjangoType], definition: DjangoTypeDefin
     if not names:
         raise ConfigurationError(
             f"{definition.graphql_type_name}: DjangoType over "
-            f"{_safe_class_name(definition.model)} has no GraphQL fields. Meta.fields is empty "
+            f"{truth.name(definition.model)} has no GraphQL fields. Meta.fields is empty "
             "(or Meta.exclude removes every column) and no field is consumer-authored; "
             "declare at least one field.",
         )
@@ -381,7 +338,7 @@ def _format_model_label_routing_error(
     ``type`` strategy.
     """
     parts = [
-        f"  {_safe_class_name(model)}: {_safe_class_name(emitter)} emits model-label GlobalIDs but the "
+        f"  {truth.name(model)}: {truth.name(emitter)} emits model-label GlobalIDs but the "
         f"primary's strategy is {primary_strategy!r}"
         for model, emitter, primary_strategy in offenders
     ]
@@ -445,15 +402,15 @@ def _audit_model_label_routing(multi_type_models: tuple[type[models.Model], ...]
         primary_definition = registry.get_definition(primary)
         if primary_definition is None:
             raise ConfigurationError(
-                f"Cannot finalize {_safe_class_name(model)}: its primary DjangoType "
-                f"{_safe_class_name(primary)} has no registered DjangoTypeDefinition.",
+                f"Cannot finalize {truth.name(model)}: its primary DjangoType "
+                f"{truth.name(primary)} has no registered DjangoTypeDefinition.",
             )
         primary_strategy = primary_definition.effective_globalid_strategy
         if not _accepts_model_label_decode(primary_strategy):
             offenders.append((model, emitter, primary_strategy))
     if not offenders:
         return
-    offenders.sort(key=lambda entry: _safe_class_name(entry[0]))
+    offenders.sort(key=lambda entry: truth.name(entry[0]))
     raise ConfigurationError(_format_model_label_routing_error(offenders))
 
 
@@ -469,8 +426,8 @@ def _first_model_label_emitter(model: type[models.Model]) -> type[DjangoType] | 
         definition = registry.get_definition(type_cls)
         if definition is None:
             raise ConfigurationError(
-                f"Cannot finalize {_safe_class_name(model)}: registered DjangoType "
-                f"{_safe_class_name(type_cls)} has no DjangoTypeDefinition.",
+                f"Cannot finalize {truth.name(model)}: registered DjangoType "
+                f"{truth.name(type_cls)} has no DjangoTypeDefinition.",
             )
         strategy = definition.effective_globalid_strategy
         if _emits_model_label(strategy):
@@ -518,24 +475,20 @@ def _warn_model_label_secondary_collapse(
         )
         if not secondaries:
             continue
-        secondary_names = ", ".join(sorted(_safe_class_name(type_cls) for type_cls in secondaries))
-        try:
-            app_label = _safe_str(model._meta.app_label)
-            model_name = _safe_str(model._meta.model_name)
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            app_label = _safe_class_name(model)
-            model_name = _safe_class_name(model)
+        secondary_names = ", ".join(sorted(truth.name(type_cls) for type_cls in secondaries))
+        # A model class's ``_meta`` is its ``Options``.
+        model_meta = cast("Options[models.Model]", truth.static_attr(model, "_meta"))
         logger.warning(
             "GlobalID identity collapse on model %s.%s: %s emit model-anchored GlobalIDs "
             "that decode to the primary type %s, so node(id:)/nodes(ids:) refetch them as %s "
             "and their distinct identity / get_queryset scope is lost. Set "
             'Meta.globalid_strategy = "type" on the secondary type(s) for disjoint identity '
             "scopes (spec-031 Decision 8).",
-            app_label,
-            model_name,
+            model_meta.app_label,
+            model_meta.model_name,
             secondary_names,
-            _safe_class_name(primary),
-            _safe_class_name(primary),
+            truth.name(primary),
+            truth.name(primary),
         )
 
 
@@ -558,7 +511,7 @@ def _suppress_relation_list_form(type_cls: type[DjangoType], name: str) -> None:
     must not ``KeyError`` / ``AttributeError`` on the second pass.
     """
     _ = type_cls.__annotations__.pop(name, None)
-    if name in type_cls.__dict__:
+    if name in truth.class_dict(type_cls):
         delattr(type_cls, name)
 
 
@@ -611,7 +564,7 @@ def _register_relation_connection_teardown(
     generated_resolver = cast("StrawberryResolver[object]", field_obj.base_resolver).wrapped_func  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
     def teardown() -> None:
-        current = class_dict(type_cls).get(generated, _MISSING_CLASS_MEMBER)
+        current = truth.class_dict(type_cls).get(generated, _MISSING_CLASS_MEMBER)
         if current is field_obj or current is generated_resolver:
             delattr(type_cls, generated)
 
@@ -619,11 +572,12 @@ def _register_relation_connection_teardown(
             _ = definition.relation_connections.pop(generated, None)
             if not definition.relation_connections:
                 definition.relation_connections = None
-        # Raw ``__dict__`` on purpose: the three branches below key off the entry
+        # The class's own namespace on purpose: the three branches below key off the entry
         # being ABSENT (3.14+) and off dict IDENTITY (<= 3.13). ``inspect.get_annotations``
         # never returns ``None`` and hands back a fresh dict, collapsing both.
-        current_annotations: dict[str, object] | None = type_cls.__dict__.get(  # noqa: RUF063
-            "__annotations__",
+        current_annotations = cast(
+            "dict[str, object] | None",
+            truth.class_dict(type_cls).get("__annotations__"),
         )
         if current_annotations is None:
             # Python 3.14+ (PEP 649): the class ``__dict__`` never carries a
@@ -652,7 +606,10 @@ def _register_relation_connection_teardown(
 
         if shape != "connection":
             return
-        if relation_name not in type_cls.__dict__ and list_resolver is not _MISSING_CLASS_MEMBER:
+        if (
+            relation_name not in truth.class_dict(type_cls)
+            and list_resolver is not _MISSING_CLASS_MEMBER
+        ):
             setattr(type_cls, relation_name, list_resolver)
 
     registry.register_type_teardown(type_cls, teardown)
@@ -740,13 +697,13 @@ def _synthesize_relation_connections() -> None:
             if target_type is None or not implements_relay_node(target_type):
                 if shapes.get(name) in ("connection", "both"):
                     target_label = (
-                        _safe_class_name(target_type)
+                        truth.name(target_type)
                         if target_type is not None
-                        else _safe_class_name(field.related_model)
+                        else truth.name(field.related_model)
                     )
                     raise ConfigurationError(
-                        f"{_safe_class_name(type_cls)}.Meta.relation_shapes["
-                        f"{_safe_arg_repr(name)}] explicitly "
+                        f"{truth.name(type_cls)}.Meta.relation_shapes["
+                        f"{truth.render(name)}] explicitly "
                         f"requests a connection, but the relation's target type "
                         f"{target_label} is not Relay-Node-shaped. Add `relay.Node` to the "
                         f"target's `Meta.interfaces`, or narrow the entry to "
@@ -763,21 +720,21 @@ def _synthesize_relation_connections() -> None:
             # the REGISTRY rather than from the target class: the connection
             # class this field publishes, the sidecar arguments its signature
             # carries, and the model its pipeline seeds and seals against all
-            # come from that one object, and a stateful target metaclass is
-            # never asked. A registered Relay target always has a registered
+            # come from that one object, and the target class is never asked.
+            # A registered Relay target always has a registered
             # definition; its absence is a framework defect, not a consumer
             # error, so the miss fails loudly rather than degrading the shape.
             target_definition = registry.get_definition(target_type)
             if target_definition is None:
                 raise ConfigurationError(
-                    f"{_safe_class_name(type_cls)}.{name} resolves to registered type "
-                    f"{_safe_class_name(target_type)}, which carries no registered "
+                    f"{truth.name(type_cls)}.{name} resolves to registered type "
+                    f"{truth.name(target_type)}, which carries no registered "
                     f"DjangoTypeDefinition; the synthesized relation connection cannot be "
                     f"built without one.",
                 )
             generated = f"{name}_connection"
-            attached = type_cls.__dict__.get(generated)
-            if getattr(attached, _SYNTHESIZED_RELATION_CONNECTION_MARKER, False):
+            attached = truth.class_dict(type_cls).get(generated)
+            if truth.static_attr(attached, _SYNTHESIZED_RELATION_CONNECTION_MARKER, default=False):
                 # Attached by a prior partial finalize. A rerun's Phase 2
                 # re-attaches the generated list resolver for this relation, so
                 # for a ``"connection"`` shape the list form must be removed
@@ -803,17 +760,17 @@ def _synthesize_relation_connections() -> None:
                 if name == generated or graphql_name == camel
             )
             if colliding:
-                collides_with = ", ".join(_safe_arg_repr(n) for n in colliding)
+                collides_with = ", ".join(truth.render(n) for n in colliding)
                 raise ConfigurationError(
-                    f"{_safe_class_name(type_cls)}: the synthesized relation connection "
-                    f"{_safe_arg_repr(generated)} collides with existing field(s) "
+                    f"{truth.name(type_cls)}: the synthesized relation connection "
+                    f"{truth.render(generated)} collides with existing field(s) "
                     f"{collides_with} on the GraphQL surface "
-                    f"({_safe_arg_repr(camel)} under default camel-casing). Rename the colliding attribute, "
+                    f"({truth.render(camel)} under default camel-casing). Rename the colliding attribute, "
                     f'or opt out with relation_shapes = {{"{name}": "list"}}.',
                 )
             annotations = type_cls.__annotations__
             annotations_snapshot = dict(annotations)
-            list_resolver = class_dict(type_cls).get(name, _MISSING_CLASS_MEMBER)
+            list_resolver = truth.class_dict(type_cls).get(name, _MISSING_CLASS_MEMBER)
             # Strawberry types the resolver-form ``relay.connection`` ``-> Any``; it builds the
             # connection's ``StrawberryField``.
             connection_field = object_result(
@@ -978,16 +935,15 @@ def finalize_django_types() -> None:
             continue
         if definition is None:
             raise ConfigurationError(
-                f"Cannot finalize {_safe_class_name(pending.source_type)}: pending relation "
-                f"{_safe_field_label(pending.field_name)} has no DjangoTypeDefinition.",
+                f"Cannot finalize {truth.name(pending.source_type)}: pending relation "
+                f"{truth.text(pending.field_name)} has no DjangoTypeDefinition.",
             )
         try:
             field_meta = definition.field_map[pending.field_name]
-        except BaseException as exc:
+        except KeyError as exc:
             raise ConfigurationError(
-                f"Cannot finalize {_safe_class_name(pending.source_type)}: pending relation "
-                f"{_safe_field_label(pending.field_name)} has invalid field metadata. "
-                f"{_safe_type_name(exc)}.",
+                f"Cannot finalize {truth.name(pending.source_type)}: pending relation "
+                f"{truth.text(pending.field_name)} has no field metadata.",
             ) from exc
         resolved.append(
             (pending, target_type, field_meta),
@@ -998,18 +954,11 @@ def finalize_django_types() -> None:
 
     resolved_pending = [*consumer_authored]
     for pending, target_type, field_meta in resolved:
-        try:
-            pending.source_type.__annotations__[pending.field_name] = resolved_relation_annotation(
-                pending.django_field,
-                target_type,
-                field_meta=field_meta,
-            )
-        except BaseException as exc:
-            raise ConfigurationError(
-                f"Cannot finalize {_safe_class_name(pending.source_type)}: relation annotation "
-                f"{_safe_field_label(pending.field_name)} could not be rewritten. "
-                f"{_safe_type_name(exc)}.",
-            ) from exc
+        pending.source_type.__annotations__[pending.field_name] = resolved_relation_annotation(
+            pending.django_field,
+            target_type,
+            field_meta=field_meta,
+        )
         resolved_pending.append(pending)
     registry.discard_pending(resolved_pending)
 
@@ -1069,7 +1018,7 @@ def finalize_django_types() -> None:
             # violation raises before Phase 3 flips ``finalized`` (pure
             # validation - idempotent under the partial-finalize rerun).
             validate_cursor_field_columns(
-                _safe_class_name(type_cls),
+                truth.name(type_cls),
                 definition.model,
                 definition.cursor_field,
             )
@@ -1274,8 +1223,10 @@ def _bind_set_owner_common(
     (``utils/querysets.py::relation_target_type``).
     """
     set_model = get_model(set_cls)
-    if set_model is not None and (
-        not isinstance(set_model, type) or not issubclass(definition.model, set_model)
+    # ``is_subclass`` matches ``set_model`` by identity in the real MRO, so no
+    # metaclass ``__subclasscheck__`` runs
+    if set_model is not None and not (
+        truth.is_type(set_model) and truth.is_subclass(definition.model, set_model)
     ):
         # A non-class ``set_model`` (e.g. the Django lazy-ref string idiom on
         # the order side, which reads the RAW ``Meta.model`` with no
@@ -1285,7 +1236,11 @@ def _bind_set_owner_common(
     # The class's OWN slot: a subclass inherits its base's binding through
     # attribute lookup, but it is a separate set wired to its own owner (the
     # multi-owner refusal's remedy), so a base's owner is never its previous one.
-    previous: DjangoTypeDefinition | None = set_cls.__dict__.get("_owner_definition")
+    # ``_owner_definition`` is the finalizer-bound ``DjangoTypeDefinition`` slot.
+    previous = optional_instance(
+        truth.class_dict(set_cls).get("_owner_definition"),
+        DjangoTypeDefinition,
+    )
     if previous is None:
         set_cls._owner_definition = definition
         return
@@ -1293,7 +1248,7 @@ def _bind_set_owner_common(
         return
     before_second_owner_check(set_cls, previous, definition)
     # ``related_filters`` / ``related_orders``: the set metaclass's name-keyed declarations.
-    related: Mapping[str, object] = getattr(set_cls, related_attr, {}) or {}
+    related = cast("Mapping[str, object]", truth.static_attr(set_cls, related_attr, {}) or {})
     for field_name in related:
         prev_target = previous.related_target_for(field_name)
         new_target = definition.related_target_for(field_name)
@@ -1571,20 +1526,14 @@ def _format_owner_target_mismatch_error(
     words via ``functools.partial``).
     """
     prev_name = (
-        _safe_class_name(prev_target[0].origin, qualified=True)
-        if prev_target is not None
-        else "<unresolved>"
+        truth.qualname(prev_target[0].origin) if prev_target is not None else "<unresolved>"
     )
-    new_name = (
-        _safe_class_name(new_target[0].origin, qualified=True)
-        if new_target is not None
-        else "<unresolved>"
-    )
+    new_name = truth.qualname(new_target[0].origin) if new_target is not None else "<unresolved>"
     return (
-        f"{family} {_safe_class_name(set_cls, qualified=True)} cannot bind to multiple owners with "
-        f"diverging targets: {_safe_class_name(previous.origin, qualified=True)} resolves "
-        f"{_safe_arg_repr(field_name)} to {prev_name}, but "
-        f"{_safe_class_name(new.origin, qualified=True)} resolves it "
+        f"{family} {truth.qualname(set_cls)} cannot bind to multiple owners with "
+        f"diverging targets: {truth.qualname(previous.origin)} resolves "
+        f"{truth.render(field_name)} to {prev_name}, but "
+        f"{truth.qualname(new.origin)} resolves it "
         f"to {new_name}. Declare separate {family} subclasses for the diverging "
         f"owners{suffix}."
     )
@@ -1603,12 +1552,12 @@ def _format_owner_pk_mismatch_error(
     Grep-stable alongside the other ``_format_*`` finalize-error helpers.
     """
     return (
-        f"FilterSet {_safe_class_name(filterset_cls, qualified=True)} cannot bind to multiple owners with "
+        f"FilterSet {truth.qualname(filterset_cls)} cannot bind to multiple owners with "
         f"diverging own-primary-key Relay identity: "
-        f"{_safe_class_name(previous.origin, qualified=True)} "
+        f"{truth.qualname(previous.origin)} "
         f"(relay_node={implements_relay_node(previous.origin)}, "
-        f"type_name={_safe_arg_repr(previous.graphql_type_name)}) vs "
-        f"{_safe_class_name(new.origin, qualified=True)} "
+        f"type_name={truth.render(previous.graphql_type_name)}) vs "
+        f"{truth.qualname(new.origin)} "
         f"(relay_node={implements_relay_node(new.origin)}, "
         f"type_name={new.graphql_type_name!r}). The filterset's own `id` filter "
         "resolves to a GlobalID typed to its owner, so owners diverging on "
@@ -1636,10 +1585,10 @@ def _format_owner_get_queryset_mismatch_error(
     """
     noun = family.lower()
     return (
-        f"{family} {_safe_class_name(set_cls, qualified=True)} cannot bind to multiple owners when "
+        f"{family} {truth.qualname(set_cls)} cannot bind to multiple owners when "
         f"either scopes get_queryset visibility: "
-        f"{_safe_class_name(previous.origin, qualified=True)} and/or "
-        f"{_safe_class_name(new.origin, qualified=True)} defines a custom get_queryset. "
+        f"{truth.qualname(previous.origin)} and/or "
+        f"{truth.qualname(new.origin)} defines a custom get_queryset. "
         f"When this {noun} is used as a {related} target, or a path re-enters its "
         "table, its related-row visibility is scoped through the bound owner's "
         "get_queryset, but only the first binding is stored - so it would scope by "
@@ -1666,11 +1615,11 @@ def _format_owner_table_mismatch_error(
     """
     noun = family.lower()
     return (
-        f"{family} {_safe_class_name(set_cls, qualified=True)} cannot bind to multiple owners "
-        f"over different tables: {_safe_class_name(previous.origin, qualified=True)} "
-        f"(model {_safe_class_name(previous.model)}) and "
-        f"{_safe_class_name(new.origin, qualified=True)} "
-        f"(model {_safe_class_name(new.model)}). A path re-entering this {noun}'s "
+        f"{family} {truth.qualname(set_cls)} cannot bind to multiple owners "
+        f"over different tables: {truth.qualname(previous.origin)} "
+        f"(model {truth.name(previous.model)}) and "
+        f"{truth.qualname(new.origin)} "
+        f"(model {truth.name(new.model)}). A path re-entering this {noun}'s "
         "table reads the type it is bound to, but only the first binding is stored, "
         "and a multi-table-inheritance parent and child are different tables - so "
         "the second owner would read re-entered rows through the first owner's "
@@ -1701,24 +1650,24 @@ def _format_owner_set_model_mismatch_error(
     """
     # Class values render through the class-name renderer; a non-class
     # ``Meta.model`` (the string lazy-ref idiom on the raw-Meta order side,
-    # or any other non-class value) renders through the guarded repr so the
+    # or any other non-class value) renders through ``truth.render`` so the
     # message names the declared VALUE, not the value's type name. The
     # ``<unset>`` label keeps the None-shape contract for a defensive call.
     set_model_name = (
-        (_safe_class_name(set_model) if isinstance(set_model, type) else _safe_arg_repr(set_model))
+        (truth.name(set_model) if truth.is_type(set_model) else truth.render(set_model))
         if set_model is not None
         else "<unset>"
     )
     noun = family.lower()
     return (
-        f"{family} {_safe_class_name(set_cls, qualified=True)} is declared as the {meta_key} "
-        f"of {_safe_class_name(owner.origin, qualified=True)} "
-        f"(model {_safe_class_name(owner.model)}), but its own "
+        f"{family} {truth.qualname(set_cls)} is declared as the {meta_key} "
+        f"of {truth.qualname(owner.origin)} "
+        f"(model {truth.name(owner.model)}), but its own "
         f"Meta.model is {set_model_name}. {article} {noun}'s Meta.model must be its "
         f"owner's model{dash}or a base the owner derives from{dash}so the "
         f"{noun}'s {purpose} resolve against the owner's queryset. Key "
-        f"{_safe_class_name(set_cls, qualified=True)} on "
-        f"{_safe_class_name(owner.model)}, or attach it to a "
+        f"{truth.qualname(set_cls)} on "
+        f"{truth.name(owner.model)}, or attach it to a "
         f"{set_model_name} type."
     )
 
@@ -1770,11 +1719,11 @@ def _format_orphan_sets_error(
     if len(orphans) == 1:
         cls = orphans[0]
         return (
-            f"{family} '{_safe_class_name(cls)}' is referenced via {helper} but "
+            f"{family} '{truth.name(cls)}' is referenced via {helper} but "
             f"never assigned to a DjangoType via Meta.{meta_key}. Add "
-            f"'{meta_key} = {_safe_class_name(cls)}' to the relevant DjangoType's Meta."
+            f"'{meta_key} = {truth.name(cls)}' to the relevant DjangoType's Meta."
         )
-    lines = [f"  - {_safe_qualified_class_name(cls)}" for cls in orphans]
+    lines = [f"  - {truth.label(cls)}" for cls in orphans]
     body = "\n".join(lines)
     return (
         f"{family}s referenced via {helper} but not wired to any "
@@ -1796,16 +1745,12 @@ def _format_unregistered_related_target_error(
     runtime message raised by ``FilterSet._iter_visibility_steps`` for the
     same misconfiguration so the two surfaces read as one contract.
     """
-    child_model: object = getattr(getattr(child_filterset, "_meta", None), "model", None)
-    target_label = (
-        _safe_class_name(child_model, qualified=True)
-        if child_model is not None
-        else "<unresolved>"
-    )
+    child_model: object = truth.static_attr(truth.static_attr(child_filterset, "_meta"), "model")
+    target_label = truth.qualname(child_model) if child_model is not None else "<unresolved>"
     return (
         f"Cannot finalize Django types: FilterSet "
-        f"{_safe_class_name(filterset_cls, qualified=True)} declares RelatedFilter "
-        f"{_safe_arg_repr(field_name)} targeting {target_label}, but no "
+        f"{truth.qualname(filterset_cls)} declares RelatedFilter "
+        f"{truth.render(field_name)} targeting {target_label}, but no "
         f"DjangoType is registered for that model. The related branch's visibility "
         f"scoping runs the target type's get_queryset (spec-027 Decision 8 step 3); "
         f"without a registered target the branch would silently return unfiltered "
@@ -1839,7 +1784,7 @@ def _bind_orderset_owner(orderset_cls: type[OrderSet], definition: DjangoTypeDef
     _bind_set_owner_common(
         orderset_cls,
         definition,
-        get_model=lambda cls: getattr(getattr(cls, "Meta", None), "model", None),
+        get_model=lambda cls: truth.static_attr(truth.static_attr(cls, "Meta"), "model"),
         format_model_mismatch=_format_owner_orderset_model_mismatch_error,
         before_second_owner_check=_check_orderset_owner_axes,
         related_attr="related_orders",
@@ -1871,7 +1816,7 @@ def _format_owner_orderset_model_mismatch_error(
         owner,
         family="OrderSet",
         meta_key="orderset_class",
-        set_model=getattr(getattr(orderset_cls, "Meta", None), "model", None),
+        set_model=truth.static_attr(truth.static_attr(orderset_cls, "Meta"), "model"),
         article="An",
         dash=" -- ",
         purpose="order_by(...) lookups",
@@ -1882,7 +1827,7 @@ def _format_owner_orderset_model_mismatch_error(
 class _SidecarBindingSpec(Generic[_SetT]):
     """Per-family configuration for the shared phase-2.5 binding driver.
 
-    The ordered four-subpass binding skeleton (``_bind_sidecar_sets``) is shared
+    The ordered subpass skeleton (``_bind_sidecar_sets``) is shared
     by FilterSet and OrderSet; this carries the family
     differences. ``expand`` runs Layer-4 expansion for one set;
     ``post_expand_audit`` is the optional filter-only
@@ -1922,7 +1867,12 @@ def _expand_orderset(orderset_cls: type[OrderSet]) -> None:
     ``ConfigurationError`` with ``__cause__`` preserved here.
     """
     _ = orderset_cls.get_fields()
-    for related in orderset_cls.related_orders.values():
+    # The metaclass stores ``related_orders`` from ``collect_related_declarations``.
+    related_orders = cast(
+        "Mapping[str, RelatedOrder]",
+        truth.static_attr(orderset_cls, "related_orders", {}),
+    )
+    for related in related_orders.values():
         _ = related.orderset
 
 
@@ -1942,7 +1892,12 @@ def _audit_unregistered_related_filter_targets(wired: list[type[FilterSet]]) -> 
     pending_filtersets: list[type[FilterSet]] = list(wired)
     while pending_filtersets:
         filterset_cls = pending_filtersets.pop()
-        for field_name, related_filter in filterset_cls.related_filters.items():
+        # The metaclass stores ``related_filters`` from ``collect_related_declarations``.
+        related_filters = cast(
+            "Mapping[str, RelatedFilter]",
+            truth.static_attr(filterset_cls, "related_filters", {}) or {},
+        )
+        for field_name, related_filter in related_filters.items():
             child_filterset = related_filter.filterset
             if child_filterset is not None and child_filterset not in seen_filtersets:
                 seen_filtersets.add(child_filterset)
@@ -1967,24 +1922,29 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
 
     1. Bind every owner (``spec.bind_owner``) before any expansion runs.
     2. Expand every set (``spec.expand``); ``ImportError`` from an unresolved
-       lazy related target and any other exception rewrap as
-       ``ConfigurationError`` naming the offending set (uniform finalize-time
-       error shape). ``repr(exc)`` keeps the underlying error fully in the
-       consumer-visible message and ``from exc`` preserves ``__cause__``.
-    3. (Optional) ``spec.post_expand_audit`` -- the filter-only transitive
+       lazy related target rewraps as ``ConfigurationError`` naming the
+       offending set, ``from exc`` preserving ``__cause__``. Any other
+       exception is consumer behaviour (a ``get_filters`` / ``get_fields``
+       override, a lazy factory) and propagates unchanged.
+    2.5. (Optional) ``spec.post_expand_audit`` -- the filter-only transitive
        unregistered-``RelatedFilter``-target walk.
-    4. Orphan validation: helper-referenced sets not wired to any DjangoType
+    3. Orphan validation: helper-referenced sets not wired to any DjangoType
        raise via ``spec.format_orphans``. Runs BEFORE materialization so a
        failure leaves no half-materialized input classes in the namespace.
-    5. Materialize every built input class as a module global.
+    4. Materialize every built input class as a module global.
     """
     # Subpass 1: bind every owner before any expansion runs.
     wired: list[_SetT] = []
+    finalized_wired: list[_SetT] = []
     for _type_cls, definition in registry.iter_definitions():
-        if definition.finalized:
-            continue
         set_cls = spec.read_set(definition)
         if set_cls is None:
+            continue
+        if definition.finalized:
+            # Bound on the earlier pass: skip the re-bind, but keep the set
+            # in the orphan-compare population so a recover-in-place rerun
+            # does not flag it orphan.
+            finalized_wired.append(set_cls)
             continue
         spec.bind_owner(set_cls, definition)
         wired.append(set_cls)
@@ -1998,16 +1958,8 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
         except ImportError as exc:  # noqa: PERF203
             raise ConfigurationError(
                 f"Cannot finalize Django types: {spec.expand_label_noun} "
-                f"{_safe_class_name(set_cls, qualified=True)} references an unresolved "
-                f"{spec.related_noun} target. {_safe_str(exc)}",
-            ) from exc
-        except ConfigurationError:
-            raise
-        except Exception as exc:
-            raise ConfigurationError(
-                f"Cannot finalize Django types: {spec.expand_label_noun} "
-                f"{_safe_class_name(set_cls, qualified=True)} raised during expansion. "
-                f"{_safe_arg_repr(exc)}",
+                f"{truth.qualname(set_cls)} references an unresolved "
+                f"{spec.related_noun} target. {truth.text(exc)}",
             ) from exc
 
     # Subpass 2.5 (filter-only today): unregistered related-target audit.
@@ -2017,10 +1969,10 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
     # Subpass 3: orphan validation against the helper-tracked set. Runs BEFORE
     # materialization so a failure here doesn't leave half-materialized input
     # classes in the inputs-module namespace.
-    wired_set = set(wired)
+    wired_set = set(wired) | set(finalized_wired)
     orphans: list[_SetT] = sorted(
         spec.helper_ledger - wired_set,
-        key=_safe_qualified_class_name,
+        key=truth.label,
     )
     if orphans:
         raise ConfigurationError(spec.format_orphans(orphans))
@@ -2038,7 +1990,7 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
 
 
 def _bind_ordersets() -> None:
-    """Run the four ordered phase-2.5 subpasses for orderset binding.
+    """Run the ordered phase-2.5 subpasses for orderset binding.
 
     Subpass 1 -- bind every owner. Walks every wired definition and
     binds ``orderset_cls._owner_definition`` via
@@ -2052,9 +2004,7 @@ def _bind_ordersets() -> None:
     ``ImportError`` from
     ``LazyRelatedClassMixin.resolve_lazy_class`` is rewrapped as
     ``ConfigurationError`` with ``__cause__`` preserving the
-    original. Any other exception rewraps as ``ConfigurationError``
-    with ``repr(exc)`` keeping the original class + args in the
-    consumer-visible message (uniform finalize-time error shape).
+    original. Any other exception propagates unchanged.
 
     Subpass 3 -- orphan validation. Compares the OrderSets passed to
     ``order_input_type(...)`` (per Decision 11) against the set of
@@ -2159,8 +2109,8 @@ def _format_globalid_encode_only_filter_error(
     """Build the encode-only GlobalID-filter ConfigurationError message."""
     return (
         f"Cannot finalize Django types: filterset "
-        f"{_safe_class_name(filterset_cls, qualified=True)} declares "
-        f"GlobalID filter {_safe_arg_repr(field_name)} targeting {target.graphql_type_name}, whose "
+        f"{truth.qualname(filterset_cls)} declares "
+        f"GlobalID filter {truth.render(field_name)} targeting {target.graphql_type_name}, whose "
         f"globalid strategy is '{strategy}'. The '{strategy}' strategy is encode-only "
         f"(no decode path exists), so this filter input could never validly consume the "
         f"IDs its target emits. Remove the filter or give {target.graphql_type_name} a "
@@ -2186,7 +2136,7 @@ def _audit_filterset_subpass_2_5(wired: list[type[FilterSet]]) -> None:
 
 
 def _bind_filtersets() -> None:
-    """Run the four ordered phase-2.5 subpasses for filterset binding.
+    """Run the ordered phase-2.5 subpasses for filterset binding.
 
     Subpass 1 - bind every owner. Walks every wired definition and
     binds ``filterset_cls._owner_definition`` via

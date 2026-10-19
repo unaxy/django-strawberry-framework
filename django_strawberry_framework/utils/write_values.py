@@ -12,7 +12,8 @@ mutation resolver is not the utility module for the other write flavors):
 - ``decode_visible_relation`` - the visibility-on-every-branch single-relation
   decode spine (type-check -> visible object -> flavor projection);
 - ``decode_visible_relation_ids`` - the batched id-set compose (type-check each
-  id, then one visibility / existence ``pk__in`` query answering the stored keys);
+  id, batched NodeID mapping, then one visibility / existence ``pk__in`` query
+  answering the stored keys);
 - ``store_decoded`` / ``decoded_into`` / ``scalar_into`` / ``file_into`` /
   ``relation_into`` / ``decode_field_handlers`` - the SCALAR / RELATION / FILE
   store-into-dest vocabulary the write-flavor walks share;
@@ -27,8 +28,7 @@ from typing import TYPE_CHECKING, cast
 
 from strawberry import relay
 
-from django_strawberry_framework.exceptions import _safe_text
-
+from . import truth
 from ._narrowing import dict_items, enum_value, is_dict, is_list, list_iter, list_of
 from .errors import (
     FIELD_ERROR_CODE_INVALID,
@@ -53,8 +53,10 @@ if TYPE_CHECKING:
     from strawberry import Info
 
     from django_strawberry_framework.mutations.inputs import FieldError
+    from django_strawberry_framework.types.relay import _RelayDjangoType
 
     from .inputs import InputFieldSpec
+    from .typing import ModelField
 
     #: One kind handler: decode ``(spec, value)``, store it, and report a ``FieldError``.
     _FieldHandler: TypeAlias = Callable[[InputFieldSpec, object], FieldError | None]
@@ -128,7 +130,7 @@ def unencodable_text_error(field_name: str, value: object) -> FieldError | None:
                     [
                         entry
                         for key, item in dict_items(current)
-                        for entry in ((path, key), (join_error_path(path, _safe_text(key)), item))
+                        for entry in ((path, key), (join_error_path(path, truth.text(key)), item))
                     ],
                 ),
             )
@@ -190,7 +192,7 @@ def coerce_relation_pk_or_none(related_model: type[models.Model], pk: object) ->
     which makes it the same not-found ``relation_field_error`` as a genuinely
     missing pk, never a backend crash.
     """
-    pk_field = getattr(getattr(related_model, "_meta", None), "pk", None)
+    pk_field = getattr(truth.static_attr(related_model, "_meta"), "pk", None)
     return coerce_field_value_or_none(pk_field, pk)
 
 
@@ -202,21 +204,21 @@ def type_check_relation_id(
     info: object = None,
     index: int | None = None,
 ) -> tuple[object, FieldError | None]:
-    """Type-check + coerce ONE relation id to a pk WITHOUT a DB fetch.
+    """Type-check + coerce ONE relation id to a pk.
 
     The "GlobalID -> ``decode_model_global_id`` (non-``OK`` -> uniform relation
     error) | raw pk -> ``coerce_relation_pk_or_none`` (``None`` -> uniform relation
     error)" two-branch structural check the three write flavors share. Promoted here
     (from the serializer's cleanly-factored ``_type_check_relation_id``) so the
     single definition of "what counts as a well-formed relation id" is shared: the
-    serializer single/multi decoders call it, and the form single decoder calls it
-    (keeping only its ``empty_values`` pass-through + ``to_field_name`` reduction on
-    top). Neither branch touches the DB - visibility is confirmed separately by the
-    caller.
+    serializer single decoder and the form single decoder call it (the form keeping
+    only its ``empty_values`` pass-through + ``to_field_name`` reduction on
+    top), and the batched set decoder calls it per raw-pk element. The raw-pk
+    branch touches no DB; the GlobalID branch resolves a non-pk NodeID value to
+    its real pk with a query (batched per set by ``decode_visible_relation_ids``)
+    - visibility is confirmed separately by the caller in both branches.
 
-    The batched set decoder (``decode_visible_relation_ids``) runs this per
-    element, then confirms the whole set in one visibility query. A
-    ``relay.GlobalID`` is decoded against the target model under the schema
+    A ``relay.GlobalID`` is decoded against the target model under the schema
     executing ``info`` (``strawberry_schema_from_info``), whose published type
     names a ``type``-strategy slot carries (a non-``OK`` status is the uniform
     ``relation_field_error``); a raw pk is coerced through the target pk field
@@ -252,13 +254,15 @@ def type_check_relation_id(
         pk = coerce_relation_pk_or_none(related_model, value)
         if pk is None:
             return None, relation_field_error(graphql_name)
-    text_error = unencodable_text_error(
-        graphql_name if index is None else join_error_path(graphql_name, str(index)),
-        pk,
-    )
+    text_error = unencodable_text_error(_relation_id_error_path(graphql_name, index), pk)
     if text_error is not None:
         return None, text_error
     return pk, None
+
+
+def _relation_id_error_path(graphql_name: str, index: int | None) -> str:
+    """Key a relation id's error to ``graphql_name``, or to its ``graphql_name.<index>`` element."""
+    return graphql_name if index is None else join_error_path(graphql_name, str(index))
 
 
 def decode_scalar_leaf(graphql_name: str, value: object) -> tuple[object, FieldError | None]:
@@ -355,10 +359,11 @@ def materialize_relation_id_container(
     """Materialize a relation-id container, or return the uniform field-keyed error.
 
     GraphQL normally supplies a list, but every write flavor's M2M seam can be
-    reached with an arbitrary iterable, including a one-shot or hostile
-    iterator. A malformed container is an invalid relation VALUE, not a
-    resolver exception, so it collapses to the same field-keyed
-    ``relation_field_error`` envelope every other relation rejection uses.
+    reached with an arbitrary iterable, including a one-shot iterator. A
+    non-iterable is an invalid relation VALUE, not a resolver exception, so it
+    collapses to the same field-keyed ``relation_field_error`` envelope every
+    other relation rejection uses; an iterable's own iteration is its
+    behaviour, and whatever it raises propagates.
 
     Security-relevant, which is why it is one body rather than a copied one:
     the container is materialized BEFORE any member is decoded, so a
@@ -372,7 +377,8 @@ def materialize_relation_id_container(
         return None, relation_field_error(graphql_name)
     try:
         return list_of(values), None
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+    except TypeError:
+        # ``list()``'s documented refusal of a non-iterable.
         return None, relation_field_error(graphql_name)
 
 
@@ -391,14 +397,19 @@ def decode_visible_relation_ids(
     The batched compose the model FK / M2M set decoder and the serializer
     ``RELATION_MULTI`` decoder share:
 
-    (i) ``type_check_relation_id`` on every element (a non-``OK`` ``GlobalID`` /
-    uncoercible raw pk is the uniform field-keyed ``FieldError``, short-circuiting
-    before any query); (ii) an empty set returns ``[]`` without touching the DB
-    (a valid M2M clear); (iii) ``visible_related_objects`` confirms the whole set
-    in ONE ``pk__in`` query through the related primary's ``get_queryset`` (or the
-    default manager when no primary is registered); (iv) a hidden / missing
-    member is the same ``relation_field_error`` (hidden and missing
-    indistinguishable, no existence leak).
+    (i) every element is type-checked query-free first - a raw pk through
+    ``type_check_relation_id``, a ``GlobalID`` through the shared decode/coerce
+    half (a non-``OK`` decode / uncoercible literal is the uniform field-keyed
+    ``FieldError``, short-circuiting before any query) - then the decoded
+    non-pk NodeID values are mapped to real pks in one ``__in`` query per
+    distinct ``(type, id_attr)`` group (a value matching no row is the same
+    uniform error, indistinguishable from missing); (ii) an empty set returns
+    ``[]`` without touching the DB (a valid M2M clear); (iii)
+    ``visible_related_objects`` confirms the whole set in ONE ``pk__in`` query
+    through the related primary's ``get_queryset`` (or the default manager when
+    no primary is registered); (iv) a hidden / missing member is the same
+    ``relation_field_error`` (hidden and missing indistinguishable, no
+    existence leak).
 
     The ids name rows by pk; the answer is the key a relation stores for each, read by
     the same query: the pk itself when ``key_attname`` is ``None`` (the serializer, whose
@@ -414,24 +425,68 @@ def decode_visible_relation_ids(
     Flavor null policy stays at the caller: the model M2M path rejects a
     whole-list ``None``; the serializer passes it through so ``is_valid()``
     decides. Returns ``(keys, None)`` in input order on success or ``(None, FieldError)``.
+
+    The ``relay`` imports are function-local for the same cycle dodge the
+    ``type_check_relation_id`` docstring documents.
     """
     provided_values, container_error = materialize_relation_id_container(values, graphql_name)
     if container_error is not None:
         return None, container_error
 
-    pks: list[object] = []
+    from django_strawberry_framework.relay import (  # noqa: PLC0415 - import cycle
+        GlobalIDDecode,
+        _decode_and_coerce,
+        _resolve_real_pks_batched,
+    )
+
     # A ``None`` error means the container materialized into a list.
-    for index, value in enumerate(cast("list[object]", provided_values)):
-        pk, error = type_check_relation_id(
-            value,
-            graphql_name=graphql_name,
-            related_model=related_model,
-            info=info,
-            index=None if single else index,
+    members = cast("list[object]", provided_values)
+    slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]] = {}
+    pks: list[object] = [None] * len(members)
+    pending: list[tuple[int, type[_RelayDjangoType], object]] = []
+    for position, value in enumerate(members):
+        index = None if single else position
+        if isinstance(value, relay.GlobalID):
+            # Only a GlobalID member reads ``info`` (for the executing schema); raw pks never do.
+            intermediate = _decode_and_coerce(
+                value,
+                related_model,
+                slots=slots,
+                schema=strawberry_schema_from_info(info),
+            )
+            if intermediate.status is not GlobalIDDecode.OK:
+                return None, relation_field_error(graphql_name)
+            # The coerced id is bound into the batched NodeID query below, so it meets the
+            # same text preflight ``type_check_relation_id`` holds a raw pk to.
+            text_error = unencodable_text_error(
+                _relation_id_error_path(graphql_name, index),
+                intermediate.pk,
+            )
+            if text_error is not None:
+                return None, text_error
+            # An ``OK`` decode always carries the decoded type.
+            decoded_type = cast("type[_RelayDjangoType]", intermediate.resolved_type)
+            pending.append((position, decoded_type, intermediate.pk))
+        else:
+            pk, error = type_check_relation_id(
+                value,
+                graphql_name=graphql_name,
+                related_model=related_model,
+                info=info,
+                index=index,
+            )
+            if error is not None:
+                return None, error
+            pks[position] = pk
+    if pending:
+        resolved = _resolve_real_pks_batched(
+            [(resolved_type, coerced) for _, resolved_type, coerced in pending],
+            slots,
         )
-        if error is not None:
-            return None, error
-        pks.append(pk)
+        for (position, _resolved_type, _coerced), real_pk in zip(pending, resolved, strict=True):
+            if real_pk is None:
+                return None, relation_field_error(graphql_name)
+            pks[position] = real_pk
     if not pks:
         return [], None
     visible = visible_related_objects(related_model, pks, info, async_recourse, key_attname)

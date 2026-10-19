@@ -62,6 +62,7 @@ from django.db.models import Case, Exists, F, OuterRef, Q, When
 from django.db.models.constants import LOOKUP_SEP
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.querysets import VisibleRowExists
 from django_strawberry_framework.utils.relations import (
@@ -185,8 +186,8 @@ def attach_exists(
     inner_model = inner_queryset.model
     if inner_model is not model:
         raise OptimizerError(
-            f"attach_exists inner queryset model {inner_model.__name__!r} does not "
-            f"match outer model {model.__name__!r}; the inner root must be a "
+            f"attach_exists inner queryset model {truth.name(inner_model)!r} does not "
+            f"match outer model {truth.name(model)!r}; the inner root must be a "
             f"correlated queryset over the same model.",
         )
     # Snapshot both resolutions BEFORE comparing and format the message from the
@@ -303,7 +304,7 @@ def _correlation_steps(
         for link_model, pairs, link_segment, referenced in links:
             if not pairs or not isinstance(link_model, type):
                 raise ConfigurationError(
-                    f"{model.__qualname__}.{relation_path}: segment {segment!r} is not a "
+                    f"{truth.qualname(model)}.{relation_path}: segment {segment!r} is not a "
                     "relation with link columns, so a related row cannot be correlated to "
                     "the outer row.",
                 )

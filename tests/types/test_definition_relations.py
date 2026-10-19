@@ -9,17 +9,19 @@ registry-resolved ``DjangoTypeDefinition``:
   ``Book.loans`` -> ``Loan.book`` with ``related_name="loans"``),
   OneToOne in both directions, scalar non-relation field, missing field,
   ``GenericForeignKey``, unregistered target, primary-wins target
-  resolution, the post-finalize memo cache, and malformed model /
-  relation metadata degrading to ``None``.
+  resolution, the post-finalize memo cache, and malformed lookup names
+  degrading to ``None``.
 - ``graphql_type_name``: the shared name-derivation rule, including the
-  unreadable-origin and invalid-name rejections.
+  origin-name fallback and the empty / invalid-name rejections.
 - custom Relay ID-resolver detection (``has_custom_id_resolver_for`` /
   ``origin_has_custom_id_resolver`` / ``_is_framework_relay_id_resolver``):
   memoization, the framework-default exemptions, ``relay.NodeID``
-  placement, and fail-closed handling of hostile class metadata.
+  placement, and a raising consumer ``resolve_id_attr`` propagating.
 
 ``Meta.name`` validation at type creation lives with its siblings in
-``tests/types/test_base.py``.
+``tests/types/test_base.py``. Live GraphQL names and primary relation targets
+live in ``examples/fakeshop/test_query/test_library_api.py`` and
+``examples/fakeshop/test_query/test_schema_composition_api.py``.
 """
 
 from __future__ import annotations
@@ -39,7 +41,6 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import (
     DjangoTypeDefinition,
-    _is_framework_relay_id_resolver,
     origin_has_custom_id_resolver,
 )
 from django_strawberry_framework.utils.typing import object_result
@@ -176,7 +177,7 @@ def _malformed_definition(
     """Build a directly constructed definition carrying malformed metadata.
 
     The constructor takes eleven arguments of which only three vary across
-    the hostile-metadata tests, so every such test declares its variation
+    the malformed-metadata tests, so every such test declares its variation
     here rather than re-inlining the full call.
     """
     return DjangoTypeDefinition(
@@ -195,8 +196,11 @@ def _malformed_definition(
     )
 
 
-def test_graphql_type_name_wraps_unreadable_origin_and_rejects_empty_name() -> None:
-    """An unreadable origin name and an empty ``name`` are both typed failures."""
+def test_graphql_type_name_reads_the_origin_name_past_a_hostile_metaclass() -> None:
+    """A metaclass ``__getattribute__`` that raises for ``__name__`` never runs.
+
+    The fallback name is read from the class's own slot (``utils/truth.py::name``).
+    """
 
     class _HostileMeta(type):
         @override
@@ -208,16 +212,13 @@ def test_graphql_type_name_wraps_unreadable_origin_and_rejects_empty_name() -> N
     class _HostileOrigin(metaclass=_HostileMeta):
         pass
 
-    with pytest.raises(ConfigurationError, match="Could not inspect"):
-        _ = _malformed_definition(origin=_HostileOrigin).graphql_type_name
-    with pytest.raises(ConfigurationError, match="empty name"):
-        _ = _malformed_definition(name="").graphql_type_name
+    assert _malformed_definition(origin=_HostileOrigin).graphql_type_name == "_HostileOrigin"
 
 
-def test_related_target_lookup_degrades_malformed_model_and_relation_metadata(
+def test_related_target_lookup_propagates_malformed_model_and_relation_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every unreadable step of the target walk degrades to ``None``, never an exception."""
+    """Every unreadable step of the target walk propagates its own error."""
 
     class _UnreadableRelationFlag:
         @property
@@ -232,7 +233,7 @@ def test_related_target_lookup_degrades_malformed_model_and_relation_metadata(
             raise RuntimeError("target exploded")
 
     def _exploding_field(_name: str) -> object:
-        raise RuntimeError("field")
+        raise RuntimeError("field exploded")
 
     def _unreadable_relation_flag(_name: str) -> object:
         return _UnreadableRelationFlag()
@@ -241,13 +242,14 @@ def test_related_target_lookup_degrades_malformed_model_and_relation_metadata(
         return _UnreadableTarget()
 
     cases = [
-        SimpleNamespace(get_field=_exploding_field),
-        SimpleNamespace(get_field=_unreadable_relation_flag),
-        SimpleNamespace(get_field=_unreadable_target),
+        (SimpleNamespace(get_field=_exploding_field), "field exploded"),
+        (SimpleNamespace(get_field=_unreadable_relation_flag), "relation flag exploded"),
+        (SimpleNamespace(get_field=_unreadable_target), "target exploded"),
     ]
-    for meta in cases:
+    for meta, message in cases:
         definition = _malformed_definition(model=SimpleNamespace(_meta=meta))
-        assert definition.related_target_for("relation") is None
+        with pytest.raises(RuntimeError, match=message):
+            _ = definition.related_target_for("relation")
 
     target = object()
     field = SimpleNamespace(is_relation=True, related_model=target)
@@ -256,16 +258,17 @@ def test_related_target_lookup_degrades_malformed_model_and_relation_metadata(
         return field
 
     def _exploding_get(_model: object) -> object:
-        raise RuntimeError
+        raise RuntimeError("get exploded")
 
     def _exploding_get_definition(_type_cls: object) -> object:
-        raise RuntimeError
+        raise RuntimeError("get_definition exploded")
 
     definition = _malformed_definition(
         model=SimpleNamespace(_meta=SimpleNamespace(get_field=_relation_field)),
     )
     monkeypatch.setattr(registry, "get", _exploding_get)
-    assert definition.related_target_for("relation") is None
+    with pytest.raises(RuntimeError, match="get exploded"):
+        _ = definition.related_target_for("relation")
 
     target_type = object()
 
@@ -274,11 +277,16 @@ def test_related_target_lookup_degrades_malformed_model_and_relation_metadata(
 
     monkeypatch.setattr(registry, "get", _target_type_get)
     monkeypatch.setattr(registry, "get_definition", _exploding_get_definition)
-    assert definition.related_target_for("relation") is None
+    with pytest.raises(RuntimeError, match="get_definition exploded"):
+        _ = definition.related_target_for("relation")
 
 
-def test_custom_id_detection_fails_closed_for_hostile_class_metadata() -> None:
-    """Unreadable ``__mro__`` / ``__dict__`` metadata counts as a custom resolver."""
+def test_custom_id_detection_reads_hostile_class_metadata_truthfully() -> None:
+    """Hostile ``__mro__`` / ``__dict__`` / ``__class__`` hooks never run.
+
+    The real MRO and namespaces are read (``utils/truth.py``), and none of these classes
+    declares an id resolver, so none counts as custom.
+    """
 
     class _HostileMroMeta(type):
         @override
@@ -314,16 +322,37 @@ def test_custom_id_detection_fails_closed_for_hostile_class_metadata() -> None:
     class _UnreadableMroOrigin(metaclass=_UnreadableMroMeta):
         pass
 
-    assert origin_has_custom_id_resolver(_HostileMro, "id") is True
-    assert origin_has_custom_id_resolver(_HostileDict, "id") is True
-    assert origin_has_custom_id_resolver(_UnreadableMroOrigin, "id") is True
+    assert origin_has_custom_id_resolver(_HostileMro, "id") is False
+    assert origin_has_custom_id_resolver(_HostileDict, "id") is False
+    assert origin_has_custom_id_resolver(_UnreadableMroOrigin, "id") is False
     # basedpyright: the object whose __class__ raises is the hostile input under test;
     # origin_has_custom_id_resolver types the parameter as type[object]
-    assert origin_has_custom_id_resolver(ClassReadRaises(message="class exploded"), "id") is True  # pyright: ignore[reportArgumentType]
+    assert origin_has_custom_id_resolver(ClassReadRaises(message="class exploded"), "id") is False  # pyright: ignore[reportArgumentType]
 
 
-def test_custom_id_detection_fails_closed_for_hostile_relay_resolver() -> None:
-    """A ``resolve_id_attr`` that raises or returns a non-string counts as custom."""
+def test_graphql_type_name_rejects_empty_name() -> None:
+    """An empty ``name`` is a typed failure naming the origin class."""
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = _malformed_definition(origin=Book, name="").graphql_type_name
+    assert str(exc_info.value) == (
+        "GraphQL type name for Book must be a non-empty string; got an empty name."
+    )
+
+
+def test_graphql_type_name_rejects_a_non_string_name() -> None:
+    """A non-string ``name`` is a typed failure naming the origin class and the value."""
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = _malformed_definition(origin=Book, name=7).graphql_type_name
+    assert str(exc_info.value) == ("GraphQL type name for Book must be a non-empty string; got 7.")
+
+
+def test_graphql_type_name_falls_back_to_the_origin_class_name() -> None:
+    """Without ``Meta.name`` the surface name is the origin class's declared name."""
+    assert _malformed_definition(origin=Book).graphql_type_name == "Book"
+
+
+def test_custom_id_detection_propagates_and_flags_consumer_relay_resolver() -> None:
+    """A raising consumer ``resolve_id_attr`` propagates; a non-string return counts as custom."""
 
     class _RaisingNode(relay.Node):
         @classmethod
@@ -338,7 +367,8 @@ def test_custom_id_detection_fails_closed_for_hostile_relay_resolver() -> None:
         def resolve_id_attr(cls) -> int:  # pyright: ignore[reportIncompatibleMethodOverride]
             return 123
 
-    assert origin_has_custom_id_resolver(_RaisingNode, "id") is True
+    with pytest.raises(RuntimeError, match="resolver exploded"):
+        origin_has_custom_id_resolver(_RaisingNode, "id")
     assert origin_has_custom_id_resolver(_NonStringNode, "id") is True
 
 
@@ -604,26 +634,6 @@ def test_related_target_for_rejects_unhashable_field_names() -> None:
     assert BookType.__django_strawberry_definition__.related_target_for([]) is None
 
 
-def test_graphql_type_name_rejects_hostile_metadata() -> None:
-    """A malformed definition name raises a typed error with safe diagnostics."""
-
-    class HostileName:
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("str should not escape")
-
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr should not escape")
-
-    definition = _malformed_definition(origin=Book, name=HostileName())
-    with pytest.raises(
-        ConfigurationError,
-        match="must be a non-empty string; got <unprintable HostileName>",
-    ):
-        _ = definition.graphql_type_name
-
-
 def test_graphql_type_name_rejects_invalid_graphql_names() -> None:
     """Directly constructed definitions preserve the GraphQL name contract."""
     definition = _malformed_definition(origin=Book, name="bad-name")
@@ -640,17 +650,6 @@ def test_custom_id_resolver_guards_reject_malformed_pk_names() -> None:
     # basedpyright: the unhashable pk name is the hostile input under test;
     # origin_has_custom_id_resolver types the parameter as str
     assert origin_has_custom_id_resolver(Book, []) is False  # pyright: ignore[reportArgumentType]
-
-
-def test_framework_id_resolver_guard_survives_hostile_descriptor() -> None:
-    """A broken ``__func__`` descriptor is treated as consumer-owned."""
-
-    class HostileResolver:
-        @property
-        def __func__(self) -> NoReturn:
-            raise RuntimeError("descriptor should not escape")
-
-    assert _is_framework_relay_id_resolver(HostileResolver()) is False
 
 
 def test_definition_equality_ignores_memoization_caches() -> None:

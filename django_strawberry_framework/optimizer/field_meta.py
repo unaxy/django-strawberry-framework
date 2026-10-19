@@ -23,14 +23,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
-from django_strawberry_framework.exceptions import OptimizerError, _safe_type_name
+from django_strawberry_framework.exceptions import OptimizerError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.relations import (
     RelationLink,
     has_composite_pk,
     instance_accessor,
     is_many_side_relation_kind,
-    relation_attr,
     relation_bool,
     relation_kind,
     relation_link,
@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.utils.relations import RelationKind
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+
+_ABSENT = object()
 
 
 class _DjangoFieldLike(Protocol):
@@ -235,25 +237,20 @@ class FieldMeta:
                 than a late ``AttributeError`` mid-walk.
 
         """
-        try:
-            field_name = read_attr(field, "name")
-            # Inside the guard: reading ``is_relation`` and asking it for its
-            # truth value are one operation from the caller's side, and a
-            # descriptor whose ``__bool__`` raises is as malformed as one whose
-            # attribute access does.
-            is_relation = bool(field.is_relation)
-        except BaseException as exc:
+        field_name = read_attr(field, "name", _ABSENT)
+        is_relation = read_attr(field, "is_relation", _ABSENT)
+        if field_name is _ABSENT or is_relation is _ABSENT:
             raise OptimizerError(
                 f"FieldMeta.from_django_field expected a Django field descriptor "
-                f"exposing 'name' and 'is_relation'; got {_safe_type_name(field)}.",
-            ) from exc
+                f"exposing 'name' and 'is_relation'; got {truth.kind(field)}.",
+            )
         # ``field`` is a public parameter, and a descriptor can answer ``name`` with any object
-        if not isinstance(field_name, str):
+        if not truth.is_instance(field_name, str):
             raise OptimizerError(
                 f"FieldMeta.from_django_field expected a string field name; "
-                f"got {_safe_type_name(field_name)}.",
+                f"got {truth.kind(field_name)}.",
             )
-        return cls._from_field_shape(field, is_relation=is_relation, field_name=field_name)
+        return cls._from_field_shape(field, is_relation=bool(is_relation), field_name=field_name)
 
     @classmethod
     def _from_field_shape(
@@ -282,10 +279,10 @@ class FieldMeta:
         elision metadata live here so the two call sites cannot drift.
         """
         if field_name is None:
-            field_name = relation_attr(field, "name", None)
-        if not isinstance(field_name, str):
+            field_name = read_attr(field, "name", None)
+        if not truth.is_instance(field_name, str):
             raise OptimizerError(
-                f"FieldMeta expected a string field name; got {_safe_type_name(field_name)}.",
+                f"FieldMeta expected a string field name; got {truth.kind(field_name)}.",
             )
         kind = relation_kind(field)
         link = relation_link(field) if is_relation else RelationLink()
@@ -294,33 +291,31 @@ class FieldMeta:
         # ``ForeignObject``, which has no single target column (``None`` here).
         # Every other shape keeps Django's ``target_field``, which names one
         # column for each of them (a reverse rel's child pk, an M2M's target pk).
+        target_field: object
         if kind == "forward_single" and link.targets:
             target_field = link.targets[0] if len(link.targets) == 1 else None
         else:
-            target_field = relation_attr(field, "target_field", None)
+            target_field = read_attr(field, "target_field", None)
         # Trusted, not checked: a Django relation's ``related_model`` is a model class
         # or ``None`` (a resolver-path stand-in may carry a lighter class that
         # ``_target_pk_name`` reads defensively).
-        related_model = cast(
-            "type[models.Model] | None",
-            relation_attr(field, "related_model", None),
-        )
+        related_model = cast("type[models.Model] | None", read_attr(field, "related_model", None))
         target_pk_name = _target_pk_name(related_model)
         target_field_name = (
-            relation_attr(target_field, "name", None) if target_field is not None else None
+            read_attr(target_field, "name", None) if target_field is not None else None
         )
-        if target_field_name is not None and not isinstance(target_field_name, str):
+        if target_field_name is not None and not truth.is_instance(target_field_name, str):
             target_field_name = None
         target_field_attname = (
-            relation_attr(target_field, "attname", None) if target_field is not None else None
+            read_attr(target_field, "attname", None) if target_field is not None else None
         )
-        if target_field_attname is not None and not isinstance(target_field_attname, str):
+        if target_field_attname is not None and not truth.is_instance(target_field_attname, str):
             target_field_attname = None
         is_m2m = relation_bool(field, "many_to_many")
         is_o2m = relation_bool(field, "one_to_many")
         is_o2o = relation_bool(field, "one_to_one")
-        attname = relation_attr(field, "attname", None)
-        if attname is not None and not isinstance(attname, str):
+        attname = read_attr(field, "attname", None)
+        if attname is not None and not truth.is_instance(attname, str):
             attname = None
         auto_created = relation_bool(field, "auto_created")
         concrete = relation_bool(field, "concrete")
@@ -338,7 +333,7 @@ class FieldMeta:
         # A duck-typed descriptor that omits ``concrete`` and is not M2M keeps
         # its attname so resolver test doubles carrying only ``attname`` are
         # unaffected.
-        if is_relation and (relation_attr(field, "concrete", None) is False or is_m2m):
+        if is_relation and (getattr(field, "concrete", None) is False or is_m2m):
             attname = None
         content_type_field_name = relation_name(field, "content_type_field_name")
         object_id_field_name = relation_name(field, "object_id_field_name")
@@ -399,25 +394,18 @@ class FieldMeta:
 def _target_pk_name(model: type[models.Model] | None) -> str | None:
     """Return ``model``'s concrete primary-key field name, or ``None``.
 
-    Reads ``_meta`` defensively: ``FieldMeta`` is also built from fabricated
-    field shapes on the resolver path (``_field_meta_for_resolver``), whose
-    ``related_model`` may be a lightweight stand-in without ``_meta``. A
-    missing ``_meta`` simply means "no resolvable target pk", which disables
-    FK-id elision rather than raising.
+    ``FieldMeta`` is also built from fabricated field shapes on the resolver
+    path (``_field_meta_for_resolver``), whose ``related_model`` may be a
+    lightweight stand-in without ``_meta``. A missing ``_meta`` simply means
+    "no resolvable target pk", which disables FK-id elision rather than
+    raising.
     """
     if model is None:
         return None
-    try:
-        meta: object = getattr(model, "_meta", None)
-        if meta is None:
-            return None
-        pk: object = getattr(meta, "pk", None)
-        if pk is None:
-            return None
-        pk_name: object = getattr(pk, "name", None)
-        return pk_name if isinstance(pk_name, str) else None
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return None
+    meta: object = truth.static_attr(model, "_meta")
+    pk: object = getattr(meta, "pk", None) if meta is not None else None
+    pk_name: object = getattr(pk, "name", None) if pk is not None else None
+    return pk_name if truth.is_instance(pk_name, str) else None
 
 
 def _non_pk_attnames(fields: tuple[ConcreteField, ...]) -> tuple[str, ...]:

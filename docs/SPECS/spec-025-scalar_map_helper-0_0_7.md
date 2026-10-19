@@ -23,8 +23,8 @@ Project conventions: the live-HTTP-priority rule at [`AGENTS.md #"any line reach
 ## Slice checklist
 
 - [ ] Slice 1: Helper module + `BigInt` definition
-  - [ ] [`django_strawberry_framework/scalars.py`][scalars]: `BigInt` is a bare `NewType("BigInt", int)`; `_BIGINT_SCALAR_DEFINITION: ScalarDefinition` is built via the no-warning `strawberry.scalar(name=..., serialize=..., parse_value=...)` overload (the `cls is None and name is not None` branch at [`.venv/lib/python3.14/site-packages/strawberry/types/scalar.py #"if cls is None and name is not None"`][scalar], which returns a `ScalarDefinition` without emitting `DeprecationWarning`); `_PACKAGE_SCALAR_MAP: dict[object, ScalarDefinition]` maps the `BigInt` `NewType` to that definition; the public [`django_strawberry_framework/scalars.py::strawberry_config`][scalars] factory and the private [`django_strawberry_framework/scalars.py::_safe_scalar_map_key_label`][scalars] collision-key labeller per [Decision 2](#decision-2--helper-api-shape-and-module-location) and [Decision 3](#decision-3--bigint-redefinition-as-bare-newtype--scalardefinition). The module carries no `warnings` import and no suppression block ([Decision 6](#decision-6--no-warning-suppression-at-the-definition-site)).
-    - Module surface: imports `Mapping`, `StrawberryConfig` (`strawberry.schema.config`), `ScalarDefinition` (`strawberry.types.scalar`) and `_safe_arg_repr` / `_safe_type_name` from [`django_strawberry_framework/exceptions.py`][exceptions]. The module declares an `__all__`; this spec's names in it are `"BigInt"` and `"strawberry_config"`.
+  - [ ] [`django_strawberry_framework/scalars.py`][scalars]: `BigInt` is a bare `NewType("BigInt", int)`; `_BIGINT_SCALAR_DEFINITION: ScalarDefinition` is built via the no-warning `strawberry.scalar(name=..., serialize=..., parse_value=...)` overload (the `cls is None and name is not None` branch at [`.venv/lib/python3.14/site-packages/strawberry/types/scalar.py #"if cls is None and name is not None"`][scalar], which returns a `ScalarDefinition` without emitting `DeprecationWarning`); `_PACKAGE_SCALAR_MAP: dict[object, ScalarDefinition]` maps the `BigInt` `NewType` to that definition; the public [`django_strawberry_framework/scalars.py::strawberry_config`][scalars] factory, which names each collision by the package `ScalarDefinition.name` it redeclares, per [Decision 2](#decision-2--helper-api-shape-and-module-location) and [Decision 3](#decision-3--bigint-redefinition-as-bare-newtype--scalardefinition). The module carries no `warnings` import and no suppression block ([Decision 6](#decision-6--no-warning-suppression-at-the-definition-site)).
+    - Module surface: imports `StrawberryConfig` (`strawberry.schema.config`), `ScalarDefinition` (`strawberry.types.scalar`), `Mapping` (type-checking only) and the `utils/truth.py` module, whose `is_instance` / `text` / `kind` / `render` reads the `BigInt` parser and serializer name rejected values through. The module declares an `__all__`; this spec's names in it are `"BigInt"` and `"strawberry_config"`.
   - [ ] [`django_strawberry_framework/__init__.py`][django-strawberry-framework-init]: re-exports `strawberry_config` on the [`django_strawberry_framework/__init__.py #"from .scalars import BigInt"`][django-strawberry-framework-init] line beside `BigInt`; both are in the package `__all__`, where `"strawberry_config"` is the **last** element (see [Edge cases](#edge-cases-and-constraints) for the sort rule).
 - [ ] Slice 2: Tests
   - [ ] [`tests/test_scalars.py`][test-scalars]: the `strawberry_config()` factory sections ("scalar-map tests" and "`**config_kwargs` passthrough tests") carry the tests named in the [Test plan](#test-plan), one pytest item each.
@@ -163,7 +163,7 @@ The one field the helper does NOT forward is `scalar_map`: the helper owns it, a
 
 - `strawberry_config(extra_scalar_map={BigInt: <some other ScalarDefinition>})` → `ValueError("strawberry_config(extra_scalar_map=...) cannot redeclare package-defined scalars: BigInt. Define a Strawberry custom scalar of a different NewType / class to register under a separate key.")`.
 - `strawberry_config(scalar_map=...)` → `ValueError("strawberry_config() owns scalar_map; pass consumer scalars with extra_scalar_map=...")`, for any value including `{}` and `None`: the kwarg name is owned by the helper, not the value.
-- `strawberry_config(extra_scalar_map=<a mapping that raises while being read, or whose keys raise while being hashed or compared>)` → `ValueError("strawberry_config(extra_scalar_map=...) must be materializable with keys that hash and compare safely; got <safe repr>.")`, chained `from` whatever the consumer code raised. The guard spans materialization, the collision intersection and the merge — every operation that dispatches into consumer key code — and catches `BaseException`, so a consumer object can never substitute its own exception for the factory's.
+- `strawberry_config(extra_scalar_map=<a mapping that raises while being read, or whose keys raise while being hashed or compared>)` → whatever the mapping or key raised, unchanged. The copy (`dict(extra_scalar_map)`), the collision check and the merge run the mapping's and the keys' own behaviour, which is consumer code, and the factory does not wrap it.
 - `strawberry_config(extra_scalar_map={"not a NewType or class": <ScalarDefinition>})` → no validation; Strawberry's `scalar_map` contract accepts any key (`Mapping[object, ScalarDefinition]` at [`.venv/lib/python3.14/site-packages/strawberry/schema/config.py #"scalar_map: Mapping[object, ScalarDefinition]"`][config]), and the factory does not guess what "any type" excludes.
 - `strawberry_config(unknown_kwarg=True)` → no helper-level validation; upstream `StrawberryConfig(...)` raises its own `TypeError`. The supported kwarg set is Strawberry's and would drift if the helper listed it.
 
@@ -215,43 +215,29 @@ def strawberry_config(
         raise ValueError(
             "strawberry_config() owns scalar_map; pass consumer scalars with extra_scalar_map=...",
         )
-    try:
-        extra: dict[object, ScalarDefinition] = (
-            {} if extra_scalar_map is None else dict(extra_scalar_map)
-        )
-        collisions = _PACKAGE_SCALAR_MAP.keys() & extra.keys()
-        merged: dict[object, ScalarDefinition] = dict(_PACKAGE_SCALAR_MAP)
-        merged.update(extra)
-    except BaseException as exc:
-        raise ValueError(
-            "strawberry_config(extra_scalar_map=...) must be materializable with "
-            f"keys that hash and compare safely; got {_safe_arg_repr(extra_scalar_map)}.",
-        ) from exc
+    extra: dict[object, ScalarDefinition] = (
+        {} if extra_scalar_map is None else dict(extra_scalar_map)
+    )
+    collisions = sorted(
+        definition.name for key, definition in _PACKAGE_SCALAR_MAP.items() if key in extra
+    )
+    merged: dict[object, ScalarDefinition] = dict(_PACKAGE_SCALAR_MAP)
+    merged.update(extra)
     if collisions:
         raise ValueError(
             "strawberry_config(extra_scalar_map=...) cannot redeclare package-defined scalars: "
-            f"{', '.join(sorted(_safe_scalar_map_key_label(k) for k in collisions))}. "
+            f"{', '.join(collisions)}. "
             "Define a Strawberry custom scalar of a different NewType / class "
             "to register under a separate key.",
         )
     return StrawberryConfig(scalar_map=merged, **config_kwargs)
-
-
-def _safe_scalar_map_key_label(key: object) -> str:
-    try:
-        name = getattr(key, "__name__", None)
-    except BaseException:
-        name = None
-    if isinstance(name, str):
-        return str.__str__(name)
-    return _safe_arg_repr(key)
 ```
 
 Three properties of that body are contract, not incidental spelling:
 
 - **Absent is distinguished from empty by an explicit `is None` test**, never by truthiness: `if extra_scalar_map` would let a consumer mapping's `__bool__` decide which branch runs.
-- **Every dispatch into consumer key code is guarded** — materialization, the key-set intersection and the merge (which re-hash and, on a hash collision with a package key, compare the consumer's keys) — and the guard raises the factory's own `ValueError` chained from the original.
-- **Collision keys are labelled through `_safe_scalar_map_key_label`**, which tolerates a `__name__` that raises, rejects a non-`str` `__name__`, and reads a `str`-subclass `__name__` through the base `str` slot so the subclass's `__str__` / `__format__` / `__lt__` never run while the message is assembled.
+- **The mapping and its keys run their own behaviour, unwrapped.** Materialization, the collision check and the merge (which re-hash and, on a hash collision with a package key, compare the consumer's keys) are the consumer objects' own code; whatever they raise propagates unchanged.
+- **A collision is named by the PACKAGE definition it redeclares** (`ScalarDefinition.name` of the `_PACKAGE_SCALAR_MAP` entry the consumer key matched), so the message is built from framework-owned names only and no consumer key's `__name__` / `__repr__` / `__str__` runs while it is assembled.
 
 Rationale: [Decision 3][rationale-d3].
 
@@ -259,7 +245,7 @@ Rationale: [Decision 3][rationale-d3].
 
 A consumer `extra_scalar_map` key already present in `_PACKAGE_SCALAR_MAP` makes `strawberry_config(...)` raise `ValueError("strawberry_config(extra_scalar_map=...) cannot redeclare package-defined scalars: <names>. Define a Strawberry custom scalar of a different NewType / class to register under a separate key.")` — a hard error, with no override path.
 
-`ValueError` is the factory's **only** rejection class: the collision, the owned `scalar_map=` kwarg, and a mapping or key that raises inside the guarded region. The guard is what makes that uniformity a contract — consumer key code is contained rather than allowed to replace the factory's exception. [`ConfigurationError`][glossary-configurationerror] is deliberately not used: each rejection is a consumer-input mistake at helper-call time, not a `DjangoType`-creation or finalization error. The messages are enumerated in [Error shapes](#error-shapes).
+`ValueError` is the factory's **only** rejection class: the collision and the owned `scalar_map=` kwarg. An exception a consumer mapping or key raises while being copied, hashed or compared is that object's own and propagates unchanged; the factory raises nothing in its place. [`ConfigurationError`][glossary-configurationerror] is deliberately not used: each rejection is a consumer-input mistake at helper-call time, not a `DjangoType`-creation or finalization error. The messages are enumerated in [Error shapes](#error-shapes).
 
 Rationale: [Decision 4][rationale-d4].
 
@@ -316,16 +302,16 @@ Rationale: [Decision 9][rationale-d9].
 - **The returned `scalar_map` is a fresh `dict`.** The field type accepts any `Mapping`; the factory builds a new `dict(_PACKAGE_SCALAR_MAP)` and merges the materialized extra map into it, so neither the package map nor the caller's mapping is shared with the result.
 - **Independent return value semantics.** Each call returns a new `StrawberryConfig` with a new `scalar_map` dict; mutating one call's result (`config.scalar_map[X] = ...`) does not leak into the next. Pinned by `test_strawberry_config_independent_call_returns_independent_instance`.
 - **`extra_scalar_map={}` and `extra_scalar_map=None` produce the same `scalar_map`, but not by the same route.** Absence is decided by `is None`; an empty mapping is materialized into an empty `dict`. The equivalence is an outcome, never a truthiness test. Pinned by `test_strawberry_config_accepts_none_extra_scalar_map` and `test_strawberry_config_accepts_empty_extra_scalar_map`.
-- **Consumer key code is contained.** `dict(extra_scalar_map)` runs consumer `keys()` / `__iter__` / `__getitem__` / `__hash__`; the intersection and the merge re-run `__hash__` and, on a hash collision with a package key, `__eq__`. All of it sits inside the `BaseException` guard and surfaces as the factory's `ValueError` chained from the original. Pinned by `test_strawberry_config_rejects_unmaterializable_extra_scalar_map` and `test_strawberry_config_hostile_key_eq_raising_is_contained`.
+- **Consumer key code propagates.** `dict(extra_scalar_map)` runs consumer `keys()` / `__iter__` / `__getitem__` / `__hash__`; the collision check and the merge re-run `__hash__` and, on a hash collision with a package key, `__eq__`. Whatever that code raises propagates unchanged. Pinned by `test_strawberry_config_mapping_failure_propagates` and `test_strawberry_config_hostile_key_eq_error_propagates`.
 - **`extra_scalar_map` mutation post-call.** The factory copies the caller's mapping, so neither the call nor a later mutation of that mapping touches the other side. Pinned by `test_strawberry_config_extra_scalar_map_does_not_mutate_caller_dict`.
 - **`**config_kwargs` passthrough semantics.** Every kwarg other than `scalar_map` is forwarded verbatim — no translation, no defaults, no validation; a typo (`relay_max_resluts=200`) surfaces as upstream's own `TypeError`. Pinned by `test_strawberry_config_forwards_auto_camel_case_kwarg`, `test_strawberry_config_forwards_relay_max_results_kwarg`, `test_strawberry_config_combines_extra_scalar_map_and_config_kwargs` and `test_strawberry_config_unknown_kwarg_raises_typeerror_from_upstream`.
 - **Underscore-prefixed `StrawberryConfig` kwargs pass through unchanged.** `StrawberryConfig` declares `_unsafe_disable_same_type_validation: bool = False` ([`.venv/lib/python3.14/site-packages/strawberry/schema/config.py #"_unsafe_disable_same_type_validation"`][config]) as a real `__init__` kwarg; the helper does not special-case it.
 - **`scalar_map=` is rejected even when empty.** `strawberry_config(scalar_map={})` and `strawberry_config(scalar_map=None)` both raise `ValueError`. Pinned by `test_strawberry_config_rejects_scalar_map_kwarg`.
 - **Keyword-only invocation.** `strawberry_config({BigInt: alt_def})` raises `TypeError` from Python itself because the signature begins with `*,`; no dedicated test.
 - **The name-only overload does not default `parse_value`.** On the `cls is None and name is not None` overload, omitting `parse_value=` leaves `ScalarDefinition.parse_value = None` (only the class-passing overload defaults it to `cls`). The helper does not validate consumer `ScalarDefinition`s (Strawberry owns that contract); consumers building their own definitions on this overload pass `parse_value=` explicitly.
-- **Collision-error message stability.** The message names each colliding key through `_safe_scalar_map_key_label`: the key's `__name__` when it is a `str` (the `NewType` and class cases, read through the base `str` slot), otherwise `_safe_arg_repr`. A key may have no `__name__`, a `__name__` descriptor that raises, a non-`str` `__name__`, or a `str`-subclass `__name__` with hostile dunders; none may turn the collision rejection into a different error. The `NewType`-keyed format is pinned by `test_strawberry_config_collision_with_package_scalar_raises_value_error`; the hostile-metadata paths by `test_strawberry_config_collision_message_survives_hostile_key`, `test_scalar_collision_label_falls_back_when_class_name_metadata_is_unreadable` and `test_safe_scalar_map_key_label_normalizes_str_subclass_name`.
+- **Collision-error message stability.** The message names each collision by the `ScalarDefinition.name` of the package entry it redeclares, sorted, so a consumer key's own name, `repr` or `str` never reaches it. The `NewType`-keyed format is pinned by `test_strawberry_config_collision_with_package_scalar_raises_value_error`; a key that only aliases `BigInt` (hashing and comparing equal to it, with a raising `__repr__`) by `test_strawberry_config_collision_message_survives_hostile_key`.
 - **`__all__` ordering.** The package `__all__` is sorted isort-style (ruff `RUF022`): SCREAMING_SNAKE_CASE names, then CamelCase, then the rest, each group in ASCII order. `"strawberry_config"` is the last element because `s` sorts after every other lowercase initial the tuple carries. The exact tuple is pinned by `test_public_api_surface_is_pinned` in [`tests/base/test_init.py`][test-init], which is where to read it.
-- **Coverage at 100%.** Every branch of `strawberry_config` and `_safe_scalar_map_key_label` is covered by the [Test plan](#test-plan) items; there is no uncoverable branch, and [`pyproject.toml`][pyproject] `[tool.coverage.report] fail_under = 100` gates it.
+- **Coverage at 100%.** Every branch of `strawberry_config` is covered by the [Test plan](#test-plan) items; there is no uncoverable branch, and [`pyproject.toml`][pyproject] `[tool.coverage.report] fail_under = 100` gates it.
 
 ## Test plan
 
@@ -337,14 +323,12 @@ Package tests live in [`tests/test_scalars.py`][test-scalars] per [Decision 7](#
 - `test_strawberry_config_default_scalar_map_includes_bigint` — `BigInt in result.scalar_map`, the value is a `ScalarDefinition`, and its `name == "BigInt"`. Pins [Decision 3](#decision-3--bigint-redefinition-as-bare-newtype--scalardefinition).
 - `test_strawberry_config_accepts_none_extra_scalar_map` — `extra_scalar_map=None` yields `len(result.scalar_map) == 1` with `BigInt` present.
 - `test_strawberry_config_accepts_empty_extra_scalar_map` — `extra_scalar_map={}` yields the same.
-- `test_strawberry_config_rejects_unmaterializable_extra_scalar_map` — a `Mapping` whose `__getitem__` and `__repr__` raise; asserts `ValueError` matching `"must be materializable.*unprintable _BrokenMapping"`.
+- `test_strawberry_config_mapping_failure_propagates` — a `Mapping` whose `__getitem__` raises; the copy is the mapping's own behaviour, so its `RuntimeError` propagates.
 - `test_strawberry_config_merges_extra_scalar_map` — `CustomScalar = NewType("CustomScalar", str)` with a `strawberry.scalar(name="CustomScalar", ...)` definition; asserts two entries, both keys present, and the consumer definition stored by identity.
 - `test_strawberry_config_extra_scalar_map_does_not_mutate_caller_dict` — the caller's dict equals its pre-call copy.
-- `test_scalar_collision_label_falls_back_when_class_name_metadata_is_unreadable` — a class whose metaclass raises on `__name__` is labelled by its guarded repr.
 - `test_strawberry_config_collision_with_package_scalar_raises_value_error` — `extra_scalar_map={BigInt: alt_def}` raises `ValueError` whose message contains `"BigInt"` and `"cannot redeclare"`. Pins [Decision 4](#decision-4--conflict-resolution-for-extra_scalar_map-collisions).
-- `test_strawberry_config_collision_message_survives_hostile_key` — a key hashing and comparing equal to `BigInt` with a raising `__repr__`: the label is `"<unprintable _HostileKey>"` and the factory still raises the collision `ValueError`.
-- `test_strawberry_config_hostile_key_eq_raising_is_contained` — a key hashing like `BigInt` whose `__eq__` raises: `ValueError` matching `"must be materializable"`, message containing `"hash and compare safely"`, `RuntimeError` as `__cause__`.
-- `test_safe_scalar_map_key_label_normalizes_str_subclass_name` — a `str`-subclass `__name__` with raising `__str__` / `__format__` / `__lt__` comes back as a plain `str` that sorts and joins safely.
+- `test_strawberry_config_collision_message_survives_hostile_key` — a key hashing and comparing equal to `BigInt` with a raising `__repr__`: the collision is detected and the message names the package `BigInt` definition, so the key's `__repr__` never runs.
+- `test_strawberry_config_hostile_key_eq_error_propagates` — a key hashing like `BigInt` whose `__eq__` raises: the key's own `RuntimeError` propagates unchanged.
 - `test_strawberry_config_independent_call_returns_independent_instance` — two calls give distinct configs and distinct `scalar_map` dicts; mutating one leaves the other unchanged.
 
 ### `tests/test_scalars.py` — `**config_kwargs` passthrough tests
@@ -406,7 +390,7 @@ Each item names a live constraint the contract depends on.
 ## Definition of done
 
 1. [`docs/SPECS/spec-025-scalar_map_helper-0_0_7.md`][spec-025] (this document) carries the structured filename per [Decision 1](#decision-1--spec-filename-and-canonical-naming), with [`docs/SPECS/appx/spec-025-scalar_map_helper-0_0_7-terms.csv`][spec-025-terms] anchoring every project-specific term the spec links to its [`docs/GLOSSARY.md`][glossary] heading (per [`docs/SPECS/NEXT.md`][next] Step 7).
-2. [`django_strawberry_framework/scalars.py`][scalars] defines `BigInt = NewType("BigInt", int)`, `_BIGINT_SCALAR_DEFINITION` via `strawberry.scalar(name="BigInt", serialize=_serialize_bigint, parse_value=_parse_bigint)`, `_PACKAGE_SCALAR_MAP = {BigInt: _BIGINT_SCALAR_DEFINITION}`, and `strawberry_config(*, extra_scalar_map: Mapping[object, ScalarDefinition] | None = None, **config_kwargs: Any) -> StrawberryConfig` per [Decision 2](#decision-2--helper-api-shape-and-module-location) and [Decision 3](#decision-3--bigint-redefinition-as-bare-newtype--scalardefinition): `scalar_map=` rejected with `ValueError`, absence decided by `is None`, every dispatch into consumer key code guarded so the factory's `ValueError` cannot be displaced (per [Error shapes](#error-shapes)), and collision keys labelled through `_safe_scalar_map_key_label`. The module imports no `warnings` and suppresses nothing ([Decision 6](#decision-6--no-warning-suppression-at-the-definition-site)). `_parse_bigint` and `_serialize_bigint` keep spec-017's **wire format** — decimal string in, decimal string out — while normalizing hostile `int` / `str` subclasses through the base descriptors.
+2. [`django_strawberry_framework/scalars.py`][scalars] defines `BigInt = NewType("BigInt", int)`, `_BIGINT_SCALAR_DEFINITION` via `strawberry.scalar(name="BigInt", serialize=_serialize_bigint, parse_value=_parse_bigint)`, `_PACKAGE_SCALAR_MAP = {BigInt: _BIGINT_SCALAR_DEFINITION}`, and `strawberry_config(*, extra_scalar_map: Mapping[object, ScalarDefinition] | None = None, **config_kwargs: Any) -> StrawberryConfig` per [Decision 2](#decision-2--helper-api-shape-and-module-location) and [Decision 3](#decision-3--bigint-redefinition-as-bare-newtype--scalardefinition): `scalar_map=` rejected with `ValueError`, absence decided by `is None`, consumer mapping and key code left to propagate its own errors (per [Error shapes](#error-shapes)), and each collision named by the package definition it redeclares. The module imports no `warnings` and suppresses nothing ([Decision 6](#decision-6--no-warning-suppression-at-the-definition-site)). `_parse_bigint` and `_serialize_bigint` keep spec-017's **wire format** — decimal string in, decimal string out — while normalizing hostile `int` / `str` subclasses through the base descriptors.
 3. [`django_strawberry_framework/__init__.py`][django-strawberry-framework-init] re-exports `strawberry_config` beside `BigInt` from `.scalars`, and `"strawberry_config"` is the **last** element of `__all__`.
 4. [`tests/test_scalars.py`][test-scalars] carries every test named under the two `strawberry_config()` factory headings of the [Test plan](#test-plan), one pytest item each, no `pytest.mark.parametrize` fan-out.
 5. [`tests/test_scalars.py`][test-scalars] `test_package_import_does_not_emit_strawberry_deprecation_warning` passes: the import is clean under `-W error::DeprecationWarning` per [Decision 6](#decision-6--no-warning-suppression-at-the-definition-site).
@@ -486,7 +470,6 @@ Each item names a live constraint the contract depends on.
 <!-- django_strawberry_framework/ -->
 [converters]: ../../django_strawberry_framework/types/converters.py
 [django-strawberry-framework-init]: ../../django_strawberry_framework/__init__.py
-[exceptions]: ../../django_strawberry_framework/exceptions.py
 [scalars]: ../../django_strawberry_framework/scalars.py
 
 <!-- tests/ -->

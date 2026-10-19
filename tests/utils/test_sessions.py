@@ -1,6 +1,6 @@
 """Behavioral tests for the session-engine resolver and connection actor lease.
 
-``session_store_class`` hostile ``SESSION_ENGINE`` shapes and the WebSocket actor
+``session_store_class`` malformed and hostile ``SESSION_ENGINE`` shapes and the WebSocket actor
 lease have no GraphQL document: login/logout sessions live in
 ``examples/fakeshop/test_query/test_auth_api.py``; actor serialization stays here
 until fakeshop mounts ASGI.
@@ -76,10 +76,9 @@ def test_session_store_class_reports_an_unreadable_setting_as_configuration_erro
 ) -> None:
     """A ``settings.SESSION_ENGINE`` read that RAISES becomes ``ConfigurationError``.
 
-    A settings object whose ``SESSION_ENGINE`` descriptor raises is the
-    hostile-configuration shape the five-shape guard exists for: the resolver
-    must name the setting rather than let the descriptor's own exception escape
-    through the session boundary.
+    A settings object whose ``SESSION_ENGINE`` read raises one of the settings
+    read errors the resolver names (here ``KeyError``) surfaces as the typed
+    error naming the setting, chained to the original.
     """
 
     class _RaisingSettings:
@@ -138,6 +137,18 @@ def test_session_store_class_reports_a_storeless_engine_as_configuration_error(
         session_store_class()
 
 
+class _PlainSubclassEngine(str):
+    """A deployment-supplied engine subclass with benign dunders."""
+
+
+@override_settings(
+    SESSION_ENGINE=_PlainSubclassEngine("django.contrib.sessions.backends.db"),
+)
+def test_session_store_class_plain_subclass_engine_resolves() -> None:
+    """A benign ``str`` subclass resolves exactly like the string it carries."""
+    assert session_store_class() is DBSessionStore
+
+
 class _FormatHostileEngine(str):
     """A deployment-supplied engine whose ``__format__`` raises while being interpolated."""
 
@@ -162,9 +173,8 @@ def test_session_store_class_format_hostile_engine_raises_configuration_error() 
     ``f"{engine}.SessionStore"`` must never dispatch a consumer dunder: a
     raising ``__format__`` would replace the promised ``ConfigurationError``
     with an arbitrary exception on exactly the misconfiguration path where the
-    typed error matters (the same guarantee ``describe_value`` gives the
-    non-string rejection). The engine is flattened through the base ``str``
-    slot, so the rejection stays typed.
+    typed error matters. The engine is copied to an exact ``str`` through the
+    base slot (``truth.text``), so the rejection stays typed.
     """
     with pytest.raises(ConfigurationError, match="Could not resolve SESSION_ENGINE"):
         session_store_class()
@@ -175,10 +185,8 @@ def test_session_store_class_repr_hostile_engine_raises_configuration_error() ->
     """A hostile ``__repr__`` on the engine cannot defeat the typed rejection.
 
     The import-failure message renders the engine through ``{engine!r}`` at the
-    RAISE SITE - before any exception object exists, so the error hierarchy's
-    own ``__repr__`` guards cannot help. A deployment-supplied engine subclass
-    with a raising ``__repr__`` must therefore arrive at that site as a plain
-    base ``str``.
+    raise site, so a deployment-supplied engine subclass with a raising
+    ``__repr__`` must arrive there as an exact base ``str``.
     """
     with pytest.raises(ConfigurationError, match="Could not resolve SESSION_ENGINE"):
         session_store_class()
@@ -186,9 +194,9 @@ def test_session_store_class_repr_hostile_engine_raises_configuration_error() ->
 
 @override_settings(SESSION_ENGINE=_ReprHostileEngine("tests.utils._no_such_engine"))
 def test_session_store_class_repr_hostile_engine_names_the_engine_path() -> None:
-    """The flattened engine still renders its path in the rejection message.
+    """The copied engine still renders its path in the rejection message.
 
-    Flattening is a safety measure, not a redaction: the actionable part of the
+    The copy is a safety measure, not a redaction: the actionable part of the
     message (which module could not be imported) survives.
     """
     with pytest.raises(ConfigurationError, match=r"tests\.utils\._no_such_engine"):
@@ -255,6 +263,17 @@ def test_session_store_class_rejects_an_empty_truthiness_hostile_engine() -> Non
         pytest.raises(ConfigurationError, match="SESSION_ENGINE must be a non-empty string"),
     ):
         session_store_class()
+
+
+@override_settings(SESSION_ENGINE=_PlainSubclassEngine("tests.utils._no_such_session_engine"))
+def test_session_store_class_unresolvable_engine_message_is_pinned() -> None:
+    """The import-failure rejection renders the engine as the exact string it carries."""
+    with pytest.raises(ConfigurationError) as excinfo:
+        session_store_class()
+    assert str(excinfo.value) == (
+        "Could not resolve SESSION_ENGINE 'tests.utils._no_such_session_engine''s "
+        "SessionStore (ModuleNotFoundError); check settings.SESSION_ENGINE."
+    )
 
 
 # ---------------------------------------------------------------------------

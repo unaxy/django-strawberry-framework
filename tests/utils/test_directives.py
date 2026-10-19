@@ -1,4 +1,4 @@
-"""Tests for the shared field-directives containment (``utils/directives.py``).
+"""Tests for the shared field-directives validation (``utils/directives.py``).
 
 ``validated_field_directives`` raises at field construction. Per-factory call
 sites stay in ``tests/test_list_field.py`` / ``tests/mutations/test_fields.py``;
@@ -6,11 +6,9 @@ consumer fields over HTTP live in ``examples/fakeshop/test_query/test_list_field
 """
 
 from collections.abc import Iterator
-from typing import NoReturn
 
 import pytest
 from django.utils.functional import SimpleLazyObject
-from typing_extensions import Self
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils.directives import validated_field_directives
@@ -91,54 +89,16 @@ def test_non_iterable_raises_configuration_error_chaining_the_typeerror() -> Non
     assert isinstance(exc.value.__cause__, TypeError)
 
 
-def test_hostile_iterator_raising_runtimeerror_is_contained() -> None:
-    """The drift the enumerated ``except`` tuple left open.
+def test_iterator_error_propagates() -> None:
+    """An iterable's own iteration runs untouched; what it raises propagates."""
 
-    The two inline copies this helper replaced caught only
-    TypeError/ValueError/AttributeError/KeyError/IndexError, so an iterator
-    raising anything else - `RuntimeError` here - walked straight through the
-    containment and escaped raw. The containment is `Exception`-wide now.
-    """
-
-    class HostileDirectives:
-        def __iter__(self) -> Self:
-            return self
-
-        def __next__(self) -> NoReturn:
-            raise RuntimeError("hostile iterator detonated")
-
-    with pytest.raises(ConfigurationError) as exc:
-        validated_field_directives("DjangoMutationField", HostileDirectives())
-    assert str(exc.value) == "DjangoMutationField directives could not be read (RuntimeError)."
-    assert isinstance(exc.value.__cause__, RuntimeError)
-
-
-def test_iterator_raising_midway_is_contained() -> None:
-    """A container that yields real entries and then raises still rejects typed."""
-
-    class ExplodingDirectives:
+    class RaisingDirectives:
         def __iter__(self) -> Iterator[str]:
             yield "a"
-            raise ValueError("detonated midway")
+            raise RuntimeError("iterator detonated")
 
-    with pytest.raises(ConfigurationError, match=r"directives could not be read") as exc:
-        validated_field_directives("DjangoNodesField", ExplodingDirectives())
-    assert isinstance(exc.value.__cause__, ValueError)
-
-
-def test_baseexception_from_iteration_is_not_swallowed() -> None:
-    """`KeyboardInterrupt` / `SystemExit` must keep propagating through the containment.
-
-    The `except` is deliberately `Exception`-wide, not `BaseException`-wide: an
-    interrupt is not a configuration defect and must never be reported as one.
-    """
-
-    class Interrupting:
-        def __iter__(self) -> Iterator[str]:
-            raise KeyboardInterrupt
-
-    with pytest.raises(KeyboardInterrupt):
-        validated_field_directives("DjangoListField", Interrupting())
+    with pytest.raises(RuntimeError, match="iterator detonated"):
+        validated_field_directives("DjangoMutationField", RaisingDirectives())
 
 
 class _ClaimsStr(ClaimsClassBase):
@@ -147,46 +107,50 @@ class _ClaimsStr(ClaimsClassBase):
     claimed = str
 
 
-@pytest.mark.parametrize("raised", [RuntimeError, ValueError])
-def test_value_whose_class_read_raises_is_the_typed_unreadable_reject(
-    raised: type[Exception],
-) -> None:
-    """The text-or-bytes check reads ``__class__``; that read is inside the containment.
-
-    Dropping the check from the ``try`` lets the value's own exception escape raw.
-    """
-    with pytest.raises(ConfigurationError) as exc:
-        validated_field_directives("DjangoListField", ClassReadRaises(raised))
-    assert str(exc.value) == (f"DjangoListField directives could not be read ({raised.__name__}).")
-    assert isinstance(exc.value.__cause__, raised)
-
-
-@pytest.mark.parametrize("raised", [KeyboardInterrupt, SystemExit])
-def test_interrupt_from_a_class_read_is_not_swallowed(raised: type[BaseException]) -> None:
-    """The containment stays ``Exception``-wide for the class read too.
-
-    Routing the check through ``_safe_predicate`` (``BaseException`` to ``False``) fails here.
-    """
-    with pytest.raises(raised):
-        validated_field_directives("DjangoListField", ClassReadRaises(raised))
-
-
 @pytest.mark.parametrize(
-    ("value", "type_name"),
-    [(SimpleLazyObject(lambda: "@deprecated"), "SimpleLazyObject"), (_ClaimsStr(), "_ClaimsStr")],
-    ids=["lazy-proxy", "claims-str"],
+    "raised",
+    [
+        RuntimeError,
+        ValueError,
+        KeyboardInterrupt,
+        SystemExit,
+    ],
 )
-def test_value_claiming_text_through_its_class_is_still_rejected_as_text(
-    value: object,
-    type_name: str,
+def test_value_whose_class_read_raises_is_judged_by_its_real_class(
+    raised: type[BaseException],
 ) -> None:
-    """The check stays a proxy-aware ``isinstance``: a lazy ``str`` is text, not directives.
+    """The text-or-bytes check never reads ``__class__``, so a raising one never fires.
 
-    A real-type predicate would let ``tuple()`` iterate the proxy's characters and the
-    raw ``AttributeError`` at schema build would return.
+    The value's real class is neither text nor iterable: the typed unreadable reject,
+    chaining ``list()``'s ``TypeError``. An ``isinstance`` check would let the value's own
+    exception (an interrupt included) escape before any iteration starts.
     """
     with pytest.raises(ConfigurationError) as exc:
-        validated_field_directives("DjangoListField", value)
+        validated_field_directives("DjangoListField", ClassReadRaises(raised))
+    assert str(exc.value) == "DjangoListField directives could not be read (TypeError)."
+    assert isinstance(exc.value.__cause__, TypeError)
+
+
+def test_lazy_proxy_over_text_is_rejected_as_text() -> None:
+    """A Django lazy proxy is checked as the object it wraps: a lazy ``str`` is text.
+
+    Checking the proxy's own real class would let ``list()`` iterate the proxy's
+    characters and the raw ``AttributeError`` at schema build would return.
+    """
+    with pytest.raises(ConfigurationError) as exc:
+        validated_field_directives("DjangoListField", SimpleLazyObject(lambda: "@deprecated"))
     assert str(exc.value) == (
-        f"DjangoListField directives must be a sequence of directive instances; got {type_name}."
+        "DjangoListField directives must be a sequence of directive instances; "
+        "got SimpleLazyObject."
     )
+
+
+def test_value_claiming_text_through_its_class_is_judged_by_its_real_class() -> None:
+    """A ``__class__`` that claims ``str`` is not a ``str``: the value is still rejected.
+
+    Its real class is not iterable, so it takes the typed unreadable reject.
+    """
+    with pytest.raises(ConfigurationError) as exc:
+        validated_field_directives("DjangoListField", _ClaimsStr())
+    assert str(exc.value) == "DjangoListField directives could not be read (TypeError)."
+    assert isinstance(exc.value.__cause__, TypeError)

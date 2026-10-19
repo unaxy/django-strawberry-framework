@@ -2603,30 +2603,10 @@ def test_validate_normalized_terms_rejects_hostile_container_and_string_subclass
     assert _validate_normalized_terms(HostileOrder, good) is good
 
 
-def test_input_has_active_terms_hostile_eq_and_repr() -> None:
-    """Hostile non-primitive terms returned by _normalize_input raise ConfigurationError."""
+def test_input_has_active_terms_rejects_non_str_path_term() -> None:
+    """A non-``str`` path term returned by _normalize_input is a typed rejection."""
 
-    class HostileEqTerm:
-        def __init__(self, val: object) -> None:
-            self.val = val
-
-        @override
-        def __eq__(self, other: object) -> NoReturn:
-            raise RuntimeError("hostile __eq__ called")
-
-        # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-        __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-    class HostileReprTerm:
-        def __init__(self, val: object) -> None:
-            self.val = val
-
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("hostile __repr__ called")
-
-    # Hostile non-str path rejected during boundary validation
-    class HostileEqOrder(OrderSet):
+    class BadTermOrder(OrderSet):
         class Meta:
             model = Book
             fields = ["title"]
@@ -2635,30 +2615,14 @@ def test_input_has_active_terms_hostile_eq_and_repr() -> None:
         @override
         # basedpyright: deliberately a non-str key, the invalid term the boundary refuses
         def _normalize_input(cls, input_value: object) -> list[tuple[object, Ordering | None]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [("title", Ordering.ASC), (HostileEqTerm("custom"), None)]
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"HostileEqOrder\._normalize_input returned invalid term",
-    ):
-        HostileEqOrder._input_has_active_terms([{"title": "ASC"}])
-
-    # Hostile __repr__ during invalid term error formatting
-    class HostileReprOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-        @classmethod
-        @override
-        # basedpyright: deliberately a non-Ordering direction, the invalid term the boundary refuses
-        def _normalize_input(cls, input_value: object) -> list[tuple[str, object]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [("title", HostileReprTerm("boom"))]
+            return [("title", Ordering.ASC), (7, None)]
 
     with pytest.raises(ConfigurationError) as exc_info:
-        HostileReprOrder._input_has_active_terms([{"title": "ASC"}])
-    assert "returned invalid term" in str(exc_info.value)
-    assert "<unprintable" in str(exc_info.value)
+        BadTermOrder._input_has_active_terms([{"title": "ASC"}])
+    assert str(exc_info.value) == (
+        f"OrderSet {BadTermOrder.__qualname__}._normalize_input returned invalid term "
+        "(7, None); expected a (field_path: str, direction: Ordering | None) tuple."
+    )
 
 
 def test_input_has_active_terms_public_apply_override_independence() -> None:

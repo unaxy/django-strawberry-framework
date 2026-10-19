@@ -1,7 +1,7 @@
 """Shared fixtures for the auth test modules.
 
-Holds the ``sync_boundary_spy`` fixture (previously duplicated verbatim in
-``test_mutations`` and ``test_queries``). Plain, non-fixture helpers shared
+Holds the ``sync_boundary_spy`` fixture ``test_mutations`` and
+``test_queries`` share. Plain, non-fixture helpers shared
 across the modules live in ``tests/auth/_helpers.py``.
 """
 
@@ -20,10 +20,11 @@ def sync_boundary_spy(monkeypatch: pytest.MonkeyPatch) -> list[Callable[..., obj
     """Spy on ``run_in_one_sync_boundary`` so async-body entry is counted deterministically.
 
     Both ``login`` / ``logout`` and ``current_user`` ride the same
-    ``_make_auth_field`` dispatch seam and the same ``_sync_bridged_async_body``
-    interim async body, which bridges to the sync body through this ONE shared
-    worker. Counting its calls counts how many times the native async body was
-    awaited (and so proves which path resolved the field). The async closure
+    ``_make_auth_field`` dispatch seam and cross this ONE shared
+    ``run_in_one_sync_boundary`` worker - ``current_user`` through the
+    ``_sync_bridged_async_body`` interim bridge, ``login`` / ``logout`` through
+    their native async bodies. Counting its calls counts how many times an async
+    body was awaited (and so proves which path resolved the field). The async closure
     resolves the module-global name at call time, so patching the module attribute
     is observed.
     """

@@ -92,11 +92,11 @@ same move makes things worse.
    transaction effects, cancellation, the point where actor/time/state are observed. Not Boolean
    agreement on a happy input. Splitting a predicate ≠ automatically safe; hoisting a check out of
    the boundary that makes it valid changes its meaning.
-9. **Enforce sameness mechanically when one body is impossible.** One owner holds the canonical
-   form; a check proves every copy against it under an independently enumerated population,
-   per-region identity + cardinality, rejected parse failures, negative controls (missing,
-   duplicated, truncated, renamed, omitted). Passing count ≠ completeness.
-   `scripts/check_trailing_commas.py`, `build_tree_md.py --check` = this shape.
+9. **Prove sameness behaviorally; never by census.** A consolidation's oracle is a behavioral
+   test that fails on a wrong value, message, or effect - one a correct hand copy of the owner
+   still passes. AST / source-reading / 'used only in owner' gates are barred. Where bypass
+   itself is the vulnerability (security / data-exposure rules), the negative control is a
+   behavioral bypass attempt that must refuse - not a spelling count.
 10. **Write the grammar at the owner.** Convention living only in code gets bypassed by the next
     capable person, who sees custom logic, not a rule. Each grammar + each intentional separation
     stated in prose where owned ([sets_mixins.py][sets-mixins] module docstring; `"__all__"` note
@@ -134,8 +134,9 @@ the system less DRY.
   consumes `binding_attrs`. Neither path spells a slot.
 - **Change challenge.** Add a family-specific cached slot → only the declaration gains its
   identity; generic reset discovers it. Independent regression test proves the clear removes the
-  new state (a test reading the slot list from the declaration passes whatever it says). New family
-  declares its own record, never copies the lifecycle body.
+  new state (the oracle spells its own slot expectation — reading the slot list from the
+  declaration would pass whatever it says — so a new slot needs its own spelled assertion). New
+  family declares its own record, never copies the lifecycle body.
 - **Intentional separation.** `FilterSet.get_fields`: per-field `"__all__"` lookup expansion vs
   model-level `"__all__"` sweep share a token, not a contract. Posit a change to either → other
   doesn't move. Recorded at the owner so no cycle re-litigates. Rejections are measured like
@@ -210,6 +211,14 @@ repeated literals, concept matches; its fingerprint hashes a docstring-stripped 
 separates sync from async → finds textual twins only. `check` = artifact names every target
 definition, not that it reasoned. Orientation tools; never findings, never a gate on judgment.
 
+Bar: consolidate only when a plausible change forces edits at 2+ definitions that each carry real
+logic - or the rule is security / data-exposure / db-routing relevant, or the copies already
+drifted - with no added machinery.
+
+A change to someone else's rule does not count: Django / Strawberry / GraphQL-owned spellings
+(slot names, token grammars) are not consolidatable rules however many sites spell them. Posit
+changes to OUR rule.
+
 ## Deciding and consolidating
 
 First try to DISPROVE shared responsibility: inputs, outputs, errors, state transitions, timing,
@@ -233,6 +242,9 @@ Every finding, consolidated or rejected:
 - **Owner + lifetime** — chosen owner w/ responsibility reasoning; principle 4 lifetime fields for
   any stored derivation.
 - **Migration** — what each former definition becomes (call, declaration, deletion).
+- `Shrinkage` - net package lines over the item baseline; what was deleted; machinery
+  attestation (no new helper / wrapper / constant, or the new edge's responsibility in one
+  clause).
 - **Distinct behavior** — what stays separate/compatible; where recorded.
 - **Behavioral proof** — tests/experiments showing observable equivalence (principle 8), each
   `static-reviewed` | `execution-deferred` | `execution-verified`, each naming the wrong result it
@@ -240,21 +252,13 @@ Every finding, consolidated or rejected:
   anything ordering, transactional, async). `execution-deferred` = listed under the artifact's
   `## Pending execution` as `proof: <command>`. A command the gate runs that discharges no
   finding (regression witness, suite-is-green confirmation) is listed as `gate: <command>`.
-- **Structural gate** — oracle that fails when the owner is bypassed, w/ its negative control: a
-  behavior-preserving hand copy of the owner's body. Every behavior oracle passes that control
-  (the copy is correct); so does a name/existence assertion
-  ([test_resolvers.py][test-resolvers]`::test_write_flavors_share_resolver_entry_factory` asserts
-  `__name__` thrice). Owner already single + no gate = `gate-only` finding: distinct outcome, not
-  a consolidation; needs a justified population (which mechanism, which bypass is plausible),
-  never a bespoke existence test per helper. First run the would-be gate against the tree and
-  show the rule currently holds: a gate born red gets weakened, not fixed; a red result is a
-  defect, not a gate.
+- **Negative control** - behavioral bypass attempt where bypass is the threat; else none.
 - **Coupling** — findings that must land together + why (generated slot collides, import moves).
   Visible to a reviewer reading one finding alone.
-- **Freshness** — fingerprint of every input inspected: blob id per file (`git hash-object
-  <path>`; `HEAD:<path>` when clean), searched population, tests, contract sources, and every
-  module EXCLUDED from the family on the strength of its body. A path name can't say later
-  whether its bytes changed. Any fingerprint change reopens the finding.
+- **Freshness** - fingerprint the owner + every touch path + the proving tests: blob id per file
+  (`git hash-object <path>`; `HEAD:<path>` when clean), searched population, contract sources.
+  Excluded modules are named, not blob-pinned; a later cycle re-derives exclusions fresh. A path
+  name can't say later whether its bytes changed. Any fingerprint change reopens the finding.
 
 Fields only where they apply; a finding is a decision aid, not a catalog entry. Finding line
 estimate = per finding; plan outcomes measure the cycle over the baseline diff; the two need not
@@ -275,8 +279,8 @@ fakeshop fixture that doesn't exist (model, relation shape), the test lands at t
 existing tier and the missing fixture becomes a `## Defects` entry for the maintainer: never a new example
 model inside an item. Oracles never rewritten to read from the owner they check. Owner coverage ≠
 every former behavior still runs. Intentional test repetition stays when it keeps behaviors
-independently legible. Every gate a finding relies on must be shown able to fail for the
-divergence it guards (`scripts/prove_failability.py`).
+independently legible. Every behavioral proof a finding relies on must be shown able to fail
+for the divergence it guards (`scripts/prove_failability.py`).
 
 That runner mutates and restores the checkout it lives in: root from its own path, targets
 resolved against it, pytest run inside it, scratch root refused inside it. Copying a target under
@@ -389,6 +393,10 @@ A test failing before the item's first edit is pre-existing: reproduce it in the
 copy, record it under `## Defects` w/ owner + the failing command, route to the maintainer through Worker-0.
 It blocks the gate row, never the item.
 
+Drift reopens nothing: ticks and verified artifacts stand as recorded. A fresh trace in a new
+item that proves a ticked row factually wrong records it as a finding for the homing pass; the
+row stays shut.
+
 ### Workers
 
 Fresh workers per item; author never approves own change. No worker reads another's
@@ -428,7 +436,7 @@ scoped: the owner, its tests, the ledger rows the item lands.
    in `## Independent verification (Worker-2)` BEFORE reading `## Findings`; then checks `###
    Enumeration` member by member, never by sample; challenges equivalence + ownership; confirms
    matrix discharged against the target's REAL surface (claimed inapplicability judged on its
-   reason); confirms each gate fails its negative control; checks the item-scoped diff against
+   reason); confirms each negative control refuses; checks the item-scoped diff against
    [AGENTS.md][agents] prose rules (no process provenance, `path::Symbol` citations, test tier) and
    runs `uv run ruff format --check` + `uv run ruff check` on the paths it touched (a failure is
    `revision-needed`); records defects it finds under `## Defects` marked `(Worker-2)`. Zero-edit
@@ -494,6 +502,10 @@ Worker-1 appends `## Implementation (Worker-1)` on tracked changes; Worker-2 app
 `## Independent verification (Worker-2)`; later passes append `## Iterations`. Nobody erases prior
 reasoning. No inventories, copied tool output, empty placeholders.
 
+Caps: System trace at most ~25 lines; tables one line per row; Judgment at most 6 lines.
+`## What shrinks` (per family: the rule, the change, the owner, net lines, machinery attestation)
+is uncapped.
+
 ### Final gate and closeout
 
 Every item but the gate verified + inventory re-reconciled → Worker-0 dispatches the gate Worker-1
@@ -551,7 +563,6 @@ role files, the planner, or the plan. Do not commit.
 [utils-inputs]: ../../django_strawberry_framework/utils/inputs.py
 
 <!-- tests/ -->
-[test-resolvers]: ../../tests/mutations/test_resolvers.py
 
 <!-- examples/ -->
 

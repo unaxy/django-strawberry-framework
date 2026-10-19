@@ -29,9 +29,7 @@ conflict raise.
 
 from __future__ import annotations
 
-import contextlib
 import functools
-import inspect
 from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast, final
 
 import strawberry
@@ -43,7 +41,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_arg_repr, _safe_text
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations import resolvers
 from django_strawberry_framework.mutations.fields import (
     DjangoMutationField,
@@ -64,6 +62,7 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.mutations.resolvers import run_write_pipeline_sync
 from django_strawberry_framework.mutations.sets import (
     DjangoMutation,
+    DjangoMutationMetaclass,
     _validate_permission_classes,
     backing_model_of,
     make_declaration_registry,
@@ -73,6 +72,7 @@ from django_strawberry_framework.mutations.sets import (
 )
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.resource_policy import check_deadline
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_list,
     is_str,
@@ -90,7 +90,10 @@ from django_strawberry_framework.utils.errors import (
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.permissions import request_from_info
-from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
+from django_strawberry_framework.utils.querysets import (
+    _disposed_awaitable,
+    run_in_one_sync_boundary,
+)
 from django_strawberry_framework.utils.sessions import actor_transition
 from django_strawberry_framework.utils.write_values import unencodable_text_error
 
@@ -133,10 +136,11 @@ if TYPE_CHECKING:
         _payload_type_name: str | None
 
 
-# The one family label every auth surface resolves its request under (the
-# spec-040 D1 reuse directive): a single module-level constant, never a per-field
-# string literal, so the ``request_from_info`` resolution wording cannot drift
-# between the four auth fields.
+# The one family label the three fixed auth fields resolve their request under
+# (the spec-040 D1 reuse directive): a single module-level constant, never a
+# per-field string literal, so the ``request_from_info`` resolution wording cannot
+# drift between ``login`` / ``logout`` / ``me`` (``register`` rides the write
+# skeleton, whose permission classes resolve under their own labels).
 _AUTH_FAMILY_LABEL = "AuthMutation"
 
 # The single undifferentiated login-failure message (the upstream borrow, spec-040
@@ -217,9 +221,10 @@ _SURFACE_FACTORY_NAMES = {
 # The auth DECLARATION ledger (spec-040 Decision 9 / D14): a
 # ``make_declaration_registry`` instance - the same identity-deduped ``register``
 # / post-finalize reject / ``clear`` mechanics the model / form flavors use, over
-# its own disjoint store. Cleared by ``TypeRegistry.clear()`` ONLY (the hand row
-# in ``registry.py``), never by the pre-bind reset - declarations must survive a
-# recover-in-place re-finalize so ``bind_auth_mutations()`` can re-read them.
+# its own disjoint store. Cleared by ``TypeRegistry.clear()`` ONLY (the
+# owner-registered ``auth.declarations`` row below), never by the pre-bind reset
+# - declarations must survive a recover-in-place re-finalize so
+# ``bind_auth_mutations()`` can re-read them.
 _auth_declaration_registry: DeclarationRegistry[_AuthDeclaration] = make_declaration_registry(
     _AUTH_FAMILY_LABEL,
 )
@@ -276,14 +281,14 @@ class _AuthMutationMetaSnapshot:
         )
 
 
-# The class attributes ``_make_permission_holder`` stashes on every holder
-# (``_primary_type`` / ``_payload_type_name`` are rebound at bind), declared on a
-# type-checking-only base so the runtime metaclass body records no annotations: a
-# metaclass-level ``__annotations__`` would shadow ``type``'s own descriptor on every
-# holder class.
+# The metaclass of a synthesized auth permission holder. At runtime it IS
+# ``DjangoMutationMetaclass``, whose class-head seal keeps ``_mutation_meta``
+# write-once; the type-checking-only subclass declares the attributes the
+# synthesis stashes on every holder (``_primary_type`` / ``_payload_type_name`` are
+# rebound at bind), so the runtime metaclass body records no annotations.
 if TYPE_CHECKING:
 
-    class _AuthHolderAttributes(type):
+    class _SealedAuthHolderMeta(DjangoMutationMetaclass):
         """The holder class attributes, as a type checker sees them."""
 
         _mutation_meta: _AuthMutationMetaSnapshot
@@ -291,44 +296,12 @@ if TYPE_CHECKING:
         _primary_type: type[DjangoType] | None
         _payload_type_name: str | None
 
+    # One auth-ledger declaration: a fixed surface's permission holder or the
+    # ``register`` rider.
+    _AuthDeclaration: TypeAlias = _SealedAuthHolderMeta | type[DjangoMutation]
+    _AuthDeclarationT = TypeVar("_AuthDeclarationT", _SealedAuthHolderMeta, type[DjangoMutation])
 else:
-    _AuthHolderAttributes = type
-
-
-class _SealedAuthHolderMeta(_AuthHolderAttributes):
-    """Seals the synthesized auth holder's ``_mutation_meta`` head.
-
-    Mirrors ``mutations/sets.py::make_meta_validating_metaclass``: a holder's
-    ``_mutation_meta`` is stashed exactly once at synthesis; a post-declaration
-    rebind of that head (a plain attribute statement inside a ``has_permission``
-    hook, which receives the holder) would replace the fixed auth surface's
-    per-request authorization source with a hook-chosen record. Creation is the
-    one honored write; rebinding or deletion raises ``ConfigurationError``.
-    """
-
-    @override
-    def __setattr__(cls, name: str, value: object) -> None:  # noqa: N805 - a metaclass method's first argument is the class
-        if name == "_mutation_meta" and "_mutation_meta" in cls.__dict__:
-            raise ConfigurationError(
-                f"{cls.__name__}._mutation_meta is sealed and cannot be rebound; the auth "
-                "surface's validated permission set is captured once at declaration time.",
-            )
-        super().__setattr__(name, value)
-
-    @override
-    def __delattr__(cls, name: str) -> None:  # noqa: N805 - a metaclass method's first argument is the class
-        if name == "_mutation_meta" and "_mutation_meta" in cls.__dict__:
-            raise ConfigurationError(
-                f"{cls.__name__}._mutation_meta is sealed and cannot be deleted; the "
-                "validated authorization snapshot is captured once at declaration time.",
-            )
-        super().__delattr__(name)
-
-
-# One auth-ledger declaration: a fixed surface's permission holder or the
-# ``register`` rider.
-_AuthDeclaration: TypeAlias = _SealedAuthHolderMeta | type[DjangoMutation]
-_AuthDeclarationT = TypeVar("_AuthDeclarationT", _SealedAuthHolderMeta, type[DjangoMutation])
+    _SealedAuthHolderMeta = DjangoMutationMetaclass
 
 
 def _make_permission_holder(
@@ -411,8 +384,8 @@ def _reject_conflicting_permission_classes(
         factory = _SURFACE_FACTORY_NAMES[surface]
         raise ConfigurationError(
             f"auth {factory} is already declared in this process with permission_classes="
-            f"{[cls.__name__ for cls in declared]!r}; a second call with a different "
-            f"permission_classes ({[cls.__name__ for cls in permission_classes]!r}) cannot mint "
+            f"{[truth.name(cls) for cls in declared]!r}; a second call with a different "
+            f"permission_classes ({[truth.name(cls) for cls in permission_classes]!r}) cannot mint "
             "a second fixed-name auth payload. Declare each auth surface once per process with "
             "one permission set (registry.clear() resets the declaration).",
         )
@@ -533,11 +506,10 @@ def _make_auth_field(
     authenticates, or touches the session. It is pure, so the async path runs it
     on the event loop before any ``sync_to_async`` boundary is built.
     """
-    # Hostile-container containment for the directives iterable rides the shared
+    # The directives iterable is validated by the shared
     # ``utils/directives.py::validated_field_directives`` (single-sited for every field
-    # factory): a bare string would be iterated character-wise and a hostile iterator
-    # raising mid-iteration would escape raw. Validate before handing to Strawberry so
-    # the factory fails loud as ConfigurationError.
+    # factory): a bare string would otherwise be iterated character-wise. Validate
+    # before handing to Strawberry so the factory fails loud as ConfigurationError.
     directives = validated_field_directives("auth field", directives)
 
     def _resolve(info: Info[object, object], **kwargs: object) -> object:
@@ -557,20 +529,6 @@ def _make_auth_field(
     )
 
 
-def _close_unawaited(awaitable: object) -> None:
-    """Close an awaitable ``is_authenticated`` value so it is never left un-awaited.
-
-    Coroutines (and generator-based awaitables) carry ``close``; an awaitable
-    without a callable one is left alone. Whatever the read or the close raises
-    is swallowed, because the caller has already classified the request as
-    anonymous.
-    """
-    with contextlib.suppress(BaseException):
-        close = getattr(awaitable, "close", None)
-        if callable(close):
-            _ = close()
-
-
 def _authenticated_actor_or_none(request: object) -> _User | None:
     """Return the request's authenticated actor, or ``None`` when anonymous.
 
@@ -583,75 +541,30 @@ def _authenticated_actor_or_none(request: object) -> _User | None:
     (``actor is not None`` / the actor itself) so the classification cannot drift
     between the two fields.
 
-    Exception containment: a hostile ``request.user``
-    descriptor, a hostile ``user.is_authenticated`` read, a hostile legacy
-    callable, or a hostile ``is_authenticated`` VALUE whose truthiness
-    (``__bool__`` / ``__len__``) raises ``TypeError`` / ``ValueError`` /
-    ``AttributeError`` / ``KeyError`` / ``IndexError`` must not escape as an
-    unhandled top-level error. Those shapes collapse to anonymous (``None``) -
-    a fail-closed nullable return - while any other exception (e.g. a
-    ``DatabaseError`` from a ``SimpleLazyObject`` that hits the DB) is left to
-    propagate so a real store outage is not hidden as anonymous.
+    ``is_authenticated`` is the consumer user model's own attribute. The legacy
+    callable form (pre-1.10 ``is_authenticated()``) is called and its result
+    classifies, because a bound method is always truthy and would otherwise
+    authenticate every caller. A pending awaitable is neither true nor false:
+    it is disposed through the package's one awaitable disposal
+    (``utils/querysets.py::_disposed_awaitable`` - a coroutine is closed so no
+    "never awaited" warning leaks out of the resolver, a future is cancelled,
+    any other awaitable has no cleanup protocol) and read as anonymous, the
+    fail-closed answer. Whatever the attribute read, the
+    call, or the truthiness test raises propagates to the schema's error policy
+    like any other consumer behaviour, and never classifies the request as
+    anonymous.
     """
-    try:
-        user: object = getattr(request, "user", None)
-    except (
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-        IndexError,
-    ):
-        return None
+    user: object = getattr(request, "user", None)
     if user is None:
         return None
-    try:
-        is_authenticated: object = getattr(user, "is_authenticated", False)
-    except (
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-        IndexError,
-    ):
-        return None
-    # Legacy callable form (pre-1.10 ``is_authenticated()``) - call safely.
+    is_authenticated: object = getattr(user, "is_authenticated", False)
     if callable(is_authenticated):
-        try:
-            is_authenticated = is_authenticated()
-        except (
-            TypeError,
-            ValueError,
-            AttributeError,
-            KeyError,
-            IndexError,
-        ):
-            return None
-        if inspect.isawaitable(is_authenticated):
-            _close_unawaited(is_authenticated)
-            return None
-    elif inspect.isawaitable(is_authenticated):
-        _close_unawaited(is_authenticated)
+        is_authenticated = is_authenticated()
+    if _disposed_awaitable(is_authenticated):
         return None
-    # Truthiness is the FOURTH hostile surface: the read and the
-    # legacy-callable call above are contained, but a value whose ``__bool__``
-    # / ``__len__`` raises would escape here. The same five shapes collapse to
-    # anonymous; anything else still propagates (the fail-closed rule holds -
-    # a hostile truthiness classifies as anonymous, never as authenticated).
-    try:
-        if is_authenticated:
-            # The auth middleware's ``user`` is the ``AUTH_USER_MODEL`` instance or
-            # ``AnonymousUser``; only the former reports itself authenticated.
-            return cast("_User", user)
-    except (
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-        IndexError,
-    ):
-        return None
-    return None
+    # The auth middleware's ``user`` is the ``AUTH_USER_MODEL`` instance or
+    # ``AnonymousUser``; only the former reports itself authenticated.
+    return cast("_User", user) if is_authenticated else None
 
 
 def _failed_login_payload(payload_cls: type[object], slot: str) -> object:
@@ -788,10 +701,12 @@ def _django_http_login_establish(request: HttpRequest, user: _User) -> None:
     ``cycle_key``/``flush``/``save`` store outage, or a raising ``user_logged_in``
     receiver) the local actor is made anonymous and the partially established
     session is flushed - clearing the in-memory auth keys AND deleting the durable
-    rotated/empty row ``cycle_key``/``flush`` already wrote. If cleanup also raises,
-    the ORIGINAL failure is re-raised with the cleanup error chained via
-    ``__context__`` (PEP 3134), never a false clean-state claim, and never a success
-    payload. This path holds no asyncio lock - the lock is Channels-scope-only.
+    rotated/empty row ``cycle_key``/``flush`` already wrote. If cleanup also raises an
+    ordinary ``Exception``, the ORIGINAL failure is re-raised with the cleanup error
+    chained via ``__context__`` (PEP 3134), never a false clean-state claim, and never
+    a success payload. A cancellation or process-level exception raised by the cleanup
+    propagates itself, with the original failure as its ``__context__``. This path
+    holds no asyncio lock - the lock is Channels-scope-only.
     """
     try:
         auth.login(request, user)
@@ -800,7 +715,7 @@ def _django_http_login_establish(request: HttpRequest, user: _User) -> None:
         try:
             request.user = AnonymousUser()
             request.session.flush()
-        except BaseException:  # noqa: BLE001 - cleanup failure must not mask the primary
+        except Exception:  # noqa: BLE001 - cleanup failure must not mask the primary
             raise primary  # noqa: B904 - cleanup failure chains via __context__ (PEP 3134)
         raise
 
@@ -826,8 +741,9 @@ async def _channels_http_login_establish(
     ONCE here (``scope_session_lock`` is non-reentrant, so compensation runs inside
     the already-held lock and calls no helper that re-acquires it). Compensation
     makes the scope actor anonymous and flushes the session (clearing the in-memory
-    auth keys AND deleting the durable rotated/empty row); a cleanup failure chains
-    the original failure via ``__context__`` (PEP 3134).
+    auth keys AND deleting the durable rotated/empty row); an ordinary cleanup failure
+    is chained onto the original failure via ``__context__`` (PEP 3134), while a
+    cleanup-time cancellation propagates with the original as its ``__context__``.
     """
     from channels.auth import login as channels_login  # noqa: PLC0415 - channels is optional
 
@@ -845,7 +761,7 @@ async def _channels_http_login_establish(
             try:
                 scope["user"] = AnonymousUser()
                 await session.aflush()
-            except BaseException:  # noqa: BLE001 - cleanup failure must not mask the primary
+            except Exception:  # noqa: BLE001 - cleanup failure must not mask the primary
                 raise primary  # noqa: B904 - cleanup chains via __context__ (PEP 3134)
             raise
 
@@ -863,8 +779,9 @@ def _login_resolve_body(
     Strawberry ``SyncGraphQLHTTPConsumer`` (a classified Channels HTTP scope) through
     a SINGLE ``async_to_sync`` bridge at the private transport boundary (the plan's
     one permitted sync->async hop; an async Channels consumer instead awaits the
-    native async body). Since spec-046 the package router serves no HTTP at all, so
-    a Channels HTTP scope reaches here only from a consumer the project mounted
+    native async body). The package router serves no HTTP at all (spec-046
+    Decision 2 gives HTTP to the consumer's own Django ASGI application), so a
+    Channels HTTP scope reaches here only from a consumer the project mounted
     itself. The success payload is constructed BEFORE the session is
     mutated (step 6) so a payload-construction failure cannot create a session the
     client never sees, and it holds the authenticated user OBJECT (not a scalar
@@ -999,16 +916,15 @@ def _django_http_logout(request: HttpRequest, payload_cls: type[_GeneratedPayloa
     needed), then assigns ``request.user = AnonymousUser()``. Teardown runs
     unconditionally, including for an anonymous request carrying residual session
     data. On ANY failure (a raising ``user_logged_out`` receiver before flush, or a
-    store outage during ``flush``/``delete``) the local actor is made anonymous where
-    possible and the error propagates - never a false ``{ok: true}``. This path holds
+    store outage during ``flush``/``delete``) the local actor is made anonymous and
+    the error propagates - never a false ``{ok: true}``. This path holds
     no asyncio lock; the scope lock is Channels-scope-only.
     """
     _ok, payload = _logout_observation(request, payload_cls)
     try:
         auth.logout(request)
-    except BaseException:  # incl. asyncio.CancelledError: anonymize where possible + re-raise
-        with contextlib.suppress(Exception):
-            request.user = AnonymousUser()
+    except BaseException:  # incl. asyncio.CancelledError: anonymize, then re-raise
+        request.user = AnonymousUser()
         raise
     return payload
 
@@ -1025,7 +941,8 @@ async def _channels_logout(
     reclaimed, and on Channels HTTP the response middleware sees the emptied session
     and deletes/replaces the browser cookie), then sets
     ``scope["user"] = AnonymousUser()``. Channels' flush is itself durable, so no
-    explicit ``asave()`` is added here (that would double-flush); logout's durability
+    explicit ``asave()`` is added here (a save after ``flush()`` would persist a
+    fresh empty row); logout's durability
     requirement is complete via the native teardown, unlike login's key-write which
     needs the explicit save.
 
@@ -1033,7 +950,7 @@ async def _channels_logout(
     ONCE here (``scope_session_lock`` is non-reentrant): the under-lock actor capture
     (the ``ok`` observation), payload construction, native teardown, and failure
     handling are atomic against any other operation multiplexed on the same Channels
-    connection. On failure the scope actor is made anonymous where possible and the
+    connection. On failure the scope actor is made anonymous and the
     error propagates - never a false ``{ok: true}`` and never a claimed clean durable
     state the teardown did not achieve.
 
@@ -1077,9 +994,8 @@ async def _channels_logout(
                 # ``_ChannelScope`` (a WebSocket scope); ``logout`` only reads the ``session`` /
                 # ``user`` keys and writes ``user``
                 await channels_logout(scope)  # pyright: ignore[reportArgumentType]
-            except BaseException:  # incl. CancelledError: anonymize where possible + re-raise
-                with contextlib.suppress(Exception):
-                    scope["user"] = AnonymousUser()
+            except BaseException:  # incl. CancelledError: anonymize, then re-raise
+                scope["user"] = AnonymousUser()
                 raise
             return payload
 
@@ -1091,8 +1007,9 @@ def _logout_resolve_body(holder_cls: _SealedAuthHolderMeta, info: Info[object, o
     Strawberry ``SyncGraphQLHTTPConsumer`` (a classified Channels HTTP scope) through
     a SINGLE ``async_to_sync`` bridge at the private transport boundary (the plan's
     one permitted sync->async hop; an async Channels consumer instead awaits the
-    native async body). Since spec-046 the package router serves no HTTP at all, so
-    a Channels HTTP scope reaches here only from a consumer the project mounted
+    native async body). The package router serves no HTTP at all (spec-046
+    Decision 2 gives HTTP to the consumer's own Django ASGI application), so a
+    Channels HTTP scope reaches here only from a consumer the project mounted
     itself. ``ok`` retains the shipped meaning: it is ``true`` only
     when an authenticated actor existed under the lock before teardown, and an
     already-anonymous logout returns ``{ok: false, errors: []}`` after still flushing
@@ -1221,7 +1138,7 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     activation state server-owned instead of silently turning an unusual
     user-model declaration into public registration input.
     """
-    model_name = user_model.__name__
+    model_name = truth.name(user_model)
     # Django reads ``USERNAME_FIELD`` / ``REQUIRED_FIELDS`` as field names but never checks
     # their types when the model class is built, and django-stubs declares them only on
     # ``AbstractUser`` / ``AbstractBaseUser`` (its ``ModelBase.__getattr__`` admits only
@@ -1233,7 +1150,7 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     if not is_str(username_field):
         raise ConfigurationError(
             f"register_mutation() needs {model_name}.USERNAME_FIELD to be a field "
-            f"name string; got {_safe_arg_repr(username_field)}.",
+            f"name string; got {truth.render(username_field)}.",
         )
     required_fields = read_attr(user_model, "REQUIRED_FIELDS")
     if issubclass(type(required_fields), list) and is_list(required_fields):
@@ -1243,16 +1160,16 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     else:
         raise ConfigurationError(
             f"register_mutation() needs {model_name}.REQUIRED_FIELDS to be a list or "
-            f"tuple; got {_safe_arg_repr(required_fields)}.",
+            f"tuple; got {truth.render(required_fields)}.",
         )
-    names = [_safe_text(username_field)]
+    names = [truth.text(username_field)]
     for entry in entries:
         if not is_str(entry):
             raise ConfigurationError(
                 f"register_mutation() needs every {model_name}.REQUIRED_FIELDS entry to be "
-                f"a field name string; got {_safe_arg_repr(entry)}.",
+                f"a field name string; got {truth.render(entry)}.",
             )
-        names.append(_safe_text(entry))
+        names.append(truth.text(entry))
     names.append("password")
     deduped = tuple(dict.fromkeys(names))
     # Every name is a plain ``str``, so the matched entries sort and render as plain text.
@@ -1286,7 +1203,8 @@ def _register_decode_step(
     ``(user, m2m_assignments, exclude, raw_password)`` - the raw password travels
     as explicit decoded state, never an implicit closure. ``password`` is a
     required input field (``AbstractBaseUser.password`` has no default / blank),
-    so a reached decode always captured it.
+    so the real path always provides it; an UNSET password yields ``None`` here
+    and the write step rejects it as null.
     """
     # The rider is a model-backed create: its snapshot carries the user model and the
     # bind stashed the decode's reverse maps.
@@ -1467,7 +1385,7 @@ def _synthesize_register_rider(
                 fields=meta.fields,
                 shape=pinned,
             )
-            materialize_mutation_input_class(input_cls.__name__, input_cls)
+            materialize_mutation_input_class(truth.name(input_cls), input_cls)
             cls._input_field_specs, cls._model_fields_by_attr = mutation_input_field_specs(
                 model,
                 input_cls,
@@ -1564,13 +1482,13 @@ def _resolve_user_primary_or_raise(
     factories = " / ".join(_SURFACE_FACTORY_NAMES[surface] for surface in surfaces)
     if registry.types_for(user_model):
         raise ConfigurationError(
-            f"auth {factories} declared, but the user model {user_model.__name__} has multiple "
+            f"auth {factories} declared, but the user model {truth.name(user_model)} has multiple "
             "registered DjangoTypes and no declared primary; set Meta.primary = True on one of "
             "them so the auth user type is unambiguous.",
         )
     raise ConfigurationError(
         f"auth {factories} declared with no registered DjangoType for the user model "
-        f"{user_model.__name__}; declare a DjangoType with Meta.model = get_user_model() "
+        f"{truth.name(user_model)}; declare a DjangoType with Meta.model = get_user_model() "
         "(mark it Meta.primary = True if the model has several types) so the auth surface "
         "has a user type to return.",
     )
@@ -1613,14 +1531,14 @@ def bind_auth_mutations() -> None:
             object_type=primary,
             object_slot=payload_object_slot(cast("type[DjangoType]", primary)),
         )
-        materialize_mutation_input_class(payload_cls.__name__, payload_cls)
-        login_holder._payload_type_name = payload_cls.__name__
+        materialize_mutation_input_class(truth.name(payload_cls), payload_cls)
+        login_holder._payload_type_name = truth.name(payload_cls)
 
     logout_holder = by_surface.get("logout")
     if logout_holder is not None:
         payload_cls = build_payload_type("Logout", object_type=None, object_slot=None)
-        materialize_mutation_input_class(payload_cls.__name__, payload_cls)
-        logout_holder._payload_type_name = payload_cls.__name__
+        materialize_mutation_input_class(truth.name(payload_cls), payload_cls)
+        logout_holder._payload_type_name = truth.name(payload_cls)
 
     current_user_holder = by_surface.get("current_user")
     if current_user_holder is not None:

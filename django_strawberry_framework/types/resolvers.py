@@ -27,7 +27,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Final, Literal, Protocol, TypeVar, cast
 
 import strawberry
-from asgiref.sync import sync_to_async
 from django.db import models, router
 from strawberry.types import Info
 from strawberry.utils.await_maybe import AwaitableOrValue
@@ -59,6 +58,7 @@ from django_strawberry_framework.resource_policy import (
     bounded_rows_async,
     check_deadline,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_str, read_attr, require
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.querysets import (
@@ -68,6 +68,7 @@ from django_strawberry_framework.utils.querysets import (
     is_manager,
     materialized_rows,
     normalized_row_source,
+    run_in_one_sync_boundary,
 )
 from django_strawberry_framework.utils.relations import (
     RelationKind,
@@ -124,8 +125,19 @@ _PLAN_UNREAD: Final = _PlanUnread.UNREAD
 # relation is recorded as planned, strictness would never see it. The stub
 # signals "elision unsafe" instead of reading the column; ``forward_resolver``
 # treats the sentinel as not-elided and falls through to the normal
-# related-object resolve so ``_check_n1`` (strictness) sees the access.
+# related-object resolve so ``_check_n1`` (strictness) sees the access. The
+# same sentinel reports a target model that refuses the pk-only stub.
 _FK_ELISION_UNSAFE: object = object()
+
+
+def _in_instance_namespace(root: object, name: str) -> bool:
+    """Whether ``name`` is stored in ``root``'s real instance ``__dict__``.
+
+    Read through ``truth.instance_dict``, so a ``__dict__`` property on the
+    row's class never answers; a row with no instance namespace stores nothing.
+    """
+    namespace = truth.instance_dict(root)
+    return namespace is not None and name in namespace
 
 
 def _fk_attname_is_deferred(root: object, attname: str) -> bool:
@@ -142,15 +154,12 @@ def _fk_attname_is_deferred(root: object, attname: str) -> bool:
     double can simulate the deferred case by exposing a ``get_deferred_fields``
     that returns the attname while keeping it out of ``__dict__``.
     """
-    if attname in getattr(root, "__dict__", {}):
+    if _in_instance_namespace(root, attname):
         return False
     get_deferred_fields = getattr(root, "get_deferred_fields", None)
     if get_deferred_fields is None:
         return False
-    try:
-        return attname in get_deferred_fields()
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return False
+    return attname in get_deferred_fields()
 
 
 def _build_fk_id_stub(root: object, field_meta: FieldMeta) -> object:
@@ -165,6 +174,15 @@ def _build_fk_id_stub(root: object, field_meta: FieldMeta) -> object:
     strictness sees the access. A fully-loaded column (the
     optimizer-owned-projection norm and the consumer-``.only()``-that-includes-
     the-FK case) builds the stub as before.
+
+    The stub is the framework's own speculative instance: a pk-only row the
+    consumer never asked for, handed to a target model whose ``__init__`` or
+    ``post_init`` receivers may legitimately assume populated columns. When the
+    model refuses that instance (any ``Exception``), elision is unavailable for
+    the row and the same ``_FK_ELISION_UNSAFE`` sentinel sends the caller to the
+    ordinary related-object load, which builds a fully populated instance.
+    ``BaseException`` (cancellation, interpreter exit) is not an elision outcome
+    and propagates.
     """
     if field_meta.attname is None or field_meta.related_model is None:
         return None
@@ -178,7 +196,7 @@ def _build_fk_id_stub(root: object, field_meta: FieldMeta) -> object:
         return None
     try:
         stub = field_meta.related_model(pk=related_id)
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
+    except Exception:  # noqa: BLE001 - consumer code may raise anything
         return _FK_ELISION_UNSAFE
     state = getattr(stub, "_state", None)
     if state is not None:
@@ -199,7 +217,7 @@ def _will_lazy_load_single(root: object, field_name: str) -> bool:
     treated as already loaded - matching the resolver's existing
     "compatibility for test doubles" contract.
     """
-    if field_name in getattr(root, "__dict__", {}):
+    if _in_instance_namespace(root, field_name):
         return False
     state = getattr(root, "_state", None)
     fields_cache = getattr(state, "fields_cache", {})
@@ -393,7 +411,7 @@ def _name_resolver(resolver: _NamedFieldResolverT, field_name: str) -> _NamedFie
     ``resolver`` is a module-local ``def`` closure, so its ``__name__`` is
     writable (``_NamedFieldResolver``).
     """
-    resolver.__name__ = f"resolve_{field_name}"
+    resolver.__name__ = f"resolve_{field_name}"  # truth: ok writes a framework-built closure
     return resolver
 
 
@@ -545,6 +563,30 @@ def _optimizer_scoped_relation(
     return _relation_is_optimizer_scoped(key)
 
 
+def _absence_catch_spec(field_meta: FieldMeta) -> tuple[type[BaseException], ...]:
+    """Return the ``except`` spec containing single-valued relation absence.
+
+    The ORM signals "this relation does not resolve to a row" by raising the
+    target model's ``DoesNotExist``: a dangling FK column read through the
+    forward descriptor, an unsaved instance's unset non-null FK, or a missing
+    reverse row. Django raises the per-relation ``RelatedObjectDoesNotExist``
+    subclass, which inherits from BOTH that ``DoesNotExist`` and
+    ``AttributeError``; catching the ``DoesNotExist`` side alone is therefore
+    sufficient AND is the point: a bare ``AttributeError`` arm would
+    additionally swallow one raised by a consumer's own descriptor / property
+    or a typo'd accessor, turning a programming error into a silent null. The
+    empty-tuple fallback (a relation with no target model) deliberately catches
+    nothing for the same reason.
+
+    The one spec both single-valued branches (reverse OneToOne, forward FK /
+    forward OneToOne) compose by name.
+    """
+    related_model = field_meta.related_model
+    if related_model is not None:
+        return (related_model.DoesNotExist,)
+    return ()
+
+
 def _make_relation_resolver(
     field: "ModelField",
     parent_type: "type[DjangoType] | None" = None,
@@ -605,8 +647,10 @@ def _make_relation_resolver(
 
     Every branch that would otherwise reach a SYNCHRONOUS descriptor read under
     an async execution is gated on ``_will_lazy_load_single(...) and
-    async_execution()`` and routed through ``sync_to_async(getattr,
-    thread_sensitive=True)``. The lazy-load predicate is load-bearing, not
+    async_execution()`` and routed through the shared
+    ``run_in_one_sync_boundary`` worker (one
+    ``sync_to_async(thread_sensitive=True)`` hop, never a re-spelled copy).
+    The lazy-load predicate is load-bearing, not
     belt-and-braces: an already-populated relation (optimizer ``select_related``
     or a warm ``fields_cache``) must stay on the direct read so the common
     optimized path does not pay a thread hop per row, and only the genuinely
@@ -723,11 +767,7 @@ def _make_relation_resolver(
         return _name_resolver(many_resolver, field_name)
 
     if kind == "reverse_one_to_one":
-        reverse_does_not_exist = (
-            field_meta.related_model.DoesNotExist
-            if field_meta.related_model is not None
-            else AttributeError
-        )
+        reverse_does_not_exist = _absence_catch_spec(field_meta)
 
         def reverse_one_to_one_resolver(root: object, info: Info[object, object]) -> object:
             check_deadline(info)
@@ -736,7 +776,8 @@ def _make_relation_resolver(
 
                 async def _resolve_async() -> object:
                     try:
-                        related: object = await sync_to_async(read_attr, thread_sensitive=True)(
+                        related: object = await run_in_one_sync_boundary(
+                            read_attr,
                             root,
                             accessor_name,
                         )
@@ -765,21 +806,10 @@ def _make_relation_resolver(
 
         return _name_resolver(reverse_one_to_one_resolver, field_name)
 
-    # Absence containment for the forward descriptor read. The ORM signals
-    # "this FK does not resolve to a row" by raising the target model's
-    # ``DoesNotExist`` - a dangling FK column read through the descriptor, or
-    # an unsaved instance's unset non-null FK. Django raises the per-relation
-    # ``RelatedObjectDoesNotExist`` subclass, which inherits from BOTH that
-    # ``DoesNotExist`` and ``AttributeError``; catching the ``DoesNotExist``
-    # side alone is therefore sufficient AND is the point: a bare
-    # ``AttributeError`` arm would additionally swallow one raised by a
-    # consumer's own descriptor / property or a typo'd accessor, turning a
-    # programming error into a silent null. The empty-tuple fallback (a
-    # relation with no target model) deliberately catches nothing for the
-    # same reason.
-    related_does_not_exist: tuple[type[BaseException], ...] = (
-        (field_meta.related_model.DoesNotExist,) if field_meta.related_model is not None else ()
-    )
+    # Absence containment for the forward descriptor read: the target's
+    # ``DoesNotExist`` is the whole catch (``_absence_catch_spec``) - never a
+    # bare ``AttributeError``, which would swallow a consumer's own bug.
+    related_does_not_exist = _absence_catch_spec(field_meta)
 
     def forward_resolver(root: object, info: Info[object, object]) -> object:
         check_deadline(info)
@@ -812,7 +842,8 @@ def _make_relation_resolver(
 
                 async def _resolve_async() -> object:
                     try:
-                        related: object = await sync_to_async(read_attr, thread_sensitive=True)(
+                        related: object = await run_in_one_sync_boundary(
+                            read_attr,
                             root,
                             field_name,
                         )
@@ -883,7 +914,8 @@ def _make_relation_resolver(
 
             async def _resolve_async() -> object:
                 try:
-                    related: object = await sync_to_async(read_attr, thread_sensitive=True)(
+                    related: object = await run_in_one_sync_boundary(
+                        read_attr,
                         root,
                         field_name,
                     )

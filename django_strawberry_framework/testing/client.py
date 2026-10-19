@@ -41,12 +41,14 @@ from strawberry.test import BaseGraphQLTestClient
 from strawberry.test.client import Response as _EngineResponse
 from typing_extensions import override
 
-from django_strawberry_framework.conf import testing_endpoint_setting
-from django_strawberry_framework.exceptions import _safe_arg_repr
-from django_strawberry_framework.utils._narrowing import (
-    is_dict,
-    is_list_or_tuple,
+from django_strawberry_framework._multipart import (
+    _MULTIPART_CONTROL_FIELDS,
+    _MULTIPART_MAP_FIELD,
+    _MULTIPART_OPERATIONS_FIELD,
 )
+from django_strawberry_framework.conf import testing_endpoint_setting
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_dict, is_list_or_tuple
 from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
@@ -313,18 +315,22 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
         # silently clobber the envelope and post a corrupt body the server has to
         # diagnose. Reject it at the source. Explicit raise (not a bare assert)
         # so the guard holds under ``python -O``, matching the sibling guards.
-        reserved = {"operations", "map"} & set(files)
+        reserved = set(_MULTIPART_CONTROL_FIELDS) & set(files)
         if reserved:
             raise AssertionError(
                 f"files= keys may not use the reserved multipart envelope field "
-                f"name(s) {_safe_arg_repr(sorted(reserved))}; the 'operations' / 'map' fields "
+                f"name(s) {truth.render(sorted(reserved))}; the 'operations' / 'map' fields "
                 f"are built by this client - rename the variable path.",
             )
 
         self._assert_file_placeholders(sent, files)
 
         file_map = {key: [f"variables.{key}"] for key in files}
-        return {"operations": json.dumps(body), "map": json.dumps(file_map), **files}
+        return {
+            _MULTIPART_OPERATIONS_FIELD: json.dumps(body),
+            _MULTIPART_MAP_FIELD: json.dumps(file_map),
+            **files,
+        }
 
     @staticmethod
     def _assert_file_placeholders(
@@ -340,16 +346,22 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
         the POST-serialization shape the map points into: ``json.dumps`` renders
         dict (and dict subclass) values as JSON objects and list / tuple values
         as JSON arrays, so both array flavors carry indexed placeholders alike.
+        A key that is not a string is rejected here with the same uniform
+        ``AssertionError`` rather than failing inside the walk.
         Walking the path here fails a typo or a malformed call at the source,
         naming the bad path, rather than emitting a spec-invalid envelope the
         server has to diagnose later - which is also why an empty dotted segment
         (an object path like ``variables.`` that can never name a GraphQL
-        variable) and a container whose length cannot be read are rejected here
-        instead of being emitted. Explicit ``AssertionError`` (not a bare
-        ``assert``) so the guard holds under ``python -O``, matching the
-        empty-``variables`` guard above.
+        variable) is rejected here instead of being emitted. Explicit
+        ``AssertionError`` (not a bare ``assert``) so the guard holds under
+        ``python -O``, matching the empty-``variables`` guard above.
         """
         for key in files:
+            if not truth.is_instance(key, str):
+                raise AssertionError(
+                    f"files= key {truth.render(key)} is not a string: keys must be "
+                    "dot-separated variable paths.",
+                )
             current: object = variables
             for segment in key.split("."):
                 # An empty segment can never name a GraphQL variable (variable
@@ -359,7 +371,7 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
                 # diagnose (an opaque 400 naming no path). Fail at the source.
                 if not segment:
                     raise AssertionError(
-                        f"files= path {_safe_arg_repr(key)} has an empty dotted segment: "
+                        f"files= path {truth.render(key)} has an empty dotted segment: "
                         f"multipart object paths are dot-separated non-empty names, so the "
                         f"emitted map entry could never name a GraphQL variable.",
                     )
@@ -373,30 +385,19 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
                         index = int(segment)
                     except ValueError:
                         index = None
-                    try:
-                        size = len(array)
-                    except Exception as exc:
-                        # A container whose length is unreadable cannot be verified
-                        # to carry the placeholder - a malformed call, failed with
-                        # the guard's uniform type so a hostile ``__len__`` cannot
-                        # replace the guard with a raw exception escape.
-                        raise AssertionError(
-                            f"files= path {_safe_arg_repr(key)} has no matching placeholder in "
-                            f"variables: the array holding {_safe_arg_repr(segment)} has an "
-                            f"unreadable length, so the placeholder cannot be verified.",
-                        ) from exc
+                    size = len(array)
                     if index is None or index < 0 or str(index) != segment or index >= size:
                         raise AssertionError(
-                            f"files= path {_safe_arg_repr(key)} has no matching placeholder in "
-                            f"variables: {_safe_arg_repr(segment)} is not a valid index into a "
+                            f"files= path {truth.render(key)} has no matching placeholder in "
+                            f"variables: {truth.render(segment)} is not a valid index into a "
                             f"{size}-item array.",
                         )
                     current = array[index]
                 elif is_dict(current):
                     if segment not in current:
                         raise AssertionError(
-                            f"files= path {_safe_arg_repr(key)} has no matching placeholder in "
-                            f"variables: no key {_safe_arg_repr(segment)} at that level.",
+                            f"files= path {truth.render(key)} has no matching placeholder in "
+                            f"variables: no key {truth.render(segment)} at that level.",
                         )
                     current = current[segment]
                 else:
@@ -405,14 +406,14 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
                     # test call, raised as the same type as the sibling guards so
                     # ``pytest.raises(AssertionError)`` catches every bad shape.
                     raise AssertionError(
-                        f"files= path {_safe_arg_repr(key)} has no matching placeholder in "
-                        f"variables: cannot descend into {_safe_arg_repr(segment)} (the value "
+                        f"files= path {truth.render(key)} has no matching placeholder in "
+                        f"variables: cannot descend into {truth.render(segment)} (the value "
                         f"there is not a dict or list).",
                     )
             if current is not None:
                 raise AssertionError(
-                    f"files= path {_safe_arg_repr(key)} must point at a None placeholder in "
-                    f"variables, but the value there is {_safe_arg_repr(current)}.",
+                    f"files= path {truth.render(key)} must point at a None placeholder in "
+                    f"variables, but the value there is {truth.render(current)}.",
                 )
 
 

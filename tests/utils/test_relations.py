@@ -9,13 +9,14 @@ import typing
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING
 
 import pytest
 from apps.kanban.models import Decision
 from apps.library.models import Book, Branch, Genre, Loan, MembershipCard, Patron, TaggedItem
 from apps.library.models import Branch as _Branch
 from apps.library.models import Shelf as _Shelf
+from apps.scalars.models import ScalarSpecimen
 from django.apps import AppConfig
 from django.apps.registry import Apps
 from django.contrib.admin.utils import lookup_spawns_duplicates
@@ -23,8 +24,12 @@ from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelatio
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
-from django.db.models import Model
-from typing_extensions import override
+from django.db.models import Model, TextField
+from django.db.models.fields.json import KeyTransformExact, KeyTransformIContains
+from django.db.models.fields.related_lookups import RelatedExact, RelatedIsNull
+from django.db.models.functions import Lower
+from django.db.models.lookups import Exact, IContains, Lookup
+from django.test.utils import register_lookup
 
 from django_strawberry_framework.exceptions import (
     ConfigurationError,
@@ -41,8 +46,6 @@ from django_strawberry_framework.utils.relations import (
     _classify_path_cached,
     _is_traversable_relation,
     _lenient_traverses_to_many,
-    _path_traverses_to_many_cached,
-    _resolve_segment_field,
     carrier_backed_link,
     classify_path,
     has_composite_pk,
@@ -61,7 +64,6 @@ from django_strawberry_framework.utils.relations import (
     relation_link,
     validate_lookup_expr,
 )
-from django_strawberry_framework.utils.typing import object_result
 from tests._relation_fixtures import RpCompositeParent
 from tests.optimizer._link_models import (
     LnkColumnChild,
@@ -103,39 +105,6 @@ class _RelationDouble:
     related_model: type[Model]
 
 
-class _HostileRelationMetadata:
-    @override
-    def __getattribute__(self, name: str) -> object:
-        if name in {
-            "many_to_many",
-            "one_to_many",
-            "one_to_one",
-            "auto_created",
-            "concrete",
-            "content_type_field_name",
-            "object_id_field_name",
-            "is_relation",
-            "_meta",
-        }:
-            raise RuntimeError("hostile relation metadata")
-        return object_result(super().__getattribute__, name)
-
-
-class _HostileTerminal:
-    def get_lookup(self, _part: str) -> NoReturn:
-        raise RuntimeError("hostile lookup")
-
-    def get_transform(self, _part: str) -> NoReturn:
-        raise RuntimeError("hostile transform")
-
-
-class _HostileAccessor:
-    name = "x"
-
-    def get_accessor_name(self) -> NoReturn:
-        raise RuntimeError("hostile accessor")
-
-
 def test_relation_kind_classifies_many_to_many_as_many() -> None:
     field = SimpleNamespace(
         many_to_many=True,
@@ -145,12 +114,6 @@ def test_relation_kind_classifies_many_to_many_as_many() -> None:
     )
 
     assert relation_kind(field) == "many"
-
-
-def test_relation_kind_hostile_metadata_raises_typed_configuration_error() -> None:
-    """A relation descriptor cannot replace a typed metadata error with its own exception."""
-    with pytest.raises(ConfigurationError):
-        relation_kind(_HostileRelationMetadata())
 
 
 def test_relation_kind_classifies_one_to_many_as_many() -> None:
@@ -291,12 +254,6 @@ def test_is_forward_many_to_many_rejects_non_m2m() -> None:
     assert is_forward_many_to_many(field) is False
 
 
-def test_is_forward_many_to_many_hostile_metadata_raises_typed_configuration_error() -> None:
-    """The writable-M2M predicate fails closed when relation flags cannot be read."""
-    with pytest.raises(ConfigurationError):
-        is_forward_many_to_many(_HostileRelationMetadata())
-
-
 def test_is_forward_many_to_many_stock_book_genres() -> None:
     """Library ``Book.genres`` is a forward writable M2M; reverse is not."""
     assert is_forward_many_to_many(Book._meta.get_field("genres")) is True
@@ -334,12 +291,6 @@ def test_instance_accessor_prefers_precomputed_field_meta_slot() -> None:
         get_accessor_name=lambda: "WRONG-not-consulted",
     )
     assert instance_accessor(meta_like) == "book_set"
-
-
-def test_instance_accessor_hostile_accessor_raises_typed_configuration_error() -> None:
-    """A hostile reverse accessor cannot leak its raw exception from the shared seam."""
-    with pytest.raises(ConfigurationError):
-        instance_accessor(_HostileAccessor())
 
 
 # ---------------------------------------------------------------------------
@@ -687,19 +638,6 @@ def test_classify_path_non_string_path_raises_typed_path_error() -> None:
         classify_path(Book, object())  # pyright: ignore[reportArgumentType]
 
 
-def test_classify_path_malformed_path_info_member_raises_typed_path_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Malformed path-info metadata cannot escape as an attribute error."""
-    fake_field = SimpleNamespace(is_relation=True, path_infos=[object()])
-    model = _serving_field(monkeypatch, lambda _name: fake_field)
-
-    with pytest.raises(PathResolutionError) as excinfo:
-        classify_path(model, "rel")
-
-    assert excinfo.value.segment == "rel"
-
-
 def test_path_resolution_error_is_configuration_family() -> None:
     """``PathResolutionError`` is catchable as ConfigurationError and the base."""
     err = PathResolutionError(Book, "loans__x", "x")
@@ -869,14 +807,6 @@ def test_validate_lookup_expr_empty_part_raises() -> None:
     assert excinfo.value.part == ""
 
 
-def test_validate_lookup_expr_hostile_methods_raise_typed_lookup_error() -> None:
-    """A terminal's lookup hooks are contained by the lookup-validation boundary."""
-    with pytest.raises(LookupValidationError):
-        # basedpyright: the hostile terminal is the hostile input under test; validate_lookup_expr
-        # types the parameter as ModelField
-        validate_lookup_expr(_HostileTerminal(), "x")  # pyright: ignore[reportArgumentType]
-
-
 def test_lookup_validation_error_is_configuration_family() -> None:
     """``LookupValidationError`` is catchable as ConfigurationError and the base."""
     err = LookupValidationError(Book._meta.get_field("title"), "x", "x")
@@ -1038,19 +968,17 @@ def test_classify_path_public_is_uncached_accepts_unhashable_model() -> None:
     assert first is not second
 
 
-def test_path_traverses_to_many_unhashable_model_fails_closed() -> None:
+def test_path_traverses_to_many_answers_an_unhashable_model_uncached() -> None:
     """The public probe bypasses its cache when the model key is unhashable."""
-    # basedpyright: the unhashable list standing in for a model is the hostile input under test;
+    scalar = SimpleNamespace(is_relation=False, name="title")
+
+    def get_field(_segment: str) -> SimpleNamespace:
+        return scalar
+
+    unhashable_model = SimpleNamespace(_meta=SimpleNamespace(get_field=get_field))
+    # basedpyright: the unhashable namespace standing in for a model is the input under test;
     # path_traverses_to_many types the parameter as type[Model]
-    assert path_traverses_to_many([], "title") is False  # pyright: ignore[reportArgumentType]
-
-
-def test_has_composite_pk_hostile_metadata_raises_typed_configuration_error() -> None:
-    """Composite-PK detection must not leak a malformed model's metadata error."""
-    with pytest.raises(ConfigurationError):
-        # basedpyright: the hostile model metadata is the hostile input under test;
-        # has_composite_pk types the parameter as type[Model]
-        has_composite_pk(_HostileRelationMetadata())  # pyright: ignore[reportArgumentType]
+    assert path_traverses_to_many(unhashable_model, "title") is False  # pyright: ignore[reportArgumentType]
 
 
 def test_has_composite_pk_cardinality() -> None:
@@ -1065,18 +993,6 @@ def test_relation_bool_none_value_falls_back_to_default() -> None:
     field_with_none = SimpleNamespace(flag=None)
     assert relation_bool(field_with_none, "flag", default=True) is True
     assert relation_bool(field_with_none, "flag", default=False) is False
-
-
-def test_resolve_segment_field_unexpected_exception_converts_to_field_does_not_exist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unexpected exception in get_field converts into FieldDoesNotExist."""
-
-    def _exploding(_segment: str) -> object:
-        raise RuntimeError("meta get_field exploded")
-
-    with pytest.raises(FieldDoesNotExist):
-        _resolve_segment_field(_serving_field(monkeypatch, _exploding), "field")
 
 
 def test_relation_metadata_rejects_non_boolean_and_non_string_slots() -> None:
@@ -1103,36 +1019,15 @@ def test_relation_metadata_rejects_non_boolean_and_non_string_slots() -> None:
         relation_kind(malformed_name)
 
 
-def test_many_side_kind_membership_fails_closed_for_hostile_hashing() -> None:
-    """An unhashable kind is not many-side; the frozenset probe never raises."""
-
-    class _HostileKind:
-        @override
-        def __hash__(self) -> int:
-            raise RuntimeError("kind hash exploded")
-
-    # basedpyright: the unhashable kind is the hostile input under test; is_many_side_relation_kind
-    # types the parameter as RelationKind | None
-    assert is_many_side_relation_kind(_HostileKind()) is False  # pyright: ignore[reportArgumentType]
-
-
-def test_traversable_relation_probe_handles_false_and_hostile_flags() -> None:
-    """A field is untraversable when its relation flag is false or cannot be read at all."""
-
-    class _UnreadableRelationFlag:
-        @property
-        def is_relation(self) -> NoReturn:
-            raise RuntimeError("relation flag exploded")
-
+def test_traversable_relation_probe_handles_a_false_flag() -> None:
+    """A field whose relation flag is false is untraversable."""
     assert _is_traversable_relation(SimpleNamespace(is_relation=False)) is False
-    assert _is_traversable_relation(_HostileRelationMetadata()) is False
-    assert _is_traversable_relation(_UnreadableRelationFlag()) is False
 
 
 def test_classify_path_wraps_malformed_relation_flags_and_taxonomy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Malformed flags at the segment gate and at the kind gate both surface as path errors."""
+    """A malformed segment flag is a path error; a malformed kind flag is a metadata error."""
     malformed_flag = SimpleNamespace(is_relation=1)
     with pytest.raises(PathResolutionError):
         classify_path(_serving_field(monkeypatch, lambda _name: malformed_flag), "relation")
@@ -1147,84 +1042,20 @@ def test_classify_path_wraps_malformed_relation_flags_and_taxonomy(
         auto_created=False,
         concrete=True,
     )
-    with pytest.raises(PathResolutionError):
+    with pytest.raises(ConfigurationError, match="must be a bool"):
         classify_path(_serving_field(monkeypatch, lambda _name: malformed_kind), "relation")
 
 
-def test_lookup_validation_wraps_every_transform_failure_stage() -> None:
-    """Lookup resolution, transform construction, and the exact-probe all fail as typed errors."""
-
-    class _RaisingTransformLookup:
-        def get_lookup(self, _part: str) -> None:
-            return None
-
-        def get_transform(self, _part: str) -> NoReturn:
-            raise RuntimeError("transform lookup exploded")
-
-    class _RaisingTransform:
-        def __init__(self, _cursor: object) -> None:
-            raise RuntimeError("transform construction exploded")
-
-    class _ConstructingTerminal:
-        def get_lookup(self, _part: str) -> None:
-            return None
-
-        def get_transform(self, _part: str) -> type[_RaisingTransform]:
-            return _RaisingTransform
-
-    class _BrokenExact:
-        def get_lookup(self, _part: str) -> NoReturn:
-            raise RuntimeError("exact lookup exploded")
-
-    class _BrokenExactTransform:
-        def __new__(cls, _cursor: object) -> _BrokenExact:
-            return _BrokenExact()
-
-    class _BrokenExactTerminal:
-        def get_lookup(self, _part: str) -> None:
-            return None
-
-        def get_transform(self, _part: str) -> type[_BrokenExactTransform]:
-            return _BrokenExactTransform
-
-    with pytest.raises(LookupValidationError):
-        # basedpyright: each hostile terminal is the hostile input under test; validate_lookup_expr
-        # types the parameter as ModelField
-        validate_lookup_expr(_HostileTerminal(), "first__last")  # pyright: ignore[reportArgumentType]
-    with pytest.raises(LookupValidationError):
-        # basedpyright: each hostile terminal is the hostile input under test; validate_lookup_expr
-        # types the parameter as ModelField
-        validate_lookup_expr(_ConstructingTerminal(), "first__last")  # pyright: ignore[reportArgumentType]
-    with pytest.raises(LookupValidationError):
-        # basedpyright: each hostile terminal is the hostile input under test; validate_lookup_expr
-        # types the parameter as ModelField
-        validate_lookup_expr(_RaisingTransformLookup(), "last")  # pyright: ignore[reportArgumentType]
-    with pytest.raises(LookupValidationError):
-        # basedpyright: each hostile terminal is the hostile input under test; validate_lookup_expr
-        # types the parameter as ModelField
-        validate_lookup_expr(_BrokenExactTerminal(), "last")  # pyright: ignore[reportArgumentType]
-    with pytest.raises(LookupValidationError):
-        # basedpyright: the non-str lookup expression is the hostile input under test;
+def test_lookup_validation_rejects_a_non_string_expression() -> None:
+    """A non-string ``lookup_expr`` is a typed lookup error, rendered truthfully."""
+    with pytest.raises(LookupValidationError) as excinfo:
+        # basedpyright: the non-str lookup expression is the input under test;
         # validate_lookup_expr types the parameter as str
         validate_lookup_expr(Book._meta.get_field("title"), 123)  # pyright: ignore[reportArgumentType]
-
-
-def test_many_path_probes_fail_closed_for_unexpected_classifier_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Both the cached and the uncached probe answer ``False`` when the classifier explodes."""
-    _path_traverses_to_many_cached.cache_clear()
-
-    def _exploding_classifier(_model: object, _path: str) -> object:
-        raise RuntimeError("classifier exploded")
-
-    monkeypatch.setattr(relations_module, "_classify_path_cached", _exploding_classifier)
-    assert _path_traverses_to_many_cached(Book, "fresh_unexpected_path") is False
-
-    monkeypatch.setattr(relations_module, "classify_path", _exploding_classifier)
-    # basedpyright: the unhashable list standing in for a model is the hostile input under test;
-    # path_traverses_to_many types the parameter as type[Model]
-    assert path_traverses_to_many([], "path") is False  # pyright: ignore[reportArgumentType]
+    assert str(excinfo.value) == (
+        "Invalid lookup expression 123 for terminal title: part 123 is not a valid "
+        "transform or lookup."
+    )
 
 
 def test_many_path_probe_rejects_a_non_string_path() -> None:
@@ -1262,11 +1093,10 @@ def test_is_forward_concrete_relation() -> None:
     assert is_forward_concrete_relation(Branch._meta.get_field("tags")) is False
     # Scalar field -> False
     assert is_forward_concrete_relation(Book._meta.get_field("title")) is False
-    # Hostile / non-field -> False
+    # Non-field -> False
     # basedpyright: deliberately not a field; the test proves the predicate answers False
     assert is_forward_concrete_relation(None) is False  # pyright: ignore[reportCallIssue, reportArgumentType]
     assert is_forward_concrete_relation(object()) is False  # pyright: ignore[reportCallIssue, reportArgumentType]
-    assert is_forward_concrete_relation(_HostileRelationMetadata()) is False  # pyright: ignore[reportCallIssue, reportArgumentType]
 
 
 def test_is_forward_concrete_relation_reads_cardinality_not_the_column_flag() -> None:
@@ -1315,38 +1145,6 @@ def test_is_forward_concrete_relation_reads_cardinality_not_the_column_flag() ->
     assert is_forward_concrete_relation(m2m_on_django_52) is False
     assert is_forward_concrete_relation(m2m_on_django_60) is False
     assert is_forward_concrete_relation(forward_fk) is True
-
-
-def test_is_forward_concrete_relation_contains_every_metadata_read() -> None:
-    """Neither the taxonomy read nor the column read may dispatch a consumer's exception."""
-
-    class _HostileKind:
-        """Clears ``is_relation``, then explodes on every taxonomy flag behind it."""
-
-        is_relation = True
-
-        def __getattr__(self, name: str) -> object:
-            raise RuntimeError("hostile relation taxonomy")
-
-    class _HostileColumn:
-        """Classifies cleanly as ``forward_single``, then explodes on the column read."""
-
-        is_relation = True
-        many_to_many = False
-        one_to_many = False
-        one_to_one = False
-        auto_created = False
-        concrete = True
-        related_model = Branch
-
-        @property
-        def column(self) -> NoReturn:
-            raise RuntimeError("hostile column descriptor")
-
-    # basedpyright: a deliberately hostile double that declares no relation flag; the test
-    # proves the predicate contains the exception its taxonomy read raises
-    assert is_forward_concrete_relation(_HostileKind()) is False  # pyright: ignore[reportCallIssue, reportArgumentType]
-    assert is_forward_concrete_relation(_HostileColumn()) is False
 
 
 def test_path_traverses_to_many_cache_clear_reaches_the_classification_cache(
@@ -1560,19 +1358,6 @@ def test_relation_link_answers_empty_for_malformed_links(double: SimpleNamespace
     link = relation_link(double)
     assert link.carriers == ()
     assert link.targets == ()
-
-
-def test_relation_link_failure_policy_on_a_raising_read() -> None:
-    """A raising read is a ``ConfigurationError`` under the strict policy, empty under lenient."""
-
-    class _RaisingLink:
-        @property
-        def local_related_fields(self) -> NoReturn:
-            raise RuntimeError("hostile link")
-
-    with pytest.raises(ConfigurationError, match="local_related_fields"):
-        relation_link(_RaisingLink())
-    assert relation_link(_RaisingLink(), lenient=True).carriers == ()
 
 
 @pytest.mark.parametrize(
@@ -1814,22 +1599,85 @@ def test_m2m_through_link_answers_empty_without_a_through_link(double: SimpleNam
     assert m2m_through_link_fields(double) == (None, None)
 
 
-def test_m2m_through_link_fields_failure_policy_on_a_raising_lookup() -> None:
-    """A through model whose field lookup raises: ``ConfigurationError`` strict, empty lenient."""
+@pytest.mark.parametrize(
+    ("lookup_expr", "lookup_class"),
+    [
+        ("lower", Exact),
+        ("lower__exact", Exact),
+        ("lower__icontains", IContains),
+        ("lower__lower__exact", Exact),
+    ],
+    ids=[
+        "trailing-transform-implies-exact",
+        "exact",
+        "icontains",
+        "chained-transforms",
+    ],
+)
+def test_validate_lookup_expr_output_less_transform_resolves_through_the_column(
+    lookup_expr: str,
+    lookup_class: type[Lookup[object]],
+) -> None:
+    """A transform declaring no output field resolves its lookup as Django's ORM does.
 
-    class _BrokenMeta:
-        def get_field(self, name: str) -> NoReturn:
-            raise RuntimeError(name)
+    ``Lower`` takes its output field from the expression it wraps; the walk
+    wraps the terminal's column, so ``Lower`` outputs a ``TextField`` and the
+    next part resolves against it, exactly as ``title__<lookup_expr>`` compiles.
+    """
+    terminal = Book._meta.get_field("title")
+    with register_lookup(TextField, Lower):
+        resolved = validate_lookup_expr(terminal, lookup_expr)
+    assert resolved is lookup_class
 
-    class _BrokenThrough:
-        _meta = _BrokenMeta()
 
-    double = SimpleNamespace(
-        many_to_many=True,
-        through=_BrokenThrough,
-        m2m_field_name=lambda: "source",
-        m2m_reverse_field_name=lambda: "target",
-    )
-    with pytest.raises(ConfigurationError, match="through-table foreign keys"):
-        m2m_through_link_fields(double)
-    assert m2m_through_link_fields(double, lenient=True) == (None, None)
+@pytest.mark.parametrize(
+    ("lookup_expr", "part"),
+    [("lower__bogus", "bogus"), ("lower__bogus__exact", "bogus")],
+    ids=["final-part", "mid-chain-part"],
+)
+def test_validate_lookup_expr_unknown_part_after_output_less_transform_raises(
+    lookup_expr: str,
+    part: str,
+) -> None:
+    """A name the transform's resolved output field does not know is a typed rejection."""
+    terminal = Book._meta.get_field("title")
+    with register_lookup(TextField, Lower), pytest.raises(LookupValidationError) as excinfo:
+        validate_lookup_expr(terminal, lookup_expr)
+    assert excinfo.value.part == part
+    assert excinfo.value.lookup_expr == lookup_expr
+
+
+@pytest.mark.parametrize(
+    ("lookup_expr", "lookup_class"),
+    [("a__b", KeyTransformExact), ("a__b__icontains", KeyTransformIContains)],
+    ids=["trailing-key-implies-exact", "icontains"],
+)
+def test_validate_lookup_expr_nested_json_keys_resolve_key_transform_lookups(
+    lookup_expr: str,
+    lookup_class: type[Lookup[object]],
+) -> None:
+    """Nested ``JSONField`` keys validate to the key-transform lookup Django compiles.
+
+    Each key is a ``KeyTransform`` whose output field is the ``JSONField`` its
+    column carries, so the next key and the final lookup resolve against it.
+    """
+    terminal = ScalarSpecimen._meta.get_field("payload")
+    assert validate_lookup_expr(terminal, lookup_expr) is lookup_class
+
+
+@pytest.mark.parametrize(
+    ("lookup_expr", "lookup_class"),
+    [("exact", RelatedExact), ("isnull", RelatedIsNull)],
+    ids=["exact", "isnull"],
+)
+def test_validate_lookup_expr_forward_fk_column_answers_related_lookups(
+    lookup_expr: str,
+    lookup_class: type[Lookup[object]],
+) -> None:
+    """A forward FK's column keeps the FK as its output field, so lookups stay relational.
+
+    The column's output field is the terminal itself, never the target primary
+    key, matching the column Django's ORM filters a relation through.
+    """
+    terminal = Book._meta.get_field("shelf")
+    assert validate_lookup_expr(terminal, lookup_expr) is lookup_class

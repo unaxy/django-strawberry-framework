@@ -1,7 +1,7 @@
 # Review · Comments: `django_strawberry_framework/utils/strings.py`
 
 Status: verified
-Run: 0.0.15 2026-09-24-1
+Run: 0.0.15 2026-09-28-3
 
 ## Trace
 
@@ -613,3 +613,337 @@ Handoff: Read beyond the record: `optimizer/extension.py::DjangoOptimizerExtensi
 framing for the `utils/` folder Comments pass; `tests/optimizer/test_walker.py` provenance for the
 walker item. The pytest `-p no:xdist` flag breaks the repo's `addopts` (`-n`/`--dist`
 unrecognized); run Proof pytest lines exactly as written.
+
+## Review pass 2 (run 0.0.15 2026-09-28-3)
+
+Reopened: fingerprints moved. Every run-1 section above stands (F1-F7, F9-F11
+implemented and verified; F8 deferred); this pass appends the re-review of the live
+target and records zero new findings.
+
+Baselines: CYCLE_BASELINE=6ac698704402240b954f95072bed4639354ab831
+ITEM_BASELINE=e79425515bb25b376f330ac50d46d9615b9aad19.
+
+Live target read whole at blob `5a4f4811`. Its only delta vs HEAD (`991f7dad`,
+the verified post-pass-2 state) is concurrent truthful-reads work, not this
+item's: `from . import truth`, and
+`django_strawberry_framework/utils/strings.py::_plain_text` calls
+`django_strawberry_framework/utils/truth.py::is_instance` /
+`django_strawberry_framework/utils/truth.py::kind` where it called `isinstance` /
+`exceptions._safe_type_name`. `git diff e7942551 -- <target>` is empty: the
+concurrent edit predates the item baseline. `tests/utils/test_strings.py` (blob
+`2a822a3f`) differs from HEAD only in
+`tests/utils/test_strings.py::test_string_helpers_reject_non_string_inputs`,
+which now asserts the exact message (concurrent, same flow).
+
+### Trace (run 3)
+
+- Whole live target re-read (8 docstrings, 1 inline comment) + whole live
+  `tests/utils/test_strings.py`. One real caller re-read per symbol, in context:
+  `snake_case` - `optimizer/walker.py` (3 sites: 411, 769, 1421) +
+  `_field_by_graphql_name` fallback; `pascal_case` - `types/converters.py:745`,
+  `rest_framework/serializer_converter.py:889`; `pascal_case_or_raise` -
+  `sets_mixins.py:116`, `filters/inputs.py:261`; `graphql_camel_name` -
+  `utils/inputs.py:201,1344`, `forms/inputs.py`, `mutations/inputs.py` (3),
+  `rest_framework/*` (4), `filters/inputs.py:53`, `orders/inputs.py:44` imports;
+  `flatten_lookup_path` - `utils/inputs.py:200`, `utils/permissions.py:78`,
+  `orders/sets.py:731`; `_plain_text` - `utils/truth.py` scope section +
+  `is_instance` / `kind` bodies.
+- Contract re-reads: `optimizer/extension.py` `_plan_cache` + `exec_memo`
+  region (F10 wording), `types/base.py:634` raw-key build (M1 intact, F9
+  intact), `optimizer/field_meta.py::FieldMeta` `name:` entry (F9 text stands),
+  `sets_mixins.py::ClassBasedTypeNameMixin.type_name_for` (LOOKUP_SEP paths),
+  `utils/inputs.py` re-export comment, `types/__init__.py` dependency
+  paragraph, Django `Field._check_field_name` in `.venv` (E001 trailing `_`,
+  E002 `__`, E003 `pk`; no case rule).
+- Other test modules' prose about target symbols, read whole-site:
+  `tests/filters/test_inputs.py` (3), `tests/filters/test_factories.py` (1),
+  `tests/forms/test_inputs.py` (1), `tests/mutations/test_inputs.py` (1),
+  `tests/utils/test_inputs.py` (4 incl. the routed lead below),
+  `tests/orders/test_inputs.py` (1, incl. its
+  `utils/strings.py::graphql_camel_name #"if not core:"` citation, which
+  resolves: the guard is target line 238), `tests/optimizer/test_walker.py`
+  (5). Live-tier pointers: `test_schema_composition_api.py` exists w/
+  introspection; `test_library_api.py` exists w/ camelCase lookup names.
+- Sibling run-3 records read whole incl. every Handoff/Cross-axis: Performance
+  `no-findings` (R1: truth cost on cold branches only; hot path byte-identical),
+  Mechanics `no-findings` (R1/R2: twin divergence + `str.__str__` siblings not
+  one rule; `_plain_text` docstring stays true). Neither routes a gap to
+  Comments; this pass independently confirms the `_plain_text` reading.
+- Instruments (shared tree): `review_inspect.py` into
+  `<root>/comments/inspect/` + `strings.json`; `build_tree_md.py
+  --list-docstrings` on target + test module: both `ok`; `check_citations.py
+  --paths <target> <test module> --substrings`: 3 citations, 0 violations
+  (`citations.json`); provenance sweep: only the `_legacy_id` example
+  identifier, `round_trips` test names, and the two standing F8 texts; no
+  `we`/`you`, no `Tests that`/`Ensures`, no `.py:NN`.
+- Probe `<root>/comments/docstring_claims.py` by absolute path at
+  `review/utils/strings.py/comments`, package digest `sha256:c9db5de2...0eae97c9`:
+  `review-20260928T202800-b60773`, exit 0, 40/40 claims hold (every docstring
+  example, all Strawberry lossy boundaries incl. re-measured `to_camel_case`
+  emissions, round-trips, hostile-subclass + exact-message + lying-`__class__`
+  rejection rows, Django uppercase acceptance). Superseded
+  `review-20260928T202738-134d50` (exit 1, probe compared a tuple to a bare
+  `True` on one row; values shown correct).
+- Cells: default only. Sharded and pg inapplicable by construction: pure
+  `str -> str`, imports `functools`, `collections.abc`, `exceptions`, `truth`
+  (stdlib-only); no connection, alias or dialect decision. Siblings concur.
+- Fingerprints (`git hash-object`): `utils/strings.py` 5a4f481132f8;
+  `tests/utils/test_strings.py` 2a822a3fff; `utils/truth.py` d5c96bc8d191;
+  `optimizer/walker.py` d5759ef8533a; `optimizer/extension.py` 39a8739c7e56;
+  `optimizer/field_meta.py` bcddf517b014; `types/base.py` dc67f084cbc9;
+  `sets_mixins.py` 088ddab0c0f6; `filters/inputs.py` a932dbf85d89;
+  `orders/sets.py` 60859f2d5452; `utils/inputs.py` b5af8255dfa1;
+  `utils/permissions.py` 1c9cfd398e60; `utils/__init__.py` 1a4c2ec8bfd3
+  (unchanged since run 1); `types/converters.py` f6cadb0856c7;
+  `rest_framework/serializer_converter.py` 96d2b56a043e; `forms/inputs.py`
+  259afbb2d5c7; `mutations/inputs.py` 840da733f956; `orders/inputs.py`
+  2d258da74ee3; `tests/utils/test_inputs.py` 42bfb6a71e56;
+  `tests/filters/test_inputs.py` c5422da54cf3; `tests/filters/test_factories.py`
+  ffd06ab7952e; `tests/forms/test_inputs.py` 6c4617aa821c;
+  `tests/mutations/test_inputs.py` 118f431c1ec; `tests/orders/test_inputs.py`
+  be8b48a3373a; `tests/optimizer/test_walker.py` 587cb9f4fe5;
+  `test_library_api.py` 2cd1b6dd1a2f; `test_schema_composition_api.py`
+  6df1401b3bf.
+
+### Grades (run 3)
+
+Target, every docstring and comment: **true**. Module bullet per caller family
+re-verified by the census above; `_plain_text` true under the truth body (the
+probe's hostile/liar/message rows; `is_instance`/`kind` consult no namespace
+per the `truth.py` scope section, so the "never run" clause holds, and the
+exact-`str` test is still first); `_snake_case_cached` one-liner + `__x`
+comment true (body untouched); `snake_case` true (probe + re-read cache +
+  memo path: a `_plan_cache` hit returns before the walk, an uncacheable plan
+  is memoized per execution); `pascal_case` true (probe + `type_name_for` +
+  Django check); `pascal_case_or_raise` true (imperative; exactly two
+  consumers); `graphql_camel_name` true (probe); `flatten_lookup_path` true
+  (probe + all three mangles re-read in context).
+
+Own test module, graded whole: **true** except the two standing F8 texts
+(`test_snake_case_preserves_lru_cache_controls` "historical", the edge-runs
+"Collapsing them made" comment: process provenance, unchanged). The
+empty-edges comment's E001 half is exact (`_` rejected); its `""` half holds
+by declarability (no production caller passes it), not by Django's check,
+which `""` passes - noted, not a finding. The `__x`-escape test docstring's
+"only ... after an uppercase character" states the necessary condition the
+body enforces and the test pins.
+
+Other test modules' behavioral claims about target symbols: **true** at every
+site in Trace (each matches the target body and the test pins it).
+
+### Findings (run 3)
+
+High: none. Medium: none. Low: none.
+
+### Rejected (run 3)
+
+- **F8 stays `deferred`.** Low; no run-3 finding touches
+  `tests/utils/test_strings.py` (this pass: zero findings; the file's live
+  delta is concurrent work inside the item baseline, not this item's touch).
+  Its Proof still prints `2`. Reopens when any item's Worker-2 edits that
+  file for a higher finding.
+- **Looks-for discharged, `none`:** module first lines (both `ok`, no TREE.md
+  render owed); every function docstring imperative, no class in the target;
+  public symbol w/o docstring (none); signature-restating docstring (none);
+  `we`/`you`/`I` (none); `Tests that`/`Ensures` (none); line-number refs
+  (none); `path::Symbol` citations (3 resolve, incl. short-paths to one
+  candidate each); wrong stated reason (none - every run-1 reason re-verified
+  against its body and one caller); unrecorded separation (the `_plain_text`
+  twins: F5 carries the contract difference at this owner; consolidation
+  stands rejected - Mechanics R2, one slot expression, no independently
+  changeable rule); provenance in the target (none).
+
+### Not graded as findings, with trigger (run 3)
+
+- **Routed: `tests/utils/test_inputs.py::test_graphql_camel_name` - stale
+  head claim; owner: the `utils/inputs.py` item (in this run's scope).**
+  Docstring: "Head lowercased, rest PascalCased; no-word-token inputs pass
+  through." "Head lowercased" is false: the body keeps the head as written
+  (`graphql_camel_name("Foo_bar") == "FooBar"`, probe row `F3 head kept`),
+  the exact claim F3 removed from the package docstring. The test passes
+  only because every parametrized head is already lowercase. Would grade
+  Medium (stale prose stating the wrong contract, internal). Not fixed here:
+  the file is another item's test, outside this item's edit fence, and that
+  item runs concurrently. Suggested text: "Head kept as written, rest
+  PascalCased; no-word-token inputs pass through." Route check:
+  `uv run python scripts/workspace.py run
+  review/utils/strings.py/verify-comments-<n> -- python -c "from
+  django_strawberry_framework.utils.strings import graphql_camel_name;
+  print(graphql_camel_name('Foo_bar'))"` prints `FooBar`, contradicting the
+  docstring. Trigger: the `utils/inputs.py` Comments pass grades it.
+- **Standing routed lead: `django_strawberry_framework/utils/__init__.py`
+  line 17** ("case conversion (``snake_case``, ``pascal_case``)", the
+  two-helper framing F1 removed from the module): unchanged since run 1;
+  owner the `utils/` folder item, in this run's scope.
+- **Narrative wording in other modules' tests, owned by their items** (all in
+  this run's scope; behavioral claims graded true above, wording is theirs
+  to judge): "used to ... now" in `tests/filters/test_inputs.py` (2
+  docstrings), "was pinned ... now pins" in `tests/mutations/test_inputs.py`
+  and `tests/utils/test_inputs.py`, "Before ... now" / "Gap 2a" / "Site 3" /
+  "B2:" in `tests/optimizer/test_walker.py` (3 docstrings, as run 1),
+  `tests/orders/test_inputs.py` alias-background sentence. Trigger: each
+  owning item's Comments pass, or this item touching one of those files.
+- Other package modules' prose about target symbols re-read, all true, no
+  lead: `optimizer/walker.py` `snake_case` sentences (3 sites + fallback,
+  each verified), `utils/inputs.py` re-export comment (live consumer:
+  `tests/utils/test_inputs.py:27`) and "injective" line (true as used, digit
+  boundaries), `sets_mixins.py::ClassBasedTypeNameMixin.type_name_for`,
+  `filters/inputs.py::_pascal_case`, `orders/sets.py:729`, the
+  `types/__init__.py` dependency paragraph (0 `snake_case` in `types/`,
+  confirmed).
+
+### Cross-axis (run 3, for Performance / Comments)
+
+None. No finding on another axis. Concurrence, not a finding: the
+Performance R1 cold-branch measurement and the Mechanics R1/R2 rejections
+describe the same concurrent truth switch this pass graded prose against;
+the probe confirms the `_plain_text` docstring true under it (liars fail
+closed into the documented `ConfigurationError`).
+
+Handoff (run 3): Read beyond the grades: the whole `truth.py` module
+docstring scope section (the warrant for "never run"), the walker's
+`_resolve_selection_target` + `_forward_names` memo shape, the extension's
+`_get_or_build_plan` (plan cache + per-execution memo - F10's exact
+wording), `Field._check_field_name` in `.venv`, both `_camel_case` aliases
+(test-only use, no package call sites). Conclusions the grades do not state:
+the concurrent truth switch makes the `_plain_text` docstring more true,
+not less (a lying `__class__` previously fell through to an untyped
+`TypeError` from the `str` slot; now it raises the documented error); no
+caller family moved, so every run-1 caller-dependent sentence stands
+verbatim. Open threads, none this item's: F8 deferred; the two Routed leads
+above for Worker-0 to carry (`utils/inputs.py` item, `utils/` folder item);
+sibling records both closed `no-findings` with nothing routed here. Scratch
+kept under `docs/review/temp-tests/utils__strings/comments/` (inspect/,
+strings.json, citations.json, docstring_claims.py). Cells sharded/pg were
+not run (inapplicable by construction, judged above).
+
+## Verification (Comments) pass 3
+
+Address `review/utils/strings.py/verify-comments-3`, copy slot-4 synced
+2026-09-28T20:49:38Z from the shared tree, package digest
+`sha256:c9db5de2...0eae97c9` (= the run-3 reviewer's digest on both runs);
+scratch `docs/review/temp-tests/utils__strings/verify-comments-3/` (created;
+holds no files: the reviewer's probe re-ran by absolute path, the copy
+unedited). Baselines: CYCLE_BASELINE=6ac698704402240b954f95072bed4639354ab831,
+ITEM_BASELINE=e79425515bb25b376f330ac50d46d9615b9aad19. Run-1 sections stand
+(F1-F7, F9-F11 implemented and verified; F8 deferred); this pass verifies
+run 3's `no-findings` against Implement pass 3's zero-path landing. Appended,
+nothing rewritten.
+
+Step 1: `git diff e7942551 -- django_strawberry_framework/utils/strings.py`
+is empty (0 bytes), hash-equal to the empty item diff
+`docs/review/temp-tests/utils__strings/diff/pass-3.diff` (0 bytes, by design:
+all three run-3 reviews closed `no-findings`). Re-checked after the last
+probe run: still 0 bytes. The tree did not move under the pass; no report to
+Worker-0 owed. (`git status` shows the target `M` vs HEAD: the concurrent
+truth switch, which predates ITEM_BASELINE and sits in none of this item's
+hunks, as the run-3 records state.)
+
+Proof lines: none exist for run 3 (zero findings, zero Proof lines in this
+record, in the siblings' `## Cross-axis (for Comments)` - both "None" - and
+in Implement pass 3). Run-1 Proof lines were not re-run as expectations
+(closed run; several oracles moved since); the two run-1 expressions re-run
+below (F8 count, routed route-check shape) are attacks, judged on
+current-state merit only.
+
+Worker-2 pass-3 prose: none to grade. Implement pass 3 landed zero paths
+(stated in `## Implementation (Worker-2)` / Implement pass 3; confirmed:
+`docs/review/temp-tests/utils__strings/implement/` does not exist, the item
+diff is 0 bytes). No docstring or comment was written or moved, so there is
+no whole-docstring grade, no `--code-digest` identity, no TREE.md row owed.
+The item-scoped diff carries no process provenance, no line-number citation
+and no `we`: vacuous on an empty diff, stated, not skipped.
+
+Numbers reproduced: Worker-2 claims none this pass. The run-3 reviewer's
+claim probe re-ran as a current-state attack (below), not as an expectation.
+
+Claim probe, `review-20260928T204939-928f57` (reviewer's
+`comments/docstring_claims.py` by absolute path at my address, copy `fresh`,
+digest `sha256:c9db5de2...0eae97c9`, exit 0): every check row `ok`,
+`FAILURES: none`. 42 check rows all hold (F2 runtime-docstring / controls,
+every docstring example, all Strawberry lossy boundaries incl. re-measured
+`to_camel_case` emissions, round-trips, hostile-subclass + exact-message +
+lying-`__class__` rejection rows, Django uppercase acceptance). The reviewer
+counted 40 rows; the count differs, the verdict does not: zero failures on
+the same digest, so every run-3 `true` grade stands on current state.
+
+Static instruments (shared tree, current state):
+
+- `build_tree_md.py --list-docstrings` on the target and
+  `tests/utils/test_strings.py`: `2 modules, 0 breaking the first-line
+  rule`, both `ok`. No first line changed, no TREE.md render owed.
+- `check_citations.py --paths <target> <test module> --substrings`: `OK: 3
+  citations resolve`, 0 violations.
+- Provenance / `we` / `you` sweep over the live target: 3 hits, all the
+  example identifier `_legacy_id` / `_legacyId`; no `we` / `you`, no
+  provenance, no `Tests that` / `Ensures`, no `.py:NN`.
+- F8 (attack): `historical|Collapsing them made` still prints 2 rows in
+  `tests/utils/test_strings.py`. The file is outside the item diff (empty),
+  so F8 stays `deferred` under REVIEW "Severity", visible for `## Outcomes`.
+
+Whole-diff reading (Comments): the item diff is empty - there is no prose
+hunk to grade and no touched symbol whose docstring the change could have
+made false. The live target was still read whole at blob `5a4f4811`; its
+prose is the verified post-pass-2 state plus the concurrent truth switch
+inside the item baseline, which the run-3 review graded `true`.
+
+Attacks (current state):
+
+- A. The routed stale-head lead is still routed, still false, still not
+  this item's. `tests/utils/test_inputs.py:158` still reads "Head
+  lowercased, rest PascalCased; ...", contradicted on current state by the
+  probe row `F3 head kept` (`graphql_camel_name("Foo_bar") == "FooBar"`).
+  File fingerprint `42bfb6a71e56` = run-3: the text has not moved. Owner the
+  `utils/inputs.py` item (in this run's scope; the plan carries the Routed
+  line); outside this item's empty diff, not a finding here.
+- B. Standing routed leads unchanged (fingerprints all equal run-3):
+  `utils/__init__.py` two-helper framing (`1a4c2ec8bfd3`, unchanged since
+  run 1; owner the `utils/` folder item); narrative wording in
+  `tests/filters/test_inputs.py` (`c5422da54cf3`),
+  `tests/mutations/test_inputs.py` (`118f431c1ec`),
+  `tests/optimizer/test_walker.py` (`587cb9f4fe5`) and
+  `tests/orders/test_inputs.py` (`be8b48a3373a`), each owned by its item.
+  No routed text moved; no trigger fired.
+- C. Sibling verifiers' pass-2 sections (`## Verification (Performance)
+  pass 2`, `## Verification (Mechanics) pass 2`, both `verified`) route no
+  gap to Comments; their Cross-axis sections are "None". The Mechanics
+  pass-2 rejections this prose depends on (R1/R2 twin readings) stand, and
+  the Performance pass-2 attack A upholds the `_plain_text` "every call the
+  walker makes" sentence (`sel.name` is exact `str` end to end). No gap
+  arrives from either axis.
+
+Disputes: none recorded in `## Implementation (Worker-2)` / Implement pass 3
+for this axis. Cross-axis findings placed here: none.
+
+Cells: default only. Sharded and pg `inapplicable by construction`, judged
+and upheld: the target is pure `str -> str`, imports `functools`,
+`collections.abc`, `exceptions` and stdlib-only `truth`, opens no
+connection, reads no alias, makes no dialect decision. Siblings concur.
+
+New findings: none. Verdict: verified.
+
+Fingerprints (`git hash-object`, shared tree, all equal to the run-3
+records and Implement pass 3): `utils/strings.py` 5a4f481132f8;
+`tests/utils/test_strings.py` 2a822a3fff; `utils/truth.py` d5c96bc8d191;
+`optimizer/walker.py` d5759ef8533a; `types/base.py` dc67f084cbc9;
+`optimizer/field_meta.py` bcddf517b014; `utils/__init__.py` 1a4c2ec8bfd3;
+`tests/utils/test_inputs.py` 42bfb6a71e56; `tests/filters/test_inputs.py`
+c5422da54cf3; `tests/mutations/test_inputs.py` 118f431c1ec;
+`tests/orders/test_inputs.py` be8b48a3373a; `tests/optimizer/test_walker.py`
+587cb9f4fe5. Item diff `pass-3.diff` 0 bytes. Run:
+`review-20260928T204939-928f57`.
+
+Handoff: Read beyond the record: the whole live target at blob `5a4f4811`
+(prose identical to the run-3 grading basis), the reviewer's
+`docstring_claims.py` source and its 42 rows, the routed
+`tests/utils/test_inputs.py:158` docstring, both siblings' verify pass-2
+sections, Implement pass 3's attribution (the `cmp` identity proof holds:
+item diff still 0 bytes). Conclusions the checks do not state: the empty
+diff makes every run-3 grade self-standing (no fix could have falsified a
+sentence); the probe-count wobble (40 vs 42) is a counting difference over
+identical passing rows, not a behavior delta. Open threads, none this
+item's: F8 deferred again for `## Outcomes`; the `utils/inputs.py`
+stale-head lead and the `utils/` folder framing lead (both routed, in this
+run's scope) plus the four narrative-wording leads. No production code or
+test was edited; the only writes are this section, the `Status:` line, and
+the empty scratch directory.

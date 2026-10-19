@@ -87,6 +87,7 @@ from django_strawberry_framework.rest_framework.hook_context import SerializerHo
 from django_strawberry_framework.rest_framework.inputs import (
     SERIALIZER_INPUTS_MODULE_PATH,
     NestedSerializerConfig,
+    resolve_effective_serializer_fields,
 )
 from django_strawberry_framework.rest_framework.inputs import (
     _materialized_names as serializer_materialized_names,
@@ -104,6 +105,7 @@ from django_strawberry_framework.utils.input_values import UNSET
 from tests._idioms import (
     ClassReadRaises,
     ModelSerializerBase,
+    bind_unparented,
     comparing_metaclass,
     definition_raises,
     is_object_dict,
@@ -219,23 +221,6 @@ def test_non_serializer_value_rejected() -> None:
         class CreateItem(SerializerMutation):
             class Meta:
                 serializer_class = NotASerializer
-                operation = "create"
-
-
-def test_serializer_hostile_class_repr_maps_to_configuration_error() -> None:
-    """An invalid serializer-class value with a broken repr still yields a typed config error."""
-
-    class HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    with pytest.raises(ConfigurationError, match="unprintable HostileRepr"):
-
-        @definition_raises
-        class CreateItem(SerializerMutation):
-            class Meta:
-                serializer_class = HostileRepr()
                 operation = "create"
 
 
@@ -1790,8 +1775,8 @@ def test_schema_hook_rejects_invalid_field_map_at_class_creation(
                 return field_map
 
 
-def test_schema_hook_rejects_mapping_that_cannot_be_materialized() -> None:
-    """A hostile Mapping implementation cannot leak its iteration error."""
+def test_schema_hook_mapping_iteration_error_propagates() -> None:
+    """The hook mapping's own ``items()`` is consumer code: what it raises propagates."""
 
     class BrokenMapping(dict[str, object]):
         @override
@@ -1799,7 +1784,7 @@ def test_schema_hook_rejects_mapping_that_cannot_be_materialized() -> None:
             raise RuntimeError("mapping iteration exploded")
 
     serializer_cls = _item_serializer()
-    with pytest.raises(ConfigurationError, match="could not be materialized"):
+    with pytest.raises(RuntimeError, match="mapping iteration exploded"):
 
         @definition_raises
         class InvalidSchemaMapMutation(SerializerMutation):
@@ -1815,13 +1800,62 @@ def test_schema_hook_rejects_mapping_that_cannot_be_materialized() -> None:
                 return BrokenMapping()
 
 
-def test_schema_field_map_reports_malformed_entries_and_unreadable_bound_names() -> None:
-    """An unpackable-entry failure and an unreadable ``field_name`` both stay typed.
+def test_request_reading_serializer_without_schema_hook_fails_at_class_creation() -> None:
+    """A request-reading ``get_fields()`` under the default hook names the override at declaration.
 
-    Neither the per-entry unpack nor the bound-name read trusts the hook's objects,
-    so a two-tuple that is not a pair and a field whose ``field_name`` descriptor
-    raises are reported as configuration errors rather than escaping raw.
+    The default ``get_serializer_for_schema()`` reads ``.fields`` at class
+    validation, where no request exists, so the declaration itself raises the
+    typed error telling the consumer to override the hook.
     """
+
+    class RequestItemSerializer(serializers.ModelSerializer[product_models.Item]):
+        # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
+        class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+            model = product_models.Item
+            fields = (
+                "name",
+                "description",
+                "category",
+                "is_private",
+            )
+
+        @override
+        def get_fields(self) -> dict[str, DRFField]:
+            _ = dict_of(self.context)["request"]
+            return base_fields(super())
+
+    with pytest.raises(ConfigurationError) as excinfo:
+
+        @definition_raises
+        class RequestReadingMutation(SerializerMutation):
+            class Meta:
+                serializer_class = RequestItemSerializer
+                operation = "create"
+                permission_classes = []
+
+    assert str(excinfo.value) == (
+        "Could not materialize the schema-time field set for serializer "
+        "'RequestItemSerializer': KeyError: 'request'. The default discovery constructs the "
+        "serializer with no args and reads `.fields` at schema build, where no request exists "
+        "and the serializer context is empty; a serializer whose get_fields() reads the "
+        "request or other context must override get_serializer_for_schema() to return a "
+        "stable, request-independent field map."
+    )
+    assert type(excinfo.value.__cause__) is KeyError
+
+
+def test_schema_field_map_non_mapping_message_is_exact() -> None:
+    """The non-mapping reject names the mutation and renders the returned value."""
+    with pytest.raises(ConfigurationError) as exc:
+        _validate_schema_field_map("M", None)
+    assert str(exc.value) == (
+        "SerializerMutation M.get_serializer_for_schema() must return a mapping of field "
+        "name -> DRF serializers.Field; got None."
+    )
+
+
+def test_schema_field_map_reports_malformed_entries() -> None:
+    """An entry that is not a ``(name, field)`` pair is reported as a configuration error."""
 
     class MalformedEntries(dict[str, object]):
         @override
@@ -1832,57 +1866,17 @@ def test_schema_field_map_reports_malformed_entries_and_unreadable_bound_names()
     with pytest.raises(ConfigurationError, match="could not be unpacked"):
         _validate_schema_field_map("BrokenEntries", MalformedEntries())
 
-    class HostileBoundName(serializers.CharField):
-        @property
-        @override
-        def field_name(self) -> str | None:
-            raise RuntimeError("bound name unavailable")
 
-        @field_name.setter
-        # basedpyright: the hostile shape under test, a ``field_name`` property whose read raises;
-        # the checker rejects any property overriding a base class attribute
-        def field_name(self, value: str | None) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
-            self._field_name = value
-
-    with pytest.raises(ConfigurationError, match="field_name descriptor"):
-        _validate_schema_field_map("BrokenField", {"name": HostileBoundName()})
-
-
-def test_schema_field_map_hostile_bound_name_comparison_is_typed() -> None:
-    """A bound-name VALUE with a hostile ``__ne__`` stays a typed configuration error.
-
-    The ``field_name`` descriptor's READ was already guarded; the guard does not sanitize
-    the VALUE it returns, and the mismatch comparison dispatches on it - so an adversarial
-    ``__ne__`` escaped as a raw exception from the middle of the validator. The comparison
-    itself is now contained like every other untrusted read.
-    """
-
-    class HostileNe:
-        @override
-        def __ne__(self, other: object) -> NoReturn:
-            raise RuntimeError("ne exploded")
-
-        @override
-        def __repr__(self) -> str:
-            return "<HostileNe>"
-
-    field = serializers.CharField()
-    field.field_name = "name"
-    # basedpyright: the hostile field_name is the input under test; DRF types the slot as str
-    field.field_name = HostileNe()  # pyright: ignore[reportAttributeAccessIssue]
-    with pytest.raises(ConfigurationError, match="field_name whose comparison failed"):
-        _validate_schema_field_map("M", {"name": field})
-
-
-def test_schema_field_map_rejects_str_subclass_key_with_hostile_hash() -> None:
+def test_schema_field_map_rejects_str_subclass_key() -> None:
     """A ``str``-subclass key is rejected before any comparison or dict-set dispatch.
 
     Keys become input field names, so the plain-string gate (the resolver-tier
-    ``_hook_mapping`` precedent) keeps every downstream key-hashing consumer away from an
-    overridable ``__hash__`` / ``__ne__`` a ``str`` subclass could carry.
+    ``_hook_mapping`` precedent) lets only an exact ``str`` reach the downstream
+    key-hashing consumers, never an overridable ``__hash__`` / ``__ne__`` a ``str``
+    subclass could carry.
     """
 
-    class HostileStr(str):
+    class RaisingHashStr(str):
         @override
         def __hash__(self) -> NoReturn:
             raise RuntimeError("hash exploded")
@@ -1890,77 +1884,39 @@ def test_schema_field_map_rejects_str_subclass_key_with_hostile_hash() -> None:
     field = serializers.CharField()
     field.field_name = "name"
 
-    class OneHostileKey(dict[str, object]):
+    class OneSubclassKey(dict[str, object]):
         @override
         # basedpyright: deliberately yields a str-subclass key, the input the validator refuses
         def items(self) -> list[tuple[object, serializers.CharField]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [(HostileStr("name"), field)]
+            return [(RaisingHashStr("name"), field)]
 
     with pytest.raises(ConfigurationError, match="key must be a plain string"):
-        _validate_schema_field_map("M", OneHostileKey())
+        _validate_schema_field_map("M", OneSubclassKey())
 
 
-def test_schema_hook_invalid_value_with_hostile_repr_is_typed() -> None:
-    """A malformed hook value with a broken repr still reports a safe configuration error."""
-
-    class HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    serializer_cls = _item_serializer()
-    with pytest.raises(ConfigurationError, match="unprintable HostileRepr"):
-
-        @definition_raises
-        class InvalidSchemaMapMutation(SerializerMutation):
-            class Meta:
-                serializer_class = serializer_cls
-                operation = "create"
-                permission_classes = []
-
-            @classmethod
-            @override
-            # basedpyright: deliberately a non-mapping with a hostile repr, the input class creation refuses
-            def get_serializer_for_schema(cls) -> object:  # pyright: ignore[reportIncompatibleMethodOverride]
-                return HostileRepr()
-
-
-_CLASS_READ_RAISES_ROWS: list[
-    tuple[Callable[[dict[str, DRFField], type[BaseException]], object], str]
-] = [
-    (
-        lambda _fields, escape: ClassReadRaises(escape, "hostile __class__ boom"),
-        (
-            "SerializerMutation M.get_serializer_for_schema() must return a mapping of field "
-            "name -> DRF serializers.Field; got <ClassReadRaises>."
-        ),
-    ),
-    (
-        lambda _fields, escape: {"name": ClassReadRaises(escape, "hostile __class__ boom")},
-        (
-            "SerializerMutation M.get_serializer_for_schema() returned an invalid field map: "
-            "field 'name' must be a DRF serializers.Field; got <ClassReadRaises>. Return a "
-            "mapping of bound field name -> DRF serializers.Field."
-        ),
-    ),
+_CLASS_READ_RAISES_FACTORIES: list[Callable[[type[BaseException]], object]] = [
+    lambda escape: ClassReadRaises(escape, "hostile __class__ boom"),
+    lambda escape: {"name": ClassReadRaises(escape, "hostile __class__ boom")},
 ]
 
 
 @pytest.mark.parametrize(
-    ("map_factory", "message"),
-    _CLASS_READ_RAISES_ROWS,
+    "map_factory",
+    _CLASS_READ_RAISES_FACTORIES,
     ids=["map-class-read-raises", "value-class-read-raises"],
 )
 @pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_schema_field_map_class_read_that_raises_is_typed(
-    map_factory: Callable[[dict[str, DRFField], type[BaseException]], object],
-    message: str,
+def test_schema_field_map_class_read_that_raises_propagates(
+    map_factory: Callable[[type[BaseException]], object],
     escape: type[BaseException],
 ) -> None:
-    """A ``__class__`` read that raises (any ``BaseException``) answers "not a mapping" / "not a field"."""
-    field_map = map_factory(dict(bound_fields(_item_serializer()())), escape)
-    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
-        _validate_schema_field_map("M", field_map)
+    """The map and value tests are plain ``isinstance``: a raising ``__class__`` read propagates.
+
+    The value's own ``__class__`` property is consumer code, so what it raises (any
+    ``BaseException``) escapes as itself rather than being rewrapped.
+    """
+    with pytest.raises(escape, match="hostile __class__ boom"):
+        _validate_schema_field_map("M", map_factory(escape))
 
 
 def _lazy_map(fields: dict[str, DRFField]) -> object:
@@ -2223,7 +2179,7 @@ def test_subclass_redefining_serializer_validates_against_child_serializer() -> 
     snapshot. The default ``get_serializer_for_schema`` reading that inherited snapshot
     would discover the PARENT serializer's fields - rejecting a child-only field
     (``category``, absent from ``CategorySer``) as unknown at the child's class creation.
-    Reading the OWN snapshot via ``cls.__dict__`` (``None`` until assigned) falls back to
+    Reading the OWN snapshot from the class namespace (``None`` until assigned) falls back to
     ``cls.Meta``, so the child validates against its OWN serializer.
     """
     _declare_products_primaries()
@@ -2683,8 +2639,8 @@ def test_validate_nested_fields_materializes_one_shot_selectors() -> None:
     assert result["items"].fields == ("name",)
 
 
-def test_validate_nested_fields_rejects_mapping_that_cannot_be_materialized() -> None:
-    """A hostile ``Meta.nested_fields`` Mapping cannot leak its iteration error."""
+def test_validate_nested_fields_mapping_iteration_error_propagates() -> None:
+    """A ``Meta.nested_fields`` mapping's own ``items()`` error propagates unchanged."""
     serializer_cls, field_map = _category_field_map()
 
     class BrokenMapping(dict[str, object]):
@@ -2692,41 +2648,13 @@ def test_validate_nested_fields_rejects_mapping_that_cannot_be_materialized() ->
         def items(self) -> NoReturn:
             raise RuntimeError("nested iteration exploded")
 
-    with pytest.raises(ConfigurationError, match="could not be materialized"):
+    with pytest.raises(RuntimeError, match="nested iteration exploded"):
         _validate_serializer_nested_fields(
             "M",
             serializer_cls,
             "create",
             field_map,
             BrokenMapping(),
-        )
-
-
-def test_validate_nested_fields_rejects_iteration_raising_midway() -> None:
-    """An ``.items()`` iterator that raises after one VALID entry still fails typed.
-
-    The entries are materialized up front, so a midway explosion cannot escape between
-    per-entry checks (the first entry here passes every check before the iterator raises).
-    """
-    serializer_cls, field_map = _category_field_map()
-
-    def entries() -> Iterator[tuple[str, NestedSerializerConfig]]:
-        yield "items", NestedSerializerConfig()
-        raise RuntimeError("midway explosion")
-
-    class MidwayMapping(dict[str, object]):
-        @override
-        # basedpyright: deliberately a generator that fails midway, the input the validator refuses
-        def items(self) -> Iterator[tuple[str, NestedSerializerConfig]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return entries()
-
-    with pytest.raises(ConfigurationError, match="could not be materialized"):
-        _validate_serializer_nested_fields(
-            "M",
-            serializer_cls,
-            "create",
-            field_map,
-            MidwayMapping(),
         )
 
 
@@ -2750,20 +2678,12 @@ def test_validate_nested_fields_rejects_malformed_entries() -> None:
         )
 
 
-class HostileNestedKeyHash(str):
-    """A ``str`` key whose hash raises, modelling a hostile consumer key."""
+class RaisingHashNestedKey(str):
+    """A ``str`` key whose own hash raises."""
 
     @override
     def __hash__(self) -> NoReturn:
         raise RuntimeError("hash exploded")
-
-
-class HostileNestedKeyRepr:
-    """A key whose ``repr`` raises, modelling a hostile consumer key."""
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("repr exploded")
 
 
 @pytest.mark.parametrize(
@@ -2771,10 +2691,10 @@ class HostileNestedKeyRepr:
     [
         # Unhashable: would detonate ``field_map.get()`` with a raw TypeError.
         lambda: ["boom"],
-        # A str subclass carrying a hostile ``__hash__``: would detonate the dict-set.
-        HostileNestedKeyHash,
-        # A hostile ``__repr__``: would detonate the typed-error f-string assembly.
-        HostileNestedKeyRepr,
+        # A str subclass carrying its own ``__hash__``: would dispatch it in the dict-set.
+        RaisingHashNestedKey,
+        # Not a string at all.
+        lambda: 7,
     ],
 )
 def test_validate_nested_fields_rejects_non_plain_string_keys(
@@ -3051,10 +2971,10 @@ def test_unopted_writable_nested_reports_opt_in_error_not_materialization() -> N
             operation = "create"
             permission_classes = []
 
-    # Class creation succeeded: the fingerprint recorded a shallow marker (no RuntimeError, no
-    # "Could not materialize..." wrap), and the snapshot carries the fingerprint.
+    # Class creation succeeded: the fingerprint recorded a shallow marker (the child's
+    # ``get_fields()`` never ran), and the snapshot carries the fingerprint.
     assert CreateItemUnopted._mutation_meta.schema_fingerprint is not None
-    # The phase-2.5 bind's field walk raises the CANONICAL opt-in error (not the materialization wrap).
+    # The phase-2.5 bind's field walk raises the CANONICAL opt-in error (the child is never read).
     with pytest.raises(ConfigurationError, match="opt-in only"):
         finalize_django_types()
 
@@ -3365,7 +3285,8 @@ def test_validate_nested_fields_child_serializer_errors() -> None:
     # the generic read failure instead, the child's text would still be found inside it.
     assert str(config_exc.value) == "Explicit config error in child fields"
 
-    with pytest.raises(ConfigurationError) as exc:
+    # A nested serializer's own ``.fields`` failure is its behaviour and propagates as is.
+    with pytest.raises(RuntimeError, match="Unexpected runtime error in child fields"):
 
         @definition_raises
         class _Mut2(SerializerMutation):
@@ -3374,16 +3295,46 @@ def test_validate_nested_fields_child_serializer_errors() -> None:
                 operation = "create"
                 nested_fields = {"child": NestedSerializerConfig()}
 
-    # The WHOLE message, never its prefix: the closing instruction sentence is the one
-    # text the determinism fingerprint, the input build, and this schema-time ownership
-    # walk all publish, so a prefix match would let one site's tail drift unseen.
+
+def test_nested_request_reading_child_fails_at_class_creation_naming_the_override() -> None:
+    """A nested ``get_fields()`` reading the request fails the declaration with the typed error."""
+
+    class RequestChild(serializers.Serializer[object]):
+        @override
+        def get_fields(self) -> dict[str, DRFField]:
+            _ = dict_of(self.context)["request"]
+            return {"name": serializers.CharField()}
+
+    class Parent(serializers.ModelSerializer[product_models.Category]):
+        child = RequestChild()
+
+        # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
+        class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+            model = product_models.Category
+            fields = ("child",)
+
+        @override
+        def create(self, validated_data: dict[str, object]) -> NoReturn:
+            raise AssertionError("the nested-write check reads this override; nothing calls it")
+
+    with pytest.raises(ConfigurationError) as exc:
+
+        @definition_raises
+        class _RequestChildMutation(SerializerMutation):
+            class Meta:
+                serializer_class = Parent
+                operation = "create"
+                nested_fields = {"child": NestedSerializerConfig()}
+
     assert str(exc.value) == (
-        "Could not read .fields from nested serializer 'BrokenExcChild' under no-arg "
-        "construction: RuntimeError: Unexpected runtime error in child fields. A nested "
+        "Could not read .fields from nested serializer 'RequestChild' under no-arg "
+        "construction: KeyError: 'request'. Nested serializer fields are read at schema "
+        "build, where no request exists and the serializer context is empty. A nested "
         "serializer opted in via Meta.nested_fields must expose a stable, "
         "request-independent no-arg .fields (override get_serializer_for_schema() on the "
         "mutation to return a stable field map)."
     )
+    assert type(exc.value.__cause__) is KeyError
 
 
 def test_default_serializer_mutation_instance_hook_methods() -> None:
@@ -3405,3 +3356,46 @@ def test_default_serializer_mutation_instance_hook_methods() -> None:
     }
     assert instance.get_serializer_injected_data(info=info, data=data, hook_context=context) == {}
     assert instance.get_serializer_save_kwargs(info=info, data=data, hook_context=context) == {}
+
+
+# ---------------------------------------------------------------------------
+# Hook field-map keys become generated input attributes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        "",
+        "with space",
+        "9lead",
+        "class",
+    ],
+    ids=[
+        "empty",
+        "space",
+        "leading-digit",
+        "keyword",
+    ],
+)
+def test_schema_field_map_non_identifier_key_fails_typed_once_kept(bad_key: str) -> None:
+    """A hook key that cannot be a generated input attribute fails typed once the input keeps it.
+
+    The field-map validator passes the key through (a read-only or narrowed-away field may carry
+    any name); the kept-set gate in ``resolve_effective_serializer_fields`` rejects it.
+    """
+    field = bind_unparented(serializers.CharField(), bad_key)
+
+    class BadKeyEntries(dict[str, object]):
+        @override
+        # basedpyright: deliberately yields a non-identifier key, the input the gate refuses
+        def items(self) -> list[tuple[str, DRFField]]:  # pyright: ignore[reportIncompatibleMethodOverride]
+            return [(bad_key, field)]
+
+    field_map = _validate_schema_field_map("M", BadKeyEntries())
+    assert field_map == {bad_key: field}
+    with pytest.raises(
+        ConfigurationError,
+        match="cannot be attributes of the generated input class",
+    ):
+        resolve_effective_serializer_fields(_item_serializer(), field_map=field_map)

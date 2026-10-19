@@ -39,7 +39,10 @@ construction: a result the teardown already masked carries errors whose
 deliberate and leaves alone, so nothing is masked or logged twice.
 
 One masking implementation, three places it is applied, and none of them
-re-states the classification or the replacement. A plain ``strawberry.Schema``
+re-states the classification or the replacement. The three sites become one
+only if the engine offers a single hook that sees every yielded frame and
+every result built after teardown; until then a check moved to any one of
+them observes different state than the other two. A plain ``strawberry.Schema``
 that a consumer assembled themselves with ``DjangoErrorPolicyExtension`` in its
 extensions list has no schema seam, so on that schema a hook failure is the one
 case the masking does not cover.
@@ -70,10 +73,10 @@ branch to keep in parity.
 
 from __future__ import annotations
 
-import contextlib
 import copy
 from typing import TYPE_CHECKING, TypeVar
 
+from django.core.exceptions import ImproperlyConfigured
 from graphql import GraphQLError
 from graphql.execution import ExecutionResult as GraphQLExecutionResult
 from strawberry.types.execution import ExecutionResult as StrawberryExecutionResult
@@ -86,6 +89,7 @@ from django_strawberry_framework.error_policy import (
     ErrorPolicy,
     new_correlation_id,
 )
+from django_strawberry_framework.utils import truth
 
 from .operation_state import OperationState, _OperationBoundExtension
 
@@ -199,7 +203,7 @@ def _masked(error: object, policy: ErrorPolicy) -> GraphQLError:
 def _degraded(policy: ErrorPolicy) -> GraphQLError:
     """Build the floor: the policy message alone, with no location and no correlation id.
 
-    Returned only when masking one error RAISED - a hostile ``original_error``
+    Returned only when masking one error RAISED - a raising ``original_error``
     property, an ``extensions`` map that misbehaves, an error object that is not
     the shape it claims. Nothing is read off the offending error to build this,
     because whatever was read is what failed; and no correlation id is minted,
@@ -207,25 +211,11 @@ def _degraded(policy: ErrorPolicy) -> GraphQLError:
     server-side log record names the failure instead.
 
     The policy's ``message`` is the one thing still worth reading - it is what
-    this floor exists to publish - but the read is guarded, because the floor
-    itself is what every other failure lands on and a floor that can raise is
-    not a floor. A defaulted ``getattr`` would not be enough: it suppresses only
-    ``AttributeError``, and a policy that is an ``ErrorPolicy`` subclass whose
-    ``message`` is a raising property passes the ``isinstance`` gate in
-    ``schema_error_policy`` while raising anything else (``schema_error_policy``
-    can catch a hostile read on the SCHEMA, but a hostile read on an admitted
-    policy object is this function's to survive). A non-string or empty message
-    is likewise refused: the floor's whole output is one publishable string, so
-    anything else is replaced by the package default's message, which validated
-    itself at construction.
+    this floor exists to publish. Every policy reaching here is an exact
+    ``ErrorPolicy`` (``schema_error_policy`` admits nothing else), whose
+    ``message`` was validated as a non-empty exact ``str`` at construction.
     """
-    try:
-        message: object = policy.message
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        message = None
-    if not isinstance(message, str) or not message:
-        message = _PACKAGE_ERROR_POLICY.message
-    return GraphQLError(message=message)
+    return GraphQLError(message=policy.message)
 
 
 def degraded_result(policy: ErrorPolicy) -> StrawberryExecutionResult:
@@ -246,29 +236,20 @@ def degraded_result(policy: ErrorPolicy) -> StrawberryExecutionResult:
 def masking_is_active(policy: ErrorPolicy) -> bool:
     """Whether ``policy`` masks anything for the operation being answered now.
 
-    Both reads fail toward MASKING, because this is the question the mask asks:
-    a policy whose ``enabled`` read raises - an ``ErrorPolicy`` subclass can
-    smuggle a raising property past the ``isinstance`` gate in
-    ``schema_error_policy`` - is treated as enabled, and a ``DEBUG`` that cannot
-    be read at all is treated as not exactly ``True``. An unreadable ``DEBUG`` is
-    not hypothetical: deleting the attribute (the proxy caches reads in its own
-    ``__dict__``, so both layers must lose it) or answering a schema outside a
-    configured Django process both raise on the read, and letting that escape
-    would answer a masking question by exception - the query teardown would catch
-    it into a whole-result floor and destroy healthy data beside the errors it
-    should have masked, and the subscription seam would surface it mid-stream.
-    A gate that cannot read its inputs therefore keeps the mask ON, which is the
-    only direction that cannot leak.
+    The ``DEBUG`` read fails toward MASKING, because this is the question the
+    mask asks: a ``DEBUG`` that cannot be read at all is treated as not exactly
+    ``True``. An unreadable ``DEBUG`` is not hypothetical: deleting the attribute
+    (the proxy caches reads in its own ``__dict__``, so both layers must lose it)
+    or answering a schema outside a configured Django process both raise on the
+    read (``AttributeError`` / ``ImproperlyConfigured``), and letting that escape
+    would answer a masking question by exception. ``enabled`` is an exact
+    ``bool`` field of an exact ``ErrorPolicy`` and is read as stored.
     """
     try:
-        enabled = policy.enabled
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        return True
-    try:
         debug = django_setting("DEBUG")
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
+    except (AttributeError, ImproperlyConfigured):
         debug = None
-    return enabled and debug is not True
+    return policy.enabled and debug is not True
 
 
 def is_maskable_result(
@@ -300,20 +281,18 @@ def schema_error_policy(schema: object) -> ErrorPolicy:
 
     A plain ``strawberry.Schema`` a consumer wired the extension into by hand has
     no ``error_policy`` attribute; that is a supported standalone use, so it falls
-    back rather than raising. The ``isinstance`` gate is the same fail-closed
-    reasoning applied to a WRONG attribute: something that is not an
-    ``ErrorPolicy`` cannot be asked whether masking is enabled, and treating its
+    back rather than raising. The exact-type gate is the same fail-closed
+    reasoning applied to a WRONG attribute: something that is not exactly an
+    ``ErrorPolicy`` cannot be asked whether masking is enabled - a subclass could
+    answer ``enabled`` / ``message`` with code of its own - and treating its
     truthiness as an answer would let an unrelated ``schema.error_policy``
     silently disable masking. Either way the fallback is the MASKING one -
     the package's own policy - because an extension whose whole job is to mask
     must not become a no-op because it could not find its configuration.
     ``DjangoSchema`` always supplies a valid one, validated at construction.
     """
-    try:
-        policy = getattr(schema, "error_policy", None)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
-        return _PACKAGE_ERROR_POLICY
-    return policy if isinstance(policy, ErrorPolicy) else _PACKAGE_ERROR_POLICY
+    policy = getattr(schema, "error_policy", None)
+    return policy if truth.is_exact(policy, ErrorPolicy) else _PACKAGE_ERROR_POLICY
 
 
 def mask_execution_result(
@@ -466,23 +445,9 @@ class DjangoErrorPolicyExtension(_OperationBoundExtension[OperationState]):
         what it excludes.
         """
         yield
-        try:
-            policy = self._policy()
-            if not masking_is_active(policy):
-                return
-            result = getattr(getattr(self, "execution_context", None), "result", None)
-            if is_maskable_result(result):
-                self._process_result(result, policy)
-        except Exception:
-            logger.exception(
-                "The error policy encountered an unhandled exception during teardown; "
-                "the response degrades to the policy message alone (fail closed).",
-            )
-            try:
-                policy = self._policy()
-            except Exception:  # noqa: BLE001 - boundary fails closed
-                policy = _PACKAGE_ERROR_POLICY
-            # Last resort: a teardown must not raise.
-            with contextlib.suppress(Exception):
-                if hasattr(self, "execution_context") and self.execution_context is not None:
-                    self.execution_context.result = degraded_result(policy)
+        policy = self._policy()
+        if not masking_is_active(policy):
+            return
+        result = getattr(getattr(self, "execution_context", None), "result", None)
+        if is_maskable_result(result):
+            self._process_result(result, policy)

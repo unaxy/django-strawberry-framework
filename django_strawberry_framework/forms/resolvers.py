@@ -27,7 +27,7 @@ and the form-specific invariants this module owns:
 - **The dedicated form relation decoder visibility-checks EVERY branch**
   (Decision 7 / Decision 8 step 1). Each relation id - a ``relay.GlobalID``
   *or* a raw pk - is type-checked (``decode_model_global_id`` for the Relay
-  branch, ``_coerce_relation_pk_or_none`` for the raw-pk branch), then **resolved
+  branch, ``coerce_relation_pk_or_none`` for the raw-pk branch), then **resolved
   to the visible object through the related primary ``DjangoType.get_queryset``**
   (``apply_type_visibility_sync(initial_queryset(...))``). The model flavor's
   batched set decoder now shares ``decode_visible_relation_ids`` (visibility on

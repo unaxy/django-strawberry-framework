@@ -295,6 +295,7 @@ LINT_COMMANDS = (
     "python scripts/check_type_suppressions.py",
     "python scripts/check_public_types.py",
     "python scripts/check_trailing_commas.py --check",
+    "python scripts/check_truthful_reads.py --check",
     "python scripts/check_citations.py --check",
     "python scripts/build_kanban_tracked_path_constants.py --check",
     "python scripts/check_kanban_anchors.py",

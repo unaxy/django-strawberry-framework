@@ -1130,10 +1130,10 @@ async def test_every_success_payload_under_steady_pings_is_a_committed_row() -> 
 
 
 def test_execution_errors_reads_both_graphql_core_error_shapes() -> None:
-    """``_execution_errors`` bridges the graphql-core 3.2.9 errors relocation.
+    """``_execution_errors`` bridges the graphql-core 3.2.10 errors relocation.
 
-    graphql-core < 3.2.9 exposes the located-error list as
-    ``ExecutionContext.errors``; 3.2.9 moved it behind a ``CollectedErrors``
+    graphql-core < 3.2.10 exposes the located-error list as
+    ``ExecutionContext.errors``; 3.2.10 moved it behind a ``CollectedErrors``
     container at ``collected_errors.errors``. The installed version exercises
     only one shape at runtime, so both are pinned here explicitly.
     """
@@ -2024,14 +2024,12 @@ def test_snapshot_target_state_captures_filefield_name_not_the_mutable_descripto
 
 
 @pytest.mark.django_db
-def test_assert_no_target_drift_fails_closed_on_a_hostile_eq() -> None:
-    """A planted value whose equality read detonates is the typed envelope, never raw.
+def test_assert_no_target_drift_propagates_a_planted_eq_error() -> None:
+    """A planted value's own ``__eq__`` is consumer code: what it raises propagates.
 
     The code the drift check polices (a permission method / hook / validator) can
-    plant ANY object on a field - including one whose ``__eq__`` raises. An
-    unreadable comparison is drift the check cannot rule out, so it fails closed
-    into the typed ``ConfigurationError``; a raw escape would break the pipeline's
-    exception-containment contract.
+    plant ANY object on a field. Its equality read runs as-is, and its exception
+    reaches the error policy; the write never happens.
     """
 
     class _RaisingEq:
@@ -2047,19 +2045,19 @@ def test_assert_no_target_drift_fails_closed_on_a_hostile_eq() -> None:
     item = product_models.Item.objects.create(name="GuardEq", category=category)
     with write_pipeline("default", lock=False):
         require_write_pipeline().target_state = snapshot_target_state(item)
-        # basedpyright: the hostile value planted by the code the check polices is the input
-        # under test; the column's set type is str | Combinable
+        # basedpyright: the value planted by the code the check polices is the input under
+        # test; the column's set type is str | Combinable
         item.name = _RaisingEq()  # pyright: ignore[reportAttributeAccessIssue]
-        with pytest.raises(ConfigurationError, match="mutated in memory"):
+        with pytest.raises(RuntimeError, match="hostile __eq__"):
             assert_no_target_drift("GuardEqMut", item)
 
 
-def test_file_name_snapshot_fails_closed_on_a_hostile_replacement() -> None:
-    """A non-``FieldFile`` replacement with a hostile ``__eq__`` reads as drift, not a raw escape.
+def test_file_name_snapshot_compares_a_non_fieldfile_replacement_raw() -> None:
+    """A non-``FieldFile`` replacement is compared raw, through its own ``__eq__``.
 
-    The name snapshot compares the replaced value raw when it is not a
-    ``FieldFile`` - and a hostile replacement's equality read detonating must
-    answer "drifted" (fail closed), never propagate out of the guard.
+    The name snapshot compares the replaced value itself when its real class is
+    not ``FieldFile``; that comparison is the replacement's own code, so what it
+    raises propagates.
     """
 
     class _RaisingEq:
@@ -2078,9 +2076,9 @@ def test_file_name_snapshot_fails_closed_on_a_hostile_replacement() -> None:
         target_state = require_write_pipeline().target_state
         assert target_state is not None
         assert isinstance(target_state["attachment"], _FileNameSnapshot)
-        # Planted past the descriptor: a hostile non-FieldFile replacement.
+        # Planted past the descriptor: a non-FieldFile replacement.
         vars(instance)["attachment"] = _RaisingEq()
-        with pytest.raises(ConfigurationError, match="mutated in memory"):
+        with pytest.raises(RuntimeError, match="hostile __eq__"):
             assert_no_target_drift("GuardFileMut", instance)
 
 
@@ -2165,13 +2163,12 @@ def test_field_fingerprint_reads_hostile_containers_through_their_base_slots() -
 
 
 def test_field_fingerprint_orders_by_a_guarded_key_not_a_bare_repr() -> None:
-    """A constant or raising ``__repr__`` cannot collapse or break the ordering.
+    """A constant ``__repr__`` cannot collapse the ordering.
 
-    A bare ``repr`` sort key is two failures in one: a ``__repr__`` that raises
-    escapes the drift check as an untyped exception, and one that returns a
-    CONSTANT gives structurally different members the same sort key - which, for
-    an unordered container, means two different values can fingerprint the same
-    and drift between them goes undetected.
+    A bare ``repr`` sort key that returns a CONSTANT gives structurally different
+    members the same sort key - which, for an unordered container, means two
+    different values can fingerprint the same and drift between them goes
+    undetected.
     """
 
     class _ConstantRepr:
@@ -2181,15 +2178,6 @@ def test_field_fingerprint_orders_by_a_guarded_key_not_a_bare_repr() -> None:
         @override
         def __repr__(self) -> str:
             return "SAME"
-
-    class _RaisingRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("hostile repr")
-
-    # No raise, and the guarded placeholder still names the type.
-    digest = _field_fingerprint([_RaisingRepr()])
-    assert "_RaisingRepr" in digest
 
     # A constant repr no longer makes two distinct members interchangeable: the
     # ordering key falls through to type and object identity, which are total.

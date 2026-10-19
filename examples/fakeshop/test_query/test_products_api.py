@@ -1201,6 +1201,7 @@ def test_update_item_wrong_type_global_id_on_id_is_field_error() -> None:
     unregistered type - is rejected as a ``FieldError`` on ``id`` BEFORE any
     lookup, never silently coerced to a bare pk that would target the same-pk
     ``Item``. ``node`` is null and the row is untouched (spec-036 Decision 10).
+    The wrong-model envelope is the invalid-id shape, not the not-found one.
     """
     create_users(1)
     seed_data(1)
@@ -1221,8 +1222,9 @@ def test_update_item_wrong_type_global_id_on_id_is_field_error() -> None:
     assert "errors" not in payload, payload
     result = json_at(payload, "data", "updateItem")
     assert json_at(result, "node") is None
-    assert len(json_list(result, "errors")) == 1
-    assert json_at(result, "errors", 0, "field") == "id"
+    assert json_at(result, "errors") == [
+        {"field": "id", "messages": ["Invalid id."], "codes": ["invalid"]},
+    ]
     item.refresh_from_db()
     assert item.name == "Untouched"
 
@@ -3535,7 +3537,8 @@ def test_post_raw_binary_body_returns_400_not_500() -> None:
 def test_post_utf16_json_body_is_rejected_as_400() -> None:
     """A UTF-16-encoded JSON body (with BOM) -> controlled 400.
 
-    The history is the point of keeping this row. Before spec-046 this request
+    The history is the point of keeping this row. Before the wire contract
+    (spec-046 Decision 9) this request
     *succeeded*: the cross_web patch handed the raw bytes to ``parse_json`` and
     ``json.loads`` auto-detected UTF-16 per RFC 8259, so a body that used to
     500 on the sync view started answering 200 - wider than "400 instead of
@@ -3752,8 +3755,8 @@ def test_get_query_with_object_variables_executes_like_upstream() -> None:
     The happy path of the shielded GET parse. The param IS a JSON object, which is
     exactly what upstream's per-param contract accepts, so the request executes and
     returns data. Paired with the malformed-param row below, this pins that the
-    shield's two nested parses still route through the captured original
-    `parse_json` rather than the envelope guard: a shield that stopped parsing (or
+    shield's two nested parses still route around the envelope guard through
+    the shared gap-1 translator: a shield that stopped parsing (or
     started applying the request-body guard) would turn this 200 into a 400.
     """
     client = Client()
@@ -3770,10 +3773,11 @@ def test_get_query_with_object_variables_executes_like_upstream() -> None:
 def test_get_query_with_malformed_variables_param_is_the_upstream_parse_400() -> None:
     """GET `?variables={not json` -> upstream's own malformed-JSON 400, byte for byte.
 
-    The shield adds no error handling of its own: the failure is raised inside the
-    delegated original `parse_json`, so an unparseable GET param answers with the
-    same body an unparseable POST body does. A shield that swallowed or reworded the
-    parse failure would change that one wire meaning.
+    The shield adds no envelope guard of its own: the failure is raised inside the
+    delegated original `parse_json` via the shared gap-1 translator, so an
+    unparseable GET param answers with the same body an unparseable POST body does.
+    A shield that swallowed or reworded the parse failure would change that one wire
+    meaning.
     """
     client = Client()
 

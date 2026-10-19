@@ -360,7 +360,7 @@ def test_register_enum_different_class_for_same_key_raises(fresh_registry: TypeR
 
 
 def test_clear_drops_all_state(fresh_registry: TypeRegistry) -> None:
-    """``clear()`` empties type, model, and enum maps in one call.
+    """``clear()`` empties type, model, enum, definition, and pending stores in one call.
 
     Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
     LIFO order, retry, or ImportError guards. No live sibling.
@@ -373,16 +373,30 @@ def test_clear_drops_all_state(fresh_registry: TypeRegistry) -> None:
     class Status(Enum):
         ACTIVE = "active"
 
+    definition = _as_definition(object())
+    pending = PendingRelation(
+        source_type=CategoryType,
+        source_model=Category,
+        field_name="items",
+        django_field=Category._meta.get_field("items"),
+        related_model=Item,
+    )
     fresh_registry.register(Category, CategoryType)
     fresh_registry.register_enum(Category, "status", Status)
+    fresh_registry.register_definition(CategoryType, definition)
+    fresh_registry.add_pending_relation(pending)
     assert fresh_registry.get(Category) is CategoryType
     assert fresh_registry.get_enum(Category, "status") is Status
+    assert fresh_registry.get_definition(CategoryType) is definition
+    assert list(fresh_registry.iter_pending_relations()) == [pending]
 
     fresh_registry.clear()
 
     assert fresh_registry.get(Category) is None
     assert fresh_registry.model_for_type(CategoryType) is None
     assert fresh_registry.get_enum(Category, "status") is None
+    assert fresh_registry.get_definition(CategoryType) is None
+    assert list(fresh_registry.iter_pending_relations()) == []
 
 
 def test_clear_runs_owner_registered_subsystem_callback(fresh_registry: TypeRegistry) -> None:
@@ -1075,7 +1089,7 @@ def test_discard_pending_tolerates_non_hashable_django_field(fresh_registry: Typ
 
 
 def test_mutators_reject_calls_after_mark_finalized(fresh_registry: TypeRegistry) -> None:
-    """After ``mark_finalized``, every mutator raises ``ConfigurationError``.
+    """After ``mark_finalized``, every guarded mutator raises ``ConfigurationError``.
 
     Defense-in-depth: ``DjangoType.__init_subclass__`` already rejects new subclasses
     post-finalization, but the registry boundary itself must also fail loud so out-of-band mutators
@@ -1111,6 +1125,10 @@ def test_mutators_reject_calls_after_mark_finalized(fresh_registry: TypeRegistry
         fresh_registry.discard_pending([pending])
     with pytest.raises(ConfigurationError, match="finalized"):
         fresh_registry.register_enum(Category, "status", Status)
+    with pytest.raises(ConfigurationError, match="finalized"):
+        fresh_registry.register_type_teardown(CategoryType, lambda: None)
+    with pytest.raises(ConfigurationError, match="finalized"):
+        fresh_registry.unregister(CategoryType)
 
 
 def test_clear_does_not_remove_mutation_from_previously_finalized_classes() -> None:
@@ -1201,9 +1219,7 @@ def test_register_two_types_same_model_without_primary_allows_both_in_types_for(
     assert fresh_registry.primary_for(Item) is None
 
 
-def test_register_second_type_for_same_model_no_longer_raises_collision(
-    fresh_registry: TypeRegistry,
-) -> None:
+def test_register_second_type_for_same_model_does_not_raise(fresh_registry: TypeRegistry) -> None:
     """A second type for an existing model registers without raising.
 
     Registry lifecycle: primary / multi-type maps. A live request cannot show ``types_for`` order
@@ -1928,11 +1944,13 @@ def test_audit_runs_once_per_build(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The ``unregister`` public helper. Tests below
-# exercise the new public surface that replaces the direct private-map
-# pokes in the walker/extension fixtures and the older
-# check_schema-audit fixtures (types list, model index, primary slot, and
-# definition map).
+# The ``unregister`` public helper. Tests below exercise removal of one
+# type's traces (types list, model index, primary slot, definition map,
+# sourced pending relations, connection-cache entry), sibling preservation,
+# the primary-loss-then-audit contract, the unknown-type no-op, and the
+# post-finalize refusal. The extension module's ``check_schema`` fixtures
+# keep their own private-map surgery (``_force_unregister_after_finalize``)
+# for the post-finalize simulation ``unregister`` deliberately refuses.
 # ---------------------------------------------------------------------------
 
 
@@ -2103,9 +2121,9 @@ def test_unregister_keeps_siblings_intact_in_multi_type_case(fresh_registry: Typ
 def test_unregister_of_primary_leaves_state_that_audit_rejects() -> None:
     """``unregister(primary_for_multi)`` leaves a state the finalize audit refuses.
 
-    Pins the contract narrated by ``unregister``'s docstring at
-    ``django_strawberry_framework/registry.py::TypeRegistry.unregister #"When ``type_cls`` is the
-    primary for its model"``: when ``type_cls`` is the primary for its model, the model loses its
+    Pins the contract narrated by ``unregister``'s docstring
+    (``django_strawberry_framework/registry.py::TypeRegistry.unregister #"even if siblings remain"``):
+    when ``type_cls`` is the primary for its model, the model loses its
     primary even if siblings remain - the caller must re-declare a primary via a fresh registration
     cycle. Concretely: register three types against the same model with the first as primary,
     unregister the primary, then call ``finalize_django_types()`` and confirm it raises the
@@ -2231,7 +2249,7 @@ def test_clear_tolerates_unimportable_order_submodules(fresh_registry: TypeRegis
 
     Order twin of ``test_clear_tolerates_unimportable_filter_submodules``. Every subsystem binds
     its own teardown callback at ITS import time via ``register_subsystem_clear`` -- the order side
-    registers ``clear_order_input_namespace`` and ``_clear_helper_referenced_ordersets`` -- and
+    registers ``clear_order_input_namespace`` and the bound ``_helper_referenced_ordersets.clear`` -- and
     ``clear()`` replays the already-resolved callables. That replay is the only place a poisoned
     ``sys.modules`` can be reached at all, and it imports neither poisoned name directly; the two
     submodule lookups it does make are best-effort (``utils/inputs.py::_safe_import``). So neither
@@ -2263,12 +2281,11 @@ def test_clear_tolerates_unimportable_order_submodules(fresh_registry: TypeRegis
 def test_clear_tolerates_unimportable_connection_submodule(fresh_registry: TypeRegistry) -> None:
     """``clear()`` itself imports nothing, so a poisoned ``connection`` entry cannot break it.
 
-    Connection twin of ``test_clear_tolerates_unimportable_order_submodules``. ``connection.py``
-    binds its connection-type-cache teardown (``clear_connection_type_cache``) at ITS import time
-    via ``register_subsystem_clear``, and ``clear()`` replays the already-resolved callable without
-    importing ``connection.py``. So a ``sys.modules`` entry poisoned to ``None`` (the shape that
-    makes an import of it raise ImportError) cannot make ``clear()`` raise: the registry's own
-    state is dropped either way.
+    Connection twin of ``test_clear_tolerates_unimportable_order_submodules``. The connection
+    subsystem binds its teardown callbacks at ITS import time via ``register_subsystem_clear``
+    (``clear_connection_type_cache``, ``clear_window_edge_class_cache``), and ``clear()`` replays
+    the already-resolved callables. That replay imports nothing, so the poisoned ``connection``
+    module cannot make ``clear()`` raise: the registry's own state is dropped either way.
 
     Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
     LIFO order, retry, or ImportError guards. No live sibling.
@@ -2280,7 +2297,8 @@ def test_clear_tolerates_unimportable_connection_submodule(fresh_registry: TypeR
         pass
 
     # ``None`` in ``sys.modules`` makes an import of ``connection.py`` raise
-    # ImportError; ``clear()`` runs no import, so its teardown path never reaches it.
+    # ImportError. ``clear()`` runs no import, and the replayed connection
+    # callbacks import nothing, so its teardown path never reaches it.
     with blocked_modules(connection_name):
         fresh_registry.register(Category, CategoryType)
         # Must not raise even though connection.py cannot be imported.
@@ -2291,12 +2309,12 @@ def test_clear_tolerates_unimportable_connection_submodule(fresh_registry: TypeR
 def test_clear_tolerates_unimportable_relay_module(fresh_registry: TypeRegistry) -> None:
     """``clear()`` itself imports nothing, so a poisoned ``relay`` entry cannot break it.
 
-    Relay twin of ``test_clear_tolerates_unimportable_connection_submodule``. The top-level
-    ``relay.py`` binds its root-node-field ledger teardown (``_clear_node_fields_declared``,
-    spec-032 Decision 8) at ITS import time via ``register_subsystem_clear``, and ``clear()``
-    replays the already-resolved callable without importing ``relay.py``. So a ``sys.modules``
-    entry poisoned to ``None`` cannot make ``clear()`` raise: the registry's own state is dropped
-    either way. The positive co-clear path is pinned by
+    Relay twin of ``test_clear_tolerates_unimportable_connection_submodule``. The relay subsystem
+    binds its ledger teardown at ITS import time via ``register_subsystem_clear``
+    (``_clear_node_fields_declared``, spec-032 Decision 8), and ``clear()`` replays the
+    already-resolved callable. That replay imports nothing, so the poisoned ``relay`` module
+    cannot make ``clear()`` raise: the registry's own state is dropped either way. The positive
+    co-clear path is pinned by
     ``tests/test_relay_node_field.py::test_node_field_without_node_types_raises_at_finalize``.
 
     Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
@@ -2309,7 +2327,8 @@ def test_clear_tolerates_unimportable_relay_module(fresh_registry: TypeRegistry)
         pass
 
     # ``None`` in ``sys.modules`` makes an import of ``relay.py`` raise
-    # ImportError; ``clear()`` runs no import, so its teardown path never reaches it.
+    # ImportError. ``clear()`` runs no import, and the replayed relay callback
+    # imports nothing, so its teardown path never reaches it.
     with blocked_modules(relay_name):
         fresh_registry.register(Category, CategoryType)
         # Must not raise even though relay.py cannot be imported.

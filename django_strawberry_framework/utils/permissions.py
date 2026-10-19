@@ -43,14 +43,10 @@ from django.db.models.constants import LOOKUP_SEP
 from django.http import HttpRequest
 
 from django_strawberry_framework.conf import django_setting
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_attr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 
-from ._narrowing import dict_items, is_dict, is_mapping, is_str, mapping_get, read_attr, require
+from . import truth
+from ._narrowing import dict_items, is_mapping, is_str, mapping_get, read_attr, require
 from .input_values import (
     LEAF,
     RELATED,
@@ -63,6 +59,7 @@ from .input_values import (
     iter_input_items,
     related_declaration_mapping,
 )
+from .lazy import unwrap_lazy_object
 from .querysets import reject_async_in_sync_context, relation_target_type
 from .relations import leading_relation_hops
 from .strings import flatten_lookup_path
@@ -115,8 +112,7 @@ def _check_method_name(field_path: str) -> str:
 
 # ``iter_input_items`` is single-sited in ``utils/input_values.py``.
 # Re-exported here so the existing ``from ..utils.permissions import
-# iter_input_items`` consumers (``filters/sets.py``, the permission test suite) keep
-# their import path.
+# iter_input_items`` consumers (the permission test suite) keep their import path.
 __all__ = [
     "ChannelsRequestAdapter",
     "active_permission_targets",
@@ -156,20 +152,15 @@ class ChannelsRequestAdapter:
         return self._scope
 
     def _scope_value(self, key: str) -> object:
-        """Read a scope value without allowing a hostile mapping to escape raw.
+        """Read a scope value: ``Mapping.get``'s own body, spelled out.
 
-        ``Mapping.get``'s own body, spelled out: the item read, a missing key answered
-        ``None``. A subclass ``get`` override is never consulted.
+        The item read, a missing key answered ``None``; a subclass ``get`` override is
+        never consulted, and whatever the scope's own item read raises propagates.
         """
         try:
-            try:
-                return self._scope[key]
-            except KeyError:
-                return None
-        except BaseException as exc:
-            raise ConfigurationError(
-                f"The Channels request scope could not be read while resolving its {key!r} value.",
-            ) from exc
+            return self._scope[key]
+        except KeyError:
+            return None
 
     @property
     def user(self) -> object:
@@ -188,42 +179,28 @@ class ChannelsRequestAdapter:
 
 def _channels_scope(request: object) -> Mapping[object, object] | None:
     """Resolve Strawberry's HTTP or WebSocket Channels scope shape."""
-    scope = _safe_attr(_safe_attr(request, "consumer"), "scope")
+    consumer: object = getattr(request, "consumer", None)
+    scope: object = getattr(consumer, "scope", None)
     if is_mapping(scope):
         return scope
-    scope = _safe_attr(request, "scope")
+    scope = getattr(request, "scope", None)
     if is_mapping(scope):
         return scope
     return None
 
 
-def _context_request(context: object) -> tuple[object, bool]:
-    """Read the ``request`` slot off a Strawberry context, with the read CONTAINED.
+def _context_request(context: object) -> object:
+    """Read the ``request`` slot off a Strawberry context.
 
     The Mapping-vs-attribute fork, once. A Strawberry context is either a
     mapping (the classic ``{"request": ...}`` dict) or an object carrying a
-    ``request`` attribute, and both reads can dispatch consumer code: the
-    mapping read goes through the UNBOUND ``Mapping.get`` so a subclass's
-    ``get`` / ``__getitem__`` override never runs, and both are guarded so a
-    hostile descriptor cannot escape a request-resolution helper.
-
-    Returns ``(request, readable)``. The second element matters because the two
-    callers answer an unreadable slot DIFFERENTLY, and that difference is visible
-    in the errors they eventually produce: the mapping arm of
-    :func:`_request_from_context` treats it as "no request at all" and stops,
-    while every other path treats it as "no request HERE" and keeps looking.
-    Returning the fact rather than deciding it keeps that ordering with its
-    owner.
+    ``request`` attribute. The mapping read goes through the UNBOUND
+    ``Mapping.get`` so a subclass's ``get`` override never runs; a consumer
+    context whose own read raises propagates that error.
     """
     if is_mapping(context):
-        try:
-            return mapping_get(context, "request"), True
-        except BaseException:  # noqa: BLE001 - hostile object, contained by design
-            return None, False
-    try:
-        return getattr(context, "request", None), True
-    except BaseException:  # noqa: BLE001 - hostile object, contained by design
-        return None, False
+        return mapping_get(context, "request")
+    return getattr(context, "request", None)
 
 
 def _channels_request_adapter(context: object) -> ChannelsRequestAdapter | None:
@@ -233,7 +210,7 @@ def _channels_request_adapter(context: object) -> ChannelsRequestAdapter | None:
     scope = _channels_scope(context)
     if scope is not None:
         return ChannelsRequestAdapter(context, scope)
-    request, _readable = _context_request(context)
+    request = _context_request(context)
     if isinstance(request, ChannelsRequestAdapter):
         return request
     if request is not None:
@@ -243,30 +220,39 @@ def _channels_request_adapter(context: object) -> ChannelsRequestAdapter | None:
     return None
 
 
+def _is_request(value: object) -> bool:
+    """Whether ``value`` is a Django ``HttpRequest`` or a ``ChannelsRequestAdapter``.
+
+    Decided by the real class of the object a Django lazy proxy wraps
+    (``utils/lazy.py::unwrap_lazy_object``), the same check
+    ``auth/sessions.py::classify_transport`` classifies the resolved request by,
+    so a request this resolver accepts is one the auth boundary recognises. A
+    stand-in that only forwards ``__class__`` is not a request.
+    """
+    candidate = unwrap_lazy_object(value)
+    return truth.is_instance(candidate, HttpRequest) or truth.is_instance(
+        candidate,
+        ChannelsRequestAdapter,
+    )
+
+
 def _request_from_context(context: object) -> object:
     """Resolve every supported Django or Channels request context shape."""
     if isinstance(context, ChannelsRequestAdapter):
         return context
-    request, readable = _context_request(context)
+    request = _context_request(context)
     if is_mapping(context):
-        # A mapping whose read RAISED is answered "no request", not "keep
-        # looking": the fall-through below would otherwise re-enter the same
-        # unreadable object through the adapter probe. The asymmetry is
-        # deliberate and is why the read reports readability instead of
-        # deciding it.
-        if not readable:
-            return None
-        if isinstance(request, (HttpRequest, ChannelsRequestAdapter)):
+        if _is_request(request):
             return request
         return _channels_request_adapter(context)
-    if isinstance(request, (HttpRequest, ChannelsRequestAdapter)):
+    if _is_request(request):
         return request
     adapter = _channels_request_adapter(context)
     if adapter is not None:
         return adapter
     if request is not None:
         return request
-    if isinstance(context, HttpRequest):
+    if _is_request(context):
         return context
     return None
 
@@ -290,7 +276,7 @@ def request_from_info(info: object, *, family_label: str) -> object:
     ``check_permission`` seam, which has no ``.apply`` method, so hard-coding
     ``.apply`` would mis-describe the mutation caller.
     """
-    context = _safe_attr(info, "context")
+    context: object = getattr(info, "context", None)
     if context is None:
         raise ConfigurationError(
             f"{family_label} requires `info.context`; received `info` without a context.",
@@ -300,7 +286,7 @@ def request_from_info(info: object, *, family_label: str) -> object:
         return request
     raise ConfigurationError(
         f"{family_label} could not resolve a Django HttpRequest from `info.context` "
-        f"(got {_safe_type_name(context)}). Expected `info.context.request`, a bare "
+        f"(got {truth.kind(context)}). Expected `info.context.request`, a bare "
         "HttpRequest, a mapping whose `request` is an HttpRequest, or a Strawberry "
         "Channels mapping context whose `request` carries an ASGI scope "
         '(`context["request"].consumer.scope` for the HTTP consumer, '
@@ -309,15 +295,13 @@ def request_from_info(info: object, *, family_label: str) -> object:
 
 
 def _safe_get_model(app_label: str, model_name: str) -> type[models.Model] | None:
-    """Return the named model, or ``None`` when the app / model is not installed."""
+    """Return the named model, or ``None`` when the app / model is not installed.
+
+    ``apps.get_model`` answers an uninstalled app or model with ``LookupError``.
+    """
     try:
         return apps.get_model(app_label, model_name)
-    except (
-        LookupError,
-        ValueError,
-        TypeError,
-        AttributeError,
-    ):
+    except LookupError:
         return None
 
 
@@ -363,14 +347,7 @@ def auth_aliases_for_permission_classes(permission_classes: object) -> frozenset
     ``resolve_auth_aliases`` prevents model, delete, and plain-form pipelines
     from spelling the policy independently.
     """
-    try:
-        enabled = bool(permission_classes)
-    except BaseException as exc:
-        raise ConfigurationError(
-            "Permission classes could not be inspected to determine whether authorization "
-            "is enabled.",
-        ) from exc
-    return resolve_auth_aliases() if enabled else frozenset()
+    return resolve_auth_aliases() if permission_classes else frozenset()
 
 
 def extract_branch_value(
@@ -431,34 +408,26 @@ def invoke_permission_method(
     that is not callable (``check_name_permission = 42``) is silently skipped
     by a bare ``callable()`` probe -- an intended gate that never runs and
     never errors, the same authorization no-op the async guard closes -- so a
-    non-callable non-``None`` slot is a ``ConfigurationError``. An unreadable
-    slot (a raising descriptor / hostile metaclass) is typed too, matching
-    ``_related_declarations`` and ``walk_declared_relation_path`` on this
-    surface: hostile metadata reads become ``ConfigurationError``, never a raw
-    escape. A ``None`` slot stays indistinguishable from an absent one (the
+    non-callable non-``None`` slot is a ``ConfigurationError``. The slot read is
+    the consumer class's own attribute lookup, so a descriptor that raises
+    propagates. A ``None`` slot stays indistinguishable from an absent one (the
     ``getattr`` default) and remains a silent no-op.
     """
     method_name = _check_method_name(field_path)
     if fired is not None and method_name in fired:
         return
-    try:
-        method: object = getattr(bare_instance, method_name, None)
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"The {_safe_type_name(type(bare_instance))} permission gate "
-            f"{method_name!r} could not be read.",
-        ) from exc
+    method: object = getattr(bare_instance, method_name, None)
     if method is not None and not callable(method):
         raise ConfigurationError(
-            f"The {_safe_type_name(type(bare_instance))} permission gate "
-            f"{method_name!r} must be callable; got {_safe_arg_repr(method)}. "
+            f"The {truth.name(type(bare_instance))} permission gate "
+            f"{method_name!r} must be callable; got {truth.render(method)}. "
             "Define check_<field>_permission as a method (def, not async def) "
             "or remove the attribute.",
         )
     if method is not None:
         _ = reject_async_in_sync_context(
             method(request),
-            owner=type(bare_instance).__name__,
+            owner=truth.name(type(bare_instance)),
             method=method_name,
             context="permission-check",
             recourse=_GATE_ASYNC_RECOURSE,
@@ -687,16 +656,10 @@ def walk_declared_relation_path(
     while index < len(segments):
         matches: list[tuple[int, str, object]] = []
         for declared_attr, related_obj in _related_declarations(current_cls, related_attr):
-            try:
-                field_name: object = getattr(related_obj, "field_name", None)
-            except BaseException as exc:
-                raise ConfigurationError(
-                    f"{_safe_type_name(current_cls)} declares an unreadable related "
-                    f"branch under {related_attr!r}.",
-                ) from exc
+            field_name: object = getattr(related_obj, "field_name", None)
             if field_name is None:
                 field_name = declared_attr
-            if not isinstance(field_name, str):
+            if not truth.is_instance(field_name, str):
                 continue
             field_segments = tuple(field_name.split(LOOKUP_SEP))
             if segments[index : index + len(field_segments)] == field_segments:
@@ -705,7 +668,7 @@ def walk_declared_relation_path(
             break
         consumed, declared_attr, related_obj = max(matches, key=lambda match: match[0])
         target: object = getattr(related_obj, target_attr, None)
-        resolved = target if isinstance(target, type) else None
+        resolved = target if truth.is_type(target) else None
         hops.append(RelationHop(current_cls, declared_attr, related_obj, resolved))
         index += consumed
         if resolved is None:
@@ -841,42 +804,33 @@ def _related_declarations(cls: type[object], related_attr: str) -> tuple[tuple[s
     The read + ``None`` normalization + mapping proof are the shared front half
     (``utils/input_values.py::related_declaration_mapping``); what stays here is
     the authorization-specific tail: the mapping is materialized through the
-    UNBOUND ``dict.items`` so a hostile ``items`` override cannot run inside a
-    permission walk, and every failure is worded against the declaring class and
-    attribute the consumer actually wrote.
+    UNBOUND ``dict.items`` so an ``items`` override cannot run inside a
+    permission walk, and every rejection is worded against the declaring class
+    and attribute the consumer actually wrote.
     """
     try:
         related = related_declaration_mapping(cls, related_attr)
     except RelatedDeclarationError as exc:
-        if exc.kind == "not_mapping":
-            raise ConfigurationError(
-                f"{_safe_type_name(cls)} related permission declarations under "
-                f"{related_attr!r} must be a mapping; got {_safe_type_name(exc.value)}.",
-            ) from exc.__cause__
+        # The only rejection the shared read raises: the declaration is not a mapping.
         raise ConfigurationError(
-            f"{_safe_type_name(cls)} related permission declarations under "
-            f"{related_attr!r} could not be read.",
-        ) from exc.__cause__
-    # No emptiness short-circuit: a truthiness test would dispatch a hostile
-    # ``__bool__`` / ``__len__``, and an empty mapping already materializes to
+            f"{truth.kind(cls)} related permission declarations under "
+            f"{related_attr!r} must be a mapping; got {truth.kind(exc.value)}.",
+        ) from None
+    # No emptiness short-circuit: an empty mapping already materializes to
     # ``()`` through the unbound read below.
-    try:
-        items = tuple(dict_items(related)) if is_dict(related) else tuple(related.items())
-    except BaseException as exc:
-        raise ConfigurationError(
-            f"{_safe_type_name(cls)} related permission declarations under "
-            f"{related_attr!r} could not be read.",
-        ) from exc
     # ``sets_mixins.py::collect_related_declarations`` keys the collection by each
     # declaration's class-attribute name; a hand-assigned collection is held to the same
     # shape here, since the key becomes the hop's declared attribute name.
+    items = (
+        tuple(dict_items(related)) if truth.is_instance(related, dict) else tuple(related.items())
+    )
     declarations: list[tuple[str, object]] = []
     for declared_attr, related_obj in items:
         if not isinstance(declared_attr, str):
             raise ConfigurationError(
-                f"{_safe_type_name(cls)} related permission declarations under "
+                f"{truth.kind(cls)} related permission declarations under "
                 f"{related_attr!r} must be keyed by attribute name strings; got a "
-                f"{_safe_type_name(declared_attr)} key.",
+                f"{truth.kind(declared_attr)} key.",
             )
         declarations.append((declared_attr, related_obj))
     return tuple(declarations)

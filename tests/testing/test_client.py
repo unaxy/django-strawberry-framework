@@ -346,6 +346,24 @@ async def test_async_files_without_variables_raises_the_same_guard() -> None:
         await AsyncTestClient().query("mutation { x }", files={"file": object()})
 
 
+def test_files_non_string_key_raises_the_uniform_guard() -> None:
+    """A non-string ``files=`` key fails as ``AssertionError``, not ``AttributeError``.
+
+    The placeholder walk's contract is one malformed-call type: a key that is
+    not a string (the int ``0`` for a top-level list variable, a plausible
+    typo for ``"0"``) is rejected at the source with the same uniform type as
+    every other bad shape.
+    """
+    with pytest.raises(AssertionError, match="is not a string"):
+        TestClient().query(
+            "mutation($tags: [Upload]) { up }",
+            variables={"tags": [None]},
+            # basedpyright: trust boundary: ``files: dict[str, object]`` is the contract; the
+            # guard validates a test call that breaks it
+            files={0: object()},  # pyright: ignore[reportArgumentType]
+        )
+
+
 def test_files_placeholder_missing_top_level_path_raises() -> None:
     """A top-level ``files=`` path with no matching key in variables raises, naming the path.
 
@@ -446,52 +464,16 @@ def test_files_placeholder_out_of_range_list_index_raises() -> None:
 
 def test_files_placeholder_present_but_not_none_raises() -> None:
     """A ``files=`` path resolving to a non-``None`` value raises: it must be a placeholder."""
-    with pytest.raises(AssertionError, match="None placeholder"):
+    with pytest.raises(AssertionError) as excinfo:
         TestClient().query(
             "mutation($file: Upload!) { up }",
             variables={"file": "not-a-placeholder"},
             files={"file": object()},
         )
-
-
-def test_files_placeholder_hostile_repr_keeps_assertion_error_boundary() -> None:
-    """A malformed value's broken ``repr`` cannot replace the placeholder guard."""
-
-    class _HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    with pytest.raises(AssertionError, match="None placeholder"):
-        TestClient().query(
-            "mutation($file: Upload!) { up }",
-            variables={"file": _HostileRepr()},
-            files={"file": object()},
-        )
-
-
-def test_files_placeholder_hostile_repr_key_keeps_assertion_error_boundary() -> None:
-    """A ``files=`` KEY whose ``repr`` explodes cannot replace the placeholder guard.
-
-    Every rejection branch renders the offending path into its message, so an
-    unprintable key is the argument position that would otherwise let the
-    caller's own exception escape in place of the guard's uniform
-    ``AssertionError`` - the containment the leaf-value row above pins from the
-    other side.
-    """
-
-    class _HostileKey(str):
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    with pytest.raises(AssertionError, match="no key") as excinfo:
-        TestClient().query(
-            "mutation($file: Upload!) { up }",
-            variables={"other": None},
-            files={_HostileKey("file"): object()},
-        )
-    assert "repr exploded" not in str(excinfo.value)
+    assert str(excinfo.value) == (
+        "files= path 'file' must point at a None placeholder in variables, but the value "
+        "there is 'not-a-placeholder'."
+    )
 
 
 @pytest.mark.parametrize(
@@ -574,24 +556,21 @@ class _HostileLenTuple(_HostileLenMixin, tuple[None, ...]):
     [_HostileLenList, _HostileLenTuple],
     ids=["list", "tuple"],
 )
-def test_files_placeholder_hostile_len_container_fails_closed(
+def test_files_placeholder_hostile_len_container_propagates(
     container: type[_HostileLenList] | type[_HostileLenTuple],
 ) -> None:
-    """A container with an unreadable ``len`` raises the uniform guard, not a raw escape.
+    """A container whose ``len`` raises surfaces its own exception from the walker.
 
-    The walker reads ``len`` for the index range check and the error message, so
-    a hostile ``__len__`` on a list- or tuple-shaped container would otherwise
-    escape as a raw ``RuntimeError`` in place of the guard - the same containment
-    class the hostile-``repr`` row above pins for the leaf value.
+    The walker reads ``len`` for the index range check; an override that raises
+    is the caller's own container behaviour, so it propagates unchanged rather
+    than being recast as the placeholder guard's ``AssertionError``.
     """
-    with pytest.raises(AssertionError, match="unreadable length") as excinfo:
+    with pytest.raises(RuntimeError, match="hostile __len__ detonated"):
         TestClient().query(
             "mutation($tags: [Upload!]!) { up }",
             variables={"tags": container([None])},
             files={"tags.0": object()},
         )
-    assert not isinstance(excinfo.value, _HostileLenMixin)  # the guard type is uniform
-    assert "hostile __len__" not in str(excinfo.value)
 
 
 @pytest.mark.parametrize(

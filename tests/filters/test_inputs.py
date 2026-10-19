@@ -8,9 +8,11 @@ consumer helper (Decision 11).
 
 ``HIDE_FLAT_FILTERS`` wire shape lives in
 ``test_library_api.py`` / ``test_products_api.py``. Scoped ``RangeFilter``
-type names live in ``test_scalars_filter_api.py``. This file keeps
-converter dispatch, namespace lifecycle, and digit-boundary type-name
-injectivity -- construction and private helpers a request cannot name.
+type names live in ``test_scalars_filter_api.py``. Relay-relation
+``isNull`` Boolean vs GlobalID-list ``exact`` lives in
+``test_library_api.py``. This file keeps converter dispatch, namespace
+lifecycle, and digit-boundary type-name injectivity -- construction and
+private helpers a request cannot name.
 """
 
 from __future__ import annotations
@@ -42,7 +44,6 @@ from django.utils.functional import SimpleLazyObject
 from django_filters import (
     BaseInFilter,
     BaseRangeFilter,
-    BooleanFilter,
     CharFilter,
     ChoiceFilter,
     Filter,
@@ -106,11 +107,10 @@ from django_strawberry_framework.filters.sets import filter_generation_provenanc
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
 from django_strawberry_framework.types.finalizer import finalize_django_types
-from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import ClaimsClass, ClassReadRaises, is_object_dict, is_object_list
+from tests._idioms import ClaimsClass, ClassReadRaises, is_object_list
 from tests._soft_dependency import blocked_modules
 from tests.filters.fixtures.filtersets import ShelfFilter
 
@@ -142,13 +142,6 @@ def _annotations(cls: type) -> dict[object, object]:
     return dict_of(read_attr(cls, "__annotations__"))
 
 
-def _type_annotation(field: StrawberryField) -> object:
-    """``field``'s declared annotation, failing when the field carries none."""
-    annotation = field.type_annotation
-    assert annotation is not None
-    return annotation.annotation
-
-
 def _definition_fields(cls: object) -> list[StrawberryField]:
     """The Strawberry fields of generated input class ``cls``, failing when it has no definition."""
     return get_object_definition(cls, strict=True).fields
@@ -160,12 +153,6 @@ class _ScratchInput(Protocol):
 
     name: str | None
     count: int | None
-
-
-class _IsNullBag(Protocol):
-    """The ``isNull`` sub-field of a generated relation filter bag."""
-
-    is_null: bool | None
 
 
 @pytest.fixture(autouse=True)
@@ -717,34 +704,28 @@ def test_convert_filter_to_input_annotation_rejects_unknown_method_filter() -> N
         convert_filter_to_input_annotation(f, None)  # pyright: ignore[reportArgumentType]
 
 
-def test_convert_filter_to_input_annotation_keeps_hostile_diagnostics_typed() -> None:
-    """Malformed filters with raising ``__repr__`` still raise ConfigurationError."""
-
-    class BadRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
+def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> None:
+    """Malformed filters raise ConfigurationError naming the method and the filter."""
 
     class NoFieldFilter:
         extra = {}
-        method = BadRepr()
+        method = "filter_custom"
         field = None
         lookup_expr = "exact"
 
-    with pytest.raises(ConfigurationError, match="unprintable"):
-        # basedpyright: the filter whose method repr raises is the hostile input under test;
-        # convert_filter_to_input_annotation types the parameter as Filter
+    with pytest.raises(ConfigurationError) as exc_info:
+        # basedpyright: the duck-typed filter with no form field is the malformed input under
+        # test; convert_filter_to_input_annotation types the parameter as Filter
         convert_filter_to_input_annotation(NoFieldFilter(), None)  # pyright: ignore[reportArgumentType]
-
-    class BadChoiceFilter(ChoiceFilter):
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
+    assert str(exc_info.value).startswith("Filter(method='filter_custom') on <")
+    assert "exposes no form field" in str(exc_info.value)
 
     # A model field with no ``choices`` is what drives the ChoiceFilter branch to
     # its rejection, which is the diagnostic under test.
-    with pytest.raises(ConfigurationError, match="unprintable"):
-        convert_filter_to_input_annotation(BadChoiceFilter(), models.CharField())
+    choice_filter = ChoiceFilter()
+    with pytest.raises(ConfigurationError) as exc_info:
+        convert_filter_to_input_annotation(choice_filter, models.CharField())
+    assert str(exc_info.value).startswith(f"ChoiceFilter on {choice_filter!r} is not backed")
 
 
 def test_convert_filter_to_input_annotation_wraps_nullable() -> None:
@@ -1005,6 +986,21 @@ def test_normalize_input_value_range_filter_reads_a_dict_subclass_through_the_ba
     }
 
 
+def test_normalize_input_value_csv_range_filter_accepts_element_list() -> None:
+    """The expanded ``__range`` CSV leaf still takes its element list.
+
+    ``BaseRangeFilter`` rides the CSV arm (element-binding ``[start, end]``
+    list over the wire), not the ``{start, end}`` object arm -- a list
+    here is the legitimate shape, and the dict rejection for it stays
+    pinned by ``test_normalize_input_value_rejects_dict_on_expanded_range_csv``.
+    """
+
+    class IntRange(BaseRangeFilter, NumberFilter):
+        pass
+
+    assert normalize_input_value(IntRange(), [1, 5], field_name="code__range") == [1, 5]
+
+
 def test_normalize_input_value_global_id_list() -> None:
     """GlobalID OBJECTS keep their ``type_name`` (wire form), not bare node_ids.
 
@@ -1053,12 +1049,18 @@ def test_normalize_input_value_rejects_dict_on_csv_filter() -> None:
 def test_normalize_input_value_rejects_scalar_on_list_filter() -> None:
     """A scalar (string / int) into a list-consuming arm fails loud.
 
-    Iterating a ``str`` container would yield its CHARACTERS -- ``"abc"``
-    would become ``['a', 'b', 'c']`` -- the same silent shape coercion as the
-    dict-keys leak, so the guard rejects every non-list container.
+    A ``str`` container would iterate its CHARACTERS (``"abc"`` becoming
+    ``['a', 'b', 'c']``), the same silent shape coercion as the dict-keys
+    case, so the guard rejects every non-list container. The message is
+    pinned byte for byte.
     """
-    with pytest.raises(ConfigurationError, match="non-list container"):
-        normalize_input_value(ListFilter(), "abc")
+    with pytest.raises(ConfigurationError) as excinfo:
+        normalize_input_value(ListFilter(field_name="code"), "abc")
+    assert str(excinfo.value) == (
+        "ListFilter consumes a list of values for its 'code' input, but received a "
+        "non-list container (str 'abc') for the list input; send a list (the GraphQL "
+        "schema already rejects this shape over the wire)."
+    )
     with pytest.raises(ConfigurationError, match="non-list container"):
         normalize_input_value(GlobalIDMultipleChoiceFilter(), 42)
 
@@ -1311,7 +1313,6 @@ def _filter_input_subscript_form(value: object) -> object:
             id="class-read-interrupts",
         ),
         pytest.param(ClaimsClass(type), "<ClaimsClass>", id="claims-type"),
-        pytest.param(_RaisingRepr(), "<unprintable _RaisingRepr>", id="raising-repr"),
     ],
 )
 def test_filter_input_helpers_type_reject_a_value_whose_class_hooks_fail(
@@ -1328,6 +1329,26 @@ def test_filter_input_helpers_type_reject_a_value_whose_class_hooks_fail(
     with pytest.raises(TypeError) as excinfo:
         spell(value)
     assert str(excinfo.value) == f"{prefix}{rendered}"
+    assert _helper_referenced_filtersets == set()
+
+
+@pytest.mark.parametrize(
+    "spell",
+    [
+        pytest.param(_filter_input_call_form, id="call-form"),
+        pytest.param(_filter_input_subscript_form, id="subscript-form"),
+    ],
+)
+def test_filter_input_helpers_propagate_a_rejected_value_whose_repr_raises(
+    spell: Callable[[object], object],
+) -> None:
+    """A rejected value's own ``__repr__`` runs to quote it, and what it raises propagates.
+
+    The class test reads the real class and never runs a hook, but the message quotes the
+    argument through ``utils/truth.py::render``, which is the value's consumer ``__repr__``.
+    """
+    with pytest.raises(RuntimeError, match="hostile __repr__"):
+        spell(_RaisingRepr())
     assert _helper_referenced_filtersets == set()
 
 
@@ -1385,9 +1406,9 @@ def test_pascal_case_converts_separators() -> None:
 def test_type_name_for_raises_for_no_word_character_field_path(bad: str) -> None:
     """``type_name_for`` raises rather than silently collapsing to the root name.
 
-    The guard is hoisted from ``_pascal_case`` (the direct
-    ``_build_range_input_class`` consumer) into the shared
-    ``ClassBasedTypeNameMixin`` so the bag-class naming path in
+    The guard lives in the shared ``utils.strings.pascal_case_or_raise`` both
+    ``_pascal_case`` and ``ClassBasedTypeNameMixin`` wrap, so the bag-class
+    naming path in
     ``_build_input_fields`` -- which routes through ``type_name_for`` /
     ``utils.strings.pascal_case`` rather than the inputs-local
     ``_pascal_case`` -- also surfaces the no-word-character collision
@@ -2275,120 +2296,3 @@ def test_iter_filterset_subclasses_dedupes_diamond_inheritance() -> None:
     # ``D`` is reachable through both ``B`` and ``C`` but appears once.
     assert found.count(D) == 1
     assert {B, C, D}.issubset(set(found))
-
-
-# ---------------------------------------------------------------------------
-# Relay-RELATION ``isnull`` -> Boolean input
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-def test_relay_relation_isnull_generates_boolean_input_not_globalid_list() -> None:
-    """A framework-owned Relay-RELATION ``isnull`` lookup generates a Boolean input.
-
-    An ``isnull`` lookup on a relation whose target is a Relay node
-    (``Book.genres`` -> the Relay ``GenreType``) must stay an upstream
-    ``BooleanFilter`` -- a null test is never a GlobalID -- while the SAME
-    relation's ``exact`` still converts to the GlobalID list wire shape.
-
-    Justified in-process fallback: NO live fakeshop ``/graphql/``
-    surface exposes a DIRECT Relay-relation ``isnull``. Every fakeshop relation is
-    declared as a ``RelatedFilter`` (a separate traversal mechanism, not a
-    ``Meta.fields`` relation lookup), and the only ``Meta.fields`` ``isnull`` is
-    ``Book.subtitle`` (a ``CharField``); ``test_kanban_api.py`` covers only the
-    OWN-PK ``id`` ``isnull`` branch, not the relation branch corrected here.
-    Adding a relation ``isnull`` to a shipped fakeshop filterset would mutate the
-    live schema surface, so the schema-level annotation + coercion assertion is
-    earned in-process instead. The low-level Python predicate shape stays in
-    ``tests/filters/test_base.py``; this test pins the generated GraphQL INPUT.
-    """
-
-    class GenreType(DjangoType):
-        class Meta:
-            model = library_models.Genre
-            interfaces = (strawberry.relay.Node,)
-
-    apply_interfaces(GenreType, GenreType.__django_strawberry_definition__)
-
-    class RelayRelationIsnullBookFilter(FilterSet):
-        class Meta:
-            model = library_models.Book
-            fields = {"genres": ["isnull", "exact"]}
-
-    genres_field = library_models.Book._meta.get_field("genres")
-
-    # Routing: the Relay relation's ``isnull`` stays an upstream Boolean filter,
-    # while the SAME relation's ``exact`` converts to the GlobalID list primitive.
-    isnull_cls, _ = RelayRelationIsnullBookFilter.filter_for_lookup(genres_field, "isnull")
-    exact_cls, _ = RelayRelationIsnullBookFilter.filter_for_lookup(genres_field, "exact")
-    assert isnull_cls is BooleanFilter
-    assert not issubclass(isnull_cls, (GlobalIDFilter, GlobalIDMultipleChoiceFilter))
-    assert exact_cls is GlobalIDMultipleChoiceFilter
-
-    # Generated input annotations: the ``isNull`` sub-field is a Boolean scalar;
-    # the ``exact`` sub-field keeps the ``list[str]`` GlobalID list wire shape.
-    triples = _build_input_fields(RelayRelationIsnullBookFilter)
-    by_attr = {python_attr: annotation for python_attr, annotation, _kwargs in triples}
-    genres_bag = _class_arg(by_attr["genres"])
-    bag_annotations: dict[str | None, object] = {
-        field.graphql_name: _type_annotation(field) for field in _definition_fields(genres_bag)
-    }
-    assert bag_annotations["isNull"] == (bool | None)
-    assert bag_annotations["exact"] == (list[str] | None)
-
-    # Schema-level annotation + coercion: introspection reports ``isNull:
-    # Boolean``, and the resolver ACCEPTS ``true`` / ``false`` while REJECTING a
-    # non-Boolean. The former GlobalID/list coercion would instead accept a
-    # String and reject the Boolean. The resolver's annotations are assigned as
-    # real objects (not strings) so this module's ``from __future__ import
-    # annotations`` cannot stringify the per-test bag class out of scope.
-    def _probe(genres: _IsNullBag | None = None) -> str:
-        if genres is None:
-            return "omitted"
-        return f"isNull={genres.is_null!r}"
-
-    _probe.__annotations__ = {"genres": genres_bag | None, "return": str}
-
-    @strawberry.type
-    class Query:
-        probe: str = strawberry.field(resolver=_probe)
-
-    schema = strawberry.Schema(query=Query)
-
-    introspection = schema.execute_sync(
-        """
-        {
-          __type(name: "RelayRelationIsnullBookFilterGenresFilterInputType") {
-            inputFields { name type { kind name } }
-          }
-        }
-        """,
-    )
-    assert introspection.errors is None, introspection.errors
-    assert introspection.data is not None
-    introspection_data: dict[str, object] = introspection.data
-    type_payload = introspection_data["__type"]
-    assert is_object_dict(type_payload)
-    raw_input_fields = type_payload["inputFields"]
-    assert is_object_list(raw_input_fields)
-    input_fields: dict[object, object] = {}
-    for field in raw_input_fields:
-        assert is_object_dict(field)
-        input_fields[field["name"]] = field["type"]
-    assert input_fields["isNull"] == {"kind": "SCALAR", "name": "Boolean"}
-    # ``exact`` is the GlobalID membership list, NOT a Boolean scalar.
-    exact_type = input_fields["exact"]
-    assert is_object_dict(exact_type)
-    assert exact_type["kind"] == "LIST"
-
-    accepted_true = schema.execute_sync("{ probe(genres: { isNull: true }) }")
-    assert accepted_true.errors is None, accepted_true.errors
-    assert accepted_true.data == {"probe": "isNull=True"}
-
-    accepted_false = schema.execute_sync("{ probe(genres: { isNull: false }) }")
-    assert accepted_false.errors is None, accepted_false.errors
-    assert accepted_false.data == {"probe": "isNull=False"}
-
-    rejected_string = schema.execute_sync('{ probe(genres: { isNull: "not-a-bool" }) }')
-    assert rejected_string.errors, rejected_string
-    assert "Boolean cannot represent" in str(rejected_string.errors[0])

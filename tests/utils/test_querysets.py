@@ -79,6 +79,7 @@ from django_strawberry_framework.orders import Ordering, OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import querysets as querysets_module
 from django_strawberry_framework.utils._narrowing import (
+    call_method,
     instance_dict,
     is_dict,
     is_exact_dict,
@@ -118,7 +119,6 @@ from django_strawberry_framework.utils.querysets import (
     SyncMisuseError,
     _bake_deferred_filter_or_defect,
     _base_table_defect,
-    _coerced_manager_queryset,
     _concrete_or_none,
     _defect_message,
     _deferred_value_defect,
@@ -135,8 +135,7 @@ from django_strawberry_framework.utils.querysets import (
     _query_genuineness_defect,
     _reconstructed_value,
     _routing_hints_equal,
-    _safe_class_name,
-    _safe_routing_repr,
+    _routing_repr,
     _seal_or_defect,
     _sealed_prefetch_related_lookups,
     _SealPolicy,
@@ -170,7 +169,6 @@ from tests._django_private import (
 from tests._idioms import (
     ClaimsClassBase,
     ClassReadRaisesBase,
-    UnreadableStateQuerySet,
     is_object_list,
     module_binding,
     saved_pk,
@@ -178,23 +176,6 @@ from tests._idioms import (
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
-
-
-def test_safe_class_name_falls_back_for_non_string_metaclass_name_metadata() -> None:
-    """A non-string ``__name__`` degrades to the metaclass name instead of a raw label."""
-
-    class _NonStringNameMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__name__":
-                return 42
-            return object_result(super().__getattribute__, name)
-
-    class _MalformedName(metaclass=_NonStringNameMeta):
-        pass
-
-    assert _safe_class_name(_MalformedName) == "_NonStringNameMeta"
-
 
 _M = TypeVar("_M", bound=models.Model)
 
@@ -359,6 +340,11 @@ def test_coerce_field_value_or_none_drops_out_of_range_literal() -> None:
     ``OverflowError`` at ``pk__in``).
     """
     assert coerce_field_value_or_none(Category._meta.pk, 2**63) is None
+
+
+def test_coerce_field_value_or_none_drops_overflowing_duration() -> None:
+    """A duration string past ``timedelta``'s range is Django's ``OverflowError`` -> ``None``."""
+    assert coerce_field_value_or_none(models.DurationField(), "99999999999 00:00:00") is None
 
 
 @pytest.mark.django_db
@@ -1452,7 +1438,7 @@ def test_manager_result_alias_drift_fails_closed_sync() -> None:
 
 
 def test_hostile_foreign_query_type_name_cannot_escape_typed_defect() -> None:
-    """A foreign query metaclass cannot replace the typed boundary error with a raw one."""
+    """A foreign query metaclass's name hooks never run: the typed defect names its real class."""
 
     class _ExplodingMeta(type):
         @override
@@ -1468,11 +1454,15 @@ def test_hostile_foreign_query_type_name_cannot_escape_typed_defect() -> None:
     set_queryset_query(source, _HostileQuery(Category))
     sealed, defect = _seal_or_defect(source, Category, None)
     assert sealed is None
-    assert defect == ("untrusted", "QuerySet.query is object")
+    assert defect == ("untrusted", "QuerySet.query is _HostileQuery")
 
 
-def test_hostile_manager_routing_metadata_cannot_escape_coercion_boundary() -> None:
-    """Manager routing failures become a typed coercion error, not a raw exception."""
+def test_manager_all_exception_propagates_through_coercion() -> None:
+    """The Manager's own ``all()`` is consumer code: what it raises propagates unchanged.
+
+    The routing read beside it comes from the manager's instance namespace, so the
+    hostile ``_db`` hook runs only inside ``all()``.
+    """
 
     class _HostileManager(models.Manager[Category]):
         @override
@@ -1483,7 +1473,7 @@ def test_hostile_manager_routing_metadata_cannot_escape_coercion_boundary() -> N
 
     manager = _HostileManager()
     manager.model = Category
-    with pytest.raises(ConfigurationError, match="could not produce a QuerySet"):
+    with pytest.raises(RuntimeError, match="hostile manager routing read"):
         normalize_query_source(manager)
 
 
@@ -5009,27 +4999,15 @@ def test_base_table_defect_labels_a_non_string_table_name() -> None:
     assert _base_table_defect(query, Category) == "object"
 
 
-def test_manager_coercion_rejects_unreadable_routing_state() -> None:
-    """A manager without routing state is refused by the coercion boundary."""
-
-    class _NoRoutingState:
-        __slots__ = ()
-
-    with pytest.raises(ConfigurationError, match="could not read the manager's routing state"):
-        # basedpyright: the slotless object is the hostile input under test;
-        # _coerced_manager_queryset types the parameter as Manager[Model]
-        _coerced_manager_queryset(_NoRoutingState())  # pyright: ignore[reportArgumentType]
-
-
-def test_concrete_model_probe_fails_closed_for_unreadable_model_metadata(
+def test_concrete_model_probe_never_runs_a_metaclass_meta_hook(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A model whose ``_meta`` cannot be read resolves to no concrete model.
+    """A metaclass ``_meta`` hook never runs: the probe reads the real class namespace.
 
     A model class whose metaclass raises on ``_meta`` is malformed by
     construction, so no fakeshop model can carry it; ``_HostileModel`` alone
-    covers the metadata-read failure branch of
-    ``django_strawberry_framework/utils/querysets.py::_concrete_or_none``.
+    shows ``django_strawberry_framework/utils/querysets.py::_concrete_or_none``
+    answering the real concrete model past the hook.
     """
     model_base = type(models.Model)
 
@@ -5049,7 +5027,7 @@ def test_concrete_model_probe_fails_closed_for_unreadable_model_metadata(
 
     monkeypatch.setattr(_HostileModel, "_hostile_meta", True)
 
-    assert _concrete_or_none(_HostileModel) is None
+    assert _concrete_or_none(_HostileModel) is _HostileModel
 
 
 class _AsyncOnlyIterable:
@@ -6107,6 +6085,23 @@ def test_apply_type_visibility_sync_serves_a_combined_result_as_its_pk_set() -> 
     assert [row.name for row in _rows_of(Category, second_only)] == [second]
 
 
+@pytest.mark.parametrize("combinator", ["union", "intersection", "difference"])
+def test_list_relation_child_policy_serves_every_combinator_shape(combinator: str) -> None:
+    """The plain-list child seal serves union, intersection, and difference alike.
+
+    The child plan projects the sealed value (``.only()`` / ``.select_related()``)
+    and Django refilters it at fetch time, both of which Django refuses on a
+    combinator, so each shape reaches them as the single-table primary-key set it
+    selects.
+    """
+    base = Category.objects.all()
+    combined = call_method(base.filter(pk__gte=0), combinator, base.filter(pk__gte=1))
+    sealed, defect = _seal_or_defect(combined, Category, None, _LIST_RELATION_CHILD_POLICY)
+    assert defect is None
+    assert sealed is not None
+    assert sealed.query.combinator is None
+
+
 def test_validate_post_orderset_result_valid() -> None:
     """_validate_post_orderset_result accepts valid, ordered candidate querysets."""
     DummyType = _declared_type(Category, "DummyType")
@@ -6392,26 +6387,6 @@ def test_validate_post_orderset_result_rejects_hints_routing_mismatch() -> None:
         )
 
 
-def test_validate_post_orderset_result_contains_an_unreadable_instance_dictionary() -> None:
-    """A hostile QuerySet ``__dict__`` descriptor becomes a typed seal defect."""
-    DummyType = _declared_type(Category, "DummyType")
-
-    source_qs = Category.objects.all()
-    candidate = UnreadableStateQuerySet[Category](
-        model=Category,
-        query=source_qs.query.clone(),
-        using=source_qs.db,
-    )
-
-    with pytest.raises(ConfigurationError, match="untrusted defect"):
-        _validate_post_orderset_result(
-            DummyType,
-            _snapshot_routing_intent(source_qs, "MyOrderSet.apply_sync"),
-            candidate,
-            "MyOrderSet.apply_sync",
-        )
-
-
 def test_validate_post_orderset_result_zero_consumer_dispatch_on_getattribute() -> None:
     """_validate_post_orderset_result accesses _db and _hints without consumer __getattribute__."""
     DummyType = _declared_type(Category, "DummyType")
@@ -6512,15 +6487,15 @@ def test_validate_post_orderset_result_routing_hints_none_vs_empty() -> None:
 
 
 def test_routing_hints_equal_and_repr_reject_a_non_dict_hints_mapping() -> None:
-    """A ``dict`` SUBCLASS is not a ``dict`` for routing comparison, and renders safely.
+    """A ``dict`` SUBCLASS is not a ``dict`` for routing comparison, and renders as itself.
 
     The two helpers are exercised directly because the seal's ``untrusted`` proof
     rejects a non-``dict`` ``_hints`` slot before the routing compare can see it;
     the arms still have to hold, because they are the contract every future
     caller of the pair inherits. A subclass may override ``__eq__``, ``__len__``,
     ``keys`` or ``__getitem__``, so the compare admits only exact ``dict``
-    containers and the formatter falls back to ``_safe_arg_repr`` rather than
-    walking the mapping.
+    containers, and the formatter renders a non-``dict`` value by its own repr
+    rather than walking it as hints.
     """
 
     class HintsSubclass(dict[str, object]):
@@ -6528,16 +6503,22 @@ def test_routing_hints_equal_and_repr_reject_a_non_dict_hints_mapping() -> None:
         def __eq__(self, other: object) -> bool:
             raise AssertionError("Hostile subclass __eq__ invoked")
 
-        @override
-        def __repr__(self) -> str:
-            raise AssertionError("Hostile subclass __repr__ invoked")
-
         __hash__ = None
 
     hostile = HintsSubclass({"tag": "a"})
     assert _routing_hints_equal(hostile, {"tag": "a"}) is False
     assert _routing_hints_equal({"tag": "a"}, hostile) is False
-    assert "HintsSubclass" in _safe_routing_repr(hostile)
+    assert _routing_repr(hostile) == "{'tag': 'a'}"
+
+
+def test_routing_repr_names_instance_hints_by_class_and_identity() -> None:
+    """An exact hints dict renders scalars by repr and instance hints as ``<Class at 0x...>``."""
+    instance = Category(name="c")
+    assert _routing_repr(None) == "None"
+    assert _routing_repr("default") == "'default'"
+    assert _routing_repr({"tag": "a", "instance": instance}) == (
+        f"{{'instance': <Category at {hex(id(instance))}>, 'tag': 'a'}}"
+    )
 
 
 def test_routing_hints_equal_rejects_a_renamed_key_at_equal_length() -> None:
@@ -6732,13 +6713,9 @@ class _RaisingRouter:
 
 
 @override_settings(DATABASE_ROUTERS=[_RaisingRouter()])
-def test_routing_intent_fails_closed_when_the_router_raises() -> None:
-    """An unanswerable route is an unprovable one, so the ordering call is rejected."""
-    with pytest.raises(
-        ConfigurationError,
-        match=r"MyOrderSet\.apply_sync could not resolve the source QuerySet's effective "
-        r"database alias; the database router raised",
-    ):
+def test_routing_intent_propagates_the_router_error() -> None:
+    """The database router is deployment code: its exception propagates unchanged."""
+    with pytest.raises(RuntimeError, match="router exploded"):
         _snapshot_routing_intent(Category.objects.all(), "MyOrderSet.apply_sync")
 
 
@@ -6795,21 +6772,3 @@ def test_snapshot_routing_intent_keeps_a_non_dict_hints_slot_by_reference() -> N
     expected = _snapshot_routing_intent(source_qs, "MyOrderSet.apply_sync")
     assert expected.hints is hostile
     assert _routing_hints_equal({}, expected.hints) is False
-
-
-def test_snapshot_routing_intent_source_without_instance_dict() -> None:
-    """A source whose ``__dict__`` cannot be read fails closed, naming the method.
-
-    Routing intent is read straight off the source's instance dictionary, so a
-    ``__slots__`` object (or any queryset look-alike without one) leaves the
-    check undeterminable, and undeterminable leaves the permit path.
-    """
-
-    class Slotted:
-        __slots__ = ()
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"MyOrderSet\.apply_sync could not verify the source QuerySet's database routing intent\.",
-    ):
-        _snapshot_routing_intent(Slotted(), "MyOrderSet.apply_sync")

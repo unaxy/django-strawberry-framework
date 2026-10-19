@@ -30,6 +30,7 @@ from django_strawberry_framework.keyset import (
     declared_cursor_state_for_definition,
     decode_keyset_cursor,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_str, list_of
 from django_strawberry_framework.utils.connections import (
     ConnectionWindowBounds,
@@ -847,16 +848,6 @@ def relation_connection_to_attr(relation_field_name: str, response_key: str | No
     return f"_dst_{relation_field_name}${escaped_key}_connection"
 
 
-def _relation_connection_to_attr(relation_field_name: str) -> str:
-    """Compatibility delegate to ``relation_connection_to_attr``."""
-    return relation_connection_to_attr(relation_field_name)
-
-
-def _relation_connection_to_attr_for_key(relation_field_name: str, response_key: str) -> str:
-    """Compatibility delegate to ``relation_connection_to_attr``."""
-    return relation_connection_to_attr(relation_field_name, response_key)
-
-
 def _connection_node_selections(
     sel: FieldSelection,
     runtime_paths: tuple[tuple[str, ...], ...],
@@ -1451,7 +1442,7 @@ def plan_connection_relation(
         target_type,
         info,
         has_custom_qs=has_custom_get_queryset,
-        target_model=getattr(target_definition, "model", None),
+        target_definition=target_definition,
     )
     if unwindowable_child_queryset_reason(base_queryset) is not None:
         if keyset_context is not None:
@@ -1742,7 +1733,7 @@ def plan_connection_relation(
             _log_connection_fallback(
                 relation_field_name,
                 [resp_key] if resp_key is not None else _response_keys(sel),
-                f"strategy {getattr(strategy, 'name', type(strategy).__name__)!r} "
+                f"strategy {getattr(strategy, 'name', truth.name(type(strategy)))!r} "
                 "refused the window",
             )
     if not planned_keys:

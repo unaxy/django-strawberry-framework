@@ -1852,8 +1852,8 @@ def test_public_metaclasses_pin_public_identity_and_pickle() -> None:
     assert DjangoMutationMetaclass is not DjangoFormMutationMetaclass
 
 
-def test_require_subclass_accepts_expected_and_rejects_with_safe_repr() -> None:
-    """The shared Meta type-gate returns the class or raises with ``_safe_arg_repr``."""
+def test_require_subclass_accepts_expected_and_rejects_with_rendered_value() -> None:
+    """The shared Meta type-gate returns the class or raises naming the rendered value."""
 
     class Expected:
         pass
@@ -1873,20 +1873,18 @@ def test_require_subclass_accepts_expected_and_rejects_with_safe_repr() -> None:
         is Child
     )
 
-    class Hostile:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    with pytest.raises(ConfigurationError, match="unprintable Hostile"):
+    with pytest.raises(ConfigurationError) as exc:
         require_subclass(
             "Probe",
-            Hostile(),
+            "Expected",
             base_label="ProbeBase",
             key="backing",
             expected=Expected,
             expected_label="Expected",
         )
+    assert str(exc.value) == (
+        "ProbeBase Probe.Meta.backing must be a Expected subclass; got 'Expected'."
+    )
 
     with pytest.raises(ConfigurationError, match=r"belongs on OtherBase"):
         require_subclass(
@@ -1914,18 +1912,6 @@ def test_require_non_delete_operation_accepts_create_update_and_rejects_delete()
         require_non_delete_operation("ProbeBase", "Probe", _meta_class(operation="delete"))
     with pytest.raises(ConfigurationError, match="operation must be one of"):
         require_non_delete_operation("ProbeBase", "Probe", _meta_class())
-
-    class Hostile:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-    with pytest.raises(ConfigurationError, match="unprintable Hostile"):
-        require_non_delete_operation(
-            "ProbeBase",
-            "Probe",
-            _meta_class(operation=Hostile()),
-        )
 
 
 def test_form_and_serializer_type_gates_ride_require_subclass() -> None:
@@ -2122,46 +2108,28 @@ class _HostilePermMeta(type):
         raise RuntimeError("HostilePermMeta.has_permission exploded")
 
 
-def test_require_model_class_hostile_repr_safe_containment() -> None:
-    """require_model_class with hostile repr raises ConfigurationError cleanly."""
+def test_require_model_class_hostile_repr_propagates() -> None:
+    """The rejection renders the value through its own ``__repr__``; what that raises propagates."""
     hostile = _HostileRepr()
-    with pytest.raises(
-        ConfigurationError,
-        match=(
-            r"DjangoMutation Probe resolved model must be a Django model class; got "
-            r"<unprintable _HostileRepr>\."
-        ),
-    ):
+    with pytest.raises(RuntimeError, match="HostileRepr exploded"):
         require_model_class("Probe", hostile, base_label="DjangoMutation")
 
 
-def test_validate_select_for_update_hostile_repr_safe_containment() -> None:
-    """validate_select_for_update with hostile repr raises ConfigurationError cleanly."""
+def test_validate_select_for_update_hostile_repr_propagates() -> None:
+    """The non-bool rejection renders the value through its own ``__repr__``; it propagates."""
     hostile = _HostileRepr()
 
     class BadMeta:
         select_for_update = hostile
 
-    with pytest.raises(
-        ConfigurationError,
-        match=(
-            r"DjangoMutation Probe\.Meta\.select_for_update must be a bool; got "
-            r"<unprintable _HostileRepr>\."
-        ),
-    ):
+    with pytest.raises(RuntimeError, match="HostileRepr exploded"):
         validate_select_for_update("DjangoMutation", "Probe", BadMeta)
 
 
-def test_validate_input_class_hostile_repr_safe_containment() -> None:
-    """_validate_input_class with hostile repr raises ConfigurationError cleanly."""
+def test_validate_input_class_hostile_repr_propagates() -> None:
+    """The non-input rejection renders the value through its own ``__repr__``; it propagates."""
     hostile = _HostileRepr()
-    with pytest.raises(
-        ConfigurationError,
-        match=(
-            r"DjangoMutation Probe\.Meta\.input_class must be a "
-            r"@strawberry\.input-decorated type; got <unprintable _HostileRepr>\."
-        ),
-    ):
+    with pytest.raises(RuntimeError, match="HostileRepr exploded"):
         _validate_input_class(
             "Probe",
             hostile,
@@ -2172,8 +2140,12 @@ def test_validate_input_class_hostile_repr_safe_containment() -> None:
         )
 
 
-def test_validate_permission_classes_hostile_metaclass_safe_containment() -> None:
-    """_validate_permission_classes with hostile metaclass descriptor raises ConfigurationError cleanly."""
+def test_validate_permission_classes_hostile_metaclass_never_runs() -> None:
+    """A metaclass ``has_permission`` property is read as stored, never run, and refused.
+
+    The declaration is read from the real namespaces (``truth.static_attr``): the
+    property object is not callable, so the entry is no permission class.
+    """
 
     class HostilePerm(metaclass=_HostilePermMeta):
         pass
@@ -2193,50 +2165,6 @@ def test_reject_unknown_meta_keys_non_string_dict_keys() -> None:
     meta = type("NonStrKeyMeta", (), {123: "foo"})  # pyright: ignore[reportArgumentType]
     with pytest.raises(ConfigurationError, match=r"TestMutation\.Meta has unknown keys: \[123\]"):
         reject_unknown_meta_keys("TestMutation", meta, frozenset({"model", "operation"}))
-
-
-def test_django_mutation_validate_meta_hostile_values_containment() -> None:
-    """DjangoMutation definition with hostile repr values raises typed ConfigurationError."""
-    _declare_products_primaries()
-    hostile = _HostileRepr()
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"DjangoMutation BadModelMutation resolved model must be a Django model class",
-    ):
-
-        @definition_raises
-        class BadModelMutation(DjangoMutation):
-            class Meta:
-                model = hostile
-                operation = "create"
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"DjangoMutation BadLockMutation\.Meta\.select_for_update must be a bool",
-    ):
-
-        @definition_raises
-        class BadLockMutation(DjangoMutation):
-            class Meta:
-                model = product_models.Item
-                operation = "create"
-                select_for_update = hostile
-
-    with pytest.raises(
-        ConfigurationError,
-        match=(
-            r"DjangoMutation BadInputMutation\.Meta\.input_class must be a "
-            r"@strawberry\.input-decorated type"
-        ),
-    ):
-
-        @definition_raises
-        class BadInputMutation(DjangoMutation):
-            class Meta:
-                model = product_models.Item
-                operation = "create"
-                input_class = hostile
 
 
 def test_validate_permission_classes_custom_base_label_and_flavor_forwarding() -> None:
@@ -2274,50 +2202,41 @@ def test_validate_permission_classes_custom_base_label_and_flavor_forwarding() -
 
 
 class _HostileHashStr(str):
-    """A str subclass whose __hash__ raises (hostile-Meta containment parity test)."""
+    """A str subclass whose __hash__ raises (hostile-Meta truthful-read parity test)."""
 
     @override
     def __hash__(self) -> int:
         raise RuntimeError("hostile hash")
 
 
-def test_django_mutation_validate_meta_hostile_hash_operation_safe_containment() -> None:
-    """DjangoMutation._validate_meta with hostile-hash operation raises typed ConfigurationError.
+def test_django_mutation_validate_meta_reads_a_hostile_hash_operation_as_its_text() -> None:
+    """DjangoMutation._validate_meta reads ``Meta.operation`` as the plain text it spells.
 
-    A str subclass's __hash__ may raise; frozenset membership hashes its probe, so
-    a raw RuntimeError would escape the validation check meant to reject the value.
-    The operation membership test is guarded by _safe_predicate(operator.contains, ...),
-    which answers False on any hash failure and routes to the ordinary typed reject.
+    A str subclass's ``__hash__`` may raise; the membership test runs over the exact
+    ``str`` copy ``truth.text`` makes, so the override never runs and the operation is
+    the ``create`` it spells.
     """
     _declare_products_primaries()
 
-    with pytest.raises(
-        ConfigurationError,
-        match=r"DjangoMutation BadOpMutation\.Meta\.operation must be one of",
-    ):
+    class HashOpMutation(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = _HostileHashStr("create")
 
-        @definition_raises
-        class BadOpMutation(DjangoMutation):
-            class Meta:
-                model = product_models.Item
-                operation = _HostileHashStr("create")
+    operation = HashOpMutation._mutation_meta.operation
+    assert operation == "create"
+    assert type(operation) is str
 
 
-def test_require_non_delete_operation_hostile_hash_safe_containment() -> None:
-    """require_non_delete_operation with hostile-hash operation raises typed ConfigurationError.
-
-    The shared non-delete reject used by form and serializer flavors also guards
-    its frozenset membership test against hash failures.
-    """
-    with pytest.raises(
-        ConfigurationError,
-        match=r"SerializerMutation BadOpMutation\.Meta\.operation must be one of",
-    ):
-        require_non_delete_operation(
-            "SerializerMutation",
-            "BadOpMutation",
-            _meta_class(operation=_HostileHashStr("create")),
-        )
+def test_require_non_delete_operation_reads_a_hostile_hash_operation_as_its_text() -> None:
+    """The shared non-delete check also reads the operation as plain text, never hashing it."""
+    operation = require_non_delete_operation(
+        "SerializerMutation",
+        "HashOpMutation",
+        _meta_class(operation=_HostileHashStr("create")),
+    )
+    assert operation == "create"
+    assert type(operation) is str
 
 
 def test_django_mutation_input_type_name_delete_operation_raises_typed_reject() -> None:

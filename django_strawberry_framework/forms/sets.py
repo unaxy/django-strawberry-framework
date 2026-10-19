@@ -42,12 +42,13 @@ consumer overrides the construction hook), and the reverse-map
 
 from __future__ import annotations
 
+import types
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from django import forms
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_text
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import PARTIAL
 from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATION_INPUT_KIND
 from django_strawberry_framework.mutations.permissions import (
@@ -81,7 +82,8 @@ from django_strawberry_framework.mutations.sets import (
     resolver_seams,
 )
 from django_strawberry_framework.registry import register_subsystem_clear
-from django_strawberry_framework.utils._narrowing import is_class, read_attr, require
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import read_attr, require
 from django_strawberry_framework.utils.inputs import make_shape_build_cache
 
 from .inputs import (
@@ -129,6 +131,9 @@ _ALLOWED_PLAIN_FORM_META_KEYS: frozenset[str] = COMMON_WRITE_META_KEYS | frozens
         "form_class",
     },
 )
+
+# Presence sentinel for a ``Meta`` key read through ``truth.static_attr``.
+_ABSENT = object()
 
 # The model-less declaration registry for the plain ``DjangoFormMutation`` flavor
 # (spec-038 Decision 13). A SECOND, disjoint ledger from the ``036``
@@ -208,22 +213,55 @@ def _default_mutation_get_form_fields(
     nested ``Meta`` object after declaration, but that cannot change the input
     shape or the form class the default constructor binds.
     """
-    meta_snapshot: object = cls.__dict__.get("_mutation_meta")
+    meta_snapshot = truth.class_dict(cls).get("_mutation_meta")
     if meta_snapshot is not None:
         form_class = read_attr(meta_snapshot, "form_class", None)
     else:
-        form_meta = read_attr(cls, "Meta", None)
-        form_class = read_attr(form_meta, "form_class", None)
+        form_meta = truth.static_attr(cls, "Meta", None)
+        form_class = truth.static_attr(form_meta, "form_class", None)
     if form_class is None:
         raise ConfigurationError(
-            f"{cls.__name__}.get_form_fields() cannot resolve Meta.form_class.",
+            f"{truth.name(cls)}.get_form_fields() cannot resolve Meta.form_class.",
         )
     return get_form_fields(require(form_class, _is_form_class))
 
 
 def _is_form_class(value: object) -> TypeIs[FormClass]:
-    """Whether ``value`` is a ``Form`` or ``ModelForm`` subclass, asked of its real type."""
-    return is_class(value) and issubclass(value, (forms.Form, forms.ModelForm))
+    """Whether ``value`` is a ``Form`` or ``ModelForm`` subclass, asked of its real MRO."""
+    return truth.is_subclass(value, forms.Form) or truth.is_subclass(value, forms.ModelForm)
+
+
+def _require_zero_arg_form_fields_declaration(mutation_cls: type) -> None:
+    """Reject a ``get_form_fields`` declared as a function that cannot be called zero-arg.
+
+    The hook is read from the class, so a classmethod receives the mutation class
+    and a plain function or ``staticmethod`` receives nothing. A plain function or
+    ``staticmethod`` whose own signature requires a positional parameter (the
+    forgotten ``@classmethod`` over ``def get_form_fields(cls)``) can never be
+    called; that is decided from the declaration in the class namespace
+    (``truth.static_attr``) and the function's code object, before the hook runs.
+    Any other declaration (a classmethod, a zero-arg function, another callable)
+    passes; what it raises when called is its own.
+    """
+    declared = truth.static_attr(mutation_cls, "get_form_fields", None)
+    if truth.is_exact(declared, staticmethod):
+        function, declared_as = declared.__func__, "a staticmethod"
+    elif truth.is_exact(declared, types.FunctionType):
+        function, declared_as = declared, "a plain function"
+    else:
+        return
+    code = function.__code__
+    required = code.co_argcount - len(function.__defaults__ or ())
+    if required <= 0:
+        return
+    names = ", ".join(repr(parameter) for parameter in code.co_varnames[:required])
+    noun = "parameter" if required == 1 else "parameters"
+    raise ConfigurationError(
+        f"{truth.name(mutation_cls)}.get_form_fields must be a callable classmethod "
+        "returning a mapping of form field names to forms.Field instances; it is declared "
+        f"as {declared_as} requiring the positional {noun} {names}, but the hook is called "
+        "with no arguments. Decorate it with @classmethod.",
+    )
 
 
 def _mutation_form_fields(
@@ -232,36 +270,24 @@ def _mutation_form_fields(
 ) -> dict[str, forms.Field]:
     """Resolve a mutation's overridable form-field hook for one build pass.
 
-    The hook INVOCATION is the typed boundary both flavors' ``_validate_meta``
-    and ``build_input`` route through (this module's single call site): a hook
-    that cannot be invoked zero-arg - a plain function declaring ``self`` (the
-    forgotten ``@classmethod``), a partially-applied callable, a hostile
-    ``__call__`` - otherwise escapes the declaration/bind as the raw ``TypeError``
-    (or whatever the body raises) instead of the typed configuration error every
-    neighboring hook rejection raises. The wrap mirrors
-    ``forms/inputs.py::_form_field_basis``'s ``BaseException`` catch (a hostile
-    body's ``KeyboardInterrupt`` is reported, not propagated); a ``ConfigurationError``
-    from the hook body (the default hook's own typed rejects) re-raises unchanged
-    so the typed message is not double-wrapped.
+    Both flavors' ``_validate_meta`` and ``build_input`` route through this one
+    call site, so the checks below run at class creation, before the hook is ever
+    called. The contract: ``get_form_fields`` is a callable classmethod (a zero-arg
+    function or ``staticmethod`` is accepted too) returning a mapping of form field
+    names to ``forms.Field`` instances. A non-callable hook, and a function
+    declaration that requires a positional argument, are rejected typed. The hook
+    itself is consumer behaviour, so whatever a well-declared hook raises
+    propagates unchanged, and its return is validated by
+    ``normalize_form_field_basis``.
     """
     hook = getattr(mutation_cls, "get_form_fields", None)
     if not callable(hook):
         raise ConfigurationError(
-            f"{mutation_cls.__name__}.get_form_fields must be a callable classmethod "
+            f"{truth.name(mutation_cls)}.get_form_fields must be a callable classmethod "
             "returning a mapping of form field names to forms.Field instances.",
         )
-    try:
-        form_fields = hook()
-    except ConfigurationError:
-        raise
-    except BaseException as exc:
-        detail = _safe_text(exc) or "no detail"
-        raise ConfigurationError(
-            f"{mutation_cls.__name__}.get_form_fields must be a callable classmethod "
-            "returning a mapping of form field names to forms.Field instances; calling "
-            f"it raised {type(exc).__name__}: {detail}.",
-        ) from exc
-    return normalize_form_field_basis(form_class, form_fields)
+    _require_zero_arg_form_fields_declaration(mutation_cls)
+    return normalize_form_field_basis(form_class, hook())
 
 
 def _cached_build_form_input(
@@ -740,7 +766,7 @@ class DjangoModelFormMutation(_ModelFormMutationBase):
         default when unset, plus the ``FOR UPDATE`` lock). The snapshot carries
         ``form_class`` + the resolved ``model``.
         """
-        name = cls.__name__
+        name = truth.name(cls)
         meta = reject_unknown_meta_keys(
             f"DjangoModelFormMutation {name}",
             meta,
@@ -1000,16 +1026,16 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         ``form_class`` (spec-038 Decision 7 - the fixed shape-identity component a plain
         form carries in place of a model operation).
         """
-        name = cls.__name__
+        name = truth.name(cls)
         # ``operation`` is RECOGNIZED-but-rejected on the plain base (not merely an
         # unknown key): a model-less mutation has no model operation (Decision 10).
         # Reject it by KEY PRESENCE, not value, so an explicit ``operation = None``
         # is rejected too - the fixed ``"form"`` sentinel must not accept ANY copied
         # ``Meta.operation`` key (spec-038 Decision 10; a value check let
-        # ``None`` slip through as if absent). Presence MUST follow normal attribute
-        # lookup (``hasattr``), NOT ``vars(meta)`` own-keys-only: ``form_class`` /
-        # ``permission_classes`` / ``fields`` / ``exclude`` are resolved via
-        # ``getattr`` (MRO-visible), and the ModelForm flavor honors an inherited
+        # ``None`` slip through as if absent). Presence MUST follow the MRO
+        # (``truth.static_attr``), NOT ``vars(meta)`` own-keys-only: ``form_class`` /
+        # ``permission_classes`` / ``fields`` / ``exclude`` are resolved
+        # MRO-visible, and the ModelForm flavor honors an inherited
         # ``operation`` the same way - so a shared ``Meta`` parent that carries
         # ``operation`` (the common "copy a ModelForm Meta / share a base Meta"
         # pattern) must be rejected here too. ``vars(meta)`` alone let
@@ -1022,7 +1048,7 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         # genuinely-unknown remainder (``operation`` is added to the allowed set
         # passed there so a stray own-key ``operation`` cannot double-report; it is
         # already rejected above by the key-presence check).
-        if hasattr(meta, "operation"):
+        if truth.static_attr(meta, "operation", _ABSENT) is not _ABSENT:
             raise ConfigurationError(
                 f"DjangoFormMutation {name}.Meta.operation is not supported; a model-less form "
                 "mutation has no model operation (Decision 10). Remove Meta.operation.",
@@ -1046,9 +1072,9 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         # so a bare ``issubclass(_, forms.Form)`` gate would reject a ``ModelForm``
         # with a confusing "not a Form" message. The targeted reject names the
         # correct base.
-        if is_class(form_class) and issubclass(form_class, forms.ModelForm):
+        if truth.is_subclass(form_class, forms.ModelForm):
             raise ConfigurationError(
-                f"DjangoFormMutation {name}.Meta.form_class {form_class.__name__} is a "
+                f"DjangoFormMutation {name}.Meta.form_class {truth.name(form_class)} is a "
                 "forms.ModelForm; use DjangoModelFormMutation for a ModelForm (it returns the "
                 "saved object + applies the DjangoModelPermission default + the optimizer "
                 "re-fetch). DjangoFormMutation is for a plain forms.Form only.",
@@ -1076,7 +1102,7 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         # ``permission_classes = []`` opt-out (spec-038 Decision 11).
         permission_classes = _validate_permission_classes(
             name,
-            getattr(meta, "permission_classes", None),
+            truth.static_attr(meta, "permission_classes", None),
             unset_default=(DenyAll,),
         )
         # A model-less plain form cannot carry a model-requiring permission class.
@@ -1093,10 +1119,10 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         # the model-backed base + the two valid plain-form postures.
         for entry in permission_classes:
             # ``_validate_permission_classes`` returns classes only.
-            if issubclass(entry, DjangoModelPermission):
+            if truth.is_subclass(entry, DjangoModelPermission):
                 raise ConfigurationError(
                     f"DjangoFormMutation {name}.Meta.permission_classes includes "
-                    f"{entry.__name__}, which requires a model to resolve the write "
+                    f"{truth.name(entry)}, which requires a model to resolve the write "
                     "permission; a model-less DjangoFormMutation has no model. Use "
                     "DjangoModelFormMutation for a model-backed form, or on a plain form "
                     "omit permission_classes (deny-by-default) / set permission_classes = [] "

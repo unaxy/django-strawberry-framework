@@ -1,9 +1,7 @@
-"""Construction-time containment for the consumer-supplied ``directives=`` forward.
+"""Construction-time validation for the consumer-supplied ``directives=`` forward.
 
-Every field factory in the package (``DjangoListField``, ``DjangoMutationField``
-and ``register_mutation()``'s passthrough, the ``auth`` fixed-field factories,
-and the Relay root ``DjangoNodeField`` / ``DjangoNodesField``) hands a consumer
-``directives`` value straight to ``strawberry.field()``. Strawberry consumes
+Every field factory in the package hands a consumer ``directives`` value
+straight to ``strawberry.field()``. Strawberry consumes
 that iterable LAZILY -- at class decoration or SDL render -- so an unvalidated
 value fails THERE with an unrelated error, or not at all, far from the
 assignment line that supplied it:
@@ -15,30 +13,41 @@ assignment line that supplied it:
   for ``str``, and a silent build that crashes SDL render for the byte flavors;
 - an iterator that raises midway escapes as whatever it raised;
 - a non-iterable detonates as a raw ``TypeError`` inside ``strawberry.field``;
-- a value whose ``__class__`` read raises escapes the text-or-bytes check itself,
-  before any iteration starts.
+- a value whose ``__class__`` read raises escapes an ``isinstance`` text-or-bytes
+  check itself, before any iteration starts.
 
-This module owns the ONE containment behind all of them. It was three
-near-identical inline copies before, and they had already drifted (different
-safe renderer in the reject message, different ``except`` tuple), which is
-exactly how a containment stops containing.
+This module owns the ONE validation behind all of them: a char-wise value is
+refused by its real class (never a ``__class__`` read), and a non-iterable is
+refused by the ``TypeError`` ``list()`` documents for it. An iterable's own ``__iter__`` / ``__next__`` is
+the consumer's behaviour and runs untouched; whatever it raises propagates.
 
-Why the ``except`` is ``Exception``-wide rather than an enumerated tuple: the
-value being materialized is deployment-supplied and arbitrary, so its
-``__iter__`` / ``__next__`` can raise ANY exception type. An enumerated tuple
-(the previous copies listed ``TypeError``/``ValueError``/``AttributeError``/
-``KeyError``/``IndexError``) is a guess about hostile code, and a
-``RuntimeError``-raising iterator walked straight through it and escaped raw --
-the failure this containment exists to prevent. ``BaseException`` is
-deliberately NOT caught: ``KeyboardInterrupt`` / ``SystemExit`` must keep
-propagating.
+Exception policy, package-wide. ``SystemExit``, ``KeyboardInterrupt``,
+``GeneratorExit`` and ``asyncio.CancelledError`` always propagate: no handler
+in the package catches ``BaseException`` (or one of those) except to clean up
+and re-raise. Identity is read from the interpreter (``utils/truth.py``), never
+asked of a consumer object, so no handler exists to contain a raising or lying
+dunder. Consumer behaviour - hooks, resolvers, iterators, a consumer object's
+``__repr__`` / ``__str__`` - runs untouched, and its exceptions propagate to the
+one boundary, the schema's production error policy. Untrusted wire bytes are
+parsed with pre-validation or one arm no wider than the parse's own documented
+error. ``scripts/check_truthful_reads.py`` enforces the identity and
+``BaseException`` halves.
 """
 
-from django_strawberry_framework.exceptions import ConfigurationError, _safe_type_name
+from django_strawberry_framework.exceptions import ConfigurationError
 
-from ._narrowing import is_text_or_bytes, list_of
+from . import truth
+from ._narrowing import list_of
+from .lazy import unwrap_lazy_object
 
 __all__ = ("validated_field_directives",)
+
+_CHAR_WISE_TYPES: tuple[type[object], ...] = (
+    str,
+    bytes,
+    bytearray,
+    memoryview,
+)
 
 
 def validated_field_directives(label: str, directives: object) -> tuple[object, ...]:
@@ -53,21 +62,21 @@ def validated_field_directives(label: str, directives: object) -> tuple[object, 
     """
     # Text and bytes-like values are ``Iterable`` but their elements are never directives:
     # ``bytearray`` and ``memoryview`` iterate into ``int`` exactly as ``bytes`` does, so
-    # they share the reject arm rather than silently building integer directives. The class
-    # check sits inside the containment with the iteration: ``isinstance`` falls back to a
-    # ``__class__`` read, and deployment-supplied code can make that raise too.
-    try:
-        if not is_text_or_bytes(directives):
-            return tuple(list_of(directives))
-    except Exception as exc:
-        # Naming the escaping exception's TYPE (never its message, which a
-        # hostile ``__str__`` owns) keeps the diagnostic useful without
-        # letting deployment-supplied text into the envelope; ``__cause__``
-        # carries the original for anyone reading the traceback.
+    # they share the reject arm rather than silently building integer directives. The
+    # check reads the value's real class, never its ``__class__``; a Django lazy proxy is
+    # checked as the object it wraps (``utils/lazy.py::unwrap_lazy_object``), so a lazy
+    # ``str`` is text too.
+    wrapped = unwrap_lazy_object(directives)
+    if any(truth.is_instance(wrapped, char_wise) for char_wise in _CHAR_WISE_TYPES):
         raise ConfigurationError(
-            f"{label} directives could not be read ({_safe_type_name(exc)}).",
+            f"{label} directives must be a sequence of directive instances; "
+            f"got {truth.kind(directives)}.",
+        )
+    try:
+        return tuple(list_of(directives))
+    except TypeError as exc:
+        # ``list()``'s documented refusal of a non-iterable. The message names
+        # the exception's type, never its text.
+        raise ConfigurationError(
+            f"{label} directives could not be read ({truth.kind(exc)}).",
         ) from exc
-    raise ConfigurationError(
-        f"{label} directives must be a sequence of directive instances; "
-        f"got {_safe_type_name(directives)}.",
-    )

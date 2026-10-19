@@ -19,12 +19,14 @@ from typing_extensions import override
 
 from django_strawberry_framework import strawberry_config
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.filters import filter_input_type
 from django_strawberry_framework.filters import inputs as filter_inputs
 from django_strawberry_framework.filters import sets as filter_sets
 from django_strawberry_framework.mutations import sets as mutation_sets
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.orders import inputs as order_inputs
 from django_strawberry_framework.orders import sets as order_sets
+from django_strawberry_framework.orders.factories import OrderArgumentsFactory
 from django_strawberry_framework.rest_framework import inputs as ser_inputs
 from django_strawberry_framework.sets_mixins import (
     ClassBasedTypeNameMixin,
@@ -48,6 +50,7 @@ from django_strawberry_framework.utils.inputs import (
     _sorted_meta_values,
     build_strawberry_input_class,
     canonicalize_set_meta_fields,
+    duplicate_name_message,
     emit_set_input_field_triples,
     get_or_store_shape_build,
     graphql_camel_name,
@@ -75,6 +78,7 @@ from tests._idioms import (
     STR_SUBCLASS_KINDS,
     ClaimsClass,
     ClassReadRaises,
+    definition_raises,
     module_binding,
     str_subclass_name,
 )
@@ -481,13 +485,13 @@ def test_base_container_values_reads_builtin_dict_items() -> None:
     assert base_container_values({"name": 1}) == (("name", 1),)
 
 
-def test_normalize_field_name_sequence_wraps_hostile_iterators() -> None:
-    class _HostileSequence:
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("hostile field sequence")
-
-    with pytest.raises(ConfigurationError, match="readable sequence"):
-        normalize_field_name_sequence(_HostileSequence(), flavor="Probe")
+def test_normalize_field_name_sequence_rejects_a_non_iterable_value() -> None:
+    """A value ``tuple()`` cannot iterate takes the readable-sequence rejection."""
+    with pytest.raises(ConfigurationError) as excinfo:
+        normalize_field_name_sequence(5, flavor="Probe")
+    assert str(excinfo.value) == (
+        "Probe Meta.fields must be a readable sequence of field name strings; got int."
+    )
 
 
 def test_normalize_field_name_sequence_rejects_unordered_sets() -> None:
@@ -511,37 +515,15 @@ def test_normalize_field_name_sequence_rejects_unordered_sets() -> None:
         )
 
 
-def test_meta_sorting_wraps_a_hostile_generic_iterator() -> None:
-    class _HostileIterable:
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("metadata iteration exploded")
-
-    with pytest.raises(ConfigurationError, match="unreadable _HostileIterable container"):
-        _sorted_meta_values(_HostileIterable())
-
-
-def test_input_builder_wraps_unreadable_and_malformed_field_specifications() -> None:
-    class _UnreadableSpecs:
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("field specs exploded")
-
-    with pytest.raises(ConfigurationError, match="field specifications could not be read"):
-        # basedpyright: the unreadable field-spec container is the hostile input under test;
-        # build_strawberry_input_class types the parameter as a Sequence of triples
-        build_strawberry_input_class("UnreadableInput", _UnreadableSpecs())  # pyright: ignore[reportArgumentType]
+def test_input_builder_rejects_malformed_field_specifications() -> None:
     with pytest.raises(ConfigurationError, match=r"must contain.*triples"):
         # basedpyright: the two-member field spec is the hostile input under test;
         # build_strawberry_input_class types the parameter as a Sequence of triples
         build_strawberry_input_class("MalformedInput", [("name", int)])  # pyright: ignore[reportArgumentType]
 
 
-def test_meta_fields_canonicalization_bypasses_hostile_containers_and_reprs() -> None:
-    """``Meta.fields`` canonicalization never trusts consumer container hooks or reprs."""
-
-    class _HostileRepr:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("hostile repr")
+def test_meta_fields_canonicalization_bypasses_container_overrides() -> None:
+    """``Meta.fields`` canonicalization reads containers through base slots, not their hooks."""
 
     class _HostileDict(dict[str, object]):
         @override
@@ -558,8 +540,6 @@ def test_meta_fields_canonicalization_bypasses_hostile_containers_and_reprs() ->
         def __iter__(self) -> NoReturn:
             raise RuntimeError("hostile list iterator")
 
-    hostile_repr = _HostileRepr()
-    assert canonicalize_set_meta_fields({hostile_repr}) == [hostile_repr]
     assert canonicalize_set_meta_fields(_HostileSet(["b", "a"])) == ["a", "b"]
     assert canonicalize_set_meta_fields(
         _HostileDict(name=_HostileSet(["exact", "contains"])),
@@ -1322,3 +1302,89 @@ def test_resolve_effective_fields_leaves_the_row_identity_out_of_the_basis() -> 
         _narrow_probe_basis(basis, fields=("name", "key"), row_identity=identity)
     with pytest.raises(ConfigurationError, match="Probe input for Row has no fields"):
         _narrow_probe_basis({"key": 1}, row_identity=identity)
+
+
+# ---------------------------------------------------------------------------
+# Class-labelled messages: read from the interpreter, pinned byte for byte
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_name_message_labels_both_classes_by_module_and_qualname() -> None:
+    """The collision sentence names each class as ``module.qualname``."""
+
+    class _HonestA:
+        pass
+
+    class _HonestB:
+        pass
+
+    assert duplicate_name_message(
+        "claimed",
+        "XInputType",
+        _HonestA,
+        _HonestB,
+        family_label="OrderSet",
+        rename_noun="orderset",
+    ) == (
+        "'XInputType' is claimed by two distinct OrderSet classes: "
+        "tests.utils.test_inputs.test_duplicate_name_message_labels_both_classes_by_module_"
+        "and_qualname.<locals>._HonestA vs "
+        "tests.utils.test_inputs.test_duplicate_name_message_labels_both_classes_by_module_"
+        "and_qualname.<locals>._HonestB. Rename one orderset "
+        "so its class-derived input type name is unique."
+    )
+
+
+def test_emit_attribute_collision_message_is_pinned() -> None:
+    """The flattened-attribute collision names the set by its qualname."""
+
+    class HonestOrder(OrderSet):
+        __qualname__ = "HonestOrder"
+
+        class Meta:
+            fields = ["a_b", "a__b"]
+
+    with pytest.raises(ConfigurationError) as honest:
+        order_inputs._build_input_fields(HonestOrder)
+    assert str(honest.value) == (
+        "HonestOrder: members 'a_b' and 'a__b' both "
+        "generate the input attribute 'a_b' (Django path separators "
+        "flatten to '_'), so one would silently overwrite the other in the "
+        "generated input type. Rename one member or drop one via "
+        "Meta.fields / Meta.exclude."
+    )
+
+
+def test_lazy_annotation_and_factory_subclass_messages_are_pinned() -> None:
+    """The two ``TypeError`` rejections keep their exact honest wording."""
+    with pytest.raises(TypeError) as lazy:
+        # basedpyright: the non-class argument is the hostile input under test;
+        # filter_input_type types the parameter as type[FilterSet]
+        filter_input_type("nope")  # pyright: ignore[reportArgumentType]
+    assert str(lazy.value) == "filter_input_type() requires a FilterSet subclass; got 'nope'"
+
+    with pytest.raises(TypeError) as grand:
+
+        @definition_raises
+        class PlainGrand(OrderArgumentsFactory):
+            pass
+
+    assert str(grand.value) == (
+        "OrderArgumentsFactory does not support subclassing "
+        "(attempted by 'PlainGrand'): its class-level caches are shared "
+        "mutable dicts a subclass would inherit rather than isolate, silently "
+        "cross-contaminating builds. Extend it by composition (wrap an "
+        "instance), not inheritance."
+    )
+
+
+def test_normalize_sequence_unordered_rejection_names_the_set_type() -> None:
+    """A ``frozenset`` declaration is rejected naming its real class."""
+    with pytest.raises(ConfigurationError) as excinfo:
+        normalize_field_name_sequence(frozenset({"a"}), flavor="Probe")
+    assert str(excinfo.value) == (
+        "Probe Meta.fields must be an ordered sequence of field name strings (a list or "
+        "tuple), not an unordered frozenset: frozenset({'a'}). A set's iteration order "
+        "varies between processes, which would make the generated input type names and "
+        "SDL field order nondeterministic."
+    )

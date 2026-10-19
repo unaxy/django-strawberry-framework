@@ -84,13 +84,8 @@ from django.db.models.query import ModelIterable
 from typing_extensions import override
 
 from django_strawberry_framework.conf import nested_connection_strategy_setting
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_attr,
-    _safe_type_name,
-)
-from django_strawberry_framework.utils._narrowing import is_class, is_str
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._queryset_private import (
     chain_queryset,
     super_clone_queryset,
@@ -160,7 +155,7 @@ def unwindowable_child_queryset_reason(queryset: object) -> str | None:
     if getattr(query, "distinct", False):
         return "distinct"
     iterable_class = getattr(queryset, "_iterable_class", ModelIterable)
-    if not (isinstance(iterable_class, type) and issubclass(iterable_class, ModelIterable)):
+    if not truth.is_subclass(iterable_class, ModelIterable):
         return "values"
     return None
 
@@ -215,7 +210,7 @@ class RecognizedFetchQuerySet(QuerySet[models.Model, models.Model]):
         from .lateral_fetch import window_predicate_signature  # noqa: PLC0415 - import cycle
 
         clone = chain_queryset(queryset)
-        clone.__class__ = cls
+        clone.__class__ = cls  # truth: ok a write that rebinds a framework-built clone, not a read
         # The class swap above made the clone an instance of ``cls``.
         rebound = cast("RecognizedFetchQuerySet", clone)
         setattr(rebound, cls._dst_spec_attr, spec)
@@ -460,32 +455,28 @@ def resolve_strategy(value: object) -> NestedConnectionStrategy:
     consumer-authored backend). ``None`` reads the
     ``NESTED_CONNECTION_STRATEGY`` setting, defaulting to ``"windowed"``.
 
-    The rejection never fails on the value it rejects: a selection is
-    consumer-supplied, so its kind (a name, a class) is asked of its real type
-    (``utils/_narrowing.py::is_str`` / ``is_class``, neither of which reads
-    ``__class__``), every dunder its decision reads is taken through the base ``str``
-    slot (content equality for both the ``"auto"`` check and the registry
-    match - no ``dict`` lookup, whose hash and reflected comparison would
-    dispatch back into a hostile subclass), the ``plan`` attribute read absorbs
-    a raising descriptor, and the message renders through ``_safe_arg_repr``.
-    A hostile ``__class__`` / ``__eq__`` / ``__hash__`` / ``__repr__`` / ``plan``
-    can neither force a false match nor replace the typed
-    ``ConfigurationError`` with an arbitrary exception. A lazy proxy of a name
-    (``SimpleLazyObject``) is not a ``str`` and has no ``plan``, so it takes the
-    typed rejection.
+    A selection is consumer-supplied, so the decision reads only what the
+    interpreter knows: its kind (a name, a class) reads the real class
+    (``truth.is_instance`` / ``truth.is_type``, neither of which reads
+    ``__class__``), and name matching is content equality through the base
+    ``str`` slot (no ``dict`` lookup, whose hash and reflected comparison would
+    dispatch into a ``str`` subclass), so an override can never force a false
+    match. A ``__class__`` that raises or claims ``str``, and a lazy proxy of a
+    name (``SimpleLazyObject``), is not a ``str`` and has no ``plan``, so it
+    takes the typed rejection. The rejection message renders through
+    ``truth.render``.
     """
     if value is None:
         value = nested_connection_strategy_setting()
-    if is_str(value):
-        # The base ``str`` slot bypasses a subclass's ``__eq__`` override (the
-        # same slot discipline ``exceptions.py``'s renderers document); the
+    if truth.is_instance(value, str):
+        # The base ``str`` slot bypasses a subclass's ``__eq__`` override; the
         # C-level content comparison cannot dispatch back into the subclass.
         if str.__eq__(value, "auto") is True:
             return AUTO_STRATEGY
         # Content equality against the registry, scanned linearly: a ``dict``
         # lookup would hash the value and compare the STORED key against it
-        # through the subclass's reflected ``__eq__`` - both hostile-
-        # controllable. The registry has two module-owned plain-str keys, so
+        # through the subclass's reflected ``__eq__`` - both subclass-
+        # controlled. The registry has two module-owned plain-str keys, so
         # the scan is construction-time cheap and dispatch-free.
         registry = _builtin_strategies()
         strategy = None
@@ -495,20 +486,17 @@ def resolve_strategy(value: object) -> NestedConnectionStrategy:
                 break
         if strategy is None:
             raise ConfigurationError(
-                f"Unknown nested_connection_strategy {_safe_arg_repr(value)}; expected "
+                f"Unknown nested_connection_strategy {truth.render(value)}; expected "
                 f"one of {sorted(registry)} or 'auto' or a NestedConnectionStrategy "
                 f"instance.",
             )
         return strategy
-    # A raising property (or descriptor) is not a strategy, so the typed rejection
-    # below applies.
-    plan_callable = _safe_attr(value, "plan")
-    if not is_class(value) and callable(plan_callable):
+    if not truth.is_type(value) and callable(getattr(value, "plan", None)):
         # A non-class value with a callable ``plan`` is a consumer strategy.
         return cast("NestedConnectionStrategy", value)
     raise ConfigurationError(
         f"nested_connection_strategy must be a strategy name, 'auto', or an object "
-        f"with a plan(request, plan) method; got {_safe_type_name(value)}.",
+        f"with a plan(request, plan) method; got {truth.kind(value)}.",
     )
 
 

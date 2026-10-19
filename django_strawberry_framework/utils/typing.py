@@ -37,6 +37,7 @@ from strawberry.schema import Schema
 from strawberry.types.base import StrawberryContainer
 from typing_extensions import Never
 
+from . import truth
 from ._narrowing import read_attr
 
 if TYPE_CHECKING:
@@ -308,16 +309,16 @@ def is_async_callable(
     target = _callable_inspection_target(value)
     if inspect.iscoroutinefunction(target):
         return True
-    if isinstance(target, type):
-        # Calling a class runs ``type(target).__call__`` (the metaclass), not the
-        # class body's ``__call__`` -- that one belongs to instances. A plain
-        # class resolves to the sync ``type.__call__`` slot wrapper, and a
-        # metaclass carrying ``async def __call__`` is genuinely async to call.
-        return inspect.iscoroutinefunction(type(target).__call__)
     # Inspecting ``__call__``'s async-ness, not testing callability -- so
-    # ``callable()`` (what B004 suggests) is the wrong tool here.
+    # ``callable()`` is the wrong tool here. The interpreter looks ``__call__``
+    # up on the CLASS of whatever is called, so that is where it is read, from
+    # the real namespaces (``truth.static_attr``): calling a class runs its
+    # metaclass's ``__call__`` (a plain class resolves to the sync
+    # ``type.__call__`` slot wrapper, a metaclass carrying ``async def
+    # __call__`` is genuinely async to call), and calling an instance runs its
+    # class's.
     return inspect.iscoroutinefunction(
-        getattr(target, "__call__", None),  # noqa: B004
+        truth.static_attr(type(target), "__call__"),
     )
 
 

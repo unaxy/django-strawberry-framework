@@ -10,11 +10,10 @@ Scope:
   ``field.is_relation`` rather than filtering relations out.
 
 The ``has_custom_get_queryset`` sentinel and override-detection have
-shipped and are tested directly. Optimizer downgrade-to-``Prefetch``
-coverage belongs in ``tests/optimizer/``; the full forward-reference /
-definition-order independence path is covered in
-``tests/types/test_definition_order.py`` and
-``tests/types/test_definition_order_schema.py``.
+shipped and are tested directly. Live relation payloads and visibility live in
+``examples/fakeshop/test_query/test_products_visibility_api.py`` and
+``examples/fakeshop/test_query/test_library_api.py``. This file keeps Meta
+construction-time validation, registry lifecycle, and annotation internals.
 
 Meta-validation tests avoid ``fields = "__all__"`` on ``Category``:
 they either declare related types up front (so the registry resolves
@@ -68,7 +67,6 @@ from django_strawberry_framework.types.base import (
     _validate_globalid_callable,
     _validate_globalid_strategy,
     _validate_interfaces,
-    _validate_orderset_class,
     _validate_relation_shapes,
 )
 from django_strawberry_framework.types.converters import (
@@ -259,72 +257,25 @@ def test_meta_optimizer_hints_rejects_mixed_non_string_keys_safely() -> None:
                 }
 
 
-class _HostileMetaValue:
-    """A malformed Meta value whose diagnostic representation raises."""
+def test_meta_optimizer_hints_honest_mapping_rejection_names_the_kind() -> None:
+    """The non-mapping rejection names the declared value's kind exactly."""
+    meta = type("Meta", (), {"model": Category, "optimizer_hints": []})
 
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("repr should not escape")
-
-
-class _HostileMetaSequence(Sequence[object]):
-    """A sequence whose item access raises while a Meta value is inspected.
-
-    Both call sites reach ``__getitem__`` through the ``Sequence`` ABC's
-    derived iterator, so ``__len__`` is never the failing step.
-    """
-
-    @override
-    def __getitem__(self, index: int | slice) -> NoReturn:
-        raise RuntimeError("sequence access should not escape")
-
-    @override
-    def __len__(self) -> int:
-        raise RuntimeError("sequence length should not escape")
+    with pytest.raises(
+        ConfigurationError,
+        match=r"must be a mapping of field names to OptimizerHint instances, got list\.",
+    ):
+        _meta_optimizer_hints(meta, Category)
 
 
-def test_meta_validator_diagnostics_survive_hostile_values() -> None:
-    """Malformed Meta values cannot replace ConfigurationError with repr failures."""
-    hostile = _HostileMetaValue()
-
-    class InterfaceMeta:
-        interfaces = (hostile,)
-
-    validators = (
-        lambda: _validate_filterset_class(Category, hostile),
-        lambda: _validate_orderset_class(Category, hostile),
-        lambda: _validate_connection(Category, hostile, relay_shaped=False),
-        lambda: _validate_cursor_field(Category, hostile, relay_shaped=False),
-        lambda: _validate_relation_shapes(Category, hostile, relay_shaped=False),
-        lambda: _validate_globalid_strategy(Category, hostile, relay_shaped=False),
-        lambda: _validate_interfaces(InterfaceMeta, Category),
-    )
-    for validator in validators:
-        with pytest.raises(ConfigurationError, match="unprintable _HostileMetaValue"):
-            validator()
-
-
-def test_meta_connection_unknown_keys_are_typed_for_mixed_and_hostile_keys() -> None:
-    """Unknown connection keys cannot leak sorting or repr exceptions."""
-    with pytest.raises(ConfigurationError, match="unknown sub-keys"):
+def test_meta_connection_unknown_keys_are_typed_for_mixed_keys() -> None:
+    """Mixed-type unknown connection keys sort by their rendering, not by value."""
+    with pytest.raises(ConfigurationError) as exc_info:
         _validate_connection(Category, {1: True, "bogus": False}, relay_shaped=False)
-    with pytest.raises(ConfigurationError, match="unknown sub-keys"):
-        _validate_connection(Category, {_HostileMetaValue(): True}, relay_shaped=False)
-
-
-def test_meta_cursor_field_hostile_sequence_is_typed() -> None:
-    """A broken sequence descriptor cannot escape as a raw runtime exception."""
-    with pytest.raises(ConfigurationError, match="non-empty non-string sequence"):
-        _validate_cursor_field(Category, _HostileMetaSequence(), relay_shaped=True)
-
-
-@pytest.mark.parametrize("key", ["fields", "exclude"])
-def test_meta_field_collections_wrap_hostile_iteration(key: str) -> None:
-    """A field collection that raises while iterating stays a typed shape error."""
-    meta_cls = type("Meta", (), {"model": Category, key: _HostileMetaSequence()})
-
-    with pytest.raises(ConfigurationError, match=f"Meta.{key} must"):
-        type("T", (DjangoType,), {"Meta": meta_cls})
+    assert str(exc_info.value) == (
+        "Category.Meta.connection has unknown sub-keys: ['bogus', 1]. "
+        "Only 'total_count' is recognized in 0.0.9."
+    )
 
 
 def test_meta_name_rejects_an_empty_string() -> None:
@@ -339,25 +290,18 @@ def test_meta_name_rejects_an_empty_string() -> None:
                 name = ""
 
 
-def test_meta_name_rejects_hostile_values_at_type_creation() -> None:
-    """A malformed ``Meta.name`` cannot survive to Strawberry schema creation."""
-
-    class HostileName:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr should not escape")
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"Meta\.name must be a non-empty string; got <unprintable HostileName>",
-    ):
+def test_meta_name_rejects_a_non_string() -> None:
+    """A non-string ``Meta.name`` is rejected at type creation, rendered by its repr."""
+    with pytest.raises(ConfigurationError) as exc_info:
 
         @definition_raises
-        class BadNameType(DjangoType):
+        class T(DjangoType):
             class Meta:
                 model = Category
                 fields = CATEGORY_SCALAR_FIELDS
-                name = HostileName()
+                name = 42
+
+    assert str(exc_info.value) == "Category.Meta.name must be a non-empty string; got 42."
 
 
 def test_meta_name_rejects_invalid_graphql_names_at_type_creation() -> None:
@@ -372,8 +316,8 @@ def test_meta_name_rejects_invalid_graphql_names_at_type_creation() -> None:
                 name = "bad-name"
 
 
-def test_globalid_callable_wraps_non_signature_inspection_errors() -> None:
-    """A ``__signature__`` descriptor that raises is a typed configuration failure."""
+def test_globalid_callable_signature_inspection_error_propagates() -> None:
+    """A consumer encoder whose own ``__signature__`` raises propagates that exception."""
 
     class _UnreadableSignature:
         @property
@@ -388,20 +332,8 @@ def test_globalid_callable_wraps_non_signature_inspection_errors() -> None:
         ) -> str:
             return "value"
 
-    with pytest.raises(ConfigurationError, match="could not be inspected"):
+    with pytest.raises(RuntimeError, match="signature exploded"):
         _validate_globalid_callable("Meta.globalid_strategy", _UnreadableSignature())
-
-
-def test_meta_globalid_callable_hostile_descriptor_is_typed() -> None:
-    """A broken callable descriptor cannot escape GlobalID strategy validation."""
-
-    class HostileCallable:
-        @property
-        def __call__(self) -> NoReturn:
-            raise RuntimeError("callable descriptor should not escape")
-
-    with pytest.raises(ConfigurationError, match="could not be inspected"):
-        _validate_globalid_strategy(Category, HostileCallable(), relay_shaped=True)
 
 
 # ---------------------------------------------------------------------------
@@ -580,7 +512,7 @@ def test_meta_value_whose_class_cannot_be_read_is_the_typed_rejection(
 ) -> None:
     """A ``Meta`` value (or entry) whose ``__class__`` read raises is rejected like any malformed one.
 
-    Every gate asks the value's class through a guarded test, so the rejection each
+    Every gate asks the value's real class (``utils/truth.py``), so the rejection each
     key's contract promises is the one raised, never the consumer's own exception.
     """
     meta = type("Meta", (), {"model": Category, **make_meta(_ClassReadRaises(raised))})
@@ -698,7 +630,7 @@ def test_meta_class_that_inherits_str_still_contributes_the_text_it_holds() -> N
 
 
 def _lazy(value: object) -> object:
-    """A faithful lazy proxy around ``value`` (``isinstance`` answers as the wrapped value)."""
+    """A Django lazy proxy around ``value`` (the gates unwrap it before the real-class test)."""
     return SimpleLazyObject(lambda: value)
 
 
@@ -769,7 +701,7 @@ def test_meta_gates_keep_accepting_a_faithful_proxy_of_the_right_class(
     accepts: Callable[[], object],
     expected: object,
 ) -> None:
-    """The gates ask ``isinstance``, so a lazy proxy of a valid value passes as the value itself."""
+    """The gates unwrap a Django lazy proxy, so a proxy of a valid value passes as the value itself."""
     assert accepts() == expected
 
 
@@ -812,7 +744,6 @@ _NON_STRING_KEYS_TAIL = (
     [
         ((1,), "[1]"),
         ((2, 1), "[1, 2]"),
-        ((_HostileMetaValue(),), "[<unprintable _HostileMetaValue>]"),
         ((_ClassReadRaises(RuntimeError),), "[<class-read-raises>]"),
         ((_ClassReadRaises(KeyboardInterrupt),), "[<class-read-raises>]"),
         ((_ClaimsClass(str),), "[<claims-class>]"),
@@ -820,7 +751,6 @@ _NON_STRING_KEYS_TAIL = (
     ids=[
         "int",
         "ints-sorted-by-repr",
-        "repr-raises",
         "class-read-raises-runtime",
         "class-read-raises-base-exception",
         "class-claims-str",
@@ -832,9 +762,9 @@ def test_non_string_annotation_key_is_rejected_whatever_its_class_or_repr(
 ) -> None:
     """A metaclass-injected annotation key that is not really a ``str`` takes the typed rejection.
 
-    The keys are rendered through the guarded repr and sorted by their rendering, and the test
-    asks the key's real type, so a key whose ``__repr__`` raises, whose ``__class__`` raises,
-    or whose ``__class__`` claims ``str`` is reported alongside the honest ones.
+    The keys are rendered through ``utils/truth.py::render`` and sorted by their rendering, and
+    the test asks the key's real type, so a key whose ``__class__`` raises or whose ``__class__``
+    claims ``str`` is reported alongside the honest ones.
     """
     with pytest.raises(ConfigurationError) as excinfo:
 
@@ -848,6 +778,27 @@ def test_non_string_annotation_key_is_rejected_whatever_its_class_or_repr(
         f"ProbeKeysType: class annotations must have string names; got non-string keys {shown}"
         + _NON_STRING_KEYS_TAIL
     )
+
+
+def test_non_string_annotation_key_whose_repr_raises_propagates_the_repr_error() -> None:
+    """A non-string annotation key is rendered by its own ``__repr__``, whose error propagates.
+
+    The rejection renders each key through ``utils/truth.py::render``, which runs a
+    non-scalar key's ``__repr__`` as consumer behaviour.
+    """
+
+    class _ReprRaises:
+        @override
+        def __repr__(self) -> str:
+            raise RuntimeError("repr should not escape")
+
+    with pytest.raises(RuntimeError, match="repr should not escape"):
+
+        @definition_raises
+        class ProbeKeysType(DjangoType, metaclass=_inject_annotation_key(_ReprRaises())):
+            class Meta:
+                model = Category
+                fields = CATEGORY_SCALAR_FIELDS
 
 
 @pytest.mark.parametrize(
@@ -3464,27 +3415,105 @@ def test_non_string_annotation_keys_raise_configuration_error() -> None:
                 fields = ("id",)
 
 
-def test_meta_metaclass_raising_getattr_raises_configuration_error() -> None:
-    """A Meta metaclass ``__getattr__`` that raises is contained.
+# ---------------------------------------------------------------------------
+# Honest rejection messages at the collection seam
+# ---------------------------------------------------------------------------
 
-    ``getattr(meta, key, default)`` only swallows ``AttributeError``; every
-    Meta attribute read routes through ``_meta_attr`` so hostile attribute
-    access surfaces as ``ConfigurationError`` like every other shape
-    violation.
+
+def _declare_probe_type(
+    name: str,
+    meta_attrs: dict[str, object],
+    namespace_extra: dict[str, object] | None = None,
+) -> type:
+    """Declare a throwaway ``DjangoType`` from an explicit ``Meta`` dict.
+
+    Every case either registers cleanly or raises ``ConfigurationError`` at
+    the ``type(...)`` call, so the class object never leaks past the assertion.
     """
+    namespace: dict[str, object] = {"Meta": type("Meta", (), meta_attrs)}
+    if namespace_extra:
+        namespace.update(namespace_extra)
+    return type(name, (DjangoType,), namespace)
 
-    class HostileMeta(type):
-        def __getattr__(cls, item: str) -> NoReturn:
-            if item in {"fields", "optimizer_hints", "interfaces"}:
-                raise RuntimeError(f"hostile Meta access: {item}")
-            raise AttributeError(item)
 
-    with pytest.raises(ConfigurationError, match="could not be read"):
+def test_meta_name_accepted_and_stored_on_definition() -> None:
+    """An honest ``Meta.name`` is accepted and stored on the definition."""
 
-        @definition_raises
-        class ProbeHostileMetaType(DjangoType):
-            class Meta(metaclass=HostileMeta):
-                model = Category
+    class NamedProbeType(DjangoType):
+        class Meta:
+            model = Category
+            fields = CATEGORY_SCALAR_FIELDS
+            name = "CustomCategory"
+
+    assert NamedProbeType.__django_strawberry_definition__.name == "CustomCategory"
+
+
+def test_typo_guard_message_bytes_for_honest_names() -> None:
+    """The typo-guard message renders the unknown names as a list repr."""
+    meta_cls = type("Meta", (), {"model": Category, "fields": ("id", "nmae")})
+    with pytest.raises(ConfigurationError) as exc_info:
+        type("HonestTypoProbeType", (DjangoType,), {"Meta": meta_cls})
+    assert "names unknown fields: ['nmae']." in str(exc_info.value)
+
+
+def test_duplicate_interfaces_message_bytes_for_honest_names() -> None:
+    """The duplicate-interface message names each class by its declared name."""
+    with pytest.raises(ConfigurationError) as exc_info:
+        _declare_probe_type(
+            "HonestDuplicateProbeType",
+            {
+                "model": Category,
+                "fields": CATEGORY_SCALAR_FIELDS,
+                "interfaces": (relay.Node, relay.Node),
+            },
+        )
+    assert "duplicate entries: ['Node']" in str(exc_info.value)
+
+
+def test_optimizer_hint_value_gate_message_bytes_for_honest_keys() -> None:
+    """The hint-value gate message renders the offending keys as a list repr."""
+    with pytest.raises(ConfigurationError) as exc_info:
+        _declare_probe_type(
+            "HonestHintProbeType",
+            {
+                "model": Category,
+                "fields": ("id", "name", "items"),
+                "optimizer_hints": {"items": 123},
+            },
+        )
+    assert "got non-OptimizerHint for: ['items']" in str(exc_info.value)
+
+
+def test_meta_optimizer_hints_class_value_names_the_class_itself() -> None:
+    """A class declared as ``Meta.optimizer_hints`` is named by its own name, not its metaclass."""
+    meta = type("Meta", (), {"model": Category, "optimizer_hints": Category})
+    with pytest.raises(ConfigurationError) as exc_info:
+        _meta_optimizer_hints(meta, Category)
+    assert str(exc_info.value) == (
+        "Category.Meta.optimizer_hints must be a mapping of field names to OptimizerHint "
+        "instances, got Category."
+    )
+
+
+def test_meta_filterset_class_rejection_message_bytes() -> None:
+    """The sidecar gate names the model, the expected base and the declared value."""
+    with pytest.raises(ConfigurationError) as exc_info:
+        _validate_filterset_class(Category, Category)
+    assert str(exc_info.value) == (
+        "Category.Meta.filterset_class must be a FilterSet subclass; "
+        "got <class 'apps.products.models.Category'>"
+    )
+
+
+def test_meta_interfaces_non_sequence_message_names_the_kind() -> None:
+    """A non-sequence ``Meta.interfaces`` is named by its real class."""
+    meta = type("Meta", (), {"model": Category, "interfaces": {relay.Node}})
+    with pytest.raises(ConfigurationError) as exc_info:
+        _validate_interfaces(meta, Category)
+    assert str(exc_info.value) == (
+        "Category.Meta.interfaces must be a tuple/list of Strawberry interface classes "
+        "or a single interface class, got set."
+    )
 
 
 @pytest.mark.parametrize(

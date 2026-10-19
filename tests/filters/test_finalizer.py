@@ -1252,14 +1252,13 @@ def test_phase_2_5_unregistered_target_check_walks_transitive_filtersets() -> No
     assert "no DjangoType is registered" in msg
 
 
-def test_phase_2_5_non_import_get_filters_failure_rewraps_as_configuration_error() -> None:
-    """Non-ImportError raised during ``get_filters()`` surfaces as ``ConfigurationError``.
+def test_phase_2_5_non_import_get_filters_failure_propagates_unchanged() -> None:
+    """A consumer factory's own exception raised during ``get_filters()`` propagates.
 
-    Subpass 2 rewraps any exception, not only ``ImportError`` (e.g. a
-    ``RelatedFilter`` callable factory that raises ``ValueError`` when
-    evaluated), with the original on ``__cause__``: the package's
-    "finalize-time errors are ``ConfigurationError``" convention holds and
-    consumer error-matching stays uniform.
+    Subpass 2 rewraps only an unresolved lazy target's ``ImportError``; any
+    other exception (here a ``RelatedFilter`` callable factory that raises
+    ``ValueError`` when evaluated) is consumer behaviour and reaches the
+    caller unchanged.
     """
 
     def _broken_factory() -> NoReturn:
@@ -1303,13 +1302,8 @@ def test_phase_2_5_non_import_get_filters_failure_rewraps_as_configuration_error
 
     assert registry.get(Book) is BookType
 
-    with pytest.raises(ConfigurationError) as exc_info:
+    with pytest.raises(ValueError, match="intentional factory failure"):
         finalize_django_types()
-    msg = str(exc_info.value)
-    assert "BookFilter" in msg
-    assert "ValueError" in msg
-    assert "intentional factory failure" in msg
-    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 # ---------------------------------------------------------------------------
@@ -1562,10 +1556,9 @@ def test_bind_filterset_owner_raises_when_one_owner_resolves_and_other_does_not(
 def test_phase_2_5_configuration_error_from_get_filters_propagates_unwrapped() -> None:
     """A ``ConfigurationError`` raised inside ``get_filters()`` is re-raised as-is.
 
-    The finalize loop special-cases ``ImportError`` (rewrap) and generic
-    ``Exception`` (rewrap), but a ``ConfigurationError`` is already the
-    canonical finalize-time error class, so it propagates unchanged rather
-    than being double-wrapped.
+    The finalize loop rewraps only ``ImportError``; a ``ConfigurationError`` is
+    already the canonical finalize-time error class, so it propagates
+    unchanged rather than being double-wrapped.
     """
 
     def _config_error_factory() -> NoReturn:
@@ -1724,12 +1717,10 @@ def test_finalize_surfaces_the_related_filter_target_gate_identity() -> None:
 
     Ungated, the mis-typed target would survive declaration + binding +
     expansion and detonate inside ``_expand_related_filter``'s
-    ``target.get_filters()`` as a raw ``AttributeError``, typed only
-    ACCIDENTALLY by subpass 2's blanket ``except Exception`` rewrap
-    ("raised during expansion"). The ``.filterset`` gate raises the
-    typed ``ConfigurationError`` at first resolution, and subpass 2's
-    ``except ConfigurationError: raise`` propagates it BY IDENTITY -- the
-    original gate message survives, never the rewrap.
+    ``target.get_filters()`` as a raw ``AttributeError``. The ``.filterset``
+    gate raises the typed ``ConfigurationError`` at first resolution, and
+    subpass 2 propagates it BY IDENTITY -- the original gate message
+    survives.
     """
 
     class _NotAFilterSet:

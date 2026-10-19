@@ -50,6 +50,7 @@ from graphql_client import (
     json_str,
     middleware,
     middleware_without_debug_toolbar,
+    read_attr,
     response_json,
 )
 from graphql_client import assert_graphql_success as _graphql_data
@@ -147,6 +148,22 @@ def test_login_happy_path_sets_session_and_me_sees_the_user() -> None:
     # The session was established on THIS client (the cookie round trip).
     assert "sessionid" in client.cookies
     assert _graphql_data(_ME, client=client)["me"] == {"username": "staff_1"}
+
+
+@pytest.mark.django_db
+def test_me_resolves_the_relay_id_of_the_lazy_session_user() -> None:
+    """``me { id }`` encodes the session user's GlobalID through ``request.user``'s lazy proxy.
+
+    ``request.user`` is a ``SimpleLazyObject``; the default ``resolve_id`` reads
+    the row it stands for, so the id decodes back to the logged-in user's pk.
+    """
+    create_users(1)
+    client = Client()
+    assert _login(client, "staff_1", TEST_USER_PASSWORD)["errors"] == []
+    me = json_object(_graphql_data("{ me { id username } }", client=client), "me")
+    user = User.objects.get(username="staff_1")
+    assert me["username"] == "staff_1"
+    assert relay.GlobalID.from_id(json_str(me, "id")).node_id == str(read_attr(user, "pk"))
 
 
 @pytest.mark.django_db

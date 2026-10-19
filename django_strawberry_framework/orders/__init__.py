@@ -45,12 +45,7 @@ from .sets import OrderSet, OrderSetMetaclass
 # ordersets and raises ``ConfigurationError`` for orphans.
 _helper_referenced_ordersets: set[type[OrderSet]] = set()
 
-
-def _clear_helper_referenced_ordersets() -> None:
-    _helper_referenced_ordersets.clear()
-
-
-register_subsystem_clear(_clear_helper_referenced_ordersets, owner="orders.helper_references")
+register_subsystem_clear(_helper_referenced_ordersets.clear, owner="orders.helper_references")
 
 
 def _order_input_annotation(orderset_class: object, *, helper_spelling: str) -> object:

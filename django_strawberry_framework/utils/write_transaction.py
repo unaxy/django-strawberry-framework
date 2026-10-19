@@ -70,26 +70,20 @@ from __future__ import annotations
 import threading
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
+from django.core.exceptions import ValidationError
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, router, transaction
 from django.db.models.fields.files import FieldFile
 from django.db.models.signals import pre_save
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import (
-    ConfigurationError,
-    _safe_arg_repr,
-    _safe_type_name,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils.errors import FIELD_ERROR_CODE_CONFLICT, field_error
 
+from . import truth
 from ._narrowing import (
     call_method,
-    is_dict,
-    is_list_or_tuple,
-    is_set_or_frozenset,
-    is_str,
     list_of,
     pk_of,
     read_attr,
@@ -104,7 +98,6 @@ if TYPE_CHECKING:
 
     from django.db import models
     from django.db.models import QuerySet
-    from typing_extensions import TypeIs
 
     from django_strawberry_framework.mutations.inputs import FieldError
     from django_strawberry_framework.mutations.sets import WriteMutationClass
@@ -276,7 +269,9 @@ def require_managed_write(mutation_cls: WriteMutationClass) -> str:
     """
     alias = _MANAGED_WRITE_ALIAS.get()
     if alias is None:
-        raise ConfigurationError(_UNMANAGED_SCHEMA_MESSAGE.format(name=mutation_cls.__name__))
+        raise ConfigurationError(
+            _UNMANAGED_SCHEMA_MESSAGE.format(name=truth.name(mutation_cls)),
+        )
     return alias
 
 
@@ -511,9 +506,9 @@ def _sql_statement_token(sql: object) -> str:
     # subclass's base string content. Normalize through ``str.__str__`` before
     # lexical inspection so the phase guard classifies exactly the text the
     # adapter sees, never consumer-controlled string behavior.
-    if not is_str(sql):
+    if not truth.is_instance(sql, str):
         return ""
-    text = str.__str__(sql)
+    text = truth.text(sql)
     index = 0
     length = len(text)
     while index < length:
@@ -580,7 +575,7 @@ def make_cross_alias_save_guard(
             return
         if using != alias:
             raise ConfigurationError(
-                f"{actor} attempted to save a {sender.__name__} row on "
+                f"{actor} attempted to save a {truth.name(sender)} row on "
                 f"database alias {using!r}, but the mutation's transaction is pinned to "
                 f"{alias!r}; a write outside the pinned alias would escape the transaction "
                 "(it could not be rolled back with the mutation). Route the custom save "
@@ -757,7 +752,7 @@ def pin_write_queryset(
     hook_alias: object = queryset_db(queryset)
     if hook_alias is not None and hook_alias != alias:
         if owner is None:
-            owner = f"{queryset.model.__name__} get_queryset"
+            owner = f"{truth.name(queryset.model)} get_queryset"
         raise ConfigurationError(
             f"{owner} returned a queryset routed to alias {hook_alias!r}, but this mutation's "
             f"write transaction is pinned to alias {alias!r}. A write pipeline runs every query "
@@ -784,7 +779,7 @@ def check_instance_write_alias(
     instance_alias = router.db_for_write(model, instance=instance)
     if instance_alias != alias:
         raise ConfigurationError(
-            f"The database router routes {model.__name__} writes to {instance_alias!r} for this "
+            f"The database router routes {truth.name(model)} writes to {instance_alias!r} for this "
             f"instance, but the mutation's transaction is pinned to {alias!r} (the no-instance "
             "answer). An instance-sensitive write router cannot be honored mid-pipeline; make "
             "db_for_write deterministic for this model.",
@@ -802,12 +797,14 @@ def column_values_match(field: ConcreteField, first: object, second: object) -> 
     ``ForeignKey`` converts through its ``target_field`` (the related pk, or
     the ``to_field`` column), so a relation column compares in the domain it
     stores. ``True`` only when BOTH values coerce and the canonical forms are
-    equal; an uncoercible side (a forged value of the wrong shape) is a
-    mismatch, never an exception the caller must handle.
+    equal; an uncoercible side (a forged value of the wrong shape: the field's
+    ``ValidationError``, or the ``TypeError`` / ``ValueError`` a field's
+    ``to_python`` raises directly) is a mismatch, never an exception the caller
+    must handle.
     """
     try:
         return object_result(field.to_python, first) == object_result(field.to_python, second)
-    except Exception:  # noqa: BLE001 - consumer code may raise anything
+    except (ValidationError, TypeError, ValueError):
         return False
 
 
@@ -852,20 +849,19 @@ _MUTABLE_SNAPSHOT_TYPES = (
     tuple,
     bytearray,
 )
+# The containers the fingerprint walks through their base iterators.
+_FINGERPRINT_CONTAINER_TYPES = (
+    dict,
+    list,
+    tuple,
+    set,
+    frozenset,
+)
 
 
-def _is_mutable_snapshot_value(
-    value: object,
-) -> TypeIs[
-    dict[object, object]
-    | list[object]
-    | set[object]
-    | frozenset[object]
-    | tuple[object, ...]
-    | bytearray
-]:
-    """Return whether ``value`` is one of the ``_MUTABLE_SNAPSHOT_TYPES`` (subclasses included)."""
-    return isinstance(value, _MUTABLE_SNAPSHOT_TYPES)
+def _is_one_of(value: object, classes: tuple[type[object], ...]) -> bool:
+    """Whether ``value``'s real class subclasses one of ``classes`` (no ``__class__`` read)."""
+    return any(truth.is_instance(value, cls) for cls in classes)
 
 
 class _ValueSnapshot:
@@ -919,18 +915,13 @@ class _FileNameSnapshot(_ValueSnapshot):
 
         A hook that mutates ``instance.<file>.name`` in place keeps the SAME
         descriptor, so an identity / ``==`` check on the descriptor would miss
-        it. A hook that replaced the attribute with a non-``FieldFile`` is drift
-        too, so the raw value is compared in that case - and a replacement whose
-        equality read is hostile is drift this snapshot cannot rule out:
-        ``False`` (fail closed), never a raw exception.
+        it. A hook that replaced the attribute with a non-``FieldFile`` (decided
+        by its real class) is drift too, so the raw value is compared in that
+        case; the replacement's own ``__eq__`` is consumer code and whatever it
+        raises propagates.
         """
-        try:
-            current_name = current.name if isinstance(current, FieldFile) else current
-            matches = current_name == self.name
-        except Exception:  # noqa: BLE001 - consumer code may raise anything
-            return False
-        else:
-            return matches
+        current_name = current.name if truth.is_instance(current, FieldFile) else current
+        return current_name == self.name
 
 
 # The node budget for one field value's structural fingerprint. Consumer-
@@ -979,7 +970,7 @@ def _leaf_token(item: object) -> str:
     the byte strings are read through the buffer (never ``bytes(item)``, whose
     constructor dispatches a subclass ``__bytes__``), and the tag names the base
     type that defined the read - not the subclass's claimed ``__name__``.
-    Everything else is opaque: the guarded repr is joined with the type's and
+    Everything else is opaque: its repr is joined with the type's and
     the value's IDENTITY, so a constant ``__repr__`` cannot collapse two
     distinct objects onto one fingerprint. Identity is sound here because a
     fingerprint is request-scoped - the digest is recomputed from the same live
@@ -987,19 +978,19 @@ def _leaf_token(item: object) -> str:
     """
     if item is None:
         return "NoneType:None"
-    if isinstance(item, bool):
+    if truth.is_instance(item, bool):
         return f"bool:{item}"  # bool cannot be subclassed; str() is the content
-    if isinstance(item, int):
+    if truth.is_instance(item, int):
         return f"int:{int.__repr__(item)}"
-    if isinstance(item, float):
+    if truth.is_instance(item, float):
         return f"float:{float.__repr__(item)}"
-    if isinstance(item, str):
+    if truth.is_instance(item, str):
         return f"str:{str.__repr__(item)}"
-    if isinstance(item, (bytes, bytearray)):
+    if truth.is_instance(item, bytes) or truth.is_instance(item, bytearray):
         # Content-addressed and type-insensitive: bytes and bytearray of one
         # content are one value to the database write, so they are one leaf here.
         return f"b:{memoryview(item).tobytes()!r}"
-    return f"{_safe_type_name(item)}:{_safe_arg_repr(item)}:{id(type(item))}:{id(item)}"
+    return f"{truth.kind(item)}:{truth.render(item)}:{id(type(item))}:{id(item)}"
 
 
 def _field_fingerprint(value: object) -> str:
@@ -1016,12 +1007,12 @@ def _field_fingerprint(value: object) -> str:
     output IS a security check (the drift digest):
 
     - Every container is read through its BASE iterator and every unordered one
-      is ordered by the guarded key (``utils/canonical.py``) - a subclass that
+      is ordered by the canonical sort key (``utils/canonical.py``) - a subclass that
       reports different contents per call, or a ``__repr__`` that returns a
       constant, cannot decide what the walk sees.
     - A dict KEY is walked as a node in its own right (the fixed ``=v`` token
       separates key from value), so a tuple / frozenset / lying-atom key gets
-      the same hostile-safe treatment as any value - never a ``repr`` label a
+      the same treatment as any value - never a ``repr`` label a
       lying key could forge.
     - Every leaf is rendered by ``_leaf_token``: content-honest through the
       base slots for the built-in atoms, identity-discriminated for opaque
@@ -1046,8 +1037,7 @@ def _field_fingerprint(value: object) -> str:
                 "drift detection (exceeded the node budget). Reject rather than risk an "
                 "unbounded walk of consumer-controlled data.",
             )
-        is_container = is_dict(item) or is_list_or_tuple(item) or is_set_or_frozenset(item)
-        if not is_container:
+        if not _is_one_of(item, _FINGERPRINT_CONTAINER_TYPES):
             # Bytes / bytearray land here too (they are not containers): the
             # leaf renderer reads their base buffer, never ``bytes(item)``.
             parts.append(_leaf_token(item))
@@ -1062,13 +1052,13 @@ def _field_fingerprint(value: object) -> str:
         active.add(container_id)
         # Every container is read through its BASE iterator
         # (``utils/canonical.py::base_container_values``) and every unordered
-        # one is ordered by the guarded key, never a bare ``repr``: a subclass
+        # one is ordered by the canonical sort key, never a bare ``repr``: a subclass
         # that reports different contents per call, or a ``__repr__`` that
         # returns a constant, would otherwise let two structurally different
         # values fingerprint the SAME - and a drift check that cannot tell
         # them apart is the fail-open this walk exists to prevent. Each branch reads
-        # the container it has narrowed, so a ``dict`` answers its ``(key, value)`` pairs.
-        if is_dict(item):
+        # its own container, so a ``dict`` answers its ``(key, value)`` pairs.
+        if truth.is_instance(item, dict):
             parts.append("{")
             stack.append(_SnapshotClose("}", container_id))
             for key, member in sorted(
@@ -1076,31 +1066,32 @@ def _field_fingerprint(value: object) -> str:
                 key=lambda pair: canonical_sort_key(pair[0]),
                 reverse=True,
             ):
-                # The KEY is walked as a node (the same hostile-safe treatment a
+                # The KEY is walked as a node (the same treatment a
                 # value gets), with a fixed divider between key and value - never
                 # a ``repr`` label, which a lying key could forge.
                 stack.append(member)
                 stack.append(_SnapshotClose("=v"))
                 stack.append(key)
-        elif is_list_or_tuple(item):
+        elif truth.is_instance(item, list) or truth.is_instance(item, tuple):
             parts.append("[")
             stack.append(_SnapshotClose("]", container_id))
             stack.extend(reversed(base_container_values(item)))
         else:
             # The container check above leaves a ``set`` / ``frozenset`` as the only kind here.
+            members = cast("set[object] | frozenset[object]", item)
             parts.append("s{")
             stack.append(_SnapshotClose("}s", container_id))
             stack.extend(
-                sorted(base_container_values(item), key=canonical_sort_key, reverse=True),
+                sorted(base_container_values(members), key=canonical_sort_key, reverse=True),
             )
     return "".join(parts)
 
 
 def _snapshot_field_value(value: object) -> object:
     """Snapshot a field value by value: fingerprint containers, name-capture files, alias scalars."""
-    if isinstance(value, FieldFile):
+    if truth.is_instance(value, FieldFile):
         return _FileNameSnapshot(value.name)
-    if _is_mutable_snapshot_value(value):
+    if _is_one_of(value, _MUTABLE_SNAPSHOT_TYPES):
         return _FieldFingerprint(_field_fingerprint(value))
     return value
 
@@ -1152,29 +1143,19 @@ def assert_no_target_drift(owner: str, instance: models.Model) -> None:
     for attname, value in snapshot.items():
         if attname in deferred:
             continue
-        try:
-            current = read_attr(instance, attname)
-            if isinstance(value, _ValueSnapshot):
-                # Each by-value wrapper owns its own re-comparison, so this dispatch
-                # cannot fall out of step with ``_snapshot_field_value``'s capture
-                # ladder the way two mirrored ladders did.
-                drifted = not value.matches(current)
-            else:
-                # An immutable scalar snapshotted by reference.
-                drifted = current is not value and current != value
-        except ConfigurationError:
-            raise
-        except Exception:  # noqa: BLE001 - consumer code may raise anything
-            # The comparison read itself is consumer-reachable surface (the code
-            # this check polices can plant a hostile ``__eq__`` or break a
-            # descriptor). An UNREADABLE comparison is drift the check cannot
-            # rule out, so it fails closed into the typed envelope below - a raw
-            # exception must never escape the guard.
-            drifted = True
+        current = read_attr(instance, attname)
+        if isinstance(value, _ValueSnapshot):
+            # Each by-value wrapper owns its own re-comparison, so this dispatch
+            # cannot fall out of step with ``_snapshot_field_value``'s capture
+            # ladder the way two mirrored ladders did.
+            drifted = not value.matches(current)
+        else:
+            # An immutable scalar snapshotted by reference.
+            drifted = current is not value and current != value
         if drifted:
             raise ConfigurationError(
                 f"{owner}: the located, authorized row was mutated in memory before the "
-                f"write ({type(instance).__name__}.{attname} changed between the locate "
+                f"write ({truth.name(type(instance))}.{attname} changed between the locate "
                 "and the save). Permission methods, hooks, and validators must not write "
                 "to the target instance; changes go through the validated serializer data.",
             )
