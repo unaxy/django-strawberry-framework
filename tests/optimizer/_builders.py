@@ -38,6 +38,7 @@ def filter_prefetch_queryset(
     instances: Sequence[models.Model],
 ) -> _QuerySetT:
     """Django's own prefetch filter: ``queryset`` narrowed to the rows of ``instances``."""
+    # The isinstance proves the attribute is present, not that its signature matches the Protocol.
     assert isinstance(related_descriptors, _PrefetchFilterModule)
     filtered = related_descriptors._filter_prefetch_queryset(queryset, field_name, instances)
     assert isinstance(filtered, type(queryset))

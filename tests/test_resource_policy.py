@@ -1298,11 +1298,11 @@ async def test_the_exported_raw_list_bound_takes_no_client_window(
     arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
     if color == "sync":
         with pytest.raises(TypeError):
-            bounded_rows(list(range(10)), info, **{coordinate: True})
+            object_result(bounded_rows, list(range(10)), info, **{coordinate: 10})
         assert bounded_rows(list(range(10)), info) == [0, 1]
         return
     with pytest.raises(TypeError):
-        await bounded_rows_async(list(range(10)), info, **{coordinate: True})
+        object_result(bounded_rows_async, list(range(10)), info, **{coordinate: 10})
     assert await bounded_rows_async(list(range(10)), info) == [0, 1]
 
 
