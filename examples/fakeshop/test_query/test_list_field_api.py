@@ -582,6 +582,72 @@ def test_shipped_branches_offset_accepts_a_stable_model_default(
     assert _RANDOM_ORDER_SQL not in statement, statement
 
 
+@pytest.mark.django_db
+def test_shipped_branches_offset_accepts_an_explicit_order_over_a_dormant_random_model_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supplied ``orderBy`` supersedes a random ``Meta.ordering``, which stays dormant.
+
+    Django compiles the model default only when ``query.order_by`` is empty, so
+    once the stable terms the client asked for are applied the ``"?"`` never
+    reaches SQL. The guard classifies the order the request runs under and serves
+    the page rather than rejecting on a default that cannot apply.
+    """
+    _seed_three_branches()
+    monkeypatch.setattr(library_models.Branch._meta, "ordering", ("?",))
+
+    payload, branch_sql = _branch_offset_page(
+        """
+        query {
+          allLibraryBranchesViaListField(
+            orderBy: [{ city: ASC }, { id: ASC }]
+            offset: 1
+            limit: 1
+          ) {
+            name
+          }
+        }
+        """,
+    )
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
+    assert len(branch_sql) == 1
+    statement = branch_sql[0].upper()
+    assert "OFFSET 1" in statement, statement
+    assert _RANDOM_ORDER_SQL not in statement, statement
+
+
+@pytest.mark.django_db
+def test_holder_offset_refuses_an_order_only_the_resolver_applied() -> None:
+    """An order the resolver put on the source does not back a positive offset.
+
+    Only an active ``orderBy`` input or the model's own ``Meta.ordering`` names
+    the order a window pages through. A private ``order_by`` inside the resolver
+    is neither, so the request is refused before any branch statement runs.
+    """
+    _seed_three_branches()
+
+    @strawberry.type
+    class _ResolverOrderedQuery:
+        branches: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            resolver=_list_resolver(
+                lambda _root, _info: library_models.Branch.objects.order_by("name"),
+            ),
+        )
+
+    schema = DjangoSchema(query=_ResolverOrderedQuery, config=strawberry_config())
+    with CaptureQueriesContext(connection) as ctx:
+        payload = _post_sync(schema, "{ branches(offset: 1) { name } }")
+
+    assert payload["data"] is None, payload
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
+    assert [q for q in ctx.captured_queries if "library_branch" in q["sql"]] == []
+
+
 def _seed_three_shelves() -> None:
     for name in ("Alpha", "Bravo", "Charlie"):
         branch = library_models.Branch.objects.create(name=name, city="Boston")
@@ -2210,6 +2276,43 @@ def test_holder_untrusted_max_rows_is_the_limit_ceiling() -> None:
 
 
 @pytest.mark.django_db
+def test_holder_trusted_max_rows_without_max_rows_keeps_the_policy_ceiling() -> None:
+    """The trusted opt-in widens only a declared bound; with none declared the policy governs.
+
+    ``trusted_max_rows=True`` lets the field's own ``max_rows`` outrank the request
+    policy. A field that declares no ``max_rows`` has no bound to outrank it with,
+    so the omitted-limit window and the limit ceiling both stay at ``max_list_rows``.
+    """
+    _seed_three_branches()
+
+    @strawberry.type
+    class _TrustedUndeclaredQuery:
+        branches_trusted: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            trusted_max_rows=True,
+        )
+
+    schema = DjangoSchema(
+        query=_TrustedUndeclaredQuery,
+        config=strawberry_config(),
+        resource_policy={"max_list_rows": 2},
+    )
+
+    with CaptureQueriesContext(connection) as ctx:
+        payload = _post_sync(schema, "{ branchesTrusted { name } }")
+    assert "errors" not in payload, payload
+    assert len(json_list(payload, "data", "branchesTrusted")) == 2
+    branch_sql = [q["sql"].upper() for q in ctx.captured_queries if "library_branch" in q["sql"]]
+    assert len(branch_sql) == 1, branch_sql
+    assert "LIMIT 2" in branch_sql[0], branch_sql[0]
+
+    payload_over = _post_sync(schema, "{ branchesTrusted(limit: 3) { name } }")
+    assert json_at(payload_over, "errors", 0, "extensions", "reason") == "over_ceiling"
+    assert json_at(payload_over, "errors", 0, "extensions", "argument") == "limit"
+    assert json_at(payload_over, "errors", 0, "extensions", "ceiling") == 2
+
+
+@pytest.mark.django_db
 def test_holder_materialized_sequence_subclass_is_still_row_bounded() -> None:
     """A materialized source is bounded by this package, not by its own subscript.
 
@@ -2973,6 +3076,15 @@ def test_holder_branches_hostile_normalized_term_is_rejected_before_it_can_run(
     assert [q for q in ctx.captured_queries if "library_branch" in q["sql"].lower()] == []
 
 
+class _UpperConverter(NameConverter):
+    """Publishes every schema name upper-cased, so no wire name matches its default spelling."""
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        name = super().get_graphql_name(obj)
+        return name.upper()
+
+
 @pytest.mark.django_db
 def test_holder_naming_converters() -> None:
     # 1. auto_camel_case=False
@@ -3016,12 +3128,6 @@ def test_holder_naming_converters() -> None:
     assert json_at(p_err, "errors", 0, "extensions", "argument") == "offset"
 
     # 2. Custom NameConverter
-    class _UpperConverter(NameConverter):
-        @override
-        def get_graphql_name(self, obj: HasGraphQLName) -> str:
-            name = super().get_graphql_name(obj)
-            return name.upper()
-
     @strawberry.type
     class _UpperQuery:
         branches: list[library_schema.BranchType] = DjangoListField(library_schema.BranchType)
@@ -3083,6 +3189,48 @@ def test_holder_naming_converters() -> None:
     p_rejected = _post_sync(counting_schema, "{ branches(OFFSET: -1) { name } }")
     assert json_at(p_rejected, "errors", 0, "extensions", "argument") == "OFFSET"
     assert _CountingConverter.calls - before == per_success
+
+
+@pytest.mark.django_db
+def test_holder_naming_converters_name_the_order_argument() -> None:
+    """Every rejection that names the order argument names it in the published spelling.
+
+    A materialized source's ``queryset_required`` and ``order_required`` refusals
+    and the queryset guard's ``order_required`` refusal each read the order
+    argument's wire name from the executable schema, so under a converter that
+    publishes ``ORDERBY`` none of them falls back to the default ``orderBy``.
+    """
+    library_models.Branch.objects.create(name="Alpha", city="Boston")
+
+    @strawberry.type
+    class _UpperOrderQuery:
+        branches_materialized: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            resolver=_list_resolver(
+                lambda _root, _info: list(library_models.Branch.objects.all()),
+            ),
+        )
+        branches: list[library_schema.BranchType] = DjangoListField(library_schema.BranchType)
+
+    schema = DjangoSchema(
+        query=_UpperOrderQuery,
+        config=strawberry_config(name_converter=_UpperConverter()),
+    )
+    ordering_phrase = "requires an active ordering via 'ORDERBY' or model 'Meta.ordering'."
+
+    p_mat_ord = _post_sync(schema, "{ BRANCHESMATERIALIZED(ORDERBY: []) { NAME } }")
+    assert json_at(p_mat_ord, "errors", 0, "extensions", "reason") == "queryset_required"
+    assert json_at(p_mat_ord, "errors", 0, "extensions", "argument") == "ORDERBY"
+
+    p_mat_off = _post_sync(schema, "{ BRANCHESMATERIALIZED(OFFSET: 1) { NAME } }")
+    assert json_at(p_mat_off, "errors", 0, "extensions", "reason") == "order_required"
+    assert json_at(p_mat_off, "errors", 0, "extensions", "argument") == "OFFSET"
+    assert ordering_phrase in json_str(p_mat_off, "errors", 0, "message")
+
+    p_qs_off = _post_sync(schema, "{ BRANCHES(OFFSET: 1) { NAME } }")
+    assert json_at(p_qs_off, "errors", 0, "extensions", "reason") == "order_required"
+    assert json_at(p_qs_off, "errors", 0, "extensions", "argument") == "OFFSET"
+    assert ordering_phrase in json_str(p_qs_off, "errors", 0, "message")
 
 
 @pytest.mark.django_db

@@ -84,8 +84,7 @@ from django_strawberry_framework.utils.connections import (
 
 
 def test_version() -> None:
-    # Package version literal; card 050 lands on 0.0.15 where ListArgumentError
-    # is exported from the package root.
+    # The single-sourced package version literal.
     assert __version__ == "0.0.15"
 
 

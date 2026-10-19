@@ -1,7 +1,7 @@
 # Build: `DjangoListField` argument surface (`offset`, `limit`, and `orderBy`)
 
-Spec: [`docs/spec-050-list_field_arguments-0_0_15.md`][spec-050]
-Rationale: [`docs/spec-050-list_field_arguments-0_0_15-rationale.md`][spec-050-rationale]
+Spec: [`docs/SPECS/spec-050-list_field_arguments-0_0_15.md`][spec-050]
+Rationale: [`docs/SPECS/appx/spec-050-list_field_arguments-0_0_15-rationale.md`][spec-050-rationale]
 Target release: `0.0.15`
 Status: Closed. The gate, the review and the evidence-only follow-up are recorded under
 `## Closing record`; this paragraph and `## Final gate record` keep the candidate's own text.
@@ -589,8 +589,8 @@ source layout, citations, kanban anchors and tracked-path constants.
 
 ### Deferred work catalog
 
-Every item below left the card under spec Decision 20 or Decision 22 with a named owner;
-none is a Definition-of-done row of this card.
+Every item below left the card with a named owner; none is a Definition-of-done row of this
+card.
 
 - **Connection-field `FilterSet.apply_*` results are re-sealed - discharged** - both public
   sidecar returns are sealed at both fields by the shared entry pairs
@@ -601,18 +601,16 @@ none is a Definition-of-done row of this card.
   pipelines - `connection.py::_pipeline_sync` and `connection.py::_pipeline_async` - route both
   sidecar arms through them, so each field freezes the same routing intent before the override
   runs and validates the return on the same result axes: lazy, model rows of the captured model,
-  unsliced, uncombined, same alias. A hook's result contract does not depend on which field
+  unsliced, same alias, with a combined result served as its primary-key set. A hook's result contract does not depend on which field
   called it, and the row it answers is spec-030 Decision 7's "later steps can only narrow". The
-  `FilterSet.apply_*` half was deferred out of this card to `TODO-ALPHA-053-0.0.15` (rationale,
-  Decision 20 entry), which carried and discharged it together with the adjacent seal-policy
-  asymmetry: a connection request carrying a sidecar input now seals `get_queryset` under
-  `_LIST_ARGUMENT_VISIBILITY_POLICY`, the list field's argument-path rule, while a request with
-  no sidecar input keeps `_DEFAULT_SEAL_POLICY`.
+  `FilterSet.apply_*` half was carried by `TODO-ALPHA-053-0.0.15`. Both fields seal `get_queryset`
+  under the one `_DEFAULT_SEAL_POLICY`, whether or not a sidecar input or list argument is
+  supplied.
 - **An exact `QuerySet` carrying a foreign `_result_cache` escapes the raw-list ceiling** - only
   in-process application Python can write that slot, so the wire-input condition fails; a
   robustness row. Owner: `maintainer`, recorded in this catalog only: `BACKLOG.md` holds
-  scored strategic-differentiation cards, not robustness rows (`bld-050-close-row_carry.md`,
-  final verification).
+  scored strategic-differentiation cards, not robustness rows
+  (`git show 58e7ffc4:docs/builder/bld-050-close-row_carry.md`, final verification).
 - **Retired "unresolved deferred filter" vocabulary** was identified by the historical review at
   the first-party visibility messages and module boundary. The live sites now name the refused
   condition as **malformed deferred-filter state**; the archived
@@ -626,15 +624,30 @@ none is a Definition-of-done row of this card.
 - **`_UNRECOMPOSED_CHILD_POLICY` had zero production readers - discharged** - `4d9f1c3d`
   retired it, and no reference remains under `django_strawberry_framework/`.
 
+### Retired artifacts
+
+The cycle's per-pass artifacts are deleted; each is recoverable from the commit that last held it.
+
+- `git show 795adb1e^:docs/builder/bld-slice-1-argument_normalization.md`
+- `git show 795adb1e^:docs/builder/bld-slice-2-orderby_pipeline.md`
+- `git show 795adb1e^:docs/builder/bld-slice-3-sql_and_unit_contracts.md`
+- `git show 795adb1e^:docs/builder/bld-slice-4-live_acceptance.md`
+- `git show 795adb1e^:docs/builder/bld-slice-5-documentation_fold_in.md`
+- `git show 795adb1e^:docs/builder/bld-integration.md`
+- `git show 795adb1e^:docs/builder/bld-final.md`
+- `git show 58e7ffc4:docs/builder/bld-050-close-row_carry.md`
+- `git show 58e7ffc4:docs/builder/bld-050-close-trust_docs.md`
+- `git show 58e7ffc4:docs/builder/bld-050-close-final.md`
+
 <!-- LINK DEFINITIONS -->
 
 <!-- Root -->
 
 <!-- docs/ -->
-[spec-050]: ../../spec-050-list_field_arguments-0_0_15.md
-[spec-050-rationale]: ../../spec-050-list_field_arguments-0_0_15-rationale.md
 
 <!-- docs/SPECS/ -->
+[spec-050]: ../../SPECS/spec-050-list_field_arguments-0_0_15.md
+[spec-050-rationale]: ../../SPECS/appx/spec-050-list_field_arguments-0_0_15-rationale.md
 
 <!-- docs/builder/ -->
 [build-md]: ../BUILD.md

@@ -30,7 +30,7 @@ Multi-database cooperation,multi-database-cooperation,Queryset database routing 
 Ordering,ordering,Direction enum used by active order terms
 OrderSet,orderset,Existing ordering pipeline reused end to end
 order_input_type,order_input_type,Canonical lazy order input annotation helper
-PEP 562 lazy export,pep-562-lazy-export,Lazy-subpackage contract the signature builder's local orders import must not break
+PEP 562 lazy export,pep-562-lazy-export,Root-import discipline the signature builder's local orders import follows: importing the package root never imports the orders subpackage
 Probe URLconf,probe-urlconf,Test-local mounts carry the exceptional fields and custom converters
 Production error policy,production-error-policy,Context for the error-policy pass-through fixture in the live tier
 Relation handling,relation-handling,Nested raw lists remain connection-backed for pagination

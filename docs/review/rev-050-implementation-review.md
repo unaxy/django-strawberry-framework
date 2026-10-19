@@ -368,7 +368,7 @@ Swept over the 4302 added lines of the 17 in-scope files, with HEAD attribution 
 [start]: ../../START.md
 
 <!-- docs/ -->
-[spec-050]: ../spec-050-list_field_arguments-0_0_15.md
+[spec-050]: ../SPECS/spec-050-list_field_arguments-0_0_15.md
 
 <!-- docs/SPECS/ -->
 

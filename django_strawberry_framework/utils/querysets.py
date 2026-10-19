@@ -520,6 +520,38 @@ def resolve_order_name(
     return ResolvedOrderName(path, final_field, rest, related_opts, substitute)
 
 
+def take_order_expansion_step(
+    resolved: ResolvedOrderName,
+    *,
+    start: object,
+    seen: set[tuple[object, ...]],
+) -> tuple[object, ...] | None:
+    """Record the expansion of ``resolved`` in ``seen`` and return its key, or None on a repeat.
+
+    ``django/db/models/sql/compiler.py::SQLCompiler.find_ordering_name`` threads
+    one ``already_seen`` set through the whole expansion of a top-level ordering
+    term, sibling items of every related ``Meta.ordering`` included, and raises
+    ``FieldError("Infinite loop caused by ordering.")`` when an expansion's key
+    is already in it. The key is the ``join_cols`` of the join the expansion
+    starts from (``start``: None for the query's base table, otherwise the last
+    element of the key of the expansion it hangs under) and of every join its
+    path adds, each the ``(lhs, rhs)`` column pairs
+    ``django/db/models/sql/datastructures.py::Join`` reads off its
+    ``join_field``. A None return is that repeat; ``seen`` is left unchanged.
+    """
+    step = (
+        start,
+        *(
+            tuple((lhs.column, rhs.column) for lhs, rhs in hop.join_field.get_joining_fields())
+            for hop in resolved.path
+        ),
+    )
+    if step in seen:
+        return None
+    seen.add(step)
+    return step
+
+
 def _expanded_order_name(
     query: sql.Query,
     name: str,
@@ -541,12 +573,9 @@ def _expanded_order_name(
     (``utils/relations.py::order_column_paths``), a ``"pk"`` reached through a
     relation as that model's key column. Raises ``_UnexpandableOrderError`` where
     the compiler raises: a name that resolves to no field (a related ``"?"``), a
-    relation step it already took (``"Infinite loop caused by ordering."``,
-    keyed like the compiler's ``already_seen``: the ``join_cols`` of the join a
-    step starts from and of every join it adds, each the ``(lhs, rhs)`` column
-    pairs ``django/db/models/sql/datastructures.py::Join`` reads off its
-    ``join_field``), or an ordering item that is neither a name nor an order
-    expression.
+    relation step ``seen`` already holds (``"Infinite loop caused by
+    ordering."``, keyed by ``take_order_expansion_step``), or an ordering item
+    that is neither a name nor an order expression.
     """
     try:
         resolved = resolve_order_name(query, name, opts)
@@ -562,16 +591,9 @@ def _expanded_order_name(
         # outer query it must name the key column, or a relation key would expand.
         spelled = opts.pk.attname if prefix and name == "pk" else name
         return [f"{sign}{column}" for column in order_column_paths(f"{prefix}{spelled}", terminal)]
-    step = (
-        start,
-        *(
-            tuple((lhs.column, rhs.column) for lhs, rhs in hop.join_field.get_joining_fields())
-            for hop in resolved.path
-        ),
-    )
-    if step in seen:
+    step = take_order_expansion_step(resolved, start=start, seen=seen)
+    if step is None:
         raise _UnexpandableOrderError(name)
-    seen.add(step)
     nested = f"{prefix}{name}{LOOKUP_SEP}"
     expanded: list[str | F | Expression] = []
     for item in ordering:
@@ -3946,15 +3968,19 @@ def _seal_or_defect(
 
     The single sealing primitive both boundary sites run. Returns
     ``(sealed_queryset, None)`` on success, or ``(None, (code, detail))`` on the
-    first defect. Codes run ``type`` -> ``table`` -> ``untrusted`` -> ``routing``
-    -> ``evaluated`` -> ``sliced`` -> ``projection`` -> ``combined`` -> ``alias``
-    (the one canonical ordering
-    every site shares; a new code takes a FIXED position in it, and owes an arm
-    at every message-building site that can reach it), except that the outer
-    exact-``sql.Query`` check (``untrusted``) runs
-    BEFORE the combinator table walk: the walk reads query attributes through
-    normal attribute access, so only a proven-genuine ``sql.Query`` may be
-    walked.
+    first defect. The codes ``type`` / ``table`` / ``untrusted`` / ``routing`` /
+    ``evaluated`` / ``sliced`` / ``projection`` / ``combined`` / ``alias`` are the
+    one vocabulary every message-building site shares (a new code owes an arm at
+    every site that can reach it); they are not one execution order. The checks
+    run: ``type``; ``table`` on the model slot; ``untrusted`` on the outer
+    exact-``sql.Query`` and the retained ``__dict__`` slots; ``routing``; then the
+    combinator table walk, reconstruction, deferred-filter bake, iterable-class,
+    prefetch and result-cache checks (``table`` / ``untrusted``); then
+    ``evaluated`` -> ``sliced`` -> ``projection`` -> ``combined`` -> ``alias``.
+    Routing is proven before any graph walk or clone, so no reconstructed
+    queryset exists for a re-routed candidate; the outer ``sql.Query`` is proven
+    before the walk because the walk reads query attributes through normal
+    attribute access.
 
     Every read of ``candidate`` state comes from its real instance ``__dict__``
     (via ``truth.instance_dict``), never through attribute access, so a custom

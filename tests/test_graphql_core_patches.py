@@ -12,7 +12,7 @@ What stays here, and why a live request cannot express it:
   (``graphql_core`` vs ``strawberry``) toggles. A GraphQL document cannot show
   that ``apply()`` was the caller or that a missing capture refused to install.
 - The captured upstream method still yielding a residual awaitable after one
-  ``await``: that is the retirement sentinel (spec-050 Decision 13). With the
+  ``await``: that is the retirement sentinel (spec-050 Decision 12). With the
   patch installed a live request sees completed list data, never the residual
   coroutine.
 - ``_captured_upstream_method(None, ...)`` returning ``None`` rather than

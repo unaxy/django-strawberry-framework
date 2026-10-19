@@ -234,8 +234,9 @@ independently verifiable; the weight is breadth, not depth.
 - [ ] **Slice 5 — Docs fold-in + the joint `0.0.15` cut + card wrap**
   - [ ] GLOSSARY/TREE/KANBAN fold-in per the completing-spec rules;
         `docs/GLOSSARY.md` status flips for anything this card shipped **and
-        for every other card on the line** (they defer their flips to
-        this cut ([Decision 11](#decision-11--joint-0015-cut--slice-5-owns-the-version-bump))).
+        for every other card on the line** whose rows do not already read
+        `shipped (0.0.15)` (card 050's do)
+        ([Decision 11](#decision-11--joint-0015-cut--slice-5-owns-the-version-bump)).
   - [ ] The version triplet:
         `django_strawberry_framework/__init__.py::__version__` (the single
         version literal — `pyproject.toml` is `dynamic = ["version"]` and
@@ -636,9 +637,9 @@ edge because `051` touches every file in this card's WP list except
 (`django_strawberry_framework/__init__.py::__version__`,
 `tests/base/test_init.py`, the GLOSSARY package-version row) already reads
 `0.0.15` for the open development line; Slice 5 carries the release-status
-doc moves, the glossary status flips **for every card on the line**, and the
-`CHANGELOG.md` release notes. No other card on the line moves any of it
-(`spec-052` Decision 7).
+doc moves, the glossary status flips for every card on the line whose rows do
+not already read `shipped (0.0.15)` (card 050's do), and the `CHANGELOG.md`
+release notes (`spec-052` Decision 7).
 
 ### Decision 12 — TODO anchors stage the unbuilt slices
 
@@ -848,8 +849,8 @@ symbol before closing each item): `ActiveInputPermissionMixin`
       verified or added (Decision 6).
 - [ ] Full suite green under `fail_under = 100`; zero error-string assertion
       edits outside Decisions 6/10; bench deltas at noise level.
-- [ ] Slice 5 shipped: version triplet at `0.0.15`, GLOSSARY flips for
-      every card on the line, `CHANGELOG.md` release notes, card flipped Done,
+- [ ] Slice 5 shipped: version triplet at `0.0.15`, GLOSSARY rows for
+      every card on the line read `shipped (0.0.15)`, `CHANGELOG.md` release notes, card flipped Done,
       `KANBAN.md`/`KANBAN.html` regenerated from the DB, `import_spec_terms`
       green.
 
