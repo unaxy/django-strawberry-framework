@@ -2289,19 +2289,29 @@ def test_extra_hook_root_pages_backward_every_row_once(
     assert [len(tail_captured), len(head_captured)] == [1, 1]
 
 
+def _random_then_issue_pk_order_sql(pk_ordering: str) -> str:
+    """Return the ``ORDER BY`` clause Django compiles for ``order_by("?", pk_ordering)``.
+
+    Django spells ``Random()`` per vendor (``RAND()`` on SQLite, ``RANDOM()`` on
+    PostgreSQL) and quotes names per vendor, so the expected clause is compiled
+    from a reference queryset on the default connection rather than written in
+    one backend's spelling.
+    """
+    reference = models.Issue.objects.order_by("?", pk_ordering)
+    sql, _ = reference.query.sql_with_params()
+    return sql[sql.index("ORDER BY") :]
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("reverse", "order"),
-    [
-        (False, 'ORDER BY RAND() ASC, "library_issue"."id" ASC'),
-        (True, 'ORDER BY RAND() ASC, "library_issue"."id" DESC'),
-    ],
+    ("reverse", "pk_ordering"),
+    [(False, "pk"), (True, "-pk")],
     ids=["forward", "reversed"],
 )
 def test_random_extra_hook_order_keeps_the_pk_tiebreaker_at_the_root(
     *,
     reverse: bool,
-    order: str,
+    pk_ordering: str,
 ) -> None:
     """An ``extra(order_by=["?"])`` hook order serves a random page tie-broken by the pk.
 
@@ -2309,6 +2319,7 @@ def test_random_extra_hook_order_keeps_the_pk_tiebreaker_at_the_root(
     rows at random instead of serving them by the pk alone; the pk joins it
     (descending under ``.reverse()``, which leaves the random term as it is).
     """
+    order = _random_then_issue_pk_order_sql(pk_ordering)
     _seed_hook_order_rows("fk")
     schema = _hook_order_schema(
         "fk",
