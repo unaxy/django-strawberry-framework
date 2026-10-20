@@ -311,14 +311,15 @@ def is_async_callable(
         return True
     # Inspecting ``__call__``'s async-ness, not testing callability -- so
     # ``callable()`` is the wrong tool here. The interpreter looks ``__call__``
-    # up on the CLASS of whatever is called, so that is where it is read, from
-    # the real namespaces (``truth.static_attr``): calling a class runs its
-    # metaclass's ``__call__`` (a plain class resolves to the sync
-    # ``type.__call__`` slot wrapper, a metaclass carrying ``async def
+    # up in the real MRO of the CLASS of whatever is called, never that class's
+    # metaclass, so that is where it is read (``truth.mro_attr``): calling a
+    # class runs its metaclass's ``__call__`` (a plain class resolves to the
+    # sync ``type.__call__`` slot wrapper, a metaclass carrying ``async def
     # __call__`` is genuinely async to call), and calling an instance runs its
-    # class's.
+    # class's (an instance whose class declares no ``__call__`` is not callable,
+    # whatever its class's metaclass carries).
     return inspect.iscoroutinefunction(
-        truth.static_attr(type(target), "__call__"),
+        truth.mro_attr(type(target), "__call__"),
     )
 
 

@@ -544,7 +544,7 @@ def _has_len(rows: Iterable[object]) -> TypeIs[_SizedRows]:
 
     Asked of the row iterable's real class, so an instance ``__getattr__`` never runs.
     """
-    return truth.own_attr(type(rows), "__len__") is not None
+    return truth.mro_attr(type(rows), "__len__") is not None
 
 
 def _check_nodes_result(

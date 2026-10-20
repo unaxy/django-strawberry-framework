@@ -1060,7 +1060,7 @@ def _validate_permission_classes(
         truth.is_instance(value, str)
         or truth.is_instance(value, bytes)
         or truth.is_type(value)
-        or truth.own_attr(truth.class_of(value), "__iter__") is None
+        or truth.mro_attr(truth.class_of(value), "__iter__") is None
     ):
         raise ConfigurationError(
             f"{base_label} {mutation_name}.Meta.permission_classes must be a sequence of "

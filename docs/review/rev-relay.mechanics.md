@@ -32,7 +32,7 @@ the queryset primitives
 (`django_strawberry_framework/utils/querysets.py::model_for`,
 `::coerce_field_value_or_none`, `::reject_async_in_sync_context`),
 `django_strawberry_framework/registry.py::definition_for_graphql_name` +
-`::get`, `django_strawberry_framework/utils/truth.py::own_attr` +
+`::get`, `django_strawberry_framework/utils/truth.py::mro_attr` +
 `::static_attr`, the package root exports, the own test module
 (`tests/test_relay_node_field.py`, whole), spec-032 Decisions 3/4/5/8/11
 and Edge cases, spec-031 Decision 11, spec-047 Decision 9, spec-053

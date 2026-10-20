@@ -19,7 +19,7 @@ import math
 import sys
 import types
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sized
 from typing import NoReturn, Protocol
 
 import pytest
@@ -371,7 +371,7 @@ def _assert_class_identity(cls: type, expected_name: str, expected_module: str) 
     assert truth.bases(cls) == (_Base,)
     assert truth.class_dict(cls)["marker"] == "declared"
     assert truth.static_attr(cls, "marker") == "declared"
-    assert truth.own_attr(cls, "marker") == "declared"
+    assert truth.mro_attr(cls, "marker") == "declared"
     assert truth.render(cls) == f"<class '{expected_module}.{expected_name}'>"
     assert truth.is_subclass(cls, _Base) is True
     assert truth.is_subclass(cls, _Unrelated) is False
@@ -695,8 +695,34 @@ def test_non_class_structure_reads_are_empty() -> None:
 def test_static_attr_on_a_class_falls_back_to_the_metaclass() -> None:
     assert type(truth.static_attr(_LyingChecks, "__instancecheck__")) is types.FunctionType
     assert truth.static_attr(_LyingChecks, "absent", "default") == "default"
-    assert truth.own_attr(_LyingChecks, "__instancecheck__", "none") == "none"
-    assert truth.own_attr(3, "real", "none") == "none"
+    assert truth.mro_attr(_LyingChecks, "__instancecheck__", "none") == "none"
+    assert truth.mro_attr(3, "real", "none") == "none"
+
+
+def test_mro_attr_is_the_special_method_lookup() -> None:
+    class _Color(enum.Enum):
+        RED = 1
+
+    member = _Color.RED
+    member_class = type(member)
+    for dunder in ("__iter__", "__len__", "__getitem__"):
+        # The metaclass carries the dunder, the member's class does not: the
+        # member is not iterable / sized / subscriptable, as ``mro_attr`` says.
+        assert truth.static_attr(member_class, dunder) is truth.static_attr(enum.EnumMeta, dunder)
+        assert truth.static_attr(member_class, dunder) is not None
+        assert truth.mro_attr(member_class, dunder, "absent") == "absent"
+    assert not isinstance(member, Iterable)
+    assert not isinstance(member, Sized)
+
+    class _Unsupported:
+        __iter__ = None
+
+    class _Plain: ...
+
+    assert truth.mro_attr(_Unsupported, "__iter__", "absent") is None
+    assert truth.mro_attr(_Plain, "__iter__", "absent") == "absent"
+    assert truth.mro_attr(member, "__iter__", "absent") == "absent"
+    assert truth.mro_attr(3, "real", "absent") == "absent"
 
 
 def test_static_attr_data_descriptor_beats_instance_dict() -> None:
