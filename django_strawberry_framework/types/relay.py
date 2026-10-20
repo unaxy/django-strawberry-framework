@@ -32,7 +32,6 @@ from weakref import WeakKeyDictionary
 
 from django.apps import apps
 from django.db import models
-from django.db.models import CompositePrimaryKey
 from strawberry import relay
 from strawberry.relay.exceptions import NodeIDAnnotationError
 from strawberry.types.base import StrawberryObjectDefinition
@@ -64,6 +63,7 @@ from django_strawberry_framework.utils.querysets import (
     initial_queryset,
     model_for,
 )
+from django_strawberry_framework.utils.relations import has_composite_pk
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -216,9 +216,10 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
 
     Decision 2 (spec-015 #"Composite primary keys (Django 5.2+) are explicitly out of scope"):
     combining ``relay.Node`` with a composite-primary-key model is explicitly out of scope for
-    ``0.0.5``. Detection uses ``isinstance(model._meta.pk,
-    CompositePrimaryKey)`` so the gate aligns with Django 5.2+'s
-    native composite-pk type.
+    ``0.0.5``. Detection is
+    ``django_strawberry_framework/utils/relations.py::has_composite_pk``
+    (Django's ``Options.is_composite_pk``), the same read the FK-id-elision
+    eligibility test uses.
 
     The error message proposes "declare an explicit ``id: relay.NodeID[...]``
     annotation" as a remediation; honor that here so a consumer who
@@ -230,7 +231,7 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
     gate is meant to catch.
     """
     model = model_for(type_cls)
-    if not isinstance(model._meta.pk, CompositePrimaryKey):
+    if not has_composite_pk(model):
         return
     # Ask Strawberry's annotation scan directly rather than
     # ``type_cls.resolve_id_attr()``: a relay-shaped child of a relay-shaped

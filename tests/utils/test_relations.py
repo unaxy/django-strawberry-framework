@@ -982,10 +982,23 @@ def test_path_traverses_to_many_answers_an_unhashable_model_uncached() -> None:
 
 
 def test_has_composite_pk_cardinality() -> None:
-    """Composite-PK returns True only when pk_fields contains multiple fields."""
+    """Composite-PK returns True only for a model whose pk is a ``CompositePrimaryKey``."""
     assert has_composite_pk(Book) is False
 
     assert has_composite_pk(RpCompositeParent) is True
+
+
+def test_has_composite_pk_follows_a_rebound_pk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rebound ``_meta.pk`` is reported in its current shape, not the cached ``pk_fields``."""
+    single_pk = Book._meta.pk
+    assert len(Book._meta.pk_fields) == 1
+    assert len(RpCompositeParent._meta.pk_fields) == 2
+
+    monkeypatch.setattr(Book._meta, "pk", models.CompositePrimaryKey("title", "subtitle"))
+    monkeypatch.setattr(RpCompositeParent._meta, "pk", single_pk)
+
+    assert has_composite_pk(Book) is True
+    assert has_composite_pk(RpCompositeParent) is False
 
 
 def test_relation_bool_none_value_falls_back_to_default() -> None:

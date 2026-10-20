@@ -23,7 +23,7 @@ from django_strawberry_framework.utils.typing import MISSING_ATTRIBUTE
 from . import truth
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence, Sized
+    from collections.abc import Callable, Sequence
 
     from django.db.models.expressions import Col
     from django.db.models.lookups import Lookup, Transform
@@ -989,15 +989,20 @@ def instance_accessor(field: object) -> str:
 def has_composite_pk(model: type[models.Model]) -> bool:
     """Return whether ``model`` declares a Django 5.2+ composite primary key.
 
-    The FK-id-elision eligibility test (a forward single relation satisfying an
-    id-only child selection from the source row's local FK column) must fail
-    closed for a composite primary key: the source-row ``attname`` carries a
-    single-column id, but the target's ``pk`` is a tuple, so eliding would
-    compare the wrong shapes and surface wrong data. Single-sited here so
-    ``FieldMeta.from_django_field`` stamps ``fk_id_elision_eligible`` the
-    same way for registered types and the walker's unregistered fallback
-    map.
+    Reads Django's own ``Options.is_composite_pk`` property, which checks the
+    live ``_meta.pk`` on every call (``Options.pk_fields`` is a cached
+    property and would keep reporting a pk shape that has since been
+    rebound). Two consumers share this one detection:
+
+    - The FK-id-elision eligibility test (a forward single relation
+      satisfying an id-only child selection from the source row's local FK
+      column) must fail closed for a composite primary key: the source-row
+      ``attname`` carries a single-column id, but the target's ``pk`` is a
+      tuple, so eliding would compare the wrong shapes and surface wrong
+      data. ``FieldMeta.from_django_field`` stamps ``fk_id_elision_eligible``
+      through it the same way for registered types and the walker's
+      unregistered fallback map.
+    - ``django_strawberry_framework/types/relay.py::_check_composite_pk_for_relay_node``
+      rejects a Relay-declared type over a composite-pk model.
     """
-    # Django 5.2+ ``Options.pk_fields`` is a list of fields; older Django lacks it.
-    pk_fields: Sized | None = getattr(model._meta, "pk_fields", None)
-    return pk_fields is not None and len(pk_fields) > 1
+    return model._meta.is_composite_pk
