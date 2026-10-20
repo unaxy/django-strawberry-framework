@@ -44,7 +44,6 @@ wrapper, in the spirit of ``mutations/inputs.py``.
 
 from __future__ import annotations
 
-import keyword
 from types import GenericAlias
 from typing import TYPE_CHECKING, Any, cast
 
@@ -74,6 +73,7 @@ from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     build_strawberry_input_class,
     guard_dropped_required,
+    is_input_attribute_name,
     iter_input_field_collisions,
     make_input_namespace,
     name_set_input_type_name,
@@ -265,31 +265,21 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
             f"DjangoFormMutation for {truth.name(form_class)} get_form_fields() must return "
             "a mapping of field names to forms.Field instances.",
         ) from exc
-    # A field name becomes a generated input attribute (the dataclass renders it
-    # into ``__init__``), so only a non-keyword identifier can survive the build:
-    # a hook returning "" / "with space" / "9lead" / "class" would otherwise pass
-    # the string check and detonate as a raw ``SyntaxError`` out of the generated
-    # ``__init__`` source at input-class construction. ``base_fields`` keys are
-    # always identifiers (declared form attributes / model columns), so this
-    # rejects only names that could never have built an input. A name is
-    # classified by its real class and interrogated as the exact ``str`` copy
-    # ``truth.text`` makes, so a ``str`` subclass's overrides never run.
+    # A field name becomes a generated input attribute, so a name
+    # ``is_input_attribute_name`` refuses is reported here instead of failing the build.
+    # ``base_fields`` keys are always identifiers (declared form attributes / model
+    # columns), so this rejects only hook names that could never have built an input.
     invalid_names: list[object] = []
     invalid_fields: list[object] = []
     valid: dict[str, forms.Field] = {}
     for name, field in basis.items():
-        valid_name = (
-            truth.is_instance(name, str)
-            and truth.text(name).isidentifier()
-            and not keyword.iskeyword(truth.text(name))
-        )
+        valid_name = is_input_attribute_name(name)
         if not valid_name:
             invalid_names.append(name)
-        # The same hook can map a name to any value. The second real-class read of the
-        # name restates the name check for the checker.
+        # The same hook can map a name to any value.
         if not truth.is_instance(field, forms.Field):
             invalid_fields.append(name)
-        elif valid_name and truth.is_instance(name, str):
+        elif valid_name:
             valid[name] = field
     if invalid_names or invalid_fields:
         # The per-entry join keeps the benign ``['a', 'b']`` list-repr byte shape.
