@@ -49,20 +49,37 @@ Deliberate properties, each one a hand-run failure mode this encodes away:
   (``nohup`` for ``SIGHUP``, a background job for ``SIGINT``) stays ignored and
   stops nothing. Only an end no process can intercept (``SIGKILL``, an
   interpreter crash) still leaves a mutation live.
-* **A crash leaves evidence.** While a mutation is live, an
-  ``ACTIVE-MUTATION.json`` marker in the run's scratch directory names the
-  mutated file and the pristine copy that restores it. The run header, the
-  markdown record and ``--json`` all name that directory.
-* **Two runs never share scratch state.** Without ``--scratch-root`` every run
-  gets a fresh ``failability-*`` directory under the system temporary directory
-  (``TMPDIR``), so parallel runs against separate workspace copies cannot
-  overwrite each other's pristine copies, markers or probe logs; a crashed
-  run's marker stays in that directory, which the header printed. With
-  ``--scratch-root`` (or the manifest's ``scratch_root``) the run works in
-  ``<root>/tree-<digest>``, the digest naming the repository root the run
-  mutates: workspace copies sharing one root stay disjoint, and a rerun against
-  the same tree lands in the same directory, so a marker a crashed run left
-  there refuses the run until it is resolved instead of being clobbered.
+* **A crash leaves evidence where every later run looks.** Each repository
+  root has one state directory, ``<state home>/prove_failability/tree-<digest>``,
+  the digest naming the root and the state home being ``$XDG_STATE_HOME`` when it
+  is an absolute path and ``~/.local/state`` otherwise; the directories the run
+  creates there are mode ``0700``. Nothing a run is given moves it: not
+  ``--scratch-root``, not the manifest, not ``TMPDIR``. While a mutation is live
+  it holds the pristine copies and an ``ACTIVE-MUTATION.json`` marker naming the
+  mutated file and the pristine copy that restores it, so the restore source
+  lives as long as the marker does, past a ``TMPDIR`` purge or a reboot that
+  empties ``/tmp``. A marker found there refuses every later run against that
+  tree, whatever scratch root it uses, until it is resolved; a crashed run's
+  mutated bytes are never copied as the next run's pristine. Once every file's
+  restore is proved the marker is deleted first, then the copies move to the
+  scratch directory, then the tree's state directory is removed, so at rest it
+  does not exist; a run that finds no marker there first deletes any copies a
+  run killed outside that window left. A restore that could not be proved
+  leaves the copies and the markers in it. ``prove_failability`` must be a real
+  directory owned by this user, or the run is refused. The run header, the
+  markdown record and ``--json`` all name the marker.
+* **Scratch is per tree and holds what a run observed.** The probe plugin, the
+  raw run logs and the pristine copies of proved restores go to
+  ``<root>/tree-<digest>`` under ``--scratch-root`` (or the manifest's
+  ``scratch_root``), and to ``failability/tree-<digest>`` under the system
+  temporary directory (``TMPDIR``) when no root is given, so workspace copies
+  sharing one root stay disjoint and every run against one tree reuses its own
+  directory, one run at a time under the lock; a later run against the same
+  tree and scratch root overwrites the earlier run's logs and pristine copies.
+  The scratch directory may not overlap the state directory. The default
+  ``failability`` directory is created mode ``0700``, and a symlink or another
+  user's directory there refuses the run, since other users may write to the
+  temporary directory.
 * **One run per tree.** Every run, with or without ``--scratch-root``, holds an
   exclusive ``flock`` on the repository root directory it mutates from before
   it resolves its scratch directory until the run ends, so a second concurrent run
@@ -215,14 +232,14 @@ not a valid count), or its anchor did not match exactly once, or the manifest is
 unusable, or ``--output`` was asked for without a baseline, or ``--workspace``
 refused the root, or another run holds this tree's lock, or a crashed run's
 marker is unresolved; ``3`` a restore could not be proved (the tree may still
-hold a mutation - read the marker file the run leaves behind; the partial report
-is still written to ``--output`` and ``--json``); ``128 + N`` the stop signal
-``N`` (``130`` SIGINT, ``143`` SIGTERM, ``129`` SIGHUP, ``131`` SIGQUIT) ended
-the run after every mutation it made was restored and proved, and no record was
-written. When the interpreter runs this script directly, such a run then ends
-by that signal (a shell reports the same ``128 + N``; a ``subprocess`` parent
-sees ``-N``), so a calling loop stops as it would for any process the signal
-ended. Under ``uv run``, uv exits ``128 + N``.
+hold a mutation - read the marker files the run leaves in the tree's state
+directory; the partial report is still written to ``--output`` and ``--json``);
+``128 + N`` the stop signal ``N`` (``130`` SIGINT, ``143`` SIGTERM, ``129``
+SIGHUP, ``131`` SIGQUIT) ended the run after every mutation it made was
+restored and proved, and no record was written. When the interpreter runs this
+script directly, such a run then ends by that signal (a shell reports the same
+``128 + N``; a ``subprocess`` parent sees ``-N``), so a calling loop stops as it
+would for any process the signal ended. Under ``uv run``, uv exits ``128 + N``.
 """
 
 from __future__ import annotations
@@ -240,6 +257,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -259,7 +277,14 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # ``json.loads`` returns ``Any``; this alias hands callers an ``object`` to narrow.
 _loads: Callable[[str], object] = json.loads
-DEFAULT_SCRATCH_PREFIX = "failability-"
+# The XDG base directory variable for state that outlives a restart; an unset, empty or
+# relative value falls back to ``~/.local/state`` as the specification says.
+STATE_HOME_ENV = "XDG_STATE_HOME"
+STATE_DIRECTORY_NAME = "prove_failability"
+# The XDG specification's mode for a directory created under the state home.
+STATE_DIRECTORY_MODE = 0o700
+# Without --scratch-root, scratch is ``<system temporary directory>/failability/tree-<digest>``.
+DEFAULT_SCRATCH_DIRECTORY_NAME = "failability"
 TREE_NAMESPACE_PREFIX = "tree-"
 TREE_NAMESPACE_DIGEST_LENGTH = 16
 PRISTINE_DIRECTORY_NAME = "pristine"
@@ -1138,25 +1163,121 @@ def _refuse_inside_repository(directory: Path) -> None:
         )
 
 
+def _state_home() -> Path:
+    """Return the XDG state home: ``$XDG_STATE_HOME`` when absolute, else ``~/.local/state``."""
+    configured = os.environ.get(STATE_HOME_ENV, "")
+    if configured and Path(configured).is_absolute():
+        return Path(configured)
+    return Path.home() / ".local" / "state"
+
+
+def _tree_state_directory() -> Path:
+    """Return the state directory of the repository root this run mutates, creating nothing.
+
+    While a mutation is live it holds that mutation's pristine copies and the
+    live-mutation marker, and a restore that could not be proved leaves them
+    there with the restore-failed marker; at rest it does not exist. Its path
+    is a function of the repository root and the state home alone, so every run
+    against one tree finds the marker a crashed run left there, whatever scratch
+    root either run was given.
+    """
+    directory = _state_home().resolve() / STATE_DIRECTORY_NAME / _tree_namespace()
+    _refuse_inside_repository(directory)
+    return directory
+
+
+def _claim_private_directory(directory: Path) -> None:
+    """Create ``directory`` with ``STATE_DIRECTORY_MODE`` unless it exists; refuse a foreign one.
+
+    The directory is shared by every run of this user (the default scratch
+    parent under the system temporary directory, the state home's
+    ``prove_failability``), so in a temporary directory other users can write
+    to it may have been made by someone else first. Only a real directory, not
+    a symlink, owned by this user is used; anything else refuses the run before
+    anything is written into it.
+    """
+    directory.mkdir(mode=STATE_DIRECTORY_MODE, exist_ok=True)
+    status = directory.lstat()
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
+        raise ScratchRootError(
+            f"{directory} is not a directory owned by this user (uid {os.getuid()}): a symlink "
+            "or another user's directory there could redirect or expose the pristine copies, "
+            "so nothing was written; remove it or pass --scratch-root",
+        )
+
+
+def _claim_state_home() -> None:
+    """Create the state home and its ``prove_failability`` directory, refusing a foreign one."""
+    home = _state_home().resolve()
+    home.mkdir(mode=STATE_DIRECTORY_MODE, parents=True, exist_ok=True)
+    _claim_private_directory(home / STATE_DIRECTORY_NAME)
+
+
+def _sweep_orphaned_copies(directory: Path) -> None:
+    """Delete what a finished or resolved run left with no marker, then the state directory.
+
+    Called only under the tree's lock once no ``ACTIVE-MUTATION.json`` marker is
+    there, so no run that wrote these files is alive and none of them is a live
+    mutation's restore source. Pristine copies come from a run killed before
+    its mutation was applied or after its restore was proved; a
+    ``RESTORE-FAILED.json`` describes a failed restore whose live-mutation
+    marker was deleted once it was resolved.
+    """
+    pristine_directory = directory / PRISTINE_DIRECTORY_NAME
+    if pristine_directory.is_dir():
+        for path in pristine_directory.iterdir():
+            if path.is_file():
+                path.unlink()
+    (directory / RESTORE_FAILED_MARKER_NAME).unlink(missing_ok=True)
+    for path in (pristine_directory, directory):
+        with contextlib.suppress(OSError):
+            path.rmdir()
+
+
+def _open_tree_state_directory() -> Path:
+    """Create the tree's state directory and its ``pristine`` directory; return the latter.
+
+    Both get ``STATE_DIRECTORY_MODE``, as the XDG specification asks, under the
+    state home and ``prove_failability`` claimed (again) as the run claimed them.
+    """
+    directory = _tree_state_directory()
+    _claim_state_home()
+    pristine_directory = directory / PRISTINE_DIRECTORY_NAME
+    for path in (directory, pristine_directory):
+        path.mkdir(mode=STATE_DIRECTORY_MODE, exist_ok=True)
+    return pristine_directory
+
+
 def _resolve_scratch_root(raw_root: str | None) -> Path:
     """Return this run's scratch directory, refusing any location inside the repository.
 
-    Without ``raw_root`` the directory is a fresh ``failability-*`` directory
-    under the system temporary directory, so no two runs share one. With
-    ``raw_root`` it is ``<raw_root>/tree-<digest>`` for the repository root this
-    run mutates: runs against different workspace copies get disjoint
-    directories, and a rerun against the same tree gets the one a crashed run
-    left its marker in.
+    It is ``<raw_root>/tree-<digest>`` for the repository root this run mutates,
+    or ``<system temporary directory>/failability/tree-<digest>`` without
+    ``raw_root``, so runs against different workspace copies get disjoint
+    directories and every run against one tree reuses its own, the tree's lock
+    keeping it to one run at a time. It holds the probe plugin, the run logs
+    and the pristine copies of proved restores, never a live mutation's state.
+    The default parent must be a real directory owned by this user, as
+    :func:`_claim_private_directory` checks; an explicit root is the caller's.
     """
     given = _given_scratch_root(raw_root)
+    parent = (
+        Path(tempfile.gettempdir()).resolve() / DEFAULT_SCRATCH_DIRECTORY_NAME
+        if given is None
+        else given
+    )
+    resolved = parent / _tree_namespace()
+    _refuse_inside_repository(resolved)
+    state_directory = _tree_state_directory()
+    if _is_within(resolved, state_directory) or _is_within(state_directory, resolved):
+        raise ScratchRootError(
+            f"scratch directory {resolved} overlaps the tree's state directory "
+            f"{state_directory}: the sweep that empties the state directory would delete "
+            "proved runs' pristine copies, so nothing was written; pass another --scratch-root",
+        )
     if given is None:
-        parent = Path(tempfile.gettempdir()).resolve()
-        _refuse_inside_repository(parent)
-        resolved = Path(tempfile.mkdtemp(prefix=DEFAULT_SCRATCH_PREFIX, dir=parent)).resolve()
-    else:
-        resolved = given / _tree_namespace()
-        _refuse_inside_repository(resolved)
-    (resolved / PRISTINE_DIRECTORY_NAME).mkdir(parents=True, exist_ok=True)
+        _claim_private_directory(parent)
+    resolved.mkdir(parents=True, exist_ok=True)
     return resolved
 
 
@@ -1216,7 +1337,7 @@ def _lock_repository_root() -> int:
 
 
 def _refuse_live_marker(directory: Path) -> None:
-    """Refuse the run when the scratch directory holds an ``ACTIVE-MUTATION.json`` marker."""
+    """Refuse the run when the tree's state directory holds an ``ACTIVE-MUTATION.json`` marker."""
     marker = directory / ACTIVE_MARKER_NAME
     if marker.exists():
         raise ScratchRootError(
@@ -1225,18 +1346,26 @@ def _refuse_live_marker(directory: Path) -> None:
 
 
 def _claim_repository_root(raw_root: str | None) -> tuple[int, Path]:
-    """Lock this run's tree, then resolve its scratch directory and refuse a live marker there.
+    """Lock this run's tree, refuse a live marker in its state directory, resolve its scratch.
 
     Returns the lock's descriptor, which :func:`main` closes when the run ends,
     and the scratch directory. A refusal after the lock was taken releases it.
     An ``ACTIVE-MUTATION.json`` marker refuses the run whoever wrote it: under
     the lock it can only be a crashed run's, which may have left a mutation
-    that the marker alone says how to restore.
+    that the marker alone says how to restore. It is looked for in the tree's
+    state directory, which no scratch root moves, so a run given any scratch
+    root, or none, finds it. With no marker there, pristine copies and a
+    resolved restore-failed marker are swept away first, so the state directory
+    is empty at rest. A scratch directory that is the state directory, or lies
+    inside it or around it, is refused before it is created.
     """
     lock = _lock_repository_root()
     try:
+        state_directory = _tree_state_directory()
+        _claim_state_home()
+        _refuse_live_marker(state_directory)
+        _sweep_orphaned_copies(state_directory)
         directory = _resolve_scratch_root(raw_root)
-        _refuse_live_marker(directory)
     except BaseException:
         os.close(lock)
         raise
@@ -2038,6 +2167,12 @@ def execute_entry(
     function only as :class:`RunInterruptedError` from a finished scope run,
     so the ``finally`` is never cut short. A restore that cannot be proved raises
     :class:`RestoreProofError` rather than being reported as one entry's failure.
+
+    The copies go to the tree's state directory, beside the live-mutation
+    marker that names them. However the entry ends with no mutation live, the
+    marker is gone first and the copies then move to ``<scratch>/pristine``,
+    where the returned records name them; a restore that could not be proved
+    leaves both in the state directory.
     """
     try:
         plan = _plan_files(entry)
@@ -2055,13 +2190,22 @@ def execute_entry(
             restore_proof="not applicable; --check-anchors-only",
             failure=None,
         )
+    state_directory = _tree_state_directory()
+    marker = state_directory / ACTIVE_MARKER_NAME
     pristines: list[Path] = []
-    for planned in plan:
-        pristine = (
-            scratch_root / PRISTINE_DIRECTORY_NAME / _pristine_name_for(entry, planned.target)
-        )
+    destination = state_directory
+    # No mutation is live until the marker is written, nor once every restore is proved
+    # and the marker deleted; whenever the entry ends that way, its copies leave the state
+    # directory. A restore that could not be proved leaves them there with the markers.
+    no_mutation_live = True
+    moved: dict[Path, Path] = {}
+    try:
         try:
-            _ = shutil.copy2(planned.target, pristine)
+            pristine_directory = _open_tree_state_directory()
+            for planned in plan:
+                destination = pristine_directory / _pristine_name_for(entry, planned.target)
+                _ = shutil.copy2(planned.target, destination)
+                pristines.append(destination)
         except OSError as error:
             # Nothing has been mutated yet, so this is one entry's failure and not a
             # tree emergency - but it must never become "mutate first, copy later".
@@ -2070,27 +2214,33 @@ def execute_entry(
                 outcome=None,
                 restore_proof="not applicable; nothing was mutated",
                 failure=(
-                    f"the pre-mutation copy to {pristine} failed ({error}); nothing was mutated"
+                    f"the pre-mutation copy to {destination} failed ({error}); nothing was mutated"
                 ),
             )
-        pristines.append(pristine)
-    baseline = (
-        _run_scope(entry, _new_capture(scratch_root, entry, "baseline"))
-        if capture_baseline
-        else None
-    )
-    pre_existing = baseline.failed_node_ids if baseline is not None else ()
-    marker = scratch_root / ACTIVE_MARKER_NAME
-    _write_marker(marker, _marker_payload(entry, plan, pristines))
-    mutated_blobs: dict[Path, str] = {}
-    try:
-        for planned in plan:
-            _ = planned.target.write_bytes(planned.mutated)
-            mutated_blobs[planned.target] = git_blob_id(planned.target.read_bytes())
-        outcome = _run_scope(entry, _new_capture(scratch_root, entry, "mutant"))
+        baseline = (
+            _run_scope(entry, _new_capture(scratch_root, entry, "baseline"))
+            if capture_baseline
+            else None
+        )
+        pre_existing = baseline.failed_node_ids if baseline is not None else ()
+        _write_marker(marker, _marker_payload(entry, plan, pristines))
+        no_mutation_live = False
+        mutated_blobs: dict[Path, str] = {}
+        try:
+            for planned in plan:
+                _ = planned.target.write_bytes(planned.mutated)
+                mutated_blobs[planned.target] = git_blob_id(planned.target.read_bytes())
+            outcome = _run_scope(entry, _new_capture(scratch_root, entry, "mutant"))
+        finally:
+            files = _restore_every_file(entry, plan, pristines, mutated_blobs, state_directory)
+            marker.unlink(missing_ok=True)
+            no_mutation_live = True
     finally:
-        files = _restore_every_file(entry, plan, pristines, mutated_blobs, scratch_root)
-        marker.unlink(missing_ok=True)
+        if no_mutation_live:
+            moved = _retire_pristine_copies(pristines, scratch_root, state_directory)
+    files = tuple(
+        dataclasses.replace(record, pristine=str(moved[Path(record.pristine)])) for record in files
+    )
     return ProofResult(
         entry=entry,
         outcome=outcome,
@@ -2168,12 +2318,43 @@ def _marker_payload(
     }
 
 
+def _retire_pristine_copies(
+    pristines: Sequence[Path],
+    scratch_root: Path,
+    state_directory: Path,
+) -> dict[Path, Path]:
+    """Move an entry's pristine copies to ``<scratch>/pristine``; return where each now is.
+
+    Called only once no mutation of the entry's is live, after its marker is
+    deleted, so a marker never names a copy that has moved. Each copy keeps
+    its name; one that cannot be moved stays in the state directory, and the
+    returned mapping names it there. The tree's state directory is then removed
+    if nothing is left in it, so at rest it does not exist; the shared
+    ``prove_failability`` directory above it stays.
+    """
+    destination_directory = scratch_root / PRISTINE_DIRECTORY_NAME
+    moved: dict[Path, Path] = {}
+    for pristine in pristines:
+        destination = destination_directory / pristine.name
+        try:
+            destination_directory.mkdir(parents=True, exist_ok=True)
+            _ = shutil.move(pristine, destination)
+        except OSError:
+            moved[pristine] = pristine
+        else:
+            moved[pristine] = destination
+    for directory in (state_directory / PRISTINE_DIRECTORY_NAME, state_directory):
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+    return moved
+
+
 def _restore_every_file(
     entry: ProofEntry,
     plan: Sequence[PlannedFile],
     pristines: Sequence[Path],
     mutated_blobs: dict[Path, str],
-    scratch_root: Path,
+    state_directory: Path,
 ) -> tuple[FileRecord, ...]:
     """Restore and byte-prove every planned file, attempting all before raising.
 
@@ -2206,7 +2387,7 @@ def _restore_every_file(
     if failures:
         first_planned, first_pristine, first_error = failures[0]
         _write_marker(
-            scratch_root / RESTORE_FAILED_MARKER_NAME,
+            state_directory / RESTORE_FAILED_MARKER_NAME,
             {
                 "label": entry.label,
                 "mutated_file": str(first_planned.target),
@@ -2295,33 +2476,46 @@ def _expectation_verdict(expectation: Expectation, failed_count: int) -> str:
 class ReportContext:
     """Where the run happened: the tree mutated, the declared workspace, the scratch directory.
 
-    ``scratch_root`` is the directory this run wrote its pristine copies, probe
-    logs and markers to; ``scratch_root_given`` is the explicit root it was
-    namespaced under, or ``None`` when the run made a fresh directory.
+    ``scratch_root`` is the directory this run wrote its probe plugin, run logs
+    and the pristine copies of proved restores to; ``scratch_root_given`` is the
+    explicit root it was namespaced under, or ``None`` when it is the tree's
+    namespace under the system temporary directory. ``state_directory`` is where
+    a live mutation's pristine copies and markers sit, whatever the scratch.
     """
 
     repo_root: Path
     workspace: Path | None
     scratch_root: Path
+    state_directory: Path
     scratch_root_given: Path | None = None
 
     @property
     def active_marker(self) -> Path:
         """Return where a live mutation's marker sits while the mutation is live."""
-        return self.scratch_root / ACTIVE_MARKER_NAME
+        return self.state_directory / ACTIVE_MARKER_NAME
+
+    @property
+    def restore_failed_marker(self) -> Path:
+        """Return where a restore that could not be proved is recorded."""
+        return self.state_directory / RESTORE_FAILED_MARKER_NAME
 
     def describe_scratch(self) -> str:
         """Return where this run's scratch state lives and how it was chosen."""
         if self.scratch_root_given is None:
-            origin = "fresh for this run (no scratch root given)"
+            origin = (
+                "this repository root's namespace under the system temporary directory "
+                "(no scratch root given)"
+            )
         else:
             origin = (
                 f"this repository root's namespace under the given scratch root "
                 f"`{self.scratch_root_given}`"
             )
         return (
-            f"scratch directory `{self.scratch_root}`, {origin}; a crashed run's live-mutation "
-            f"marker is `{self.active_marker}`"
+            f"scratch directory `{self.scratch_root}`, {origin}; while a mutation is live its "
+            f"pristine copies and the live-mutation marker `{self.active_marker}` are in the "
+            f"state directory `{self.state_directory}`, and the copies move to the scratch "
+            "directory once the restore is proved"
         )
 
     def describe(self) -> str:
@@ -2358,8 +2552,9 @@ def render_report(
     if selection is not None and selection.is_partial:
         lines.extend(_partial_record_notice(selection))
     lines.append(
-        "Procedure, mechanized by `scripts/prove_failability.py`: the target is copied to a "
-        "scratch path OUTSIDE the repo before any mutation; the mutation site is located by an "
+        "Procedure, mechanized by `scripts/prove_failability.py`: the target is copied to the "
+        "tree's state directory OUTSIDE the repo before any mutation, and the copy moves to the "
+        "scratch directory once the restore is proved; the mutation site is located by an "
         "exact anchor asserted to match exactly once (any other count aborts the entry without "
         "writing); the same focused scope is run unmutated first, so rows already failing before "
         "the mutation are differenced out of the count; both runs' pytest exit codes are read, "
@@ -2673,6 +2868,7 @@ def build_json_report(
         "scratch_root_given": (
             None if context.scratch_root_given is None else str(context.scratch_root_given)
         ),
+        "state_directory": str(context.state_directory),
         "active_marker": str(context.active_marker),
         "manifest": str(manifest_path.resolve()),
         "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
@@ -2763,10 +2959,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--scratch-root",
         default=None,
         help=(
-            "directory for pristine copies, probe logs and markers; must be OUTSIDE the "
-            "repository. The run works in <root>/tree-<digest of the repository root>, and a "
-            "live ACTIVE-MUTATION.json there refuses the run. Default: a fresh failability-* "
-            "directory under the system temporary directory, named in the run header"
+            "directory for the probe plugin, run logs and the pristine copies of proved "
+            "restores; must be OUTSIDE the repository. The run works in <root>/tree-<digest of "
+            "the repository root>. While a mutation is live its pristine copies and the "
+            "ACTIVE-MUTATION.json marker sit in the tree's state directory ($XDG_STATE_HOME or "
+            "~/.local/state, then prove_failability/tree-<digest>) whatever this is, and a "
+            "marker there refuses the run. Default: the system temporary directory's "
+            "failability/tree-<digest>, where failability must be a real directory owned by "
+            "this user"
         ),
     )
     _ = parser.add_argument(
@@ -2860,6 +3060,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repo_root=REPO_ROOT,
             workspace=workspace,
             scratch_root=scratch_root,
+            state_directory=_tree_state_directory(),
             scratch_root_given=_given_scratch_root(raw_scratch_root),
         )
         with _stop_on_signals():
@@ -2920,7 +3121,7 @@ def _run_selected(
                 provenance_required=workspace is not None,
             )
         except RestoreProofError as error:
-            marker = scratch_root / RESTORE_FAILED_MARKER_NAME
+            marker = context.restore_failed_marker
             print("\n" + "!" * 78, file=sys.stderr)
             print("RESTORE FAILED - THE WORKING TREE MAY STILL HOLD A MUTATION", file=sys.stderr)
             print(f"  {error}", file=sys.stderr)

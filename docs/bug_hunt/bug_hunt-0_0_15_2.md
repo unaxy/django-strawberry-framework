@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 158 done, 126 to do.
+Progress: 160 done, 124 to do.
 
 ## Done
 
@@ -529,6 +529,16 @@ Progress: 158 done, 126 to do.
   located save, `save_m2m()`) inside `forced_save_or_field_errors`, and the serializer flavor answers a witnessed INSERT
   under the authorized pk as `conflict`; every flavor now returns the in-band `conflict` envelope on `id`, rolled back;
   single-table rows keep `update_fields=None`; fakeshop gains the three `UpdateLendingDesk` flavors
+- [x] 121. A crashed `prove_failability.py` run left its `ACTIVE-MUTATION.json` marker where no later run looked (a
+  fresh `failability-*` dir per default-mode run; an explicit `--scratch-root` was checked only under that same root),
+  so a rerun on another entry of the mutated file copied the mutated bytes as pristine and printed a byte-comparison
+  restore claim: fixed, the live crash state (pristine copies, the marker, `RESTORE-FAILED.json`) lives in one per-tree
+  state directory under `$XDG_STATE_HOME` or `~/.local/state`, which every run checks under the tree lock whatever its
+  scratch root (8 of 10 crash-then-rerun cells ran at HEAD, 10 of 10 are refused now); the directory is 0700, empty at
+  rest (a proved restore moves the copies into scratch, a run with no marker sweeps leftovers), and default scratch is
+  `failability/tree-<digest>` under the system temporary directory, refused unless a real directory owned by the user
+- [x] 123. BUILD.md "Mechanized: `scripts/prove_failability.py`" called the tool's default scratch "a bare `/tmp` path":
+  fixed with 121, it names `failability/tree-<digest>` under the system temporary directory and the state directory
 
 ## Outside review of the fixes
 
@@ -569,11 +579,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 121. A crashed `prove_failability.py` run without `--scratch-root` leaves its marker in its own `failability-*`
-  directory, so the next default-mode run is not refused and reads the mutated tree; a `pre_image` or `reverse_patch`
-  entry would copy the mutated bytes as pristine
-- [ ] 123. BUILD.md "Mechanized: `scripts/prove_failability.py`" says the tool's default scratch is "a bare `/tmp` path";
-  it is a fresh `failability-*` directory under `TMPDIR`
 - [ ] 132. A `SerializerMutation` whose `Meta.fields` narrowing keeps a relation to a Relay-Node type fails schema build
   (`TypeError: Mutation fields cannot be resolved. '<...>PartialInput'`), create and update, e.g. `Shelf.branch`; a non-Relay
   target builds

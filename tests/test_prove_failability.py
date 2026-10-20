@@ -33,19 +33,26 @@ The optional manifest fields have rows of their own: a declared
 fail), several sites mutate and restore together, a ``pre_image`` or
 ``reverse_patch`` reverts a file without git, the probe plugin reports the
 package ``__file__`` and database ``NAME`` from inside pytest, ``--workspace``
-refuses a root outside the copy, ``--json`` carries the whole record, and
-two runs never share scratch state: without ``--scratch-root`` each run makes a
-fresh directory, and under one explicit root each repository root gets its own
-namespace whose live marker refuses a run against that tree. Every run, with or
-without a scratch root and anchors-only included, holds an exclusive kernel lock on
-the tree itself for its whole duration, which refuses a second concurrent run before
-it writes anything, involves no file, and leaves nothing behind when its holder dies.
-The original single-anchor shape reads and grades exactly as it did.
+refuses a root outside the copy, and ``--json`` carries the whole record. Each
+repository root keeps a live mutation's pristine copies and marker in one state
+directory that no scratch root moves, so a crashed run's marker refuses every
+later run against that tree, with or without a scratch root; the directory is
+private to its owner, a failed restore leaves everything in it, and once every
+restore is proved the copies move to the run's scratch directory, where the
+record names them, and the directory is gone. Scratch is per tree under an
+explicit root and under the system temporary directory alike, so two runs
+against one tree share it and two trees never do. Every run, with or without a
+scratch root and anchors-only included, holds an exclusive kernel lock on the
+tree itself for its whole duration, which refuses a second concurrent run before
+it writes anything, involves no file, and leaves nothing behind when its holder
+dies. The original single-anchor shape reads and grades exactly as it did.
 
 ``REPO_ROOT`` is monkeypatched to a ``tmp_path`` fake repo (as
-``tests/test_clean_up.py`` does) and ``_run_scope`` is stubbed or given a
-stand-in command for ``uv run pytest``, so no test here mutates a real file or
-spawns a real pytest.
+``tests/test_clean_up.py`` does), ``XDG_STATE_HOME`` and the system temporary
+directory (``tempfile.tempdir`` and ``TMPDIR``) point into ``tmp_path``, and
+``_run_scope`` is stubbed or given a stand-in command for ``uv run pytest``, so
+no test here mutates a real file, writes under the home or temporary directory
+or spawns a real pytest.
 
 A stop signal (SIGINT, SIGTERM, SIGHUP, SIGQUIT) is delivered for real, by the kernel, to
 ``main`` running in a child process against the fake repo: the stand-in scope
@@ -119,6 +126,24 @@ SOURCE = """def gate(value):
 ANCHOR = '    if value is None:\n        raise ValueError("no")'
 
 
+@pytest.fixture(autouse=True)
+def state_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the state home into ``tmp_path``; the environment reaches child runs too."""
+    home = tmp_path / "state-home"
+    monkeypatch.setenv(prove_failability.STATE_HOME_ENV, str(home))
+    return home
+
+
+@pytest.fixture(autouse=True)
+def system_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the system temporary directory into ``tmp_path``, in process and in child runs."""
+    directory = tmp_path / "system-tmp"
+    directory.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(directory))
+    monkeypatch.setenv("TMPDIR", str(directory))
+    return directory
+
+
 @pytest.fixture
 def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repo = tmp_path / "repo"
@@ -132,8 +157,15 @@ def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def scratch_root(tmp_path: Path) -> Path:
     root = tmp_path / "scratch"
-    (root / prove_failability.PRISTINE_DIRECTORY_NAME).mkdir(parents=True)
+    root.mkdir()
     return root
+
+
+@pytest.fixture
+def state_directory(fake_repo: Path) -> Path:
+    """Return the fake repository root's state directory, which exists only while it is used."""
+    assert fake_repo == prove_failability.REPO_ROOT
+    return prove_failability._tree_state_directory()
 
 
 def _never_identical(*_args: object, **_kwargs: object) -> bool:
@@ -271,6 +303,7 @@ def _provenance(
 def test_a_proof_mutates_runs_restores_and_proves_the_restore_by_byte_comparison(
     fake_repo: Path,
     scratch_root: Path,
+    state_directory: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -287,12 +320,13 @@ def test_a_proof_mutates_runs_restores_and_proves_the_restore_by_byte_comparison
     assert result.failed_count == 2
     assert result.failure is None
     # No marker survives a proved restore, so a leftover marker always means trouble.
-    assert not (scratch_root / prove_failability.ACTIVE_MARKER_NAME).exists()
+    assert not (state_directory / prove_failability.ACTIVE_MARKER_NAME).exists()
 
 
 def test_the_mutated_text_is_what_the_scope_actually_runs_against(
     fake_repo: Path,
     scratch_root: Path,
+    state_directory: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -309,11 +343,11 @@ def test_the_mutated_text_is_what_the_scope_actually_runs_against(
         observed[f"text{len(calls)}"] = target.read_text(encoding="utf-8")
         if len(calls) == 1:
             # The baseline runs before the marker is written: nothing is mutated yet.
-            assert not (scratch_root / prove_failability.ACTIVE_MARKER_NAME).exists()
+            assert not (state_directory / prove_failability.ACTIVE_MARKER_NAME).exists()
         else:
             markers.append(
                 _json_object(
-                    (scratch_root / prove_failability.ACTIVE_MARKER_NAME).read_text(
+                    (state_directory / prove_failability.ACTIVE_MARKER_NAME).read_text(
                         encoding="utf-8",
                     ),
                 ),
@@ -331,6 +365,7 @@ def test_the_mutated_text_is_what_the_scope_actually_runs_against(
     restore_from = marker["restore_from"]
     assert isinstance(restore_from, str)
     assert restore_from.endswith("__package__views.py")
+    assert Path(restore_from).parent == state_directory / prove_failability.PRISTINE_DIRECTORY_NAME
 
 
 def test_a_delete_entry_removes_the_anchor_text(
@@ -388,6 +423,7 @@ def test_a_delete_entry_removes_the_anchor_text(
 def test_an_anchor_that_does_not_match_exactly_once_mutates_nothing(
     fake_repo: Path,
     scratch_root: Path,
+    state_directory: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     anchor: str,
@@ -403,7 +439,7 @@ def test_an_anchor_that_does_not_match_exactly_once_mutates_nothing(
     assert f"anchor matched {expected} times" in result.failure
     assert result.outcome is None
     assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
-    assert not list((scratch_root / prove_failability.PRISTINE_DIRECTORY_NAME).iterdir())
+    assert not state_directory.exists()
 
 
 @pytest.mark.usefixtures("fake_repo")
@@ -431,6 +467,7 @@ def test_check_anchors_only_validates_without_mutating_or_running(
 def test_a_failed_restore_raises_writes_a_marker_and_stops_the_run(
     fake_repo: Path,
     scratch_root: Path,
+    state_directory: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,11 +478,21 @@ def test_a_failed_restore_raises_writes_a_marker_and_stops_the_run(
         prove_failability.execute_entry(_single_entry(tmp_path), scratch_root)
 
     marker = _json_object(
-        (scratch_root / prove_failability.RESTORE_FAILED_MARKER_NAME).read_text(encoding="utf-8"),
+        (state_directory / prove_failability.RESTORE_FAILED_MARKER_NAME).read_text(
+            encoding="utf-8",
+        ),
     )
     assert marker["mutated_file"] == str(fake_repo / "package" / "views.py")
-    # The active marker deliberately survives: it is what identifies the live mutation.
-    assert (scratch_root / prove_failability.ACTIVE_MARKER_NAME).exists()
+    # The active marker deliberately survives: it is what identifies the live mutation,
+    # and the pristine copy it names stays beside it rather than moving to scratch.
+    active = _json_object(
+        (state_directory / prove_failability.ACTIVE_MARKER_NAME).read_text(encoding="utf-8"),
+    )
+    restore_from = Path(_text(active, "restore_from"))
+    assert restore_from.parent == state_directory / prove_failability.PRISTINE_DIRECTORY_NAME
+    assert restore_from.read_text(encoding="utf-8") == SOURCE
+    assert marker["restore_from"] == str(restore_from)
+    assert not (scratch_root / prove_failability.PRISTINE_DIRECTORY_NAME).exists()
 
 
 @pytest.mark.usefixtures("fake_repo")
@@ -511,7 +558,29 @@ def test_a_scratch_root_inside_the_repository_is_refused(fake_repo: Path) -> Non
 def test_a_scratch_root_outside_the_repository_is_created(tmp_path: Path) -> None:
     resolved = prove_failability._resolve_scratch_root(str(tmp_path / "outside-scratch"))
 
-    assert (resolved / prove_failability.PRISTINE_DIRECTORY_NAME).is_dir()
+    assert resolved.is_dir()
+    assert resolved.parent == tmp_path / "outside-scratch"
+
+
+def test_a_state_home_inside_the_repository_is_refused(
+    fake_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(prove_failability.STATE_HOME_ENV, str(fake_repo / "state"))
+    with pytest.raises(prove_failability.ManifestError, match="inside the repository"):
+        prove_failability._tree_state_directory()
+
+
+@pytest.mark.parametrize("value", ["", "relative/state"], ids=["empty", "relative"])
+def test_a_state_home_that_is_not_an_absolute_path_falls_back_to_the_xdg_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    value: str,
+) -> None:
+    monkeypatch.setenv(prove_failability.STATE_HOME_ENV, value)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    assert prove_failability._state_home() == tmp_path / "home" / ".local" / "state"
 
 
 def test_two_workspace_roots_under_one_scratch_root_never_share_pristine_marker_or_probe_paths(
@@ -529,9 +598,11 @@ def test_two_workspace_roots_under_one_scratch_root_never_share_pristine_marker_
     (other_repo / "package" / "views.py").write_text(other_source, encoding="utf-8")
     entry_a = _single_entry(tmp_path)
     directory_a = prove_failability._resolve_scratch_root(str(given))
+    state_a = prove_failability._tree_state_directory()
     monkeypatch.setattr(prove_failability, "REPO_ROOT", other_repo)
     entry_b = _single_entry(tmp_path)
     directory_b = prove_failability._resolve_scratch_root(str(given))
+    state_b = prove_failability._tree_state_directory()
     monkeypatch.setattr(prove_failability, "REPO_ROOT", fake_repo)
     calls: list[prove_failability.ProofEntry] = []
     probes: dict[str, list[Path]] = {"a": [], "b": []}
@@ -546,9 +617,9 @@ def test_two_workspace_roots_under_one_scratch_root_never_share_pristine_marker_
         name = "a" if entry is entry_a else "b"
         assert capture is not None
         probes[name].append(capture.probe_output)
-        directory = directory_a if name == "a" else directory_b
+        state = state_a if name == "a" else state_b
         if calls.count(entry) == 2:
-            marker = directory / prove_failability.ACTIVE_MARKER_NAME
+            marker = state / prove_failability.ACTIVE_MARKER_NAME
             markers[name] = _json_object(marker.read_text(encoding="utf-8"))
         if name == "a" and calls.count(entry) == 2:
             monkeypatch.setattr(prove_failability, "REPO_ROOT", other_repo)
@@ -564,6 +635,8 @@ def test_two_workspace_roots_under_one_scratch_root_never_share_pristine_marker_
 
     assert directory_a.parent == directory_b.parent == given
     assert directory_a != directory_b
+    assert state_a.parent == state_b.parent
+    assert state_a != state_b
     assert len(calls) == 4
     assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
     assert (other_repo / "package" / "views.py").read_text(encoding="utf-8") == other_source
@@ -573,16 +646,18 @@ def test_two_workspace_roots_under_one_scratch_root_never_share_pristine_marker_
     assert isinstance(restore_a, str)
     assert isinstance(restore_b, str)
     assert restore_a != restore_b
-    assert restore_a.startswith(str(directory_a))
-    assert restore_b.startswith(str(directory_b))
-    assert result_a.files[0].pristine == restore_a
-    assert nested["b"].files[0].pristine == restore_b
+    assert restore_a.startswith(str(state_a))
+    assert restore_b.startswith(str(state_b))
+    pristine_a = directory_a / prove_failability.PRISTINE_DIRECTORY_NAME
+    pristine_b = directory_b / prove_failability.PRISTINE_DIRECTORY_NAME
+    assert result_a.files[0].pristine == str(pristine_a / Path(restore_a).name)
+    assert nested["b"].files[0].pristine == str(pristine_b / Path(restore_b).name)
     assert len(probes["a"]) == len(probes["b"]) == 2
     assert not set(probes["a"]) & set(probes["b"])
     assert all(directory_a in path.parents for path in probes["a"])
     assert all(directory_b in path.parents for path in probes["b"])
-    for directory in (directory_a, directory_b):
-        assert not (directory / prove_failability.ACTIVE_MARKER_NAME).exists()
+    assert not state_a.exists()
+    assert not state_b.exists()
 
 
 def _hold_tree_lock(repo: Path) -> int:
@@ -605,30 +680,40 @@ def _tree_lock_is_free(repo: Path) -> bool:
     return True
 
 
+@pytest.mark.parametrize("rerun_scratch", ["same-root", "other-root", "default"])
 @pytest.mark.parametrize("writer_pid", ["running", "gone"])
-def test_a_live_marker_for_the_same_repository_root_refuses_the_run_and_is_kept(
+def test_a_crashed_runs_marker_refuses_every_later_run_against_the_tree_and_is_kept(
     fake_repo: Path,
+    state_directory: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    system_tmp: Path,
     writer_pid: str,
+    rerun_scratch: str,
 ) -> None:
     # A run that holds the tree's lock reads a marker only a crashed run can have left:
     # the writer held the same lock while its mutation was live. So the pid the marker
     # names is no evidence either way - a live one is a reused pid - and both read alike.
+    # The marker sits in the tree's state directory, so a rerun given another scratch
+    # root, or none, finds it as surely as one given the crashed run's own root.
     seen = _stub_run(monkeypatch)
-    given = tmp_path / "outside-scratch"
-    directory = prove_failability._resolve_scratch_root(str(given))
-    marker = directory / prove_failability.ACTIVE_MARKER_NAME
+    marker = state_directory / prove_failability.ACTIVE_MARKER_NAME
     pid = os.getppid() if writer_pid == "running" else None
-    restore = f"cp {directory}/pristine/x {fake_repo}/package/views.py"
+    pristine = state_directory / prove_failability.PRISTINE_DIRECTORY_NAME / "x"
+    restore = f"cp {pristine} {fake_repo}/package/views.py"
+    pristine.parent.mkdir(parents=True)
+    pristine.write_text(SOURCE, encoding="utf-8")
     marker.write_text(
         json.dumps({"pid": pid, "files": [{"restore_with": restore}]}),
         encoding="utf-8",
     )
     before = marker.read_bytes()
+    arguments = [str(_manifest(tmp_path))]
+    if rerun_scratch != "default":
+        arguments += ["--scratch-root", str(tmp_path / rerun_scratch)]
 
-    code = prove_failability.main([str(_manifest(tmp_path)), "--scratch-root", str(given)])
+    code = prove_failability.main(arguments)
 
     assert code == 1
     assert seen == []
@@ -638,6 +723,15 @@ def test_a_live_marker_for_the_same_repository_root_refuses_the_run_and_is_kept(
     assert restore in error
     assert "no longer running" in error
     assert marker.read_bytes() == before
+    # The refusal comes before the sweep, so the copy the marker names survives intact.
+    assert pristine.read_text(encoding="utf-8") == SOURCE
+    assert sorted(path.name for path in state_directory.iterdir()) == [
+        marker.name,
+        prove_failability.PRISTINE_DIRECTORY_NAME,
+    ]
+    # The refusal comes before the scratch directory is resolved, so none is made.
+    assert not (tmp_path / rerun_scratch).exists()
+    assert list(system_tmp.iterdir()) == []
     assert _tree_lock_is_free(fake_repo)
     assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
 
@@ -646,20 +740,18 @@ def test_a_live_marker_for_the_same_repository_root_refuses_the_run_and_is_kept(
 @pytest.mark.parametrize("scratch", ["given", "default"])
 def test_a_run_against_a_tree_another_run_holds_is_refused_before_anything_is_written(
     fake_repo: Path,
+    state_home: Path,
+    system_tmp: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     scratch: str,
     mode: str,
 ) -> None:
-    # The lock names the tree, not the scratch directory: a run without --scratch-root
-    # gets a fresh directory and so shares nothing with the holder but the tree, which
-    # is exactly what two runs must not share. An anchors-only run reads the tree the
-    # holder may be mutating, so it is refused the same way.
+    # The lock names the tree, not the scratch directory, so it refuses a run given any
+    # scratch root or none. An anchors-only run reads the tree the holder may be
+    # mutating, so it is refused the same way.
     seen = _stub_run(monkeypatch)
-    system_tmp = tmp_path / "system-tmp"
-    system_tmp.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(system_tmp))
     given = tmp_path / "outside-scratch"
     arguments = [str(_manifest(tmp_path))]
     if scratch == "given":
@@ -678,6 +770,7 @@ def test_a_run_against_a_tree_another_run_holds_is_refused_before_anything_is_wr
     assert "another run holds the lock on the repository root" in error
     assert str(fake_repo) in error
     assert not given.exists()
+    assert not state_home.exists()
     assert list(system_tmp.iterdir()) == []
     assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
 
@@ -703,7 +796,6 @@ def test_the_tree_lock_is_held_for_the_whole_run_and_released_when_it_ends(
         return stubbed(entry, capture)
 
     monkeypatch.setattr(prove_failability, "_run_scope", observing_run_scope)
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     arguments = [str(_manifest(tmp_path))]
     if scratch == "given":
         arguments += ["--scratch-root", str(tmp_path / "outside-scratch")]
@@ -795,15 +887,20 @@ def test_a_lock_failure_other_than_contention_propagates_and_closes_the_descript
     assert not given.exists()
 
 
-@pytest.mark.usefixtures("fake_repo")
-def test_without_a_scratch_root_every_run_gets_a_fresh_directory_named_in_header_and_json(
+def test_without_a_scratch_root_every_run_against_one_tree_shares_its_temporary_namespace(
+    state_directory: Path,
+    system_tmp: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    system_tmp = tmp_path / "system-tmp"
-    system_tmp.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(system_tmp))
+    # The default scratch is per tree, not per run: two runs against one tree reuse it
+    # (the lock keeps them one at a time), and another tree gets its own beside it.
+    namespace = (
+        system_tmp.resolve()
+        / prove_failability.DEFAULT_SCRATCH_DIRECTORY_NAME
+        / prove_failability._tree_namespace()
+    )
     documents: list[dict[str, object]] = []
     for run in range(2):
         _four_failing_rows(monkeypatch)
@@ -812,23 +909,220 @@ def test_without_a_scratch_root_every_run_gets_a_fresh_directory_named_in_header
         assert prove_failability.main([str(_manifest(tmp_path)), "--json", str(output)]) == 0
 
         documents.append(_json_object(output.read_text(encoding="utf-8")))
-        directory = documents[-1]["scratch_root"]
         header = capsys.readouterr().err
-        assert f"scratch root: {directory}" in header
-        assert "fresh for this run" in header
-    first, second = (document["scratch_root"] for document in documents)
-    assert first != second
+        assert f"scratch root: {namespace}" in header
+        assert "under the system temporary directory (no scratch root given)" in header
     for document in documents:
-        scratch_root = document["scratch_root"]
-        assert isinstance(scratch_root, str)
-        directory = Path(scratch_root)
-        assert directory.parent == system_tmp.resolve()
-        assert directory.name.startswith(prove_failability.DEFAULT_SCRATCH_PREFIX)
+        assert document["scratch_root"] == str(namespace)
         assert document["scratch_root_given"] is None
+        assert document["state_directory"] == str(state_directory)
         assert document["active_marker"] == str(
-            directory / prove_failability.ACTIVE_MARKER_NAME,
+            state_directory / prove_failability.ACTIVE_MARKER_NAME,
         )
-        assert (directory / prove_failability.PRISTINE_DIRECTORY_NAME).is_dir()
+    assert sorted(path.name for path in namespace.iterdir()) == [
+        prove_failability.PRISTINE_DIRECTORY_NAME,
+        prove_failability.PROBE_DIRECTORY_NAME,
+        prove_failability.RUNS_DIRECTORY_NAME,
+    ]
+    other_repo = tmp_path / "other-repo"
+    other_repo.mkdir()
+    monkeypatch.setattr(prove_failability, "REPO_ROOT", other_repo)
+    other = prove_failability._resolve_scratch_root(None)
+    assert other.parent == namespace.parent
+    assert other != namespace
+    assert prove_failability._tree_state_directory() != state_directory
+
+
+@pytest.mark.parametrize("scratch", ["given", "default"])
+def test_a_proved_run_leaves_no_state_directory_and_its_pristine_copy_in_scratch(
+    state_home: Path,
+    state_directory: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scratch: str,
+) -> None:
+    # The state directory exists only while a mutation is live, private to its owner
+    # as the XDG specification asks; once the restore is proved the copy moves to the
+    # scratch directory, where the record names it, and the state directory goes.
+    _four_failing_rows(monkeypatch)
+    stubbed = prove_failability._run_scope
+    live: list[dict[str, int]] = []
+
+    def observing_run_scope(
+        entry: prove_failability.ProofEntry,
+        capture: prove_failability.RunCapture | None = None,
+    ) -> prove_failability.RunOutcome:
+        if (state_directory / prove_failability.ACTIVE_MARKER_NAME).exists():
+            created = (
+                state_home,
+                state_home / prove_failability.STATE_DIRECTORY_NAME,
+                state_directory,
+                state_directory / prove_failability.PRISTINE_DIRECTORY_NAME,
+            )
+            live.append({path.name: path.stat().st_mode & 0o777 for path in created})
+        return stubbed(entry, capture)
+
+    monkeypatch.setattr(prove_failability, "_run_scope", observing_run_scope)
+    output = tmp_path / "proof.json"
+    arguments = [str(_manifest(tmp_path)), "--json", str(output)]
+    if scratch == "given":
+        arguments += ["--scratch-root", str(tmp_path / "outside-scratch")]
+
+    assert prove_failability.main(arguments) == 0
+
+    assert live == [dict.fromkeys(live[0], 0o700)]
+    assert len(live[0]) == 4
+    assert not state_directory.exists()
+    assert (state_home / prove_failability.STATE_DIRECTORY_NAME).is_dir()
+    document = _json_object(output.read_text(encoding="utf-8"))
+    pristine = Path(_text(document, "entries", 0, "files", 0, "pristine"))
+    assert pristine.parent == (
+        Path(_text(document, "scratch_root")) / prove_failability.PRISTINE_DIRECTORY_NAME
+    )
+    assert pristine.name.endswith("__package__views.py")
+    assert pristine.read_text(encoding="utf-8") == SOURCE
+    assert list(pristine.parent.iterdir()) == [pristine]
+
+
+@pytest.mark.parametrize("scratch", ["given", "default"])
+def test_a_stray_pristine_copy_with_no_marker_is_swept_before_the_run(
+    state_directory: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scratch: str,
+) -> None:
+    # A run killed before writing its marker, or after deleting it mid-move, leaves
+    # copies and no marker. Under the lock nobody owns them, so the next run sweeps
+    # them and the state directory is empty at rest again.
+    _four_failing_rows(monkeypatch)
+    stray = state_directory / prove_failability.PRISTINE_DIRECTORY_NAME / "stray__views.py"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("mutated", encoding="utf-8")
+    arguments = [str(_manifest(tmp_path))]
+    if scratch == "given":
+        arguments += ["--scratch-root", str(tmp_path / "outside-scratch")]
+
+    assert prove_failability.main(arguments) == 0
+
+    assert not state_directory.exists()
+
+
+def test_a_resolved_restore_failed_marker_is_swept_before_the_run(
+    state_directory: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With no live-mutation marker under the lock, the failed restore it recorded was
+    # resolved, so its record goes with the rest and the state directory is gone at rest.
+    _four_failing_rows(monkeypatch)
+    state_directory.mkdir(parents=True)
+    (state_directory / prove_failability.RESTORE_FAILED_MARKER_NAME).write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    assert prove_failability.main([str(_manifest(tmp_path))]) == 0
+
+    assert not state_directory.exists()
+
+
+def test_a_scratch_root_that_overlaps_the_state_directory_is_refused(
+    fake_repo: Path,
+    state_home: Path,
+    state_directory: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A scratch directory that is the state directory would have its proved copies
+    # deleted by the next run's sweep, so it is refused before it is created.
+    seen = _stub_run(monkeypatch)
+    given = state_home / prove_failability.STATE_DIRECTORY_NAME
+
+    code = prove_failability.main([str(_manifest(tmp_path)), "--scratch-root", str(given)])
+
+    assert code == 1
+    assert seen == []
+    error = capsys.readouterr().err
+    assert "scratch root refused" in error
+    assert "overlaps the tree's state directory" in error
+    assert not state_directory.exists()
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+
+
+@pytest.mark.parametrize("kind", ["symlink", "other-owner"])
+@pytest.mark.parametrize("shared", ["failability", "prove_failability"])
+def test_a_shared_directory_that_is_not_this_users_own_is_refused_before_anything_is_written(
+    fake_repo: Path,
+    state_home: Path,
+    system_tmp: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    shared: str,
+    kind: str,
+) -> None:
+    # The default scratch parent and the state home's directory are shared by every run;
+    # in a temporary directory others can write to, someone else may have made them.
+    seen = _stub_run(monkeypatch)
+    directory = (
+        system_tmp.resolve() / prove_failability.DEFAULT_SCRATCH_DIRECTORY_NAME
+        if shared == "failability"
+        else state_home.resolve() / prove_failability.STATE_DIRECTORY_NAME
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "symlink":
+        directory.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        directory.mkdir()
+        real_lstat = os.lstat
+
+        def foreign_lstat(path: "str | os.PathLike[str]") -> os.stat_result:
+            status = real_lstat(path)
+            if Path(path) != directory:
+                return status
+            fields = list(status)
+            fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+
+        monkeypatch.setattr(os, "lstat", foreign_lstat)
+
+    code = prove_failability.main([str(_manifest(tmp_path))])
+
+    assert code == 1
+    assert seen == []
+    error = capsys.readouterr().err
+    assert "scratch root refused" in error
+    assert f"{directory} is not a directory owned by this user" in error
+    assert list(elsewhere.iterdir()) == []
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+
+
+def test_a_pristine_copy_that_cannot_move_stays_in_the_state_directory_named_by_the_record(
+    fake_repo: Path,
+    scratch_root: Path,
+    state_directory: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A copy is moved only once its restore is proved and the marker is gone, so a move
+    # that fails costs nothing but tidiness: the copy stays where it was and the record
+    # says so, and the state directory holding it stays too.
+    _stub_run(monkeypatch, failed=("tests/test_x.py::test_a",))
+    (scratch_root / prove_failability.PRISTINE_DIRECTORY_NAME).write_text("", encoding="utf-8")
+
+    result = prove_failability.execute_entry(_single_entry(tmp_path), scratch_root)
+
+    (record,) = result.files
+    pristine = Path(record.pristine)
+    assert pristine.parent == state_directory / prove_failability.PRISTINE_DIRECTORY_NAME
+    assert pristine.read_text(encoding="utf-8") == SOURCE
+    assert sorted(path.name for path in state_directory.iterdir()) == [
+        prove_failability.PRISTINE_DIRECTORY_NAME,
+    ]
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
 
 
 @pytest.mark.parametrize(
@@ -2072,8 +2366,8 @@ def _scopes_started(tmp_path: Path) -> list[str]:
 def _run_logs(tmp_path: Path) -> list[str]:
     """Return the run logs the run wrote, by ``<position>-<run name>``."""
     (namespace,) = (tmp_path / "outside-scratch").iterdir()
-    assert not (namespace / prove_failability.ACTIVE_MARKER_NAME).exists()
-    assert not (namespace / prove_failability.RESTORE_FAILED_MARKER_NAME).exists()
+    # No mutation is left live, so the tree's state directory is gone, markers and all.
+    assert not prove_failability._tree_state_directory().exists()
     runs = namespace / prove_failability.RUNS_DIRECTORY_NAME
     return sorted(f"{path.name[:3]}-{path.stem.rsplit('-', 1)[-1]}" for path in runs.glob("*.log"))
 
@@ -2329,8 +2623,8 @@ def test_a_stop_signal_after_the_last_scope_lets_the_run_finish_with_its_own_ver
     assert _run_logs(tmp_path) == ["001-baseline", "001-mutant"]
 
 
-@pytest.mark.usefixtures("fake_repo")
 def test_a_restore_that_fails_during_a_stop_is_still_exit_3_with_its_marker(
+    state_directory: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2360,9 +2654,8 @@ def test_a_restore_that_fails_during_a_stop_is_still_exit_3_with_its_marker(
     error = capsys.readouterr().err
     assert "RESTORE FAILED" in error
     assert "stopped by" not in error
-    (namespace,) = (tmp_path / "outside-scratch").iterdir()
-    assert (namespace / prove_failability.RESTORE_FAILED_MARKER_NAME).exists()
-    assert (namespace / prove_failability.ACTIVE_MARKER_NAME).exists()
+    assert (state_directory / prove_failability.RESTORE_FAILED_MARKER_NAME).exists()
+    assert (state_directory / prove_failability.ACTIVE_MARKER_NAME).exists()
     assert prove_failability._STOP.signum is None
 
 
@@ -2994,6 +3287,7 @@ def test_every_site_is_live_during_the_mutant_run_and_every_file_is_restored(
 def test_one_unprovable_restore_still_restores_every_other_site(
     two_files: tuple[Path, Path],
     scratch_root: Path,
+    state_directory: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3013,12 +3307,14 @@ def test_one_unprovable_restore_still_restores_every_other_site(
 
     assert other.read_text(encoding="utf-8") == OTHER_SOURCE
     marker = _json_object(
-        (scratch_root / prove_failability.RESTORE_FAILED_MARKER_NAME).read_text(encoding="utf-8"),
+        (state_directory / prove_failability.RESTORE_FAILED_MARKER_NAME).read_text(
+            encoding="utf-8",
+        ),
     )
     assert marker["mutated_file"] == str(views)
     assert [json_at(item, "mutated_file") for item in json_list(marker, "files")] == [str(views)]
     active = _json_object(
-        (scratch_root / prove_failability.ACTIVE_MARKER_NAME).read_text(encoding="utf-8"),
+        (state_directory / prove_failability.ACTIVE_MARKER_NAME).read_text(encoding="utf-8"),
     )
     assert [json_at(item, "mutated_file") for item in json_list(active, "files")] == [
         str(views),
@@ -3029,6 +3325,7 @@ def test_one_unprovable_restore_still_restores_every_other_site(
 def test_a_site_that_does_not_match_names_itself_and_nothing_is_written(
     two_files: tuple[Path, Path],
     scratch_root: Path,
+    state_directory: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3043,7 +3340,7 @@ def test_a_site_that_does_not_match_names_itself_and_nothing_is_written(
     assert result.failure is not None
     assert result.failure.startswith("site 2 (`package/other.py`): anchor matched 0 times")
     assert views.read_text(encoding="utf-8") == SOURCE
-    assert not list((scratch_root / prove_failability.PRISTINE_DIRECTORY_NAME).iterdir())
+    assert not state_directory.exists()
 
 
 def test_two_anchor_sites_on_one_file_apply_in_order(
