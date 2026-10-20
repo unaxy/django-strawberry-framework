@@ -65,12 +65,13 @@ from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.products.serializers import RenamedRelationItemSerializer
 from apps.products.services import seed_data
+from apps.scalars.models import NullableScalarSpecimen
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files import File
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, connections
+from django.db import IntegrityError, connections, transaction
 from django.db.models import Model, QuerySet
 from django.db.models.signals import post_save, pre_save
 from django.db.utils import OperationalError
@@ -484,6 +485,7 @@ def test_decode_relation_single_raw_pk_hidden_target_is_field_error() -> None:
         saved_pk(genre),
         graphql_name="genreId",
         related_model=library_models.Genre,
+        key_attname=None,
         info=unread_info(),
     )
     assert pk is None
@@ -500,6 +502,7 @@ def test_decode_relation_single_raw_pk_visible_reduces_to_pk() -> None:
         saved_pk(genre),
         graphql_name="genreId",
         related_model=library_models.Genre,
+        key_attname=None,
         info=unread_info(),
     )
     assert error is None
@@ -514,6 +517,7 @@ def test_decode_relation_single_uncoercible_raw_pk_is_field_error() -> None:
         "not-a-pk",
         graphql_name="genreId",
         related_model=library_models.Genre,
+        key_attname=None,
         info=unread_info(),
     )
     assert pk is None
@@ -543,6 +547,7 @@ def test_decode_relation_single_wrong_model_global_id_is_field_error() -> None:
         wrong_gid,
         graphql_name="genreId",
         related_model=library_models.Genre,
+        key_attname=None,
         # A GlobalID decode reads the executing schema off ``info``.
         info=make_info(),
     )
@@ -566,6 +571,7 @@ def test_decode_relation_multi_collects_visible_then_short_circuits() -> None:
         [saved_pk(g1), saved_pk(g2)],
         graphql_name="genreIds",
         related_model=library_models.Genre,
+        key_attname=None,
         info=unread_info(),
     )
     assert error is None
@@ -576,11 +582,50 @@ def test_decode_relation_multi_collects_visible_then_short_circuits() -> None:
         [saved_pk(g1), "bad"],
         graphql_name="genreIds",
         related_model=library_models.Genre,
+        key_attname=None,
         info=unread_info(),
     )
     assert pks is None
     assert error is not None
     assert error.field == "genreIds"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("kind", ["single", "multi"])
+def test_decode_relation_over_a_to_field_key_answers_pks_and_refuses_a_null_key(kind: str) -> None:
+    """A relation storing another column answers pks for DRF and refuses a ``NULL`` key.
+
+    ``PrimaryKeyRelatedField`` resolves pks, so a row with a key decodes to its pk, never
+    the key; a visible row whose stored key is ``NULL`` would be stored as an empty relation
+    and is the relation error. ``NullableScalarSpecimen.label`` stands in for that column.
+    """
+    keyed = NullableScalarSpecimen.objects.create(label="SerKeyed")
+    unkeyed = NullableScalarSpecimen.objects.create(label=None)
+    decode = (
+        serializer_resolvers._decode_relation_single
+        if kind == "single"
+        else serializer_resolvers._decode_relation_multi
+    )
+
+    def run(pk: object) -> tuple[object, FieldError | None]:
+        return decode(
+            pk if kind == "single" else [pk],
+            graphql_name="partnerId",
+            related_model=NullableScalarSpecimen,
+            key_attname="label",
+            info=unread_info(),
+        )
+
+    expected = saved_pk(keyed) if kind == "single" else [saved_pk(keyed)]
+    assert run(saved_pk(keyed)) == (expected, None)
+    value, error = run(saved_pk(unkeyed))
+    assert value is None
+    assert error is not None
+    assert (error.field, error.messages, error.codes) == (
+        "partnerId",
+        ["Invalid id for relation 'partnerId'."],
+        ["invalid"],
+    )
 
 
 @pytest.mark.django_db
@@ -591,6 +636,7 @@ def test_decode_relation_single_explicit_none_passes_through() -> None:
         None,
         graphql_name="genreId",
         related_model=library_models.Genre,
+        key_attname=None,
         info=unread_info(),
     )
     assert error is None
@@ -608,6 +654,7 @@ def test_decode_relation_multi_explicit_none_passes_through() -> None:
         None,
         graphql_name="genreIds",
         related_model=library_models.Genre,
+        key_attname=None,
         info=unread_info(),
     )
     assert error is None
@@ -622,6 +669,7 @@ def test_decode_relation_multi_empty_list_passes_through_without_query() -> None
         [],
         graphql_name="genreIds",
         related_model=library_models.Genre,
+        key_attname=None,
         info=unread_info(),
     )
     assert error is None
@@ -1511,6 +1559,7 @@ def test_relation_decode_consumes_recorded_strategy_after_strategy_resolver_fail
         gid,
         graphql_name="categoryId",
         related_model=product_models.Category,
+        key_attname=None,
         # A GlobalID decode reads the executing schema off ``info``.
         info=make_info(),
     )
@@ -1550,6 +1599,7 @@ def test_relation_decode_async_get_queryset_from_sync_raises_sync_misuse() -> No
             saved_pk(genre),
             graphql_name="genreId",
             related_model=library_models.Genre,
+            key_attname=None,
             info=unread_info(),
         )
 
@@ -2726,6 +2776,51 @@ def test_relation_queryset_scope_covers_injected_relation_specs() -> None:
     visible_scoped = _related_queryset(bound_fields(unlocked)["branch"])
     assert visible in visible_scoped  # visibility-allowed row admitted
     assert hidden not in visible_scoped  # visibility-hidden row intersected OUT
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("pipeline", ["unlocked", "locked"])
+def test_relation_queryset_scope_admits_no_row_whose_to_field_key_is_null(pipeline: str) -> None:
+    """DRF's lookup admits only rows a ``to_field`` relation can link, injected values included.
+
+    The spec records the column the relation stores (``Branch.isil``); a branch without one
+    would be stored as ``NULL``, so the scoped queryset leaves it out, locked or not, the
+    same set the decode admits.
+    """
+    keyed = library_models.Branch.objects.create(name="KeyedInjected", isil="XX-KI")
+    _ = library_models.Branch.objects.create(name="UnkeyedInjected")
+
+    class BranchSer(serializers.Serializer[object]):
+        branch: _PkRelation[library_models.Branch] = serializers.PrimaryKeyRelatedField(
+            queryset=library_models.Branch.objects.all(),
+        )
+
+    fake = type(
+        "InjectedKeyMut",
+        (),
+        {
+            "_input_field_specs": [],
+            "_injected_field_specs": [
+                InputFieldSpec(
+                    input_attr="branch",
+                    graphql_name="branch",
+                    target_name="branch",
+                    kind=RELATION_SINGLE,
+                    related_model=library_models.Branch,
+                    key_attname="isil",
+                ),
+            ],
+        },
+    )
+    serializer = BranchSer()
+    with transaction.atomic(), write_pipeline("default", lock=pipeline == "locked"):
+        serializer_resolvers._scope_relation_querysets_to_visibility(
+            _as_serializer_mutation(fake),
+            serializer,
+            info=unread_info(),
+        )
+        scoped = _related_queryset(bound_fields(serializer)["branch"])
+        assert list(scoped.values_list("pk", flat=True)) == [keyed.pk]
 
 
 def test_relation_queryset_scope_cross_alias_author_queryset_fails_closed() -> None:

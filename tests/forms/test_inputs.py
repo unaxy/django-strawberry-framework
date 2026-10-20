@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 import pytest
 import strawberry
 from apps.library import models as library_models
+from apps.library.forms import PatronProfileGenreForm, PatronProfileGenreNameForm
 from apps.library.models import Book, Branch, Genre, TaggedItem
 from apps.products import models as product_models
 from apps.products.models import Category
@@ -79,6 +80,7 @@ from django_strawberry_framework.forms.inputs import (
     guard_partial_required_column_less_fields,
     materialize_form_input_class,
     normalize_form_field_basis,
+    require_readable_choice_keys,
     resolve_effective_form_fields,
 )
 from django_strawberry_framework.mutations.inputs import CREATE, PARTIAL
@@ -1825,3 +1827,167 @@ def test_basis_diagnostic_message_is_pinned() -> None:
         "a mapping of string names to forms.Field instances; invalid names "
         "['9lead'], invalid fields ['ok']."
     )
+
+
+# ---------------------------------------------------------------------------
+# require_readable_choice_keys: ``to_field_name`` must be a value the row carries
+# ---------------------------------------------------------------------------
+
+
+def _loan_form(
+    to_field_name: str | None,
+    queryset: models.QuerySet[Book] | None = None,
+) -> type[forms.ModelForm[library_models.Loan]]:
+    """A ``Loan`` ``ModelForm`` whose declared ``book`` keys its choices by ``to_field_name``."""
+    book_queryset = Book.objects.all() if queryset is None else queryset
+
+    class LoanBookForm(forms.ModelForm[library_models.Loan]):
+        book: forms.ModelChoiceField[Book] = forms.ModelChoiceField(
+            queryset=book_queryset,
+            to_field_name=to_field_name,
+        )
+
+        class Meta:
+            model = library_models.Loan
+            fields = ("book", "note")
+
+    return LoanBookForm
+
+
+def _plain_book_form(to_field_name: str) -> type[forms.Form]:
+    """A plain ``Form`` (no model column) whose ``book`` keys its choices by ``to_field_name``."""
+
+    class PlainBookForm(forms.Form):
+        book: forms.ModelChoiceField[Book] = forms.ModelChoiceField(
+            queryset=Book.objects.all(),
+            to_field_name=to_field_name,
+        )
+
+    return PlainBookForm
+
+
+@pytest.mark.parametrize(
+    "to_field_name",
+    [
+        None,
+        "",
+        "pk",
+        "title",
+        "id",
+        "shelf",
+        "shelf_id",
+    ],
+)
+def test_require_readable_choice_keys_admits_pk_and_concrete_fields(
+    to_field_name: str | None,
+) -> None:
+    """Unset, ``pk``, and a concrete field of the target by name or attname are readable."""
+    require_readable_choice_keys(_loan_form(to_field_name))
+
+
+@pytest.mark.parametrize(
+    ("to_field_name", "queryset"),
+    [
+        pytest.param("shelf__code", None, id="path"),
+        pytest.param(
+            "loan_count",
+            Book.objects.annotate(loan_count=models.Count("loans")),
+            id="annotation",
+        ),
+        pytest.param("nope", None, id="unknown"),
+        pytest.param("loans", None, id="reverse-relation"),
+        pytest.param("genres", None, id="many-to-many"),
+    ],
+)
+def test_require_readable_choice_keys_refuses_a_key_the_row_does_not_carry(
+    to_field_name: str,
+    queryset: models.QuerySet[Book] | None,
+) -> None:
+    """A path, an annotation, an unknown name, a reverse relation or an M2M is refused at build."""
+    form_class = _loan_form(to_field_name, queryset)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        require_readable_choice_keys(form_class)
+
+    assert str(exc_info.value) == (
+        f"DjangoFormMutation for LoanBookForm: field 'book' sets to_field_name="
+        f"{to_field_name!r}, which is not a concrete field of Book. A relation id names its "
+        "row by primary key and the form key is read off that row, so to_field_name must be "
+        "'pk' or a concrete field of Book."
+    )
+
+
+def test_require_readable_choice_keys_reads_a_column_less_field_target_from_its_queryset() -> None:
+    """A plain-form field has no model column; its queryset's model is the target."""
+    require_readable_choice_keys(_plain_book_form("title"))
+    with pytest.raises(ConfigurationError, match="field 'book' sets to_field_name='genres'"):
+        require_readable_choice_keys(_plain_book_form("genres"))
+
+
+def test_update_input_refuses_an_unreadable_key_on_a_narrowed_out_field() -> None:
+    """An update reads the full declared basis, so a field the input leaves out still fails.
+
+    The update reconstruction rebinds every declared field, the narrowed-out ``book``
+    included, through the same ``to_field_name`` read.
+    """
+    with pytest.raises(ConfigurationError, match="field 'book' sets to_field_name='shelf__code'"):
+        _ = build_form_input_class(
+            _loan_form("shelf__code"),
+            operation_kind=PARTIAL,
+            fields=("note",),
+        )
+
+
+def test_create_input_admits_an_unreadable_key_on_a_narrowed_out_field() -> None:
+    """A create binds only its input's fields, so a narrowed-out field's key is never read."""
+    _cls, specs = build_form_input_class(
+        _loan_form("shelf__code"),
+        operation_kind=FORM,
+        fields=("note",),
+    )
+
+    assert [spec.target_name for spec in specs] == ["note"]
+
+
+def test_create_input_refuses_an_unreadable_key_on_an_included_field() -> None:
+    """A create that binds the field reads its key, so an unreadable one is refused at build."""
+    with pytest.raises(ConfigurationError, match="field 'book' sets to_field_name='shelf__code'"):
+        _ = build_form_input_class(_loan_form("shelf__code"), operation_kind=FORM)
+
+
+@pytest.mark.parametrize(
+    ("form_class", "expected"),
+    [
+        pytest.param(
+            PatronProfileGenreForm,
+            {"patron": None, "favorite_genre": "name"},
+            id="declared-id-keyed",
+        ),
+        pytest.param(
+            PatronProfileGenreNameForm,
+            {"favorite_genre": "name"},
+            id="generated-name-keyed",
+        ),
+    ],
+)
+def test_relation_spec_records_the_column_a_to_field_relation_stores(
+    form_class: type[forms.ModelForm[library_models.PatronProfile]],
+    expected: dict[str, str | None],
+) -> None:
+    """A relation into a ``to_field`` key records the stored column, whatever the field is keyed by.
+
+    ``PatronProfile.favorite_genre`` stores ``Genre.name``, so its spec carries
+    ``key_attname="name"`` under the declared id-keyed field and the generated name-keyed
+    one alike; the pk-keyed ``patron`` records ``None``.
+    """
+    _cls, specs = build_form_input_class(form_class, operation_kind=CREATE)
+
+    assert {spec.target_name: spec.key_attname for spec in specs if spec.related_model} == expected
+
+
+def test_relation_spec_of_a_column_less_field_records_no_stored_column() -> None:
+    """A plain-form relation stores nothing itself, so it records no ``key_attname``."""
+    _cls, specs = build_form_input_class(_plain_book_form("title"), operation_kind=FORM)
+
+    [spec] = specs
+    assert (spec.related_model, spec.key_attname) == (Book, None)

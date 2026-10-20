@@ -5143,8 +5143,8 @@ def stringified_pks_present(
     Each value is the key a relation stores for that row. ``key_attname`` ``None``
     reads the pk alone (``values_list("pk", flat=True)``), so the value is the pk; a
     relation keyed by another column (a ``to_field``) names it and the same query
-    reads it beside the pk. A row whose key column is ``NULL`` cannot be linked by
-    that key and is left out, the same absence as a hidden or missing row.
+    reads it beside the pk, over ``linkable_rows`` only: a row whose key column is
+    ``NULL`` is left out, the same absence as a hidden or missing row.
 
     Inside an active write pipeline (``utils/write_transaction.py``) the query is
     pinned to the operation's write alias - a hook-re-routed queryset fails
@@ -5155,10 +5155,31 @@ def stringified_pks_present(
     the write before the transaction commits. Read surfaces run with no pipeline
     context and are byte-unchanged.
     """
-    queryset = pipeline_scoped_queryset(queryset, queryset.model).filter(pk__in=list(query_pks))
+    queryset = linkable_rows(
+        pipeline_scoped_queryset(queryset, queryset.model),
+        key_attname,
+    ).filter(pk__in=list(query_pks))
     if key_attname is None:
         return _by_str_pk(queryset.values_list("pk", flat=True))
     return _keys_by_str_pk(queryset.values_list("pk", key_attname))
+
+
+def linkable_rows(
+    queryset: models.QuerySet[_ModelT, _RowT],
+    key_attname: str | None,
+) -> models.QuerySet[_ModelT, _RowT]:
+    """Narrow ``queryset`` to the rows a relation storing ``key_attname`` can link.
+
+    A relation keyed by a column other than the related pk (a ``to_field``; the
+    ``key_attname`` of ``utils/relations.py::non_pk_relation_key_attname``) stores that
+    column's value. A row whose key is ``NULL`` names no row through it: storing the
+    key would clear the relation rather than link the row. So the row is left out,
+    the same absence as a hidden or missing row. ``None`` (a relation keyed by the
+    pk) keeps every row.
+    """
+    if key_attname is None:
+        return queryset
+    return queryset.filter(**{f"{key_attname}__isnull": False})
 
 
 def _by_str_pk(pks: Iterable[object]) -> dict[str, object]:
@@ -5167,8 +5188,8 @@ def _by_str_pk(pks: Iterable[object]) -> dict[str, object]:
 
 
 def _keys_by_str_pk(rows: Iterable[tuple[object, object]]) -> dict[str, object]:
-    """Index each row's non-null key by its ``str``-formed ``pk``."""
-    return {str(pk): key for pk, key in rows if key is not None}
+    """Index each row's key by its ``str``-formed ``pk``."""
+    return {str(pk): key for pk, key in rows}
 
 
 def pks_all_present(declared_pks: Iterable[object], present: AbstractSet[str]) -> bool:
@@ -5190,6 +5211,7 @@ def visible_related_object(
     pk: object,
     info: object,
     async_recourse: str = _RELAY_ASYNC_RECOURSE,
+    key_attname: str | None = None,
 ) -> models.Model | None:
     """Resolve the VISIBLE related object by pk through the related primary's ``get_queryset``.
 
@@ -5218,6 +5240,10 @@ def visible_related_object(
     The helper accepts a raw pk AFTER a flavor-specific decoder has chosen that
     branch; it does NOT imply every generated GraphQL relation input accepts both a
     raw pk and a GlobalID (the input exposes one strategy-dependent shape).
+
+    ``key_attname`` names the column a relation keyed by another column stores
+    (``linkable_rows``): a visible row whose key is ``NULL`` is ``None`` here, the same
+    answer as a hidden or missing row.
     """
     # The visibility-or-default-manager base is single-sited in
     # ``related_visibility_queryset_or_default``. Inside an
@@ -5227,7 +5253,7 @@ def visible_related_object(
     # same relation-target lock the batched membership check applies.
     queryset = related_visibility_queryset_or_default(related_model, info, async_recourse)
     queryset = pipeline_scoped_queryset(queryset, related_model)
-    return queryset.filter(pk=pk).first()
+    return linkable_rows(queryset, key_attname).filter(pk=pk).first()
 
 
 def visible_related_objects(

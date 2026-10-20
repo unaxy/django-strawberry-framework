@@ -184,6 +184,7 @@ from django_strawberry_framework.utils.inputs import optional_input_field
 from django_strawberry_framework.utils.permissions import request_from_info
 from django_strawberry_framework.utils.querysets import (
     is_manager,
+    linkable_rows,
     related_visibility_queryset,
     sync_pipeline_recourse,
 )
@@ -336,6 +337,7 @@ def _decode_relation_single(
     *,
     graphql_name: str,
     related_model: type[models.Model],
+    key_attname: str | None,
     info: Info[object, object],
 ) -> tuple[object, FieldError | None]:
     """Decode ONE relation id to its visible pk (mirrors the ``038`` form single decoder).
@@ -344,7 +346,9 @@ def _decode_relation_single(
     ``utils/write_values.py::decode_visible_relation`` spine:
     type-check + pk coercion -> visible object (a hidden / missing / wrong-model
     / uncoercible id is the uniform field-keyed ``FieldError``, no existence
-    leak) -> the pk projection (what DRF's ``PrimaryKeyRelatedField`` expects).
+    leak) -> the pk projection (what DRF's ``PrimaryKeyRelatedField`` expects). A
+    visible row whose ``to_field`` key (``key_attname``) is ``NULL`` is the same relation
+    error: the field would resolve it and the descriptor would store ``NULL``.
 
     An explicit ``None`` is NOT an id to decode: it is a clear / no-value skipped
     through unchanged so the serializer's own validation decides (a required
@@ -362,6 +366,7 @@ def _decode_relation_single(
         async_recourse=_SERIALIZER_ASYNC_RECOURSE,
         skip=lambda candidate: candidate is None,
         project=pk_of,
+        key_attname=key_attname,
     )
 
 
@@ -370,6 +375,7 @@ def _decode_relation_multi(
     *,
     graphql_name: str,
     related_model: type[models.Model],
+    key_attname: str | None,
     info: Info[object, object],
 ) -> tuple[list[object] | None, FieldError | None]:
     """Decode an M2M ``list[<id>]`` to visible pks in ONE batched visibility query.
@@ -378,7 +384,8 @@ def _decode_relation_multi(
     first structurally-bad id), then confirms the whole set's visibility in ONE ``pk__in`` query
     via the shared ``decode_visible_relation_ids`` compose. A hidden / missing member collapses
     to the same field-keyed relation error (no existence leak), exactly as the per-element
-    decode did. An explicit ``None`` (the whole list) is passed through so the serializer's
+    decode did. A visible member whose through-row key (``key_attname``) is ``NULL`` is the
+    same error. An explicit ``None`` (the whole list) is passed through so the serializer's
     own required-ness decides; an empty list is a valid clear.
     """
     if values is None:
@@ -389,7 +396,14 @@ def _decode_relation_multi(
         related_model=related_model,
         info=info,
         async_recourse=_SERIALIZER_ASYNC_RECOURSE,
+        key_attname=key_attname,
+        project=_visible_pk,
     )
+
+
+def _visible_pk(pk: object, _key: object) -> object:
+    """Answer the pk a ``PrimaryKeyRelatedField`` resolves, not the key the relation stores."""
+    return pk
 
 
 def _decode_serializer_data(
@@ -1627,6 +1641,9 @@ def _scope_specs_over_serializer(
       ``select_for_update()`` on the author's arbitrary queryset shape), so the row DRF's
       second relation lookup confirms cannot be deleted out from under the write.
 
+    A relation keyed by a ``to_field`` (``spec.key_attname``) admits only the rows whose
+    key is not ``NULL`` (``utils/querysets.py::linkable_rows``), the set the decode admits.
+
     A nested field recurses into the runtime nested serializer's own fields with the nested
     reverse map, so every depth gets the same pin + visibility + lock discipline.
     """
@@ -1687,6 +1704,9 @@ def _scope_specs_over_serializer(
                 pipeline.alias,
                 scoped,
             )
+        # DRF's lookup admits only the rows the decode does: a ``NULL`` ``to_field`` key
+        # names no row, for a decoded and an injected value alike.
+        scoped = linkable_rows(scoped, spec.key_attname)
         # basedpyright: drf-stubs types the slot's rows as the model; isinstance proves a QuerySet,
         # not its row type (a ``.values()`` queryset passes it)
         relation.queryset = scoped  # pyright: ignore[reportAttributeAccessIssue]

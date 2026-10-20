@@ -133,7 +133,6 @@ from django_strawberry_framework.utils.querysets import (
     run_in_one_sync_boundary,
     sync_pipeline_recourse,
 )
-from django_strawberry_framework.utils.relations import non_pk_relation_key_attname
 from django_strawberry_framework.utils.typing import strawberry_schema_from_info
 from django_strawberry_framework.utils.write_transaction import (
     authorization_phase,
@@ -697,6 +696,7 @@ def _decode_single_relation_id(
     *,
     graphql_name: str,
     related_model: type[models.Model],
+    key_attname: str | None,
     info: Info[object, object],
     relation_field: ModelField,
 ) -> tuple[object, FieldError | None]:
@@ -710,8 +710,8 @@ def _decode_single_relation_id(
     value (a raw pk) is coerced and visibility-checked by that compose, the same
     contract the M2M path uses. The id names the related row by pk; the value
     returned for the ``<field>_id`` attname is the key the column stores
-    (``ForeignKey.target_field``: the pk, or a ``to_field``
-    value), read by the same visibility query.
+    (``ForeignKey.target_field``: the pk, or the ``to_field`` value the spec's
+    ``key_attname`` names), read by the same visibility query.
 
     An explicit ``None`` is the clear signal for a **nullable** FK / OneToOne and
     returns ``(None, None)`` without a membership query. On a ``null=False`` relation
@@ -733,7 +733,7 @@ def _decode_single_relation_id(
         related_model=related_model,
         info=info,
         async_recourse=_MUTATION_ASYNC_RECOURSE,
-        key_attname=non_pk_relation_key_attname(relation_field),
+        key_attname=key_attname,
         single=True,
     )
     if error is not None:
@@ -747,6 +747,7 @@ def _decode_relation_id_list(
     *,
     graphql_name: str,
     related_model: type[models.Model],
+    key_attname: str | None,
     info: Info[object, object],
     relation_field: ModelField,
 ) -> tuple[list[object], FieldError | None]:
@@ -759,11 +760,12 @@ def _decode_relation_id_list(
     than iterating ``None`` into a resolver exception. A non-null list
     delegates to ``decode_visible_relation_ids`` (the same type-check + coerce +
     one-query visibility contract the FK path uses; spec-036 Decision 10).
-    ``relation_field`` names the key the through row stores for each target (the
-    target pk, or the column the through table's target-side foreign key references),
-    which is what ``_assign_m2m``'s ``.set()`` reads a non-instance member as; M2M
-    nullability is the list contract, not ``relation_field.null``.
+    ``key_attname`` names the key the through row stores for each target (``None``
+    for the target pk, else the column the through table's target-side foreign key
+    references), which is what ``_assign_m2m``'s ``.set()`` reads a non-instance member
+    as; M2M nullability is the list contract, not ``relation_field.null``.
     """
+    del relation_field  # M2M nullability is the list contract, not the field's ``null``.
     if value is None:
         return [], _relation_null_error(graphql_name)
     keys, error = decode_visible_relation_ids(
@@ -772,7 +774,7 @@ def _decode_relation_id_list(
         related_model=related_model,
         info=info,
         async_recourse=_MUTATION_ASYNC_RECOURSE,
-        key_attname=non_pk_relation_key_attname(relation_field),
+        key_attname=key_attname,
     )
     if error is not None:
         return [], error

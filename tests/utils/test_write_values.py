@@ -118,6 +118,7 @@ def test_decode_layers_preserve_omitted_null_and_provided_values() -> None:
             async_recourse="Use a synchronous visibility hook.",
             skip=lambda candidate: candidate is None,
             project=saved_pk,
+            key_attname=None,
         )
         if error is None:
             decoded[spec.input_attr] = result
@@ -283,6 +284,7 @@ def _spec(
     kind: str,
     target: str | None = None,
     graphql: str | None = None,
+    key_attname: str | None = None,
 ) -> InputFieldSpec:
     return InputFieldSpec(
         input_attr=attr,
@@ -290,6 +292,7 @@ def _spec(
         target_name=target or attr,
         kind=kind,
         related_model=Category if kind in {RELATION_SINGLE, RELATION_MULTI} else None,
+        key_attname=key_attname,
     )
 
 
@@ -475,7 +478,11 @@ def test_file_into_stores_upload_on_the_supplied_dest() -> None:
 
 
 def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
-    """One relation handler picks multi vs single, forwards extras, and stores the result."""
+    """One relation handler picks multi vs single, forwards the spec's key and extras, and stores.
+
+    ``key_attname`` reaches every decoder from the spec, so no flavor resolves the stored
+    column itself.
+    """
     dest: dict[str, object] = {}
     calls: list[tuple[object, ...]] = []
 
@@ -484,6 +491,7 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
         *,
         graphql_name: str,
         related_model: type[Model],
+        key_attname: str | None,
         info: object,
         **extra: object,
     ) -> tuple[str, None]:
@@ -493,6 +501,7 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
                 "single",
                 value,
                 graphql_name,
+                key_attname,
                 info,
                 extra,
             ),
@@ -504,6 +513,7 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
         *,
         graphql_name: str,
         related_model: type[Model],
+        key_attname: str | None,
         info: object,
         **extra: object,
     ) -> tuple[list[str | object], None]:
@@ -513,6 +523,7 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
                 "multi",
                 value,
                 graphql_name,
+                key_attname,
                 info,
                 extra,
             ),
@@ -524,6 +535,7 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
         kind=RELATION_SINGLE,
         target="category",
         graphql="categoryId",
+        key_attname="code",
     )
     spec_multi = _spec(attr="tag_ids", kind=RELATION_MULTI, target="tags", graphql="tagIds")
     info = make_info()
@@ -540,6 +552,7 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
         "single",
         7,
         "categoryId",
+        "code",
         info,
         {"form_field": "category"},
     )
@@ -549,6 +562,7 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
         "multi",
         [1, 2],
         "tagIds",
+        None,
         info,
         {"form_field": "tags"},
     )
@@ -560,10 +574,12 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
         *,
         graphql_name: str,
         related_model: type[Model],
+        key_attname: str | None,
         info: object,
     ) -> tuple[None, FieldError]:
         del (
             related_model,
+            key_attname,
             info,
         )  # relation_into passes it by keyword; this stand-in does not read it
         return None, field_error(graphql_name, "hidden", codes="invalid")
@@ -600,11 +616,13 @@ def test_decode_field_handlers_split_files_from_data() -> None:
         *,
         graphql_name: str,
         related_model: type[Model],
+        key_attname: str | None,
         info: object,
     ) -> tuple[str, None]:
         del (
             graphql_name,
             related_model,
+            key_attname,
             info,
         )  # relation_into passes it by keyword; this stand-in does not read it
         return f"pk-{value}", None
@@ -614,11 +632,13 @@ def test_decode_field_handlers_split_files_from_data() -> None:
         *,
         graphql_name: str,
         related_model: type[Model],
+        key_attname: str | None,
         info: object,
     ) -> NoReturn:
         del (
             graphql_name,
             related_model,
+            key_attname,
             info,
         )  # relation_into passes it by keyword; this stand-in does not read it
         raise AssertionError("multi should not run")
@@ -769,6 +789,7 @@ def test_decode_visible_relation_handles_invalid_id_and_missing_object() -> None
         async_recourse=recourse,
         skip=lambda x: x is None,
         project=saved_pk,
+        key_attname=None,
     )
     assert val is None
     assert error is not None
@@ -783,6 +804,7 @@ def test_decode_visible_relation_handles_invalid_id_and_missing_object() -> None
         async_recourse=recourse,
         skip=lambda x: x is None,
         project=saved_pk,
+        key_attname=None,
     )
     assert val is None
     assert error is not None
@@ -1062,6 +1084,77 @@ def test_decode_visible_relation_ids_answers_the_key_a_non_pk_relation_stores() 
     assert keys is None
     assert error is not None
     assert error.field == "partnerIds"
+
+
+@pytest.mark.django_db
+def test_decode_visible_relation_ids_projects_pks_and_still_refuses_a_null_key() -> None:
+    """``project(pk, key)`` answers what the flavor binds; a ``NULL`` key is refused first.
+
+    The serializer's ``PrimaryKeyRelatedField`` resolves pks, so its decoder projects each
+    visible row back to its pk; the row set is the one the stored key admits.
+    """
+    keyed = NullableScalarSpecimen.objects.create(label="Keyed")
+    unkeyed = NullableScalarSpecimen.objects.create(label=None)
+
+    def decode(pks: list[object]) -> tuple[list[object] | None, FieldError | None]:
+        return decode_visible_relation_ids(
+            pks,
+            graphql_name="partnerIds",
+            related_model=NullableScalarSpecimen,
+            info=unread_info(),
+            async_recourse="Use a synchronous visibility hook.",
+            key_attname="label",
+            project=lambda pk, key: (pk, key),
+        )
+
+    assert decode([keyed.pk]) == ([(keyed.pk, "Keyed")], None)
+    keys, error = decode([keyed.pk, unkeyed.pk])
+    assert keys is None
+    assert error is not None
+    assert error.field == "partnerIds"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("key_attname", [None, "label"])
+def test_decode_visible_relation_refuses_a_visible_row_whose_stored_key_is_null(
+    key_attname: str | None,
+) -> None:
+    """The single spine refuses a ``NULL`` stored key whatever the flavor projects.
+
+    With the stored column named, the visible ``label=None`` row is the uniform relation
+    error and ``project`` never runs; with no stored column (a pk-keyed relation) the same
+    row resolves.
+    """
+    unkeyed = NullableScalarSpecimen.objects.create(label=None)
+    projected: list[object] = []
+
+    def project(obj: Model) -> object:
+        projected.append(obj)
+        return saved_pk(obj)
+
+    value, error = decode_visible_relation(
+        unkeyed.pk,
+        graphql_name="partnerId",
+        related_model=NullableScalarSpecimen,
+        info=unread_info(),
+        async_recourse="Use a synchronous visibility hook.",
+        skip=lambda candidate: candidate is None,
+        project=project,
+        key_attname=key_attname,
+    )
+
+    if key_attname is None:
+        assert (value, error) == (unkeyed.pk, None)
+        assert projected == [unkeyed]
+    else:
+        assert value is None
+        assert error is not None
+        assert (error.field, error.messages, error.codes) == (
+            "partnerId",
+            ["Invalid id for relation 'partnerId'."],
+            ["invalid"],
+        )
+        assert projected == []
 
 
 @pytest.mark.django_db

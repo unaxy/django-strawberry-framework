@@ -26,6 +26,8 @@ consumer-visible behaviors end to end:
   ``Venue`` parent table and one of its own.
 * ``KioskFaultSerializer`` names a ``SelfServeDesk``, whose primary key is a parent-link
   chain, through DRF's generated ``PrimaryKeyRelatedField``.
+* ``InterlibraryLoanSerializer`` writes the ``to_field`` key ``InterlibraryLoan.lender``
+  (``Branch.isil``, which may be ``NULL``) through a declared ``PrimaryKeyRelatedField``.
 
 ``Shelf`` is non-Relay (``ShelfType`` lists no ``relay.Node`` interface), so the ``branch``
 FK relation input is a raw pk and the payload object slot is ``result`` (not ``node``); the
@@ -57,6 +59,7 @@ from .models import (
     CirculationDesk,
     Edition,
     Genre,
+    InterlibraryLoan,
     KioskFault,
     LendingDesk,
     PatronProfile,
@@ -915,6 +918,29 @@ class KioskFaultSerializer(ModelSerializerBase[KioskFault]):
     class Meta:
         model = KioskFault
         fields = ("kiosk", "note")
+
+
+class InterlibraryLoanSerializer(ModelSerializerBase[InterlibraryLoan]):
+    """An ``InterlibraryLoan`` serializer writing the ``to_field`` key ``lender``.
+
+    ``InterlibraryLoan.lender`` is ``ForeignKey(Branch, to_field="isil")``. DRF would map it
+    to a ``SlugRelatedField(slug_field="isil")``, which ``SerializerMutation`` refuses, so the
+    field is declared as a ``PrimaryKeyRelatedField``: the input names the branch by id, and
+    the saved column holds that branch's ISIL.
+    """
+
+    # DRF's stubs type the constructor as returning either a single or a many relation.
+    lender: serializers.RelatedField[Branch, Branch, object] | serializers.ManyRelatedField = (
+        serializers.PrimaryKeyRelatedField(
+            queryset=Branch.objects.all(),
+            allow_null=True,
+            required=False,
+        )
+    )
+
+    class Meta:
+        model = InterlibraryLoan
+        fields = ("lender", "title")
 
 
 class CirculationDeskHoldSerializer(ModelSerializerBase[CirculationDesk]):

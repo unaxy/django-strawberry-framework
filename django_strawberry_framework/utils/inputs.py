@@ -393,6 +393,13 @@ class InputFieldSpec:
       recorded at BUILD/BIND time so the decode never re-discovers the
       related model per request. ``None`` for a non-relation
       (``scalar`` / ``file``) field.
+    - ``key_attname`` - the related column a write through a relation field stores
+      when it is not the related pk (``utils/relations.py::non_pk_relation_key_attname``
+      of the backing model field: a ``to_field``, or the column an M2M through row's
+      target foreign key references), recorded at BUILD time by every flavor so the
+      decode reads only the rows such a relation can link
+      (``utils/querysets.py::linkable_rows``). ``None`` for a relation keyed by the pk,
+      for a relation with no backing model field, and for every non-relation.
     - ``nested_specs`` - the serializer-only nested-serializer axis: the
       ordered reverse-map ``InputFieldSpec`` tuple of the NESTED input's
       OWN fields, recorded for a ``nested_single`` / ``nested_multi`` field so the
@@ -410,6 +417,7 @@ class InputFieldSpec:
     kind: str
     source: str | None = None
     related_model: type[django_models.Model] | None = None
+    key_attname: str | None = None
     nested_specs: tuple[InputFieldSpec, ...] | None = None
     annotation_repr: str | None = None
     required: bool | None = None

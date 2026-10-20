@@ -53,7 +53,7 @@ from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.scalars import models as scalars_models
 from django import forms
-from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, models
 from django.db.models.signals import pre_save
@@ -80,7 +80,7 @@ from django_strawberry_framework.forms.resolvers import (
     _reconstruct_partial_data,
     _to_form_key_value,
 )
-from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
+from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
@@ -1766,6 +1766,7 @@ def test_decode_relation_single_empty_value_passes_through() -> None:
         None,
         graphql_name="categoryId",
         related_model=field.queryset.model,
+        key_attname=None,
         form_field=field,
         info=unread_info(),
     )
@@ -1784,6 +1785,7 @@ def test_decode_relation_multi_empty_values_return_empty_list() -> None:
             empty,
             graphql_name="genres",
             related_model=field.queryset.model,
+            key_attname=None,
             form_field=field,
             info=unread_info(),
         )
@@ -1826,6 +1828,7 @@ def test_decode_form_relation_single_uncoercible_raw_pk_is_field_error() -> None
         "abc",
         graphql_name="genre",
         related_model=field.queryset.model,
+        key_attname=None,
         form_field=field,
         info=unread_info(),
     )
@@ -1845,6 +1848,7 @@ def test_decode_form_relation_multi_collects_valid_then_short_circuits_on_bad() 
         [saved_pk(genre)],
         graphql_name="genres",
         related_model=field.queryset.model,
+        key_attname=None,
         form_field=field,
         info=unread_info(),
     )
@@ -1855,12 +1859,69 @@ def test_decode_form_relation_multi_collects_valid_then_short_circuits_on_bad() 
         ["abc"],
         graphql_name="genres",
         related_model=field.queryset.model,
+        key_attname=None,
         form_field=field,
         info=unread_info(),
     )
     assert keys is None
     assert error is not None
     assert error.field == "genres"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("kind", ["single", "multi"])
+@pytest.mark.parametrize("to_field_name", [None, "label"], ids=["pk-keyed", "key-keyed"])
+def test_decode_form_relation_refuses_a_row_whose_stored_key_is_null(
+    kind: str,
+    to_field_name: str | None,
+) -> None:
+    """A visible row whose stored ``to_field`` key is ``NULL`` is the relation error.
+
+    The relation stores ``label`` (``NullableScalarSpecimen.label`` stands in for that
+    column), which is ``NULL`` on the row, so binding it would store an empty relation.
+    That holds whatever the field is keyed by: a pk-keyed field would accept the row, and a
+    field keyed by the stored column itself would answer its own ``invalid_choice``; both
+    answer the relation error. A row with a label binds its form key.
+    """
+    keyed = scalars_models.NullableScalarSpecimen.objects.create(label=_uniq("K"))
+    unkeyed = scalars_models.NullableScalarSpecimen.objects.create(label=None)
+    queryset = scalars_models.NullableScalarSpecimen.objects.all()
+    field = (
+        forms.ModelChoiceField(queryset=queryset, required=False, to_field_name=to_field_name)
+        if kind == "single"
+        else forms.ModelMultipleChoiceField(
+            queryset=queryset,
+            required=False,
+            to_field_name=to_field_name,
+        )
+    )
+    decode = (
+        form_resolvers._decode_form_relation_single
+        if kind == "single"
+        else form_resolvers._decode_form_relation_multi
+    )
+
+    def run(pk: object) -> tuple[object, object]:
+        return decode(
+            pk if kind == "single" else [pk],
+            graphql_name="partner",
+            related_model=scalars_models.NullableScalarSpecimen,
+            key_attname="label",
+            form_field=field,
+            info=unread_info(),
+        )
+
+    form_key = saved_pk(keyed) if to_field_name is None else keyed.label
+    expected = form_key if kind == "single" else [form_key]
+    assert run(saved_pk(keyed)) == (expected, None)
+    value, error = run(saved_pk(unkeyed))
+    assert value is None
+    assert isinstance(error, FieldError)
+    assert (error.field, error.messages, error.codes) == (
+        "partner",
+        ["Invalid id for relation 'partner'."],
+        ["invalid"],
+    )
 
 
 @pytest.mark.django_db
@@ -1924,6 +1985,7 @@ def test_decode_form_relation_multi_keeps_a_member_whose_to_field_name_value_is_
             [saved_pk(empty)],
             graphql_name="genres",
             related_model=library_models.Genre,
+            key_attname=None,
             form_field=field,
             info=unread_info(),
         )
@@ -2082,6 +2144,7 @@ def test_decode_form_relation_multi_non_iterable_returns_field_error() -> None:
         12345,
         graphql_name="genres",
         related_model=library_models.Genre,
+        key_attname=None,
         form_field=field,
         info=unread_info(),
     )
@@ -2292,23 +2355,29 @@ def test_partial_update_reconstruct_reports_an_unresolvable_stored_key(
         assert error.params == {"value": genre.name}
 
 
-def test_to_form_key_value_handles_serializable_value_exceptions(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    field = forms.ModelChoiceField(
-        queryset=library_models.Genre.objects.all(),
-        to_field_name="invalid_attr",
-    )
-    row = library_models.Genre(pk=42)
+def test_to_form_key_value_reads_the_key_off_the_row_and_never_substitutes_the_pk() -> None:
+    """The form key is the row's ``to_field_name`` value, or its pk when the field keys by pk.
 
-    # An attribute the row lacks: serializable_value raises AttributeError.
-    assert _to_form_key_value(row, field) == 42
+    The input build admits only ``pk`` or a concrete field
+    (``forms/inputs.py::require_readable_choice_keys``), so a name the row cannot answer
+    is a programming error that propagates, never a silent fall back to the pk, which the
+    form's ``queryset.get(<to_field_name>=pk)`` would resolve to another row.
+    """
+    row = library_models.Genre(pk=42, name="Poetry")
 
-    def _missing(_self: library_models.Genre, _name: str) -> object:
-        raise FieldDoesNotExist("missing")
+    def key(to_field_name: str | None) -> object:
+        field = forms.ModelChoiceField(
+            queryset=library_models.Genre.objects.all(),
+            to_field_name=to_field_name,
+        )
+        return _to_form_key_value(row, field)
 
-    monkeypatch.setattr(library_models.Genre, "serializable_value", _missing)
-    assert _to_form_key_value(row, field) == 42
+    assert key("name") == "Poetry"
+    assert key("id") == 42
+    assert key("pk") == 42
+    assert key(None) == 42
+    with pytest.raises(AttributeError):
+        _ = key("missing__path")
 
 
 def test_is_empty_form_value_handles_unhashable_and_typeerror() -> None:
@@ -2344,6 +2413,7 @@ def test_decode_form_relation_multi_rejects_non_collection_sequences() -> None:
             bad,
             graphql_name="genres",
             related_model=library_models.Genre,
+            key_attname=None,
             form_field=form_field,
             info=unread_info(),
         )
@@ -2367,6 +2437,7 @@ def test_decode_form_relation_multi_one_shot_generator_fully_decoded() -> None:
         iter([saved_pk(first), saved_pk(second)]),
         graphql_name="genres",
         related_model=library_models.Genre,
+        key_attname=None,
         form_field=field,
         info=unread_info(),
     )
@@ -2398,6 +2469,7 @@ def test_decode_form_relation_multi_materializes_before_any_visibility_query() -
             _container(),
             graphql_name="genres",
             related_model=library_models.Genre,
+            key_attname=None,
             form_field=field,
             info=unread_info(),
         )

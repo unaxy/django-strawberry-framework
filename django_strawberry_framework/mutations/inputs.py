@@ -78,6 +78,7 @@ from django_strawberry_framework.utils.relations import (
     carrier_backed_link,
     is_forward_concrete_relation,
     is_forward_many_to_many,
+    non_pk_relation_key_attname,
     stored_value_column,
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
@@ -700,6 +701,9 @@ def mutation_input_field_specs(
                 target_name=python_name,
                 kind=kind,
                 related_model=related_model,
+                key_attname=(
+                    None if related_model is None else non_pk_relation_key_attname(django_field)
+                ),
             ),
         )
     return specs, model_fields

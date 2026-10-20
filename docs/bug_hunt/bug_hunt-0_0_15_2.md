@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 163 done, 125 to do.
+Progress: 164 done, 127 to do.
 
 ## Done
 
@@ -570,6 +570,17 @@ Progress: 163 done, 125 to do.
   `utils/querysets.py::coerce_field_value_or_none` runs the key's own validators then that column's; all 280 refused
   cells build and store the right row, the 280 that built keep identical SDL; fakeshop gains `KioskFault` with
   `createKioskFault` / `ViaForm` / `ViaSerializer`
+- [x] 137. The ModelForm (pk-keyed `ModelChoiceField`) and serializer (`PrimaryKeyRelatedField`) flavors stored `NULL`
+  for a relation id naming a visible row whose `to_field` key is `NULL`, silently clearing an optional FK or one-to-one
+  (16 grid cells; required FKs and M2M gave "cannot be null", a generic constraint error or a raw `ValueError`), where the
+  model flavor refused it since item 130; and `forms/resolvers.py::_to_form_key_value` fell back to `obj.pk` when
+  `to_field_name` did not resolve on the row, linking a colliding row, even a hidden one: fixed,
+  `utils/querysets.py::linkable_rows` drops `NULL`-key rows at every visible-relation read (the single spine, the batched
+  model path, DRF's lookup) from the stored column each builder records on `InputFieldSpec.key_attname`, so all 80
+  `NULL`-key cells are the relation error with nothing written; a `to_field_name` that is not `pk` or a concrete field is
+  a schema-build `ConfigurationError` on any field the operation binds (every declared field for an update) and the
+  fallback is gone (the item's `to_field_name`-keyed half was already fixed by item 266); fakeshop gains `Branch.isil` and
+  `InterlibraryLoan` with create / update in all three flavors
 
 ## Outside review of the fixes
 
@@ -610,10 +621,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 137. ModelForm and serializer flavors: a relation id naming a visible row whose `to_field` key is `NULL` clears an
-  optional relation silently (the form binds `None`; the serializer's descriptor assignment stores `NULL`), where the model
-  flavor refuses it as the relation error since item 130; `forms/resolvers.py::_to_form_key_value` also falls back to
-  `obj.pk` when `to_field_name` does not resolve on the row
 - [ ] 141. `workspace.py baseline` records the ITEM_BASELINE sha before it waits for the copy's lock and syncs, so the
   `before` copy can come from a later tree than the recorded sha
 - [ ] 142. A SIGKILLed `workspace.py` leaves its command running without any lease (its fds are not inherited), so `gc`
@@ -725,11 +732,25 @@ tracker number are recorded there; open remainders and new defects are filed as 
   model's `_meta.pk`, not the target type's id slot (`types/relay.py::_node_id_slot`): for a Relay target declaring
   `id: relay.NodeID[str]` on a non-pk column, the GlobalID the server emits for that row is refused `GLOBALID_INVALID`,
   and a GlobalID whose node id happens to be a valid pk filters by that pk (wrong rows)
+- [ ] 291. A ModelForm that sets a relation field's `to_field_name` in `__init__` is decoded by the class-level field
+  (pk-keyed): the decode binds the visible row's pk and the bound field resolves `<to_field_name>=<pk text>`, so a hidden
+  row whose key equals that text is linked with no error (visible A pk 121, hidden H `code="121"`: `targetId: 121`
+  stores H); without a collision the answer is `invalid_choice`; refuse a bound field whose `to_field_name` differs from
+  the class-level one, as the serializer's agreement guard does
+- [ ] 292. A ModelForm relation field whose `to_field_name` names a concrete non-unique column passes the item 137 build
+  guard; when two rows (visible, or one visible and one hidden) share the decoded row's key, the form's
+  `queryset.get(<to_field_name>=key)` raises `MultipleObjectsReturned`, a top-level GraphQL error with no payload (plain
+  Django fails the same way); require `pk` or a unique field at build
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 293. CHANGELOG entry for item 137: in `DjangoModelFormMutation` and `SerializerMutation` a relation id naming a
+  visible row whose `to_field` key is `NULL` is the relation error instead of silently storing `NULL` (required
+  relations and many-to-many give that error instead of a field, constraint or raw error); a form `ModelChoiceField`
+  whose `to_field_name` is not `pk` or a concrete field of its target is refused at schema build on any field the
+  operation binds, instead of linking the row whose pk collides
 - [ ] 289. CHANGELOG entry for item 133: write inputs (model, ModelForm, serializer) into a non-Relay or unregistered
   target whose primary key is a one-to-one key or a multi-table-inheritance parent link now build, typed from the column
   that key stores (0.0.14 refused the schema build); an id past that column's range on `node`, an update `id`, a relation

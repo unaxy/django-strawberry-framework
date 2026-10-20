@@ -784,6 +784,18 @@ class KioskFaultType(DjangoType):
         fields = ("id", "kiosk", "note")
 
 
+class InterlibraryLoanType(DjangoType):
+    """A loan between branches; non-Relay, so a write names its lender by raw branch id.
+
+    ``lender`` is a ``to_field`` key into ``Branch.isil``: the id names the branch by its
+    primary key, and the column stores that branch's ISIL.
+    """
+
+    class Meta:
+        model = models.InterlibraryLoan
+        fields = ("id", "lender", "title")
+
+
 class OpenVenueType(DjangoType):
     """The ``OpenVenue`` proxy, whose rows come from its filtering default manager."""
 
@@ -2718,6 +2730,60 @@ class CreateKioskFaultViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class CreateInterlibraryLoan(DjangoMutation):
+    """Create an ``InterlibraryLoan`` via the model pipeline, naming its lender by raw branch id."""
+
+    class Meta:
+        model = models.InterlibraryLoan
+        operation = "create"
+        permission_classes = []
+
+
+class CreateInterlibraryLoanViaForm(DjangoModelFormMutation):
+    """Create an ``InterlibraryLoan`` via ``InterlibraryLoanForm``, a branch-id-keyed lender."""
+
+    class Meta:
+        form_class = forms.InterlibraryLoanForm
+        operation = "create"
+        permission_classes = []
+
+
+class CreateInterlibraryLoanViaSerializer(SerializerMutation):
+    """Create an ``InterlibraryLoan`` via ``InterlibraryLoanSerializer``, naming its lender by id."""
+
+    class Meta:
+        serializer_class = serializers.InterlibraryLoanSerializer
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateInterlibraryLoan(DjangoMutation):
+    """Update an ``InterlibraryLoan`` via the model pipeline, naming its lender by raw branch id."""
+
+    class Meta:
+        model = models.InterlibraryLoan
+        operation = "update"
+        permission_classes = []
+
+
+class UpdateInterlibraryLoanViaForm(DjangoModelFormMutation):
+    """Update an ``InterlibraryLoan`` via ``InterlibraryLoanForm``, a branch-id-keyed lender."""
+
+    class Meta:
+        form_class = forms.InterlibraryLoanForm
+        operation = "update"
+        permission_classes = []
+
+
+class UpdateInterlibraryLoanViaSerializer(SerializerMutation):
+    """Update an ``InterlibraryLoan`` via ``InterlibraryLoanSerializer``, naming its lender by id."""
+
+    class Meta:
+        serializer_class = serializers.InterlibraryLoanSerializer
+        operation = "update"
+        permission_classes = []
+
+
 @strawberry.type
 class Mutation:
     """Library write surface (live raw-pk relation visibility + ``to_field_name``).
@@ -2776,6 +2842,9 @@ class Mutation:
     ``createKioskFault`` and its ``ViaForm`` / ``ViaSerializer`` siblings write a key into the
     non-Relay ``SelfServeDesk``, whose primary key is a parent-link chain: ``kioskId`` is the
     ``Int`` of ``Venue.id``, the column that chain stores.
+    ``createInterlibraryLoan`` / ``updateInterlibraryLoan`` and their ``ViaForm`` /
+    ``ViaSerializer`` siblings write the ``to_field`` key ``lender`` into ``Branch.isil``:
+    ``lenderId`` names a branch by raw id, and a branch with no ISIL is the relation error.
     """
 
     create_shelf_via_form = DjangoMutationField(CreateShelfViaForm)
@@ -2895,6 +2964,16 @@ class Mutation:
     create_kiosk_fault = DjangoMutationField(CreateKioskFault)
     create_kiosk_fault_via_form = DjangoMutationField(CreateKioskFaultViaForm)
     create_kiosk_fault_via_serializer = DjangoMutationField(CreateKioskFaultViaSerializer)
+    create_interlibrary_loan = DjangoMutationField(CreateInterlibraryLoan)
+    create_interlibrary_loan_via_form = DjangoMutationField(CreateInterlibraryLoanViaForm)
+    create_interlibrary_loan_via_serializer = DjangoMutationField(
+        CreateInterlibraryLoanViaSerializer,
+    )
+    update_interlibrary_loan = DjangoMutationField(UpdateInterlibraryLoan)
+    update_interlibrary_loan_via_form = DjangoMutationField(UpdateInterlibraryLoanViaForm)
+    update_interlibrary_loan_via_serializer = DjangoMutationField(
+        UpdateInterlibraryLoanViaSerializer,
+    )
 
 
 __all__ = ("Mutation", "Query")

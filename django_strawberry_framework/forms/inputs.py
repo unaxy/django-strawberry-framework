@@ -69,7 +69,7 @@ from django_strawberry_framework.types.converters import (
     choice_enum_name,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import dict_of
+from django_strawberry_framework.utils._narrowing import dict_of, is_str, read_attr
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     build_strawberry_input_class,
@@ -83,6 +83,8 @@ from django_strawberry_framework.utils.inputs import (
 from django_strawberry_framework.utils.relations import (
     is_forward_concrete_relation,
     is_forward_many_to_many,
+    is_model_class,
+    non_pk_relation_key_attname,
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
@@ -548,6 +550,49 @@ def _model_column_for(form_class: FormClass, name: str) -> ConcreteField | None:
     return cast("ConcreteField", column)
 
 
+def require_readable_choice_keys(
+    form_class: FormClass,
+    form_fields: Mapping[str, forms.Field] | None = None,
+) -> None:
+    """Refuse a model-choice field whose ``to_field_name`` is not a concrete field of its target.
+
+    A relation id names its row by primary key. The decode reads that row through the
+    target's visibility query and binds the value ``to_field_name`` reads off it
+    (``forms/resolvers.py::_to_form_key_value``); an omitted relation is rebound the same
+    way from the stored row. So ``to_field_name`` must be unset, ``"pk"``, or a concrete
+    field of the target, by name or attname. A lookup path, an annotation, a property, a
+    relation that is not a column, or an unknown name is a ``ConfigurationError``: the row
+    carries no such value, and the form's ``queryset.get(<to_field_name>=key)`` would resolve
+    a row other than the one the decode admitted. ``form_fields`` is the set the operation
+    binds: the full declared basis for an update, whose reconstruction rebinds every declared
+    field, including those the input leaves out, and the input's own fields for a create. A
+    field whose target model is unknown at build (no model column and no class-level
+    queryset) is refused by its relation annotation instead.
+    """
+    for name, field in _form_field_basis(form_class, form_fields).items():
+        if not truth.is_instance(field, _MODEL_CHOICE_FIELD):
+            continue
+        key = read_attr(field, "to_field_name", None)
+        if not is_str(key) or not key or key == "pk":
+            continue
+        column = _model_column_for(form_class, name)
+        model = _related_model_of(field) if column is None else column.related_model
+        if not is_model_class(model):
+            continue
+        try:
+            concrete = model._meta.get_field(key).concrete
+        except FieldDoesNotExist:
+            concrete = False
+        if not concrete:
+            raise ConfigurationError(
+                f"DjangoFormMutation for {truth.name(form_class)}: field {name!r} sets "
+                f"to_field_name={key!r}, which is not a concrete field of "
+                f"{truth.name(model)}. A relation id names its row by primary key and the "
+                "form key is read off that row, so to_field_name must be 'pk' or a concrete "
+                f"field of {truth.name(model)}.",
+            )
+
+
 def _model_less_relation_annotation(
     name: str,
     field: _ModelChoiceFieldAny,
@@ -854,6 +899,7 @@ def _field_triple_and_spec(
         target_name=name,
         kind=kind,
         related_model=related_model,
+        key_attname=None if related_model is None else non_pk_relation_key_attname(column),
     )
     return python_attr, annotation, spec, field_required
 
@@ -929,6 +975,9 @@ def build_form_input_class(
         form_fields=form_fields,
         operation_kind=operation_kind,
     )
+    # The update reconstruction rebinds every declared field; a create binds only its own.
+    bound_fields = form_fields if operation_kind == PARTIAL else effective
+    require_readable_choice_keys(form_class, bound_fields)
     # The un-narrowed shape of the same operation: the canonical-name comparison basis,
     # so an update input that drops only the row identity keeps the canonical name.
     full_field_names = tuple(

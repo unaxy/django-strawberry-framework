@@ -114,6 +114,7 @@ from django_strawberry_framework.utils.inputs import RELATION_SINGLE as RELATION
 from django_strawberry_framework.utils.inputs import SCALAR as SCALAR  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import FieldConversionBase, InputFieldSpec
 from django_strawberry_framework.utils.querysets import to_python_value
+from django_strawberry_framework.utils.relations import non_pk_relation_key_attname
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
 from .accessors import (
@@ -1499,5 +1500,6 @@ def resolve_serializer_field(
         kind=kind,
         source=source,
         related_model=related_model,
+        key_attname=None if related_model is None else non_pk_relation_key_attname(column),
     )
     return python_attr, annotation, spec

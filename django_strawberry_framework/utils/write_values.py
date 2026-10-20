@@ -306,6 +306,7 @@ def decode_visible_relation(
     async_recourse: str,
     skip: Callable[[object], bool],
     project: Callable[[models.Model], object],
+    key_attname: str | None,
     index: int | None = None,
 ) -> tuple[object, FieldError | None]:
     """Decode ONE relation id to its visible, flavor-projected value.
@@ -327,6 +328,12 @@ def decode_visible_relation(
     ``obj.pk``). ``index`` is the id's position when a caller maps this over a
     relation-id list; it keys the type-check's text error to that element.
 
+    ``key_attname`` is the column the relation stores when it is not the related pk
+    (``InputFieldSpec.key_attname``), required so no caller can leave it out: a visible
+    row whose key is ``NULL`` names no row through it
+    (``utils/querysets.py::linkable_rows``) and is the same relation error, whatever key
+    the flavor binds.
+
     Returns ``(projected, None)`` on success or ``(None, FieldError)``. The
     form MULTI decoder maps this per element (it needs the object for
     ``to_field_name``). The model and serializer MULTI decoders share
@@ -343,7 +350,7 @@ def decode_visible_relation(
     )
     if error is not None:
         return None, error
-    obj = visible_related_object(related_model, pk, info, async_recourse)
+    obj = visible_related_object(related_model, pk, info, async_recourse, key_attname)
     if obj is None:
         return None, relation_field_error(graphql_name)
     return project(obj), None
@@ -390,6 +397,7 @@ def decode_visible_relation_ids(
     info: Info[object, object],
     async_recourse: str,
     key_attname: str | None = None,
+    project: Callable[[object, object], object] | None = None,
     single: bool = False,
 ) -> tuple[list[object] | None, FieldError | None]:
     """Type-check each relation id, then confirm the whole set in one visibility query.
@@ -412,11 +420,14 @@ def decode_visible_relation_ids(
     existence leak).
 
     The ids name rows by pk; the answer is the key a relation stores for each, read by
-    the same query: the pk itself when ``key_attname`` is ``None`` (the serializer, whose
-    DRF fields resolve pks), or the ``key_attname`` column of a relation keyed by
-    another column (``utils/relations.py::non_pk_relation_key_attname``), so a model
-    write never stores a pk where the column holds a ``to_field`` value. A visible row
-    whose key is ``NULL`` cannot be linked by it and is the same relation error.
+    the same query: the pk itself when ``key_attname`` is ``None``, or the
+    ``key_attname`` column of a relation keyed by another column
+    (``utils/relations.py::non_pk_relation_key_attname``), so a model write never
+    stores a pk where the column holds a ``to_field`` value. A visible row whose key is
+    ``NULL`` names no row through it (``utils/querysets.py::linkable_rows``) and is the
+    same relation error. ``project(pk, key)`` replaces the answer for a flavor whose
+    field resolves pks (the serializer's ``PrimaryKeyRelatedField``); the NULL-key
+    refusal holds either way.
 
     Each element's type-check keys its text error to the element's index
     (``boundWith.1``); ``single`` marks ``values`` as one FK id the caller wrapped in a
@@ -492,7 +503,9 @@ def decode_visible_relation_ids(
     visible = visible_related_objects(related_model, pks, info, async_recourse, key_attname)
     if not pks_all_present(pks, visible.keys()):
         return None, relation_field_error(graphql_name)
-    return [visible[str(pk)] for pk in pks], None
+    if project is None:
+        return [visible[str(pk)] for pk in pks], None
+    return [project(pk, visible[str(pk)]) for pk in pks], None
 
 
 def _spec_field_name(spec: InputFieldSpec) -> str:
@@ -580,7 +593,7 @@ def relation_into(
     """RELATION_SINGLE / RELATION_MULTI handler over flavor decoders.
 
     Picks ``multi`` vs ``single`` from ``spec.kind``, calls with the shared
-    kwargs (``graphql_name``, ``related_model``, ``info``) plus flavor extras
+    kwargs (``graphql_name``, ``related_model``, ``key_attname``, ``info``) plus flavor extras
     (the form's ``form_field``), then ``store_decoded``. Flavor null / skip /
     projection policy stays on the decoder (form ``empty_values`` +
     ``to_field_name``; serializer ``None`` + ``obj.pk`` / batched ids).
@@ -592,6 +605,7 @@ def relation_into(
             value,
             graphql_name=field_name(spec),
             related_model=spec.related_model,
+            key_attname=spec.key_attname,
             info=info,
             **extra(spec),
         )

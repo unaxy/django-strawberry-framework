@@ -34,14 +34,16 @@ and the form-specific invariants this module owns:
   every branch, including raw pk); the form still maps per element because it
   needs the related object for ``to_field_name``. A hidden / wrong-model /
   uncoercible id is a field-keyed ``FieldError`` (hidden and missing
-  indistinguishable, no existence leak). The visible object is converted to the
-  form-key value by
-  ``to_field_name`` (``obj.serializable_value(field.to_field_name)`` else
-  ``obj.pk``) so the bound form validates by the same key it was built on. A single
-  relation whose form-key value the field cleans to empty is refused as that field's
-  ``invalid_choice`` error rather than bound as a clear. Only a whole single or list
-  value in the field's ``empty_values`` is a clear; an M2M list element never is, so
-  every element, ``""`` included, is decoded.
+  indistinguishable, no existence leak), and so is a visible row whose stored key
+  (the column a ``to_field`` relation stores) is ``NULL``, whatever column the form
+  field is keyed by. The visible object is converted to the form-key value by
+  ``to_field_name`` (``obj.serializable_value(field.to_field_name)``, or ``obj.pk``
+  when the field sets none; the input build admits only ``pk`` or a concrete field of
+  the target, ``forms/inputs.py::require_readable_choice_keys``) so the bound form
+  validates by the same key it was built on. A single relation whose form-key value the
+  field cleans to empty is refused as that field's ``invalid_choice`` error rather than
+  bound as a clear. Only a whole single or list value in the field's ``empty_values`` is
+  a clear; an M2M list element never is, so every element, ``""`` included, is decoded.
 
 - **``update`` reconstructs the full bound payload** (Decision 8 step 4): for
   every non-file declared form field the input did not provide, supply the located
@@ -140,7 +142,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, cast
 
 from django import forms
-from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.forms.models import model_to_dict
 
 from django_strawberry_framework.mutations.resolvers import (
@@ -223,13 +225,13 @@ def _to_form_key_value(obj: object, form_field: forms.Field | None) -> object:
     set validates the bound value against THAT field (``obj.serializable_value(
     to_field_name)``), not the pk; an unset ``to_field_name`` keys by ``obj.pk``.
     So the bound form's ``to_python`` resolves the same value the decode produced.
+    The input build admits only a ``to_field_name`` naming ``pk`` or a concrete field of
+    the target (``forms/inputs.py::require_readable_choice_keys``), so the value is
+    always read off the row itself, never replaced by a key of another column.
     """
     to_field_name = read_attr(form_field, "to_field_name", None)
     if is_str(to_field_name) and to_field_name:
-        try:
-            return call_method(obj, "serializable_value", to_field_name)
-        except (AttributeError, FieldDoesNotExist):
-            pass
+        return call_method(obj, "serializable_value", to_field_name)
     return getattr(obj, "pk", obj)
 
 
@@ -307,8 +309,9 @@ def _unrepresentable_choice(
     bound with it. ``ModelChoiceField.to_python`` answers ``None`` for any value in the
     field's ``empty_values`` before it looks a choice up, so a related row whose form-key
     value is one of them (a ``to_field_name`` column holding ``""``, a text key ``""``, a
-    nullable key column holding ``NULL``) cannot be named through the field: binding the
-    key clears an optional relation or reports a required one as missing. ``form_key`` is
+    nullable column other than the one the relation stores holding ``NULL``) cannot be named
+    through the field: binding the key clears an optional relation or reports a required
+    one as missing. ``form_key`` is
     ``None`` when no related row resolves (a dangling stored key), which is refused the same
     way. Either is the field's own ``invalid_choice`` error with ``value`` as its parameter,
     never a clear and never a reinterpreted key. Only single relations reach it: a
@@ -333,6 +336,7 @@ def _decode_form_relation_single(
     *,
     graphql_name: str,
     related_model: type[models.Model],
+    key_attname: str | None,
     form_field: forms.Field | None,
     info: Info[object, object],
     index: int | None = None,
@@ -365,6 +369,11 @@ def _decode_form_relation_single(
     instead would mis-report a decode-level "Invalid id for relation" error and
     block a legitimate nullable-FK clear.
 
+    A visible row whose stored key (``key_attname``, the column a ``to_field`` relation
+    stores) is ``NULL`` names no row, whatever column the form field is keyed by: the
+    descriptor would store ``NULL`` and clear the relation. It is the uniform relation
+    error the spine answers for a hidden or missing row.
+
     A visible row whose form-key value the field cleans to empty (a ``to_field_name``
     column holding ``""``) cannot be linked through a single ``ModelChoiceField``: binding
     that key would clear the relation the client named. It is the field's own
@@ -384,6 +393,7 @@ def _decode_form_relation_single(
         async_recourse=_FORM_ASYNC_RECOURSE,
         skip=skip,
         project=lambda obj: _to_form_key_value(obj, form_field),
+        key_attname=key_attname,
         index=index,
     )
     if error is not None or skip(value):
@@ -406,6 +416,7 @@ def _decode_form_relation_multi(
     *,
     graphql_name: str,
     related_model: type[models.Model],
+    key_attname: str | None,
     form_field: forms.Field | None,
     info: Info[object, object],
 ) -> tuple[list[object] | None, FieldError | None]:
@@ -457,6 +468,7 @@ def _decode_form_relation_multi(
             async_recourse=_FORM_ASYNC_RECOURSE,
             skip=_never_a_clear,
             project=lambda obj: _to_form_key_value(obj, form_field),
+            key_attname=key_attname,
             index=index,
         )
         if error is not None:

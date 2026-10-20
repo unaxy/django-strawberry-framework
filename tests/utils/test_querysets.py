@@ -155,6 +155,7 @@ from django_strawberry_framework.utils.querysets import (
     expand_relation_order,
     initial_queryset,
     is_async_only_iterable,
+    linkable_rows,
     normalize_query_source,
     normalized_row_source,
     pks_all_present,
@@ -479,6 +480,55 @@ def test_visible_related_objects_reads_a_non_pk_key_beside_the_pk_in_one_query()
             str(keyed.pk): keyed.pk,
             str(unkeyed.pk): unkeyed.pk,
         }
+    finally:
+        registry.clear()
+
+
+@pytest.mark.django_db
+def test_linkable_rows_drops_null_keys_and_keeps_every_row_for_a_pk_key() -> None:
+    """A relation keyed by a column links only rows whose key is set; a pk key links every row.
+
+    ``key_attname`` ``None`` answers the queryset itself, so a pk-keyed read gains no
+    predicate.
+    """
+    keyed = NullableScalarSpecimen.objects.create(label="Keyed")
+    unkeyed = NullableScalarSpecimen.objects.create(label=None)
+    queryset = NullableScalarSpecimen.objects.filter(pk__in=[keyed.pk, unkeyed.pk])
+
+    assert linkable_rows(queryset, None) is queryset
+    assert list(linkable_rows(queryset, "label").values_list("pk", flat=True)) == [keyed.pk]
+
+
+@pytest.mark.django_db
+def test_visible_related_object_answers_none_for_a_null_key_in_one_query() -> None:
+    """A visible row whose stored key is ``NULL`` is ``None``, like a hidden or missing row.
+
+    The predicate rides the one visibility query; with no ``key_attname`` the same row
+    resolves.
+    """
+    registry.clear()
+    keyed = NullableScalarSpecimen.objects.create(label="Keyed")
+    unkeyed = NullableScalarSpecimen.objects.create(label=None)
+    try:
+        with CaptureQueriesContext(connection) as ctx:
+            refused = visible_related_object(
+                NullableScalarSpecimen,
+                unkeyed.pk,
+                None,
+                key_attname="label",
+            )
+        assert refused is None
+        assert len(ctx.captured_queries) == 1
+        assert (
+            visible_related_object(
+                NullableScalarSpecimen,
+                keyed.pk,
+                None,
+                key_attname="label",
+            )
+            == keyed
+        )
+        assert visible_related_object(NullableScalarSpecimen, unkeyed.pk, None) == unkeyed
     finally:
         registry.clear()
 
