@@ -17,7 +17,7 @@ DjangoOptimizerExtension,djangooptimizerextension,no optimizer change; downgrade
 Plan cache,plan-cache,plans baking cascading hooks are uncacheable (custom-hook rule); pinned
 Queryset diffing,queryset-diffing,B8 no-regression fence for consumer select_related on cascading relations
 Strictness mode,strictness-mode,cascade composes SQL never lazy-loads; raise stays silent — pinned in Slice 2
-Multi-database cooperation,multi-database-cooperation,axis 2 extended: every cascade subquery pinned to the caller's resolved alias (Decision 8)
+Multi-database cooperation,multi-database-cooperation,axis 2 extended: every cascade subquery pinned to the caller's explicit alias; unrouted under an unrouted caller (Decision 8)
 only() projection,only-projection,the helper is pure filter composition; composes with projections downstream
 FK-id elision,fk-id-elision,elision already falls back when a target hook must run; cascading targets never elide
 Meta.optimizer_hints,metaoptimizer_hints,typo-guard precedent for the loud fields= validation (Decision 9); hints untouched

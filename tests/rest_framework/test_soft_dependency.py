@@ -27,8 +27,6 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-import subprocess
-import sys
 from collections.abc import Iterator
 from typing import Any, get_type_hints
 
@@ -37,9 +35,13 @@ import pytest
 import django_strawberry_framework
 from django_strawberry_framework.utils._narrowing import read_attr
 from tests._soft_dependency import simulated_absence
+from tests._subprocess import run_in_fresh_process
 
-# The verified DRF floor; the install hint must name it (place 2 of the
-# three-places-that-must-agree). The test matches this substring.
+# The verified DRF floor, RE-TYPED here rather than imported: a test comparing
+# ``utils/imports.py::DRF_FLOOR`` against itself could never notice the hint
+# drifting. This literal is one of the floor's three gated places, beside that
+# constant and the ``pyproject.toml`` dev-group row (compared to each other in
+# ``tests/test_ci_governance.py``); the tests match the hint against it.
 _HINT_SUBSTRING = "djangorestframework>=3.17.0"
 
 
@@ -85,16 +87,7 @@ except ImportError as exc:
 else:
     raise AssertionError("SerializerMutation must reach the DRF install guard")
 """
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"fresh DRF-absent import failed: stdout={result.stdout!r}, stderr={result.stderr!r}"
-    )
+    run_in_fresh_process(script, fakeshop=False, timeout=15)
 
 
 @pytest.mark.parametrize("name", tuple(django_strawberry_framework._DRF_SOFT_EXPORTS))
@@ -141,7 +134,7 @@ def test_other_attribute_miss_raises_attribute_error() -> None:
 def test_successful_lookup_does_not_memoize(name: str) -> None:
     """A successful serializer-surface access (DRF present) does not bind into root globals.
 
-    Non-memoization (Decision 12): the resolved class is NOT written into the root
+    Non-memoization (spec-039 Decision 12): the resolved class is NOT written into the root
     module ``globals()``, so each access re-fires the guard (the absent-DRF test can
     evict + re-hit it). Run WITHOUT the absence fixture (DRF present), so the access
     succeeds; then assert the name is not in ``vars(...)``.

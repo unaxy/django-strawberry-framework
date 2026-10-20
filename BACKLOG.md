@@ -28,7 +28,7 @@ Cards are grouped by subsystem. Group order and card order within groups carry n
 
 **Spec**:
 
-The envelope core is shipped (`mutations/inputs.py::FieldError`, spec-036 Decision 7 + spec-039 rev6 #4/#13): `field: str` (dotted; `__all__` sentinel), `messages: list[str]`, plus the additive `codes: list[str]` / `path: list[str]` pair, grouped one entry per field. Path segments are strings (`["items", "0", "name"]`) because GraphQL's type system cannot express the error spec's heterogeneous `[String | Int]` path list inside a schema type — clients get spec-shaped segments at string fidelity. This card does **not** reshape any of that published contract; it adds:
+The envelope core is shipped (`utils/errors.py::FieldError`, spec-036 Decision 7 + spec-039 rev6 #4/#13): `field: str` (dotted; `__all__` sentinel), `messages: list[str]`, plus the additive `codes: list[str]` / `path: list[str]` pair, grouped one entry per field. Path segments are strings (`["items", "0", "name"]`) because GraphQL's type system cannot express the error spec's heterogeneous `[String | Int]` path list inside a schema type — clients get spec-shaped segments at string fidelity. This card does **not** reshape any of that published contract; it adds:
 
 - **The code registry.** Codes come from a package registry that consumers extend via `@register_error_code("payment.declined")`. The shipped framework codes (`invalid`, `null`, `not_found`, `constraint`, plus the DRF / Django validation codes passed through into `codes`) seed the registry as the package-owned vocabulary.
 - The `dst.*` namespace is **reserved for package-emitted codes**. Consumer registration inside `dst.*` raises `ConfigurationError`. Duplicate registration of any code raises `ConfigurationError` at import time.
@@ -123,7 +123,9 @@ and optimizer strictness diagnostics.
 **Sequencing**: if the [structural templates][card-structural-templates] card has landed, this
 strategy must consume its sidecar normalization and its `RowIdentityProof` gate rather than
 certify child row identity for itself. A strategy that self-certifies reopens the window-safety
-hole in a new backend — the exact failure the gate exists to prevent.
+hole in a new backend — the exact failure the gate exists to prevent. The strategy interface this
+card implements gets its owning spec under the [fetch-strategy seam][card-nested-fetch-strategy-seam]
+card.
 
 ### `backward_nested_keyset_pagination`
 
@@ -162,6 +164,8 @@ fetching, and the count-free probe policy.
 must consume the [structural templates][card-structural-templates] card's sidecar normalization
 and `RowIdentityProof` gate instead of self-certifying child row identity. Backward cursors also
 inherit the rule that a cursor minted under one viewer must not decode into rows under another.
+The strategy interface it extends gets its owning spec under the [fetch-strategy
+seam][card-nested-fetch-strategy-seam] card.
 
 ### `mti_aware_lateral_nested_fetch`
 
@@ -200,7 +204,8 @@ visibility-scope recognition, and composite-index advisory.
 rule applies — consume the [structural templates][card-structural-templates] card's sidecar
 normalization and `RowIdentityProof` gate; never self-certify child row identity. MTI parent/child
 joins are precisely the shape where an unexplained multiplying join hides, so the proof matters
-more here, not less.
+more here, not less. The strategy interface it extends gets its owning spec under the
+[fetch-strategy seam][card-nested-fetch-strategy-seam] card.
 
 ### `selection_aware_annotations`
 
@@ -1743,7 +1748,7 @@ class OrderMatrix(DjangoMatrix):
 - **Every push routes through `transaction.on_commit`.** `post_save` fires *inside* the transaction; pushing on the signal directly sends phantom events for writes that subsequently roll back. This is the classic bug of the feature class and the non-negotiable line of the spec.
 - Subscription visibility runs through `get_queryset` (and the permission cards when they land): a subscriber receives only events for rows they could query.
 - **Documented coverage gap, stated loudly**: Django signals do not fire on `queryset.update()`, `bulk_update`, `bulk_create(ignore_conflicts=...)`, or raw SQL. The feature is "signal-wired", not "change-data-capture"; consumers needing completeness for bulk paths are pointed at explicit publish hooks.
-- Transport substrate: **shipped** (spec-041, 0.0.14) — `routers.py::DjangoGraphQLProtocolRouter` already wires Strawberry's Channels consumers onto HTTP + WebSocket with `AuthMiddlewareStack` and origin validation behind the soft `channels` dependency, so the WebSocket endpoint subscriptions ride on exists today. This card owns the signal→publish machinery on top; the seam stays transport-agnostic so other async backends can plug in.
+- Transport substrate: **shipped** (spec-041 and spec-046, 0.0.14) — `routers.py::DjangoGraphQLProtocolRouter` routes WebSocket onto Strawberry's Channels consumer behind the Host check, the Origin check and `AuthMiddlewareStack`, under the soft `channels` dependency, while HTTP stays the project's own Django ASGI application, so the WebSocket endpoint subscriptions ride on exists today. This card owns the signal→publish machinery on top; the seam stays transport-agnostic so other async backends can plug in.
 - Subscription-time policy checks happen at subscription open; a per-event-flood defense (e.g. a `SubscriptionConcurrencyCap` policy) belongs to the DoS stack.
 
 **Composes with**: `opt_in_async_resolvers`, `declarative_row_and_field_permissions`, `dos_policy_stack_framework`.
@@ -1790,7 +1795,7 @@ class OrderMatrix(DjangoMatrix):
 - **Connection-scoped context is the safe form of auth reuse**: auth runs once at connection accept, the context lives exactly as long as the connection, and revocation has a natural enforcement point (close the connection). No TTL, no staleness window — the lifecycle is protocol-defined, not timer-defined. This is deliberately *not* the sibling card's TTL cache; over a connection the TTL mechanism is unnecessary.
 - **Supersession**: a new operation carrying the same client-declared operation group (e.g. the search box's group key) cancels the prior in-flight operation of that group — wired through the graphql-ws `complete`/stop machinery into `request_lifecycle_cancellation_and_reuse`'s DB-cancel seam, so superseded searches free the database, not just the socket.
 - WS operations resolve through `operation_document_and_plan_cache` — one cache across HTTP and WS, never two.
-- Transport substrate: **shipped** (spec-041, 0.0.14) — `routers.py::DjangoGraphQLProtocolRouter` already carries queries over WebSocket with `AuthMiddlewareStack` and origin validation behind the soft `channels` dependency. This card adds no protocol surface.
+- Transport substrate: **shipped** (spec-041 and spec-046, 0.0.14) — `routers.py::DjangoGraphQLProtocolRouter` owns only the WebSocket route (Host check, Origin check, `AuthMiddlewareStack`, then Strawberry's Channels consumer) under the soft `channels` dependency; HTTP stays the project's own Django ASGI application. This card adds no protocol surface.
 - **Sibling of `signal_wired_subscriptions`, never merged**: that card is server-initiated push (signals → `on_commit` → publish); this card is client-driven re-execution with new variables. They share the shipped transport and nothing else — merging would double an already Difficulty-7 card.
 
 **Composes with**: `request_lifecycle_cancellation_and_reuse` (*prerequisite*), `operation_document_and_plan_cache` (*prerequisite*), shipped spec-041 Channels router (builds on), `signal_wired_subscriptions` (transport sibling), `opt_in_async_resolvers`, `dos_policy_stack_framework` (per-connection operation caps belong there).
@@ -1960,6 +1965,7 @@ If a card turns out to be wrong (the upstream packages ship it, real-world adopt
 [card-multi-database-cooperation-contract]: KANBAN.md#multi_database_cooperation_contract
 [card-multiple-djangotypes-per-model-with-metaprimary]: KANBAN.md#multiple_djangotypes_per_model_with_metaprimary
 [card-mutation-idempotency-keys]: KANBAN.md#mutation_idempotency_keys
+[card-nested-fetch-strategy-seam]: KANBAN.md#owning_spec_for_the_nested_connection_fetch_strategy_seam
 [card-optimizer-explain-mode]: KANBAN.md#optimizer_explain_mode
 [card-structural-templates]: KANBAN.md#structural_optimization_templates_and_nested_sidecar_batching
 [kanban]: KANBAN.md

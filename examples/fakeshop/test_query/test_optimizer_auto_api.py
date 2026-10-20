@@ -511,7 +511,7 @@ def install_distinct_child_schema(
 def test_distinct_child_queryset_never_windows_over_http() -> None:
     """A target ``get_queryset`` returning ``.distinct()`` leaves the nested page unplanned.
 
-    The nested planner refuses the whole relation (Decision 6), so each parent
+    The nested planner refuses the whole relation (spec-033 Decision 6), so each parent
     pays its own child query and no ``ROW_NUMBER() OVER`` window is emitted.
     """
     _seed_hint_shelf()

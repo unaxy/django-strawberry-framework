@@ -442,9 +442,9 @@ Contracts (initial set):
    imports no feature subpackage (`exceptions`, the root `resource_policy`
    module — `utils/connections.py` imports `effective_bound` /
    `policy_from_info` at module level — and stdlib/Django only), with
-   exactly three sanctioned function-local deferred imports whitelisted via
+   exactly two sanctioned function-local deferred imports whitelisted via
    the
-   contract's `ignore_imports` — all exist to break real import cycles, not
+   contract's `ignore_imports` — both exist to break real import cycles, not
    as boundary leaks:
    (i) `utils/querysets.py::related_visibility_queryset` does
    `from ..registry import registry` (deferred because `registry` imports
@@ -452,12 +452,12 @@ Contracts (initial set):
    (ii) `utils/write_values.py::type_check_relation_id` does
    `from ..relay import GlobalIDDecode, decode_model_global_id` inside the
    `relay.GlobalID` branch (deferred because `relay` imports `utils.querysets`
-   at module level — cycle documented at the call site);
-   (iii) `utils/errors.py::field_error` does
-   `from ..mutations.inputs import NON_FIELD_ERROR_KEY, FieldError` at
-   runtime (the same names its TYPE_CHECKING block imports).
-   TYPE_CHECKING-only upward imports (`utils/errors.py`,
-   `utils/write_values.py`, `utils/write_transaction.py` -> `mutations`;
+   at module level — cycle documented at the call site).
+   `FieldError` / `NON_FIELD_ERROR_KEY` are defined in `utils/errors.py`
+   itself (re-exported by `mutations/inputs.py`), so the shared error
+   constructors import nothing from `mutations`.
+   TYPE_CHECKING-only upward imports (`utils/write_transaction.py` ->
+   `mutations`;
    `utils/input_values.py`, `utils/querysets.py` -> `filters` / `orders`;
    `utils/querysets.py`, `utils/inputs.py` -> `types`; `utils/inputs.py`,
    `utils/permissions.py` -> `sets_mixins`) are covered by the

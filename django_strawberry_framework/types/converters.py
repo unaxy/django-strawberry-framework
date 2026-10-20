@@ -3,7 +3,7 @@
 Public surface:
 
 - ``convert_field_output(field, type_name)`` - the read-output entry point
-  ``types/base.py:_build_annotations`` calls for every non-relation column.
+  ``types/base.py::_build_annotations`` calls for every non-relation column.
   Routes ``FileField`` / ``ImageField`` through ``FIELD_OUTPUT_TYPE_MAP`` to
   the structured ``DjangoFileType`` / ``DjangoImageType`` output objects
   (nullable by default as ``<object> | None`` to match the parent resolver's
@@ -457,7 +457,7 @@ def convert_scalar(
             unaffected. ``True`` emits ``T | None`` regardless of the
             column (force nullable). ``False`` emits ``T`` regardless (force
             required). Sourced per field from ``Meta.nullable_overrides`` /
-            ``Meta.required_overrides`` by ``types/base._build_annotations``.
+            ``Meta.required_overrides`` by ``types/base.py::_build_annotations``.
             Only the OUTER field's nullability is affected; the recursive
             ``ArrayField.base_field`` call is left unset, so the inner
             element nullability follows ``base_field.null``.

@@ -105,8 +105,8 @@ if TYPE_CHECKING:
     from django.db import models
     from django.db.models import QuerySet
 
-    from django_strawberry_framework.mutations.inputs import FieldError
     from django_strawberry_framework.mutations.sets import WriteMutationClass
+    from django_strawberry_framework.utils.errors import FieldError
 
     from .typing import ConcreteField
 

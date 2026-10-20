@@ -306,8 +306,9 @@ card does not copy.
 - **Fakeshop.** The `scalars` app's `MediaSpecimen` carries `attachment`
   (`FileField`, required), `image` (`ImageField`, required), `optional_attachment`
   (`FileField`, `blank=True`) and `spare_image` (`ImageField`, `null=True`), exposed by
-  `MediaSpecimenType`, the opt-in `MediaSpecimenWithPathType`
-  (`filesystem_path_fields = ("attachment",)`) and the `createMediaSpecimen` /
+  `MediaSpecimenType` (selecting its four columns by `Meta.fields`), the opt-in
+  `MediaSpecimenWithPathType` (the same four by `Meta.exclude`,
+  `filesystem_path_fields = ("attachment",)`) and the `createMediaSpecimen` /
   `updateMediaSpecimen` mutations. The products `Item.attachment` (`FileField`,
   `null=True, blank=True`) carries the form and serializer upload paths. The
   fakeshop `/graphql/` mount is the package's
@@ -825,9 +826,10 @@ rule applies in full: a line a real fakeshop query reaches is covered over HTTP.
 
 - **Live `/graphql/` tests** ([`test_uploads_api.py`][test-uploads-api], against
   `MediaSpecimen`) own the public contract: the default-nullable SDL (a *required*
-  column renders nullable), no `path` on the default objects and its presence under
-  `MediaSpecimenWithPathType`'s opt-in, populated subfields (incl. `width` / `height`
-  from a real PNG), the empty-file object-`null` case, every degradation row (a
+  column renders nullable), a file and an image column dropped by `Meta.fields` or
+  `Meta.exclude` absent from the type, no `path` on the default objects and its
+  presence under `MediaSpecimenWithPathType`'s opt-in, populated subfields (incl.
+  `width` / `height` from a real PNG), the empty-file object-`null` case, every degradation row (a
   backend whose `path` raises `NotImplementedError` nulls only `path`; a vanished file
   nulls `size`; unparseable image bytes null `width` / `height`; a
   `SuspiciousFileOperation` is reported, not nulled — storage faults injected with

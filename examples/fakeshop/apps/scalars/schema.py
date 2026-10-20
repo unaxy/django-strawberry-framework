@@ -226,16 +226,16 @@ class MediaSpecimenWithPathType(DjangoType):
     ``primary = False``: ``MediaSpecimenType`` stays the type a relation to
     ``MediaSpecimen`` resolves to, and this one is reachable only through its own
     root field.
+
+    The columns are selected by ``Meta.exclude`` where ``MediaSpecimenType``
+    uses ``Meta.fields``: both publish the same four columns, so the live schema
+    shows a file and an image column dropped by either selection form, with no
+    output field and no generated file resolver for the excluded pair.
     """
 
     class Meta:
         model = models.MediaSpecimen
-        fields = (
-            "id",
-            "label",
-            "attachment",
-            "image",
-        )
+        exclude = ("optional_attachment", "spare_image")
         filesystem_path_fields = ("attachment",)
         primary = False
 

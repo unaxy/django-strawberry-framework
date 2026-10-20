@@ -63,6 +63,7 @@ from .plans import (
     runtime_path_from_info,
 )
 from .selections import (
+    RUNTIME_PREFIXES_ATTR,
     included_field_selections,
     is_fragment,
     response_key,
@@ -736,7 +737,7 @@ def _resolver_identities_for(
     ``resolver_key(type_cls, relation_field_name, runtime_path)`` - the
     load-bearing "planned -> silent" parity (``connection.py`` resolver doc).
 
-    A selection-specific ``_optimizer_runtime_prefixes`` (set by connection
+    A selection-specific ``RUNTIME_PREFIXES_ATTR`` (set by connection
     extraction) overrides the inherited ``runtime_prefixes``; the runtime path
     is the cartesian product over those prefixes and ``_response_keys(sel)``.
     """
@@ -1151,15 +1152,15 @@ def _plan_prefetch_relation(
     """Plan a queryset-boundary relation traversal with optional child optimization.
 
     The prefetch LOOKUP segment is the relation's instance accessor
-    (``utils.relations.instance_accessor``), not ``field.name``: Django's
-    ``prefetch_related`` resolves lookups via ``getattr`` on the instance,
-    and for a reverse relation without ``related_name`` the field name is
-    the related QUERY name (``"book"``) while the accessor is ``"book_set"``
-    - planning the query name made every optimized query over such a
-    relation fail with ``AttributeError: ... invalid parameter to
-    prefetch_related()``. Plan keys and resolver
-    identities stay in field-name vocabulary; only the lookup string
-    Django consumes uses the accessor.
+    (``django_strawberry_framework/utils/relations.py::instance_accessor``),
+    not ``field.name``: Django's ``prefetch_related`` resolves lookups via
+    ``getattr`` on the instance, and for a reverse relation without
+    ``related_name`` the field name is the related QUERY name (``"book"``)
+    while the accessor is ``"book_set"`` - planning the query name made
+    every optimized query over such a relation fail with
+    ``AttributeError: ... invalid parameter to prefetch_related()``. Plan
+    keys and resolver identities stay in field-name vocabulary; only the
+    lookup string Django consumes uses the accessor.
 
     ``enable_only`` (G2 gate, spec-035 Decision 4) gates only the connector
     columns and the child plan's projection; the ``Prefetch`` itself is
@@ -1838,7 +1839,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
                 arguments=getattr(sel, "arguments", None) or {},
                 selections=list(getattr(sel, "selections", None) or []),
                 _optimizer_response_keys=[_response_key(sel)],
-                _optimizer_runtime_prefixes=_selection_runtime_prefixes(sel),
+                **{RUNTIME_PREFIXES_ATTR: _selection_runtime_prefixes(sel)},
                 # Per-response-key argument payloads (spec-033 Decision 6); see
                 # the merge branch above and ``_aliased_arguments_diverge``.
                 _optimizer_response_key_arguments={
@@ -1953,7 +1954,7 @@ def _selection_runtime_prefixes(selection: FieldSelection) -> list[tuple[str, ..
     # runtime-path tuples.
     prefixes: Iterable[tuple[str, ...]] | None = getattr(
         selection,
-        "_optimizer_runtime_prefixes",
+        RUNTIME_PREFIXES_ATTR,
         None,
     )
     if prefixes is None:
@@ -1967,9 +1968,9 @@ def _merge_runtime_prefixes(merged: SimpleNamespace, selection: FieldSelection) 
     if incoming is None:
         return
     # The first-seen merge branch stored a list of runtime-path tuples or ``None``.
-    stored = read_attr(merged, "_optimizer_runtime_prefixes")
+    stored = read_attr(merged, RUNTIME_PREFIXES_ATTR)
     if stored is None:
-        merged._optimizer_runtime_prefixes = incoming
+        setattr(merged, RUNTIME_PREFIXES_ATTR, incoming)
         return
     carried = require(stored, is_list)
     for prefix in incoming:

@@ -1,10 +1,9 @@
 """Live GraphQL HTTP tests for the library app's read/write, Relay, keyset, and optimizer surface.
 
-Async ``node`` / ``nodes`` rows on ``/graphql-async/`` are exempt from
-``graphql_client.py`` (sync-only) and use ``AsyncTestClient`` with
-``django_db(transaction=True)``. Typed ``DjangoNodesField`` rows ride a
-holder at ``/graphql-test/`` because the shipped query exposes typed
-``genre(id:)`` only.
+Async ``node`` / ``nodes`` rows on ``/graphql-async/`` drive ``AsyncTestClient``
+(``graphql_client.py`` is sync-only) with ``django_db(transaction=True)``. Typed
+``DjangoNodesField`` rows ride a holder at ``/graphql-test/`` because the shipped
+query exposes typed ``genre(id:)`` only.
 """
 
 import base64
@@ -29,7 +28,7 @@ from django import forms
 from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
-from django.db.models import Model, QuerySet
+from django.db.models import Model, Prefetch, QuerySet, Value
 from django.db.models.signals import post_init, pre_save
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
@@ -5674,10 +5673,9 @@ def test_public_patron_exclude_deny_list_shapes_type_and_resolves() -> None:
 # ``first: 0`` and ``first`` + ``last`` pins (re-affirmed, not duplicated);
 # the five conformance tests at the end of the block (``test_first_overrun``
 # through ``test_backward_pagination_last_before``) complete the matrix. The
-# stale-``after`` test pins ONLY the no-error
-# property (Revision 2 P1 - offset cursors encode a position, not row
-# identity). All assertions are behavior-only - never SQL shape
-# (pre-``033`` posture, Decision 12).
+# stale-``after`` test pins ONLY the no-error property (offset cursors encode
+# a position, not row identity). All assertions are behavior-only - never SQL
+# shape (pre-``033`` posture, Decision 12).
 # ---------------------------------------------------------------------------
 
 
@@ -6853,12 +6851,12 @@ def test_anonymous_inline_fragment_with_directive_around_node_field_resolves() -
     assert all("id" not in json_object(edge, "node") for edge in edges)
 
 
-# TODO(spec-035): extend this live connection-fragment block with the
-# matching-type relation-planning acceptance test required by the test_query
-# README. Pseudocode: seed multiple genres and books, capture SQL around
-# ``allLibraryGenresConnection { edges { node { ... on GenreType { books {
-# title } } } } }``, assert the response succeeds, and assert the books M2M is
-# prefetched rather than loaded once per genre.
+# TODO(BACKLOG polymorphic_interface_connections - the abstract-return optimizer entry card): add
+# to this live connection-fragment block the matching-type relation-planning acceptance test
+# required by the test_query README. Pseudocode: seed multiple genres and books, capture SQL
+# around ``allLibraryGenresConnection { edges { node { ... on GenreType { books { title } } }
+# } }``, assert the response succeeds, and assert the books M2M is prefetched rather than
+# loaded once per genre.
 @pytest.mark.django_db
 def test_typed_inline_fragment_under_connection_field_still_resolves() -> None:
     """A typed inline fragment (``... on T {}``) under a connection field stays working.
@@ -7010,7 +7008,7 @@ def test_first_overrun() -> None:
 
 @pytest.mark.django_db
 def test_stale_after_cursor_no_error() -> None:
-    """An ``after`` cursor whose row was deleted does NOT error (Revision 2 P1).
+    """An ``after`` cursor whose row was deleted does NOT error.
 
     Pins ONLY the no-error property: Strawberry's offset cursors encode a
     position, not row identity, so no skip / duplicate / next-row assertion
@@ -7065,8 +7063,8 @@ def test_has_next_page_correct_when_edges_unrequested() -> None:
     Strawberry's ``should_resolve_list_connection_edges`` takes a distinct
     path when neither ``edges`` nor ``pageInfo`` is selected; a ``pageInfo``-only
     selection must still walk the window and report the flag correctly for
-    both a windowed (true) and an exact (false) page (Revision 6 P3 - the
-    observable inverse of an unrequested field).
+    both a windowed (true) and an exact (false) page (the observable inverse
+    of an unrequested field).
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
@@ -9318,6 +9316,136 @@ def _genre_books_connection(
     return json_object(payload, "data", "allLibraryGenres", 0, "booksConnection"), captured
 
 
+#: A rewrite applied to ``GenreType.get_queryset``'s queryset.
+_GenreQuerysetHook = Callable[[QuerySet[models.Genre]], QuerySet[Model]]
+
+
+def _plain_books_under_window_attr(queryset: QuerySet[models.Genre]) -> QuerySet[Model]:
+    """Prefetch plain ``Book`` rows (no window row number) under the shared window attr."""
+    return queryset.prefetch_related(
+        Prefetch(
+            "books",
+            queryset=models.Book.objects.order_by("id"),
+            to_attr="_dst_books_connection",
+        ),
+    )
+
+
+#: How a ``GenreType`` hook can put a value under the reserved shared window
+#: attribute that the ``booksConnection`` resolver refuses to serve: the hook,
+#: the ``booksConnection`` arguments, and whether ``BookType.get_queryset``
+#: adds ``.distinct()`` so the walker leaves the relation unplanned (the
+#: sidecar ``filter:`` leaves it unplanned by itself).
+_REFUSED_WINDOW_SHAPES: dict[str, tuple[_GenreQuerysetHook, str, bool]] = {
+    "rows-without-row-number": (_plain_books_under_window_attr, "first: 2", True),
+    "not-a-list": (
+        lambda queryset: queryset.annotate(_dst_books_connection=Value(0)),
+        "first: 2",
+        True,
+    ),
+    "sidecar-filter": (
+        _plain_books_under_window_attr,
+        'first: 2, filter: { title: { exact: "a" } }',
+        False,
+    ),
+}
+
+
+def _strict_genre_books_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: str,
+    *,
+    hook: _GenreQuerysetHook | None = None,
+    distinct_target: bool = False,
+) -> JSONObject:
+    """Post ``allLibraryGenres { booksConnection(<arguments>) }`` under ``strictness="raise"``.
+
+    ``hook`` (when given) rewrites ``GenreType.get_queryset``'s queryset;
+    ``distinct_target`` makes ``BookType.get_queryset`` return ``.distinct()``.
+    Returns the parsed envelope.
+    """
+    if hook is not None:
+
+        def _genre_hook(
+            _cls: type[DjangoType],
+            queryset: QuerySet[models.Genre],
+            _info: strawberry.Info[object, object],
+            **_kwargs: object,
+        ) -> QuerySet[Model]:
+            return hook(queryset)
+
+        monkeypatch.setattr(library_schema.GenreType, "get_queryset", classmethod(_genre_hook))
+    if distinct_target:
+        book_hook = library_schema.BookType.get_queryset
+
+        def _distinct_books(
+            _cls: type[DjangoType],
+            queryset: QuerySet[models.Book],
+            info: strawberry.Info[object, object],
+            **_kwargs: object,
+        ) -> QuerySet[models.Book]:
+            return book_hook(queryset, info).distinct()
+
+        monkeypatch.setattr(library_schema.BookType, "get_queryset", classmethod(_distinct_books))
+    schema = DjangoSchema(
+        query=library_schema.Query,
+        config=strawberry_config(),
+        extensions=[lambda: DjangoOptimizerExtension(strictness="raise")],
+        error_policy={"enabled": False},
+    )
+    response = _post_holder(
+        schema,
+        f"{{ allLibraryGenres {{ booksConnection({arguments}) {{ edges {{ node {{ title }} }} }} }} }}",
+    )
+    assert response.status_code == 200
+    return response_json(response)
+
+
+@pytest.mark.parametrize("shape", list(_REFUSED_WINDOW_SHAPES))
+@pytest.mark.django_db
+def test_strictness_raise_reports_a_refused_window_attribute_as_unplanned(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """A value under the window attribute that the resolver does not serve is a per-parent query.
+
+    The walker leaves the relation unplanned, and the hook's value under
+    ``_dst_books_connection`` is not a window the resolver serves (rows without
+    ``_dst_row_number``, not a list, or a ``filter:`` the window cannot carry),
+    so the per-parent pipeline runs and ``strictness="raise"`` reports it: the
+    attribute's presence alone does not make the access served.
+    """
+    _seed_genre_books("a", "b", "c")
+    hook, arguments, distinct_target = _REFUSED_WINDOW_SHAPES[shape]
+    payload = _strict_genre_books_connection(
+        monkeypatch,
+        arguments,
+        hook=hook,
+        distinct_target=distinct_target,
+    )
+    assert payload.get("errors"), payload
+    assert "Unplanned N+1: books" in json_str(payload, "errors", 0, "message"), payload
+    assert json_object(payload, "errors", 0).get("path") == [
+        "allLibraryGenres",
+        0,
+        "booksConnection",
+    ], payload
+
+
+@pytest.mark.django_db
+def test_strictness_raise_stays_silent_on_a_served_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walker's own window under ``_dst_books_connection`` is served: no strictness error."""
+    _seed_genre_books("a", "b", "c")
+    payload = _strict_genre_books_connection(monkeypatch, "first: 2")
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "allLibraryGenres", 0, "booksConnection", "edges") == [
+        {"node": {"title": "a"}},
+        {"node": {"title": "b"}},
+    ]
+
+
 def _array_cursor(index: int) -> str:
     """The ``arrayconnection`` cursor for a 0-based offset index (matches endCursor)."""
     return relay.to_base64("arrayconnection", str(index))
@@ -9968,7 +10096,7 @@ def test_divergent_aliases_nested_same_key_conflict_serves_each_subtree_args() -
         # ``a``'s subtree asked for 1 nested genre per book...
         for edge in json_list(genre_row, "a", "edges"):
             assert len(json_list(edge, "node", "genresConnection", "edges")) == 1
-        # ...and ``b``'s asked for 2 - the P0 served it 1 (first-payload-wins).
+        # ...and ``b``'s asked for 2, which a first-payload-wins window would serve as 1.
         assert len(json_list(genre_row, "b", "edges")) == 3
         for edge in json_list(genre_row, "b", "edges"):
             nested = [
@@ -16106,11 +16234,11 @@ def test_golden_sdl_products_serializer_input() -> None:
 # (the ``partition_expr`` of optimizer/join_taxonomy.py::classify_relation_join),
 # which joins the through table at plan time. Django's prefetch filtering then
 # applies the parent predicate with
-# django/db/models/fields/related_descriptors.py::_filter_prefetch_queryset
-# #"reuse_all=True", which REUSES that join. On older Django generations (and
-# in a hypothetical refactor that moves the window annotation after prefetch
-# filtering) the predicate would add a SECOND through-table join instead -
-# cartesian row duplication that inflates ``_dst_row_number`` partitions and
+# django/db/models/fields/related_descriptors.py::_filter_prefetch_queryset #"reuse_all=True",
+# which REUSES that join. On older Django generations (and in a hypothetical
+# refactor that moves the window annotation after prefetch filtering) the
+# predicate would add a SECOND through-table join instead - cartesian row
+# duplication that inflates ``_dst_row_number`` partitions and
 # ``_dst_total_count``. The prior live tests could not catch that: their data
 # shapes attach each child to exactly one parent, so a duplicate join has
 # fan-out x1 and produces correct-looking pages. These two tests seed

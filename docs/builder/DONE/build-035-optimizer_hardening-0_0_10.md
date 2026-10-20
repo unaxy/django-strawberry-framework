@@ -115,12 +115,6 @@ should have used from the start, and the stated "population is zero" in the firs
 report was a false count of exactly the shape `BUILD.md` `## Claims are proven mechanically,
 never accepted on prose` grades Medium.
 
-**Out of scope, cataloged not fixed** (re-derived wrap-aware: **seven** occurrences, not six): `tests/optimizer/test_extension.py #"Decision 7 line 346"`
-(x2) and `#"Decision 7 line 347"`, three in `tests/mutations/test_sets.py`, and
-`tests/optimizer/test_extension.py #"spec line"` (which wraps AND names no spec at all, so it is
-invisible to both a line-oriented sweep and a spec-named one) cite *other* specs by line number.
-Same defect class, different card; this cycle is spec-035's.
-
 **Hot-path declaration:** none. No slice changes runtime behavior — Slice 2 is comment-text
 only (verified by an AST-with-comments-stripped comparison), and Slices 1 and 3 are `.md`.
 
@@ -207,12 +201,7 @@ already decided (Worker 2 fixes).
 > closed**, and `bld-035-final.md` was deleted after it too, leaving this plan as the cycle's only
 > retained artifact. Every one of them, and every `Sources:` pointer into them elsewhere, is
 > recoverable at commit `8c05f7fc` - `git show 8c05f7fc:docs/builder/<name>.md`. They are listed here
-> as the cycle's real artifact set, not as live paths. **Everything the final gate's deferred-work
-> catalog left open now lives on a card or in `BACKLOG.md`**: `TODO-ALPHA-053-0.0.15` carries the
-> unretargeted fifth anchor, `TODO-ALPHA-056-0.0.17` carries the citation-hygiene items (raw
-> line-number sites with their addresses inlined, the live-source self-citations, the
-> `path::Symbol` qualification register, and the anchor-uniqueness warning case), and `BACKLOG.md`
-> `polymorphic_interface_connections` carries R4 plus the live-coverage note.
+> as the cycle's real artifact set, not as live paths.
 
 - `docs/builder/bld-035-slice-1-rationale_extraction.md`
 - `docs/builder/bld-035-slice-2-carry_forward_anchors.md`
@@ -266,16 +255,12 @@ or recorded below -- nothing is left pointing at a deleted file.
 
 | # | Item | Disposition |
 |---|---|---|
-| D1 | The fifth carry-forward anchor at `examples/fakeshop/test_query/test_library_api.py:3680` is still `TODO(spec-035)` | **`TODO-ALPHA-053-0.0.15`** -- the only card whose sweep opens that file |
-| D2 | The two package test-tree anchors are deletable only once this cycle's successor spec records their file placement | **`BACKLOG.md` `polymorphic_interface_connections` R4**, with both measured legs |
 | D3 | `selections.py`'s anchor cited `(R1)` without naming the defining document | **CLOSED** in the tree, 2026-09-01 |
-| D4 | Nine raw-line-number citations owned by *other* specs | **`TODO-ALPHA-056-0.0.17`**, with all nine addresses inlined into that item |
 | D5 | Twelve live-source `(line NNN)` self-citations + 2 `cookbook line(s)` | **`TODO-ALPHA-056-0.0.17`** as its own item; it had no owner before |
 | D6 | The `## Implementation plan` delta-table preamble carries chronology | **Judged, deliberately left** -- see below |
 | D7 | The companion's `## Post-ship divergences` mixes two list forms | **Judged, deliberately left** -- see below |
 | D8 | `#"defaults to enabled"` is the least distinctive of the five anchors | **`TODO-ALPHA-056-0.0.17`**, as the fourth instance on its anchor-uniqueness item |
 | D9 | A companion citation pointed at the `_project_scalar_only_window` alias site | **CLOSED** inside the cycle |
-| D10 | `path::Symbol` under-qualification is a repo-wide convention register | **`TODO-ALPHA-056-0.0.17`**, figures re-derived across three citation grammars |
 | D11 | Derived counts drifted four times in this cycle | **Recorded below** as a standing rule |
 | D12 | A `#"substring"` anchor in `tests/types/test_resolvers.py` did not resolve | **CLOSED** in the tree, 2026-09-01; the class is carried by card 056 |
 

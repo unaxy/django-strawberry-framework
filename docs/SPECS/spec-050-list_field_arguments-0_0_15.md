@@ -2548,16 +2548,17 @@ and that rejections and `limit: 0` perform no SQL
 (`test_list_argument_rejections_and_limit_zero_perform_no_sql`).
 
 `examples/fakeshop/test_query/test_list_field_async_api.py` mounts a test-local schema through
-`AsyncDjangoGraphQLView` and `AsyncClient`, following the fakeshop async-test pattern in
+`AsyncDjangoGraphQLView` and posts through the package's own `AsyncTestClient`, following the
+fakeshop async-test pattern in
 [`examples/fakeshop/test_query/test_relations_async_api.py`][fakeshop-test-relations-async]:
 the shipped fakeshop URLconf mounts the sync view, so the module supplies its own async mount
 over the apps' already-registered types and declares only test-local fields. Every case
 carries `@pytest.mark.django_db(transaction=True)`, which the tier's async suites require for
-ORM access inside the event loop. The module is a documented exemption from the shared
-[`examples/fakeshop/graphql_client.py`][fakeshop-graphql-client] helpers, stated in its
-docstring: those helpers are synchronous by construction
-([`django_strawberry_framework.testing.TestClient`][glossary-testclient] over
-`django.test.Client`) and expose no async post. No case sets `DJANGO_ALLOW_ASYNC_UNSAFE`, and
+ORM access inside the event loop. The shared
+[`examples/fakeshop/graphql_client.py`][fakeshop-graphql-client] helpers are synchronous by
+construction ([`django_strawberry_framework.testing.TestClient`][glossary-testclient] over
+`django.test.Client`) and expose no async post, so the module drives `AsyncTestClient`
+directly. No case sets `DJANGO_ALLOW_ASYNC_UNSAFE`, and
 neither does `tests/test_relay_connection.py`. The module proves the default resolver
 (`test_async_queryset_completion_default_resolver`), a CONFORMING LAZY sync consumer returning
 `Manager` / `QuerySet` - one that does not evaluate, since the adapter cannot make an
@@ -2960,10 +2961,9 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
   [`scripts/build_kanban_tracked_path_constants.py`][build-kanban-tracked-paths], include both
   live list-field suites.
 - [`examples/fakeshop/test_query/README.md`][fakeshop-test-query-readme] - the suite map
-  indexes BOTH suites, and its clients section lists execution colour (an
-  `AsyncDjangoGraphQLView` mount) as a reason to leave
-  [`examples/fakeshop/graphql_client.py`][fakeshop-graphql-client], with the exemption declared
-  in the exempt module's docstring.
+  indexes BOTH suites, and its clients section names execution colour (an
+  `AsyncDjangoGraphQLView` mount) as the reason an async row drives `AsyncTestClient` rather
+  than [`examples/fakeshop/graphql_client.py`][fakeshop-graphql-client].
 - [`django_strawberry_framework/__init__.py`][package-init] and
   [`tests/base/test_init.py`][test-base-init] - the `ListArgumentError` root export beside
   `ResourceLimitExceeded` and `PaginationArgumentError`, and the pinned `__all__`, star-import,

@@ -576,6 +576,7 @@ def _post_bytes(
     **extra: Unpack[_PostExtra],
 ) -> "_MonkeyPatchedWSGIResponse | Awaitable[_MonkeyPatchedASGIResponse]":
     """POST an exact byte string, so a row can own the length or a hostile header."""
+    # raw-envelope exemption: an exact byte string, so the row owns its length and headers.
     return client.post(path, data=raw, content_type="application/json", **extra)
 
 
@@ -944,6 +945,8 @@ def _post_multipart(
         client.cookies["csrftoken"] = token
         if send_header:
             headers["x-csrftoken"] = token
+    # raw-envelope exemption: a byte-built multipart body with real control fields and the
+    # CSRF cookie / header shape the row names.
     return client.generic(
         "POST",
         path,
@@ -1686,6 +1689,7 @@ def test_a_multipart_request_over_the_declared_cap_is_refused() -> None:
     seed_data(1)
 
     with override_settings(ROOT_URLCONF=__name__):
+        # raw-envelope exemption: an oversized, malformed multipart ``operations`` field.
         response = Client().post("/cap-tiny/", data={"operations": "x" * (_TINY_CAP * 2)})
 
     _assert_body_limit_response(response)
@@ -2438,12 +2442,14 @@ async def _declared_json_response(charset: str | None, *, is_async: bool) -> "_T
         content_type = f"{content_type}; charset={charset}"
     if is_async:
         with override_settings(ROOT_URLCONF=__name__):
+            # raw-envelope exemption: a declared charset that contradicts the bytes.
             return await AsyncClient().generic(
                 "POST",
                 "/async-graphql/",
                 data=_NON_ASCII_JSON_BODY,
                 content_type=content_type,
             )
+    # raw-envelope exemption: a declared charset that contradicts the bytes.
     return Client().generic(
         "POST",
         "/graphql/",

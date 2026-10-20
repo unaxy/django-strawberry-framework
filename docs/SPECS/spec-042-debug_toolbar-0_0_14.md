@@ -188,9 +188,11 @@ request tests.
         package's own install hint into an unsupported toolbar
         ([Decision 5](#decision-5--soft-django-debug-toolbar-dependency-an-import-time-require_debug_toolbar-guard-the-rest_framework-shape)).
         The three-places-that-must-agree rule applies — the dev-group specifier,
-        the `_DEBUG_TOOLBAR_INSTALL_HINT` string, and the re-typed test literal
-        all name the same floor, and the package test compares all three (hint
-        against literal, literal against the [`pyproject.toml`][pyproject] row)
+        `utils/imports.py::DEBUG_TOOLBAR_FLOOR` (which the
+        `_DEBUG_TOOLBAR_INSTALL_HINT` string interpolates), and the re-typed
+        test literal all name the same floor; the package test compares hint
+        against literal and literal against the [`pyproject.toml`][pyproject]
+        row, and a governance row compares the constant against the same row,
         so none can move alone. Those three are the **gated** sites, not the
         whole population: documentation that restates the floor is gated by
         nothing, so a floor bump sweeps the tree instead of trusting any
@@ -1012,17 +1014,19 @@ lazy-symbol][glossary-pep-562-lazy-export] variant:
 3. **The dependency gate.** **`django-debug-toolbar>=7.0.0`** sits in
    `[dependency-groups].dev`, with `uv.lock` carrying it (the
    [`spec-039`][spec-039] lockfile discipline). **The floor is `7.0.0`,
-   single-valued across the hint, the dev group, and the re-typed test
-   literal** — deliberately above upstream's `>=6.0.0`, because `7.0.0` is the
-   first release whose Django classifiers reach the `6.0` this package
-   advertises. The [`spec-041`][spec-041] single-floor rule applies verbatim:
+   single-valued across `DEBUG_TOOLBAR_FLOOR` (which the hint interpolates),
+   the dev group, and the re-typed test literal** — deliberately above
+   upstream's `>=6.0.0`, because `7.0.0` is the first release whose Django
+   classifiers reach the `6.0` this package advertises. The [`spec-041`][spec-041] single-floor rule applies verbatim:
    the install hint is the error message a deploying consumer follows, so it
    must not guide a Django 6.0 user into an unsupported toolbar. The floor's
    Django coverage reaches 6.0 and stops short of the `6.1`
    [`pyproject.toml`][pyproject] also advertises — a gap recorded deliberately.
    The three-places-that-must-agree rule holds, and it names the **gated** trio:
    the package test compares the hint to the re-typed literal and the literal
-   to the [`pyproject.toml`][pyproject] dev-group row, so none of the three can
+   to the [`pyproject.toml`][pyproject] dev-group row, and
+   `tests/test_ci_governance.py::test_debug_toolbar_floor_constant_matches_the_pyproject_dependency_row`
+   compares `DEBUG_TOOLBAR_FLOOR` to the same row, so none of the three can
    move alone. It is not a census of everywhere the floor is written — the
    consumer docs restate it ungated — so a bump sweeps the tree rather than
    trusting an enumeration, and sweeps for the package **name**, reading each
@@ -1933,16 +1937,17 @@ each is in the [rationale][rationale-risks].
   before it did too — and the containment is the behavior-level tests
   (Tests 1, 3), which fail loudly on any reshape.
 - **The floor is single-valued across its three gated sites, and restated
-  elsewhere ungated.** The dev-group specifier, the `_DEBUG_TOOLBAR_INSTALL_HINT`
-  string, and the re-typed test literal must always name the same
-  `django-debug-toolbar` floor; the package test compares all three, so moving
-  one alone fails the suite. The install hint is the error message a deploying
-  consumer follows, so a drift there misdirects a real install. The consumer
-  docs restate the floor with no gate behind them, so a floor bump owes a sweep
-  of the tree — never a count of the places it is written, which is a claim
-  nothing checks. The sweep is for the package **name**, each hit read: a needle
-  carrying the `>=` is bounded by one spelling and misses a restatement that
-  separates the name from the constraint with a backtick or a space.
+  elsewhere ungated.** The dev-group specifier, `DEBUG_TOOLBAR_FLOOR` (which
+  the `_DEBUG_TOOLBAR_INSTALL_HINT` string interpolates), and the re-typed test
+  literal must always name the same `django-debug-toolbar` floor; the package
+  test and the governance row compare them, so moving one alone fails the
+  suite. The install hint is the error message a deploying consumer follows,
+  so a drift there misdirects a real install. The consumer docs restate the
+  floor with no gate behind them, so a floor bump owes a sweep of the tree —
+  never a count of the places it is written, which is a claim nothing checks.
+  The sweep is for the package **name**, each hit read: a needle carrying the
+  `>=` is bounded by one spelling and misses a restatement that separates the
+  name from the constraint with a backtick or a space.
 - **The Strawberry floor is read, never restated.** `BaseView`'s presence at the
   package's declared `strawberry-graphql` floor is confirmed by the view-class
   gate in a throwaway venv, with the floor version read at gate time from
@@ -2047,11 +2052,11 @@ each is in the [rationale][rationale-risks].
       `operationName == "IntrospectionQuery"`
       ([Decision 8](#decision-8--the-introspection-query-skip-is-preserved-verbatim)).
 - [ ] **`django-debug-toolbar>=7.0.0`** is in `[dependency-groups].dev`, locked
-      in `uv.lock`; the dev-group specifier, the
-      hint string, and the re-typed test literal agree on the **single** floor
-      and the package test compares all three (Test 12a), whose Django coverage
-      reaches 6.0 and stops short of the `6.1` [`pyproject.toml`][pyproject]
-      also advertises.
+      in `uv.lock`; the dev-group specifier, `DEBUG_TOOLBAR_FLOOR` (which the
+      hint string interpolates), and the re-typed test literal agree on the
+      **single** floor, compared by the package test (Test 12a) and the
+      governance row, whose Django coverage reaches 6.0 and stops short of the
+      `6.1` [`pyproject.toml`][pyproject] also advertises.
 - [ ] The Strawberry view-class gate holds: `strawberry.django.views.BaseView`
       is importable at the package's declared `strawberry-graphql` floor
       — the version read at gate time from [`pyproject.toml`][pyproject] and

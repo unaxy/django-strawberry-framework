@@ -3099,6 +3099,57 @@ async def test_the_websocket_host_and_origin_checks_are_independent(
 
 
 @pytest.mark.parametrize(
+    ("host", "origin", "expected_logged"),
+    [
+        pytest.param("evil.example", "http://testserver", True, id="hostile-host"),
+        pytest.param("testserver", "http://testserver", False, id="both-allowed"),
+        pytest.param("testserver", "http://evil.example.com", False, id="hostile-origin"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+async def test_a_websocket_host_denial_is_logged_where_django_logs_the_http_one(
+    caplog: pytest.LogCaptureFixture,
+    host: str,
+    origin: str,
+    *,
+    expected_logged: bool,
+) -> None:
+    """A refused ``Host`` is recorded on ``django.security.DisallowedHost``.
+
+    Django reports the same refusal on HTTP through that logger at ``ERROR``, with
+    the exception's message and the exception attached, so a deployment that
+    already routes or silences it covers the handshake with no new configuration.
+    The record is server-side only: the close still matches an ``Origin`` refusal
+    byte for byte.
+
+    The allowed handshake and the ``Origin`` refusal are the controls: neither
+    reaches the ``DisallowedHost`` arm, so neither may write to the logger. A record
+    on either would mean the log is not tied to the Host decision.
+
+    WebSocket Host handshake is not the HTTP ``ALLOWED_HOSTS`` boundary. Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``
+    (``test_a_hostile_host_header_is_rejected_before_the_schema_runs``).
+    """
+    router = _router()
+    with caplog.at_level(logging.ERROR, logger="django.security.DisallowedHost"):
+        connected, detail = await _ws_handshake(router, host=host, origin=origin)
+
+    records = [r for r in caplog.records if r.name == "django.security.DisallowedHost"]
+    if not expected_logged:
+        assert records == []
+        return
+    assert connected is False
+    assert detail == _DENIED_HANDSHAKE_CLOSE_CODE
+    assert len(records) == 1
+    (record,) = records
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], DisallowedHost)
+    assert record.getMessage() == str(record.exc_info[1])
+    assert host in record.getMessage()
+
+
+@pytest.mark.parametrize(
     ("allowed_hosts", "host", "origin"),
     [
         pytest.param(["*"], "anything.example", "http://anything.example", id="wildcard"),
@@ -4718,7 +4769,7 @@ async def test_an_operation_error_produced_after_revocation_is_suppressed_by_the
 async def test_the_connection_lock_stops_a_sibling_payload_escaping_after_revocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """spec-046 Decision 11, the lease held through the send: the sibling race.
+    """spec-046 Decision 16, the lease held through the send: the sibling race.
 
     The race the design exists to close: two operations on one socket, both
     authorized when they started. Operation ``a`` reaches the outbound checkpoint
@@ -4796,7 +4847,7 @@ async def test_the_connection_lock_stops_a_sibling_payload_escaping_after_revoca
 async def test_a_revoked_but_idle_socket_stays_open_until_its_next_protected_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """spec-046 Decision 11, the accepted idle consequence: event-driven, not polled.
+    """spec-046 Decision 16, the accepted idle consequence: event-driven, not polled.
 
     The contract's honest limit, pinned so it stays a decision rather than an
     accident. Detection is event-boundary-driven: nothing polls, so a revoked
@@ -4807,7 +4858,7 @@ async def test_a_revoked_but_idle_socket_stays_open_until_its_next_protected_che
     nothing, and the very next protected checkpoint closes the connection.
 
     A row asserting only the close would be satisfied by a background monitor,
-    which spec-046 Decision 11 rejects (it makes freshness a function of a detection
+    which spec-046 Decision 16 rejects (it makes freshness a function of a detection
     interval and multiplies reads by idle connection count); the ``reads`` assertion
     across the idle window is what rules one out.
 

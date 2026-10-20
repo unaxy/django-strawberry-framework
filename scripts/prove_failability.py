@@ -171,6 +171,15 @@ exactly as above.
   not applied, so one query-count test failing ``assert 6 == 1`` is a complete
   proof when it is the row the proof names. ``[]`` is a behaviour-preservation
   proof: the mutation (usually a revert) must make no row fail.
+* ``"isolates": "<node id>"`` declares a row-isolation proof: the mutation
+  exists to make exactly one named row fail, and a second failing row would
+  falsify it. The verdict is **row isolated** when the attributable failing
+  set is exactly that node id (compared by equality, never as a glob), and
+  **ROW ISOLATION NOT MET** naming the declared row when it did not fail and
+  every extra row that did. Like ``expect_failing``, which it excludes, it
+  replaces the row-count grading, so a successful one-row proof is never
+  **WEAKLY PINNED**; an entry without either field is a boundary proof graded
+  by the weakly-pinned arithmetic.
 * ``"pre_image": "<file>"`` with ``target`` replaces the target's bytes
   wholesale with a saved pre-image (for example ``git show <base>:<path>``
   written to a file by the caller). Refused when the pre-image equals the
@@ -225,18 +234,18 @@ lines, provenance and wall time, the declared and observed sets, and the
 verdict.
 
 Exit codes: ``0`` every entry proved, no boundary weakly pinned, every declared
-``expect_failing`` met, and no collection or setup error; ``1`` at least one
-entry is weakly pinned, misses its declared ``expect_failing``, carries a
-collection/setup error or a pytest exit code outside ``{0, 1}`` (so its count is
-not a valid count), or its anchor did not match exactly once, or the manifest is
-unusable, or ``--output`` was asked for without a baseline, or ``--workspace``
-refused the root, or another run holds this tree's lock, or a crashed run's
-marker is unresolved; ``3`` a restore could not be proved (the tree may still
-hold a mutation - read the marker files the run leaves in the tree's state
-directory; the partial report is still written to ``--output`` and ``--json``);
-``128 + N`` the stop signal ``N`` (``130`` SIGINT, ``143`` SIGTERM, ``129``
-SIGHUP, ``131`` SIGQUIT) ended the run after every mutation it made was
-restored and proved, and no record was written. When the interpreter runs this
+``expect_failing`` and ``isolates`` met, and no collection or setup error; ``1``
+at least one entry is weakly pinned, misses its declared ``expect_failing`` or
+``isolates``, carries a collection/setup error or a pytest exit code outside
+``{0, 1}`` (so its count is not a valid count), or its anchor did not match
+exactly once, or the manifest is unusable, or ``--output`` was asked for without
+a baseline, or ``--workspace`` refused the root, or another run holds this
+tree's lock, or a crashed run's marker is unresolved; ``3`` a restore could not
+be proved (the tree may still hold a mutation - read the marker files the run
+leaves in the tree's state directory; the partial report is still written to
+``--output`` and ``--json``); ``128 + N`` the stop signal ``N`` (``130`` SIGINT,
+``143`` SIGTERM, ``129`` SIGHUP, ``131`` SIGQUIT) ended the run after every
+mutation it made was restored and proved, and no record was written. When the interpreter runs this
 script directly, such a run then ends by that signal (a shell reports the same
 ``128 + N``; a ``subprocess`` parent sees ``-N``), so a calling loop stops as it
 would for any process the signal ended. Under ``uv run``, uv exits ``128 + N``.
@@ -253,6 +262,7 @@ import filecmp
 import fnmatch
 import hashlib
 import json
+import operator
 import os
 import re
 import shutil
@@ -478,6 +488,7 @@ ENTRY_KEYS = frozenset(
         "mutation",
         "scope",
         "expect_failing",
+        "isolates",
         "pre_image",
         "reverse_patch",
         "sites",
@@ -617,7 +628,8 @@ class ProofEntry:
     anchor site spelled by ``target``/``anchor``/``replacement``, which is how
     the original manifest shape and a hand-built entry are read.
     ``expect_failing`` is the declared failing set, or ``None`` for row-count
-    grading.
+    grading. ``isolates`` is the one node id a row-isolation proof must fail and
+    the only one it may fail, or ``None``; at most one of the two is set.
     """
 
     label: str
@@ -630,6 +642,14 @@ class ProofEntry:
     prose: str = ""
     sites: tuple[MutationSite, ...] = ()
     expect_failing: tuple[str, ...] | None = None
+    isolates: str | None = None
+
+    @property
+    def declared_failing(self) -> tuple[str, ...] | None:
+        """Return the failing set this entry declares, or ``None`` for row-count grading."""
+        if self.isolates is not None:
+            return (self.isolates,)
+        return self.expect_failing
 
     @property
     def mutation_sites(self) -> tuple[MutationSite, ...]:
@@ -759,7 +779,7 @@ class FileRecord:
 
 @dataclass(frozen=True)
 class Expectation:
-    """How the attributable failing set compares with a declared ``expect_failing``."""
+    """How the attributable failing set compares with the entry's declared failing set."""
 
     declared: tuple[str, ...]
     missing: tuple[str, ...]
@@ -802,14 +822,15 @@ class ProofResult:
     @property
     def expectation(self) -> Expectation | None:
         """Return the declared-set comparison, or ``None`` when nothing was declared or run."""
-        declared = self.entry.expect_failing
+        declared = self.entry.declared_failing
         if declared is None or self.outcome is None:
             return None
+        # A row-isolation proof names one node id, so it is compared by equality: a glob
+        # reading could accept a second row the proof exists to exclude.
+        matches = operator.eq if self.entry.isolates is not None else _pattern_matches
         observed = self.attributable_node_ids
         missing = tuple(
-            pattern
-            for pattern in declared
-            if not any(_pattern_matches(pattern, node) for node in observed)
+            pattern for pattern in declared if not any(matches(pattern, node) for node in observed)
         )
         return Expectation(
             declared=declared,
@@ -817,12 +838,12 @@ class ProofResult:
             unexpected=tuple(
                 node
                 for node in observed
-                if not any(_pattern_matches(pattern, node) for pattern in declared)
+                if not any(matches(pattern, node) for pattern in declared)
             ),
             missing_but_failing_at_baseline=tuple(
                 pattern
                 for pattern in missing
-                if any(_pattern_matches(pattern, node) for node in self.pre_existing_node_ids)
+                if any(matches(pattern, node) for node in self.pre_existing_node_ids)
             ),
         )
 
@@ -959,7 +980,7 @@ class ProofResult:
         """
         if self.failure is not None or self.outcome is None:
             return False
-        if self.invalid_count_reason is not None or self.entry.expect_failing is not None:
+        if self.invalid_count_reason is not None or self.entry.declared_failing is not None:
             return False
         return self.failed_count <= WEAKLY_PINNED_MAXIMUM
 
@@ -967,12 +988,12 @@ class ProofResult:
     def is_inside_rerun_floor(self) -> bool:
         """Whether a VALID count puts this boundary inside Worker-3's mandatory re-run floor.
 
-        A declared ``expect_failing`` replaces the row-count grading, so neither
-        threshold applies to it.
+        A declared ``expect_failing`` or ``isolates`` replaces the row-count
+        grading, so neither threshold applies to it.
         """
         if self.failure is not None or self.outcome is None:
             return False
-        if self.invalid_count_reason is not None or self.entry.expect_failing is not None:
+        if self.invalid_count_reason is not None or self.entry.declared_failing is not None:
             return False
         return self.failed_count <= MANDATORY_RERUN_FLOOR
 
@@ -1541,6 +1562,17 @@ def _parse_entry(raw_entry: object, position: int, base: Path | None = None) -> 
                 "patterns ([] declares that nothing may fail)",
             )
         expect_failing = patterns
+    isolates: str | None = None
+    if "isolates" in raw_entry:
+        raw_isolates = raw_entry["isolates"]
+        if not isinstance(raw_isolates, str) or not raw_isolates:
+            raise ManifestError(f"{label}: 'isolates' must be one non-empty node id")
+        if expect_failing is not None:
+            raise ManifestError(
+                f"{label}: give either 'isolates' (exactly one row must fail) or "
+                "'expect_failing' (a declared set), not both",
+            )
+        isolates = raw_isolates
     first = sites[0]
     if single_anchor:
         derived = _describe_mutation(first.anchor, first.replacement)
@@ -1564,6 +1596,7 @@ def _parse_entry(raw_entry: object, position: int, base: Path | None = None) -> 
         prose=mutation or "",
         sites=() if single_anchor else sites,
         expect_failing=expect_failing,
+        isolates=isolates,
     )
 
 
@@ -2441,7 +2474,10 @@ def _verdict(result: ProofResult) -> str:
         notes.append(f"**INVALID COUNT - {invalid}**")
     expectation = result.expectation
     if expectation is not None and invalid is None:
-        notes.append(_expectation_verdict(expectation, result.failed_count))
+        if result.entry.isolates is not None:
+            notes.append(_isolation_verdict(expectation))
+        else:
+            notes.append(_expectation_verdict(expectation, result.failed_count))
     if result.is_weakly_pinned:
         notes.append("**WEAKLY PINNED - revision-needed**")
     if result.is_inside_rerun_floor:
@@ -2470,6 +2506,22 @@ def _expectation_verdict(expectation: Expectation, failed_count: int) -> str:
         unexpected = ", ".join(f"`{node}`" for node in expectation.unexpected)
         parts.append(f"failing but not declared: {unexpected}")
     return f"**EXPECTATION NOT MET - revision-needed** ({'; '.join(parts)})"
+
+
+def _isolation_verdict(expectation: Expectation) -> str:
+    """Return the verdict for a declared ``isolates`` row against a valid count."""
+    (isolated,) = expectation.declared
+    if expectation.is_met:
+        return f"row isolated: exactly the declared row `{isolated}` failed, and no other"
+    parts: list[str] = []
+    if expectation.missing:
+        parts.append(f"declared row not failing: `{isolated}`")
+    if expectation.missing_but_failing_at_baseline:
+        parts.append("it was already failing before the mutation")
+    if expectation.unexpected:
+        extra = ", ".join(f"`{node}`" for node in expectation.unexpected)
+        parts.append(f"extra failing rows: {extra}")
+    return f"**ROW ISOLATION NOT MET - revision-needed** ({'; '.join(parts)})"
 
 
 @dataclass(frozen=True)
@@ -2638,14 +2690,16 @@ def render_report(
         lines.append(f"   - collection/setup errors: {result.error_count}")
         if result.invalid_count_reason is not None:
             lines.append(f"   - **NOT A VALID COUNT**: {result.invalid_count_reason}")
-        if result.entry.expect_failing is not None:
+        if result.entry.isolates is not None:
+            lines.append(f"   - declared `isolates`: `{result.entry.isolates}`")
+        elif result.entry.expect_failing is not None:
             declared = ", ".join(f"`{p}`" for p in result.entry.expect_failing) or "none"
             lines.append(f"   - declared `expect_failing`: {declared}")
         for node_id in result.attributable_node_ids or ("(none)",):
             lines.append(f"   - `{node_id}`{_crash_suffix(result.outcome, node_id)}")
         for node_id in result.outcome.error_node_ids:
             lines.append(f"   - ERROR `{node_id}`{_crash_suffix(result.outcome, node_id)}")
-        if result.failed_count == 0 and result.entry.expect_failing is None:
+        if result.failed_count == 0 and result.entry.declared_failing is None:
             invalid = result.invalid_count_reason is not None
             lines.append(f"   - {NO_COUNT_TO_EXPLAIN if invalid else ZERO_ROW_PLACEHOLDER}")
         for name, run in (("mutant", result.outcome), ("baseline", result.baseline)):
@@ -2660,7 +2714,9 @@ def render_report(
         "A boundary whose removal fails 0 or 1 rows is **weakly pinned** and is "
         "`revision-needed` per `docs/builder/BUILD.md` - the fix is more or better-targeted "
         "rows, never a weaker boundary. A boundary at 3 rows or fewer is inside Worker-3's "
-        "mandatory independent re-run floor. A proof carrying collection or setup errors, or "
+        "mandatory independent re-run floor. Neither threshold grades an entry that declares "
+        "`expect_failing` or `isolates`: its verdict is the declared set against the failing "
+        "one. A proof carrying collection or setup errors, or "
         "whose pytest run exited anything but 0 or 1 (nothing collected, interrupted, internal "
         "error, usage error), is not a valid count at all - and a 0 from such a run is not a "
         "zero-row result: resolve it and re-run.",
@@ -2826,6 +2882,7 @@ def _entry_record(result: ProofResult, position: int) -> dict[str, object]:
         "expect_failing": (
             None if result.entry.expect_failing is None else list(result.entry.expect_failing)
         ),
+        "isolates": result.entry.isolates,
         "expectation": (
             None
             if expectation is None

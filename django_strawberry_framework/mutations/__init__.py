@@ -1,6 +1,6 @@
 """Mutations subsystem - the write side.
 
-A six-module subpackage in the spirit of ``filters/`` / ``orders/`` (Decision 4's
+A six-module subpackage in the spirit of ``filters/`` / ``orders/`` (spec-036 Decision 4's
 ``inputs`` / ``sets`` / ``resolvers`` / ``fields`` quartet plus ``permissions.py``
 for Decision 15 write-auth and ``operations.py`` for canonical operation descriptors):
 

@@ -33,3 +33,4 @@ Relay Node integration,relay-node-integration,the bounded collection surface
 Connection-aware optimizer planning,connection-aware-optimizer-planning,nested connection pages share the clamp
 Single-upstream parity,single-upstream-parity,the borrowing-posture rule
 max_value_depth,max_value_depth,the value-nesting bound the pre-parse document scan cannot supply
+DjangoSchema,djangoschema,the schema class that resolves the policy once and builds the extension into every chain

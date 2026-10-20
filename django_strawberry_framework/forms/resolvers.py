@@ -173,12 +173,11 @@ if TYPE_CHECKING:
     from strawberry.types import Info
     from typing_extensions import TypeIs
 
-    from django_strawberry_framework.mutations.inputs import FieldError
     from django_strawberry_framework.mutations.resolvers import (
         _AsyncResolverEntry,
         _SyncResolverEntry,
     )
-    from django_strawberry_framework.utils.errors import ErrorKeyMap
+    from django_strawberry_framework.utils.errors import ErrorKeyMap, FieldError
     from django_strawberry_framework.utils.typing import ForeignKeyField
 
     from .sets import DjangoFormMutation, DjangoModelFormMutation

@@ -322,9 +322,9 @@ def test_modelform_missing_operation_rejected() -> None:
         "update",
         "delete",
         "upsert",
-        # An explicit ``operation = None`` is rejected by KEY PRESENCE, not value
-        # (``spec-038-form_mutations-0_0_12`` Finding 5): the fixed ``"form"`` sentinel
-        # accepts no copied ``Meta.operation`` key, even one set to ``None``.
+        # An explicit ``operation = None`` is rejected by KEY PRESENCE, not value:
+        # the fixed ``"form"`` sentinel accepts no copied ``Meta.operation`` key,
+        # even one set to ``None``.
         None,
     ],
 )
@@ -405,12 +405,12 @@ def test_plain_form_class_accepted_as_known_key() -> None:
     assert Submit._mutation_meta.model is None
     assert Submit._mutation_meta.operation == "form"
     # An unset ``permission_classes`` defaults to deny-by-default for the plain
-    # flavor - it cannot inherit the model-permission default (Finding 1).
+    # flavor - it cannot inherit the model-permission default.
     assert Submit._mutation_meta.permission_classes == (DenyAll,)
 
 
 def test_plain_form_unset_permission_classes_defaults_to_deny_all() -> None:
-    """A plain form with no ``permission_classes`` defaults to ``[DenyAll]`` (Finding 1).
+    """A plain form with no ``permission_classes`` defaults to ``[DenyAll]``.
 
     A model-less form cannot inherit ``DjangoModelPermission`` (it reads a model
     the plain flavor never resolves), so the safe default is deny-by-default rather
@@ -439,7 +439,7 @@ def test_plain_form_empty_permission_classes_is_allow_any_opt_out() -> None:
 
 
 def test_modelform_unset_permission_classes_keeps_model_permission_default() -> None:
-    """The ModelForm flavor still defaults to ``[DjangoModelPermission]`` (no regression, Finding 1)."""
+    """The ModelForm flavor still defaults to ``[DjangoModelPermission]``."""
     form_cls = _item_model_form()
 
     class CreateItem(DjangoModelFormMutation):
@@ -673,7 +673,7 @@ def test_modelform_update_over_only_the_primary_key_raises_at_class_creation() -
 
 
 def test_cached_build_form_input_runs_required_guard_per_declaration() -> None:
-    """A cached narrowed shape does NOT let a later declaration bypass the create-required guard (Finding 5).
+    """A cached narrowed shape does NOT let a later declaration bypass the create-required guard.
 
     The per-shape build cache is keyed by ``(form_class, operation_kind, effective
     set)`` - NOT by ``guard_required``. So a WAIVING mutation

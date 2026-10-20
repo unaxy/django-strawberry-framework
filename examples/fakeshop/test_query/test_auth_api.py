@@ -991,6 +991,8 @@ def test_login_and_logout_face_djangos_real_csrf_check() -> None:
         variables: Mapping[str, object] | None = None,
         **extra: Unpack[_CsrfHeader],
     ) -> "_MonkeyPatchedWSGIResponse":
+        # raw-envelope exemption: the WSGI-style CSRF header on a CSRF-enforcing client, whose
+        # refused direction is Django's non-JSON 403 the client's decode cannot carry.
         return client.post(
             "/graphql/",
             data=json.dumps({"query": query, "variables": variables or {}}),

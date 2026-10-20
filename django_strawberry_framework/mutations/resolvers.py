@@ -110,6 +110,7 @@ from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_NOT_FOUND,
     FIELD_ERROR_CODE_NULL,
     FIELD_ERROR_CODE_PROTECTED,
+    FieldError,
     build_error_key_map,
     field_error,
     integrity_error_field_errors,
@@ -155,7 +156,7 @@ from django_strawberry_framework.utils.write_values import (
 )
 
 from . import inputs
-from .inputs import EXCLUDED, FieldError, payload_object_slot
+from .inputs import EXCLUDED, payload_object_slot
 from .operations import operation_takes_id
 from .permissions import _require_sync_bool_auth_result
 

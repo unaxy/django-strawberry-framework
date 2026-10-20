@@ -90,14 +90,11 @@ from .keyset import (
 from .list_field import _validate_relay_djangotype_target
 from .optimizer._context import window_cursor_state
 from .optimizer.extension import apply_connection_optimization
-from .optimizer.nested_planner import (
-    _extend_only_projection,
-    relation_connection_to_attr,
-)
 from .optimizer.plans import (
     WINDOW_KEYSET_SEEK_COUNT,
     WINDOW_ROW_NUMBER,
     WINDOW_TOTAL_COUNT,
+    _extend_only_projection,
     effective_connection_order,
     effective_cursor_state,
     ends_in_unique_column,
@@ -121,6 +118,7 @@ from .utils.connections import (
     CONNECTION_FILTER_KWARG,
     CONNECTION_ORDER_KWARG,
     NEXT_PAGE_PROBE_ROWS,
+    PaginationArgumentError,
     UnwindowableConnection,
     assert_relay_pagination_bound,
     connection_sidecar_inputs_from_kwargs,
@@ -131,6 +129,7 @@ from .utils.connections import (
     is_supplied,
     offset_engine_arguments,
     page_arguments,
+    relation_connection_to_attr,
     resolve_relay_max_results,
     split_window_rows,
     window_range_plan,
@@ -1186,7 +1185,7 @@ def _resolve_keyset_connection(
 
 
 def _guard_first_and_last(first: int | None, last: int | None) -> None:
-    """Raise ``GraphQLError`` when both ``first`` and ``last`` are supplied.
+    """Raise ``PaginationArgumentError`` when both ``first`` and ``last`` are supplied.
 
     The package's own pagination guard (spec-030 Decision 3): Strawberry's
     ``SliceMetadata.from_arguments`` applies ``first`` then ``last`` without a
@@ -1198,7 +1197,7 @@ def _guard_first_and_last(first: int | None, last: int | None) -> None:
     first_supplied = is_supplied(first)
     last_supplied = is_supplied(last)
     if first_supplied and last_supplied:
-        raise GraphQLError(
+        raise PaginationArgumentError(
             "Connection arguments `first` and `last` are mutually exclusive; supply only one.",
         )
 
@@ -1319,15 +1318,14 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
         The count-selection inspection sits in the ``_consume_window`` argument
         list, so it runs only AFTER the guard and AFTER the selected-fields
         prime below - a malformed pagination request answers with the guard's
-        ``GraphQLError`` having read only the schema config off ``info`` (the
-        ``relay_max_results`` clamp runs first;
+        ``PaginationArgumentError`` having read only the schema config off
+        ``info`` (the ``relay_max_results`` clamp runs first;
         ``test_first_and_last_guard_on_generated_subclass``), and the bare shape
-        short-circuits it away entirely. The
-        window branch then runs BEFORE the count work, so the
-        ``_WindowedConnectionRows`` marker - which is NOT a queryset - is treated
-        as an annotated optimized source: ``totalCount`` is read from
-        ``_dst_total_count`` inside ``_resolve_from_window`` rather than counted,
-        bypassing ``_guard_total_count_countable`` / ``.count()`` entirely
+        short-circuits it away entirely. The window branch then runs BEFORE the
+        count work, so the ``_WindowedConnectionRows`` marker - which is NOT a
+        queryset - is treated as an annotated optimized source: ``totalCount`` is
+        read from ``_dst_total_count`` inside ``_resolve_from_window`` rather than
+        counted, bypassing ``_guard_total_count_countable`` / ``.count()`` entirely
         (spec-033 Decision 5). Marker rows directly serve planned ``limit == 0`` /
         overshot-``offset`` pages; only unservable wrappers recover through
         ``_consume_fallback``. Pins:
@@ -2035,7 +2033,7 @@ def _synthesized_signature(
     requires); ``info`` is included so the resolver receives it; ``filter`` /
     ``order_by`` are added only for the sidecars the type declares, with the
     SAME ``filter_input_type(FS)`` / ``list[order_input_type(OS)]`` lazy
-    ``Annotated`` shapes a hand-written filter/order resolver uses. Calling
+    ``LazyType`` shapes a hand-written filter/order resolver uses. Calling
     those helpers ALSO registers the FilterSet / OrderSet against the
     ``_helper_referenced_filtersets`` / ``_helper_referenced_ordersets`` orphan
     ledgers, so ``finalize_django_types`` orphan validation stays honest - no
@@ -2065,7 +2063,7 @@ def _synthesized_signature(
     ]
     annotations: dict[str, object] = {"info": Info}
     if definition.filterset_class is not None:
-        # ``filter_input_type`` returns a runtime-built ``Annotated`` alias, which widens
+        # ``filter_input_type`` returns a ``strawberry.LazyType``, whose ``__or__`` widens
         # with ``| None``
         filter_ann: object = (
             cast("OptionalWidenable", filter_input_type(definition.filterset_class)) | None
@@ -2315,19 +2313,15 @@ def _build_relation_connection_resolver(
     def _resolve(root: object, info: Info[object, object], **kwargs: object) -> object:
         # Per-response-key window first (divergent aliases): the attr
         # is a pure function of ``info.path.key`` - the resolve-time twin of
-        # the response key the walker planned under. ``probe_attr`` tracks
-        # which attr actually held rows so the strictness probe below reads
-        # the same location the fast path did; with neither attr present it
-        # stays the shared attr, whose absence IS the unplanned signal.
-        # A field's own path segment is its response key, never a list index.
+        # the response key the walker planned under; the shared attr is the
+        # fallback. A field's own path segment is its response key, never a
+        # list index.
         per_key_attr = relation_connection_to_attr(
             relation_field_name,
             cast("str", info.path.key),
         )
-        probe_attr = per_key_attr
         window_rows: object = getattr(root, per_key_attr, None)
         if window_rows is None:
-            probe_attr = to_attr
             window_rows = getattr(root, to_attr, None)
         filter_input, order_by_input = connection_sidecar_inputs_from_kwargs(kwargs)
         no_sidecar = not has_connection_sidecar_input(
@@ -2363,9 +2357,11 @@ def _build_relation_connection_resolver(
                     )
                 ),
             )
-        # Strictness (spec-033 Decision 8): consult the union-published
-        # sentinels via the parameterized ``_check_n1`` BEFORE the per-parent
-        # pipeline. The reason names WHY the fallback fired so a flagged
+        # Strictness (spec-033 Decision 8): this branch did not serve the
+        # windowed page (attr absent, not a list, rows without the window row
+        # number, or a sidecar kwarg), so the per-parent pipeline below WILL
+        # query; ``_check_n1`` consults the union-published sentinels before
+        # it runs. The reason names WHY the fallback fired so a flagged
         # connection reads as actionable: a sidecar (``filter:`` / ``orderBy:``)
         # selection is the explicitly-unwindowed shape (spec-033 Decision 6),
         # so it carries the spec's filter/orderBy wording; any other fallback
@@ -2382,7 +2378,6 @@ def _build_relation_connection_resolver(
             relation_field_name,
             declaring_type,
             kind="connection_to_attr",
-            to_attr=probe_attr,
             reason=reason,
         )
         return _pipeline_sync(

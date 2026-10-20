@@ -16,8 +16,7 @@ JavaScript** — a per-panel `CSS.escape` call and a record-predicate check insi
 a patched `JSON.parse`, on a page that only renders when the dev-gated toolbar is
 active. `BUILD.md` `## Hot-path budget` asks for a before/after **number**, and
 no instrument in this repository can produce one for a browser asset: the suite
-has no JS runtime at all (`### Deferred work catalog` carries that question to
-the maintainer). So `none` here means *below the threshold that owes a number*,
+has no JS runtime at all. So `none` here means *below the threshold that owes a number*,
 on magnitude and on the dev-only gate — **not** "no executable code changed".
 Recording the distinction because a silent `none` resting on a false reason is
 indistinguishable from a considered one.
@@ -320,8 +319,8 @@ all: `git show 50b7d489:docs/builder/<name>`. Every remaining `bld-042-*`
 filename in this file is therefore a **retrieval key, not a live path** — nothing
 below is broken by their absence. What the final gate held that nothing else
 recorded was moved into this plan before it was deleted: `## The cycle's
-instrument failures`, `## The owner rule's provenance, corrected`,
-`## The JS-runtime question` and `## Decided — do not re-raise`.
+instrument failures`, `## The owner rule's provenance, corrected` and
+`## Decided — do not re-raise`.
 
 ## Checklist
 
@@ -479,16 +478,6 @@ leaves the artifact describing a contract no worker built against.
    the artifact and the spec amendments; Worker 2 then builds, Worker 3 reviews,
    Worker 1 final-verifies. `### Isolation is non-waivable` holds: the planner
    writes no source.
-2. **The JS-runtime question — DEFERRED TO CLOSE-OUT, homed.** Cohort B escalated
-   (correctly, rather than holding it at `revision-needed`) that the template
-   asset has **no executing test of any kind** — every assertion in the port
-   guard is text-identity on the file, so a green template test proves the text
-   is present and nothing about whether the script runs. Whether this repo takes
-   on a JS runtime is a contract-level call. **Maintainer decision: carry it into
-   `docs/builder/bld-042-final.md` for discussion at close-out.** Worker 1 must
-   surface it there under `### Deferred work catalog` with the escalation's own
-   reasoning, not a paraphrase — it is a named item with a named owner
-   (`AGENTS.md`: an item routed forward without a named owner dies).
 
 ## Items Cohort A routed to Worker 0
 
@@ -536,8 +525,7 @@ caught it**; in every case the first read exactly like a clean result.
    whose text mentions the excluded path.** The floor-restatement census dropped
    `docs/SPECS/appx/spec-042-debug_toolbar-0_0_14-terms.csv` silently, because the
    filter intended to drop hits *in* a path also dropped every line that merely
-   *names* it. The sweep read as complete. Carried with deferred item 1, whose owner is
-   `TODO-ALPHA-053-0.0.15`, since the next floor bump runs that same census.
+   *names* it. The sweep read as complete.
 
 2. **A line-anchored grep found 2 of 3 wrapped sites.** The I3 sweep for the
    published sweep-instruction clause returned two hits, because the middleware's
@@ -597,74 +585,9 @@ returns **0** both in the working tree and at `git show HEAD:AGENTS.md`. Worker 
 dispatches, Cohort C's catalog and the final gate's own dispatch all named
 `AGENTS.md`; the integration pass corrected it, and this is the correction's home.
 
-## The JS-runtime question — a maintainer decision, parked for close-out
-
-Recorded here at the maintainer's explicit instruction (build plan
-`## Maintainer decisions taken mid-cycle` item 2), with **the escalation's own
-reasoning rather than a paraphrase**, because it is a contract-level call and not
-a worker's (`BUILD.md` `### Contract-level findings are escalated as maintainer
-decisions before dispatch`).
-
-Cohort B's escalation, in its own words (`bld-042-review-2-code_verification.md`
-`### Notes for Worker 1`, retired — `git show 50b7d489:docs/builder/<name>`):
-
-> **Escalated (contract-level): the asset has no executing test of any kind.**
-> Every template assertion is a substring check over the file's text, so the
-> suite can prove the guards are *written* and can never prove they *work* — and
-> three of the four documented divergence families exist specifically to survive
-> runtime inputs (null-prototype objects, absent DOM nodes, a shadow root). M2's
-> parametrized split raises the failability count and is the in-scope fix, but it
-> does not change what is being proved. Whether this package should carry a
-> JavaScript runtime for one 89-line asset is a contract-level call, not a
-> worker's. Resolution paths: (a) accept text-identity pinning permanently and
-> say so in the spec, so the next reviewer does not re-raise it; (b) add a
-> minimal DOM harness for this asset alone; (c) narrow the asset so less of it
-> needs guarding.
-
-**What is true after the cycle, and what is not.** M2 is closed: the single node
-id became **57 parametrized rows**, so removing any one template guard now fails
-its own row. That raised failability and changed nothing about what is proved.
-All 57 rows are text-identity predicates over the file on disk. **A green table
-proves the guard's text is present, single-sited and correctly ordered, and says
-nothing about whether the JavaScript runs.** The integration pass narrowed the
-gap in one direction only, and measured rather than argued it: all eight absence
-needles occur exactly once in upstream's asset and never in the port, so the rows
-**do** detect a verbatim paste of upstream's text — and a rewrite of the same hole
-in different words passes every one of them.
-
-**Homed 2026-09-12 on `TODO-BETA-072-0.1.8`** (adversarial non-live test suite),
-so the question carries a named owner now that this plan is archived.
-Path (a) has already been half-taken: the spec now carries
-`## Risks and open questions` #"The bridge asset's guards are pinned by text,
-never by execution.", which states the limit and names the maintainer as the
-risk's owner. What remains is the decision itself.
-
-**What the machine actually has, measured at this gate rather than assumed:**
-
-```shell
-$ node --version
-v24.10.0
-$ node -e 'console.log("typeof CSS =", typeof CSS); console.log("typeof document =", typeof document)'
-typeof CSS = undefined
-typeof document = undefined
-```
-
-`node` is installed, so path (b) is not blocked on a missing runtime — but a bare
-`node` carries **no `CSS` global at all** and no `document`. That matters for
-scoping the decision: even the one guard that is otherwise pure language,
-`CSS.escape(panelId)` with its empty-identifier skip, cannot be exercised under
-`node` as it stands. Path (b) is not "run the file under node"; it is a DOM/CSSOM
-emulator (jsdom or equivalent) as a new dev dependency, for one 89-line asset.
-That cost is the substance of the decision, and it is the maintainer's.
-
-It is also the reason the cycle's hot-path declaration can carry no number: the
-build plan's `Hot-path declaration: none` rests on magnitude and the dev-only
-gate, **not** on "no executable code changed", and no instrument in this
-repository can produce a before/after number for a browser asset.
-
 ## Decided — do not re-raise
 
-Four rulings the cycle made and nothing else records. Each was re-verified against
+Three rulings the cycle made and nothing else records. Each was re-verified against
 source on 2026-09-12 before this plan was archived.
 
 1. **The spec's `## Implementation plan` opener is not banned process
@@ -688,12 +611,3 @@ source on 2026-09-12 before this plan was archived.
    meets them. The disposition now lives where it is needed, in
    `tests/middleware/test_debug_toolbar.py`'s own table comment, stated by
    mechanism and without a count (the table is a population later work extends).
-4. **`scripts/prove_failability.py`'s verdict arithmetic has no row-isolation
-   case.** It labels a one-row result `WEAKLY PINNED - revision-needed` because the
-   arithmetic is written for boundary proofs, where one row means one assertion
-   holds a guard. A **row-isolation** proof — "does this row produce a failing id
-   no other row produces" — seeks exactly one row, and a second would falsify it,
-   so the tool's line reads as a finding against a proof that succeeded. Twice in
-   this cycle a pass had to write a paragraph explaining the verdict does not
-   apply. **Homed 2026-09-12 on `TODO-BETA-072-0.1.8`**, beside that card's
-   existing failability-manifest item.

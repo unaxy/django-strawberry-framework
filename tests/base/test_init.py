@@ -7,8 +7,6 @@ out of ``__all__`` so ``import *`` stays DRF-free (spec-039 Decision 12).
 
 import logging
 import os
-import subprocess
-import sys
 import textwrap
 
 import pytest
@@ -81,6 +79,7 @@ from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.connections import (
     PaginationArgumentError as ConnectionsPaginationArgumentError,
 )
+from tests._subprocess import run_in_fresh_process
 
 
 def test_version() -> None:
@@ -255,17 +254,12 @@ def test_reexported_types_resolve_to_canonical_subpackage_definitions() -> None:
 
 def test_orders_submodule_not_imported_at_package_root() -> None:
     """Verify importing django_strawberry_framework alone does not import orders submodule."""
-    cmd = [
-        sys.executable,
-        "-c",
-        (
-            "import sys, django_strawberry_framework; "
-            "assert 'django_strawberry_framework.orders' not in sys.modules, "
-            "'django_strawberry_framework.orders leaked into package root import'"
-        ),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stderr
+    run_in_fresh_process(
+        "import sys, django_strawberry_framework; "
+        "assert 'django_strawberry_framework.orders' not in sys.modules, "
+        "'django_strawberry_framework.orders leaked into package root import'",
+        fakeshop=False,
+    )
 
 
 _UNPATCHED_IMPORT = textwrap.dedent(
@@ -403,16 +397,9 @@ _ANNOTATION_CHECK = _UNPATCHED_IMPORT + textwrap.dedent(
 )
 
 
-def _run_without_django_stubs_ext(script: str) -> subprocess.CompletedProcess[str]:
+def _run_without_django_stubs_ext(script: str) -> None:
     env = {key: value for key, value in os.environ.items() if key != "DJANGO_SETTINGS_MODULE"}
-    return subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        timeout=120,
-    )
+    run_in_fresh_process(script, fakeshop=False, env=env, timeout=120)
 
 
 def test_every_module_imports_without_django_stubs_ext_patch() -> None:
@@ -429,8 +416,7 @@ def test_every_module_imports_without_django_stubs_ext_patch() -> None:
     On 3.10-3.13 it is also the runtime catch for an eager annotation naming a
     ``TYPE_CHECKING``-only import (ruff ``TC004`` is the static one).
     """
-    result = _run_without_django_stubs_ext(_UNPATCHED_IMPORT)
-    assert result.returncode == 0, result.stderr
+    _run_without_django_stubs_ext(_UNPATCHED_IMPORT)
 
 
 def test_annotations_evaluate_without_django_stubs_ext_patch() -> None:
@@ -448,5 +434,4 @@ def test_annotations_evaluate_without_django_stubs_ext_patch() -> None:
     ``NameError`` fails. Function-local classes are skipped: their annotations
     close over a scope no module namespace holds.
     """
-    result = _run_without_django_stubs_ext(_ANNOTATION_CHECK)
-    assert result.returncode == 0, result.stderr
+    _run_without_django_stubs_ext(_ANNOTATION_CHECK)

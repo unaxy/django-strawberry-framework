@@ -7,7 +7,7 @@ Relay Node integration,relay-node-integration,"The shipped 0.0.5 foundation (Met
 Meta.interfaces,metainterfaces,"Declares relay.Node; Decision 8 rejects Meta.connection on a type that is not Relay-Node-shaped by either spelling - relay.Node in Meta.interfaces, or direct relay.Node inheritance."
 Meta.connection,metaconnection,"The type-level Relay connection options key this card ships; it accepts {""total_count"": bool}, requires a Relay-Node-shaped type (relay.Node in Meta.interfaces or direct inheritance), and drives the per-target connection class shape. Shipped (0.0.9)."
 FilterSet,filterset,The shipped filter subsystem the connection field's filter: argument is auto-derived from; reuses apply_sync / apply_async.
-filter_input_type,filter_input_type,The shipped resolver-argument helper whose lazy Annotated machinery and orphan-validation ledger the connection field's filter: argument reuses (Decision 6).
+filter_input_type,filter_input_type,The shipped resolver-argument helper whose LazyType machinery and orphan-validation ledger the connection field's filter: argument reuses (Decision 6).
 Meta.filterset_class,metafilterset_class,The per-type sidecar key driving the filter: argument generation.
 OrderSet,orderset,The shipped ordering subsystem the orderBy: argument is auto-derived from; reuses apply_sync / apply_async.
 order_input_type,order_input_type,The shipped element-type helper wrapped as list[order_input_type(...)] for the list-shaped orderBy: argument (Decision 6).
@@ -49,3 +49,4 @@ Multi-database cooperation,multi-database-cooperation,The .using(alias) _db-pres
 OptimizerHint,optimizerhint,"Per-relation override on the wrapped type; unchanged by the connection field, which plans against the root queryset."
 Meta.optimizer_hints,metaoptimizer_hints,The Meta key carrying OptimizerHint values; unchanged by the connection field.
 Cross-subsystem invariants,cross-subsystem-invariants,The 1.0.0 rule that every Layer-3 argument composes with the optimizer; this card is the field that composition runs through.
+Meta.cursor_field,metacursor_field,"The keyset-cursor opt-in shipped in 0.0.14 by django_strawberry_framework/keyset.py; declared on a Relay-Node-shaped type it switches every connection over that type from Strawberry offset cursors to encrypted value cursors. This spec owns its contract (the Keyset cursors section) because the connection is the only surface it changes."

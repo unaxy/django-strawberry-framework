@@ -40,15 +40,14 @@ the field shape each pipeline belongs to. The sync matrix runs on the shipped
 connection field this module builds over the same shipped ``GenreType`` with an
 ``async def`` consumer resolver, which is the only field shape that selects
 ``connection.py::_pipeline_async``; it is served over a ``/graphql-async/``
-mount this module owns (``graphql_client.py`` is sync-only, so those rows take
-the documented ``AsyncTestClient`` + ``django_db(transaction=True)``
-exemption). The async rows mirror the sync matrix shape for shape - evaluated,
-materialized-list, none, projection, wrong-model, sliced, combined,
-routing-rewritten-in-place and malformed-deferred-filter - with one
-substitution the pipelines force: the sync-only ``awaitable-in-sync`` row has
-two async twins, ``non-awaitable`` for a public method that never returned an
-awaitable and ``residual-awaitable`` for one that awaited to a second
-awaitable. Each row asserts the typed rejection, that no raw exception text
+mount this module owns (``graphql_client.py`` is sync-only, so those rows drive
+``AsyncTestClient`` with ``django_db(transaction=True)``). The async rows mirror
+the sync matrix shape for shape - evaluated, materialized-list, none,
+projection, wrong-model, sliced, combined, routing-rewritten-in-place and
+malformed-deferred-filter - with one substitution the pipelines force: the
+sync-only ``awaitable-in-sync`` row has two async twins, ``non-awaitable`` for
+a public method that never returned an awaitable and ``residual-awaitable`` for
+one that awaited to a second awaitable. Each row asserts the typed rejection, that no raw exception text
 reaches the payload, and - through a sentinel the override records before it
 returns - that ``apply_async`` was actually entered; the pass-through control
 is the same. The residual row also reads the disposal, since the refused
@@ -311,6 +310,58 @@ def test_live_keyset_over_cap_first_is_graphql_error() -> None:
     assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Argument 'first' cannot be higher than 100.",
     ], payload
+
+
+#: ``(id, document, message)``: one row per pagination-argument rejection the
+#: package raises - an offset page size, an offset cursor, ``first`` with
+#: ``last``, and a keyset (``Meta.cursor_field``) cursor.
+_PAGINATION_REJECTION_ROWS = [
+    (
+        "offset-negative-first",
+        "{ allItems(first: -1) { edges { node { id } } } }",
+        "Argument 'first' must be a non-negative integer.",
+    ),
+    (
+        "offset-malformed-cursor",
+        '{ allItems(first: 1, after: "not-a-cursor") { edges { node { id } } } }',
+        "Argument 'after' contains a non-existing value.",
+    ),
+    (
+        "first-and-last",
+        "{ allItems(first: 1, last: 1) { edges { node { id } } } }",
+        "Connection arguments `first` and `last` are mutually exclusive; supply only one.",
+    ),
+    (
+        "keyset-malformed-cursor",
+        '{ allLibraryIssuesConnection(first: 1, after: "not-a-cursor") { edges { node { id } } } }',
+        "Argument 'after' contains an invalid cursor for this connection.",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [row[1:] for row in _PAGINATION_REJECTION_ROWS],
+    ids=[row[0] for row in _PAGINATION_REJECTION_ROWS],
+)
+def test_pagination_rejection_carries_the_pagination_invalid_code(
+    document: str,
+    message: str,
+) -> None:
+    """Every pagination-argument rejection reaches a ``DEBUG=False`` client coded.
+
+    The error policy passes a ``GraphQLError`` through untouched, so the
+    message and ``extensions.code`` ``PAGINATION_INVALID`` both survive: a
+    client branches on the code, never on the prose.
+    """
+    seed_data(1)
+    payload = graphql_payload(document)
+    assert payload["data"] is None, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "extensions", "code"))
+        for error in json_list(payload, "errors")
+    ] == [(message, "PAGINATION_INVALID")], payload
 
 
 @pytest.mark.django_db
@@ -853,8 +904,8 @@ urlpatterns = [
 async def _post_async_genres(query: str) -> JSONObject:
     """POST ``query`` against the async-resolver genre connection over ``/graphql-async/``.
 
-    ``graphql_client.py`` is sync-only, so the async rows take the documented
-    exemption and drive ``AsyncTestClient`` against a mount this module owns.
+    ``graphql_client.py`` is sync-only, so the async rows drive ``AsyncTestClient``
+    against a mount this module owns.
     The schema is built here, inside the test, so it is composed from the types
     the autouse reload just registered, and published through ``_ASYNC_CURRENT``
     for the view to read.

@@ -212,10 +212,11 @@ Spec: [Decision 8][s65-d8].
   Rejected: it would restate the exact conflation the audit called out, and would make the
   package's own documentation the source of a false guarantee.
 - **Listing a header-size knob (`--limit-request-field-size`) beside the body directives.**
-  Rejected: it bounds a **header field**, not the body, and no mainstream ASGI server bounds
-  the total body at all. A reader scanning a list of concrete directions takes the list, not
-  a qualifier, so the list names only real body directives (nginx's `client_max_body_size`,
-  Apache's `LimitRequestBody`) and states the ASGI-server absence outright.
+  Rejected: it bounds a **header field**, not the body, and the package relies on no ASGI
+  server to bound the total body (Daphne, the server verified, does not). A reader scanning a
+  list of concrete directions takes the list, not a qualifier, so the list names only real
+  body directives (nginx's `client_max_body_size`, Apache's `LimitRequestBody`) and states
+  outright that no ASGI-server cap is assumed.
 
 ### Decision 9 — The strict UTF-8 wire contract is enforced by the package view: its own body source, one strict decode
 

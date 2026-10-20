@@ -468,12 +468,12 @@ def test_connection_only_relation_stays_list_suppressed_on_refinalize() -> None:
 def test_synthesized_connection_carries_sidecar_args_and_total_count() -> None:
     """The synthesized field carries the TARGET's sidecar args and ``totalCount`` opt-in.
 
-    Type-level target-driven contract (Decision 6): ``ItemType`` declares
-    ``filterset_class`` / ``orderset_class`` / ``connection`` so
+    Type-level target-driven contract (spec-032 Decision 6): ``ItemType``
+    declares ``filterset_class`` / ``orderset_class`` / ``connection`` so
     ``itemsConnection`` gets ``filter:`` / ``orderBy:`` arguments and a
-    ``totalCount``-carrying connection type; ``PropertyType`` declares none,
-    so ``propertiesConnection`` carries only the four Relay pagination args
-    and no ``totalCount``.
+    ``totalCount``-carrying connection type; ``PropertyType`` declares none, so
+    ``propertiesConnection`` carries only the four Relay pagination args and no
+    ``totalCount``.
 
     Package-only for the sidecar-LESS half: no shipped example type is a
     nested connection target that declares neither ``filterset_class`` nor
@@ -758,10 +758,11 @@ def _genres_list_schema(
 def _genres_filterable_book_schema(*, strictness: str = "raise") -> strawberry.Schema:
     """Build the same M2M genres list root but with ``BookType`` carrying a sidecar.
 
-    A ``filterset_class`` on ``BookType`` means a nested ``booksConnection(filter:
-    ...)`` selection is a Decision-6 sidecar fallback: the walker leaves it
-    unplanned, so the resolver runs the per-parent pipeline and (with strictness
-    active) fires the B3 contract with the filter/orderBy fallback reason.
+    A ``filterset_class`` on ``BookType`` means a nested
+    ``booksConnection(filter: ...)`` selection is a spec-033 Decision-6 sidecar
+    fallback: the walker leaves it unplanned, so the resolver runs the
+    per-parent pipeline and (with strictness active) fires the B3 contract with
+    the filter/orderBy fallback reason.
     """
 
     class _BookFilter(FilterSet):
@@ -807,12 +808,13 @@ def _genres_distinct_book_schema(
 ) -> strawberry.Schema:
     """M2M genres list root whose ``BookType`` target ``get_queryset`` ``.distinct()``s.
 
-    A ``.distinct()``-ing target is a Decision-6 DISTINCT fallback: the window's
-    ``Count(1) OVER`` would over-count the pre-DISTINCT fan-out rows, so the
-    walker leaves the nested ``booksConnection`` unplanned and the per-parent
-    pipeline runs - which counts ``totalCount`` correctly via ``.distinct().count()``.
-    ``BookType`` opts into ``Meta.connection`` so ``totalCount`` exists; the
-    ``genres__isnull=False`` join is what fans rows out so DISTINCT is load-bearing.
+    A ``.distinct()``-ing target is a spec-033 Decision-6 DISTINCT fallback: the
+    window's ``Count(1) OVER`` would over-count the pre-DISTINCT fan-out rows,
+    so the walker leaves the nested ``booksConnection`` unplanned and the
+    per-parent pipeline runs - which counts ``totalCount`` correctly via
+    ``.distinct().count()``. ``BookType`` opts into ``Meta.connection`` so
+    ``totalCount`` exists; the ``genres__isnull=False`` join is what fans rows
+    out so DISTINCT is load-bearing.
     """
 
     class BookType(DjangoType):
@@ -1590,10 +1592,10 @@ def test_fast_path_non_pk_ordering_applies_explicit_deterministic_order_by() -> 
 def test_fast_path_cursor_round_trips_to_fallback_after() -> None:
     """A fast-path ``endCursor`` fed to ``after:`` on an optimizer-less execution continues.
 
-    The cursor-parity invariant's observable proof (Decision 4): the fast path's
-    positional offset cursors are format-compatible with the pipeline's, so a
-    page-1 ``endCursor`` captured under the optimizer drives a correct page-2
-    ``after:`` with the optimizer absent.
+    The cursor-parity invariant's observable proof (spec-033 Decision 4): the
+    fast path's positional offset cursors are format-compatible with the
+    pipeline's, so a page-1 ``endCursor`` captured under the optimizer drives a
+    correct page-2 ``after:`` with the optimizer absent.
     """
     _seed_library_books(
         [
@@ -1631,7 +1633,7 @@ def test_fast_path_fires_for_reverse_fk_without_related_name(
 ) -> None:
     """The fast path fires for a reverse FK without ``related_name``.
 
-    Decision 5: the resolver receives the relation FIELD NAME
+    spec-033 Decision 5: the resolver receives the relation FIELD NAME
     (``repairticket``), not the accessor (``repairticket_set``), so its
     ``_dst_<field>_connection`` probe matches the ``to_attr`` the walker keyed
     on the field name. The fixed query count (parent + one window) proves the
@@ -1815,9 +1817,10 @@ def test_fast_path_total_count_marker_bypasses_non_queryset_guard() -> None:
     """``totalCount`` over the wrapper does NOT raise the non-queryset count guard.
 
     The ``_WindowedConnectionRows`` marker is not a ``QuerySet``; the totalCount
-    variant must branch on it BEFORE ``_guard_total_count_countable`` / ``.count()``
-    (Decision 5), so selecting ``totalCount`` over a fast-path window resolves
-    cleanly instead of raising the M1 non-queryset ``GraphQLError``.
+    variant must branch on it BEFORE ``_guard_total_count_countable`` /
+    ``.count()`` (spec-033 Decision 5), so selecting ``totalCount`` over a
+    fast-path window resolves cleanly instead of raising the M1 non-queryset
+    ``GraphQLError``.
     """
     _seed_library_books(["a", "b", "c"])
     schema = _genres_list_schema(optimizer=True, book_total_count=True)
@@ -1992,10 +1995,11 @@ def test_fast_path_zero_children_parent_serves_under_ambiguous_shapes(
 def test_fast_path_ignores_window_when_sidecar_kwargs_present() -> None:
     """A ``filter:`` argument makes the resolver ignore the window and run the pipeline.
 
-    The defensive belt (Decision 5): even if the walker desyncs and plans a
-    window, a sidecar-carrying selection must NOT consume it (which would serve
-    unfiltered wrong data) - the resolver refuses the window when its own
-    ``filter`` / ``order_by`` kwargs are present and runs the filtered pipeline.
+    The defensive belt (spec-033 Decision 5): even if the walker desyncs and
+    plans a window, a sidecar-carrying selection must NOT consume it (which
+    would serve unfiltered wrong data) - the resolver refuses the window when
+    its own ``filter`` / ``order_by`` kwargs are present and runs the filtered
+    pipeline.
     """
 
     class _BookFilter(FilterSet):
@@ -2209,10 +2213,11 @@ def test_strictness_raise_malformed_cursor_surfaces_pagination_error_not_optimiz
 def test_sidecar_fallback_is_flagged_with_reason() -> None:
     """A sidecar fallback's ``"raise"`` message carries an ACTIONABLE reason.
 
-    Decision 6 consistency pin (Risks bullet "include the fallback reason in the
-    message"): a consumer who legitimately filters a nested connection gets a
-    per-parent fallback that strictness flags - the message must explain WHY
-    (the filter/orderBy wording) so it does not look like an optimizer defect.
+    spec-033 Decision 6 consistency pin (Risks bullet "include the fallback
+    reason in the message"): a consumer who legitimately filters a nested
+    connection gets a per-parent fallback that strictness flags - the message
+    must explain WHY (the filter/orderBy wording) so it does not look like an
+    optimizer defect.
     """
     _seed_library_books(["apple", "banana", "avocado"])
     schema = _genres_filterable_book_schema(strictness="raise")
@@ -2481,15 +2486,14 @@ def test_strictness_silent_when_planned() -> None:
         },
         path=_path("objs", 0, "booksConnection"),
     )
-    # ``to_attr`` absent on root (no window served), yet planned -> silent. The
-    # call mirrors the connection.py consultation exactly.
+    # No window served, yet planned -> silent. The call mirrors the
+    # connection.py consultation exactly.
     _check_n1(
         info,
         SimpleNamespace(),
         "books",
         GenreType,
         kind="connection_to_attr",
-        to_attr="_dst_books_connection",
         reason="not window-planned; resolving per-parent",
     )
 
@@ -2506,7 +2510,6 @@ def test_strictness_silent_when_planned() -> None:
             "books",
             GenreType,
             kind="connection_to_attr",
-            to_attr="_dst_books_connection",
             reason="not window-planned; resolving per-parent",
         )
 

@@ -52,3 +52,4 @@ seed_data,seed_data,mandatory first line of every catalog test
 Live-first coverage mandate,live-first-coverage-mandate,decides where each regression lives
 Joint version cut,joint-version-cut,the rule that owns the version bump and release wording (Decision 12)
 Single-upstream parity,single-upstream-parity,makes the file path field optional rather than foundational
+DjangoSchema,djangoschema,the required schema class that gains the error policy (Decision 7)

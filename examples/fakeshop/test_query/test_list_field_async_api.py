@@ -1,9 +1,8 @@
 """Live async-HTTP contract for ``DjangoListField`` arguments.
 
-This suite is intentionally exempt from ``examples/fakeshop/graphql_client.py``:
-that helper is synchronous by construction, while these cases cross a real
-``AsyncClient`` -> ``AsyncDjangoGraphQLView`` -> graphql-core async-completion
-boundary.
+These cases cross a real ``AsyncClient`` -> ``AsyncDjangoGraphQLView`` ->
+graphql-core async-completion boundary, posting through the package's own
+``AsyncTestClient`` (``examples/fakeshop/graphql_client.py`` is sync-only).
 
 No case sets ``DJANGO_ALLOW_ASYNC_UNSAFE``. All tests carry
 ``@pytest.mark.django_db(transaction=True)``.
@@ -69,6 +68,7 @@ from django_strawberry_framework.resource_policy import (
     policy_from_info,
 )
 from django_strawberry_framework.schema import DjangoSchema
+from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_deferred_filter,
     set_queryset_hints,
@@ -152,17 +152,14 @@ async def _post_async(
     try:
         with override_settings(**override_dict):
             clear_url_caches()
-            http_client = client or AsyncClient()
-            body: JSONObject = {"query": query}
-            if variables is not None:
-                body["variables"] = variables
-            response = await http_client.post(
-                "/graphql-async/",
-                data=json.dumps(body),
-                content_type="application/json",
+            res = await AsyncTestClient(client=client).query(
+                query,
+                variables,
+                assert_no_errors=False,
+                url="/graphql-async/",
             )
-        assert response.status_code == 200
-        return response_json(response)
+        assert res.response.status_code == 200
+        return response_json(res.response)
     finally:
         _CURRENT["schema"] = None
         _CURRENT["view_class"] = None

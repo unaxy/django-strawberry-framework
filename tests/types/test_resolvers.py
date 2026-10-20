@@ -881,7 +881,7 @@ def test_forward_resolver_without_related_model_propagates_attribute_error() -> 
 # the strictness test does NOT mock the router (it never reaches that path
 # per ``django_strawberry_framework/types/resolvers.py::_check_n1``).
 #
-# Mock pattern (per spec Decision 5 + ``Mock contract`` block):
+# Mock pattern (per spec-023 Decision 5 + ``Mock contract`` block):
 #
 # ruff: disable[ERA001]
 #     from unittest.mock import Mock
@@ -1627,40 +1627,19 @@ def test_an_unsealable_prefetch_cache_is_refused_under_the_accessor_it_was_read_
 
 
 def test_resolver_helpers_edge_cases() -> None:
-    # Line 313: kind == "connection_to_attr"
+    # kind == "connection_to_attr" never re-probes root: its caller reached the
+    # per-parent branch, so a window attribute present on root still queries.
     info = SimpleNamespace(path=SimpleNamespace(key="items", prev=None), context={})
-    root_with_attr = SimpleNamespace(prefetched_page=["item1"])
-    # Not lazy when to_attr is present on root
-    _check_n1(
-        info,
-        root_with_attr,
-        "items",
-        _parent_type(Category),
-        kind="connection_to_attr",
-        to_attr="prefetched_page",
-        strictness="warn",
-    )
-    # Lazy when to_attr is None on root
-    root_without_attr = SimpleNamespace(prefetched_page=None)
-    _check_n1(
-        info,
-        root_without_attr,
-        "items",
-        _parent_type(Category),
-        kind="connection_to_attr",
-        to_attr="prefetched_page",
-        strictness="warn",
-    )
-    # Lazy when to_attr is not a str
-    _check_n1(
-        info,
-        root_with_attr,
-        "items",
-        _parent_type(Category),
-        kind="connection_to_attr",
-        to_attr=None,
-        strictness="warn",
-    )
+    root_with_attr = SimpleNamespace(_dst_items_connection=["item1"])
+    with pytest.raises(OptimizerError, match="Unplanned N\\+1: items"):
+        _check_n1(
+            info,
+            root_with_attr,
+            "items",
+            _parent_type(Category),
+            kind="connection_to_attr",
+            strictness="raise",
+        )
 
     # Lines 639 and 697: skip_field_names
     DummyTarget = _parent_type(Category, "DummyTarget")

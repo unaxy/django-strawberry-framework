@@ -229,31 +229,16 @@ both sites now spell the chain identically (`_get_or_build_plan`, reached from `
 
 **No deferred work of this round's own.** Every dispatched finding, Worker 3's seven findings, RR-1,
 and the final-verification pass's own Decision 1 finding landed inside the round. D-R3-1, escalated
-non-blocking, was closed by deletion rather than parked. Three items lie outside the writable set by
+non-blocking, was closed by deletion rather than parked. Two items lie outside the writable set by
 the dispatch:
 
-1. **The live `KANBAN.md` `DONE-018-0.0.6` card body names the public `audit_primary_ambiguity()`** —
-   private as `_audit_primary_ambiguity` since commit `13d8dac5`, 2026-05-18. **Now homed on
-   `TODO-ALPHA-052-0.1.0`**, which carries the row id, the fix instrument (a DB edit plus regenerate,
-   since `KANBAN.md` renders from `examples/fakeshop/db.sqlite3`), and the two findings below. Nothing
-   further is owed here. **One row, not two:** this item originally also charged the body with quoting
-   the retired duplicate-primary message `"<new> is already declared primary as <existing>"`. That was
-   read off the verbatim card-body copy in the companion, which does carry it, and attributed to the
-   board, which never did — the substring `declared primary` returns zero `CardItem` and zero
-   `CardReference` rows board-wide. The withdrawal is recorded because the card bullet cites this
-   hand-off and tells its author not to hunt for a second edit. Two facts surfaced in the same
-   measurement and travelled to that bullet: the one real staleness is `CardItem` 723 (`note`, order
-   6), and **10 of that card's 15 `note` items end mid-sentence** (rows 720, 721, 722, 723, 725, 726,
-   727, 728, 732, 733) from an import-time truncation predating every residual cycle, so row 723 is
-   both stale and clipped. Same defect class the round's own reports hit three times — a description
-   outliving the source it was derived from — reaching the hand-off list itself.
-2. **Two `check_trailing_commas` layout violations exist repo-wide and belong to no cycle**, so they
+1. **Two `check_trailing_commas` layout violations exist repo-wide and belong to no cycle**, so they
    are recorded here rather than carded: `examples/fakeshop/test_query/test_products_visibility_api.py`
    (untracked, a concurrent session's live-tier test, `should collapse (< threshold, over-exploded)`)
    and an agent memory file under `.claude/` missing the link-def scaffold, outside the package
    entirely. Both block a pre-commit run over their own paths until their owners fix them. Neither was
    fixed and neither was reverted.
-3. **No standing-doc edit is owed for this card.** `docs/GLOSSARY.md`, `CHANGELOG.md`,
+2. **No standing-doc edit is owed for this card.** `docs/GLOSSARY.md`, `CHANGELOG.md`,
    `docs/README.md`, and `TODAY.md` were each read against `HEAD` and each reflects shipped state — the
    glossary marks `Meta.primary` `shipped (0.0.6)` and quotes the landed error message, and
    `CHANGELOG.md` documents both the message reword and the `register` / `get` semantics. Recorded so

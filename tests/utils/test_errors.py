@@ -34,6 +34,7 @@ from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
     GLOBALID_INVALID_ERROR_CODE,
     GLOBALID_UNVALIDATABLE_ERROR_CODE,
+    PAGINATION_INVALID_ERROR_CODE,
     build_error_key_map,
     coded_error_extensions,
     empty_validation_error,
@@ -212,6 +213,7 @@ def test_field_error_code_vocabulary_is_the_public_wire_contract() -> None:
     assert GLOBALID_INVALID_ERROR_CODE == "GLOBALID_INVALID"
     assert GLOBALID_UNVALIDATABLE_ERROR_CODE == "GLOBALID_UNVALIDATABLE"
     assert FILTER_INVALID_ERROR_CODE == "FILTER_INVALID"
+    assert PAGINATION_INVALID_ERROR_CODE == "PAGINATION_INVALID"
     for name in (
         "FIELD_ERROR_CODE_INVALID",
         "FIELD_ERROR_CODE_NULL",
@@ -223,6 +225,7 @@ def test_field_error_code_vocabulary_is_the_public_wire_contract() -> None:
         "GLOBALID_INVALID_ERROR_CODE",
         "GLOBALID_UNVALIDATABLE_ERROR_CODE",
         "FILTER_INVALID_ERROR_CODE",
+        "PAGINATION_INVALID_ERROR_CODE",
         "coded_error_extensions",
         "empty_validation_error",
         "null_field_error",
