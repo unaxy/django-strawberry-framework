@@ -299,6 +299,6 @@ def _unsupported_form_field(field: forms.Field) -> ConfigurationError:
     return ConfigurationError(
         f"Unsupported form field type {truth.kind(field)!r} on form "
         f"field {truth.render(field)}. convert_form_field has no mapping "
-        "for it and no supported ancestor; register a supported base class, or "
-        "supply a custom input_class field for it.",
+        "for it and no supported ancestor; subclass a supported form field, or "
+        "drop it via Meta.fields / Meta.exclude.",
     )

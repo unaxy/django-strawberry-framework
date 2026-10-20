@@ -260,8 +260,8 @@ def test_unknown_custom_field_subclass_raises() -> None:
         convert_form_field(field)
     assert str(excinfo.value) == (
         f"Unsupported form field type 'CustomField' on form field {field!r}. "
-        "convert_form_field has no mapping for it and no supported ancestor; register a "
-        "supported base class, or supply a custom input_class field for it."
+        "convert_form_field has no mapping for it and no supported ancestor; subclass a "
+        "supported form field, or drop it via Meta.fields / Meta.exclude."
     )
 
 
