@@ -145,13 +145,13 @@ def require_non_delete_operation(base_label: str, name: str, meta: type[object])
     verb cannot leave one flavor still spelling the membership test. The
     model-less plain form does NOT call this (it rejects ANY ``operation`` key).
     """
-    operation = truth.static_attr(meta, "operation")
+    raw_operation = truth.static_attr(meta, "operation")
     if (
-        not truth.is_instance(operation, str)
-        or truth.text(operation) not in NON_DELETE_WRITE_OPERATIONS
+        not truth.is_instance(raw_operation, str)
+        or (operation := truth.text(raw_operation)) not in NON_DELETE_WRITE_OPERATIONS
     ):
-        raise non_delete_operation_error(base_label, name, operation)
-    return truth.text(operation)
+        raise non_delete_operation_error(base_label, name, raw_operation)
+    return operation
 
 
 def reject_unknown_meta_keys(name: str, meta: object, allowed: frozenset[str]) -> type[object]:
@@ -1324,13 +1324,15 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         # ``require_model_class`` so those overrides cannot skip the gate.
         model = require_model_class(name, model, base_label="DjangoMutation")
 
-        operation = truth.static_attr(meta, "operation")
-        if not truth.is_instance(operation, str) or truth.text(operation) not in _VALID_OPERATIONS:
+        raw_operation = truth.static_attr(meta, "operation")
+        if (
+            not truth.is_instance(raw_operation, str)
+            or (operation := truth.text(raw_operation)) not in _VALID_OPERATIONS
+        ):
             raise ConfigurationError(
                 f"DjangoMutation {name}.Meta.operation must be one of "
-                f"{sorted(_VALID_OPERATIONS)}; got {truth.render(operation)}.",
+                f"{sorted(_VALID_OPERATIONS)}; got {truth.render(raw_operation)}.",
             )
-        operation = truth.text(operation)
 
         # The model-flavor field-sequence pair routes through the shared
         # ``normalize_meta_field_selection`` (spec-039 - no per-flavor
