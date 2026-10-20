@@ -1412,23 +1412,15 @@ def clear_connection_type_cache() -> None:
 register_subsystem_clear(clear_connection_type_cache, owner="connection.type_cache")
 
 
+# The per-connection-class resolved-edge-class cache. Cleared by
+# ``registry.clear()`` (the documented test-only registry reset) so a
+# registry-clearing test or fixture also drops the resolved edge classes,
+# rather than accumulating dead identity-keyed entries across schema reloads;
+# production never reloads the schema.
 _window_edge_class_cache: truth.IdentityMap[type[object], type[relay.Edge[relay.Node]]] = (
     truth.IdentityMap()
 )
-
-
-def clear_window_edge_class_cache() -> None:
-    """Clear the per-connection-class resolved-edge-class cache.
-
-    Test-only - production never reloads the schema. Wired into
-    ``registry.clear()`` (the documented registry reset) so a registry-clearing
-    test or fixture also drops the resolved edge classes, rather than
-    accumulating dead identity-keyed entries across schema reloads.
-    """
-    _window_edge_class_cache.clear()
-
-
-register_subsystem_clear(clear_window_edge_class_cache, owner="connection.edge_class")
+register_subsystem_clear(_window_edge_class_cache.clear, owner="connection.edge_class")
 
 
 def _generate_connection_class(

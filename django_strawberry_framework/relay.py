@@ -108,19 +108,13 @@ __all__ = ("DjangoNodeField", "DjangoNodesField")
 # ``registry.clear()`` co-clears it). Appended by BOTH factories on every
 # call; only emptiness is load-bearing, the factory-name entries aid debugging.
 _node_fields_declared: list[str] = []
+register_subsystem_clear(_node_fields_declared.clear, owner="relay.node_fields")
 
 _SYNC_RESOLVER_RECOURSE = (
     "DjangoNodeField and DjangoNodesField execute resolve_node(s) synchronously "
     "under schema.execute_sync(); make the consumer override synchronous or run "
     "the schema asynchronously."
 )
-
-
-def _clear_node_fields_declared() -> None:
-    _node_fields_declared.clear()
-
-
-register_subsystem_clear(_clear_node_fields_declared, owner="relay.node_fields")
 
 
 def _decode_or_graphql_error(

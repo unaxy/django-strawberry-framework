@@ -91,6 +91,8 @@ from django_strawberry_framework.connection import (
     _pipeline_async,
     _pipeline_sync,
     _total_count_requested,
+    _window_edge_class,
+    _window_edge_class_cache,
     _window_rows_are_annotated,
     _WindowedConnectionRows,
     clear_connection_type_cache,
@@ -2187,6 +2189,17 @@ def test_registry_clear_also_clears_connection_type_cache() -> None:
     assert _connection_type_cache
     registry.clear()
     assert not _connection_type_cache
+
+
+def test_registry_clear_also_clears_window_edge_class_cache() -> None:
+    """``registry.clear()`` drops the resolved edge classes with the connection classes."""
+    node_type = _make_node_type("EdgeClassCacheNode", total_count=None)
+    _window_edge_class(
+        _connection_type_for(node_type, node_type.__django_strawberry_definition__),
+    )
+    assert _window_edge_class_cache
+    registry.clear()
+    assert not _window_edge_class_cache
 
 
 @pytest.mark.parametrize("total_count", [None, True], ids=["bare", "total-count"])
