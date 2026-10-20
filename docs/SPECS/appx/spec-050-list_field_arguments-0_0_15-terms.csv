@@ -8,7 +8,7 @@ Cookbook parity,cookbook-parity,The separate north-star target this card advance
 DjangoConnection,djangoconnection,Named connection return surface in migration discussion
 DjangoConnectionField,djangoconnectionfield,Connection surface explicitly excluded from offset arguments
 DjangoListField,djangolistfield,Primary public surface extended by this card
-DjangoOptimizerExtension,djangooptimizerextension,Must receive the final sliced root queryset and rewrap the adapter on every return path
+DjangoOptimizerExtension,djangooptimizerextension,Receives the final sliced root queryset and rewraps the async adapter on every return path
 DjangoResourcePolicyExtension,djangoresourcepolicyextension,Generic collection-cost accounting charges a fixed raw-list-ceiling estimate
 DjangoType,djangotype,Meta-first target type for the field
 Execution resource policy,execution-resource-policy,Existing request budget reused for both ceilings
@@ -19,13 +19,13 @@ Joint version cut,joint-version-cut,Card 053 owns the shared 0.0.15 release stat
 List offset order precondition,list-offset-order-precondition,Nonzero offset requires a materially active order; no pk tiebreaker or DISTINCT
 ListArgumentError,listargumenterror,Typed runtime rejection carrying the stable LIST_ARGUMENT_INVALID extensions
 Live-first coverage mandate,live-first-coverage-mandate,Determines test placement
-Meta.aggregate_class,metaaggregate_class,Cookbook Meta key named in the TODAY.md non-edit rationale; stays out of this card
+Meta.aggregate_class,metaaggregate_class,Cookbook Meta key TODAY.md lists as not accepted; stays out of this card
 Meta.fields,metafields,Existing declaration key used in the consumer example
-Meta.fields_class,metafields_class,Cookbook Meta key named in the TODAY.md non-edit rationale; stays out of this card
+Meta.fields_class,metafields_class,Cookbook Meta key TODAY.md lists as not accepted; stays out of this card
 Meta.filterset_class,metafilterset_class,Explicitly not inferred into this list field
 Meta.model,metamodel,Existing declaration key used in the consumer example
 Meta.orderset_class,metaorderset_class,Source of the conditionally published typed order argument under the active naming converter
-Meta.search_fields,metasearch_fields,Cookbook Meta key named in the TODAY.md non-edit rationale; stays out of this card
+Meta.search_fields,metasearch_fields,Cookbook Meta key TODAY.md lists as not accepted; stays out of this card
 Multi-database cooperation,multi-database-cooperation,Queryset database routing must survive slicing
 Ordering,ordering,Direction enum used by active order terms
 OrderSet,orderset,Existing ordering pipeline reused end to end
