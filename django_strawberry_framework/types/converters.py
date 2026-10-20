@@ -67,7 +67,7 @@ import re
 import uuid
 from enum import Enum, EnumMeta
 from types import GenericAlias
-from typing import TYPE_CHECKING, Final, Literal, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, TypeGuard, TypeVar, cast
 
 import strawberry
 from django.db import models
@@ -83,7 +83,7 @@ from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.strings import pascal_case
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable
 
     from django.contrib.postgres.fields import ArrayField, HStoreField
     from typing_extensions import Never, TypeForm
@@ -318,15 +318,6 @@ _CHOICE_ENTRY_LENGTH = 2
 _NON_IDENT = re.compile(r"\W+", flags=re.ASCII)
 
 
-class _Missing(Enum):
-    """The one-member type of ``_MISSING``, so an ``is`` check narrows it away."""
-
-    MISSING = "missing"
-
-
-# A class-map miss, distinct from every value a map can hold.
-_MISSING: Final = _Missing.MISSING
-_V = TypeVar("_V")
 _GRAPHQL_RESERVED_ENUM_VALUES = frozenset(
     {"false", "null", "true"},
 )
@@ -369,24 +360,6 @@ def array_element_field(field: object) -> "ConcreteField | None":
     return None
 
 
-def _class_map_lookup(
-    mapping: "Mapping[type[ConcreteField], _V]",
-    field: object,
-) -> "_V | Literal[_Missing.MISSING]":
-    """Return the ``mapping`` value for the first class in ``field``'s real MRO that keys it.
-
-    Keys are matched by identity, never by the class's ``__hash__`` / ``__eq__``,
-    so a field class cannot claim another class's entry. ``_MISSING`` when no
-    class in the MRO is a key.
-    """
-    entries = tuple(mapping.items())
-    for klass in truth.mro(truth.class_of(field)):
-        for key, value in entries:
-            if key is klass:
-                return value
-    return _MISSING
-
-
 def scalar_for_field(field: "ModelField") -> "TypeForm[object]":
     """Resolve a Django field to its ``SCALAR_MAP`` Python / Strawberry scalar.
 
@@ -400,9 +373,9 @@ def scalar_for_field(field: "ModelField") -> "TypeForm[object]":
     It does NOT apply choice substitution or null widening; callers layer those
     on (``convert_scalar`` does; filter inputs handle choices separately).
     """
-    scalar = _class_map_lookup(SCALAR_MAP, field)
-    if scalar is not _MISSING:
-        return scalar
+    entry = truth.mro_entry(SCALAR_MAP, truth.class_of(field))
+    if entry is not None:
+        return entry[1]
     raise ConfigurationError(
         f"Unsupported Django field type {truth.render(truth.kind(field))} on "
         f"{_field_label(field)}. Add an entry to "
@@ -545,11 +518,11 @@ def _field_output_type_for(field: "ModelField") -> type[DjangoFileType] | None:
     Walks ``type(field).__mro__`` against ``FIELD_OUTPUT_TYPE_MAP`` exactly as
     ``scalar_for_field`` walks ``SCALAR_MAP`` -- so an ``ImageField`` (and any
     consumer ``ImageField`` subclass) resolves to ``DjangoImageType`` before
-    ``FileField`` is reached -- and returns ``None`` for a non-file column. The
-    single MRO-walk site, so the map walk is written once.
+    ``FileField`` is reached -- and returns ``None`` for a non-file column. Both
+    walks compose ``utils/truth.py::mro_entry``, so the map walk is written once.
     """
-    output_type = _class_map_lookup(FIELD_OUTPUT_TYPE_MAP, field)
-    return None if output_type is _MISSING else output_type
+    entry = truth.mro_entry(FIELD_OUTPUT_TYPE_MAP, truth.class_of(field))
+    return None if entry is None else entry[1]
 
 
 def convert_field_output(
