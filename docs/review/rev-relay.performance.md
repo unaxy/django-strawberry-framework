@@ -289,7 +289,7 @@ micro-rejections with numbers.
   no settings read, no regex, no lock, no cache, no query.
   Trigger: the armed-budget path appearing in a request profile.
 - R5: `django_strawberry_framework/relay.py::_check_nodes_result`
-  runs `truth.own_attr(type(result), "__len__")` once per distinct
+  runs `truth.mro_attr(type(result), "__len__")` once per distinct
   type per batch (sub-microsecond MRO walk on the exact result
   type), the truthful sized-vs-iterator discriminator the
   positional contract needs. Trigger: relocation to per-row, or a

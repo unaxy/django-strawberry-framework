@@ -19,7 +19,7 @@ metaclass ``__eq__`` / ``__hash__`` could intercept:
   way, through their own types' slots.
 - Membership in a read MRO is tested by identity (``is``), never ``in`` or
   ``==``, so a metaclass ``__eq__`` cannot claim to be a framework base.
-- Declared attributes (``static_attr`` / ``own_attr`` / ``instance_dict``) are
+- Declared attributes (``static_attr`` / ``mro_attr`` / ``instance_dict``) are
   looked up in the real MRO's raw namespaces, never through ``__getattr__`` /
   ``__getattribute__`` or a descriptor. ``inspect.getattr_static`` is not
   equivalent: it reads ``entry.__dict__`` by ordinary attribute lookup, which a
@@ -30,7 +30,7 @@ descriptor or metaclass hook, with one exception shared with the interpreter's
 own attribute lookup: finding a name in a namespace dict compares it with any
 planted non-``str`` key whose hash collides, which runs that key's ``__eq__``
 (and propagates whatever it raises). That applies to every read that consults
-a namespace: ``module`` / ``label`` of a class, ``static_attr``, ``own_attr``,
+a namespace: ``module`` / ``label`` of a class, ``static_attr``, ``mro_attr``,
 ``instance_dict``, the name of a callable instance, and the class and scalar
 spellings of ``render`` / ``text`` / ``describe``. The reads that consult no
 namespace (``class_of``, ``is_type``, ``is_instance``, ``is_one_of``, ``is_mapping_dict``,
@@ -75,8 +75,8 @@ __all__ = (
     "label",
     "module",
     "mro",
+    "mro_attr",
     "name",
-    "own_attr",
     "qualname",
     "render",
     "static_attr",
@@ -589,11 +589,19 @@ def static_attr(obj: object, attr: str, default: object = None) -> object:
     return default if class_value is _ABSENT else class_value
 
 
-def own_attr(cls: object, attr: str, default: object = None) -> object:
-    """``attr`` from the first real-MRO namespace of ``cls`` that defines it.
+def mro_attr(cls: object, attr: str, default: object = None) -> object:
+    """``attr`` from the real MRO of ``cls`` only: CPython's special-method lookup.
 
-    Unlike ``static_attr`` the metaclass is never consulted, so the answer is
-    what the class body (or a base's) declared.
+    The interpreter reads a dunder it invokes implicitly (``len(x)``,
+    ``iter(x)``, ``x[i]``, ``x()``) from the real MRO of ``type(x)`` alone,
+    never from the instance or from the class's metaclass; this is that lookup,
+    read without running consumer code. The first real-MRO namespace of ``cls``
+    that defines ``attr`` answers. Unlike ``static_attr``, which falls back to
+    the metaclass, an attribute only the metaclass carries is absent here: for
+    an enum class ``static_attr`` finds ``EnumType.__iter__``, yet its members
+    are not iterable and this read reports ``default``. A stored ``None``
+    (``__iter__ = None``, the data model's "explicitly unsupported") comes back
+    as ``None``; a non-class ``cls`` answers ``default``.
     """
     if not is_type(cls):
         return default

@@ -1693,7 +1693,7 @@ def _guard_non_queryset_iterable(source: object) -> None:
     """
     if (
         isinstance(source, (Iterable, AsyncIterable))
-        or truth.own_attr(type(source), "__getitem__") is not None
+        or truth.mro_attr(type(source), "__getitem__") is not None
     ):
         return
     raise GraphQLError(

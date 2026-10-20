@@ -537,6 +537,25 @@ def test_is_async_callable_sees_through_an_async_call_metaclass() -> None:
     assert is_async_callable(_InstanceAsyncCallable()) is True
 
 
+def test_is_async_callable_ignores_the_metaclass_call_of_an_instance_class() -> None:
+    """An instance is called through its class's MRO, never its class's metaclass.
+
+    ``_UsesAsyncMeta``'s metaclass carries ``async def __call__`` (calling the
+    class is async), but the class itself declares no ``__call__``, so an
+    instance of it is not callable at all and is not an async callable.
+    """
+
+    class _AsyncMeta(type):
+        @override
+        async def __call__(cls) -> None: ...
+
+    class _UsesAsyncMeta(metaclass=_AsyncMeta): ...
+
+    instance = object.__new__(_UsesAsyncMeta)
+    assert not callable(instance)
+    assert is_async_callable(instance) is False
+
+
 def test_unwrap_non_null_peels_only_non_null_layers() -> None:
     """The narrow peel stops at the list wrapper its callers must still see.
 
