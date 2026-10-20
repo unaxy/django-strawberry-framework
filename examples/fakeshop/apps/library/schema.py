@@ -2627,6 +2627,37 @@ class UpdateEditionViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class UpdateLendingDesk(DjangoMutation):
+    """Update a ``LendingDesk`` via the model pipeline; the ``id`` is the raw pk.
+
+    The row spans the ``Venue`` parent table and the desk's own, and the update writes both
+    as UPDATEs, so a row deleted after the locate is the ``conflict`` envelope.
+    """
+
+    class Meta:
+        model = models.LendingDesk
+        operation = "update"
+        permission_classes = []
+
+
+class UpdateLendingDeskViaForm(DjangoModelFormMutation):
+    """Update a ``LendingDesk`` via ``LendingDeskForm`` - a row spanning two tables."""
+
+    class Meta:
+        form_class = forms.LendingDeskForm
+        operation = "update"
+        permission_classes = []
+
+
+class UpdateLendingDeskViaSerializer(SerializerMutation):
+    """Update a ``LendingDesk`` via ``LendingDeskSerializer`` - a row spanning two tables."""
+
+    class Meta:
+        serializer_class = serializers.LendingDeskSerializer
+        operation = "update"
+        permission_classes = []
+
+
 @strawberry.type
 class Mutation:
     """Library write surface (live raw-pk relation visibility + ``to_field_name``).
@@ -2676,6 +2707,9 @@ class Mutation:
     its raw ISBN ``id``.
     ``updateCirculationDeskHoldViaSerializer`` writes a desk's hold, a ``GenericForeignKey``,
     through a ``PrimaryKeyRelatedField`` whose ``Book`` queryset names the one model it holds.
+    ``updateLendingDesk`` and its ``ViaForm`` / ``ViaSerializer`` siblings update a
+    multi-table ``LendingDesk`` (``name`` on the ``Venue`` parent table, ``windowCount`` on
+    the desk's own) located by its raw pk ``id``.
     """
 
     create_shelf_via_form = DjangoMutationField(CreateShelfViaForm)
@@ -2786,6 +2820,9 @@ class Mutation:
     delete_edition = DjangoMutationField(DeleteEdition)
     update_edition_via_form = DjangoMutationField(UpdateEditionViaForm)
     update_edition_via_serializer = DjangoMutationField(UpdateEditionViaSerializer)
+    update_lending_desk = DjangoMutationField(UpdateLendingDesk)
+    update_lending_desk_via_form = DjangoMutationField(UpdateLendingDeskViaForm)
+    update_lending_desk_via_serializer = DjangoMutationField(UpdateLendingDeskViaSerializer)
 
 
 __all__ = ("Mutation", "Query")

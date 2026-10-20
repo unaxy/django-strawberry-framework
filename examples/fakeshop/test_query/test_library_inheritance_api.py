@@ -33,6 +33,12 @@ query shape, off the SQL the request emitted:
   it: ``exact`` / ``in`` take the shelf's primary key and match both carriers,
   never a hidden shelf, and ``isNull`` is a Boolean answered over the shelves
   the viewer sees (a hidden shelf and a missing one alike), in one statement.
+- Multi-table updates: ``updateLendingDesk`` and its ``ViaForm`` / ``ViaSerializer``
+  siblings write the ``Venue`` table and the desk's own as two ``UPDATE`` s, the model and
+  ``ModelForm`` flavors naming every loaded non-key column in ``update_fields``; a desk
+  deleted after authorization (the whole row, or only the desk's table) is the in-band
+  ``conflict`` envelope, never re-INSERTed by the model or ``ModelForm`` flavor, and the
+  serializer's re-INSERT is refused the same way and rolled back.
 - Write-input requiredness: ``Book.archive_genres`` (``editable=False``) is
   absent from both generated ``Book`` inputs, and ``MediaSpecimen``'s optional
   file columns are optional through the ``blank`` arm and the ``null`` arm
@@ -44,13 +50,27 @@ import re
 
 import pytest
 from apps.library import models
+from apps.library import schema as library_schema
 from apps.products.services import create_users
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection
+from django.db.models.signals import pre_save
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
-from graphql_client import assert_graphql_success, json_at, json_list, json_object, json_str
+from graphql_client import (
+    DeleteAfterAuthorization,
+    assert_graphql_success,
+    graphql_payload,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    statement_shapes,
+    statement_shapes_after_last_delete,
+)
+
+from django_strawberry_framework import DjangoMutation
 
 
 def _sql_from_table(captured: CaptureQueriesContext, table: str) -> list[str]:
@@ -948,3 +968,260 @@ def test_media_specimen_create_input_requiredness_reads_blank_and_null_separatel
     fields = _introspect_input_fields("MediaSpecimenInput")
 
     assert fields[name] == {"kind": "SCALAR", "name": "Upload", "ofType": None}, fields
+
+
+# ===========================================================================
+# Multi-table update writes: every table as an UPDATE, a deleted row ``conflict``
+# ===========================================================================
+
+_DESK_UPDATE_INPUTS = {
+    "updateLendingDesk": "LendingDeskPartialInput",
+    "updateLendingDeskViaForm": "LendingDeskFormPartialInput",
+    "updateLendingDeskViaSerializer": "LendingDeskSerializerPartialInput",
+}
+
+_DESK_CONFLICT_ERRORS = [
+    {
+        "field": "id",
+        "messages": ["The row was changed or removed by a concurrent operation; retry."],
+        "codes": ["conflict"],
+    },
+]
+
+
+def _desk_update_mutation(mutation: str) -> type[DjangoMutation]:
+    """The mutation class the rebuilt schema serves, read off its module at test time."""
+    return {
+        "updateLendingDesk": library_schema.UpdateLendingDesk,
+        "updateLendingDeskViaForm": library_schema.UpdateLendingDeskViaForm,
+        "updateLendingDeskViaSerializer": library_schema.UpdateLendingDeskViaSerializer,
+    }[mutation]
+
+
+def _post_desk_update(mutation: str, desk: models.LendingDesk) -> tuple[object, list[str]]:
+    """Rename ``desk`` and change its window count; return the payload and the SQL."""
+    query = (
+        f"mutation($id: ID!, $d: {_DESK_UPDATE_INPUTS[mutation]}!) {{ "
+        f"{mutation}(id: $id, data: $d) {{ result {{ name windowCount }} "
+        "errors { field messages codes } } }"
+    )
+    with CaptureQueriesContext(connection) as captured:
+        payload = graphql_payload(
+            query,
+            variables={"id": desk.pk, "d": {"name": "Renamed Desk", "windowCount": 9}},
+        )
+    assert "errors" not in payload, payload
+    return json_at(payload, "data", mutation), [
+        query["sql"] for query in captured.captured_queries
+    ]
+
+
+def _stored_desk(desk_pk: int | None) -> tuple[list[tuple[str, int]], list[str]]:
+    """The desk's stored columns, and its parent ``Venue`` row's name alone."""
+    return (
+        list(
+            models.LendingDesk._base_manager.filter(pk=desk_pk).values_list(
+                "name",
+                "window_count",
+            ),
+        ),
+        list(models.Venue._base_manager.filter(pk=desk_pk).values_list("name", flat=True)),
+    )
+
+
+#: A desk update's statements in every flavor: the locate, then both tables UPDATEd inside
+#: the write's own savepoint (the forced update's, or the serializer save's), the re-fetch.
+_DESK_UPDATE = [
+    "SAVEPOINT",
+    "SAVEPOINT",
+    "SELECT",
+    "SAVEPOINT",
+    'UPDATE "library_venue"',
+    'UPDATE "library_lendingdesk"',
+    "RELEASE",
+    "SELECT",
+    "RELEASE",
+    "RELEASE",
+]
+
+#: The pipeline's tail after a write it refuses: its rollback and releases.
+_REFUSED_TAIL = ["ROLLBACK", "RELEASE", "RELEASE"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mutation", "update_fields"),
+    [
+        pytest.param(
+            "updateLendingDesk",
+            frozenset(
+                {
+                    "name",
+                    "opened_on",
+                    "lead_ticket",
+                    "window_count",
+                },
+            ),
+            id="updateLendingDesk",
+        ),
+        pytest.param(
+            "updateLendingDeskViaForm",
+            frozenset(
+                {
+                    "name",
+                    "opened_on",
+                    "lead_ticket",
+                    "window_count",
+                },
+            ),
+            id="updateLendingDeskViaForm",
+        ),
+        pytest.param(
+            "updateLendingDeskViaSerializer",
+            None,
+            id="updateLendingDeskViaSerializer",
+        ),
+    ],
+)
+def test_lending_desk_update_writes_both_tables_over_http(
+    mutation: str,
+    update_fields: frozenset[str] | None,
+) -> None:
+    """A ``LendingDesk`` update writes its ``Venue`` table and its own, each as an ``UPDATE``.
+
+    The model and ``ModelForm`` flavors save the multi-table row with ``force_update`` and
+    every loaded non-key column of both tables in ``update_fields``, which a ``pre_save``
+    receiver sees: Django's update-only save on each table, so the statements are the two
+    ``UPDATE`` s a plain save runs. The serializer flavor's DRF save is a plain one
+    (``update_fields=None``) with the same two statements.
+    """
+    desk = models.LendingDesk.objects.create(name="Desk", window_count=2)
+    seen: list[object] = []
+
+    def _record(sender: object, **kwargs: object) -> None:
+        del sender
+        seen.append(kwargs["update_fields"])
+
+    pre_save.connect(_record, sender=models.LendingDesk, weak=False)
+    try:
+        result, sql = _post_desk_update(mutation, desk)
+    finally:
+        _ = pre_save.disconnect(_record, sender=models.LendingDesk)
+
+    assert result == {"result": {"name": "Renamed Desk", "windowCount": 9}, "errors": []}
+    assert seen == [update_fields]
+    assert statement_shapes(sql) == _DESK_UPDATE
+    assert _stored_desk(desk.pk) == ([("Renamed Desk", 9)], ["Renamed Desk"])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mutation", "deleted", "writes"),
+    [
+        pytest.param(
+            "updateLendingDesk",
+            "row",
+            [
+                "SAVEPOINT",
+                'UPDATE "library_venue"',
+                "ROLLBACK",
+                "RELEASE",
+                "SELECT",
+            ],
+            id="updateLendingDesk-row",
+        ),
+        pytest.param(
+            "updateLendingDesk",
+            "desk-table",
+            [
+                "SAVEPOINT",
+                'UPDATE "library_venue"',
+                'UPDATE "library_lendingdesk"',
+                "ROLLBACK",
+                "RELEASE",
+                "SELECT",
+            ],
+            id="updateLendingDesk-desk-table",
+        ),
+        pytest.param(
+            "updateLendingDeskViaForm",
+            "row",
+            [
+                "SAVEPOINT",
+                'UPDATE "library_venue"',
+                "ROLLBACK",
+                "RELEASE",
+                "SELECT",
+            ],
+            id="updateLendingDeskViaForm-row",
+        ),
+        pytest.param(
+            "updateLendingDeskViaForm",
+            "desk-table",
+            [
+                "SAVEPOINT",
+                'UPDATE "library_venue"',
+                'UPDATE "library_lendingdesk"',
+                "ROLLBACK",
+                "RELEASE",
+                "SELECT",
+            ],
+            id="updateLendingDeskViaForm-desk-table",
+        ),
+        pytest.param(
+            "updateLendingDeskViaSerializer",
+            "row",
+            [
+                "SAVEPOINT",
+                'UPDATE "library_venue"',
+                'INSERT "library_venue"',
+                'INSERT "library_lendingdesk"',
+                "RELEASE",
+            ],
+            id="updateLendingDeskViaSerializer-row",
+        ),
+        pytest.param(
+            "updateLendingDeskViaSerializer",
+            "desk-table",
+            [
+                "SAVEPOINT",
+                'UPDATE "library_venue"',
+                'UPDATE "library_lendingdesk"',
+                'INSERT "library_lendingdesk"',
+                "RELEASE",
+            ],
+            id="updateLendingDeskViaSerializer-desk-table",
+        ),
+    ],
+)
+def test_lending_desk_update_of_a_row_deleted_after_authorization_is_conflict_over_http(
+    mutation: str,
+    deleted: str,
+    writes: list[str],
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """A ``LendingDesk`` update whose row is deleted after authorization is ``conflict``.
+
+    ``row`` deletes the whole multi-table row (its ``Venue`` parent with it); ``desk-table``
+    deletes only the desk's own table (``keep_parents=True``). The model and ``ModelForm``
+    flavors UPDATE each table with ``update_fields`` named, so the table that matches no row
+    raises Django's zero-row signal inside the forced update's savepoint and nothing is
+    INSERTed: neither the vanished parent row nor the desk row is re-created. The
+    serializer flavor's DRF save keeps Django's update-else-insert and re-INSERTs the row,
+    which its write witness answers with ``conflict``. Every flavor rolls the transaction
+    back, the stand-in delete with it, so the stored desk is as before the request.
+    """
+    desk = models.LendingDesk.objects.create(name="Desk", window_count=2)
+    before = _stored_desk(desk.pk)
+    delete_after_authorization(
+        _desk_update_mutation(mutation),
+        (lambda: models.Venue._base_manager.filter(pk=desk.pk).delete())
+        if deleted == "row"
+        else (lambda: models.LendingDesk._base_manager.get(pk=desk.pk).delete(keep_parents=True)),
+    )
+
+    result, sql = _post_desk_update(mutation, desk)
+
+    assert result == {"result": None, "errors": _DESK_CONFLICT_ERRORS}
+    assert statement_shapes_after_last_delete(sql) == [*writes, *_REFUSED_TAIL]
+    assert _stored_desk(desk.pk) == before

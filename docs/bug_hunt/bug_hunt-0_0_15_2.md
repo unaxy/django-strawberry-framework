@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 157 done, 125 to do.
+Progress: 158 done, 126 to do.
 
 ## Done
 
@@ -519,6 +519,16 @@ Progress: 157 done, 125 to do.
   forwards it to the scope, now in its own session (a repeat after `STOP_REPEAT_GRACE` kills the group); the run then
   restores and proves the tree through the existing `finally`, writes no record and exits `128 + N` (a direct script
   run dies by the signal); only `SIGKILL` or an interpreter crash still leaves the marker and `restore_with`
+- [x] 282. An update whose located row a concurrent transaction deleted after the locate (`Meta.select_for_update =
+  False`, or a backend without `FOR UPDATE`) was re-inserted and reported as updated on a `DjangoModelFormMutation`
+  (`form.save()` runs UPDATE, 0 rows, then INSERT) and on a model `DjangoMutation` over a multi-table row whose parent
+  row vanished (`force_update` covers only the child table), and was a masked top-level `ConfigurationError` on a
+  `SerializerMutation`: fixed, `mutations/resolvers.py::save_located_row` saves with `force_update=True` plus
+  `update_fields` naming every loaded non-key column of every table on a multi-table row (an existence check first when
+  a table contributes no column), the ModelForm update splits as Django's admin does (`form.save(commit=False)`, the
+  located save, `save_m2m()`) inside `forced_save_or_field_errors`, and the serializer flavor answers a witnessed INSERT
+  under the authorized pk as `conflict`; every flavor now returns the in-band `conflict` envelope on `id`, rolled back;
+  single-table rows keep `update_fields=None`; fakeshop gains the three `UpdateLendingDesk` flavors
 
 ## Outside review of the fixes
 
@@ -678,19 +688,25 @@ tracker number are recorded there; open remainders and new defects are filed as 
   model, and DRF then writes the related instance into the scalar column (read, not run: a `TypeError` for `id`; for a
   text column the instance's `str()` or a validation error); the model-backed scalar branch of
   `serializer_converter.py::resolve_serializer_field` never checks that the serializer field is a relation
-- [ ] 282. A `DjangoModelFormMutation` update whose located row a concurrent transaction deletes before `form.save()`
-  re-inserts it and reports success (`form.save()` runs UPDATE, 0 rows, then INSERT), while the model flavor saves with
-  `force_update=True` and the serializer witness refuses it; the GLOSSARY `DjangoMutation` concurrency paragraph's
-  "never a silent success or a resurrecting insert" names direct model updates only (seen probing item 274, simulated
-  with a `pre_save` delete; needs `Meta.select_for_update = False` on PostgreSQL / MySQL)
 - [ ] 284. `workspace.py run` / `prove` (`::stream`) start the command in the wrapper's process group and forward no
   signal: a SIGTERM / SIGHUP to `workspace.py` alone (`TaskStop`, `timeout`) ends the wrapper and its lease while the
   prover or pytest keeps running in the copy, so `gc` / `release` can reclaim it underneath (the catchable sibling of 142)
+- [ ] 285. An update whose located row a concurrent transaction deletes after the locate but before decode and
+  validation finish answers a misleading field error instead of `conflict`: a partial `DjangoModelFormMutation` update of
+  `Book` that omits `genres` gets `genres` `required` (the form rebuilds the M2M initial from the database, now empty),
+  and deleting the `Category` of the `Item` being updated gets `categoryId` `invalid_choice` (ModelForm) / `invalid`
+  (model); in-band and rolled back, never a silent success (seen fixing item 282, simulated in-process; needs
+  `Meta.select_for_update = False` on PostgreSQL / MySQL)
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 286. CHANGELOG entry for item 282: an update whose row a concurrent transaction deleted (`Meta.select_for_update =
+  False` or no `FOR UPDATE`) is the `conflict` error on every flavor instead of a re-inserted row reported as updated
+  (ModelForm; model over a multi-table row) or a masked `ConfigurationError` (serializer); a ModelForm update now calls
+  the form's `save(commit=False)` (work an override does only when committing does not run), and the model's `save()`
+  receives `force_update` (plus `update_fields` on a multi-table row) and must pass keyword arguments through
 - [ ] 283. CHANGELOG entry for item 274: a create naming a client-assigned primary key (model, register, ModelForm)
   saves with `force_insert`, so a row committed concurrently under that key is the `__all__` `constraint` error instead
   of being overwritten; a model `save()` override receives `force_insert` there, and a ModelForm `save()` override is

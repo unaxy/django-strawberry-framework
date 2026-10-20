@@ -332,10 +332,12 @@ package-internal; Slice 4 is the live consumer surface.
     form field name re-keyed to the GraphQL input field the client sent, the form's
     `NON_FIELD_ERRORS` bucket → the `"__all__"` sentinel `036` defined, via the reused
     `validation_error_to_field_errors(ValidationError(form.errors.as_data()), key_map)`)
-    and returns a null-object payload; **write** via `form.save()` (`ModelForm`) /
-    `perform_mutate` (plain form), **wrapped by the `036` `save_or_field_errors`
-    save-time mapper** (an `IntegrityError` or a consumer save-time Django
-    `ValidationError` → envelope, no top-level error at write), the
+    and returns a null-object payload; **write** via the form's save (`ModelForm`; an
+    update and a client-assigned-key create split around `commit=False`) /
+    `perform_mutate` (plain form), **wrapped by the `036` save-time mappers**
+    (`save_or_field_errors`; a `ModelForm` update `forced_save_or_field_errors`: an
+    `IntegrityError` or a consumer save-time Django `ValidationError` → envelope, a
+    located row deleted before the update → `conflict`, no top-level error at write), the
     `ModelForm` save also mapping a `blank=True, null=False` non-text choice column
     the form cleaned to `""` onto that column's field-keyed `null` error; **re-fetch**
     the saved object by pk + optimizer-plan (the `ModelForm` flavor); **return** the
@@ -1455,18 +1457,27 @@ write flavor rides.
    error names the input the client sent), reached through a map rather than its
    `CAMELCASE_ERRORS` casing, because an input name here is not always the camel-cased
    form field name. Returns a null-object payload.
-5. **Write**: for a `ModelForm`, `form.save()` (commit=True; M2M written via the
-   internal `save_m2m()`) returns the saved instance. A create whose row Django would
-   write UPDATE-then-INSERT (a client-assigned key,
-   `django_strawberry_framework/mutations/resolvers.py::adds_by_update_first`) splits the
-   save the way Django's admin does: the form's `save()` is called with `commit=False`,
-   and the package saves the row it returned (an INSERT through
+5. **Write**: for a `ModelForm`, an update, and a create whose row Django would write
+   UPDATE-then-INSERT (a client-assigned key,
+   `django_strawberry_framework/mutations/resolvers.py::adds_by_update_first`), split
+   the save the way Django's admin does: the form's `save()` is called with
+   `commit=False`, the package saves the row it returned and calls `form.save_m2m()`,
+   so work a `ModelForm.save()` override does only when committing does not run there
+   (an override that saves the instance itself under `commit=False` makes a plain
+   `save()`). A create saves it as an INSERT through
    `django_strawberry_framework/mutations/resolvers.py::save_new_row`, whose
    `force_insert` the model's `save()` receives, per Django's override contract of
-   passing keyword arguments through) and calls `form.save_m2m()`, so work a
-   `ModelForm.save()` override does only when committing does not run there; a row
-   committed under that key between `is_valid()` and the save is the `IntegrityError`
-   envelope below, never overwritten. For a plain `Form`,
+   passing keyword arguments through: a row committed under that key between
+   `is_valid()` and the save is the `IntegrityError` envelope below, never
+   overwritten. An update saves it as an UPDATE through
+   `django_strawberry_framework/mutations/resolvers.py::save_located_row` (the model's
+   `save()` receives `force_update`, plus `update_fields` naming every loaded column
+   when the row spans multi-table parents, and passes them through by the same
+   contract), run inside
+   `django_strawberry_framework/mutations/resolvers.py::forced_save_or_field_errors`:
+   a located row a concurrent transaction deleted after the locate is the `conflict`
+   envelope on `id`, never re-inserted. Every other create is one `form.save()`
+   (commit=True; M2M written via the internal `save_m2m()`). For a plain `Form`,
    `perform_mutate(self, form, info)` runs the form's side effect per the pinned
    plain-form contract
    ([Decision 6](#decision-6--base-class-strategy-djangomodelformmutation-rides-the-djangomutation-base-the-plain-form-is-the-model-less-sibling)):
@@ -1480,14 +1491,16 @@ write flavor rides.
    null-object + `FieldError` envelope** the model-driven path returns (the same
    message policy / `"__all__"` keying), **never** a top-level `GraphQLError` / 500 —
    preserving the cross-flavor envelope contract at write time as well as validation
-   time. This wraps **both** the `ModelForm` `form.save()` and the plain-form
-   `perform_mutate` default save path. Runs inside the one `transaction.atomic()`
-   boundary (the `IntegrityError` is caught at the resolver, so the atomic block is
+   time. This wraps **both** the `ModelForm` save and the plain-form
+   `perform_mutate` default save path (a `ModelForm` update through its update-side
+   counterpart `forced_save_or_field_errors`, the same mappings plus `conflict`).
+   Runs inside the one `transaction.atomic()` boundary (the `IntegrityError` is caught at the resolver, so the atomic block is
    exited cleanly with the envelope as the result). **A save-time Django
    `ValidationError` maps the same way.** A `ValidationError` raised by consumer
    save-time code (a `ModelForm.save()` / `Model.save()` override, a `pre_save` /
    `post_save` / `m2m_changed` receiver, a plain-form `perform_mutate`) returns the
-   null-object / `{ ok: false }` envelope through the same `save_or_field_errors`,
+   null-object / `{ ok: false }` envelope through the same `save_or_field_errors`
+   (`forced_save_or_field_errors` on a `ModelForm` update),
    keyed to the GraphQL input names: by form field name on the plain form
    (`build_error_key_map`), by every name Django keys the backing model field by on the
    `ModelForm` (`django_strawberry_framework/utils/errors.py::save_time_error_key_map`,
@@ -1537,7 +1550,9 @@ helpers the runner composes are public, and live in three modules:
   per step 5, wrapping a zero-arg save callable and a lazily built error key map; the
   `ModelForm` flavor calls it through
   `_modelform_save_or_field_errors`, which adds step 5's blank non-text choice column
-  mapping).
+  mapping), and `forced_save_or_field_errors` (its update-side counterpart, adding the
+  disappearing-row `conflict` envelope, which the `ModelForm` update hands its
+  `commit=False` split).
 - [`utils/errors.py`][utils-errors] — `validation_error_to_field_errors` and
   `build_error_key_map` (the validation-error mapper and its input-name key map, reused
   per step 4), and `save_time_error_key_map` (the `ModelForm`'s step-5 key map).
@@ -1564,9 +1579,11 @@ argument. `bind_form_mutations()` is likewise one call to the shared
 [`mutations/operations.py`][mutations-operations] so no flavor re-spells it. A
 `ModelForm`'s
 [`form.save()`][upstream-forms-mutation] with `commit=True` writes its M2M rows
-(`save_m2m()` runs inside `save()`), so step 5 is a single `form.save()` inside the
+(`save_m2m()` runs inside `save()`), so a create is a single `form.save()` inside the
 one `transaction.atomic()` with no separate M2M step, except the client-assigned-key
-create, whose admin-style split calls `form.save_m2m()` itself inside the same block.
+create; that create and every update use the admin-style split, which calls
+`form.save_m2m()` itself inside the same block (an update inside its forced update's
+savepoint).
 
 The async path runs the whole sync body in one
 `sync_to_async(thread_sensitive=True)` call, and a sync pipeline meeting an
@@ -1875,16 +1892,24 @@ Rationale companion: [Decision 14][rationale-d14].
   narrowing that drops a required **column-less** field is rejected at bind for the
   same reason, since the reconstruction can only supply model-backed fields. Both are
   waived when `get_form_kwargs` / `get_form` is overridden to supply the values.
-- **Write-time `IntegrityError`.** A valid `form.save()` (or the plain-form
+- **Write-time `IntegrityError`.** A valid `ModelForm` save (or the plain-form
   `perform_mutate` save) that loses a concurrent-uniqueness race or hits a residual DB
   constraint returns the null-object + `FieldError` envelope via the `036`
-  `save_or_field_errors` mapper — never a top-level `GraphQLError`
+  `save_or_field_errors` mapper (`forced_save_or_field_errors` on a `ModelForm`
+  update) — never a top-level `GraphQLError`
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
-  On a `ModelForm` create over a client-assigned key the form's `save()` is called with
-  `commit=False` and the package saves the row it returned and calls `save_m2m()`, as
-  Django's admin does, so work an override does only when committing does not run
-  there; the model's `save()` receives `force_insert`, and a row committed under that
-  key after `is_valid()` is this envelope, never overwritten.
+  On a `ModelForm` update, and a create over a client-assigned key, the form's `save()`
+  is called with `commit=False` and the package saves the row it returned and calls
+  `save_m2m()`, as Django's admin does, so work an override does only when committing
+  does not run there. On the create the model's `save()` receives `force_insert`, and a
+  row committed under that key after `is_valid()` is this envelope, never overwritten.
+- **Write-time disappearing row.** On a `ModelForm` update the model's `save()`
+  receives `force_update` (plus `update_fields` naming every loaded column when the row
+  spans multi-table parents), so a located row a concurrent transaction deleted after
+  the locate (reachable under `Meta.select_for_update = False` or on a backend without
+  `FOR UPDATE`) matches no row on some table and returns the null-object + `conflict`
+  `FieldError` envelope on `id` with the transaction rolled back, never a re-inserted
+  row reported as updated.
 - **Write-time blank non-text choice column.** A `ModelForm` over a `blank=True,
   null=False` choice column of any non-text type (e.g. integer, decimal, date) cleans
   an explicit `null` (or an omission with no column default) to `""`, which only
@@ -1985,7 +2010,15 @@ behavior reachable through `/graphql/`, package tests own internals.
   table, a taken patron is the `unique` error on `patronId`, and a profile a competing
   writer saves after `is_valid()` (a `pre_save` receiver inserting it) is the `"__all__"`
   `constraint` envelope with nothing written
-  (`examples/fakeshop/test_query/test_library_api.py::test_form_create_patron_profile_names_its_patron_by_the_key_over_http`). **Write-time consumer `ValidationError`** — `Item.save()`
+  (`examples/fakeshop/test_query/test_library_api.py::test_form_create_patron_profile_names_its_patron_by_the_key_over_http`).
+  **Write-time disappearing row** — an `updateBookViaForm` over a full input naming
+  `genres` and an `updatePatronProfileViaForm` over the client-assigned `patron` key whose
+  located row is deleted after authorization return the `conflict` envelope on `id` with
+  no `INSERT` and the stored state rolled back
+  (`examples/fakeshop/test_query/test_library_api.py::test_form_update_of_a_row_deleted_after_authorization_is_conflict_over_http`),
+  as do `updateItemViaForm` and the multi-table `updateLendingDeskViaForm`, deleted whole
+  or only from the desk's own table, whose no-race update names `update_fields`
+  (`test_products_api.py`, `test_library_inheritance_api.py`). **Write-time consumer `ValidationError`** — `Item.save()`
   refusing `SAVE_REJECTED_ITEM_NAME` on `createItemViaForm` / `updateItemViaForm`
   returns the `name`-keyed envelope with nothing written (the create also over the
   async view), and the kanban `setCardStatus` illegal transition (a `pre_save`
@@ -2047,7 +2080,8 @@ behavior reachable through `/graphql/`, package tests own internals.
     / `ModelMultipleChoiceField` with `to_field_name` set validates the decoded value
     by the target field, not pk; **write-time `IntegrityError`** — a valid
     `form.save()` raising `IntegrityError` (and the plain-form `perform_mutate` save
-    path) → `FieldError` envelope, not a top-level error (via `save_or_field_errors`);
+    path) → `FieldError` envelope, not a top-level error (via `save_or_field_errors`;
+    `forced_save_or_field_errors` on a `ModelForm` update);
     **write-time consumer `ValidationError`** — a save-time `ValidationError` on the
     `ModelForm` and plain-form paths keys through each flavor's key map (form field
     name, model field name, forward-relation `attname`, `NON_FIELD_ERRORS`, an
@@ -2238,7 +2272,7 @@ The completion contract.
    onto the [`FieldError` envelope][glossary-fielderror-envelope] (each form field keyed
    to its input name, `NON_FIELD_ERRORS` → `"__all__"`, via the reused
    `validation_error_to_field_errors(ValidationError(form.errors.as_data()), key_map)`); **the write is wrapped by the `036` `save_or_field_errors`
-   save-time mapper** (no top-level error on a save-time race or a consumer save-time
+   save-time mapper** (`forced_save_or_field_errors` on a `ModelForm` update) (no top-level error on a save-time race or a consumer save-time
    `ValidationError`), and
    a `ModelForm` save refused over a `blank=True, null=False` non-text choice column
    cleaned to `""` returns that column's field-keyed `null` error;

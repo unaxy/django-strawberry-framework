@@ -54,7 +54,7 @@ class ItemModelForm(forms.ModelForm[Item]):
     constraint surfaces automatically through ``_post_clean`` -> ``validate_constraints``
     as a ``NON_FIELD_ERRORS`` entry the resolver maps to the ``"__all__"`` sentinel. A
     ``models.SAVE_REJECTED_ITEM_NAME`` name passes validation and is refused by
-    ``Item.save()`` inside ``form.save()``: the save-time ``ValidationError`` case.
+    ``Item.save()`` inside the form's save: the save-time ``ValidationError`` case.
     """
 
     class Meta:

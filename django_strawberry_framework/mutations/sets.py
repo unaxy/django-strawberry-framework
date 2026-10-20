@@ -1092,9 +1092,12 @@ def validate_select_for_update(flavor: str, mutation_name: str, meta: type[objec
     locate and every relation-target check acquire a base-manager ``SELECT ...
     FOR UPDATE`` (constrained by the visibility pk subquery) inside the write
     transaction. The default is ``True`` - locked writes are the safe posture;
-    an explicit ``False`` opts into weaker concurrency (a row located this
-    transaction may be concurrently modified, surfacing as the in-band
-    ``conflict`` envelope instead of waiting on the lock). On a backend without
+    an explicit ``False`` opts into weaker concurrency: a row located this
+    transaction may be concurrently modified or deleted instead of waiting on the
+    lock, and a deleted one surfaces as the in-band ``conflict`` envelope on every
+    flavor, never re-INSERTed by the update on any table a multi-table row spans
+    (``mutations/resolvers.py::save_located_row``; the serializer flavor through
+    its write witness). On a backend without
     ``FOR UPDATE`` (sqlite) Django skips the clause silently, so ``True`` is
     safe to leave in place regardless of backend. A non-bool is a clear
     class-creation error.

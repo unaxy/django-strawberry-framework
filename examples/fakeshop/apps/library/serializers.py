@@ -22,6 +22,8 @@ consumer-visible behaviors end to end:
 * ``PrintingSerializer`` writes the ``edition`` FK and the ``bound_with`` M2M into the
   text-keyed ``Edition``, so both raw-pk relation inputs carry ISBN text;
   ``EditionImprintSerializer`` updates an ``Edition`` located by that text.
+* ``LendingDeskSerializer`` updates a multi-table ``LendingDesk`` through a column of its
+  ``Venue`` parent table and one of its own.
 
 ``Shelf`` is non-Relay (``ShelfType`` lists no ``relay.Node`` interface), so the ``branch``
 FK relation input is a raw pk and the payload object slot is ``result`` (not ``node``); the
@@ -47,7 +49,17 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.rest_framework.accessors import base_fields
 
-from .models import Book, Branch, CirculationDesk, Edition, Genre, PatronProfile, Printing, Shelf
+from .models import (
+    Book,
+    Branch,
+    CirculationDesk,
+    Edition,
+    Genre,
+    LendingDesk,
+    PatronProfile,
+    Printing,
+    Shelf,
+)
 
 #: A serializer's name-to-field map. The four ``Any``s are DRF ``Field``'s generics, which
 #: no single binding fits across a heterogeneous map.
@@ -880,6 +892,18 @@ class EditionImprintSerializer(ModelSerializerBase[Edition]):
     class Meta:
         model = Edition
         fields = ("imprint",)
+
+
+class LendingDeskSerializer(ModelSerializerBase[LendingDesk]):
+    """A ``LendingDesk`` serializer over a parent column and a local one.
+
+    ``name`` lives on the ``Venue`` parent table and ``window_count`` on the desk's own, so
+    an update writes both tables of the multi-table row.
+    """
+
+    class Meta:
+        model = LendingDesk
+        fields = ("name", "window_count")
 
 
 class CirculationDeskHoldSerializer(ModelSerializerBase[CirculationDesk]):

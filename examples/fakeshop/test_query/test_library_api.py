@@ -38,6 +38,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django_filters import CharFilter, Filter, TypedChoiceFilter
 from graphql_client import (
+    DeleteAfterAuthorization,
     JSONObject,
     json_at,
     json_list,
@@ -47,6 +48,7 @@ from graphql_client import (
     middleware_without_debug_toolbar,
     response_json,
     saved_pk,
+    statement_shapes_after_last_delete,
 )
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _assert_graphql_success
@@ -60,6 +62,7 @@ from django_strawberry_framework import (
     DjangoConnection,
     DjangoConnectionField,
     DjangoListField,
+    DjangoMutation,
     DjangoNodesField,
     DjangoOptimizerExtension,
     DjangoSchema,
@@ -12093,7 +12096,8 @@ def test_update_book_at_repair_desk_validates_the_omitted_stored_choice_over_htt
             },
             variables={"id": global_id_for(library_schema.BookType, book.pk), "d": {}},
         )
-    # The located row is read once; a refused form writes nothing and rolls its savepoint back.
+    # The located row is read once; a refused form writes nothing and rolls its savepoint back,
+    # and an admitted one UPDATEs inside the forced update's own savepoint.
     assert [query["sql"].split()[0] for query in captured.captured_queries] == (
         [
             "SAVEPOINT",
@@ -12108,7 +12112,9 @@ def test_update_book_at_repair_desk_validates_the_omitted_stored_choice_over_htt
             "SAVEPOINT",
             "SAVEPOINT",
             "SELECT",
+            "SAVEPOINT",
             "UPDATE",
+            "RELEASE",
             "SELECT",
             "RELEASE",
             "RELEASE",
@@ -13854,7 +13860,7 @@ def test_non_ascii_text_keyed_relation_ids_are_written_over_http(
     [
         ("model-update", 9),
         ("model-delete", 9),
-        ("form-update", 7),
+        ("form-update", 9),
         ("serializer-update", 9),
     ],
 )
@@ -17821,3 +17827,158 @@ def test_update_shelf_condition_writes_blank_over_http() -> None:
     assert result["result"] == {"code": "U-worn", "condition": "BLANK"}
     shelf.refresh_from_db()
     assert shelf.condition == ""
+
+
+# An update's located row deleted after authorization (``conftest.py``'s
+# ``delete_after_authorization``, the stand-in for a concurrent delete under
+# ``Meta.select_for_update = False``) answers ``conflict`` through the ``ModelForm`` flavor:
+# the form's save is split around ``commit=False`` and the row UPDATEd, never re-INSERTed.
+
+_FORM_UPDATE_CONFLICT_ERRORS = [
+    {
+        "field": "id",
+        "messages": ["The row was changed or removed by a concurrent operation; retry."],
+        "codes": ["conflict"],
+    },
+]
+
+
+def _forced_update_conflict(table: str) -> list[str]:
+    """The write a forced update of a deleted single-table row runs, after its form's reads.
+
+    The zero-row ``UPDATE`` inside its own savepoint, rolled back; the absence probe; the
+    pipeline's rollback and releases.
+    """
+    return [
+        "SAVEPOINT",
+        f"UPDATE {table}",
+        "ROLLBACK",
+        "RELEASE",
+        "SELECT",
+        "ROLLBACK",
+        "RELEASE",
+        "RELEASE",
+    ]
+
+
+class _FormUpdateRace(NamedTuple):
+    """A ``ModelForm`` update over a row the stand-in deletes, with its stored-state probe."""
+
+    mutation: type[DjangoMutation]
+    query: str
+    variables: dict[str, object]
+    stored: Callable[[], object]
+    delete: Callable[[], object]
+
+
+def _book_form_update_race() -> _FormUpdateRace:
+    """A book with genres, an archived genre and a loan: a full form input naming ``genres``."""
+    book = models.Book.objects.create(title="RaceBook", shelf=_seed_shelf())
+    kept, archived, sent = (
+        models.Genre.objects.create(name=name) for name in ("RaceKept", "RaceArchived", "RaceSent")
+    )
+    book.genres.set([kept])
+    book.archive_genres.set([archived])
+    _ = models.Loan.objects.create(book=book, patron=models.Patron.objects.create(name="Racer"))
+
+    def stored() -> object:
+        return (
+            list(models.Book._base_manager.filter(pk=book.pk).values_list("title", "subtitle")),
+            sorted(saved_pk(genre.pk) for genre in book.genres.all()),
+            sorted(saved_pk(genre.pk) for genre in book.archive_genres.all()),
+            models.Loan._base_manager.filter(book_id=book.pk).count(),
+        )
+
+    return _FormUpdateRace(
+        library_schema.UpdateBookViaForm,
+        "mutation($id: ID!, $d: BookGenresModelFormPartialInput!) { "
+        "updateBookViaForm(id: $id, data: $d) { node { title } errors { field messages codes } } }",
+        {
+            "id": global_id_for(library_schema.BookType, book.pk),
+            "d": {
+                "title": "Renamed",
+                "subtitle": "Renamed too",
+                "genres": [global_id_for(library_schema.GenreType, sent.pk)],
+            },
+        },
+        stored,
+        lambda: models.Book._base_manager.filter(pk=book.pk).delete(),
+    )
+
+
+def _profile_form_update_race() -> _FormUpdateRace:
+    """A patron profile, whose primary key is its client-assigned one-to-one ``patron``."""
+    patron = models.Patron.objects.create(name="RaceProfilePatron")
+    _ = models.PatronProfile.objects.create(patron=patron, address_2="Kept")
+
+    def stored() -> object:
+        return list(
+            models.PatronProfile._base_manager.filter(pk=patron.pk).values_list("address_2"),
+        )
+
+    return _FormUpdateRace(
+        library_schema.UpdatePatronProfileViaForm,
+        "mutation($id: ID!, $d: PatronProfileGenreFormPartialInput!) { "
+        "updatePatronProfileViaForm(id: $id, data: $d) { node { secondaryAddress } "
+        "errors { field messages codes } } }",
+        {
+            "id": global_id_for(library_schema.PatronProfileType, patron.pk),
+            "d": {"address_2": "Renamed"},
+        },
+        stored,
+        lambda: models.PatronProfile._base_manager.filter(pk=patron.pk).delete(),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("race", "writes"),
+    [
+        pytest.param(
+            _book_form_update_race,
+            [
+                "SELECT",
+                "SELECT",
+                "SELECT",
+                *_forced_update_conflict('"library_book"'),
+            ],
+            id="updateBookViaForm",
+        ),
+        pytest.param(
+            _profile_form_update_race,
+            ["SELECT", "SELECT", *_forced_update_conflict('"library_patronprofile"')],
+            id="updatePatronProfileViaForm",
+        ),
+    ],
+)
+def test_form_update_of_a_row_deleted_after_authorization_is_conflict_over_http(
+    race: Callable[[], _FormUpdateRace],
+    writes: list[str],
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """A ``ModelForm`` update whose located row is deleted after authorization is ``conflict``.
+
+    The form's ``save(commit=False)`` row is saved with ``force_update`` inside its own
+    savepoint: the zero-row ``UPDATE`` rolls back and no ``INSERT`` runs, so neither a
+    cascaded child (the book's loan), a many-to-many row the form does not edit
+    (``archive_genres``), nor the form's own ``genres`` is lost or rewritten. A book with a
+    full input naming ``genres`` and a profile whose primary key is the client-assigned
+    ``patron`` alike: the transaction rolls back and the stored state is as before.
+    """
+    case = race()
+    before = case.stored()
+    delete_after_authorization(case.mutation, case.delete)
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = response_json(_post_graphql(case.query, variables=case.variables))
+
+    assert "errors" not in payload, payload
+    (result,) = json_object(payload, "data").values()
+    assert json_at(result, "errors") == _FORM_UPDATE_CONFLICT_ERRORS
+    assert (
+        statement_shapes_after_last_delete(
+            [query["sql"] for query in captured.captured_queries],
+        )
+        == writes
+    )
+    assert case.stored() == before

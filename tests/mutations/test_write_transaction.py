@@ -1208,32 +1208,6 @@ class _DeleteTargetOutFromUnder:
 
 
 @pytest.mark.django_db
-def test_update_of_concurrently_deleted_row_returns_conflict_envelope() -> None:
-    """A forced update matching zero rows is the in-band ``conflict`` envelope, rolled back."""
-    _declare_item_types()
-    UpdateItem = _declare_update_mutation(permission_classes=[_DeleteTargetOutFromUnder])
-    schema = _mutation_schema(UpdateItem)
-    item = _seed_item("Vanishing")
-
-    result = schema.execute_sync(
-        _UPDATE,
-        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "NeverLands"}},
-    )
-
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    payload = _json_object(result.data, "write0")
-    assert payload["node"] is None
-    assert [_json_at(error, "field") for error in _json_list(payload, "errors")] == ["id"]
-    assert "concurrent" in require_instance(_json_at(payload, "errors", 0, "messages", 0), str)
-    # The conflict envelope rolled the WHOLE transaction back - including the
-    # in-transaction out-of-band delete - and the update was never silently
-    # converted into an insert: the row survives with its original name.
-    item.refresh_from_db()
-    assert item.name == "Vanishing"
-
-
-@pytest.mark.django_db
 def test_delete_of_concurrently_deleted_row_returns_conflict_envelope() -> None:
     """A delete whose target row vanished after locate is the ``conflict`` envelope."""
     _declare_item_types()

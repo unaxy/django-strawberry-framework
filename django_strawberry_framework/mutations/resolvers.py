@@ -52,6 +52,11 @@ and the load-bearing invariants this module owns:
   maps to the same envelope as a documented best-effort fallback: a create
   INSERTs (``save_new_row``), so a row committed under a client-assigned key
   between the check and the save is that envelope, never overwritten.
+- **An update UPDATEs** (``save_located_row`` inside
+  ``forced_save_or_field_errors``, shared by the model and ``ModelForm``
+  flavors): a located row a concurrent transaction deleted after the locate is
+  the in-band ``conflict`` envelope on ``id``, never re-INSERTed, on every table
+  a multi-table row spans.
 - **A save-time ``ValidationError`` feeds the same envelope**: a consumer
   ``Model.save()`` / ``delete()`` override, a ``pre_save`` / ``post_save`` /
   ``m2m_changed`` / ``pre_delete`` signal receiver, or a plain form's
@@ -1088,8 +1093,9 @@ def _model_write_step(
     update row, ``None`` for create) selects the save mode: a create INSERTs the
     ``decoded`` target (``save_new_row``: a concurrently committed row under a
     client-assigned key is the ``constraint`` envelope, never overwritten), an update
-    saves it with ``force_update=True`` (the 0.0.14 disappearing-row concurrency
-    contract via ``forced_save_or_field_errors``).
+    UPDATEs it (``save_located_row`` inside ``forced_save_or_field_errors``: a located
+    row a concurrent transaction deleted is the ``conflict`` envelope, never
+    re-INSERTed).
 
     ``decoded`` is the THREE-tuple contract exactly. ``_model_decode_step``
     returns a four-tuple when the mutation's specs carry the spec-040 D6
@@ -1121,11 +1127,11 @@ def _model_write_step(
                 error_key_map=error_key_map,
             )
         else:
-            # A direct model UPDATE saves with ``force_update=True``: a
-            # located row a concurrent transaction deleted would otherwise be
-            # silently re-INSERTed by ``save()``'s update-else-insert fallback,
-            # reporting success for a write the deleter never sees. The zero-row
-            # forced update maps to the in-band ``conflict`` envelope.
+            # A direct model UPDATE saves through ``save_located_row``: a located
+            # row a concurrent transaction deleted would otherwise be silently
+            # re-INSERTed by ``save()``'s update-else-insert fallback, reporting
+            # success for a write the deleter never sees. The zero-row update maps
+            # to the in-band ``conflict`` envelope.
             write_error = forced_save_or_field_errors(target, error_key_map=error_key_map)
         if write_error is None:
             write_error = save_or_field_errors(
@@ -1167,6 +1173,85 @@ def save_new_row(row: models.Model) -> None:
         row.save()
 
 
+def save_located_row(row: models.Model) -> None:
+    """Persist an update's located ``row``, never as an INSERT of a row that vanished.
+
+    A plain ``Model.save()`` on a loaded row runs UPDATE-then-INSERT, so a row a
+    concurrent transaction deleted between the locate and this save would be
+    re-INSERTed and reported as updated. The row saves with ``force_update=True``,
+    the UPDATE an update means: zero matched rows raise Django's zero-row signal,
+    which ``forced_save_or_field_errors`` returns as the ``conflict`` envelope.
+    ``force_update`` covers the row's own table only: ``Model._save_parents`` saves
+    each multi-table parent without it, so a vanished parent row would be
+    re-INSERTed and the child INSERTed after it. A multi-table row therefore also
+    names its loaded columns in ``update_fields`` (``located_row_update_fields``),
+    Django's documented update-only save, which ``_save_parents`` hands every parent
+    table and which Django already makes for a deferred row: the statements are the
+    UPDATEs of a plain forced save, and a table matching no row raises the same
+    zero-row signal. A table that contributes no column to that set (a child
+    declaring no field of its own, or a chain with no non-key column at all, which
+    saves with ``force_update`` alone since an empty ``update_fields`` skips the
+    save) runs no UPDATE Django could count, so Django treats it as updated: for
+    such a row the save is preceded by one base-manager ``exists()`` of the row on
+    its database, and an absent row raises the zero-row signal before ``save()``
+    runs, so no ``pre_save`` / ``post_save`` receiver fires on it. The window after
+    that check is the post-write re-fetch's, which answers a row gone by then with
+    the same envelope. A single-table row, a proxy of one included, keeps
+    ``update_fields=None`` and runs no extra query, so its ``save()`` override and
+    ``pre_save`` / ``post_save`` receivers see exactly a plain forced save. A
+    consumer ``save()`` override receives the keywords and passes them through, per
+    Django's documented override contract.
+    """
+    update_fields = located_row_update_fields(row)
+    tables = _tables_of(row)
+    if len(tables) > 1 and any(
+        not any(field.name in update_fields for field in table._meta.local_concrete_fields)
+        for table in tables
+    ):
+        model = type(row)
+        if not model._base_manager.using(row._state.db).filter(pk=pk_of(row)).exists():
+            raise not_updated_exceptions(model)[0]("Forced update did not affect any rows.")
+    if update_fields:
+        row.save(force_update=True, update_fields=update_fields)
+    else:
+        row.save(force_update=True)
+
+
+def _tables_of(row: models.Model) -> tuple[type[models.Model], ...]:
+    """Return the concrete models whose tables ``row`` spans: its own and each parent's.
+
+    A proxy contributes no table of its own and lists its concrete model among its
+    parents, so it answers with that model's chain; more than one entry means a parent
+    link joins a second table.
+    """
+    model = type(row)
+    return tuple(table for table in (model, *model._meta.all_parents) if not table._meta.proxy)
+
+
+def located_row_update_fields(row: models.Model) -> tuple[str, ...]:
+    """Return the columns an update of the multi-table ``row`` names in ``update_fields``.
+
+    Empty for a single-table row, a proxy of one included (``force_update`` alone
+    covers its one table). For a row a parent link joins to a second table, every
+    concrete column of every table it spans, its own and each parent's, minus each
+    table's primary-key columns (a parent link serving as the child's primary key
+    among them), generated columns and deferred columns: the loaded-column set
+    ``Model.save()`` computes itself for a deferred row, so the UPDATE statements are
+    those of a plain forced save. A table none of whose columns is in the set is the
+    one ``save_located_row`` checks for existence before the save.
+    """
+    tables = _tables_of(row)
+    if len(tables) == 1:
+        return ()
+    key_fields = {field for table in tables for field in table._meta.pk_fields}
+    deferred = row.get_deferred_fields()
+    return tuple(
+        field.name
+        for field in type(row)._meta.concrete_fields
+        if field not in key_fields and not field.generated and field.attname not in deferred
+    )
+
+
 def adds_by_update_first(row: models.Model) -> bool:
     """Return whether saving the added ``row`` would try an UPDATE on one of its tables.
 
@@ -1193,20 +1278,25 @@ def forced_save_or_field_errors(
     target: models.Model,
     *,
     error_key_map: Callable[[], ErrorKeyMap | None],
+    save_callable: Callable[[], object] | None = None,
 ) -> list[FieldError] | None:
-    """Run ``target.save(force_update=True)``; map races to the envelope else ``None``.
+    """Save the located ``target`` as an update; map races to the envelope else ``None``.
 
-    The update-side counterpart of ``save_or_field_errors``, with the
+    ``save_callable`` runs the write: by default ``save_located_row(target)`` (the
+    model flavor); the ``ModelForm`` flavor passes its ``form.save(commit=False)`` ->
+    ``save_located_row`` -> ``form.save_m2m()`` split over the located row the form
+    is bound to. The update-side counterpart of ``save_or_field_errors``, with the
     disappearing-row contract on top: a constraint race is the ``"__all__"``
     ``IntegrityError`` envelope (the standing mapping, checked FIRST -
     ``IntegrityError`` is itself a ``DatabaseError``, so the order matters under
     the Django 5.2 untyped catch); a save-time ``ValidationError`` maps through
     ``error_key_map`` exactly as in ``save_or_field_errors``; a zero-row forced
-    update runs through the version-compat conflict disambiguation
-    (``forced_update_conflict_errors``: usable transaction + demonstrably absent
-    row -> ``conflict`` envelope, any other database error propagates and rolls
-    back). Django 6.0 raises the typed
-    ``Model.NotUpdated``; 5.2 a bare ``DatabaseError`` (``not_updated_exceptions``).
+    update, on any table of a multi-table row (a table contributing no column is
+    checked for existence before the save, ``save_located_row``), runs through the
+    version-compat conflict disambiguation (``forced_update_conflict_errors``: usable transaction +
+    demonstrably absent row -> ``conflict`` envelope, any other database error
+    propagates and rolls back). Django 6.0 raises the typed ``Model.NotUpdated``;
+    5.2 a bare ``DatabaseError`` (``not_updated_exceptions``).
     """
     alias = require_write_pipeline().alias
     try:
@@ -1217,7 +1307,10 @@ def forced_save_or_field_errors(
         # transaction is unusable". Containing the failure to a savepoint keeps
         # the outer transaction healthy for the disambiguation below.
         with transaction.atomic(using=alias):
-            target.save(force_update=True)
+            if save_callable is None:
+                save_located_row(target)
+            else:
+                _ = save_callable()
     except IntegrityError:
         return integrity_error_field_errors()
     except ValidationError as exc:
@@ -1461,9 +1554,10 @@ def save_or_field_errors(
     Wraps a zero-arg callable rather than a fixed ``instance.save()`` so ONE
     save-time catch serves every save path: the ``036`` model pipeline passes
     a create's ``save_new_row`` and its M2M assignment; the form pipeline passes
-    ``form.save`` (the ``ModelForm`` flavor) / a bound ``perform_mutate`` (the
-    plain flavor, spec-038 Decision 8 step 5); the serializer passes its
-    savepointed ``serializer.save()`` closure. Two failures map, and nothing
+    a ``ModelForm`` create's save / a bound ``perform_mutate`` (the plain flavor,
+    spec-038 Decision 8 step 5); the serializer passes its savepointed
+    ``serializer.save()`` closure. An update of the model or ``ModelForm``
+    flavor goes through ``forced_save_or_field_errors`` instead. Two failures map, and nothing
     else:
 
     - a post-validation ``IntegrityError`` (a race, or a constraint validation

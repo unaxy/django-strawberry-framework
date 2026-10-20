@@ -2017,7 +2017,13 @@ The pipeline steps:
    A custom `create()` whose plain `save()` of a client-assigned key UPDATEs a row a
    concurrent transaction committed under it witnesses no `created=True` write and fails
    closed the same way; DRF's own `ModelSerializer.create` INSERTs (`QuerySet.create`),
-   so the stock create meets that race as the `IntegrityError` envelope.
+   so the stock create meets that race as the `IntegrityError` envelope. Before these
+   checks, an update whose save the witness saw INSERT (`created=True`) under the
+   `authorized_pk` on the pinned alias returns the in-band `conflict` envelope on `id`,
+   rolled back with the inserted row (`_guarded_serializer_write`): DRF's
+   `ModelSerializer.update` saves through Django's update-else-insert, so a located row
+   a concurrent transaction deleted after the locate (whole, or only a multi-table
+   child's own table) is re-inserted, where a present row would have refused the INSERT.
 
    **The wrapper is value-preserving — the saved object is captured, not re-derived.**
    Every flavor's save rides `mutations/resolvers.py::save_or_field_errors`, which
@@ -2777,6 +2783,12 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   concurrent-uniqueness race returns the null-object + `FieldError` envelope via the
   shared `utils/errors.py::integrity_error_field_errors` leaf — never a top-level
   `GraphQLError`.
+- **Write-time disappearing row.** An update whose located row a concurrent transaction
+  deleted after the locate (reachable under `Meta.select_for_update = False` or on a
+  backend without `FOR UPDATE`) is re-inserted by DRF's update-else-insert save; the
+  write witness's `created=True` under the `authorized_pk` returns the null-object +
+  `conflict` `FieldError` envelope on `id` with the transaction rolled back, never a
+  top-level `ConfigurationError`.
 - **Write-time `ValidationError` — DRF and Django shapes take DIFFERENT paths.** A
   `serializer.save()` whose custom `create()` / `update()` raises a validation error returns
   the null-object + `FieldError` envelope, **not** a top-level `GraphQLError` — but the two
@@ -2926,7 +2938,12 @@ same transport, different app.
   shape** — asserting the payload re-fetch keeps the relation at a bounded absolute query
   count (`CaptureQueriesContext`). The plan-object half of G2 — `select_related` /
   `prefetch_related` retained and `.only(...)` suppressed on the stashed optimizer plan —
-  is package-internal below, because no `/graphql/` response carries the stash.
+  is package-internal below, because no `/graphql/` response carries the stash. An
+  `updateItemViaSerializer` whose located row is deleted after authorization
+  (`::test_update_of_an_item_deleted_after_authorization_is_conflict_over_http`) returns
+  the `conflict` envelope after the witnessed re-INSERT, rolled back, as does the
+  multi-table `updateLendingDeskViaSerializer` deleted whole or only from the desk's own
+  table ([`test_library_inheritance_api.py`][test-library-inheritance-api]`::test_lending_desk_update_of_a_row_deleted_after_authorization_is_conflict_over_http`).
 - **Package-internal** ([`tests/rest_framework/`][test-rest-framework]):
   - `test_converter.py` — each supported serializer-field class → annotation +
     required-ness; `PrimaryKeyRelatedField` / `ManyRelatedField` id mapping
@@ -3629,7 +3646,8 @@ populates it: the DRF flattener passes each leaf `ErrorDetail.code`
 code from the `utils/errors.py` `FIELD_ERROR_CODE_*` vocabulary (`invalid` for a bad relation
 id / bad lookup id / unstorable text, `null` for an explicit null, `not_found` for a locate
 miss, `constraint` for the `IntegrityError` fallback, `protected` for a protected delete,
-`conflict` for a row that vanished under a forced update, `truncated` when the DRF error
+`conflict` for a located row that vanished before the write (a forced update matching no
+row, the serializer's witnessed re-INSERT, a failed delete), `truncated` when the DRF error
 flattening hits its node budget). A client branches on `required` / `invalid` / `unique` / …
 without parsing localized text. Uniform across all three write flavors (the leaf is shared).
 Live-tested (`createShelfViaMetadataSerializer`: a `max_length` DRF code).
@@ -3842,6 +3860,7 @@ re-keying / opt-in-gated-fingerprint branches are package-tested.
 [products-models]: ../../examples/fakeshop/apps/products/models.py
 [products-schema]: ../../examples/fakeshop/apps/products/schema.py
 [products-serializers]: ../../examples/fakeshop/apps/products/serializers.py
+[test-library-inheritance-api]: ../../examples/fakeshop/test_query/test_library_inheritance_api.py
 [test-products-api]: ../../examples/fakeshop/test_query/test_products_api.py
 [test-query-readme]: ../../examples/fakeshop/test_query/README.md
 [test-uploads-api]: ../../examples/fakeshop/test_query/test_uploads_api.py

@@ -201,11 +201,22 @@ composition `036` proves.
   form-required field on update). Rejected for cross-flavor consistency with the
   model-driven `DjangoMutation.update`: the reconstruction from the located instance
   gives partial semantics while the bound `ModelForm` still validates the whole set.
-- **`form.save(commit=False)` + explicit `instance.save()` + `form.save_m2m()` as the
-  general write.** Rejected: for a `ModelForm` with M2M fields, `form.save()`
-  (commit=True) already runs `save_m2m()` internally, so a single `form.save()` inside
-  the one `transaction.atomic()` is complete. The split is used for a create over a
-  client-assigned key alone, whose INSERT must be forced (Decision 8 step 5).
+- **One `form.save()` (commit=True) as the update write.** Rejected: `form.save()`
+  calls the model's bare `save()`, whose UPDATE-then-INSERT re-inserts a located row a
+  concurrent transaction deleted after the locate and reports it updated, and no
+  keyword reaches `save()` through it. The update is `form.save(commit=False)` +
+  `save_located_row` + `form.save_m2m()` (Decision 8 step 5), Django's own admin split,
+  so the UPDATE is forced on every table the row spans; the cost, work a
+  `ModelForm.save()` override does only when committing no longer running, is the one
+  the client-assigned-key create already pays.
+- **Wrapping the bare `form.save()` with a forced `instance.save`** (shadowing the
+  instance's `save` with `force_update=True` for the call). Rejected: not Django API,
+  it breaks an override that passes its own `force_insert` / `update_fields`, and it
+  forces every save of the instance in the window, an override's second save included.
+- **One `form.save()` for every create.** Kept for a key Django assigns or defaults:
+  `form.save()` (commit=True) already runs `save_m2m()` internally, so it is complete
+  inside the one `transaction.atomic()`. Only a create over a client-assigned key splits,
+  whose INSERT must be forced (Decision 8 step 5).
 
 ## Decision 9 — Optimizer composition: the `ModelForm` payload re-fetch rides the `spec-036` G2 path
 

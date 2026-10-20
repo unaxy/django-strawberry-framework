@@ -1,9 +1,10 @@
 """Shared live-``/graphql/`` HTTP helpers for the fakeshop acceptance suites.
 
 Single-sites the live-tier request contracts: JSON GraphQL posts, raw-body posts,
-status-code assertions, parsed payload extraction, GraphQL-error rejection, and
-exact-data assertions. Superset signatures keep simple callers terse while
-letting variable-driven and custom-client tests use the same envelope.
+status-code assertions, parsed payload extraction, GraphQL-error rejection,
+exact-data assertions, and the verb-and-table reading of captured SQL. Superset
+signatures keep simple callers terse while letting variable-driven and custom-client
+tests use the same envelope.
 
 The JSON path routes through the package's own
 :class:`django_strawberry_framework.testing.TestClient` (spec-043), so
@@ -20,12 +21,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from django.conf import settings
 from django.test import Client
 from typing_extensions import TypeIs
 
+from django_strawberry_framework import DjangoMutation
 from django_strawberry_framework.testing import TestClient
 
 if TYPE_CHECKING:
@@ -128,6 +130,47 @@ def saved_pk(pk: int | None) -> int:
     """Return a saved row's integer primary key (``Model.pk`` is ``None`` only before the first save)."""
     assert pk is not None, "expected a saved row"
     return pk
+
+
+class DeleteAfterAuthorization(Protocol):
+    """Arm a mutation class to delete its located row once authorization has run.
+
+    The ``test_query/conftest.py::delete_after_authorization`` fixture's type: ``delete`` runs
+    inside the armed class's ``check_permission``, after the mutation's own authorization.
+    """
+
+    def __call__(self, mutation: type[DjangoMutation], delete: Callable[[], object], /) -> None:
+        """Wrap ``mutation.check_permission`` to run ``delete`` once it authorized."""
+        ...
+
+
+def statement_shapes(sqls: Sequence[str]) -> list[str]:
+    """Return each statement's verb, with the table an ``INSERT`` / ``UPDATE`` writes.
+
+    ``INSERT INTO "t" ...`` reads ``INSERT "t"`` and ``UPDATE "t" ...`` reads ``UPDATE "t"``;
+    every other statement reads as its first word (``SELECT``, ``SAVEPOINT``, ``RELEASE``,
+    ``ROLLBACK``, ``DELETE``), so a row pins which tables a write touched and in what order.
+    """
+    shapes: list[str] = []
+    for sql in sqls:
+        words = sql.split()
+        if words[0] == "INSERT":
+            shapes.append(f"INSERT {words[2]}")
+        elif words[0] == "UPDATE":
+            shapes.append(f"UPDATE {words[1]}")
+        else:
+            shapes.append(words[0])
+    return shapes
+
+
+def statement_shapes_after_last_delete(sqls: Sequence[str]) -> list[str]:
+    """Return the ``statement_shapes`` of the statements after the last ``DELETE``.
+
+    The statements a write ran after a stand-in concurrent delete
+    (``test_query/conftest.py::delete_after_authorization``) of its located row.
+    """
+    last_delete = max(index for index, sql in enumerate(sqls) if sql.startswith("DELETE"))
+    return statement_shapes(sqls[last_delete + 1 :])
 
 
 #: ``getattr`` typed ``-> object``: reads a setting (django-stubs types every ``LazySettings``
