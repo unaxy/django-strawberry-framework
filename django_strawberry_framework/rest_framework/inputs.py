@@ -984,11 +984,9 @@ def resolve_injected_field_specs(
     if not injected_fields:
         return []
     model = serializer_model(serializer_class)
-    provisional_name = generated_input_type_name(
-        truth.name(serializer_class),
+    provisional_name = serializer_canonical_input_name(
+        serializer_class,
         is_partial=operation_kind == PARTIAL,
-        is_full_shape=True,
-        token="",
     )
     specs: list[InputFieldSpec] = []
     for name in injected_fields:
@@ -1084,11 +1082,9 @@ def describe_serializer_input(name: str) -> str | None:
     shape = _SERIALIZER_SHAPE_REGISTRY.get(name)
     if shape is None:
         return None
-    canonical_name = generated_input_type_name(
-        truth.name(shape.serializer_class),
+    canonical_name = serializer_canonical_input_name(
+        shape.serializer_class,
         is_partial=shape.operation_kind == PARTIAL,
-        is_full_shape=True,
-        token="",
     )
     name_note = (
         "canonical (the DEFAULT full shape)"
@@ -1211,6 +1207,24 @@ def _shape_token(
     # security digest (also keeps FIPS builds working).
     digest = hashlib.sha1(discriminant.encode(), usedforsecurity=False).hexdigest()[:16]
     return f"{base}{digest}"
+
+
+def serializer_canonical_input_name(
+    serializer_class: type[DRFBaseSerializer],
+    *,
+    is_partial: bool,
+) -> str:
+    """Return the full-shape ``<Serializer>Input`` / ``<Serializer>PartialInput`` name.
+
+    Final for the DEFAULT full shape; provisional for a derived shape, whose
+    descriptor-derived name ``serializer_input_type_name`` computes after the field walk.
+    """
+    return generated_input_type_name(
+        truth.name(serializer_class),
+        is_partial=is_partial,
+        is_full_shape=True,
+        token="",
+    )
 
 
 def serializer_input_type_name(
@@ -1865,12 +1879,7 @@ def build_serializer_input_class(
     # The provisional type name (for the choice-enum ``<TypeName><Field>Enum``
     # build) - the canonical name; the descriptor-derived divergent name is
     # computed after the field walk (it needs the resolved specs / annotations).
-    provisional_name = generated_input_type_name(
-        truth.name(serializer_class),
-        is_partial=is_partial,
-        is_full_shape=True,
-        token="",
-    )
+    provisional_name = serializer_canonical_input_name(serializer_class, is_partial=is_partial)
 
     # The per-field walk resolves each field, threads DRF metadata into descriptions,
     # and AGGREGATES every per-field conversion error + input-attr / GraphQL-name
