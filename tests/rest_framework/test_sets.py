@@ -870,10 +870,9 @@ def test_declared_choice_value_the_column_does_not_list_fails_finalize(
 def test_get_serializer_kwargs_override_no_longer_waives_create_required_guard() -> None:
     """Overriding ``get_serializer_kwargs`` does NOT waive the create-required guard (hardened).
 
-    The old blanket waiver (``_hook_overridden`` skipping the guard) let a constructor hook
-    silently own required-field coverage - the exact bypass the hardening pass removes. The
-    same narrowed shape that raises without an override still raises WITH one; the sanctioned
-    path is ``Meta.injected_fields`` + ``get_serializer_injected_data``.
+    A waiver keyed on the override would let a constructor hook silently own required-field
+    coverage. The same narrowed shape that raises without an override still raises WITH one;
+    the sanctioned path is ``Meta.injected_fields`` + ``get_serializer_injected_data``.
     """
     _declare_products_primaries()
     serializer_cls = _item_serializer_with_required_extra()

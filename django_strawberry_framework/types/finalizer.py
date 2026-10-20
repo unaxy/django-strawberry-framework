@@ -1455,8 +1455,8 @@ def _check_set_owner_get_queryset_safety(
     the leak. Only the framework's default identity hook
     (``DjangoType.get_queryset`` -> ``return queryset``) is provably
     owner-independent, and ``definition.has_custom_get_queryset`` (set at
-    class-creation by ``_detect_custom_get_queryset``, which walks the MRO to
-    ``DjangoType``) is exactly the "carries any override" predicate. Fail CLOSED on
+    class-creation by ``utils/truth.py::overrides`` against ``DjangoType``) is
+    exactly the "carries any override" predicate. Fail CLOSED on
     any custom override - shared or not - and require separate set subclasses per
     owner. ``family`` / ``related`` name the set family and its related
     declaration in the message.

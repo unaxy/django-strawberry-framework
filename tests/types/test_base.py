@@ -56,7 +56,6 @@ from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.base import (
     ALLOWED_META_KEYS,
     DEFERRED_META_KEYS,
-    _detect_custom_get_queryset,
     _meta_optimizer_hints,
     _normalize_fields_spec,
     _normalize_sequence_spec,
@@ -158,23 +157,6 @@ def test_subclass_without_meta_passes_through() -> None:
     assert registry.get(Category) is None
     assert not hasattr(AbstractType, "__strawberry_definition__")
     assert AbstractType.has_custom_get_queryset() is False
-
-
-def test_detect_custom_get_queryset_returns_false_for_non_djangotype_class() -> None:
-    """The helper is defensive for classes and objects outside the DjangoType hierarchy."""
-
-    class PlainType:
-        pass
-
-    class PlainTypeWithGetQueryset:
-        def get_queryset(self) -> None:
-            pass
-
-    assert _detect_custom_get_queryset(PlainType) is False
-    assert _detect_custom_get_queryset(PlainTypeWithGetQueryset) is False
-    assert _detect_custom_get_queryset(None) is False
-    assert _detect_custom_get_queryset(123) is False
-    assert _detect_custom_get_queryset("not_a_type") is False
 
 
 def test_meta_required_model_raises_when_missing() -> None:
@@ -2137,7 +2119,6 @@ def test_has_custom_get_queryset_false_when_using_default() -> None:
             model = Category
             fields = CATEGORY_SCALAR_FIELDS
 
-    assert CategoryType._is_default_get_queryset is True
     assert CategoryType.has_custom_get_queryset() is False
 
 
@@ -2159,17 +2140,14 @@ def test_has_custom_get_queryset_true_when_overridden() -> None:
         ) -> models.QuerySet[Category]:
             return queryset.filter(is_private=False)
 
-    assert CategoryType._is_default_get_queryset is False
     assert CategoryType.has_custom_get_queryset() is True
 
 
 def test_has_custom_get_queryset_inherits_through_intermediate_base() -> None:
     """A subclass without its own ``get_queryset`` whose parent overrides one still reports True.
 
-    The sentinel sits on the class itself - Python's normal attribute
-    lookup walks the MRO, so a child that does not redeclare
-    ``get_queryset`` inherits the parent's ``False`` flag through the
-    class hierarchy without us writing any MRO-walking code.
+    The child resolves the parent's ``get_queryset`` through its MRO, which is
+    not ``DjangoType``'s own, so its own answer is ``True``.
     """
 
     class BaseCategoryType(DjangoType):
@@ -2228,8 +2206,8 @@ def test_has_custom_get_queryset_inherits_through_abstract_base_without_meta() -
         ) -> models.QuerySet[models.Model]:
             return queryset.filter(is_private=False)
 
-    # The abstract base flipped its own sentinel even without Meta.
-    assert TenantScopedType._is_default_get_queryset is False
+    # The abstract base answers for its own hook even without Meta.
+    assert TenantScopedType.has_custom_get_queryset() is True
 
     class CategoryType(TenantScopedType):
         class Meta:
@@ -2237,9 +2215,36 @@ def test_has_custom_get_queryset_inherits_through_abstract_base_without_meta() -
             fields = CATEGORY_SCALAR_FIELDS
 
     # Concrete subclass does not redefine ``get_queryset`` itself, but
-    # inherits the flipped sentinel via normal attribute lookup.
+    # resolves the abstract base's override through its MRO.
     assert "get_queryset" not in CategoryType.__dict__
     assert CategoryType.has_custom_get_queryset() is True
+
+
+def test_meta_less_subclass_override_of_a_concrete_parent_reports_custom() -> None:
+    """A ``Meta``-less subclass that overrides ``get_queryset`` reports its own hook.
+
+    The concrete parent's hook is the identity, so its answer is ``False``; the
+    subclass inherits the parent's definition but not its verdict.
+    """
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = CATEGORY_SCALAR_FIELDS
+
+    class ScopedCategoryType(CategoryType):
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: models.QuerySet[Category],
+            info: object,
+            **kwargs: object,
+        ) -> models.QuerySet[Category]:
+            return queryset.filter(is_private=False)
+
+    assert CategoryType.has_custom_get_queryset() is False
+    assert ScopedCategoryType.has_custom_get_queryset() is True
 
 
 # ---------------------------------------------------------------------------
@@ -3076,18 +3081,6 @@ def test_meta_cursor_field_finalization_validates_columns() -> None:
 
     with pytest.raises(ConfigurationError, match="must end in a unique column"):
         finalize_django_types()
-
-
-def test_has_custom_get_queryset_with_subclasscheck_without_mro() -> None:
-    class FakeMeta(type):
-        @override
-        def __subclasscheck__(cls, subclass: type) -> bool:
-            return True
-
-    class FakeType(metaclass=FakeMeta):
-        pass
-
-    assert not _detect_custom_get_queryset(FakeType)
 
 
 def test_post_finalization_registration_raises() -> None:

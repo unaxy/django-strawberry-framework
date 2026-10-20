@@ -70,8 +70,8 @@ per-class read and would answer the wrong question at depth.
 ## `## Where the contract lives` — the sentinel that outlives the definition
 
 `_is_default_get_queryset` is stamped before the `meta is None` early return, because an abstract base
-that overrides `get_queryset` without declaring `Meta` returns before any definition exists, and its
-concrete subclasses must still inherit the signal. A definition-only carrier cannot hold the flag for
+that overrides `get_queryset` without declaring `Meta` returns before any definition exists, and it
+must still answer for its own hook. A definition-only carrier cannot hold the flag for
 the one class that most needs it.
 
 - *Rejected: synthesizing a definition for `Meta`-less bases.* It would put a non-type into

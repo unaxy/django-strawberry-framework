@@ -341,7 +341,7 @@ class ItemType(DjangoType):
 
 `DjangoType` also exposes `has_custom_get_queryset() -> bool` (introspection helper) so the optimizer can detect when a type overrides the default identity implementation. The default implementation returns the queryset unchanged; any subclass override flips this flag to `True`.
 
-The introspection is wired in two places, both type-system surface this spec owns even though the optimizer is their only consumer. First, `DjangoType` carries the class-var sentinel `_is_default_get_queryset: ClassVar[bool] = True`. Second, `django_strawberry_framework/types/base.py::DjangoType.__init_subclass__` stamps it from `::_detect_custom_get_queryset`, which walks `cls.__mro__` and stops at `DjangoType`, so an override declared anywhere between the subclass and the base counts.
+The introspection is wired in two places, both type-system surface this spec owns even though the optimizer is their only consumer. First, `DjangoType` carries the class-var sentinel `_is_default_get_queryset: ClassVar[bool] = True`. Second, `django_strawberry_framework/types/base.py::DjangoType.__init_subclass__` stamps it from `django_strawberry_framework/utils/truth.py::overrides(cls, DjangoType, "get_queryset")`, which compares the `get_queryset` the subclass resolves through its real MRO with `DjangoType`'s own by stored-function identity, so an override declared anywhere between the subclass and the base counts.
 
 Two properties of that wiring are load-bearing and neither survives a naive `"get_queryset" in cls.__dict__` test on the subclass alone:
 

@@ -84,11 +84,11 @@ class DjangoTypeDefinition:
     # the optimizer's canonical source
     field_map: dict[str, FieldMeta]
     optimizer_hints: dict[str, OptimizerHint]
-    # Get-queryset signal, populated by the MRO-walking helper (see the
+    # Get-queryset signal, populated by `truth.overrides` (see the
     # collection pseudocode), not by `"get_queryset" in cls.__dict__`, so
-    # abstract bases that override get_queryset propagate the flag to
-    # concrete subclasses. The class-level `_is_default_get_queryset`
-    # sentinel is the carrier for classes that never reach a definition.
+    # an override on an abstract base counts for its concrete subclasses.
+    # The class-level `_is_default_get_queryset` sentinel carries the same
+    # answer on every class, a definition or not.
     has_custom_get_queryset: bool
     # Names of fields whose annotation OR Strawberry-field assignment was
     # supplied by the consumer (see "Manual annotation contract for
@@ -205,13 +205,13 @@ class TypeRegistry:
 ```python path=null start=null
 def __init_subclass__(cls, **kwargs):
     super().__init_subclass__(**kwargs)
-    # 1. MRO-aware custom get_queryset detection, and the sentinel stamp.
+    # 1. Custom get_queryset detection by stored-function identity, and the sentinel stamp.
     #    Both lines run unconditionally, BEFORE the meta-is-None opt-out and
     #    before the finalized-registry guard, because an abstract base
     #    without Meta returns at step 2 and therefore never acquires a
     #    definition object to carry the flag on. The class attribute is
     #    the carrier for exactly that case.
-    has_custom_get_queryset = _detect_custom_get_queryset(cls)
+    has_custom_get_queryset = truth.overrides(cls, DjangoType, "get_queryset")
     cls._is_default_get_queryset = not has_custom_get_queryset
     # 2. Resolve Meta; intermediate abstract bases without Meta opt out.
     #    This branch stays reachable AFTER finalization so abstract bases
@@ -453,7 +453,7 @@ We take one concept and explicitly reject everything else.
 - `django_strawberry_framework/types/base.py::_build_annotations` is a per-field dispatch: non-relation fields convert through `convert_field_output` (which delegates to `convert_scalar`), and every auto-synthesized relation appends a `PendingRelation` to the returned list.
 - `django_strawberry_framework/registry.py::TypeRegistry.add_pending_relation`, `iter_pending_relations` and `discard_pending` are the registry's only forward-reference mechanism; the registry carries no lazy-reference placeholder.
 - `DjangoTypeDefinition.field_map` and `.optimizer_hints` are the **only** store for field metadata and hints: no class attribute carries either. The walker resolves both through the registered definition per planning entry (`optimizer/walker.py::_resolve_field_map`, `::_resolve_optimizer_hints`), and the [schema audit][glossary-schema-audit] reads `registry.get_definition(type_cls).field_map` directly. Resolving per entry rather than off the class is what lets a nested branch plan against the metadata of the type it is descending into rather than the root's.
-- `_is_default_get_queryset` is the one class attribute beside the definition. The definition carries the signal as `DjangoTypeDefinition.has_custom_get_queryset`, populated by the MRO-walking `_detect_custom_get_queryset(cls)`, **not** by `"get_queryset" in cls.__dict__` alone: the MRO walk is what lets an abstract base that overrides `get_queryset` (a tenant-scoped mixin, say) propagate the flag to concrete subclasses. The class attribute is a `ClassVar` stamped at collection step 1 — **before** the `Meta` opt-out — because that opt-out is exactly the case the definition cannot serve: an abstract base without `Meta` returns before any `DjangoTypeDefinition` is built. `DjangoType.has_custom_get_queryset()` reads the definition when the class has one and falls back to the negated sentinel when it does not, so `optimizer/walker.py::_target_has_custom_get_queryset` sees one shape either way.
+- `_is_default_get_queryset` is the one class attribute beside the definition. The definition carries the signal as `DjangoTypeDefinition.has_custom_get_queryset`, populated by `django_strawberry_framework/utils/truth.py::overrides` (`cls`'s `get_queryset`, read through its real MRO, is not `DjangoType`'s own stored function), **not** by `"get_queryset" in cls.__dict__` alone: reading through the MRO is what lets an abstract base that overrides `get_queryset` (a tenant-scoped mixin, say) count for its concrete subclasses. The class attribute is a `ClassVar` stamped at collection step 1 — **before** the `Meta` opt-out — because that opt-out is exactly the case the definition cannot serve: an abstract base without `Meta` returns before any `DjangoTypeDefinition` is built. `DjangoType.has_custom_get_queryset()` returns the class's own negated sentinel, never an inherited definition's copy, so a `Meta`-less subclass that overrides `get_queryset` under a concrete parent answers for its own hook.
 - `django_strawberry_framework/types/resolvers.py::_attach_relation_resolvers` is called from `finalize_django_types()` with `definition.selected_fields`, because resolver attachment no longer has `_select_fields`'s return value at hand; the definition is the only source of truth at that point. `FieldMeta` is **not** sufficient for resolver bodies because they need `attname`, `related_model.DoesNotExist`, and cardinality flags.
 - `types/base.py::DEFERRED_META_KEYS` rejects `aggregate_class`, `fields_class`, and `search_fields`, and nothing else. A key leaves that set only when the subsystem that applies it end-to-end ships — never as a reservation — so `filterset_class`, `orderset_class`, and `interfaces` are accepted `Meta` keys belonging to the specs listed under "DjangoTypeDefinition".
 - The `cls.__annotations__ = {**synthesized, **consumer_annotations}` merge puts the consumer last so the consumer wins. This spec pins what the merge does for relation names; the scalar half of the override semantics is `spec-019-consumer_overrides_scalar-0_0_6.md`'s.

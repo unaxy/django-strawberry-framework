@@ -19,7 +19,7 @@ metaclass ``__eq__`` / ``__hash__`` could intercept:
   way, through their own types' slots.
 - Membership in a read MRO is tested by identity (``is``), never ``in`` or
   ``==``, so a metaclass ``__eq__`` cannot claim to be a framework base.
-- Declared attributes (``static_attr`` / ``mro_attr`` / ``instance_dict``) are
+- Declared attributes (``static_attr`` / ``mro_attr`` / ``overrides`` / ``instance_dict``) are
   looked up in the real MRO's raw namespaces, never through ``__getattr__`` /
   ``__getattribute__`` or a descriptor. ``inspect.getattr_static`` is not
   equivalent: it reads ``entry.__dict__`` by ordinary attribute lookup, which a
@@ -31,7 +31,7 @@ own attribute lookup: finding a name in a namespace dict compares it with any
 planted non-``str`` key whose hash collides, which runs that key's ``__eq__``
 (and propagates whatever it raises). That applies to every read that consults
 a namespace: ``module`` / ``label`` of a class, ``static_attr``, ``mro_attr``,
-``instance_dict``, the name of a callable instance, and the class and scalar
+``overrides``, ``instance_dict``, the name of a callable instance, and the class and scalar
 spellings of ``render`` / ``text`` / ``describe``. The reads that consult no
 namespace (``class_of``, ``is_type``, ``is_instance``, ``is_one_of``, ``is_mapping_dict``,
 ``is_subclass``, ``is_exact``, ``mro``, ``bases``, ``class_dict``, ``kind``,
@@ -77,6 +77,7 @@ __all__ = (
     "mro",
     "mro_attr",
     "name",
+    "overrides",
     "qualname",
     "render",
     "static_attr",
@@ -628,6 +629,21 @@ def stored_function(value: object) -> object:
     if value_type is types.MethodType:
         return _get_method_func(value)
     return value
+
+
+def overrides(cls: object, base: type[object], name: str) -> bool:
+    """Whether the class ``cls`` resolves ``name`` to a different stored function than ``base``.
+
+    ``False`` when ``cls`` is not a real subclass of ``base``. Otherwise both
+    sides are read by ``mro_attr`` (the real MRO only, never the metaclass)
+    and compared by the identity of the stored function, so a
+    ``classmethod`` / ``staticmethod`` re-wrap of the same function, or a
+    re-assignment of ``base``'s own function on a subclass, is not an
+    override. Nothing consumer-defined runs.
+    """
+    if not is_subclass(cls, base):
+        return False
+    return stored_function(mro_attr(cls, name)) is not stored_function(mro_attr(base, name))
 
 
 def _class_repr(cls: type) -> str:

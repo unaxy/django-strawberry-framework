@@ -782,6 +782,93 @@ def test_lying_wrapper_subclass_intercepts_the_ordinary_read() -> None:
     assert DISPATCHED == ["lie:__func__"]
 
 
+def _base_hook(_cls: type[object]) -> str:
+    """The function ``_HookBase.hook`` stores."""
+    return "base"
+
+
+def _own_hook(_cls: type[object]) -> str:
+    """A different function an overriding subclass stores."""
+    return "own"
+
+
+class _HookBase:
+    """A framework-shaped base whose ``hook`` a subclass may override."""
+
+    hook = classmethod(_base_hook)
+
+
+def test_overrides_a_direct_override() -> None:
+    overriding = type("Overriding", (_HookBase,), {"hook": classmethod(_own_hook)})
+
+    assert truth.overrides(overriding, _HookBase, "hook") is True
+
+
+def test_overrides_through_an_intermediate_base() -> None:
+    intermediate = type("Intermediate", (_HookBase,), {"hook": staticmethod(_own_hook)})
+    leaf = type("Leaf", (intermediate,), {})
+
+    assert "hook" not in truth.class_dict(leaf)
+    assert truth.overrides(leaf, _HookBase, "hook") is True
+
+
+def test_overrides_no_override() -> None:
+    class Inheriting(_HookBase): ...
+
+    assert truth.overrides(Inheriting, _HookBase, "hook") is False
+    assert truth.overrides(_HookBase, _HookBase, "hook") is False
+
+
+def test_overrides_a_rewrap_of_the_base_function_is_not_an_override() -> None:
+    rewrapped = type("Rewrapped", (_HookBase,), {"hook": classmethod(_base_hook)})
+    reassigned = type("Reassigned", (_HookBase,), {"hook": _HookBase.hook})
+
+    assert truth.class_dict(rewrapped)["hook"] is not truth.class_dict(_HookBase)["hook"]
+    assert truth.class_dict(reassigned)["hook"] is not truth.class_dict(_HookBase)["hook"]
+    assert truth.overrides(rewrapped, _HookBase, "hook") is False
+    assert truth.overrides(reassigned, _HookBase, "hook") is False
+
+
+def test_overrides_a_non_subclass_or_non_class_is_false() -> None:
+    class Unrelated:
+        @classmethod
+        def hook(cls) -> str:
+            return "unrelated"
+
+    class ClaimingMeta(type):
+        @override
+        def __subclasscheck__(cls, subclass: type) -> bool:
+            return True
+
+    class ClaimingBase(_HookBase, metaclass=ClaimingMeta): ...
+
+    # The ordinary check believes the base's lie; the real MRO does not.
+    assert issubclass(Unrelated, ClaimingBase)
+    assert truth.overrides(Unrelated, ClaimingBase, "hook") is False
+    assert truth.overrides(Unrelated, _HookBase, "hook") is False
+    for value in (
+        None,
+        3,
+        "not_a_type",
+        _HookBase(),
+    ):
+        assert truth.overrides(value, _HookBase, "hook") is False
+
+
+def test_overrides_never_consults_the_metaclass() -> None:
+    class HookMeta(type):
+        def hook(cls) -> str:
+            return "meta"
+
+    class Plain:
+        pass
+
+    class Carrying(Plain, metaclass=HookMeta): ...
+
+    assert truth.static_attr(Carrying, "hook") is HookMeta.__dict__["hook"]
+    assert truth.overrides(Carrying, Plain, "hook") is False
+
+
 def test_instance_dict_reads_the_real_namespace_slot() -> None:
     plain = _Base()
     plain.stored = "value"
