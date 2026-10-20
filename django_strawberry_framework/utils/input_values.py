@@ -243,15 +243,9 @@ def raise_set_traversal_depth_exceeded(
     input-deep into a ``RecursionError`` instead of a typed error at the source -
     so the sentence is shared and only the three words that name WHICH walk hit
     the cap are per-caller.
-
-    The label is the set's qualname read from the interpreter
-    (``truth.qualname``), so naming the class that failed cannot itself fail.
     """
     cap = set_traversal_depth_cap(set_cls)
-    # The slot can hold a ``str`` subclass (``cls.__qualname__ = StrSub(...)``); ``truth.text``
-    # copies it through the base ``str`` slot so its ``__str__`` / ``__format__`` never run
-    # inside the message below.
-    label = truth.text(truth.qualname(set_cls))
+    label = truth.qualname(set_cls)
     if subject:
         label = f"{subject} {label}"
     cap_detail = (

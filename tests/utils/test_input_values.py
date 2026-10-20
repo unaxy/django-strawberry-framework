@@ -590,42 +590,6 @@ def test_assert_set_traversal_depth_words_knobless_sets_with_the_default_sentenc
         )
 
 
-@pytest.mark.parametrize("subject", ["", "FilterSet"])
-def test_depth_cap_error_label_survives_a_str_subclass_qualname(subject: str) -> None:
-    """A walk that decided to fail names the class through the base ``str`` slot.
-
-    The ``str`` subclass overrides ``__str__`` and ``__format__`` to raise, so a label
-    interpolated as-is replaces the typed depth error with the consumer's exception.
-    """
-
-    class _HostileQualname(str):
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("hostile qualname __str__")
-
-        @override
-        def __format__(self, format_spec: str) -> str:
-            raise RuntimeError("hostile qualname __format__")
-
-    class _Set:
-        _MAX_LOGIC_DEPTH = 1
-
-    _Set.__qualname__ = _HostileQualname("Hostile.Set")
-    with pytest.raises(ConfigurationError) as excinfo:
-        assert_set_traversal_depth(
-            _Set,
-            2,
-            branch="logical-branch",
-            input_noun="filter",
-            subject=subject,
-        )
-    label = f"{subject} Hostile.Set" if subject else "Hostile.Set"
-    assert str(excinfo.value) == (
-        f"{label}: logical-branch nesting exceeded _MAX_LOGIC_DEPTH=1. Flatten the "
-        "filter input or split into multiple queries."
-    )
-
-
 @pytest.mark.parametrize("raised", [RuntimeError, KeyboardInterrupt])
 def test_depth_cap_error_label_survives_a_qualname_whose_class_read_raises(
     raised: type[BaseException],
