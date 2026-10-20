@@ -1,11 +1,16 @@
 name: Postgres CI
 
-# Manual-only tier. The Postgres suite spins up a real Postgres server and
+# Manual and weekly tier. The Postgres suite spins up a real Postgres server and
 # re-runs the DB-touching tests against it, which is resource-heavy, so it is
-# gated behind workflow_dispatch (the "Run workflow" button) rather than firing
-# on every push / pull_request like Django CI does.
+# gated behind workflow_dispatch (the "Run workflow" button) and a weekly
+# schedule rather than firing on every push / pull_request like Django CI does.
 on:
   workflow_dispatch:
+  schedule:
+    # 05:53 UTC every Monday, beside Django CI's weekly full matrix: Django
+    # latest installs on every run, so a Django release that breaks a Postgres
+    # path surfaces within a week even when no commit dispatches this tier.
+    - cron: "53 5 * * 1"
 
 # Least privilege: this tier only reads the repository (spec-049 Decision 3).
 permissions:

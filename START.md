@@ -98,7 +98,7 @@ Django range spanning a Python-floor boundary → `uv.lock` carries TWO Django r
 
 Soft deps (never in `[project].dependencies`; tests cover present AND absent): `cryptography` (`Meta.cursor_field` keyset only), `channels[daphne]` (ASGI router), `django-debug-toolbar` (toolbar middleware), `djangorestframework` (`SerializerMutation`). Absence = `sys.modules[name] = None` sentinel via `tests/_soft_dependency.py`.
 
-CI: exact-floor cell + latest cell every push/PR; latest owns coverage gate. Full matrix + sharded-DB variant = manual dispatch only. Floor cell = API-compat probe, never a deployment recommendation.
+CI: exact-floor cell + latest cell every push/PR; latest owns coverage gate. Full matrix + sharded-DB variant = manual dispatch + weekly schedule (Mon 05:41 UTC). Floor cell = API-compat probe, never a deployment recommendation.
 
 **Floor is executed, never reasoned.** Newer source / changelog / classifier ≠ answer. Throwaway venv outside repo, explicit interpreter, focused tests:
 
@@ -140,7 +140,7 @@ Four trees, one `pytest.ini`, one command: `uv run pytest`.
 - **Uncovered line = claim nobody tested.** Read the claim before a test blesses it; branch may be uncovered because its reasoning is wrong. Two agents disagree on a boundary → settle vs live code, never average, never confidence.
 - **Soft-dep absence:** `sys.modules[name] = None` via `tests/_soft_dependency.py`. Never patch `builtins.__import__` (guards use `importlib.import_module`; block silently passes).
 - **Env knobs** (`examples/fakeshop/config/settings.py`): `FAKESHOP_SHARDED=1` → adds `shard_b` (`db_shard_b.sqlite3`) beside `default` (`db.sqlite3`), un-skips sharded tests. `FAKESHOP_PG_DSN=postgres://...` → `default` = Postgres, un-skips `@pytest.mark.pg` (needs `--group pg`). `DJANGO_STRAWBERRY_KANBAN_DB=<path>` → render scripts read a COPY of board DB. Sharded ⊥ PG.
-- **CI tiers:** `django.yml` sqlite, every push/PR, owns coverage. `postgres.yml` manual, path-disjoint shards, oversubscribed workers, no coverage. `kanban-pages.yml` republishes board to Pages when INPUTS change. `dependency-audit.yml` osv-scanner over `uv.lock`, daily. `publish.yml` `v*` tag → `uv build` + tag-vs-`__version__` check → `pypi` environment approval → Trusted Publishing upload (no token; PyPI's publisher binding names the file and the environment). Dependabot rewrites `uv.lock` + action SHAs weekly; re-read its branch after every rebase (floor-raise vs lock-only can flip).
+- **CI tiers:** `django.yml` sqlite, every push/PR, owns coverage. `postgres.yml` manual + weekly (Mon 05:53 UTC), path-disjoint shards, oversubscribed workers, no coverage. `kanban-pages.yml` republishes board to Pages when INPUTS change. `dependency-audit.yml` osv-scanner over `uv.lock`, daily. `publish.yml` `v*` tag → `uv build` + tag-vs-`__version__` check → `pypi` environment approval → Trusted Publishing upload (no token; PyPI's publisher binding names the file and the environment). Dependabot rewrites `uv.lock` + action SHAs weekly; re-read its branch after every rebase (floor-raise vs lock-only can flip).
 
 ## Pre-commit and CI gates
 

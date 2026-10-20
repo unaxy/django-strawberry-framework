@@ -330,6 +330,25 @@ def test_dependency_audit_workflow_runs_on_pull_request_and_a_schedule() -> None
     assert triggers.get("schedule"), "dependency audit must run on a schedule"
 
 
+@pytest.mark.parametrize("name", ["django.yml", "postgres.yml"])
+def test_vendor_and_full_matrix_tiers_run_on_a_schedule(name: str) -> None:
+    """The full Django matrix and the Postgres tier also run weekly with no commit.
+
+    Every run installs the newest Django patch release, so upstream drift can
+    break either tier while the repository stays still.
+    """
+    workflow = _workflow(WORKFLOW_DIR / name)
+    triggers = _mapping(workflow[True] if True in workflow else workflow["on"])
+    assert triggers.get("schedule"), f"{name} must run on a schedule"
+
+
+def test_the_scheduled_django_run_selects_the_full_matrix() -> None:
+    """A scheduled Django CI run takes the dispatch matrix, not the two push cells."""
+    workflow = _workflow(WORKFLOW_DIR / "django.yml")
+    matrix = _mapping(_mapping(_mapping(_mapping(workflow["jobs"])["test"])["strategy"])["matrix"])
+    assert "github.event_name == 'schedule'" in str(matrix["include"])
+
+
 def _environment_name(job: _YAMLMapping) -> object:
     """Return a job's environment name, from the bare or the mapping spelling."""
     environment = job.get("environment")
