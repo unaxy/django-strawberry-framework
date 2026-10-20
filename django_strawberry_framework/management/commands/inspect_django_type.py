@@ -9,8 +9,10 @@ authoritative record differs by field origin:
 - **Auto-synthesized fields** read the resolved GraphQL annotation from
   ``origin.__annotations__`` (the post-finalize record that already reflects
   ``Meta.nullable_overrides`` / ``required_overrides``) rather than re-running
-  ``convert_scalar``, and re-walk ``SCALAR_MAP`` only to NAME which converter
-  row fired.
+  ``convert_scalar``, and name which converter row fired from
+  ``types/converters.py::scalar_route``, the dispatch ``convert_scalar`` itself
+  branches on (``SCALAR_MAP[<Class>]``, ``choice enum``,
+  ``ArrayField -> list[<element label>]``, ``HStoreField -> JSON``).
 - **Consumer-authored fields** (an annotation or ``strawberry.field`` override)
   read the resolved type from the finalized Strawberry field metadata
   (``origin.__strawberry_definition__``). That is authoritative for both override
@@ -61,7 +63,12 @@ from django_strawberry_framework.management.commands._imports import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import _PACKAGE_SCALAR_MAP
 from django_strawberry_framework.types.base import DjangoType, _is_suppressed_relay_pk
-from django_strawberry_framework.types.converters import SCALAR_MAP, _field_output_type_for
+from django_strawberry_framework.types.converters import (
+    ArrayRoute,
+    HStoreRoute,
+    _field_output_type_for,
+    scalar_route,
+)
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_str, optional_instance, require
@@ -407,12 +414,7 @@ class Command(BaseCommand):
         output_type = _field_output_type_for(field)
         if output_type is not None:
             return graphql_type, nullable, f"convert_field_output -> {truth.name(output_type)}"
-        # ``choice enum`` for a choice field; otherwise name the SCALAR_MAP row
-        # that fired - the matched MRO ancestor (Decision 4) - so a consumer
-        # subclass of a supported field reports the ancestor row (e.g.
-        # ``TextField``) rather than its own concrete class name.
-        converter = "choice enum" if field.choices else f"SCALAR_MAP[{_matched_scalar_key(field)}]"
-        return graphql_type, nullable, converter
+        return graphql_type, nullable, _scalar_route_label(field)
 
     @staticmethod
     def _consumer_authored_row(
@@ -484,25 +486,21 @@ def _annotation_is_optional(annotation: object) -> bool:
     return False
 
 
-def _matched_scalar_key(field: "ModelField") -> str:
-    """Name the ``SCALAR_MAP`` entry (the MRO ancestor) that fired for ``field``.
+def _scalar_route_label(field: "ConcreteField") -> str:
+    """Name the ``convert_scalar`` arm that converted ``field``, from ``scalar_route``.
 
-    ``convert_scalar`` resolves a scalar field by walking ``type(field).__mro__``
-    against ``SCALAR_MAP``, so a consumer subclass of a supported field is
-    converted by its nearest supported ancestor - ``MyTextField(TextField)``
-    fires the ``TextField`` row, not a ``MyTextField`` row. Report that ancestor
-    so the converter column names the row that actually fired. Falls back to the
-    concrete class name, only reachable for a field with no ``SCALAR_MAP``
-    ancestor - and this helper only ever sees an *auto-synthesized* scalar
-    (``_resolve_row`` routes every consumer-authored field, including an
-    annotation override of an unsupported column, to ``_consumer_authored_row``
-    first), whose scalar necessarily resolved at construction. So the fallback is
-    unreachable for a finalized type.
+    ``choice enum`` for a choice column, else the ``SCALAR_MAP`` row that fired: the
+    matched MRO ancestor (Decision 4), so a consumer subclass of a supported field
+    reports the ancestor row (``TextField``), not its own class. An ``ArrayField``
+    reads ``ArrayField -> list[<element label>]``, the element labelled by this same
+    rule, and an ``HStoreField`` reads ``HStoreField -> JSON``.
     """
-    return next(
-        (truth.name(klass) for klass in truth.mro(type(field)) if klass in SCALAR_MAP),
-        truth.name(type(field)),
-    )
+    route = scalar_route(field)
+    if isinstance(route, ArrayRoute):
+        return f"ArrayField -> list[{_scalar_route_label(route.element)}]"
+    if isinstance(route, HStoreRoute):
+        return "HStoreField -> JSON"
+    return "choice enum" if route.choices else f"SCALAR_MAP[{truth.name(route.key)}]"
 
 
 def _render_strawberry_type(field_type: object, scalar_namer: _ScalarNamer | None = None) -> str:

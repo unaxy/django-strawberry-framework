@@ -8,12 +8,13 @@ fakeshop shape: argparse ``--schema`` help; a custom ``NameConverter`` (prefixin
 every SDL name would break the live GraphQL suite); empty-registry unfinalized /
 no-Meta bases; function-local UNRESOLVED forward refs; direct ``relay.Node``
 inheritance; a ``Meta.name`` / ``__name__`` collision; helper rendering
-(``_matched_scalar_key``, ``_sdl_type_name``, ``_render_annotation``,
-``_scalar_name``). A process-wide name converter in fakeshop would change the
-shipped SDL. The relation-pk rows read real library models (the
-``PatronProfile.patron`` one-to-one pk and the ``LendingDesk.venue_ptr`` parent
-link) through test-local Relay-shaped types; this module declares no Django
-model.
+(``_sdl_type_name``, ``_render_annotation``, ``_scalar_name``); and the
+``ArrayField`` / ``HStoreField`` converter rows, which only PostgreSQL columns
+reach. A process-wide name converter in fakeshop would change the shipped SDL.
+The relation-pk rows read real library models (the ``PatronProfile.patron``
+one-to-one pk and the ``LendingDesk.venue_ptr`` parent link) through test-local
+Relay-shaped types; the only Django models this module declares are the
+unmanaged hosts of the ``tests/_postgres_fields.py`` container doubles.
 """
 
 import sys
@@ -38,14 +39,15 @@ from typing_extensions import override
 from django_strawberry_framework import DjangoType, finalize_django_types, strawberry_config
 from django_strawberry_framework.management.commands.inspect_django_type import (
     Command,
-    _matched_scalar_key,
     _render_annotation,
     _scalar_name,
     _sdl_type_name,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.base import _is_suppressed_relay_pk
 from tests._idioms import stub_module
+from tests._postgres_fields import FakeArrayField, FakeHStoreField
 from tests.optimizer import _link_models
 
 
@@ -248,15 +250,64 @@ def test_unfinalized_type_raises_command_error(monkeypatch: pytest.MonkeyPatch) 
         call_command("inspect_django_type", "test_module.ConcreteType")
 
 
-def test_matched_scalar_key_names_supported_mro_ancestor() -> None:
-    # A consumer subclass of a supported field must report the SCALAR_MAP row
-    # that actually fired (the matched MRO ancestor), not its own concrete class.
-    class CustomTextField(models.TextField[str, str]):
-        pass
+def _inspect_text(type_name: str) -> str:
+    """Return the ``inspect_django_type`` table printed for the registered ``type_name``."""
+    out = StringIO()
+    call_command("inspect_django_type", type_name, stdout=out)
+    return out.getvalue()
 
-    assert _matched_scalar_key(CustomTextField()) == "TextField"
-    # A directly-supported field reports its own class (ancestor == concrete).
-    assert _matched_scalar_key(models.CharField()) == "CharField"
+
+def test_inspect_array_rows_name_the_array_arm_and_each_element_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``ArrayField`` row names the array arm and, inside it, its element's own label.
+
+    A choices ``base_field`` reads ``choice enum`` inside the list, and a plain one names
+    the ``SCALAR_MAP`` row the element converts through.
+    """
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+
+    class TaggedShelf(models.Model):
+        tags = FakeArrayField(models.CharField(max_length=5))
+        grades = FakeArrayField(models.CharField(max_length=1, choices=[("a", "A"), ("b", "B")]))
+
+        class Meta:
+            managed = False
+            app_label = "test_inspect_array"
+
+    class TaggedShelfType(DjangoType):
+        class Meta:
+            model = TaggedShelf
+            fields = ("tags", "grades")
+
+    assert registry.get(TaggedShelf) is TaggedShelfType
+    finalize_django_types()
+    text = _inspect_text("TaggedShelfType")
+    assert _connection_row(text, "tags").endswith("ArrayField -> list[SCALAR_MAP[CharField]]")
+    assert _connection_row(text, "grades").endswith("ArrayField -> list[choice enum]")
+
+
+def test_inspect_hstore_row_names_the_hstore_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ``HStoreField`` row names the HStore arm, which converts to ``JSON``."""
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
+
+    class TaggedLedger(models.Model):
+        attributes = FakeHStoreField()
+
+        class Meta:
+            managed = False
+            app_label = "test_inspect_hstore"
+
+    class TaggedLedgerType(DjangoType):
+        class Meta:
+            model = TaggedLedger
+            fields = ("attributes",)
+
+    assert registry.get(TaggedLedger) is TaggedLedgerType
+    finalize_django_types()
+    assert _connection_row(_inspect_text("TaggedLedgerType"), "attributes").endswith(
+        "HStoreField -> JSON",
+    )
 
 
 def test_sdl_type_name_ignores_inherited_strawberry_definition() -> None:

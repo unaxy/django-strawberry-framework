@@ -29,9 +29,15 @@ Public surface:
   ``FileField`` to their output object. Consulted only through the shared
   ``_field_output_type_for`` MRO walk; never by ``scalar_for_field``.
 - ``convert_scalar(field, type_name)`` - scalar columns
-  (``CharField`` -> ``str`` etc.). Walks ``type(field).__mro__`` against
-  ``SCALAR_MAP``, then delegates to ``convert_choices_to_enum`` when
-  ``field.choices`` is set, then widens to ``T | None`` on ``field.null``.
+  (``CharField`` -> ``str`` etc.). Branches on ``scalar_route(field)``: the
+  ``ArrayField`` / ``HStoreField`` arms, else the ``SCALAR_MAP`` match, then
+  delegates to ``convert_choices_to_enum`` when ``field.choices`` is set, then
+  widens to ``T | None`` on ``field.null``.
+- ``scalar_route(field)`` - which ``convert_scalar`` arm converts a column:
+  ``ArrayRoute`` (with the element field), ``HStoreRoute``, or ``MapRoute``
+  (the matched ``SCALAR_MAP`` key class, its scalar, and whether the choice
+  enum replaces it). ``inspect_django_type`` names its converter column from
+  the same route.
 - ``convert_choices_to_enum(field, type_name)`` - generate (or fetch
   cached) Strawberry ``Enum`` from a Django choice field; called from
   ``convert_scalar`` when ``field.choices`` is set and also importable
@@ -65,9 +71,10 @@ import decimal
 import keyword
 import re
 import uuid
+from dataclasses import dataclass
 from enum import Enum, EnumMeta
 from types import GenericAlias
-from typing import TYPE_CHECKING, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, TypeAlias, TypeGuard, TypeVar, cast
 
 import strawberry
 from django.db import models
@@ -360,6 +367,22 @@ def array_element_field(field: object) -> "ConcreteField | None":
     return None
 
 
+def _scalar_map_entry(field: "ModelField") -> "tuple[type[ConcreteField], TypeForm[object]]":
+    """Return the ``SCALAR_MAP`` ``(key, scalar)`` entry ``field``'s nearest MRO class keys.
+
+    The one ``SCALAR_MAP`` walk: ``scalar_for_field`` and ``scalar_route``'s map arm both
+    read it. Raises ``ConfigurationError`` for an unsupported field class.
+    """
+    entry = truth.mro_entry(SCALAR_MAP, truth.class_of(field))
+    if entry is not None:
+        return entry
+    raise ConfigurationError(
+        f"Unsupported Django field type {truth.render(truth.kind(field))} on "
+        f"{_field_label(field)}. Add an entry to "
+        "SCALAR_MAP or exclude this field via Meta.exclude.",
+    )
+
+
 def scalar_for_field(field: "ModelField") -> "TypeForm[object]":
     """Resolve a Django field to its ``SCALAR_MAP`` Python / Strawberry scalar.
 
@@ -373,14 +396,54 @@ def scalar_for_field(field: "ModelField") -> "TypeForm[object]":
     It does NOT apply choice substitution or null widening; callers layer those
     on (``convert_scalar`` does; filter inputs handle choices separately).
     """
-    entry = truth.mro_entry(SCALAR_MAP, truth.class_of(field))
-    if entry is not None:
-        return entry[1]
-    raise ConfigurationError(
-        f"Unsupported Django field type {truth.render(truth.kind(field))} on "
-        f"{_field_label(field)}. Add an entry to "
-        "SCALAR_MAP or exclude this field via Meta.exclude.",
-    )
+    return _scalar_map_entry(field)[1]
+
+
+@dataclass(frozen=True)
+class ArrayRoute:
+    """``convert_scalar``'s ``ArrayField`` arm: ``list[<element>]`` over ``element``."""
+
+    element: "ConcreteField"
+
+
+@dataclass(frozen=True)
+class HStoreRoute:
+    """``convert_scalar``'s ``HStoreField`` arm: ``strawberry.scalars.JSON``."""
+
+
+@dataclass(frozen=True)
+class MapRoute:
+    """``convert_scalar``'s ``SCALAR_MAP`` arm: the matched ``key`` class and its ``scalar``.
+
+    ``choices`` is true when the column declares choices, so the generated choice enum
+    replaces ``scalar``.
+    """
+
+    key: "type[ConcreteField]"
+    scalar: "TypeForm[object]"
+    choices: bool
+
+
+ScalarRoute: TypeAlias = ArrayRoute | HStoreRoute | MapRoute
+
+
+def scalar_route(field: "ConcreteField") -> ScalarRoute:
+    """Return which ``convert_scalar`` arm converts ``field``, with that arm's data.
+
+    The sentinel-guarded postgres containers come first (``ArrayField``, then
+    ``HStoreField``), so a test double subclassing ``models.Field`` never matches a
+    ``SCALAR_MAP`` parent; every other column takes the ``SCALAR_MAP`` arm, which
+    raises ``ConfigurationError`` for an unsupported field class. Classification only:
+    the container arms' nested-array and ``choices`` rejections stay in
+    ``convert_scalar``.
+    """
+    element = array_element_field(field)
+    if element is not None:
+        return ArrayRoute(element)
+    if _HSTORE_FIELD_CLS is not None and truth.is_instance(field, _HSTORE_FIELD_CLS):
+        return HStoreRoute()
+    key, scalar = _scalar_map_entry(field)
+    return MapRoute(key, scalar, choices=bool(field.choices))
 
 
 def convert_scalar(
@@ -397,15 +460,14 @@ def convert_scalar(
        (``field.null`` when ``force_nullable is None``, else
        ``force_nullable`` itself); this single value drives every outer
        nullability decision below.
-    0b. If the field is a sentinel-guarded postgres type (``ArrayField`` /
-       ``HStoreField``), dispatch to the matching branch and return early.
-       ``ArrayField`` rejects nested arrays and outer ``choices``, then
-       recurses on ``base_field`` and wraps in ``list[inner]``.
-       ``HStoreField`` rejects outer ``choices``, then returns
-       ``strawberry.scalars.JSON``. Both branches widen to ``T | None`` on
+    0b. Branch on ``scalar_route(field)``. The array arm rejects nested
+       arrays and outer ``choices``, then recurses on ``base_field`` and wraps
+       in ``list[inner]``. The HStore arm rejects outer ``choices``, then
+       returns ``strawberry.scalars.JSON``. Both widen to ``T | None`` on
        ``effective_null`` themselves.
-    1. Walk ``type(field).__mro__`` until a supported Django field class is
-       found in ``SCALAR_MAP``; raise ``ConfigurationError`` if unsupported.
+    1. Otherwise the route is the ``SCALAR_MAP`` arm: the nearest class in
+       ``type(field).__mro__`` that keys ``SCALAR_MAP`` (an unsupported field
+       already raised ``ConfigurationError`` in ``scalar_route``).
     2. If the field declares ``choices``, replace the scalar type with a
        generated ``Enum`` via ``convert_choices_to_enum(field, type_name)``.
     3. If ``effective_null``, widen to ``T | None``.
@@ -461,18 +523,15 @@ def convert_scalar(
     # ArrayField / HStoreField / choice / scalar branches without per-branch
     # override logic.
     effective_null = field.null if force_nullable is None else force_nullable
-    # Sentinel-guarded ``ArrayField`` dispatch runs **before** the MRO walk
-    # so a subclass-of-``models.Field`` test double does not accidentally
-    # match a parent in ``SCALAR_MAP``. The recursive call into
-    # ``base_field`` re-enters ``convert_scalar`` and naturally inherits
-    # choice substitution and inner-null widening; the outer
+    route = scalar_route(field)
+    # The recursive call into ``base_field`` re-enters ``convert_scalar`` and
+    # naturally inherits choice substitution and inner-null widening; the outer
     # ``effective_null`` widens the resulting ``list[inner]`` here. The
     # recursion is left ``force_nullable``-unset so the inner element
     # nullability follows ``base_field.null`` and is NOT affected by the
     # outer override.
-    element = array_element_field(field)
-    if element is not None:
-        if array_element_field(element) is not None:
+    if isinstance(route, ArrayRoute):
+        if array_element_field(route.element) is not None:
             raise ConfigurationError(
                 f"Nested ArrayField on {_field_label(field)} is not supported.",
             )
@@ -482,14 +541,12 @@ def convert_scalar(
                 f"field; outer-array choices are ambiguous at the GraphQL boundary. Declare choices "
                 f"on base_field for element-level enum, or use FilterSet.",
             )
-        inner = convert_scalar(element, type_name)
+        inner = convert_scalar(route.element, type_name)
         result = GenericAlias(list, (inner,))
         return result | None if effective_null else result
-    # Sentinel-guarded ``HStoreField`` dispatch mirrors the ArrayField
-    # posture: outer-``choices`` rejection (HStore stores
-    # ``dict[str, str | None]`` with no enum-able GraphQL shape), then
-    # return ``strawberry.scalars.JSON`` widened on ``effective_null``.
-    if _HSTORE_FIELD_CLS is not None and truth.is_instance(field, _HSTORE_FIELD_CLS):
+    # HStore stores ``dict[str, str | None]`` with no enum-able GraphQL shape,
+    # so outer ``choices`` are rejected before returning ``JSON``.
+    if isinstance(route, HStoreRoute):
         if field.choices:
             raise ConfigurationError(
                 f"HStoreField on {_field_label(field)} declares choices; "
@@ -499,12 +556,10 @@ def convert_scalar(
             )
         json_type = strawberry.scalars.JSON
         return json_type | None if effective_null else json_type
-    # Shared field-class -> scalar lookup (also used by the filter-input
-    # converter) so a column resolves to the same scalar on both sides. Walks
-    # the MRO, so consumer subclasses of a supported field resolve to the
-    # parent's scalar and an unsupported field raises ``ConfigurationError``.
-    py_type: object = scalar_for_field(field)
-    if field.choices:
+    # The ``SCALAR_MAP`` arm resolved through the lookup the filter-input
+    # converter shares, so a column resolves to the same scalar on both sides.
+    py_type: object = route.scalar
+    if route.choices:
         py_type = convert_choices_to_enum(field, type_name)
     if effective_null:
         # A ``SCALAR_MAP`` value or generated enum is a runtime annotation.
