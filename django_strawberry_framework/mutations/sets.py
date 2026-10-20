@@ -56,7 +56,12 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import list_of, read_attr, require_instance
+from django_strawberry_framework.utils._narrowing import (
+    list_of,
+    optional_instance,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils.imports import import_attr
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
@@ -387,6 +392,27 @@ def backing_model_of(meta: _ValidatedMutationMeta) -> type[models.Model]:
     is always a model class.
     """
     return cast("type[models.Model]", meta.model)
+
+
+def own_backing_class(cls: type[object], key: str) -> object:
+    """Return ``Meta.<key>`` from the class's OWN validated snapshot, else from its live ``Meta``.
+
+    The no-argument discovery hooks (``get_form_fields`` / ``get_serializer_for_schema``)
+    run inside ``_validate_meta``, before the metaclass stamps ``_mutation_meta``, where
+    only the live declaration exists; every later call reads the frozen snapshot, so a
+    post-declaration ``Meta`` edit cannot drift the shape. The snapshot is read from the
+    class's own namespace, never up the MRO, where a subclass still validating would find
+    its parent's. A class neither arm answers for raises ``ConfigurationError``.
+    """
+    meta = optional_instance(truth.class_dict(cls).get("_mutation_meta"), _ValidatedMutationMeta)
+    backing = (
+        truth.static_attr(truth.static_attr(cls, "Meta"), key)
+        if meta is None
+        else read_attr(meta, key)
+    )
+    if backing is None:
+        raise ConfigurationError(f"{truth.name(cls)} cannot resolve Meta.{key}.")
+    return backing
 
 
 def resolve_meta_model(

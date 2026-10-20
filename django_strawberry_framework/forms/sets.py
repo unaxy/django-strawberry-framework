@@ -71,6 +71,7 @@ from django_strawberry_framework.mutations.sets import (
     make_meta_validating_metaclass,
     model_backed_permission_and_lock,
     normalize_meta_field_selection,
+    own_backing_class,
     reject_unknown_meta_keys,
     require_backing_class,
     require_model_class,
@@ -82,7 +83,7 @@ from django_strawberry_framework.mutations.sets import (
 )
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr, require
+from django_strawberry_framework.utils._narrowing import require
 from django_strawberry_framework.utils.inputs import make_shape_build_cache
 
 from .inputs import (
@@ -204,25 +205,8 @@ register_subsystem_clear(clear_form_shape_build_cache, owner="forms.shape_cache"
 def _default_mutation_get_form_fields(
     cls: type[DjangoModelFormMutation | DjangoFormMutation],
 ) -> dict[str, forms.Field]:
-    """Return the mutation's stable field basis from its declared ``form_class``.
-
-    Class validation runs before the metaclass stamps ``_mutation_meta``, so that
-    one validation window reads the live ``Meta`` declaration. Every later call
-    must use the concrete class's own frozen snapshot: a consumer can mutate the
-    nested ``Meta`` object after declaration, but that cannot change the input
-    shape or the form class the default constructor binds.
-    """
-    meta_snapshot = truth.class_dict(cls).get("_mutation_meta")
-    if meta_snapshot is not None:
-        form_class = read_attr(meta_snapshot, "form_class", None)
-    else:
-        form_meta = truth.static_attr(cls, "Meta", None)
-        form_class = truth.static_attr(form_meta, "form_class", None)
-    if form_class is None:
-        raise ConfigurationError(
-            f"{truth.name(cls)}.get_form_fields() cannot resolve Meta.form_class.",
-        )
-    return get_form_fields(require(form_class, _is_form_class))
+    """Return the mutation's stable field basis from its declared ``form_class``."""
+    return get_form_fields(require(own_backing_class(cls, "form_class"), _is_form_class))
 
 
 def _is_form_class(value: object) -> TypeIs[FormClass]:
