@@ -21,6 +21,7 @@ from apps.scalars.models import NullableScalarSpecimen
 from django.db import connection
 from django.db.models import Model
 from django.test.utils import CaptureQueriesContext
+from django.utils.functional import SimpleLazyObject
 from strawberry import relay
 from typing_extensions import override
 
@@ -205,36 +206,57 @@ def test_materialize_relation_id_container_iteration_error_propagates() -> None:
         materialize_relation_id_container(RaisingIterator(), "categoryIds")
 
 
-def test_materialize_relation_id_container_rejects_text_mapping_and_non_iterable_atoms() -> None:
-    """Text / mapping atoms (including SUBCLASSES) and non-iterables are the uniform error.
+class _TextSub(str):
+    pass
+
+
+class _MappingSub(dict[str, object]):
+    pass
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param("12", id="str"),
+        pytest.param(_TextSub("ab"), id="str-subclass"),
+        pytest.param(b"12", id="bytes"),
+        pytest.param(bytearray(b"1"), id="bytearray"),
+        pytest.param(memoryview(b"1"), id="memoryview"),
+        pytest.param({"a": 1}, id="dict"),
+        pytest.param(_MappingSub({"a": 1}), id="dict-subclass"),
+        pytest.param(SimpleLazyObject(lambda: "12"), id="lazy-str"),
+        pytest.param(SimpleLazyObject(lambda: {"a": 1}), id="lazy-dict"),
+        pytest.param(7, id="int"),
+        pytest.param(object(), id="object"),
+    ],
+)
+def test_materialize_relation_id_container_rejects_text_mapping_and_non_iterable_atoms(
+    values: object,
+) -> None:
+    """Text / bytes-like / mapping atoms (subclasses included) and non-iterables are the uniform error.
 
     A text atom iterated would decompose into per-character "ids" and a mapping
     into per-key "ids"; a non-iterable would raise ``TypeError`` out of ``list()``.
-    Subclassing is pinned because ``isinstance`` accepts a subclass: the atom set
-    must classify by type relationship, not exact type.
+    A Django lazy proxy is judged by the object it stands for.
     """
+    provided_values, error = materialize_relation_id_container(values, "categoryIds")
+    assert provided_values is None
+    assert error is not None
+    assert error.field == "categoryIds"
 
-    class _TextSub(str):
-        pass
 
-    class _MappingSub(dict[str, object]):
-        pass
-
-    for values in (
-        "12",
-        _TextSub("ab"),
-        b"12",
-        bytearray(b"1"),
-        memoryview(b"1"),
-        {"a": 1},
-        _MappingSub({"a": 1}),
-        7,
-        object(),
-    ):
-        provided_values, error = materialize_relation_id_container(values, "categoryIds")
-        assert provided_values is None
-        assert error is not None
-        assert error.field == "categoryIds"
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param([1, 2], id="list"),
+        pytest.param(SimpleLazyObject(lambda: [1, 2]), id="lazy-list"),
+    ],
+)
+def test_materialize_relation_id_container_materializes_a_list(values: object) -> None:
+    """A list, or a lazy proxy standing for one, is materialized member by member."""
+    provided_values, error = materialize_relation_id_container(values, "categoryIds")
+    assert error is None
+    assert provided_values == [1, 2]
 
 
 def test_materialize_relation_id_container_materializes_once() -> None:

@@ -29,7 +29,15 @@ from typing import TYPE_CHECKING, cast
 from strawberry import relay
 
 from . import truth
-from ._narrowing import dict_items, enum_value, is_dict, is_list, list_iter, list_of
+from ._narrowing import (
+    dict_items,
+    enum_value,
+    is_char_wise,
+    is_dict,
+    is_list,
+    list_iter,
+    list_of,
+)
 from .errors import (
     FIELD_ERROR_CODE_INVALID,
     field_error,
@@ -37,6 +45,7 @@ from .errors import (
     relation_field_error,
 )
 from .inputs import FILE, RELATION_MULTI, RELATION_SINGLE, iter_provided_input_fields
+from .lazy import unwrap_lazy_object
 from .querysets import (
     coerce_field_value_or_none,
     pks_all_present,
@@ -339,19 +348,6 @@ def decode_visible_relation(
     return project(obj), None
 
 
-# The relation-id container's text/mapping atoms: values that are iterable but
-# are NEVER a container OF relation ids: the char-wise types of
-# ``_narrowing.py::is_char_wise`` plus ``Mapping``, which is a container - just
-# never this one.
-RELATION_ID_ATOM_TYPES = (
-    str,
-    bytes,
-    bytearray,
-    memoryview,
-    Mapping,
-)
-
-
 def materialize_relation_id_container(
     values: object,
     graphql_name: str,
@@ -367,13 +363,16 @@ def materialize_relation_id_container(
 
     Security-relevant, which is why it is one body rather than a copied one:
     the container is materialized BEFORE any member is decoded, so a
-    partially-consumed iterator can never reach a visibility query, and a text
-    / mapping atom is rejected outright rather than iterated into per-character
-    or per-key "ids".
+    partially-consumed iterator can never reach a visibility query, and a text,
+    bytes-like or mapping atom is rejected outright rather than iterated into
+    per-character or per-key "ids". The atom check reads the real class of the
+    object a Django lazy proxy stands for, so a ``__class__`` claim neither
+    hides an atom nor turns a container into one.
 
     Returns ``(provided_values, None)`` or ``(None, field_error)``.
     """
-    if isinstance(values, RELATION_ID_ATOM_TYPES):
+    unwrapped = unwrap_lazy_object(values)
+    if is_char_wise(unwrapped) or issubclass(truth.class_of(unwrapped), Mapping):
         return None, relation_field_error(graphql_name)
     try:
         return list_of(values), None
