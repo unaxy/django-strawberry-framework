@@ -157,13 +157,24 @@ class _Query:
         return 1
 
 
-def _schema(mutation_type: type) -> strawberry.Schema:
-    """Build a finalized schema with the optimizer extension installed."""
+def _schema(mutation_type: type, *, mask_errors: bool = True) -> strawberry.Schema:
+    """Build a finalized schema with the optimizer extension installed.
+
+    ``mask_errors=False`` opts out of the response-boundary error policy, so an
+    exception the pipeline propagates reaches ``original_error`` unmasked.
+    """
     optimizer = DjangoOptimizerExtension()
+    if mask_errors:
+        return DjangoSchema(
+            query=_Query,
+            mutation=mutation_type,
+            extensions=[lambda: optimizer],
+        )
     return DjangoSchema(
         query=_Query,
         mutation=mutation_type,
         extensions=[lambda: optimizer],
+        error_policy={"enabled": False},
     )
 
 
@@ -176,6 +187,7 @@ def _build_item_schema(
     *,
     category_get_queryset: object | None = None,
     input_cls: object | None = None,
+    mask_errors: bool = True,
 ) -> tuple[strawberry.Schema, tuple[type[DjangoType], type[DjangoType]]]:
     """Declare Item/Category primaries + create/update/delete mutations; return (schema, types)."""
     category_body: dict[str, object] = {
@@ -234,7 +246,7 @@ def _build_item_schema(
         delete_item = DjangoMutationField(DeleteItem)
 
     finalize_django_types()
-    return _schema(Mutation), (CategoryT, ItemT)
+    return _schema(Mutation, mask_errors=mask_errors), (CategoryT, ItemT)
 
 
 def _json_at(value: object, *path: str | int) -> object:
@@ -1562,6 +1574,82 @@ def test_save_time_django_validation_error_reads_its_names_as_model_fields(
         },
     }
     assert not product_models.Item.objects.filter(name="Refused").exists()
+
+
+_ITEM_SAVE_LOOKUP_DISPATCH_UID = "tests.mutations.item_save_reads_a_missing_category"
+
+
+@contextlib.contextmanager
+def _item_save_reads_a_missing_category() -> Generator[None, None, None]:
+    """Make every ``Item`` save inside the block look up a category no row carries.
+
+    The ``pre_save`` receiver's ``Category.objects.get`` raises ``Category.DoesNotExist``
+    from inside the write, the trusted-code ``DoesNotExist`` a lookup in a receiver,
+    ``save()`` override or ``clean()`` raises.
+    """
+
+    def _lookup(**_kwargs: object) -> None:
+        _ = product_models.Category.objects.get(name="no category carries this name")
+
+    pre_save.connect(
+        _lookup,
+        sender=product_models.Item,
+        weak=False,
+        dispatch_uid=_ITEM_SAVE_LOOKUP_DISPATCH_UID,
+    )
+    try:
+        yield
+    finally:
+        _ = pre_save.disconnect(
+            sender=product_models.Item,
+            dispatch_uid=_ITEM_SAVE_LOOKUP_DISPATCH_UID,
+        )
+
+
+def _select_tables(sqls: list[str]) -> list[str]:
+    """The quoted table each ``SELECT`` in ``sqls`` reads first, in statement order."""
+    return [sql.split(" FROM ", 1)[1].split()[0] for sql in sqls if sql.startswith("SELECT")]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_does_not_exist_from_the_write_propagates_while_the_row_is_present(operation: str) -> None:
+    """A ``DoesNotExist`` escaping the write propagates unless the located row is gone.
+
+    The ``pre_save`` receiver's lookup raises ``Category.DoesNotExist`` inside the write.
+    An update probes its located row after the exception (the last read), finds it present
+    and re-raises: the error is about the trusted code, not a vanished row, and it reaches
+    the GraphQL boundary unchanged. A create has no located row and re-raises without a
+    probe. Nothing is written either way.
+    """
+    schema, (CategoryT, ItemT) = _build_item_schema(mask_errors=False)
+    category = product_models.Category.objects.create(name=_category_name())
+    item = product_models.Item.objects.create(name="Kept", category=category)
+    if operation == "create":
+        query = "mutation($d: ItemInput!){ createItem(data:$d){ node{ id } errors{ field } } }"
+        variables: dict[str, object] = {
+            "d": {"name": "New", "categoryId": global_id_for(CategoryT, saved_pk(category))},
+        }
+    else:
+        query = (
+            "mutation($id: ID!, $d: ItemPartialInput!){ "
+            "updateItem(id:$id, data:$d){ node{ id } errors{ field } } }"
+        )
+        variables = {"id": global_id_for(ItemT, saved_pk(item)), "d": {"name": "Renamed"}}
+
+    with _item_save_reads_a_missing_category(), CaptureQueriesContext(connection) as captured:
+        res = schema.execute_sync(query, variable_values=variables)
+
+    assert res.data is None
+    assert res.errors is not None
+    assert [type(error.original_error) for error in res.errors] == [
+        product_models.Category.DoesNotExist,
+    ]
+    tables = _select_tables([query["sql"] for query in captured.captured_queries])
+    # The receiver's lookup is the last category read; only the update's probe follows it.
+    lookup = max(index for index, table in enumerate(tables) if table == '"products_category"')
+    assert tables[lookup + 1 :] == ([] if operation == "create" else ['"products_item"'])
+    assert list(product_models.Item.objects.values_list("name", flat=True)) == ["Kept"]
 
 
 # ---------------------------------------------------------------------------

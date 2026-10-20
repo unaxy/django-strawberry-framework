@@ -2191,8 +2191,9 @@ locate_instance → not_found_error → authorize_or_raise` preamble, and the
 rides**: model `DjangoMutation` create / update / **delete**, `DjangoModelFormMutation`,
 this serializer flavor, and the **model-less plain form**. The callback contract is what
 keeps it small rather than generic: the skeleton owns atomicity, locate, the not-found
-payload, **authorization before `decode_step`**, the optimizer re-fetch, and payload
-construction; each flavor supplies only
+payload, **authorization before `decode_step`**, the `conflict` answer for a failed step
+over a located row a probe finds gone, the optimizer re-fetch, and payload construction;
+each flavor supplies only
 `decode_step(instance) -> decoded data | StepFailure`,
 `write_step(instance, decoded) -> saved instance | StepFailure` (a `StepFailure` wraps the
 step's `list[FieldError]`, so a product that is itself a list never reads as a failure; the serializer's is
@@ -2794,6 +2795,17 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   write witness's `created=True` under the `authorized_pk` returns the null-object +
   `conflict` `FieldError` envelope on `id` with the transaction rolled back, never a
   top-level `ConfigurationError`.
+- **Validation-time disappearing row.** A located row removed before the decode or
+  `serializer.is_valid()` finished (deleted, or cascaded away with a row it references)
+  can fail them first: a named relation that vanished with the row is the relation's
+  `invalid`, and DRF's `UniqueTogetherValidator` reading the vanished row's relation
+  through its descriptor raises `DoesNotExist`. Either is the same `conflict` envelope on
+  `id`, never `serializer.errors` or a masked top-level error: on a step failure over a
+  located row the shared skeleton
+  (`django_strawberry_framework/mutations/resolvers.py::run_write_pipeline_sync`) probes it
+  (`django_strawberry_framework/utils/write_transaction.py::located_row_vanished`) and
+  answers `conflict` when it is gone; a row still present keeps the step's answer and its
+  `DoesNotExist` propagates.
 - **Write-time `ValidationError` — DRF and Django shapes take DIFFERENT paths.** A
   `serializer.save()` whose custom `create()` / `update()` raises a validation error returns
   the null-object + `FieldError` envelope, **not** a top-level `GraphQLError` — but the two
@@ -2949,6 +2961,14 @@ same transport, different app.
   the `conflict` envelope after the witnessed re-INSERT, rolled back, as does the
   multi-table `updateLendingDeskViaSerializer` deleted whole or only from the desk's own
   table ([`test_library_inheritance_api.py`][test-library-inheritance-api]`::test_lending_desk_update_of_a_row_deleted_after_authorization_is_conflict_over_http`).
+  An `updateItemViaSerializer` whose category delete cascaded to the row after
+  authorization (`::test_item_update_whose_category_delete_cascaded_to_the_row_is_conflict_over_http`:
+  the omitted category and another named category through DRF's
+  `UniqueTogetherValidator` `DoesNotExist`, the named one through the relation's
+  `invalid`) and an
+  `updatePrintingViaSerializer` naming the edition that vanished with the row
+  (`test_library_api.py::test_update_whose_row_vanished_before_validation_failed_is_conflict_over_http`)
+  return `conflict`, the located-row probe the last read, rolled back.
 - **Package-internal** ([`tests/rest_framework/`][test-rest-framework]):
   - `test_converter.py` — each supported serializer-field class → annotation +
     required-ness; `PrimaryKeyRelatedField` / `ManyRelatedField` id mapping
@@ -3651,7 +3671,8 @@ code from the `utils/errors.py` `FIELD_ERROR_CODE_*` vocabulary (`invalid` for a
 id / bad lookup id / unstorable text, `null` for an explicit null, `not_found` for a locate
 miss, `constraint` for the `IntegrityError` fallback, `protected` for a protected delete,
 `conflict` for a located row that vanished before the write (a forced update matching no
-row, the serializer's witnessed re-INSERT, a failed delete), `truncated` when the DRF error
+row, the serializer's witnessed re-INSERT, a failed delete, a decode or validation failure
+over a row the probe then finds gone), `truncated` when the DRF error
 flattening hits its node budget). A client branches on `required` / `invalid` / `unique` / …
 without parsing localized text. Uniform across all three write flavors (the leaf is shared).
 Live-tested (`createShelfViaMetadataSerializer`: a `max_length` DRF code).

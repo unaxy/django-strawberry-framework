@@ -78,6 +78,7 @@ from graphql_client import (
     json_str,
     middleware_without_debug_toolbar,
     response_json,
+    select_tables_after_last_delete,
     statement_shapes,
     statement_shapes_after_last_delete,
 )
@@ -5246,13 +5247,13 @@ _SAVE_REJECTED_ROWS: dict[str, _SaveRejectedRow] = {
         ),
         "change_item",
         "update",
-        15,
+        16,
     ),
     "deleteItem": _SaveRejectedRow(
         _save_rejected_query("deleteItem", "$id: ID!", "id: $id"),
         "delete_item",
         "delete",
-        11,
+        12,
     ),
     "createItemViaForm": _SaveRejectedRow(
         _save_rejected_query("createItemViaForm", "$d: ItemModelFormInput!", "data: $d"),
@@ -5268,7 +5269,7 @@ _SAVE_REJECTED_ROWS: dict[str, _SaveRejectedRow] = {
         ),
         "change_item",
         "update",
-        16,
+        17,
     ),
     "createItemViaSerializer": _SaveRejectedRow(
         _save_rejected_query(
@@ -5288,7 +5289,7 @@ _SAVE_REJECTED_ROWS: dict[str, _SaveRejectedRow] = {
         ),
         "change_item",
         "update",
-        15,
+        16,
     ),
 }
 
@@ -5352,8 +5353,9 @@ def test_item_save_time_validation_error_returns_the_name_keyed_envelope(mutatio
     ``serializer.save()``. Each answers with
     ``node: null`` and one ``FieldError`` on ``name`` carrying the rule's message and
     code (no top-level error, no masked policy message), the write rolled back, and
-    the exact query count of a request that never reached the ``INSERT`` / ``UPDATE``
-    / ``DELETE``.
+    the exact query count of a request whose write was refused: an update or delete
+    counts the existence probe of its located row the refusal runs (the row is still
+    there, so the refusal stands).
     """
     seed_data(1)
     create_users(1)
@@ -5388,8 +5390,8 @@ def test_item_save_time_validation_error_returns_the_name_keyed_envelope(mutatio
 #: the transaction implicitly, so only SQLite's reaches the wrapper.
 _ASYNC_SAVE_REJECTED_QUERIES: dict[str, int] = {
     "createItem": 8,
-    "updateItem": 11,
-    "deleteItem": 7,
+    "updateItem": 12,
+    "deleteItem": 8,
     "createItemViaForm": 9,
     "createItemViaSerializer": 11,
 }
@@ -5438,7 +5440,8 @@ async def test_item_save_time_validation_error_returns_the_envelope_over_graphql
     The async view runs the same sync write pipeline behind one ``sync_to_async``
     boundary, so the model flavor's create / update / delete and the ``ModelForm`` and
     serializer creates answer with the same ``name``-keyed envelope, write nothing,
-    and run the exact statement count of a request that never reached the write.
+    and run the exact statement count of a refused write (an update or delete probing
+    its located row once).
     """
     await sync_to_async(seed_data)(1)
     await sync_to_async(create_users)(1)
@@ -6417,6 +6420,179 @@ def test_update_of_an_item_deleted_after_authorization_is_conflict_over_http(
         )
         == writes
     )
+    assert _stored_item(item.pk) == before
+
+
+# A step failure on a located row is checked against the row before it is answered: the
+# ``Category`` delete below cascades to the ``Item`` being updated, so an error from the
+# decode or validation that ran after it (the form re-reading the omitted category's stored
+# key, ``full_clean`` validating it as a co-member of ``unique_item_per_category``, the
+# relation lookup of the named category, DRF's ``UniqueTogetherValidator`` reading the
+# vanished row's category) describes a row that no longer exists, and every flavor answers
+# ``conflict`` instead. A category deleted while the item survives keeps its own answer.
+
+#: Every ``Item`` update mutation -> its partial input type.
+_ITEM_UPDATE_RACE_INPUTS = {
+    **_UPDATE_ITEM_INPUTS,
+    "updateItemWithFileViaForm": "ItemFileModelFormPartialInput",
+}
+
+
+def _item_race_mutation(mutation: str) -> type[DjangoMutation]:
+    """The ``Item`` update class the rebuilt schema serves, read off its module at test time."""
+    return {
+        "updateItem": products_schema.UpdateItem,
+        "updateItemViaForm": products_schema.UpdateItemViaForm,
+        "updateItemViaSerializer": products_schema.UpdateItemViaSerializer,
+        "updateItemWithFileViaForm": products_schema.UpdateItemWithFileViaForm,
+    }[mutation]
+
+
+def _item_race_categories() -> tuple[models.Item, models.Category, models.Category]:
+    """The earliest seeded item, its category, and another seeded category."""
+    item = models.Item.objects.earliest("pk")
+    other = models.Category.objects.exclude(pk=item.category_id).earliest("pk")
+    return item, item.category, other
+
+
+def _item_race_input(shape: str, category: models.Category, other: models.Category) -> JSONObject:
+    """A rename omitting ``categoryId``, naming the item's own category, or naming ``other``."""
+    named = {"names": category, "names-other": other}.get(shape)
+    if named is None:
+        return {"name": "Renamed"}
+    return {"name": "Renamed", "categoryId": _global_id("products.category", named.pk)}
+
+
+def _post_item_race(
+    mutation: str,
+    item: models.Item,
+    data: JSONObject,
+) -> tuple[JSONObject, list[str]]:
+    """Post one ``Item`` update as a ``change_item`` user; answer its payload + captured SQL."""
+    client = _login_with_perm("staff_1", "change_item")
+    query = (
+        f"mutation($id: ID!, $d: {_ITEM_UPDATE_RACE_INPUTS[mutation]}!) {{ "
+        f"{mutation}(id: $id, data: $d) {{ node {{ name }} errors {{ field messages codes }} }} }}"
+    )
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_graphql(
+            query,
+            client=client,
+            variables={"id": _global_id("products.item", item.pk), "d": data},
+        )
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    return (
+        json_object(payload, "data", mutation),
+        [query["sql"] for query in captured.captured_queries],
+    )
+
+
+#: The pipeline's tail after a step failure: its rollback and releases.
+_ITEM_REFUSED_TAIL = ["ROLLBACK", "RELEASE", "RELEASE"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mutation", "shape", "category_reads"),
+    [
+        pytest.param("updateItem", "omit", 1, id="updateItem-omit"),
+        pytest.param("updateItem", "names", 1, id="updateItem-names"),
+        pytest.param("updateItemViaForm", "omit", 1, id="updateItemViaForm-omit"),
+        pytest.param("updateItemViaForm", "names", 1, id="updateItemViaForm-names"),
+        pytest.param("updateItemWithFileViaForm", "omit", 1, id="updateItemWithFileViaForm-omit"),
+        pytest.param(
+            "updateItemWithFileViaForm",
+            "names",
+            1,
+            id="updateItemWithFileViaForm-names",
+        ),
+        pytest.param("updateItemViaSerializer", "omit", 1, id="updateItemViaSerializer-omit"),
+        pytest.param("updateItemViaSerializer", "names", 1, id="updateItemViaSerializer-names"),
+        pytest.param(
+            "updateItemViaSerializer",
+            "names-other",
+            3,
+            id="updateItemViaSerializer-names-other",
+        ),
+    ],
+)
+def test_item_update_whose_category_delete_cascaded_to_the_row_is_conflict_over_http(
+    mutation: str,
+    shape: str,
+    category_reads: int,
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """An ``Item`` update whose row a category delete cascaded away is ``conflict``.
+
+    The stand-in deletes the item's category after authorization, and the ``CASCADE`` takes
+    the item with it. Every flavor's decode or validation then fails on a category it reads
+    (the omitted stored key, the named category, or, for the serializer, DRF's
+    ``UniqueTogetherValidator`` reading the row's category: a ``DoesNotExist``). The
+    pipeline probes the located row, finds it gone, and answers ``conflict`` on ``id``
+    instead of the field error or the masked exception. The transaction rolls back: the
+    item, its entries and its category are stored as before.
+    """
+    seed_data(1)
+    create_users(1)
+    item, category, other = _item_race_categories()
+    before = (_stored_item(item.pk), models.Category.objects.filter(pk=category.pk).count())
+    delete_after_authorization(
+        _item_race_mutation(mutation),
+        lambda: models.Category._base_manager.filter(pk=category.pk).delete(),
+    )
+
+    result, sql = _post_item_race(mutation, item, _item_race_input(shape, category, other))
+
+    assert result == {"node": None, "errors": _CONFLICT_ERRORS}
+    assert statement_shapes_after_last_delete(sql) == [
+        *["SELECT"] * (category_reads + 1),
+        *_ITEM_REFUSED_TAIL,
+    ]
+    assert select_tables_after_last_delete(sql) == [
+        *['"products_category"'] * category_reads,
+        '"products_item"',
+    ]
+    assert (_stored_item(item.pk), models.Category.objects.filter(pk=category.pk).count()) == (
+        before
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mutation", sorted(_ITEM_UPDATE_RACE_INPUTS))
+def test_item_update_naming_a_category_deleted_after_authorization_keeps_invalid_over_http(
+    mutation: str,
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """A named category deleted while the item survives keeps the relation's ``invalid``.
+
+    The stand-in deletes only the category the input names, not the item's own: the
+    relation lookup refuses the id, the probe finds the located row still present, and the
+    field error stands, a true answer about the input. Nothing is written.
+    """
+    seed_data(1)
+    create_users(1)
+    item, category, other = _item_race_categories()
+    before = _stored_item(item.pk)
+    delete_after_authorization(
+        _item_race_mutation(mutation),
+        lambda: models.Category._base_manager.filter(pk=other.pk).delete(),
+    )
+
+    result, sql = _post_item_race(mutation, item, _item_race_input("names-other", category, other))
+
+    assert result == {
+        "node": None,
+        "errors": [
+            {
+                "field": "categoryId",
+                "messages": ["Invalid id for relation 'categoryId'."],
+                "codes": ["invalid"],
+            },
+        ],
+    }
+    assert statement_shapes_after_last_delete(sql) == ["SELECT", "SELECT", *_ITEM_REFUSED_TAIL]
+    assert select_tables_after_last_delete(sql) == ['"products_category"', '"products_item"']
     assert _stored_item(item.pk) == before
 
 

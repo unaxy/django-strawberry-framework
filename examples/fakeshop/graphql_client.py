@@ -173,6 +173,21 @@ def statement_shapes_after_last_delete(sqls: Sequence[str]) -> list[str]:
     return statement_shapes(sqls[last_delete + 1 :])
 
 
+def select_tables_after_last_delete(sqls: Sequence[str]) -> list[str]:
+    """Return the quoted table each ``SELECT`` after the last ``DELETE`` reads first.
+
+    ``SELECT ... FROM "t" ...`` reads ``"t"``, in statement order: which rows a write
+    looked up after a stand-in concurrent delete of its located row, the existence probe
+    of the located row included.
+    """
+    last_delete = max(index for index, sql in enumerate(sqls) if sql.startswith("DELETE"))
+    return [
+        sql.split(" FROM ", 1)[1].split()[0]
+        for sql in sqls[last_delete + 1 :]
+        if sql.startswith("SELECT")
+    ]
+
+
 #: ``getattr`` typed ``-> object``: reads a setting (django-stubs types every ``LazySettings``
 #: attribute ``Any``), ``User.pk`` or a module attribute as a value the caller then checks.
 read_attr: Callable[[object, str], object] = getattr

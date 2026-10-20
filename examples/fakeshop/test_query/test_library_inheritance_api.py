@@ -66,6 +66,7 @@ from graphql_client import (
     json_list,
     json_object,
     json_str,
+    select_tables_after_last_delete,
     statement_shapes,
     statement_shapes_after_last_delete,
 )
@@ -1225,3 +1226,55 @@ def test_lending_desk_update_of_a_row_deleted_after_authorization_is_conflict_ov
     assert result == {"result": None, "errors": _DESK_CONFLICT_ERRORS}
     assert statement_shapes_after_last_delete(sql) == [*writes, *_REFUSED_TAIL]
     assert _stored_desk(desk.pk) == before
+
+
+@pytest.mark.django_db
+def test_lending_desk_update_naming_a_ticket_that_vanished_with_the_row_is_conflict_over_http(
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """A desk update naming its lead ticket, deleted whole with its tickets, is ``conflict``.
+
+    The stand-in deletes the multi-table desk through its ``Venue`` parent after
+    authorization, and the ``CASCADE`` takes the repair ticket the input names as
+    ``leadTicketId``. The relation lookup refuses the ticket; the pipeline probes the located
+    desk (through its own table), finds it gone and answers ``conflict`` on ``id`` instead of
+    the relation's ``invalid``. The transaction rolls back: the desk, its venue row and its
+    ticket are stored as before.
+    """
+    desk = models.LendingDesk.objects.create(name="Desk", window_count=2)
+    ticket = models.RepairTicket.objects.create(code="T-1", venue=desk)
+    _ = models.Venue._base_manager.filter(pk=desk.pk).update(lead_ticket=ticket)
+
+    def stored() -> object:
+        return (
+            _stored_desk(desk.pk),
+            list(models.Venue._base_manager.filter(pk=desk.pk).values_list("lead_ticket_id")),
+            models.RepairTicket._base_manager.filter(venue_id=desk.pk).count(),
+        )
+
+    before = stored()
+    delete_after_authorization(
+        library_schema.UpdateLendingDesk,
+        lambda: models.Venue._base_manager.filter(pk=desk.pk).delete(),
+    )
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = graphql_payload(
+            "mutation($id: ID!, $d: LendingDeskPartialInput!) { "
+            "updateLendingDesk(id: $id, data: $d) { result { name } "
+            "errors { field messages codes } } }",
+            variables={"id": desk.pk, "d": {"name": "Renamed Desk", "leadTicketId": ticket.pk}},
+        )
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "updateLendingDesk") == {
+        "result": None,
+        "errors": _DESK_CONFLICT_ERRORS,
+    }
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert statement_shapes_after_last_delete(sql) == ["SELECT", "SELECT", *_REFUSED_TAIL]
+    assert select_tables_after_last_delete(sql) == [
+        '"library_repairticket"',
+        '"library_lendingdesk"',
+    ]
+    assert stored() == before

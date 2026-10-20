@@ -56,7 +56,12 @@ and the load-bearing invariants this module owns:
   ``forced_save_or_field_errors``, shared by the model and ``ModelForm``
   flavors): a located row a concurrent transaction deleted after the locate is
   the in-band ``conflict`` envelope on ``id``, never re-INSERTed, on every table
-  a multi-table row spans.
+  a multi-table row spans. A located row's decode / validation / write failure
+  (its field errors, or a ``DoesNotExist`` escaping the step) is the same
+  envelope when a probe then finds the row gone (``located_row_vanished``, run
+  only on such a failure): those errors described a row that no longer exists. A
+  row still present keeps the step's own answer, and its ``DoesNotExist``
+  propagates.
 - **A save-time ``ValidationError`` feeds the same envelope**: a consumer
   ``Model.save()`` / ``delete()`` override, a ``pre_save`` / ``post_save`` /
   ``m2m_changed`` / ``pre_delete`` signal receiver, or a plain form's
@@ -89,7 +94,7 @@ import datetime
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Model, ProtectedError, RestrictedError
 from django.utils import timezone
@@ -135,6 +140,7 @@ from django_strawberry_framework.utils.write_transaction import (
     check_instance_write_alias,
     conflict_error,
     forced_update_conflict_errors,
+    located_row_vanished,
     not_updated_exceptions,
     open_write_pipeline,
     pin_write_queryset,
@@ -311,7 +317,14 @@ def run_write_pipeline_sync(
     ``transaction.atomic()`` block for rollback - so a ``write_step`` that made a
     partial write and THEN raised a validation error (a custom
     ``serializer.save()`` that inserts a row, then raises) never commits the
-    partial write; the error envelope is the no-effect outcome.
+    partial write; the error envelope is the no-effect outcome. On a located
+    row (update / delete) a failed step, or a ``DoesNotExist`` escaping one, is
+    first checked against the row (``located_row_vanished``): a row a concurrent
+    transaction removed is the ``conflict`` envelope on ``id`` in place of the
+    step's answer, and a row still present keeps it (the exception re-raised).
+    A step that already answered ``conflict`` is not probed again, a create has no
+    located row (its ``DoesNotExist`` propagates unprobed), and a success runs no
+    probe.
     """
     # The cooperative deadline (spec-047) BEFORE the pipeline's own transaction
     # opens: a write pipeline locates, locks, and writes rows, so an operation
@@ -423,13 +436,42 @@ def run_write_pipeline_sync(
                         ),
                     )
 
-            decoded = decode_step(instance)
-            if isinstance(decoded, StepFailure):
-                return _error_payload(decoded.errors)
-
-            saved = write_step(instance, decoded)
+            # A located row a concurrent transaction removed after the locate makes
+            # every later read answer about a row that no longer exists: an omitted
+            # M2M re-read as empty, a stored key whose target cascaded away with the
+            # row, a validator reading the row's relation through its descriptor. So
+            # a step failure on a located row - its field errors, or a
+            # ``DoesNotExist`` escaping the step - is checked against the row first:
+            # a row demonstrably gone is the ``conflict`` envelope, the answer the
+            # save itself gives such a row. A row still present keeps the step's own
+            # answer (the exception re-raised), a step that already answered
+            # ``conflict`` is not probed again, and a success runs no extra query.
+            try:
+                decoded = decode_step(instance)
+                saved = (
+                    decoded if isinstance(decoded, StepFailure) else write_step(instance, decoded)
+                )
+            except ObjectDoesNotExist:
+                if instance is None or not located_row_vanished(
+                    type(instance),
+                    authorized_pk,
+                    using,
+                ):
+                    raise
+                return _error_payload([conflict_error()])
             if isinstance(saved, StepFailure):
-                return _error_payload(saved.errors)
+                errors = saved.errors
+                if (
+                    instance is not None
+                    and errors != [conflict_error()]
+                    and located_row_vanished(
+                        type(instance),
+                        authorized_pk,
+                        using,
+                    )
+                ):
+                    errors = [conflict_error()]
+                return _error_payload(errors)
 
             if tail_step is not None:
                 return tail_step(saved)

@@ -332,7 +332,9 @@ package-internal; Slice 4 is the live consumer surface.
     form field name re-keyed to the GraphQL input field the client sent, the form's
     `NON_FIELD_ERRORS` bucket → the `"__all__"` sentinel `036` defined, via the reused
     `validation_error_to_field_errors(ValidationError(form.errors.as_data()), key_map)`)
-    and returns a null-object payload; **write** via the form's save (`ModelForm`; an
+    and returns a null-object payload (on an update whose located row a concurrent
+    transaction removed meanwhile, the skeleton's probe answers the `conflict` envelope
+    on `id` instead); **write** via the form's save (`ModelForm`; an
     update and a client-assigned-key create split around `commit=False`) /
     `perform_mutate` (plain form), **wrapped by the `036` save-time mappers**
     (`save_or_field_errors`; a `ModelForm` update `forced_save_or_field_errors`: an
@@ -1600,7 +1602,9 @@ step cannot silently write through a second connection; and an immutable
 `authorized_pk` / `target_state` snapshot is captured right after the locate, so a
 later step cannot retarget the write to a row the caller was not authorized for. A
 step returning a `StepFailure` (its `errors: list[FieldError]`) marks the block for rollback, so a partial write
-followed by a validation failure never commits.
+followed by a validation failure never commits; on an update whose located row the
+skeleton's probe (`django_strawberry_framework/utils/write_transaction.py::located_row_vanished`)
+then finds gone, that envelope is `conflict` on `id` in place of the step's errors.
 
 Rationale companion: [Decision 8][rationale-d8].
 
@@ -1910,6 +1914,17 @@ Rationale companion: [Decision 14][rationale-d14].
   `FOR UPDATE`) matches no row on some table and returns the null-object + `conflict`
   `FieldError` envelope on `id` with the transaction rolled back, never a re-inserted
   row reported as updated.
+- **Validation-time disappearing row.** A located row removed before the bound form
+  validated (deleted, or cascaded away with a row it references) fails the form on data
+  rebuilt from a row that no longer exists: an omitted M2M re-read from the database as
+  empty (`required`), an omitted relation whose stored key's target vanished with the row
+  (`invalid_choice`), a named relation that vanished with it. That failure is the same
+  `conflict` envelope on `id`, never `form.errors`: on a step failure over a located row
+  the shared skeleton (`django_strawberry_framework/mutations/resolvers.py::run_write_pipeline_sync`)
+  probes it (`django_strawberry_framework/utils/write_transaction.py::located_row_vanished`)
+  and answers `conflict` when it is gone. A row still present keeps `form.errors`: a
+  partial update after the only kept genre was deleted is `genres` `required`, true about
+  the row.
 - **Write-time blank non-text choice column.** A `ModelForm` over a `blank=True,
   null=False` choice column of any non-text type (e.g. integer, decimal, date) cleans
   an explicit `null` (or an omission with no column default) to `""`, which only
@@ -2018,7 +2033,16 @@ behavior reachable through `/graphql/`, package tests own internals.
   (`examples/fakeshop/test_query/test_library_api.py::test_form_update_of_a_row_deleted_after_authorization_is_conflict_over_http`),
   as do `updateItemViaForm` and the multi-table `updateLendingDeskViaForm`, deleted whole
   or only from the desk's own table, whose no-race update names `update_fields`
-  (`test_products_api.py`, `test_library_inheritance_api.py`). **Write-time consumer `ValidationError`** — `Item.save()`
+  (`test_products_api.py`, `test_library_inheritance_api.py`). **Validation-time
+  disappearing row** — `updateItemViaForm` / `updateItemWithFileViaForm`
+  (`test_products_api.py::test_item_update_whose_category_delete_cascaded_to_the_row_is_conflict_over_http`),
+  `updateBookViaForm`, `updatePrintingViaForm`, `updatePatronProfileViaForm` and
+  `updateShelfViaForm`
+  (`test_library_api.py::test_update_whose_row_vanished_before_validation_failed_is_conflict_over_http`)
+  whose located row vanished before the form validated return `conflict` with the probe as
+  the last read, rolled back; the row-present control keeps `genres` `required`
+  (`test_library_api.py::test_form_partial_update_after_a_kept_genre_was_deleted_keeps_required_over_http`).
+  **Write-time consumer `ValidationError`** — `Item.save()`
   refusing `SAVE_REJECTED_ITEM_NAME` on `createItemViaForm` / `updateItemViaForm`
   returns the `name`-keyed envelope with nothing written (the create also over the
   async view), and the kanban `setCardStatus` illegal transition (a `pre_save`

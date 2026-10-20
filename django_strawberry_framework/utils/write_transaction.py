@@ -26,10 +26,16 @@ discipline instead of three drifting copies:
   whose joins / unions / annotations a ``FOR UPDATE`` cannot legally carry.
   Backends without ``FOR UPDATE`` (sqlite) skip the clause silently, so the
   lock is a no-op there by Django's own contract.
-- **Disappearing-row conflicts.** ``forced_update_conflict_errors`` maps a
-  zero-row forced update to the in-band ``conflict`` ``FieldError`` - but ONLY
-  when the transaction is still usable and the row is demonstrably absent;
-  any other database error propagates and rolls back. Django 6.0 raises the
+- **Disappearing-row conflicts.** ``located_row_vanished`` is the one probe every
+  ``conflict`` answer rests on: a base-manager existence check that answers "gone"
+  only when it ran on a usable transaction and found no row.
+  ``forced_update_conflict_errors`` maps a zero-row forced update to the in-band
+  ``conflict`` ``FieldError`` - but ONLY when that probe finds the row gone; any
+  other database error propagates and rolls back. The write pipeline runs the same
+  probe on an update / delete step that failed (field errors, or an escaping
+  ``DoesNotExist``), so a located row a concurrent transaction removed before its
+  decode or validation finished is the ``conflict`` envelope too
+  (``mutations/resolvers.py::run_write_pipeline_sync``). Django 6.0 raises the
   typed ``Model.NotUpdated``; Django 5.2 raises a bare ``DatabaseError``, so
   the compat catch is version-sensitive (``not_updated_exceptions``). The model
   and ``ModelForm`` flavors update through
@@ -1218,7 +1224,9 @@ def conflict_error() -> FieldError:
     """Build the in-band concurrent-write ``conflict`` ``FieldError`` on ``id``.
 
     The disappearing-row envelope: the target existed at locate but a concurrent
-    transaction removed (or made unwritable) it before this one finished. Keyed
+    transaction removed (or made unwritable) it before this one finished - found
+    by the save, the post-write re-fetch, or the ``located_row_vanished`` probe a
+    failed update / delete step runs, whose field errors it replaces. Keyed
     to ``id`` like the not-found envelope - the failure is about the addressed
     row - with the distinct ``conflict`` code so a client can retry rather than
     treat it as a permanent miss.
@@ -1228,6 +1236,25 @@ def conflict_error() -> FieldError:
         "The row was changed or removed by a concurrent operation; retry.",
         codes=FIELD_ERROR_CODE_CONFLICT,
     )
+
+
+def located_row_vanished(model: type[models.Model], pk: object, alias: str) -> bool:
+    """Return whether the located row ``pk`` is demonstrably gone from ``alias``'s database.
+
+    The one disappearing-row probe every ``conflict`` answer rests on: a base-manager
+    ``exists()`` of the row, never the visibility queryset (a row a concurrent write
+    made hidden was not removed). Only a probe that ran and found no row answers
+    ``True``; every other outcome answers ``False``, so the caller's own outcome
+    stands: a transaction on ``alias`` already marked ``needs_rollback`` answers
+    without a query, and a probe that fails (a poisoned transaction the flag did not
+    reflect) answers ``False`` with its ``DatabaseError`` discarded.
+    """
+    if connections[alias].needs_rollback:
+        return False
+    try:
+        return not model._base_manager.using(alias).filter(pk=pk).exists()
+    except DatabaseError:
+        return False
 
 
 def not_updated_exceptions(model: type[models.Model]) -> tuple[type[BaseException], ...]:
@@ -1259,22 +1286,14 @@ def forced_update_conflict_errors(
     1. the transaction on ``alias`` is still usable (Django raised the zero-row
        signal in Python; a real backend error would have poisoned the
        connection / marked it ``needs_rollback``), and
-    2. the row is demonstrably absent (a base-manager ``exists()`` probe - the
-       forced update matched zero rows because the row is gone, not because of
-       some other update anomaly).
+    2. the row is demonstrably absent (``located_row_vanished`` - the forced
+       update matched zero rows because the row is gone, not because of some
+       other update anomaly).
 
-    Anything else re-raises: a genuine database error must propagate and roll
-    the transaction back, never be swallowed into a retryable envelope.
+    Anything else re-raises ``exc``, a probe that itself failed included: a
+    genuine database error must propagate and roll the transaction back, never be
+    swallowed into a retryable envelope.
     """
-    connection = connections[alias]
-    if not connection.needs_rollback:
-        model = type(instance)
-        try:
-            row_present = model._base_manager.using(alias).filter(pk=pk_of(instance)).exists()
-        except DatabaseError:
-            # The probe itself failed (a poisoned transaction the flag did not
-            # reflect): the ORIGINAL error is the one that must propagate.
-            raise exc from None
-        if not row_present:
-            return [conflict_error()]
+    if located_row_vanished(type(instance), pk_of(instance), alias):
+        return [conflict_error()]
     raise exc

@@ -1083,7 +1083,9 @@ def validate_select_for_update(flavor: str, mutation_name: str, meta: type[objec
     lock, and a deleted one surfaces as the in-band ``conflict`` envelope on every
     flavor, never re-INSERTed by the update on any table a multi-table row spans
     (``mutations/resolvers.py::save_located_row``; the serializer flavor through
-    its write witness). On a backend without
+    its write witness), and never answered by a field error its decode or
+    validation reached first (``mutations/resolvers.py::run_write_pipeline_sync``
+    probes the located row on a step failure). On a backend without
     ``FOR UPDATE`` (sqlite) Django skips the clause silently, so ``True`` is
     safe to leave in place regardless of backend. A non-bool is a clear
     class-creation error.
