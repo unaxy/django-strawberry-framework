@@ -820,18 +820,13 @@ _FROZEN_VIEW_CONTAINERS: tuple[
 )
 
 
-def _is_one_of(value: object, classes: tuple[type[object], ...]) -> bool:
-    """Whether ``value``'s real class is (a subclass of) one of ``classes``."""
-    return any(truth.is_instance(value, cls) for cls in classes)
-
-
 def _is_frozen_container(value: object) -> TypeIs[_FrozenContainer]:
     """Whether ``value``'s real class is one of the ``_FROZEN_VIEW_CONTAINERS``.
 
     Asked of the real class (``truth.is_instance``, subclasses included), never of a
     ``__class__`` read, which can raise or claim a container the value is not.
     """
-    return _is_one_of(value, _FROZEN_VIEW_CONTAINERS)
+    return truth.is_one_of(value, _FROZEN_VIEW_CONTAINERS)
 
 
 @overload
@@ -878,7 +873,7 @@ def _frozen_hook_view(value: object) -> object:
             return _upload_metadata(cast("_FileAny", item))
         if truth.is_instance(item, bytearray):
             return bytes(item)
-        if _is_one_of(item, _IMMUTABLE_LEAF_TYPES):
+        if truth.is_one_of(item, _IMMUTABLE_LEAF_TYPES):
             return item
         raise ConfigurationError(
             "SerializerMutation hook data contains a value of type "
@@ -906,7 +901,7 @@ def _frozen_hook_view(value: object) -> object:
         if truth.is_instance(source, dict):
             # ``_new_acc`` built a dict accumulator for exactly this dict source.
             return MappingProxyType(cast("dict[object, object]", acc))
-        if _is_one_of(source, (set, frozenset)):
+        if truth.is_one_of(source, (set, frozenset)):
             return frozenset(acc)
         return tuple(acc)
 

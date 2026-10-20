@@ -11,6 +11,7 @@ read defeated a live attack rather than a harmless double.
 
 from __future__ import annotations
 
+import abc
 import enum
 import functools
 import inspect
@@ -538,6 +539,25 @@ def test_class_claimer_intercepts_isinstance() -> None:
     assert DISPATCHED == []
 
 
+def test_class_claimer_intercepts_isinstance_of_a_tuple() -> None:
+    assert isinstance(_ClassClaimer(), (str, int)) is True
+    assert DISPATCHED == ["class", "class"]
+    DISPATCHED.clear()
+    assert truth.is_one_of(_ClassClaimer(), (str, int)) is False
+    assert truth.is_one_of(_ClassClaimer(), (str, _ClassClaimer)) is True
+    assert DISPATCHED == []
+
+
+def test_raising_class_intercepts_isinstance_of_a_tuple() -> None:
+    with pytest.raises(RuntimeError, match="__class__"):
+        isinstance(_ClassRaiser(), (str, int))
+    assert DISPATCHED == ["class"]
+    DISPATCHED.clear()
+    assert truth.is_one_of(_ClassRaiser(), (str, int)) is False
+    assert truth.is_one_of(_ClassRaiser(), (str, _ClassRaiser)) is True
+    assert DISPATCHED == []
+
+
 def test_getattr_trap_intercepts_the_ordinary_read_of_a_missing_attribute() -> None:
     trap = _GetattrTrap()
     with pytest.raises(RuntimeError, match="absent"):
@@ -635,6 +655,25 @@ def test_hostile_str_is_copied_through_the_base_slot() -> None:
 def test_is_subclass_of_a_non_class_is_false() -> None:
     assert truth.is_subclass(3, int) is False
     assert truth.is_subclass(_ClassRaiser(), _ClassRaiser) is False
+
+
+def test_is_one_of_accepts_a_real_subclass_and_rejects_an_empty_tuple() -> None:
+    true_value: object = True
+    assert truth.is_one_of(true_value, (str, int)) is True
+    assert truth.is_one_of(true_value, ()) is False
+
+
+def test_is_one_of_ignores_a_virtual_abc_registration() -> None:
+    class _Virtual(abc.ABC):
+        """An ABC ``_Unrelated`` is registered on but never inherits."""
+
+        @abc.abstractmethod
+        def required(self) -> None:
+            """The abstract member that makes this a real ABC."""
+
+    _ = _Virtual.register(_Unrelated)
+    assert isinstance(_Unrelated(), (str, _Virtual)) is True
+    assert truth.is_one_of(_Unrelated(), (str, _Virtual)) is False
 
 
 def test_is_type_and_is_exact() -> None:
