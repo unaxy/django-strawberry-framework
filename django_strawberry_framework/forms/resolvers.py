@@ -105,7 +105,12 @@ and the form-specific invariants this module owns:
   (``mutations/resolvers.py::save_located_row``, whose ``force_update`` the model's
   ``save()`` receives, inside ``forced_save_or_field_errors``): a located row a
   concurrent transaction deleted after the locate is the ``conflict`` envelope on
-  ``id``, never re-INSERTed. Every other create is one ``form.save()``.
+  ``id``, never re-INSERTed. A bound form that fails over such a row (the omitted
+  M2M rebuilt from the now-empty database, an omitted relation's stored key whose
+  target cascaded away with it) is the same envelope, not ``form.errors``: the
+  shared skeleton probes the located row on a step failure
+  (``mutations/resolvers.py::run_write_pipeline_sync``). Every other create is one
+  ``form.save()``.
 
 - **The ``ModelForm`` re-fetch rides the ``036`` ``refetch_optimized`` G2 path**
   (Decision 9): by pk WITHOUT the visibility filter, routed through

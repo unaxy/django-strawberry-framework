@@ -48,6 +48,7 @@ from graphql_client import (
     middleware_without_debug_toolbar,
     response_json,
     saved_pk,
+    select_tables_after_last_delete,
     statement_shapes_after_last_delete,
 )
 from graphql_client import assert_graphql_data as _assert_graphql_data
@@ -12096,12 +12097,14 @@ def test_update_book_at_repair_desk_validates_the_omitted_stored_choice_over_htt
             },
             variables={"id": global_id_for(library_schema.BookType, book.pk), "d": {}},
         )
-    # The located row is read once; a refused form writes nothing and rolls its savepoint back,
-    # and an admitted one UPDATEs inside the forced update's own savepoint.
+    # The located row is read once; a refused form writes nothing, probes that the located row
+    # still exists (so its own error stands) and rolls its savepoint back, and an admitted one
+    # UPDATEs inside the forced update's own savepoint.
     assert [query["sql"].split()[0] for query in captured.captured_queries] == (
         [
             "SAVEPOINT",
             "SAVEPOINT",
+            "SELECT",
             "SELECT",
             "ROLLBACK",
             "RELEASE",
@@ -13562,8 +13565,9 @@ _PRINTING_WRITES = {
 }
 
 #: Statements a refused ``Printing`` write runs besides its ``Edition`` lookups: two
-#: savepoints opened, the inner one rolled back, both released, plus the update's locate.
-_PRINTING_WRITE_FRAME_QUERIES = {"create": 5, "update": 6}
+#: savepoints opened, the inner one rolled back, both released, plus the update's locate and
+#: its probe that the located row still exists.
+_PRINTING_WRITE_FRAME_QUERIES = {"create": 5, "update": 7}
 
 
 def _post_printing_write(
@@ -17910,8 +17914,8 @@ def _forced_update_conflict(table: str) -> list[str]:
     ]
 
 
-class _FormUpdateRace(NamedTuple):
-    """A ``ModelForm`` update over a row the stand-in deletes, with its stored-state probe."""
+class _UpdateRace(NamedTuple):
+    """An update over a row the stand-in deletes, with its stored-state probe."""
 
     mutation: type[DjangoMutation]
     query: str
@@ -17920,7 +17924,7 @@ class _FormUpdateRace(NamedTuple):
     delete: Callable[[], object]
 
 
-def _book_form_update_race() -> _FormUpdateRace:
+def _book_form_update_race() -> _UpdateRace:
     """A book with genres, an archived genre and a loan: a full form input naming ``genres``."""
     book = models.Book.objects.create(title="RaceBook", shelf=_seed_shelf())
     kept, archived, sent = (
@@ -17938,7 +17942,7 @@ def _book_form_update_race() -> _FormUpdateRace:
             models.Loan._base_manager.filter(book_id=book.pk).count(),
         )
 
-    return _FormUpdateRace(
+    return _UpdateRace(
         library_schema.UpdateBookViaForm,
         "mutation($id: ID!, $d: BookGenresModelFormPartialInput!) { "
         "updateBookViaForm(id: $id, data: $d) { node { title } errors { field messages codes } } }",
@@ -17955,7 +17959,7 @@ def _book_form_update_race() -> _FormUpdateRace:
     )
 
 
-def _profile_form_update_race() -> _FormUpdateRace:
+def _profile_form_update_race() -> _UpdateRace:
     """A patron profile, whose primary key is its client-assigned one-to-one ``patron``."""
     patron = models.Patron.objects.create(name="RaceProfilePatron")
     _ = models.PatronProfile.objects.create(patron=patron, address_2="Kept")
@@ -17965,7 +17969,7 @@ def _profile_form_update_race() -> _FormUpdateRace:
             models.PatronProfile._base_manager.filter(pk=patron.pk).values_list("address_2"),
         )
 
-    return _FormUpdateRace(
+    return _UpdateRace(
         library_schema.UpdatePatronProfileViaForm,
         "mutation($id: ID!, $d: PatronProfileGenreFormPartialInput!) { "
         "updatePatronProfileViaForm(id: $id, data: $d) { node { secondaryAddress } "
@@ -18001,7 +18005,7 @@ def _profile_form_update_race() -> _FormUpdateRace:
     ],
 )
 def test_form_update_of_a_row_deleted_after_authorization_is_conflict_over_http(
-    race: Callable[[], _FormUpdateRace],
+    race: Callable[[], _UpdateRace],
     writes: list[str],
     delete_after_authorization: DeleteAfterAuthorization,
 ) -> None:
@@ -18030,4 +18034,349 @@ def test_form_update_of_a_row_deleted_after_authorization_is_conflict_over_http(
         )
         == writes
     )
+    assert case.stored() == before
+
+
+# A step failure on a located row is checked against the row before it is answered. Each
+# stand-in below deletes the located row itself or a row whose ``CASCADE`` takes it (the
+# book's shelf, the printing's edition, the profile's patron, the shelf's branch), so the
+# decode or validation that ran after it fails on a row that no longer exists: the form
+# rebuilding an omitted many-to-many from the database (now empty) or an omitted relation
+# from its stored key, ``full_clean`` validating the stored shelf as a co-member of a unique
+# constraint, the relation lookup of an id the input names. Every one answers ``conflict``
+# on ``id`` instead of the field error, after probing the located row.
+
+
+def _book_race(mutation: str, shape: str, deleted: str) -> _UpdateRace:
+    """A shelved book with genres, an archived genre and a loan, updated by ``mutation``.
+
+    ``shape`` omits every relation (``omit``), names a genre (``genres``) or names every
+    field (``full``); ``deleted`` is the row the stand-in removes: the book, its shelf or
+    the genre it keeps.
+    """
+    shelf = _seed_shelf()
+    book = models.Book.objects.create(title="RaceBook", subtitle="sub", shelf=shelf)
+    kept, archived, sent = (
+        models.Genre.objects.create(name=name) for name in ("RaceKept", "RaceArchived", "RaceSent")
+    )
+    book.genres.set([kept])
+    book.archive_genres.set([archived])
+    _ = models.Loan.objects.create(book=book, patron=models.Patron.objects.create(name="Racer"))
+    genres = [global_id_for(library_schema.GenreType, sent.pk)]
+    data: dict[str, object] = {"title": "Renamed"}
+    if shape != "omit":
+        data["genres"] = genres
+    if shape == "full":
+        data["subtitle"] = "Renamed too"
+        data["circulationStatus"] = "available"
+        data["shelfId"] = shelf.pk
+    input_type = {
+        "updateBookViaCustomInput": "BookPartialInput",
+        "updateBookViaForm": "BookGenresModelFormPartialInput",
+    }[mutation]
+
+    def stored() -> object:
+        return (
+            list(
+                models.Book._base_manager.filter(pk=book.pk).values_list(
+                    "title",
+                    "subtitle",
+                    "shelf_id",
+                ),
+            ),
+            sorted(saved_pk(genre.pk) for genre in book.genres.all()),
+            sorted(saved_pk(genre.pk) for genre in book.archive_genres.all()),
+            models.Loan._base_manager.filter(book_id=book.pk).count(),
+            models.Genre._base_manager.filter(pk=kept.pk).count(),
+        )
+
+    deleted_rows = {
+        "row": models.Book._base_manager.filter(pk=book.pk),
+        "shelf": models.Shelf._base_manager.filter(pk=shelf.pk),
+        "kept_genre": models.Genre._base_manager.filter(pk=kept.pk),
+    }[deleted]
+    return _UpdateRace(
+        {
+            "updateBookViaCustomInput": library_schema.UpdateBookViaCustomInput,
+            "updateBookViaForm": library_schema.UpdateBookViaForm,
+        }[mutation],
+        f"mutation($id: ID!, $d: {input_type}!) {{ "
+        f"{mutation}(id: $id, data: $d) {{ node {{ title }} errors {{ field messages codes }} }} }}",
+        {"id": global_id_for(library_schema.BookType, book.pk), "d": data},
+        stored,
+        deleted_rows.delete,
+    )
+
+
+def _printing_race(mutation: str, shape: str) -> _UpdateRace:
+    """A printing bound with a second edition, updated by ``mutation``; its edition deleted.
+
+    ``shape`` omits the relations (``omit``) or names the printing's own edition and a
+    third edition to bind with (``names``).
+    """
+    publisher = models.Publisher.objects.create(name="RacePress", house_code="RP")
+    edition, bound, named = (
+        models.Edition.objects.create(isbn_13=isbn, publisher=publisher)
+        for isbn in ("9780000000010", "9780000000020", "9780000000030")
+    )
+    printing = models.Printing.objects.create(edition=edition, run_size=5)
+    printing.bound_with.set([bound])
+    data: dict[str, object] = {"runSize": 7}
+    if shape == "names":
+        data |= {"editionId": edition.pk, "boundWith": [named.pk]}
+    input_type = {
+        "updatePrinting": "PrintingBound_uwithEditionRun_usizePartialInput",
+        "updatePrintingViaForm": "PrintingFormPartialInput",
+        "updatePrintingViaSerializer": "PrintingSerializerPartialInput",
+    }[mutation]
+
+    def stored() -> object:
+        return (
+            list(
+                models.Printing._base_manager.filter(pk=printing.pk).values_list(
+                    "edition_id",
+                    "run_size",
+                ),
+            ),
+            sorted(bound_edition.pk for bound_edition in printing.bound_with.all()),
+            models.Edition._base_manager.filter(pk=edition.pk).count(),
+        )
+
+    return _UpdateRace(
+        {
+            "updatePrinting": library_schema.UpdatePrinting,
+            "updatePrintingViaForm": library_schema.UpdatePrintingViaForm,
+            "updatePrintingViaSerializer": library_schema.UpdatePrintingViaSerializer,
+        }[mutation],
+        f"mutation($id: ID!, $d: {input_type}!) {{ "
+        f"{mutation}(id: $id, data: $d) {{ node {{ id }} errors {{ field messages codes }} }} }}",
+        {"id": global_id_for(library_schema.PrintingType, printing.pk), "d": data},
+        stored,
+        lambda: models.Edition._base_manager.filter(pk=edition.pk).delete(),
+    )
+
+
+def _profile_race(shape: str) -> _UpdateRace:
+    """A patron profile with a stored favorite genre, updated through the form; its patron deleted.
+
+    ``shape`` omits ``favoriteGenreId`` (``omit``) or names another genre (``names``).
+    """
+    patron = models.Patron.objects.create(name="RaceProfilePatron")
+    stored_genre, named_genre = (
+        models.Genre.objects.create(name=name) for name in ("StoredGenre", "NamedGenre")
+    )
+    _ = models.PatronProfile.objects.create(
+        patron=patron,
+        address_2="Kept",
+        favorite_genre=stored_genre,
+    )
+    data: dict[str, object] = {"address_2": "Renamed"}
+    if shape == "names":
+        data["favoriteGenreId"] = global_id_for(library_schema.GenreType, named_genre.pk)
+
+    def stored() -> object:
+        return (
+            list(
+                models.PatronProfile._base_manager.filter(pk=patron.pk).values_list(
+                    "address_2",
+                    "favorite_genre_id",
+                ),
+            ),
+            models.Patron._base_manager.filter(pk=patron.pk).count(),
+        )
+
+    return _UpdateRace(
+        library_schema.UpdatePatronProfileViaForm,
+        "mutation($id: ID!, $d: PatronProfileGenreFormPartialInput!) { "
+        "updatePatronProfileViaForm(id: $id, data: $d) { node { secondaryAddress } "
+        "errors { field messages codes } } }",
+        {"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
+        stored,
+        lambda: models.Patron._base_manager.filter(pk=patron.pk).delete(),
+    )
+
+
+def _shelf_race() -> _UpdateRace:
+    """A shelf with an alternate branch, renamed through the form; its own branch deleted."""
+    branch, alternate = (
+        models.Branch.objects.create(name=name, city="Boston")
+        for name in ("RaceBranch", "RaceAlternate")
+    )
+    shelf = models.Shelf.objects.create(code="RACE-1", topic="t", branch=branch)
+    shelf.alt_branches.set([alternate])
+
+    def stored() -> object:
+        return (
+            list(models.Shelf._base_manager.filter(pk=shelf.pk).values_list("topic", "branch_id")),
+            sorted(saved_pk(alt.pk) for alt in shelf.alt_branches.all()),
+            models.Branch._base_manager.filter(pk=branch.pk).count(),
+        )
+
+    return _UpdateRace(
+        library_schema.UpdateShelfViaForm,
+        "mutation($id: ID!, $d: ShelfRelationsFormPartialInput!) { "
+        "updateShelfViaForm(id: $id, data: $d) { result { code } errors { field messages codes } } }",
+        {"id": str(shelf.pk), "d": {"topic": "renamed"}},
+        stored,
+        lambda: models.Branch._base_manager.filter(pk=branch.pk).delete(),
+    )
+
+
+#: The pipeline's tail after a step failure: its rollback and releases.
+_STEP_FAILURE_TAIL = ["ROLLBACK", "RELEASE", "RELEASE"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("race", "reads"),
+    [
+        pytest.param(
+            lambda: _book_race("updateBookViaCustomInput", "full", "shelf"),
+            ['"library_shelf"', '"library_book"'],
+            id="updateBookViaCustomInput-full-shelf",
+        ),
+        pytest.param(
+            lambda: _book_race("updateBookViaCustomInput", "genres", "shelf"),
+            ['"library_genre"', '"library_shelf"', '"library_book"'],
+            id="updateBookViaCustomInput-genres-shelf",
+        ),
+        pytest.param(
+            lambda: _book_race("updateBookViaCustomInput", "omit", "shelf"),
+            ['"library_shelf"', '"library_book"'],
+            id="updateBookViaCustomInput-omit-shelf",
+        ),
+        pytest.param(
+            lambda: _book_race("updateBookViaForm", "omit", "row"),
+            ['"library_genre"', '"library_genre"', '"library_book"'],
+            id="updateBookViaForm-omit-row",
+        ),
+        pytest.param(
+            lambda: _book_race("updateBookViaForm", "omit", "shelf"),
+            ['"library_genre"', '"library_genre"', '"library_book"'],
+            id="updateBookViaForm-omit-shelf",
+        ),
+        pytest.param(
+            lambda: _printing_race("updatePrinting", "names"),
+            ['"library_edition"', '"library_printing"'],
+            id="updatePrinting-names-edition",
+        ),
+        pytest.param(
+            lambda: _printing_race("updatePrintingViaForm", "names"),
+            ['"library_edition"', '"library_printing"'],
+            id="updatePrintingViaForm-names-edition",
+        ),
+        pytest.param(
+            lambda: _printing_race("updatePrintingViaForm", "omit"),
+            [
+                '"library_edition"',
+                '"library_edition"',
+                '"library_edition"',
+                '"library_printing"',
+            ],
+            id="updatePrintingViaForm-omit-edition",
+        ),
+        pytest.param(
+            lambda: _printing_race("updatePrintingViaSerializer", "names"),
+            ['"library_edition"', '"library_printing"'],
+            id="updatePrintingViaSerializer-names-edition",
+        ),
+        pytest.param(
+            lambda: _profile_race("names"),
+            [
+                '"library_genre"',
+                '"library_patron"',
+                '"library_genre"',
+                '"library_genre"',
+                '"library_patronprofile"',
+            ],
+            id="updatePatronProfileViaForm-names-patron",
+        ),
+        pytest.param(
+            lambda: _profile_race("omit"),
+            [
+                '"library_genre"',
+                '"library_patron"',
+                '"library_genre"',
+                '"library_genre"',
+                '"library_patronprofile"',
+            ],
+            id="updatePatronProfileViaForm-omit-patron",
+        ),
+        pytest.param(
+            _shelf_race,
+            ['"library_branch"', '"library_branch"', '"library_shelf"'],
+            id="updateShelfViaForm-omit-branch",
+        ),
+    ],
+)
+def test_update_whose_row_vanished_before_validation_failed_is_conflict_over_http(
+    race: Callable[[], _UpdateRace],
+    reads: list[str],
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """An update whose located row vanished before its decode or validation failed is ``conflict``.
+
+    The stand-in deletes the located row, directly or through a ``CASCADE``, after
+    authorization. The decode or validation that runs next fails on a row that no longer
+    exists (``genres`` ``required``, ``invalid_choice`` on an omitted relation, ``invalid``
+    on a named one); the pipeline probes the located row (the last read), finds it gone and
+    answers ``conflict`` on ``id`` instead. The transaction rolls back: every row the
+    stand-in deleted is stored as before.
+    """
+    case = race()
+    before = case.stored()
+    delete_after_authorization(case.mutation, case.delete)
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = response_json(_post_graphql(case.query, variables=case.variables))
+
+    assert "errors" not in payload, payload
+    (result,) = json_object(payload, "data").values()
+    assert json_at(result, "errors") == _FORM_UPDATE_CONFLICT_ERRORS
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert statement_shapes_after_last_delete(sql) == [
+        *["SELECT"] * len(reads),
+        *_STEP_FAILURE_TAIL,
+    ]
+    assert select_tables_after_last_delete(sql) == reads
+    assert case.stored() == before
+
+
+@pytest.mark.django_db
+def test_form_partial_update_after_a_kept_genre_was_deleted_keeps_required_over_http(
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """A partial form update after its only kept genre was deleted keeps ``genres`` ``required``.
+
+    The stand-in deletes the genre the book keeps, not the book: the form rebuilds the
+    omitted ``genres`` from the database, now empty, and refuses it. The probe finds the
+    located book still present, so the field error stands, a true answer about the row.
+    Nothing is written.
+    """
+    case = _book_race("updateBookViaForm", "omit", "kept_genre")
+    before = case.stored()
+    delete_after_authorization(case.mutation, case.delete)
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = response_json(_post_graphql(case.query, variables=case.variables))
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "updateBookViaForm") == {
+        "node": None,
+        "errors": [
+            {"field": "genres", "messages": ["This field is required."], "codes": ["required"]},
+        ],
+    }
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert statement_shapes_after_last_delete(sql) == [
+        "SELECT",
+        "SELECT",
+        "SELECT",
+        *_STEP_FAILURE_TAIL,
+    ]
+    assert select_tables_after_last_delete(sql) == [
+        '"library_genre"',
+        '"library_genre"',
+        '"library_book"',
+    ]
     assert case.stored() == before

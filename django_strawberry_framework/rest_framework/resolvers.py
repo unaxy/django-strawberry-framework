@@ -97,7 +97,11 @@ The serializer-specific invariants this module owns:
   witness (``_write_witness``) records under the authorized pk on the pinned alias
   is the re-INSERT of a located row a concurrent transaction deleted after the
   locate: the step returns the in-band ``conflict`` envelope on ``id``, rolled back
-  with the re-inserted row, before the saved result is validated.
+  with the re-inserted row, before the saved result is validated. A decode or
+  ``is_valid()`` that fails over such a row first (``serializer.errors``, or a
+  ``DoesNotExist`` DRF's ``UniqueTogetherValidator`` raises reading the vanished
+  row's relation) is the same envelope: the shared skeleton probes the located row
+  on a step failure (``mutations/resolvers.py::run_write_pipeline_sync``).
 
 - **The re-fetch rides the ``036`` ``refetch_optimized`` G2 path** (spec-039 Decision 9 /
   G2): the shared skeleton re-fetches the saved object by pk WITHOUT the visibility

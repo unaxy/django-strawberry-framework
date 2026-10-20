@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 161 done, 124 to do.
+Progress: 162 done, 124 to do.
 
 ## Done
 
@@ -548,6 +548,17 @@ Progress: 161 done, 124 to do.
   `SerializerMutation.build_input` also publishes the class each bind builds, so a rebuild never resolves a parked `Int`
   input and a relation target may be declared after the root `Mutation` (69 of 69 grid cells failed "no registered
   primary" at HEAD); GraphQL type names are unchanged; fakeshop gains `updatePatronProfileGenreViaSerializer`
+- [x] 285. An update or delete whose located row a concurrent transaction deleted after authorization
+  (`Meta.select_for_update = False`, or a backend without `FOR UPDATE`) answered a misleading field error when decode or
+  validation failed before the save (an omitted relation re-read as empty or as a key that vanished with the row on
+  ModelForm / model; a named relation that vanished with the row), or a masked top-level `DoesNotExist` from DRF's
+  `UniqueTogetherValidator` on a serializer: fixed, `mutations/resolvers.py::run_write_pipeline_sync` probes a located
+  row only when its step fails (`utils/write_transaction.py::located_row_vanished`, which the save's own conflict check
+  now reuses) and answers the `conflict` envelope on `id` when the row is gone; a `DoesNotExist` escaping the step is
+  `conflict` the same way, and propagates while the row is present and on create (22 of 102 row-gone cells were not
+  `conflict` at HEAD, 102 of 102 are now; a success runs no extra query, a failure one); a model or serializer update
+  writing back a stale omitted key after a concurrent `SET_NULL` under the opt-out is Django's whole-row-save lost
+  update, refused by the database, and stays out of scope
 
 ## Outside review of the fixes
 
@@ -702,17 +713,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 284. `workspace.py run` / `prove` (`::stream`) start the command in the wrapper's process group and forward no
   signal: a SIGTERM / SIGHUP to `workspace.py` alone (`TaskStop`, `timeout`) ends the wrapper and its lease while the
   prover or pytest keeps running in the copy, so `gc` / `release` can reclaim it underneath (the catchable sibling of 142)
-- [ ] 285. An update whose located row a concurrent transaction deletes after the locate but before decode and
-  validation finish answers a misleading field error instead of `conflict`: a partial `DjangoModelFormMutation` update of
-  `Book` that omits `genres` gets `genres` `required` (the form rebuilds the M2M initial from the database, now empty),
-  and deleting the `Category` of the `Item` being updated gets `categoryId` `invalid_choice` (ModelForm) / `invalid`
-  (model); in-band and rolled back, never a silent success (seen fixing item 282, simulated in-process; needs
-  `Meta.select_for_update = False` on PostgreSQL / MySQL)
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 288. CHANGELOG entry for item 285: an update or delete whose row a concurrent transaction deleted before its
+  validation finished (`Meta.select_for_update = False` or no `FOR UPDATE`) is the `conflict` error instead of a field
+  error about the vanished data or a masked `DoesNotExist` (serializer); a failed update / delete runs one more query
 - [ ] 287. CHANGELOG entry for item 132: a `SerializerMutation` narrowed by `Meta.fields` / `exclude` /
   `optional_fields` / `nested_fields` that keeps a relation to a `Meta.interfaces = (relay.Node,)` type builds (0.0.14
   failed the schema build, or after a rebuild served a stale `Int` relation id), and a serializer relation target may be
