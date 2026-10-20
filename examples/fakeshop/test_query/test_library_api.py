@@ -14764,6 +14764,55 @@ def test_serializer_to_field_relation_update_stores_the_target_key_over_http(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("genre", "NarrowedNew"), ("null", None), ("omitted", "NarrowedOld")],
+)
+def test_narrowed_serializer_update_over_relay_target_writes_the_genre_over_http(
+    value: str,
+    expected: str | None,
+) -> None:
+    """A ``Meta.fields``-narrowed serializer update keeps its Relay relation as a ``GlobalID``.
+
+    ``updatePatronProfileGenreViaSerializer`` narrows the profile serializer to
+    ``address_2`` and ``favorite_genre``, so its input takes a descriptor-derived name, and
+    ``GenreType`` is Relay through ``Meta.interfaces``. The schema builds, the input publishes
+    exactly the two kept fields with ``favoriteGenreId: ID``, and a genre ``GlobalID``, an
+    explicit null or an omitted relation lands in the column as the genre name, cleared, or kept.
+    """
+    old = models.Genre.objects.create(name="NarrowedOld")
+    new = models.Genre.objects.create(name="NarrowedNew")
+    patron = models.Patron.objects.create(name="NarrowedUpdatePatron")
+    models.PatronProfile.objects.create(patron=patron, favorite_genre=old)
+    input_type = _mutation_data_input_type_name("updatePatronProfileGenreViaSerializer")
+    assert input_type != "PatronProfileSerializerPartialInput"
+    assert _input_field_names(input_type) == {"address_2", "favoriteGenreId"}
+    assert _input_field_type(input_type, "favoriteGenreId") == {
+        "kind": "SCALAR",
+        "name": "ID",
+        "ofType": None,
+    }
+    data: dict[str, object] = {"address_2": "Suite 9"}
+    if value == "genre":
+        data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
+    elif value == "null":
+        data["favoriteGenreId"] = None
+
+    response = _post_graphql(
+        f"mutation($id: ID!, $d: {input_type}!) {{ "
+        f"updatePatronProfileGenreViaSerializer(id: $id, data: $d) {{ {_PROFILE_SELECTION} }} }}",
+        variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
+    )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    result = json_object(payload, "data", "updatePatronProfileGenreViaSerializer")
+    assert result["errors"] == []
+    assert json_at(result, "node", "secondaryAddress") == "Suite 9"
+    assert _profile_genre_column(patron) == [expected]
+
+
+@pytest.mark.django_db
 @override_settings(**_ERROR_POLICY_PASS_THROUGH)
 @pytest.mark.parametrize("spelling", ["own", "renamed"])
 def test_serializer_to_field_relation_replaced_by_custom_create_is_rejected_over_http(

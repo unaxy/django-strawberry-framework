@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 160 done, 124 to do.
+Progress: 161 done, 124 to do.
 
 ## Done
 
@@ -539,6 +539,15 @@ Progress: 160 done, 124 to do.
   `failability/tree-<digest>` under the system temporary directory, refused unless a real directory owned by the user
 - [x] 123. BUILD.md "Mechanized: `scripts/prove_failability.py`" called the tool's default scratch "a bare `/tmp` path":
   fixed with 121, it names `failability/tree-<digest>` under the system temporary directory and the state directory
+- [x] 132. A `SerializerMutation` whose `Meta.fields` narrowing keeps a relation to a Relay-Node type fails schema build
+  (`TypeError: Mutation fields cannot be resolved. '<...>PartialInput'`), create and update, e.g. `Shelf.branch`; a non-Relay
+  target builds: fixed, the cause was the `data:` reference's name, derived when the root `Mutation` body ran, before
+  finalization made a `Meta.interfaces = (relay.Node,)` target a node, so a digest-named shape (`fields` / `exclude` /
+  `optional_fields` / nested narrowing) folded `Int` into the reference and `ID` into the bound class; the reference now
+  names the mutation's own `<Mutation>Data` slot (`rest_framework/inputs.py::serializer_input_slot`), under which
+  `SerializerMutation.build_input` also publishes the class each bind builds, so a rebuild never resolves a parked `Int`
+  input and a relation target may be declared after the root `Mutation` (69 of 69 grid cells failed "no registered
+  primary" at HEAD); GraphQL type names are unchanged; fakeshop gains `updatePatronProfileGenreViaSerializer`
 
 ## Outside review of the fixes
 
@@ -579,9 +588,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 132. A `SerializerMutation` whose `Meta.fields` narrowing keeps a relation to a Relay-Node type fails schema build
-  (`TypeError: Mutation fields cannot be resolved. '<...>PartialInput'`), create and update, e.g. `Shelf.branch`; a non-Relay
-  target builds
 - [ ] 133. A `PrimaryKeyRelatedField` to a model whose pk is a `OneToOneField` (`PatronProfile`) is refused at schema build
   ("Unsupported Django field type 'OneToOneField' on PatronProfile.patron"); a FK to such a model cannot be written by a
   serializer mutation (fails loud)
@@ -707,6 +713,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 287. CHANGELOG entry for item 132: a `SerializerMutation` narrowed by `Meta.fields` / `exclude` /
+  `optional_fields` / `nested_fields` that keeps a relation to a `Meta.interfaces = (relay.Node,)` type builds (0.0.14
+  failed the schema build, or after a rebuild served a stale `Int` relation id), and a serializer relation target may be
+  declared after the root `Mutation`; GraphQL type names are unchanged
 - [ ] 286. CHANGELOG entry for item 282: an update whose row a concurrent transaction deleted (`Meta.select_for_update =
   False` or no `FOR UPDATE`) is the `conflict` error on every flavor instead of a re-inserted row reported as updated
   (ModelForm; model over a multi-table row) or a masked `ConfigurationError` (serializer); a ModelForm update now calls

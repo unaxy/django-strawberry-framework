@@ -261,14 +261,18 @@ def _synthesized_mutation_signature(
     named via the seams ``mutation_cls.input_type_name(meta)`` +
     ``mutation_cls.input_module_path`` (the model default = ``mutations.inputs`` /
     today's name; the form flavors override to ``forms.inputs`` + the form-input
-    name), so the form ``data:`` ref resolves the form-derived input. ``id`` is the
-    raw ``strawberry.ID`` string (the ``DjangoNodeField`` server-side-decode
-    precedent). The **return** annotation is a ``strawberry.lazy`` forward-ref to
-    the generated ``<Name>Payload`` (non-null - the field always returns a payload;
-    the object slot inside is nullable). The payload ref ALWAYS names
-    ``mutations.inputs`` (``INPUTS_MODULE_PATH``): both flavors materialize their
-    payload there, even though the form ``data:`` input lives in ``forms.inputs``
-    (the spec-038 Decision 5 namespace divergence - do not conflate them).
+    name; the serializer flavor names its ``<Mutation>Data`` slot in
+    ``rest_framework.inputs``, which its bind fills), so the form ``data:`` ref
+    resolves the form-derived input. The seams run here, before
+    ``finalize_django_types``, so a name they return may not depend on anything
+    finalization changes. ``id`` is the raw ``strawberry.ID`` string (the
+    ``DjangoNodeField`` server-side-decode precedent). The **return** annotation is
+    a ``strawberry.lazy`` forward-ref to the generated ``<Name>Payload`` (non-null -
+    the field always returns a payload; the object slot inside is nullable). The
+    payload ref ALWAYS names ``mutations.inputs`` (``INPUTS_MODULE_PATH``): both
+    flavors materialize their payload there, even though the form ``data:`` input
+    lives in ``forms.inputs`` (the spec-038 Decision 5 namespace divergence - do not
+    conflate them).
     """
     meta = mutation_cls._mutation_meta
     operation = meta.operation

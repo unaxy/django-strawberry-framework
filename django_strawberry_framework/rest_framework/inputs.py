@@ -16,7 +16,9 @@ Generated input classes MUST become real globals of this module because
 through ``module.__dict__`` (the same contract ``mutations/inputs.py`` /
 ``forms/inputs.py`` rely on). ``materialize_serializer_input_class`` /
 ``clear_serializer_input_namespace`` (from the shared
-``utils/inputs.py::make_input_namespace`` trio) own that lifecycle.
+``utils/inputs.py::make_input_namespace`` trio) own that lifecycle. A mutation's
+``data:`` reference names that mutation's own slot (``serializer_input_slot``),
+never a descriptor-derived class name.
 
 The shape is the ``038`` form discipline adapted to DRF (spec-039 Decision 7):
 
@@ -148,6 +150,25 @@ def materialize_serializer_input_class(name: str, input_cls: type[object]) -> No
         if debug is None:
             raise
         raise ConfigurationError(f"{exc}\n\nShape registered under {name!r}:\n{debug}") from exc
+
+
+def serializer_input_slot(mutation_cls: type[object]) -> str:
+    """Return the module-global name a ``SerializerMutation``'s ``data:`` reference resolves.
+
+    ``DjangoMutationField`` builds the ``data:`` ``strawberry.lazy`` reference when the
+    root ``Mutation`` class body runs, before ``finalize_django_types``; the input class
+    and its descriptor-derived name exist only after the bind walks the serializer
+    against the finalized registry (a relation id is a ``GlobalID`` only once its target
+    type is a Relay node, which ``Meta.interfaces`` makes true at finalization). So the
+    reference names this slot, derived from the mutation alone, and
+    ``SerializerMutation.build_input`` materializes the bound class under it beside the
+    class's own name: the reference can only resolve to the class the current bind
+    built. ``<Mutation>Data`` parallels the payload's ``<Mutation>Payload`` (two
+    registered mutations sharing a class name already collide there at bind), and never
+    ends in ``Input``, so no generated input class name can claim it. A plain identifier,
+    because ``Annotated["<name>", ...]`` compiles the name as a forward reference.
+    """
+    return f"{truth.name(mutation_cls)}Data"
 
 
 def clear_serializer_input_namespace() -> None:
@@ -1931,9 +1952,9 @@ def build_serializer_input_class(
     return input_cls, shape
 
 
-# The serializer shape cache can be primed before finalization by
-# ``SerializerMutation.input_type_name()``. Clear it with the generated-input
-# ledgers before every bind so nested cache hits cannot suppress re-materialization.
+# The serializer shape cache outlives one bind. Clear it with the generated-input
+# ledgers before every bind so nested cache hits cannot suppress re-materialization and
+# a rebuild re-walks every shape against the registry it finalizes.
 _serializer_shape_build_cache: dict[
     SerializerInputShape,
     tuple[type[object], SerializerInputShape],
