@@ -31,7 +31,6 @@ from django.db.models import Prefetch
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
-from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 
 # The shared public strategy-selection type (and the validator it feeds) are
 # owned by ``nested_fetch`` beside ``NestedConnectionStrategy``. They are
@@ -81,18 +80,15 @@ def _require_prefetch(obj: object) -> _PrefetchAny:
 
     The check reads the value's real class (``truth.is_instance``), so a
     ``Prefetch`` subclass passes and a value whose ``__class__`` read raises (or
-    claims ``Prefetch``) is the typed ``ConfigurationError``. A Django lazy proxy
-    of a ``Prefetch`` (``SimpleLazyObject``) is checked as the object it wraps
-    (``utils/lazy.py::unwrap_lazy_object``) and stored as handed in.
+    claims ``Prefetch``) is the typed ``ConfigurationError``, as is a Django lazy
+    proxy of a ``Prefetch`` (``SimpleLazyObject``), refused like ``strategy``'s.
     """
-    if not truth.is_instance(unwrap_lazy_object(obj), _PREFETCH):
+    if not truth.is_instance(obj, _PREFETCH):
         raise ConfigurationError(
             "OptimizerHint.prefetch(obj) requires a django.db.models.Prefetch "
             f"instance; got {truth.kind(obj)}.",
         )
-    # The check above proves the wrapped object a ``Prefetch``; ``obj`` itself may be the
-    # lazy proxy standing for it, which the narrowing cannot follow.
-    return cast("_PrefetchAny", obj)
+    return obj
 
 
 def _require_strategy(name: object) -> StrategySelection:

@@ -1022,12 +1022,6 @@ def test_re_readable_gate_rejects_a_value_whose_class_read_raises(
     assert is_re_readable_field_declaration(ClassReadRaises(escape)) is False
 
 
-def test_re_readable_gate_keeps_the_honest_lazy_proxies_it_always_judged_by_class() -> None:
-    """A lazy proxy of a collection is a collection; a lazy proxy of a string is still text."""
-    assert is_re_readable_field_declaration(SimpleLazyObject(lambda: ["code"])) is True
-    assert is_re_readable_field_declaration(SimpleLazyObject(lambda: "code")) is False
-
-
 def test_re_readable_gate_rejection_names_a_value_whose_class_read_raises() -> None:
     """The ``got`` tail renders the value without reading its ``__class__``."""
 

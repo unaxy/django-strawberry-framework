@@ -8,7 +8,6 @@ SKIP identity, factory classmethods, frozen immutability, and invalid-state
 import typing
 from collections.abc import Callable
 from typing import NoReturn
-from unittest import mock
 
 import pytest
 from django.db.models import Prefetch
@@ -139,28 +138,21 @@ class TestPrefetchFactory:
             # types the parameter as a Prefetch
             OptimizerHint.prefetch(None)  # pyright: ignore[reportArgumentType]
 
-    @pytest.mark.parametrize(
-        "make",
-        [lambda: _PrefetchSubclass("items"), lambda: SimpleLazyObject(lambda: Prefetch("items"))],
-        ids=["prefetch-subclass", "lazy-proxy"],
-    )
-    def test_prefetch_subclass_and_proxies_accepted(self, make: Callable[[], object]) -> None:
-        """A subclass and a Django lazy proxy of a ``Prefetch`` pass and are stored as is."""
-        obj = make()
-        # basedpyright: each object is a Prefetch (or stands for one) without being typed as one
-        assert OptimizerHint.prefetch(obj).prefetch_obj is obj  # pyright: ignore[reportArgumentType]
-        # basedpyright: as above, through direct construction
-        assert OptimizerHint(prefetch_obj=obj).prefetch_obj is obj  # pyright: ignore[reportArgumentType]
+    def test_prefetch_subclass_accepted(self) -> None:
+        """A ``Prefetch`` subclass passes and is stored as is."""
+        obj = _PrefetchSubclass("items")
+        assert OptimizerHint.prefetch(obj).prefetch_obj is obj
+        assert OptimizerHint(prefetch_obj=obj).prefetch_obj is obj
 
     @pytest.mark.parametrize(
         "route",
         [_prefetch_through_factory, _prefetch_through_constructor],
         ids=["factory", "direct"],
     )
-    def test_prefetch_spec_mock_rejected(self, route: Callable[[object], OptimizerHint]) -> None:
-        """A ``Mock(spec=Prefetch)`` only claims ``Prefetch`` through ``__class__``: rejected."""
-        with pytest.raises(ConfigurationError, match="got Mock"):
-            _ = route(mock.Mock(spec=Prefetch))
+    def test_prefetch_lazy_proxy_rejected(self, route: Callable[[object], OptimizerHint]) -> None:
+        """A Django lazy proxy of a ``Prefetch`` is not a ``Prefetch``: refused like ``strategy``'s."""
+        with pytest.raises(ConfigurationError, match="got SimpleLazyObject"):
+            _ = route(SimpleLazyObject(lambda: Prefetch("items")))
 
 
 class TestStrategyFactory:

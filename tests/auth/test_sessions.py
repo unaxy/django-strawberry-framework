@@ -21,7 +21,7 @@ import contextvars
 import subprocess
 import sys
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest import mock
@@ -103,27 +103,29 @@ def test_classify_rejects_an_unknown_transport_object() -> None:
     )
 
 
-def test_a_django_lazy_request_resolves_and_classifies_as_the_request_it_wraps() -> None:
-    """The context resolver and the classifier read a lazy proxy the same way.
+@pytest.mark.parametrize(
+    ("build", "kind"),
+    [
+        (lambda: mock.Mock(spec=HttpRequest), "Mock"),
+        (lambda: SimpleLazyObject(lambda: RequestFactory().post("/graphql/")), "SimpleLazyObject"),
+    ],
+    ids=["mock-spec", "lazy-proxy"],
+)
+def test_a_stand_in_that_forwards_class_is_not_a_request_to_either_check(
+    build: Callable[[], object],
+    kind: str,
+) -> None:
+    """A stand-in that forwards ``__class__`` is refused by both checks by its real class.
 
-    Both check the real class of the object a ``SimpleLazyObject`` wraps, so the
-    request the resolver hands back is one the classifier recognises.
+    A ``Mock(spec=HttpRequest)`` wraps no request; a ``SimpleLazyObject`` around one
+    is still not an ``HttpRequest``, so the resolver and the classifier agree on it.
     """
-    lazy = SimpleLazyObject(lambda: RequestFactory().post("/graphql/"))
-    info = SimpleNamespace(context={"request": lazy})
-    request = request_from_info(info, family_label="login")
-    assert request is lazy
-    assert classify_transport(request) is Transport.DJANGO_HTTP
-
-
-def test_a_stand_in_that_forwards_class_is_not_a_request_to_either_check() -> None:
-    """A ``Mock(spec=HttpRequest)`` wraps no request; both checks refuse it by its real class."""
-    stand_in = mock.Mock(spec=HttpRequest)
+    stand_in = build()
     with pytest.raises(ConfigurationError) as excinfo:
         classify_transport(stand_in)
     assert str(excinfo.value) == (
         "The auth session boundary could not classify the request transport (got "
-        "Mock); expected a Django HttpRequest or a Strawberry Channels request adapter."
+        f"{kind}); expected a Django HttpRequest or a Strawberry Channels request adapter."
     )
     info = SimpleNamespace(context={"request": stand_in})
     with pytest.raises(ConfigurationError, match="login could not resolve a Django HttpRequest"):

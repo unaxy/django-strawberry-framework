@@ -57,16 +57,11 @@ from django_strawberry_framework.types.base import (
     ALLOWED_META_KEYS,
     DEFERRED_META_KEYS,
     _meta_optimizer_hints,
-    _normalize_fields_spec,
-    _normalize_sequence_spec,
     _select_fields,
     _validate_connection,
-    _validate_cursor_field,
     _validate_filterset_class,
     _validate_globalid_callable,
-    _validate_globalid_strategy,
     _validate_interfaces,
-    _validate_relation_shapes,
 )
 from django_strawberry_framework.types.converters import (
     DjangoFilePathType,
@@ -611,92 +606,16 @@ def test_meta_class_that_inherits_str_still_contributes_the_text_it_holds() -> N
     assert definition.description == "About categories"
 
 
-def _lazy(value: object) -> object:
-    """A Django lazy proxy around ``value`` (the gates unwrap it before the real-class test)."""
-    return SimpleLazyObject(lambda: value)
+def test_meta_model_that_is_a_lazy_proxy_of_a_model_is_the_typed_rejection() -> None:
+    """A ``SimpleLazyObject`` around a model class is not a model class, so ``Meta.model`` refuses it."""
+    meta = type(
+        "Meta",
+        (),
+        {"model": SimpleLazyObject(lambda: Category), "fields": CATEGORY_SCALAR_FIELDS},
+    )
 
-
-@pytest.mark.parametrize(
-    ("accepts", "expected"),
-    [
-        (lambda: _normalize_fields_spec(_lazy(("id", "name"))), ("id", "name")),
-        (lambda: _normalize_fields_spec(("id", _lazy("name"))), ("id", "name")),
-        (lambda: _normalize_sequence_spec(_lazy(["name"])), ("name",)),
-        (lambda: _normalize_sequence_spec(_lazy({"name"})), ("name",)),
-        (lambda: _validate_connection(Category, _lazy({}), relay_shaped=True), {}),
-        (
-            lambda: _validate_connection(
-                Category,
-                {"total_count": SimpleLazyObject(lambda: True)},
-                relay_shaped=True,
-            ),
-            {"total_count": True},
-        ),
-        (
-            lambda: _validate_cursor_field(Category, _lazy(("id",)), relay_shaped=True),
-            ("id",),
-        ),
-        (
-            lambda: _validate_cursor_field(Category, (_lazy("id"),), relay_shaped=True),
-            ("id",),
-        ),
-        (
-            lambda: _validate_relation_shapes(
-                Category,
-                _lazy({"items": "both"}),
-                relay_shaped=True,
-            ),
-            {"items": "both"},
-        ),
-        (lambda: _validate_globalid_strategy(Category, _lazy("type"), relay_shaped=True), "type"),
-        (
-            lambda: _validate_interfaces(
-                type("M", (), {"interfaces": _lazy((relay.Node,))}),
-                Category,
-            ),
-            (relay.Node,),
-        ),
-        (
-            lambda: _meta_optimizer_hints(
-                type("M", (), {"optimizer_hints": _lazy({"items": _HINT})}),
-                Category,
-            ),
-            {"items": _HINT},
-        ),
-    ],
-    ids=[
-        "fields-proxy",
-        "fields-entry-proxy",
-        "exclude-list-proxy",
-        "exclude-set-proxy",
-        "connection-proxy",
-        "connection-total_count-proxy",
-        "cursor_field-proxy",
-        "cursor_field-entry-proxy",
-        "relation_shapes-proxy",
-        "globalid_strategy-proxy",
-        "interfaces-proxy",
-        "optimizer_hints-proxy",
-    ],
-)
-def test_meta_gates_keep_accepting_a_faithful_proxy_of_the_right_class(
-    accepts: Callable[[], object],
-    expected: object,
-) -> None:
-    """The gates unwrap a Django lazy proxy, so a proxy of a valid value passes as the value itself."""
-    assert accepts() == expected
-
-
-def test_meta_model_and_primary_proxies_register_the_type() -> None:
-    """A lazy proxy of the model class and of the ``primary`` flag are accepted at class creation."""
-
-    class ProxiedType(DjangoType):
-        class Meta:
-            model = _lazy(Category)
-            fields = CATEGORY_SCALAR_FIELDS
-            primary = SimpleLazyObject(lambda: True)
-
-    assert bool(ProxiedType.__django_strawberry_definition__.primary) is True
+    with pytest.raises(ConfigurationError, match=r"^Meta\.model must be a Django model class$"):
+        type("T", (DjangoType,), {"Meta": meta})
 
 
 def _inject_annotation_key(*keys: object) -> type[type]:

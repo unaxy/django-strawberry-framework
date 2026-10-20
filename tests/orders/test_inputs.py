@@ -29,7 +29,6 @@ import pytest
 from apps.library.models import Book, Shelf
 from django.db.models import F
 from django.db.models.expressions import OrderBy
-from django.utils.functional import SimpleLazyObject
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -746,22 +745,6 @@ def test_order_input_helpers_propagate_a_rejected_value_whose_repr_raises(
     with pytest.raises(RuntimeError, match="hostile __repr__"):
         spell(_RaisingRepr())
     assert _helper_referenced_ordersets == initial
-
-
-def test_order_input_type_accepts_a_lazy_proxy_of_an_orderset() -> None:
-    """A lazily resolved OrderSet is still an OrderSet: the guard asks the proxied class."""
-
-    class HelperOrderLazy(OrderSet):
-        pass
-
-    initial = set(_helper_referenced_ordersets)
-    # basedpyright: a lazy proxy is not a ``type[OrderSet]`` to the checker; the proxied class
-    # answering the guard at run time is the behavior under test
-    annotation = order_input_type(SimpleLazyObject(lambda: HelperOrderLazy))  # pyright: ignore[reportArgumentType]
-    inner = type_args(annotation)[0]
-    assert isinstance(inner, ForwardRef)
-    assert inner.__forward_arg__ == "HelperOrderLazyInputType"
-    _helper_referenced_ordersets.intersection_update(initial)
 
 
 # ---------------------------------------------------------------------------

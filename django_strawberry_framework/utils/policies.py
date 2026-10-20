@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
-from .lazy import unwrap_lazy_object
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -132,16 +131,13 @@ def resolve_policy(
     configures nothing gets the same guarantee as one that configures
     everything.
 
-    Either override may be a Django lazy proxy (``SimpleLazyObject``); it is
-    read as the object it wraps (``utils/lazy.py::unwrap_lazy_object``) before
-    any type check, so the factory runs once, here, at schema construction.
+    Either override is recognised by its real class, never a ``__class__`` read,
+    so a Django lazy proxy (``SimpleLazyObject``) of a policy or a mapping is the
+    typed rejection below, like any other value of the wrong class.
     """
-    # Instances are recognised by their real class, never a ``__class__`` read;
-    # a Django lazy proxy is recognised as the object it wraps.
-    given = unwrap_lazy_object(explicit)
-    if truth.is_instance(given, policy_cls):
-        return canonical_policy(given, policy_cls=policy_cls)
-    overrides = given if given is not None else unwrap_lazy_object(read_setting())
+    if truth.is_instance(explicit, policy_cls):
+        return canonical_policy(explicit, policy_cls=policy_cls)
+    overrides = explicit if explicit is not None else read_setting()
     if overrides is None:
         return canonical_policy(default, policy_cls=policy_cls)
     if truth.is_instance(overrides, policy_cls):

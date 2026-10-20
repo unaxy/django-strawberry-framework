@@ -59,7 +59,6 @@ from .consumers import (
 from .exceptions import ConfigurationError
 from .utils import truth
 from .utils.imports import CHANNELS_FLOOR, STRAWBERRY_FLOOR, require_optional_module
-from .utils.lazy import unwrap_lazy_object
 from .utils.querysets import _dispose_sync_awaitable
 
 if TYPE_CHECKING:
@@ -311,16 +310,14 @@ def _refused_coroutine(application: object) -> bool:
 
     Both tests read the real class (``utils/truth.py::is_instance``), so a
     ``__class__`` that raises or lies is never consulted and the construction
-    error is what the caller sees. A Django lazy proxy is seen through first
-    (``utils/lazy.py::unwrap_lazy_object``), so a coroutine handed back behind
-    one is still recognized and closed. Anything else is disposed of by nobody:
-    the disposal helper's own tests are ``isinstance`` checks that would read a
-    hostile ``__class__``, so it is reached only with a real coroutine or future.
+    error is what the caller sees. Anything else, a Django lazy proxy included, is
+    disposed of by nobody: the disposal helper's own tests are ``isinstance``
+    checks that would read a hostile ``__class__``, so it is reached only with a
+    real coroutine or future.
     """
-    target = unwrap_lazy_object(application)
-    is_coroutine = truth.is_instance(target, _COROUTINE)
-    if is_coroutine or truth.is_instance(target, _FUTURE):
-        _dispose_sync_awaitable(target)
+    is_coroutine = truth.is_instance(application, _COROUTINE)
+    if is_coroutine or truth.is_instance(application, _FUTURE):
+        _dispose_sync_awaitable(application)
     return is_coroutine
 
 

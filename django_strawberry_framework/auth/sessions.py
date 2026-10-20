@@ -10,8 +10,7 @@ classified).
 ``request_from_info`` (``utils/permissions.py::request_from_info``) resolves a
 Django ``HttpRequest`` or a ``ChannelsRequestAdapter``; this module classifies
 that object into ONE explicit transport mode before any credential or session
-work. Classification begins with a real-class check (``utils/truth.py::is_instance``,
-on the object a Django lazy proxy wraps: ``utils/lazy.py::unwrap_lazy_object``)
+work. Classification begins with a real-class check (``utils/truth.py::is_instance``)
 against ``ChannelsRequestAdapter`` rather than sniffing for scope-like attributes,
 because the adapter's ``__getattr__`` delegation
 (``utils/permissions.py::ChannelsRequestAdapter.__getattr__``) makes
@@ -59,7 +58,6 @@ from django.http import HttpRequest
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.imports import CHANNELS_FLOOR, require_optional_module
-from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from django_strawberry_framework.utils.sessions import (
     ScopeSingletonMessages,
@@ -135,12 +133,10 @@ def require_channels() -> ModuleType:
 def classify_transport(request: object) -> Transport:
     """Resolve the ``request_from_info`` result to one explicit ``Transport`` mode.
 
-    Begins with ``truth.is_instance`` against ``ChannelsRequestAdapter``, applied
-    to the ``unwrap_lazy_object`` candidate (attribute-presence sniffing is
-    unreliable under the adapter's ``__getattr__`` delegation). A Django
-    lazy proxy is classified as the object it wraps
-    (``utils/lazy.py::unwrap_lazy_object``); any other object is classified by its
-    real class, so a stand-in that only forwards ``__class__`` is rejected. A
+    Begins with ``truth.is_instance`` against ``ChannelsRequestAdapter``
+    (attribute-presence sniffing is unreliable under the adapter's ``__getattr__``
+    delegation). The request is classified by its real class, so a stand-in that
+    only forwards ``__class__`` (a Django lazy proxy included) is rejected. A
     recognized adapter first forces the ``channels`` soft dependency through
     ``require_channels()`` -- a Channels-shaped context that reached this boundary
     without the dependency is a loud, actionable ``ImportError``, never a swallowed
@@ -149,10 +145,9 @@ def classify_transport(request: object) -> Transport:
     object, and every missing / unrecognized scope type, is rejected with an
     actionable ``ConfigurationError``.
     """
-    candidate = unwrap_lazy_object(request)
-    if truth.is_instance(candidate, ChannelsRequestAdapter):
+    if truth.is_instance(request, ChannelsRequestAdapter):
         _ = require_channels()
-        scope_type = candidate.scope.get("type")
+        scope_type = request.scope.get("type")
         if type(scope_type) is str and scope_type == "http":
             return Transport.CHANNELS_HTTP
         if type(scope_type) is str and scope_type == "websocket":
@@ -164,7 +159,7 @@ def classify_transport(request: object) -> Transport:
             "URLconf, and over WebSocket through DjangoGraphQLProtocolRouter, so the scope "
             "carries a recognized protocol type.",
         )
-    if truth.is_instance(candidate, HttpRequest):
+    if truth.is_instance(request, HttpRequest):
         return Transport.DJANGO_HTTP
     raise ConfigurationError(
         "The auth session boundary could not classify the request transport (got "
