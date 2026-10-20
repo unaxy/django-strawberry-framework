@@ -382,8 +382,8 @@ bind that materializes the auth payloads.
   overrides), `make_declaration_registry` (the auth ledger) and
   `_validate_permission_classes` (the AllowAny default);
   [`mutations/inputs.py`][mutations-inputs] `build_payload_type` /
-  `payload_object_slot` (both payload shapes) and `mutation_input_field_specs` (the
-  `EXCLUDED` password kind); [`mutations/resolvers.py`][mutations-resolvers]
+  `payload_object_slot` (both payload shapes), `payload_type_name` (the lazy payload
+  return refs) and `mutation_input_field_specs` (the `EXCLUDED` password kind); [`mutations/resolvers.py`][mutations-resolvers]
   `authorize_or_raise`, `run_write_pipeline_sync` and `refetch_optimized`;
   [`mutations/fields.py`][mutations-fields] `DjangoMutationField`, `_lazy_ref` and
   `build_lazy_field_signature`.

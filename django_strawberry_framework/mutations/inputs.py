@@ -1108,6 +1108,11 @@ def payload_object_slot(primary_type: type[DjangoType]) -> str:
     return "node" if implements_relay_node(primary_type) else "result"
 
 
+def payload_type_name(mutation_name: str) -> str:
+    """Return the payload class name ``build_payload_type`` creates and every lazy return ref names."""
+    return f"{mutation_name}Payload"
+
+
 def build_payload_type(
     mutation_name: str,
     *,
@@ -1169,7 +1174,7 @@ def build_payload_type(
             slot: None,
             "errors": strawberry.field(default_factory=list),
         }
-    cls = type(f"{mutation_name}Payload", (), namespace)
+    cls = type(payload_type_name(mutation_name), (), namespace)
     # basedpyright: strawberry.type's signature returns its argument's type unchanged, so the
     # __strawberry_definition__ the decorator attaches is invisible without the cast
     return cast("type[WithStrawberryObjectDefinition]", strawberry.type(cls))

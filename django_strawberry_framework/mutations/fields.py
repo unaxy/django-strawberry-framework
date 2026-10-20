@@ -63,7 +63,7 @@ from django_strawberry_framework.utils.directives import validated_field_directi
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.input_values import UNSET
 
-from .inputs import INPUTS_MODULE_PATH
+from .inputs import INPUTS_MODULE_PATH, payload_type_name
 from .operations import operation_takes_data, operation_takes_id
 from .sets import iter_mutations
 
@@ -284,7 +284,7 @@ def _synthesized_mutation_signature(
         data_ann = _lazy_ref(mutation_cls.input_type_name(meta), mutation_cls.input_module_path)
         arguments.append(("data", data_ann))
 
-    return_annotation = _lazy_ref(f"{truth.name(mutation_cls)}Payload", INPUTS_MODULE_PATH)
+    return_annotation = _lazy_ref(payload_type_name(truth.name(mutation_cls)), INPUTS_MODULE_PATH)
     return build_lazy_field_signature(arguments, return_annotation)
 
 

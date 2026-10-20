@@ -58,6 +58,7 @@ from django_strawberry_framework.mutations.inputs import (
     mutation_input_field_specs,
     mutation_input_shape,
     payload_object_slot,
+    payload_type_name,
 )
 from django_strawberry_framework.mutations.resolvers import run_write_pipeline_sync
 from django_strawberry_framework.mutations.sets import (
@@ -1077,7 +1078,7 @@ def login_mutation(
         sync_body=functools.partial(_login_resolve_body, holder_cls),
         async_body=functools.partial(_login_resolve_body_async, holder_cls),
         arguments=[("username", str), ("password", str)],
-        return_annotation=_lazy_ref("LoginPayload", INPUTS_MODULE_PATH),
+        return_annotation=_lazy_ref(payload_type_name("Login"), INPUTS_MODULE_PATH),
         description=description,
         deprecation_reason=deprecation_reason,
         directives=directives,
@@ -1105,7 +1106,7 @@ def logout_mutation(
         sync_body=functools.partial(_logout_resolve_body, holder_cls),
         async_body=functools.partial(_logout_resolve_body_async, holder_cls),
         arguments=[],
-        return_annotation=_lazy_ref("LogoutPayload", INPUTS_MODULE_PATH),
+        return_annotation=_lazy_ref(payload_type_name("Logout"), INPUTS_MODULE_PATH),
         description=description,
         deprecation_reason=deprecation_reason,
         directives=directives,
