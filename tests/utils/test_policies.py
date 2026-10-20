@@ -18,12 +18,11 @@ from dataclasses import dataclass
 from typing import NoReturn
 
 import pytest
-from django.utils.functional import SimpleLazyObject
 from typing_extensions import override
 
 from django_strawberry_framework.error_policy import resolve_error_policy
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.resource_policy import ResourcePolicy, resolve_resource_policy
+from django_strawberry_framework.resource_policy import resolve_resource_policy
 from django_strawberry_framework.utils.policies import resolve_policy
 from tests._idioms import ClaimsClass, ClassReadRaises
 
@@ -92,33 +91,6 @@ def test_an_instance_through_the_setting_slot_is_taken_on_the_same_terms() -> No
     resolved = _resolve(None, policy)
     assert resolved == policy
     assert resolved is not policy
-
-
-@pytest.mark.parametrize("slot", ["explicit", "setting"])
-def test_a_django_lazy_instance_is_read_as_the_instance_it_wraps(slot: str) -> None:
-    """A ``SimpleLazyObject`` policy in either slot is canonicalized from the policy it wraps.
-
-    The proxy passes ``isinstance`` only by forwarding ``__class__``; the
-    resolver reads the wrapped object and recognises that by its real class.
-    """
-    policy = _ProbePolicy(width=3)
-    lazy = SimpleLazyObject(lambda: policy)
-    # basedpyright: the lazy proxy is the input under test; _resolve types the explicit
-    # parameter as resolve_policy does: a policy, a mapping or None
-    resolved = _resolve(lazy) if slot == "explicit" else _resolve(None, lazy)  # pyright: ignore[reportArgumentType]
-    assert resolved == policy
-    assert resolved is not policy
-    assert type(resolved) is _ProbePolicy
-
-
-def test_a_lazy_resource_policy_argument_supplies_its_bounds() -> None:
-    """``resolve_resource_policy`` takes the bounds of the ``ResourcePolicy`` a lazy proxy wraps."""
-    lazy = SimpleLazyObject(lambda: ResourcePolicy(max_depth=5))
-    # basedpyright: the lazy proxy is the input under test; resolve_resource_policy types the
-    # parameter as a policy, a mapping or None
-    resolved = resolve_resource_policy(lazy)  # pyright: ignore[reportArgumentType]
-    assert type(resolved) is ResourcePolicy
-    assert resolved.max_depth == 5
 
 
 def test_the_setting_supplies_overrides_when_the_argument_is_absent() -> None:

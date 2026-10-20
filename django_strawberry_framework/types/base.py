@@ -71,7 +71,6 @@ from django_strawberry_framework.optimizer.hints import OptimizerHint
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import dict_of, list_of
-from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 from django_strawberry_framework.utils.typing import is_async_callable
 
@@ -282,7 +281,6 @@ def _validate_connection(
     """
     if connection is None:
         return None
-    connection = unwrap_lazy_object(connection)
     model_name = truth.name(model)
     if not truth.is_instance(connection, dict):
         raise ConfigurationError(
@@ -300,7 +298,7 @@ def _validate_connection(
     # own exact name, holding the bool it was proven to be.
     options: dict[str, bool] = {}
     if "total_count" in connection:
-        total_count = unwrap_lazy_object(connection["total_count"])
+        total_count = connection["total_count"]
         if not truth.is_exact(total_count, bool):
             raise ConfigurationError(
                 f"{model_name}.Meta.connection['total_count'] must be a bool; "
@@ -318,20 +316,6 @@ def _validate_connection(
 def _is_str_tuple(entries: tuple[object, ...]) -> "TypeIs[tuple[str, ...]]":
     """Return whether every entry of ``entries`` is a ``str``."""
     return all(truth.is_instance(entry, str) for entry in entries)
-
-
-def _unwrapped_entries(value: object) -> tuple[object, ...]:
-    """Return the entries of a ``Meta`` collection, each Django lazy proxy unwrapped.
-
-    The caller has proved ``value`` iterable by its real class; it is read through
-    ``list_of``, which iterates it exactly as a loop over it would.
-
-    A real-class test ignores the ``__class__`` a ``SimpleLazyObject`` forwards, so an entry
-    proxying a valid value is read as the object it stands for
-    (``utils/lazy.py::unwrap_lazy_object``) before the gate tests it, as the collection
-    itself is.
-    """
-    return tuple(unwrap_lazy_object(entry) for entry in list_of(value))
 
 
 def _validate_cursor_field(
@@ -355,11 +339,10 @@ def _validate_cursor_field(
     """
     if value is None:
         return None
-    value = unwrap_lazy_object(value)
     owner = f"{truth.name(model)}.Meta.cursor_field"
     is_sequence = not truth.is_instance(value, str) and issubclass(truth.class_of(value), Sequence)
     # ``is_sequence`` read the value's real class as a ``Sequence``.
-    entries = _unwrapped_entries(value) if is_sequence else ()
+    entries = tuple(list_of(value)) if is_sequence else ()
     if not entries or not _is_str_tuple(entries):
         raise ConfigurationError(
             f"{owner} must be a non-empty non-string sequence of order strings; "
@@ -402,7 +385,6 @@ def _validate_relation_shapes(
     """
     if value is None:
         return None
-    value = unwrap_lazy_object(value)
     model_name = truth.name(model)
     if not truth.is_instance(value, dict):
         raise ConfigurationError(
@@ -410,9 +392,7 @@ def _validate_relation_shapes(
             f"field names to shapes; got {truth.render(value)}",
         )
     shapes: dict[str, str] = {}
-    for raw_key, raw_shape in value.items():
-        key = unwrap_lazy_object(raw_key)
-        shape = unwrap_lazy_object(raw_shape)
+    for key, shape in value.items():
         if not truth.is_instance(key, str):
             raise ConfigurationError(
                 f"{model_name}.Meta.relation_shapes keys must be relation field "
@@ -477,7 +457,6 @@ def _validate_globalid_strategy(
     """
     if value is None:
         return None
-    value = unwrap_lazy_object(value)
     is_meta = source == "meta"
     # Only the setting path (``source="setting"``) passes ``model=None``.
     subject = (
@@ -974,7 +953,6 @@ def _normalize_fields_spec(value: object) -> tuple[str, ...] | Literal["__all__"
     """Normalize ``Meta.fields`` for storage on ``DjangoTypeDefinition``."""
     if value is None:
         return value
-    value = unwrap_lazy_object(value)
     if truth.is_instance(value, str):
         if truth.text(value) == "__all__":
             return "__all__"
@@ -986,7 +964,7 @@ def _normalize_fields_spec(value: object) -> tuple[str, ...] | Literal["__all__"
             "Meta.fields must be '__all__' or a non-string sequence of field names",
         )
     # The real-class check above proved a ``Sequence``.
-    entries = _unwrapped_entries(value)
+    entries = tuple(list_of(value))
     if _is_str_tuple(entries):
         return entries
     invalid = next(entry for entry in entries if not truth.is_instance(entry, str))
@@ -1014,7 +992,6 @@ def _normalize_sequence_spec(value: object, key: str = "exclude") -> tuple[str, 
     """
     if value is None:
         return None
-    value = unwrap_lazy_object(value)
     if truth.is_instance(value, str) or not issubclass(
         truth.class_of(value),
         (Sequence, AbstractSet),
@@ -1023,7 +1000,7 @@ def _normalize_sequence_spec(value: object, key: str = "exclude") -> tuple[str, 
             f"Meta.{key} must be a non-string sequence or set of field names",
         )
     # The real-class check above proved a ``Sequence`` or ``AbstractSet``.
-    entries = _unwrapped_entries(value)
+    entries = tuple(list_of(value))
     if _is_str_tuple(entries):
         return entries
     invalid = next(entry for entry in entries if not truth.is_instance(entry, str))
@@ -1105,7 +1082,7 @@ def _meta_optimizer_hints(meta: object, model: type[models.Model]) -> dict[str, 
     (``utils/truth.py::kind``): an instance by its real class, a class by its
     own name (``got Category.``), never by its metaclass.
     """
-    value = unwrap_lazy_object(_meta_attr(meta, "optimizer_hints"))
+    value = _meta_attr(meta, "optimizer_hints")
     if value is None:
         return {}
     if not issubclass(truth.class_of(value), Mapping):
@@ -1116,14 +1093,13 @@ def _meta_optimizer_hints(meta: object, model: type[models.Model]) -> dict[str, 
     # The real-class check above proved a ``Mapping``. One pass over a plain copy of the
     # consumer mapping: the keys checked are the keys returned.
     hints: dict[str, object] = {}
-    for raw_key, hint in dict_of(value).items():
-        key = unwrap_lazy_object(raw_key)
+    for key, hint in dict_of(value).items():
         if not truth.is_instance(key, str):
             raise ConfigurationError(
                 f"{truth.name(model)}.Meta.optimizer_hints keys must be field name strings; "
                 f"got {truth.render(key)}.",
             )
-        hints[key] = unwrap_lazy_object(hint)
+        hints[key] = hint
     return hints
 
 
@@ -1245,7 +1221,7 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
     helper only validates the shape and contents of the
     ``Meta.interfaces`` tuple itself.
     """
-    raw = unwrap_lazy_object(_meta_attr(meta, "interfaces"))
+    raw = _meta_attr(meta, "interfaces")
     if raw is None:
         return ()
     if truth.is_instance(raw, str):
@@ -1255,7 +1231,7 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
         entries: tuple[object, ...] = (raw,)
     elif truth.is_instance(raw, tuple) or truth.is_instance(raw, list):
         # The real-class check above proved a ``tuple`` or ``list``.
-        entries = _unwrapped_entries(raw)
+        entries = tuple(list_of(raw))
     else:
         raise ConfigurationError(_interfaces_shape_error(model, truth.name(truth.class_of(raw))))
     if entries == ():
@@ -1354,10 +1330,9 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     Every shape gate tests a consumer value by its real class (``utils/truth.py::is_instance``,
     ``is_subclass``, ``is_exact``, ``class_of``), never through its ``__class__`` attribute,
     so a value whose ``__class__`` read raises is rejected with the same ``ConfigurationError``
-    as any other malformed value. A Django lazy proxy (``SimpleLazyObject``) of a valid value
-    is unwrapped first (``utils/lazy.py::unwrap_lazy_object``) and passes as the value itself;
-    ``Meta.name`` and ``Meta.description`` are the exception, read as text through the base
-    ``str`` slot, which refuses a proxy.
+    as any other malformed value. A Django lazy proxy (``SimpleLazyObject``) forwards
+    ``__class__`` but is not the class it stands for, so every key refuses it with that same
+    error (``utils/lazy.py`` states the rule).
 
     Validation order:
 
@@ -1396,7 +1371,7 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
         ConfigurationError: any of the above violations.
 
     """
-    model = unwrap_lazy_object(_meta_attr(meta, "model"))
+    model = _meta_attr(meta, "model")
     if model is None:
         raise ConfigurationError("Meta.model is required")
     if not truth.is_subclass(model, models.Model):
@@ -1454,7 +1429,7 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     if has_fields and has_exclude:
         raise ConfigurationError("Meta.fields and Meta.exclude are mutually exclusive")
 
-    primary = unwrap_lazy_object(_meta_attr(meta, "primary", default=False))
+    primary = _meta_attr(meta, "primary", default=False)
     if not truth.is_exact(primary, bool):
         raise ConfigurationError("Meta.primary must be a bool")
 

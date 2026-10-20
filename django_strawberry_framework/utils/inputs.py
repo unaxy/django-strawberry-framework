@@ -1450,11 +1450,9 @@ def build_lazy_input_annotation(
     literal outside the call) so the ForwardRef wrapping holds.
 
     ``TypeError`` for ANY other argument, including one whose ``__class__`` raises or
-    claims a class it is not (the test reads the real class, ``truth.is_subclass``); a
-    lazy proxy of a set class is judged, and recorded, as the class it proxies
-    (``utils/lazy.py::unwrap_lazy_object``).
+    claims a class it is not (the test reads the real class, ``truth.is_subclass``), so a
+    Django lazy proxy of a set class is refused too.
     """
-    set_class = unwrap_lazy_object(set_class)
     if not truth.is_subclass(set_class, expected_base):
         raise TypeError(
             f"{helper_spelling} requires {expected_label} subclass; got {truth.render(set_class)}",

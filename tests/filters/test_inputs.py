@@ -40,7 +40,6 @@ from apps.scalars import models as scalar_models
 from django import forms
 from django.db import models
 from django.db.models import QuerySet
-from django.utils.functional import SimpleLazyObject
 from django_filters import (
     BaseInFilter,
     BaseRangeFilter,
@@ -1350,22 +1349,6 @@ def test_filter_input_helpers_propagate_a_rejected_value_whose_repr_raises(
     with pytest.raises(RuntimeError, match="hostile __repr__"):
         spell(_RaisingRepr())
     assert _helper_referenced_filtersets == set()
-
-
-def test_filter_input_type_accepts_a_lazy_proxy_of_a_filterset() -> None:
-    """A lazily resolved FilterSet is still a FilterSet: the guard asks the proxied class."""
-
-    class MyFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
-
-    # basedpyright: a lazy proxy is not a ``type[FilterSet]`` to the checker; the proxied class
-    # answering the guard at run time is the behavior under test
-    result = filter_input_type(SimpleLazyObject(lambda: MyFilter))  # pyright: ignore[reportArgumentType]
-    inner = _args(result)[0]
-    assert isinstance(inner, typing.ForwardRef)
-    assert inner.__forward_arg__ == "MyFilterInputType"
 
 
 # ---------------------------------------------------------------------------

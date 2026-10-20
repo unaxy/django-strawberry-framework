@@ -57,7 +57,6 @@ from .exceptions import ConfigurationError
 from .utils import truth
 from .utils._narrowing import is_char_wise, is_mapping, read_attr, require
 from .utils.input_values import SetInputTraversal, is_inactive_value
-from .utils.lazy import unwrap_lazy_object
 from .utils.permissions import (
     active_permission_targets,
     active_related_branches,
@@ -624,13 +623,11 @@ def is_re_readable_field_declaration(value: object) -> bool:
     never entered: an object that only defines ``__iter__`` is not a
     ``Collection``. The protocol is asked of the value's real class, so an
     instance-level ``__class__`` is never consulted (a value whose ``__class__``
-    read raises is judged by what it really is, never by the raise). A Django
-    lazy proxy is judged by the object it stands for: the proxy class itself
-    implements the whole ``Collection`` protocol, so a proxied string would
-    otherwise pass as a container.
+    read raises is judged by what it really is, never by the raise). Both
+    callers pass the declaration ``utils/inputs.py::plain_set_meta_fields``
+    already read, which reads a Django lazy proxy as the object it stands for.
     """
-    unwrapped = unwrap_lazy_object(value)
-    return issubclass(truth.class_of(unwrapped), Collection) and not is_char_wise(unwrapped)
+    return issubclass(truth.class_of(value), Collection) and not is_char_wise(value)
 
 
 def require_re_readable_field_declaration(

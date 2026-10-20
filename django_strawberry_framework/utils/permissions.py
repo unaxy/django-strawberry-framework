@@ -59,7 +59,6 @@ from .input_values import (
     iter_input_items,
     related_declaration_mapping,
 )
-from .lazy import unwrap_lazy_object
 from .querysets import reject_async_in_sync_context, relation_target_type
 from .relations import leading_relation_hops
 from .strings import flatten_lookup_path
@@ -223,15 +222,14 @@ def _channels_request_adapter(context: object) -> ChannelsRequestAdapter | None:
 def _is_request(value: object) -> bool:
     """Whether ``value`` is a Django ``HttpRequest`` or a ``ChannelsRequestAdapter``.
 
-    Decided by the real class of the object a Django lazy proxy wraps
-    (``utils/lazy.py::unwrap_lazy_object``), the same check
+    Decided by the value's real class, the same check
     ``auth/sessions.py::classify_transport`` classifies the resolved request by,
     so a request this resolver accepts is one the auth boundary recognises. A
-    stand-in that only forwards ``__class__`` is not a request.
+    stand-in that only forwards ``__class__`` (a Django lazy proxy included) is
+    not a request.
     """
-    candidate = unwrap_lazy_object(value)
-    return truth.is_instance(candidate, HttpRequest) or truth.is_instance(
-        candidate,
+    return truth.is_instance(value, HttpRequest) or truth.is_instance(
+        value,
         ChannelsRequestAdapter,
     )
 
