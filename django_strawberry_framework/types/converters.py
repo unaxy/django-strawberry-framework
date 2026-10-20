@@ -963,11 +963,21 @@ def choice_column_is_grouped(field: "ConcreteField") -> bool:
     )
 
 
+def choice_enum_name(type_name: str, field_name: str) -> str:
+    """Return the generated choice-enum name ``<TypeName><FieldName>Enum``.
+
+    Every flavor (read-side model column, serializer choice field, form choice field) publishes
+    its generated choice enum into the one schema namespace under this name, so enums for the
+    same type and field name collide or dedupe by the same rule.
+    """
+    return f"{type_name}{pascal_case(field_name)}Enum"
+
+
 def convert_choices_to_enum(field: "ConcreteField", type_name: str) -> type[Enum]:
     """Generate (or fetch from registry) a Strawberry ``Enum`` for ``field.choices``.
 
     1. Cache check on ``(field.model, field.name)``; return cached on hit.
-    2. Compute enum name ``f"{type_name}{PascalCase(field.name)}Enum"``.
+    2. Compute the enum name via ``choice_enum_name(type_name, field.name)``.
     3. Delegate to the shared ``build_enum_from_choices`` core (empty / grouped-form
        rejection, the ``BLANK`` member when ``_column_admits_empty_string``, value-based
        sanitization, sanitize-collision guard, ``Enum`` build).
@@ -992,7 +1002,7 @@ def convert_choices_to_enum(field: "ConcreteField", type_name: str) -> type[Enum
     if cached is not None:
         return cached
 
-    enum_name = f"{type_name}{pascal_case(field_name)}Enum"
+    enum_name = choice_enum_name(type_name, field_name)
     choice_source = field.choices or []
     include_blank = _column_admits_empty_string(field)
     enum_cls = build_enum_from_choices(
