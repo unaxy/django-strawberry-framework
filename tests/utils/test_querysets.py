@@ -28,6 +28,7 @@ import django.db.models.query as django_query
 import pytest
 import pytest_django
 from apps.library.models import (
+    Annotation,
     Book,
     Branch,
     LendingDesk,
@@ -151,6 +152,7 @@ from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
     coerce_field_value_or_none,
+    expand_relation_order,
     initial_queryset,
     is_async_only_iterable,
     normalize_query_source,
@@ -387,6 +389,37 @@ def test_coerce_field_value_or_none_runs_key_and_stored_column_validators() -> N
 def test_coerce_field_value_or_none_drops_overflowing_duration() -> None:
     """A duration string past ``timedelta``'s range is Django's ``OverflowError`` -> ``None``."""
     assert coerce_field_value_or_none(models.DurationField(), "99999999999 00:00:00") is None
+
+
+@pytest.mark.django_db
+def test_expand_relation_order_spells_a_related_pk_as_its_key_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``"pk"`` inside a related ``Meta.ordering`` is spelled as that model's key column.
+
+    ``SQLCompiler.find_ordering_name`` expands ``profile`` to ``PatronProfile``'s
+    ordering and never expands the ``"pk"`` there. Spelled from ``Annotation`` as
+    ``profile__pk`` it would end on the ``patron`` one-to-one key and expand again,
+    to ``Patron.Meta.ordering``; the emails here run against the keys, so only the
+    key column orders the rows as Django does.
+    """
+    for name, email in (
+        ("Ada", "c@example.com"),
+        ("Bo", "b@example.com"),
+        ("Cy", "a@example.com"),
+    ):
+        patron = Patron.objects.create(name=name, email=email)
+        Annotation.objects.create(profile=PatronProfile.objects.create(patron=patron), body=name)
+    monkeypatch.setattr(PatronProfile._meta, "ordering", ["pk"])
+    monkeypatch.setattr(Patron._meta, "ordering", ["email"])
+    queryset = Annotation._base_manager.order_by("profile")
+
+    expanded = expand_relation_order(["profile"], queryset.query)
+
+    assert expanded == ["profile__patron_id"]
+    django_order = [annotation.body for annotation in queryset]
+    assert django_order == ["Ada", "Bo", "Cy"]
+    assert [annotation.body for annotation in queryset.order_by(*expanded)] == django_order
 
 
 @pytest.mark.django_db
