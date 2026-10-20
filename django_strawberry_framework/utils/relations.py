@@ -58,6 +58,7 @@ __all__ = [
     "relation_kind",
     "relation_link",
     "relation_name",
+    "stored_value_column",
     "validate_lookup_expr",
 ]
 
@@ -845,6 +846,28 @@ def is_single_column_foreign_key(field: object) -> TypeGuard[ForeignKeyField]:
     lateral and single-parent fetch link) gates on this predicate.
     """
     return isinstance(field, models.ForeignKey) and getattr(field, "column", None) is not None
+
+
+@overload
+def stored_value_column(field: ConcreteField) -> ConcreteField: ...
+@overload
+def stored_value_column(field: ModelField) -> ModelField: ...
+def stored_value_column(field: ModelField) -> ModelField:
+    """Return the column whose values ``field`` stores: itself, or the column a key references.
+
+    A ``ForeignKey`` / ``OneToOneField`` holds the value of the column it references
+    (``ForeignKey.target_field``: the related pk, or its ``to_field``), and that column
+    may itself be a key: a one-to-one primary key, a multi-table-inheritance parent
+    link (one link per inheritance level), a ``to_field`` naming another key. The walk
+    follows each link to the first column that is not a key, the walk
+    ``ForeignKey.get_col`` makes to pick a key's output field, so a value typed or
+    range-checked against the result is held to the column that stores it. Every
+    other field (a plain column, a composite primary key, a reverse relation) is
+    returned as is.
+    """
+    while isinstance(field, models.ForeignKey):
+        field = field.target_field
+    return field
 
 
 def carrier_backed_link(field: object) -> RelationLink | None:

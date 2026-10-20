@@ -24,6 +24,8 @@ consumer-visible behaviors end to end:
   ``EditionImprintSerializer`` updates an ``Edition`` located by that text.
 * ``LendingDeskSerializer`` updates a multi-table ``LendingDesk`` through a column of its
   ``Venue`` parent table and one of its own.
+* ``KioskFaultSerializer`` names a ``SelfServeDesk``, whose primary key is a parent-link
+  chain, through DRF's generated ``PrimaryKeyRelatedField``.
 
 ``Shelf`` is non-Relay (``ShelfType`` lists no ``relay.Node`` interface), so the ``branch``
 FK relation input is a raw pk and the payload object slot is ``result`` (not ``node``); the
@@ -55,6 +57,7 @@ from .models import (
     CirculationDesk,
     Edition,
     Genre,
+    KioskFault,
     LendingDesk,
     PatronProfile,
     Printing,
@@ -904,6 +907,14 @@ class LendingDeskSerializer(ModelSerializerBase[LendingDesk]):
     class Meta:
         model = LendingDesk
         fields = ("name", "window_count")
+
+
+class KioskFaultSerializer(ModelSerializerBase[KioskFault]):
+    """A ``KioskFault`` serializer; ``kiosk`` is DRF's generated ``PrimaryKeyRelatedField``."""
+
+    class Meta:
+        model = KioskFault
+        fields = ("kiosk", "note")
 
 
 class CirculationDeskHoldSerializer(ModelSerializerBase[CirculationDesk]):

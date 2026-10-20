@@ -809,6 +809,9 @@ class SelfServeDesk(LendingDesk):
 
     kiosk_code: _Text = models.TextField()
 
+    # Reverse accessor Django adds at class creation, declared for the type checker.
+    faults: RelatedManager[KioskFault]
+
 
 class OpenVenueManager(models.Manager["OpenVenue"]):
     """Default manager keeping only venues that have opened."""
@@ -852,6 +855,30 @@ class RepairTicket(models.Model):
     @override
     def __str__(self) -> str:
         return self.code
+
+
+class KioskFault(models.Model):
+    """A fault reported against a self-serve desk.
+
+    ``kiosk`` stores the desk's primary key, which is the ``lendingdesk_ptr`` parent
+    link; that link stores ``LendingDesk.venue_ptr``, which stores ``Venue.id``. A key
+    into the third level of the inheritance chain therefore holds a ``Venue.id`` value
+    two links down.
+    """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
+    kiosk: _FK[SelfServeDesk] = models.ForeignKey(
+        SelfServeDesk,
+        related_name="faults",
+        on_delete=models.CASCADE,
+    )
+    note: _Text = models.TextField()
+
+    @override
+    def __str__(self) -> str:
+        return self.note
 
 
 class VenueBadge(models.Model):

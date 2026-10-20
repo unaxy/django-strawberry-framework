@@ -23,6 +23,7 @@ name-keyed field over the same key, so the stored name is the form key.
 inputs carry ISBN text; ``EditionImprintForm`` updates an ``Edition`` located by that text.
 ``LendingDeskForm`` updates a multi-table ``LendingDesk`` through a column of its ``Venue``
 parent table and one of its own, so the update writes both tables.
+``KioskFaultForm`` names a ``SelfServeDesk``, whose primary key is a parent-link chain.
 ``BranchWithShelfForm`` and ``BranchPairForm`` add model-less plain-form
 ``perform_mutate`` write-hook and transaction-rollback cases.
 """
@@ -197,6 +198,18 @@ class LendingDeskForm(forms.ModelForm[models.LendingDesk]):
     class Meta:
         model = models.LendingDesk
         fields = ("name", "window_count")
+
+
+class KioskFaultForm(forms.ModelForm[models.KioskFault]):
+    """A ``KioskFault`` ``ModelForm`` over its ``kiosk`` key and ``note``.
+
+    The generated ``kiosk`` choice field resolves a ``SelfServeDesk`` by primary key, the
+    ``lendingdesk_ptr`` parent link.
+    """
+
+    class Meta:
+        model = models.KioskFault
+        fields = ("kiosk", "note")
 
 
 class BranchWithShelfForm(forms.Form):

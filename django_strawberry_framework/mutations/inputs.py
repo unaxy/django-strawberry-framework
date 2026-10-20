@@ -70,6 +70,7 @@ from django_strawberry_framework.utils.relations import (
     carrier_backed_link,
     is_forward_concrete_relation,
     is_forward_many_to_many,
+    stored_value_column,
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
@@ -501,9 +502,11 @@ def relation_id_scalar(
     """Return the GraphQL id scalar for a write-input relation to ``related_model``.
 
     ``relay.GlobalID`` when the related model's primary ``DjangoType`` is
-    Relay-Node-shaped; otherwise the related model's raw pk scalar via
-    ``scalar_for_field``. This is the one id-type rule the three write flavors
-    share: model-backed ``relation_input_annotation`` and
+    Relay-Node-shaped; otherwise the scalar of the column storing the related
+    model's primary key via ``scalar_for_field`` (a one-to-one primary key or a
+    parent-link chain is followed to the column it references,
+    ``utils/relations.py::stored_value_column``). This is the one id-type rule the
+    three write flavors share: model-backed ``relation_input_annotation`` and
     column-less ``annotate_queryset_relation`` (form + serializer).
     Primary-required vs raw-pk fallback stays at those call sites (the serializer
     flavor requires a registered primary and raises before calling this, spec-039;
@@ -511,7 +514,7 @@ def relation_id_scalar(
     """
     if related_primary_type is not None and implements_relay_node(related_primary_type):
         return relay.GlobalID
-    return scalar_for_field(related_model._meta.pk)
+    return scalar_for_field(stored_value_column(related_model._meta.pk))
 
 
 def relation_id_annotation(

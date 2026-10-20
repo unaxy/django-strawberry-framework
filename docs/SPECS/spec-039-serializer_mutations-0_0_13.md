@@ -549,7 +549,9 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     decoder** that mirrors the `038` form decoder (serializer-field-keyed, not the
     model-attr-keyed `036` decoder). **The generated input field exposes
     exactly ONE strategy-dependent shape** (Decision 7): a `GlobalID` when the target primary
-    [`DjangoType`][glossary-djangotype] is Relay-shaped, else the target's raw-pk scalar — so
+    [`DjangoType`][glossary-djangotype] is Relay-shaped, else the scalar of the column
+    storing the target's primary key (a one-to-one key or parent-link chain followed to the
+    column it references) — so
     a live request can only deliver the one shape the annotation admits; the **shared decode
     helper** accepts both a `GlobalID` and a raw pk only because it is reused and package
     tests drive the raw-pk / non-Relay branch by direct call. Each id the decoder sees
@@ -1377,7 +1379,8 @@ the relation / file rows below are package extensions graphene lacks, not parity
   `ManyRelatedField` → `list[<id>]` (`relation_multi`); the generated field carries
   **exactly one** id annotation, **strategy-dependent on the target** — the target primary
   [`DjangoType`][glossary-djangotype]'s `GlobalID` when it is Relay-Node-shaped, else the
-  target's **raw-pk scalar** — decided at the build site (a live request can only submit
+  **scalar of the column storing the target's primary key** (a one-to-one key or
+  parent-link chain followed to the column it references) — decided at the build site (a live request can only submit
   the one shape that annotation admits; "accepts both `GlobalID` and raw pk" is the shared
   decode *helper*'s contract, not a single generated field's,
   [Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)
@@ -1853,8 +1856,8 @@ The pipeline steps:
    model-attr-keyed `036` decoder). **The generated input field carries
    exactly ONE annotation, strategy-dependent** (Decision 7): a relation whose target
    primary [`DjangoType`][glossary-djangotype] is Relay-shaped exposes a `GlobalID`; a
-   non-Relay / raw-pk target exposes the target's raw-pk scalar. So a *live* GraphQL
-   request can only ever deliver the **one shape the annotation admits** — a raw integer
+   non-Relay / raw-pk target exposes the scalar of the column storing its primary key.
+   So a *live* GraphQL request can only ever deliver the **one shape the annotation admits** — a raw integer
    against a `GlobalID`-typed field is a **top-level variable-coercion error before the
    resolver runs** (verified: products' `test_create_item_malformed_category_id_is_top_level_coercion_error`,
    because relation inputs are typed `GlobalID`, not `ID!`). The **shared decode helper**

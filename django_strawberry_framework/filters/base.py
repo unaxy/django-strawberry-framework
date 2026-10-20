@@ -102,6 +102,7 @@ from django_strawberry_framework.utils.relations import (
     is_model_class,
     relation_kind,
     relation_link,
+    stored_value_column,
 )
 from django_strawberry_framework.utils.typing import object_result, strawberry_schema_from_info
 
@@ -1499,9 +1500,7 @@ def _model_identity_column(model: object, to_field_name: str | None) -> Concrete
     meta: object = getattr(model, "_meta", None)
     if not isinstance(meta, Options):
         return None
-    column = meta.get_field(to_field_name) if to_field_name else meta.pk
-    while isinstance(column, models.ForeignKey):
-        column = column.target_field
+    column = stored_value_column(meta.get_field(to_field_name) if to_field_name else meta.pk)
     return column if isinstance(column, models.Field) else None
 
 

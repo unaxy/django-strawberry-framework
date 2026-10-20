@@ -38,7 +38,13 @@ query shape, off the SQL the request emitted:
   ``ModelForm`` flavors naming every loaded non-key column in ``update_fields``; a desk
   deleted after authorization (the whole row, or only the desk's table) is the in-band
   ``conflict`` envelope, never re-INSERTed by the model or ``ModelForm`` flavor, and the
-  serializer's re-INSERT is refused the same way and rolled back.
+  serializer's re-INSERT is refused the same way and rolled back; an ``id`` past
+  ``Venue.id``'s range is the not-found error in every flavor, the desk kept.
+- A key into a parent-link chain: ``createKioskFault`` and its ``ViaForm`` /
+  ``ViaSerializer`` siblings name a non-Relay ``SelfServeDesk``, whose primary key is
+  the ``lendingdesk_ptr`` -> ``venue_ptr`` chain, so ``kioskId`` is typed ``Int!`` from
+  ``Venue.id``; a visible kiosk stores, and a kiosk under a closed venue or a missing
+  one is the relation error with nothing written.
 - Write-input requiredness: ``Book.archive_genres`` (``editable=False``) is
   absent from both generated ``Book`` inputs, and ``MediaSpecimen``'s optional
   file columns are optional through the ``blank`` arm and the ``null`` arm
@@ -1229,6 +1235,33 @@ def test_lending_desk_update_of_a_row_deleted_after_authorization_is_conflict_ov
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("mutation", list(_DESK_UPDATE_INPUTS))
+def test_lending_desk_update_out_of_range_id_is_not_found_over_http(mutation: str) -> None:
+    """A desk update ``id`` past ``Venue.id``'s range is the not-found error; the desk is kept.
+
+    ``LendingDeskType`` is non-Relay, so the ``id`` is the raw primary key, the
+    ``venue_ptr`` parent link. The link carries no range validator of its own: the id is
+    held to the range of ``Venue.id``, the column the link stores, before the locate
+    query runs, never reaching it as a backend ``OverflowError``.
+    """
+    desk = models.LendingDesk.objects.create(name="Desk", window_count=2)
+    before = _stored_desk(desk.pk)
+
+    payload = graphql_payload(
+        f"mutation($id: ID!, $d: {_DESK_UPDATE_INPUTS[mutation]}!) {{ "
+        f"{mutation}(id: $id, data: $d) {{ result {{ name }} errors {{ field messages }} }} }}",
+        variables={"id": str(2**70), "d": {"name": "Renamed Desk"}},
+    )
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", mutation) == {
+        "result": None,
+        "errors": [{"field": "id", "messages": ["No matching row found."]}],
+    }
+    assert _stored_desk(desk.pk) == before
+
+
+@pytest.mark.django_db
 def test_lending_desk_update_naming_a_ticket_that_vanished_with_the_row_is_conflict_over_http(
     delete_after_authorization: DeleteAfterAuthorization,
 ) -> None:
@@ -1278,3 +1311,95 @@ def test_lending_desk_update_naming_a_ticket_that_vanished_with_the_row_is_confl
         '"library_lendingdesk"',
     ]
     assert stored() == before
+
+
+# ===========================================================================
+# A key into a parent-link chain: typed and checked through the column it stores
+# ===========================================================================
+
+_KIOSK_FAULT_CREATES = {
+    "createKioskFault": "KioskFaultInput",
+    "createKioskFaultViaForm": "KioskFaultFormInput",
+    "createKioskFaultViaSerializer": "KioskFaultSerializerInput",
+}
+
+
+@pytest.mark.parametrize("mutation", list(_KIOSK_FAULT_CREATES))
+def test_kiosk_fault_inputs_type_the_kiosk_key_from_the_column_its_chain_stores(
+    mutation: str,
+) -> None:
+    """``kioskId`` is ``Int!`` in every flavor: the ``Venue.id`` two parent links down.
+
+    ``SelfServeDeskType`` is non-Relay, so the key is a raw id typed from the target's
+    primary key, and that key is the ``lendingdesk_ptr`` parent link, which stores
+    ``LendingDesk.venue_ptr``, which stores ``Venue.id``. A walk stopping one link short
+    lands on ``venue_ptr``, a relation with no scalar.
+    """
+    fields = _introspect_input_fields(_KIOSK_FAULT_CREATES[mutation])
+
+    assert fields == {
+        "kioskId": {"kind": "NON_NULL", "name": None, "ofType": {"kind": "SCALAR", "name": "Int"}},
+        "note": {"kind": "NON_NULL", "name": None, "ofType": {"kind": "SCALAR", "name": "String"}},
+    }
+
+
+def _post_kiosk_fault(mutation: str, kiosk_id: int | None) -> object:
+    """Create a fault naming ``kiosk_id`` through ``mutation``; return its payload."""
+    payload = graphql_payload(
+        f"mutation($d: {_KIOSK_FAULT_CREATES[mutation]}!) {{ {mutation}(data: $d) {{ "
+        "result { note kiosk { kioskCode } } errors { field messages codes path } } }",
+        variables={"d": {"kioskId": kiosk_id, "note": "Jammed"}},
+    )
+    assert "errors" not in payload, payload
+    return json_at(payload, "data", mutation)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mutation", list(_KIOSK_FAULT_CREATES))
+def test_kiosk_fault_create_naming_a_visible_kiosk_stores_it(mutation: str) -> None:
+    """A visible kiosk's id stores the fault against that kiosk."""
+    _seed_desks()
+    kiosk = models.SelfServeDesk.objects.get(name="Lobby Kiosk")
+
+    result = _post_kiosk_fault(mutation, kiosk.pk)
+
+    assert result == {"result": {"note": "Jammed", "kiosk": {"kioskCode": "K-1"}}, "errors": []}
+    assert list(models.KioskFault.objects.values_list("kiosk_id", "note")) == [
+        (kiosk.pk, "Jammed"),
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mutation", list(_KIOSK_FAULT_CREATES))
+@pytest.mark.parametrize("kiosk", ["hidden", "missing"])
+def test_kiosk_fault_create_naming_a_hidden_or_missing_kiosk_is_the_relation_error(
+    mutation: str,
+    kiosk: str,
+) -> None:
+    """A kiosk under a closed venue, or no kiosk at all, is the relation error; nothing is written.
+
+    ``SelfServeDeskType`` cascades over its parent links into ``VenueType``, which hides
+    venues named ``Closed ...``, so the ``Closed Annex Kiosk`` row exists but is not
+    visible; the missing id is one past every venue.
+    """
+    _seed_desks()
+    hidden = models.SelfServeDesk.objects.get(name="Closed Annex Kiosk")
+    last = models.Venue.objects.order_by("pk").last()
+    assert last is not None
+    assert last.pk is not None
+    kiosk_id = {"hidden": hidden.pk, "missing": last.pk + 1}[kiosk]
+
+    result = _post_kiosk_fault(mutation, kiosk_id)
+
+    assert result == {
+        "result": None,
+        "errors": [
+            {
+                "field": "kioskId",
+                "messages": ["Invalid id for relation 'kioskId'."],
+                "codes": ["invalid"],
+                "path": ["kioskId"],
+            },
+        ],
+    }
+    assert not models.KioskFault.objects.exists()

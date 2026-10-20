@@ -968,8 +968,9 @@ required-ness from `field.required`:
   since model validation rejects `None` after the form field's no-op and the non-null
   annotation refuses it before execution instead.
 - `ModelChoiceField` → the target model's id (a Relay-`GlobalID` when the target's
-  primary [`DjangoType`][glossary-djangotype] is Relay-Node-shaped, else the raw pk
-  scalar — reusing the [`mutations/inputs.py`][mutations-inputs]
+  primary [`DjangoType`][glossary-djangotype] is Relay-Node-shaped, else the scalar of
+  the column storing the target's primary key, a one-to-one key or parent-link chain
+  followed to the column it references — reusing the [`mutations/inputs.py`][mutations-inputs]
   `relation_input_annotation` strategy); `ModelMultipleChoiceField` →
   `list[<id>]`.
 - `forms.FileField` / `forms.ImageField` → the [`Upload`][glossary-upload-scalar]

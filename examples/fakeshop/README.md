@@ -940,7 +940,8 @@ slice ships the demonstration is one uncomment away.
   `SelfServeDesk`), reverse FK / OneToOne / M2M relations declared without
   `related_name`, a nullable foreign-key cycle, two proxies whose default
   managers filter (`OpenVenue`, `VisibleBranch`), one model carrying every
-  relation kind (`CirculationDesk`), a multi-column forward `ForeignObject`
+  relation kind (`CirculationDesk`), a key into the third level of the chain
+  (`KioskFault.kiosk`), a multi-column forward `ForeignObject`
   (`ShelfLabel.shelf`, held in `branch` and `shelf_code`), and a non-editable M2M
   (`Book.archive_genres`).
 - **`apps.products`**: the canonical consumer app and the subject of
