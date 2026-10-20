@@ -24,8 +24,6 @@ What stays here, and why no live request can express it:
   over HTTP).
 """
 
-import subprocess
-import sys
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from typing import NewType
@@ -45,6 +43,7 @@ from django_strawberry_framework.scalars import (
 )
 from django_strawberry_framework.scalars import Upload as UploadFromScalars
 from django_strawberry_framework.utils.typing import object_result
+from tests._subprocess import run_in_fresh_process
 
 # ---------------------------------------------------------------------------
 # Strict serializer - hostile subclasses and non-int Python objects
@@ -251,26 +250,12 @@ def test_package_import_does_not_emit_strawberry_deprecation_warning() -> None:
     """The package import surface is clean of Strawberry's class-direct ``scalar()`` warning.
 
     Subprocess isolation avoids the importlib.reload-doesn't-reload-submodules trap.
-
-    ``sys.executable`` is the venv's Python under ``uv run pytest``, so the
-    subprocess inherits the editable package install - no PATH / PYTHONPATH
-    munging needed.
     """
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-W",
-            "error::DeprecationWarning",
-            "-c",
-            "import django_strawberry_framework",
-        ],
-        capture_output=True,
-        text=True,
+    run_in_fresh_process(
+        "import django_strawberry_framework",
+        fakeshop=False,
+        interpreter_flags=("-W", "error::DeprecationWarning"),
         timeout=15,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"Importing the package under -W error::DeprecationWarning failed:\nstderr: {result.stderr}"
     )
 
 

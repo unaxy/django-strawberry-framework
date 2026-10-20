@@ -30,10 +30,12 @@ pins the shape rather than one instance of it.
 
 The optional manifest fields have rows of their own: a declared
 ``expect_failing`` set replaces the row-count grading (``[]`` = nothing may
-fail), several sites mutate and restore together, a ``pre_image`` or
-``reverse_patch`` reverts a file without git, the probe plugin reports the
-package ``__file__`` and database ``NAME`` from inside pytest, ``--workspace``
-refuses a root outside the copy, and ``--json`` carries the whole record. Each
+fail), a declared ``isolates`` row makes a one-row result the success verdict
+of a row-isolation proof and any other failing set its failure, several sites
+mutate and restore together, a ``pre_image`` or ``reverse_patch`` reverts a
+file without git, the probe plugin reports the package ``__file__`` and
+database ``NAME`` from inside pytest, ``--workspace`` refuses a root outside the
+copy, and ``--json`` carries the whole record. Each
 repository root keeps a live mutation's pristine copies and marker in one state
 directory that no scratch root moves, so a crashed run's marker refuses every
 later run against that tree, with or without a scratch root; the directory is
@@ -3205,6 +3207,143 @@ def test_a_declaration_does_not_rescue_an_invalid_count(
 def test_a_declaration_must_be_a_list_of_node_ids(tmp_path: Path, value: object) -> None:
     with pytest.raises(prove_failability.ManifestError, match="'expect_failing' must be a list"):
         prove_failability.load_manifest(_manifest(tmp_path, expect_failing=value))
+
+
+# --- row-isolation proofs ---------------------------------------------------------------
+
+
+OTHER_ROW = "tests/test_x.py::test_other"
+
+
+def _run_isolating(
+    tmp_path: Path,
+    scratch_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failed: tuple[str, ...],
+    baseline_failed: tuple[str, ...] = (),
+) -> prove_failability.ProofResult:
+    _stub_run(monkeypatch, failed=failed, baseline_failed=baseline_failed)
+    entry = _single_entry(tmp_path, isolates=COUNT_ROW)
+    return prove_failability.execute_entry(entry, scratch_root)
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_row_isolation_proof_failing_only_its_declared_row_is_row_isolated(
+    scratch_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run_isolating(tmp_path, scratch_root, monkeypatch, failed=(COUNT_ROW,))
+
+    assert result.entry.isolates == COUNT_ROW
+    assert result.is_weakly_pinned is False
+    assert result.is_inside_rerun_floor is False
+    verdict = prove_failability._verdict(result)
+    assert verdict == f"row isolated: exactly the declared row `{COUNT_ROW}` failed, and no other"
+    report = prove_failability.render_report([result])
+    assert "WEAKLY PINNED" not in report
+    assert "why 0" not in report
+    assert f"declared `isolates`: `{COUNT_ROW}`" in report
+    assert prove_failability._exit_code([result]) == 0
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_row_isolation_proof_names_every_extra_failing_row(
+    scratch_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run_isolating(
+        tmp_path,
+        scratch_root,
+        monkeypatch,
+        failed=(COUNT_ROW, OTHER_ROW),
+    )
+
+    assert result.is_expectation_unmet is True
+    verdict = prove_failability._verdict(result)
+    assert verdict == (
+        f"**ROW ISOLATION NOT MET - revision-needed** (extra failing rows: `{OTHER_ROW}`)"
+    )
+    assert prove_failability._exit_code([result]) == 1
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_row_isolation_proof_whose_declared_row_passes_is_not_met(
+    scratch_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passing = _run_isolating(tmp_path, scratch_root, monkeypatch, failed=())
+
+    assert prove_failability._verdict(passing) == (
+        f"**ROW ISOLATION NOT MET - revision-needed** (declared row not failing: `{COUNT_ROW}`)"
+    )
+    assert "why 0" not in prove_failability.render_report([passing])
+    assert prove_failability._exit_code([passing]) == 1
+
+    elsewhere = _run_isolating(
+        tmp_path,
+        scratch_root,
+        monkeypatch,
+        failed=(OTHER_ROW,),
+        baseline_failed=(COUNT_ROW,),
+    )
+
+    assert prove_failability._verdict(elsewhere) == (
+        f"**ROW ISOLATION NOT MET - revision-needed** (declared row not failing: `{COUNT_ROW}`; "
+        f"it was already failing before the mutation; extra failing rows: `{OTHER_ROW}`)"
+    )
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_row_isolation_node_id_is_compared_by_equality_not_as_a_glob(
+    scratch_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_run(monkeypatch, failed=("tests/test_x.py::test_alias_one",))
+    entry = _single_entry(tmp_path, isolates="tests/test_x.py::test_alias_*")
+
+    result = prove_failability.execute_entry(entry, scratch_root)
+
+    assert result.is_expectation_unmet is True
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_boundary_proof_failing_one_row_is_still_weakly_pinned(
+    scratch_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_run(monkeypatch, failed=(COUNT_ROW,))
+
+    result = prove_failability.execute_entry(_single_entry(tmp_path), scratch_root)
+
+    assert result.entry.isolates is None
+    assert prove_failability._verdict(result) == (
+        "**WEAKLY PINNED - revision-needed**; inside Worker-3's mandatory re-run floor (<= 3 rows)"
+    )
+    assert prove_failability._exit_code([result]) == 1
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"isolates": ["tests/test_x.py::test_a"]}, "'isolates' must be one non-empty node id"),
+        ({"isolates": ""}, "'isolates' must be one non-empty node id"),
+        ({"isolates": COUNT_ROW, "expect_failing": [COUNT_ROW]}, "give either 'isolates'"),
+    ],
+)
+@pytest.mark.usefixtures("fake_repo")
+def test_an_isolates_declaration_must_be_one_node_id_without_expect_failing(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(prove_failability.ManifestError, match=message):
+        prove_failability.load_manifest(_manifest(tmp_path, **overrides))
 
 
 # --- several sites mutated together ---------------------------------------------------

@@ -490,7 +490,7 @@ def _scalar_route_label(field: "ConcreteField") -> str:
     """Name the ``convert_scalar`` arm that converted ``field``, from ``scalar_route``.
 
     ``choice enum`` for a choice column, else the ``SCALAR_MAP`` row that fired: the
-    matched MRO ancestor (Decision 4), so a consumer subclass of a supported field
+    matched MRO ancestor (spec-029 Decision 4), so a consumer subclass of a supported field
     reports the ancestor row (``TextField``), not its own class. An ``ArrayField``
     reads ``ArrayField -> list[<element label>]``, the element labelled by this same
     rule, and an ``HStoreField`` reads ``HStoreField -> JSON``.

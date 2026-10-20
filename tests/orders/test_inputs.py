@@ -22,10 +22,10 @@ import sys
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from pathlib import Path
-from typing import Annotated, ForwardRef, get_args, get_origin
+from typing import get_args
 
 import pytest
+import strawberry
 from apps.library.models import Book, Shelf
 from django.db.models import F
 from django.db.models.expressions import OrderBy
@@ -58,12 +58,14 @@ from django_strawberry_framework.orders.inputs import (
     normalize_input_value,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.types.finalizer import finalize_django_types
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.input_values import UNSET
 from tests._definition import make_definition
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import ClaimsClass, ClassReadRaises, type_args
+from tests._idioms import ClaimsClass, ClassReadRaises, consumer_module, consumer_query
 from tests._soft_dependency import blocked_modules
+from tests._subprocess import run_in_fresh_process
 
 # The module declares function-scope ``OrderSet`` subclasses whose class-derived
 # input type names (``BookOrderInputType``, ``ShelfOrderInputType``) are the same
@@ -553,19 +555,16 @@ def test_clear_order_input_namespace_resets_orderset_subclass_binding_state() ->
 
 
 def test_order_input_type_returns_element_annotation_for_orderset_subclass() -> None:
-    """``order_input_type(MyOrder)`` returns ``Annotated[ForwardRef("MyOrderInputType"), ...]``."""
+    """``order_input_type(MyOrder)`` returns the element ``LazyType("MyOrderInputType", ...)``."""
 
     class HelperOrderA(OrderSet):
         pass
 
     result = order_input_type(HelperOrderA)
-    args = type_args(result)
-    # First positional arg of Annotated is the (string-wrapped) forward
-    # reference; Python stores it as a ForwardRef when the position is a
-    # string literal.
-    forward = args[0]
-    name = forward.__forward_arg__ if isinstance(forward, ForwardRef) else str(forward)
-    assert name == "HelperOrderAInputType"
+    assert isinstance(result, strawberry.LazyType)
+    assert result.type_name == "HelperOrderAInputType"
+    assert result.module == INPUTS_MODULE_PATH
+    assert result.package is None
 
 
 def test_order_input_type_raises_typeerror_for_non_orderset() -> None:
@@ -590,17 +589,20 @@ def test_order_input_type_records_orderset_into_helper_referenced_set() -> None:
 
 
 def test_order_input_type_is_idempotent_under_repeated_calls() -> None:
-    """Calling the helper multiple times keeps the ledger size at one."""
+    """Repeated calls keep one ledger entry and return equal ``LazyType`` annotations."""
 
     class HelperOrderC(OrderSet):
         pass
 
     _helper_referenced_ordersets.discard(HelperOrderC)
     initial_size = len(_helper_referenced_ordersets)
-    order_input_type(HelperOrderC)
-    order_input_type(HelperOrderC)
-    order_input_type(HelperOrderC)
+    first = order_input_type(HelperOrderC)
+    second = order_input_type(HelperOrderC)
+    third = order_input_type(HelperOrderC)
     assert HelperOrderC in _helper_referenced_ordersets
+    assert isinstance(first, strawberry.LazyType)
+    assert first == second
+    assert second == third
     # The set grew by exactly 1 (set semantics dedup repeat adds).
     assert len(_helper_referenced_ordersets) == initial_size + 1
     _helper_referenced_ordersets.discard(HelperOrderC)
@@ -612,21 +614,17 @@ def test_order_input_type_is_idempotent_under_repeated_calls() -> None:
 
 
 def test_order_input_subscript_returns_the_order_input_type_element_annotation() -> None:
-    """``OrderInput[MyOrder]`` is the same lazy ``Annotated`` element the call form returns."""
+    """``OrderInput[MyOrder]`` is the same ``LazyType`` element the call form returns."""
 
     class HelperOrderD(OrderSet):
         pass
 
     subscripted = OrderInput[HelperOrderD]
     called = order_input_type(HelperOrderD)
-    assert get_origin(subscripted) is Annotated
-    forward = type_args(subscripted)[0]
-    assert isinstance(forward, ForwardRef)
-    assert forward.__forward_arg__ == "HelperOrderDInputType"
-    assert forward == get_args(called)[0]
-    assert [read_attr(marker, "module", None) for marker in type_args(subscripted)[1:]] == [
-        INPUTS_MODULE_PATH,
-    ]
+    assert isinstance(subscripted, strawberry.LazyType)
+    assert subscripted.type_name == "HelperOrderDInputType"
+    assert subscripted.module == INPUTS_MODULE_PATH
+    assert subscripted == called
 
 
 def test_order_input_subscript_records_orderset_into_helper_referenced_set() -> None:
@@ -748,6 +746,172 @@ def test_order_input_helpers_propagate_a_rejected_value_whose_repr_raises(
 
 
 # ---------------------------------------------------------------------------
+# order_input_type / OrderInput[...] under PEP 563 deferred annotations
+# ---------------------------------------------------------------------------
+
+_PEP563_ORDER_PROGRAM = """
+from __future__ import annotations
+
+import strawberry
+from apps.library.models import Branch
+
+from django_strawberry_framework import DjangoType
+from django_strawberry_framework.orders import OrderInput, OrderSet, order_input_type
+
+
+class Pep563BranchOrder(OrderSet):
+    class Meta:
+        model = Branch
+        fields = ["name"]
+
+
+class Pep563BranchType(DjangoType):
+    class Meta:
+        model = Branch
+        fields = ("id", "name")
+        orderset_class = Pep563BranchOrder
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    def by_call(self, order_by: list[order_input_type(Pep563BranchOrder)]) -> list[Pep563BranchType]:
+        return []
+
+    @strawberry.field
+    def by_optional_call(
+        self,
+        order_by: list[order_input_type(Pep563BranchOrder)] | None = None,
+    ) -> list[Pep563BranchType]:
+        return []
+
+    @strawberry.field
+    def by_subscript(
+        self,
+        order_by: list[OrderInput[Pep563BranchOrder]] | None = None,
+    ) -> list[Pep563BranchType]:
+        return []
+"""
+
+
+def test_order_input_helpers_resolve_under_pep563_deferred_annotations() -> None:
+    """Every helper spelling in a ``from __future__ import annotations`` module builds its input.
+
+    Strawberry evaluates the annotation STRING in the consumer module's globals, where the
+    generated ``Pep563BranchOrderInputType`` is not a name; the helper's return must resolve
+    against the inputs module, not the consumer's globals.
+    """
+    with consumer_module("tests_orders_pep563_consumer", _PEP563_ORDER_PROGRAM) as namespace:
+        finalize_django_types()
+        sdl = str(strawberry.Schema(query=consumer_query(namespace)))
+    assert "byCall(orderBy: [Pep563BranchOrderInputType!]!): [Pep563BranchType!]!" in sdl
+    assert "byOptionalCall(orderBy: [Pep563BranchOrderInputType!] = null)" in sdl
+    assert "bySubscript(orderBy: [Pep563BranchOrderInputType!] = null)" in sdl
+    assert _helper_referenced_ordersets == {namespace["Pep563BranchOrder"]}
+    assert sdl.count("input Pep563BranchOrderInputType {") == 1
+
+
+def test_order_input_type_needs_its_orderset_in_module_globals_under_pep563() -> None:
+    """A ``TYPE_CHECKING``-only OrderSet import is the one name the build cannot resolve.
+
+    The deferred annotation is the helper CALL, evaluated in the consumer's globals at schema
+    build, so the OrderSet the call names must be a runtime global there. The generated input
+    name never needs to be: the field declared first, over a runtime OrderSet, resolves, and
+    the build fails only at the field whose OrderSet is a type-checking import.
+    """
+    program = """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import strawberry
+from apps.library.models import Branch
+
+from django_strawberry_framework import DjangoType
+from django_strawberry_framework.orders import OrderSet, order_input_type
+
+if TYPE_CHECKING:
+    from apps.library.orders import ShelfOrder
+
+
+class Pep563GuardOrder(OrderSet):
+    class Meta:
+        model = Branch
+        fields = ["name"]
+
+
+class Pep563GuardType(DjangoType):
+    class Meta:
+        model = Branch
+        fields = ("id", "name")
+        orderset_class = Pep563GuardOrder
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    def branches(self, order_by: list[order_input_type(Pep563GuardOrder)] | None = None) -> list[str]:
+        return []
+
+    @strawberry.field
+    def shelves(self, order_by: list[order_input_type(ShelfOrder)] | None = None) -> list[str]:
+        return []
+"""
+    with consumer_module("tests_orders_pep563_type_checking", program) as namespace:
+        finalize_django_types()
+        with pytest.raises(
+            TypeError,
+            match=r"^Query fields cannot be resolved\. name 'ShelfOrder' is not defined$",
+        ):
+            strawberry.Schema(query=consumer_query(namespace))
+    assert _helper_referenced_ordersets == {namespace["Pep563GuardOrder"]}
+
+
+def test_order_input_type_resolves_each_repeated_pep563_evaluation() -> None:
+    """Two resolvers re-evaluating one helper call share one input and one ledger entry."""
+    program = """
+from __future__ import annotations
+
+import strawberry
+from apps.library.models import Branch
+
+from django_strawberry_framework import DjangoType
+from django_strawberry_framework.orders import OrderSet, order_input_type
+
+
+class Pep563RepeatOrder(OrderSet):
+    class Meta:
+        model = Branch
+        fields = ["name"]
+
+
+class Pep563RepeatType(DjangoType):
+    class Meta:
+        model = Branch
+        fields = ("id", "name")
+        orderset_class = Pep563RepeatOrder
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    def first(self, order_by: list[order_input_type(Pep563RepeatOrder)] | None = None) -> list[str]:
+        return []
+
+    @strawberry.field
+    def second(self, order_by: list[order_input_type(Pep563RepeatOrder)] | None = None) -> list[str]:
+        return []
+"""
+    with consumer_module("tests_orders_pep563_repeat", program) as namespace:
+        finalize_django_types()
+        sdl = str(strawberry.Schema(query=consumer_query(namespace)))
+    assert "first(orderBy: [Pep563RepeatOrderInputType!] = null): [String!]!" in sdl
+    assert "second(orderBy: [Pep563RepeatOrderInputType!] = null): [String!]!" in sdl
+    assert sdl.count("input Pep563RepeatOrderInputType {") == 1
+    assert _helper_referenced_ordersets == {namespace["Pep563RepeatOrder"]}
+
+
+# ---------------------------------------------------------------------------
 # registry.clear() integration
 # ---------------------------------------------------------------------------
 
@@ -800,28 +964,10 @@ def test_registry_clear_clears_helper_referenced_ordersets() -> None:
 
 def test_registry_clear_works_without_orders_imported() -> None:
     """``registry.clear()`` must not raise when orders package was never imported."""
-    fakeshop = Path(__file__).resolve().parents[2] / "examples" / "fakeshop"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import django; "
-                "import os; "
-                f"import sys; sys.path.insert(0, {str(fakeshop)!r}); "
-                "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings'); "
-                "django.setup(); "
-                "import django_strawberry_framework.registry as r; "
-                "assert 'django_strawberry_framework.orders' not in sys.modules; "
-                "r.registry.clear()"
-            ),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"subprocess failed: stdout={result.stdout!r}, stderr={result.stderr!r}"
+    run_in_fresh_process(
+        "import django_strawberry_framework.registry as r; "
+        "assert 'django_strawberry_framework.orders' not in sys.modules; "
+        "r.registry.clear()",
     )
 
 

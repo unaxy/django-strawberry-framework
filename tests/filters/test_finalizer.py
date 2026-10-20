@@ -28,11 +28,9 @@ observe an unbound FilterSet.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from collections import OrderedDict
 from collections.abc import Iterator
-from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
@@ -83,6 +81,7 @@ from django_strawberry_framework.utils._narrowing import (
     require,
 )
 from django_strawberry_framework.utils.typing import object_result
+from tests._subprocess import run_in_fresh_process
 
 
 def _is_filter_map(value: object) -> TypeIs[OrderedDict[str, Filter]]:
@@ -1066,30 +1065,10 @@ def test_clear_filter_input_namespace_can_be_called_directly() -> None:
 
 def test_registry_clear_works_without_filters_imported() -> None:
     """``registry.clear()`` must not raise when filters package was never imported."""
-    # Absolute, ``__file__``-derived path so the subprocess resolves the
-    # example app regardless of pytest's working directory.
-    fakeshop = Path(__file__).resolve().parents[2] / "examples" / "fakeshop"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import django; "
-                "import os; "
-                f"import sys; sys.path.insert(0, {str(fakeshop)!r}); "
-                "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings'); "
-                "django.setup(); "
-                "import django_strawberry_framework.registry as r; "
-                "assert 'django_strawberry_framework.filters' not in sys.modules; "
-                "r.registry.clear()"
-            ),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"subprocess failed: stdout={result.stdout!r}, stderr={result.stderr!r}"
+    run_in_fresh_process(
+        "import django_strawberry_framework.registry as r; "
+        "assert 'django_strawberry_framework.filters' not in sys.modules; "
+        "r.registry.clear()",
     )
 
 

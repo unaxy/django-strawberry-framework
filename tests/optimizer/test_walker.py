@@ -469,6 +469,125 @@ def test_plan_relay_id_projects_attname_when_pk_is_relation() -> None:
         registry.clear()
 
 
+def _relation_plan_shape(plan: OptimizationPlan) -> dict[str, object]:
+    """The relation-planning slots of ``plan``, each ``Prefetch`` read down to its queryset shape."""
+
+    def lookup_shape(lookup: object) -> object:
+        if not isinstance(lookup, Prefetch):
+            return lookup
+        queryset = lookup.queryset
+        assert queryset is not None
+        return (
+            lookup.prefetch_to,
+            queryset.model,
+            queryset.query.select_related,
+            queryset.query.deferred_loading,
+            [lookup_shape(inner) for inner in queryset_prefetch_lookups(queryset)],
+        )
+
+    return {
+        "select_related": tuple(plan.select_related),
+        "prefetch_related": [lookup_shape(lookup) for lookup in plan.prefetch_related],
+        "only_fields": tuple(plan.only_fields),
+        "fk_id_elisions": tuple(plan.fk_id_elisions),
+        "planned_resolver_keys": tuple(plan.planned_resolver_keys),
+        "cacheable": plan.cacheable,
+    }
+
+
+def _plan_against_target(
+    selections: list[SimpleNamespace],
+    parent_model: type[Model],
+    target_model: type[Model],
+    *,
+    relay_node: bool,
+) -> dict[str, object]:
+    """Plan ``selections`` on ``parent_model`` with ``target_model``'s type Relay or not."""
+    registry.clear()
+    target_interfaces = (relay.Node,) if relay_node else ()
+
+    class RelationTargetType(DjangoType):
+        class Meta:
+            model = target_model
+            fields = ("id", "name")
+            interfaces = target_interfaces
+
+    finalize_django_types()
+    assert registry.get(target_model) is RelationTargetType
+    assert issubclass(RelationTargetType, relay.Node) is relay_node
+    try:
+        return _relation_plan_shape(plan_optimizations(selections, parent_model))
+    finally:
+        registry.clear()
+
+
+@pytest.mark.parametrize(
+    (
+        "selections",
+        "parent_model",
+        "target_model",
+        "select_related",
+        "elisions",
+    ),
+    [
+        (
+            [_sel("category", selections=[_sel("id"), _sel("name")])],
+            Item,
+            Category,
+            ("category",),
+            (),
+        ),
+        (
+            [_sel("category", selections=[_sel("id")])],
+            Item,
+            Category,
+            (),
+            ("category@category",),
+        ),
+        (
+            [_sel("items", selections=[_sel("id"), _sel("name")])],
+            Category,
+            Item,
+            (),
+            (),
+        ),
+        (
+            [_sel("item", selections=[_sel("category", selections=[_sel("name")])])],
+            Entry,
+            Category,
+            ("item", "item__category"),
+            (),
+        ),
+    ],
+    ids=[
+        "forward-fk",
+        "forward-fk-id-only",
+        "reverse-fk",
+        "nested-forward-fk",
+    ],
+)
+def test_plan_relay_target_relation_planning_matches_non_relay_target(
+    selections: list[SimpleNamespace],
+    parent_model: type[Model],
+    target_model: type[Model],
+    select_related: tuple[str, ...],
+    elisions: tuple[str, ...],
+) -> None:
+    """A Relay ``Node`` target type plans relations exactly as a non-Relay target does.
+
+    The two target types differ only in ``Meta.interfaces``; the ``select_related``,
+    ``prefetch_related`` and ``only()`` shapes, FK-id elision and resolver keys must be
+    equal. Relay adds nothing to the relation plan because the target pk attname is
+    ``id``, the column the non-Relay ``id`` field already projects.
+    """
+    relay_plan = _plan_against_target(selections, parent_model, target_model, relay_node=True)
+    plain_plan = _plan_against_target(selections, parent_model, target_model, relay_node=False)
+
+    assert relay_plan == plain_plan
+    assert plain_plan["select_related"] == select_related
+    assert plain_plan["fk_id_elisions"] == elisions
+
+
 def test_plan_prefetches_relation_with_missing_related_model_defensively(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

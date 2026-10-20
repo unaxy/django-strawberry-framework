@@ -108,7 +108,13 @@ from django_strawberry_framework.types.finalizer import finalize_django_types
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import ClaimsClass, ClassReadRaises, is_object_list
+from tests._idioms import (
+    ClaimsClass,
+    ClassReadRaises,
+    consumer_module,
+    consumer_query,
+    is_object_list,
+)
 from tests._soft_dependency import blocked_modules
 
 if TYPE_CHECKING:
@@ -1129,21 +1135,8 @@ def test_construct_search_empty_input_returns_empty_dict() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_filter_input_type_returns_annotated_with_lazy_module_path() -> None:
-    class MyFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
-
-    result = filter_input_type(MyFilter)
-    metadata = _args(result)[1:]
-    # The strawberry.lazy marker is a `StrawberryLazyReference` whose
-    # `module` attr carries the module path.
-    assert any(read_attr(marker, "module", None) == INPUTS_MODULE_PATH for marker in metadata)
-
-
-def test_filter_input_type_returns_forwardref_in_annotation_args() -> None:
-    """`Annotated[<str_variable>, ...]` wraps the string as a `ForwardRef`."""
+def test_filter_input_type_returns_lazy_type_resolving_in_the_inputs_module() -> None:
+    """The `LazyType` resolves against the inputs module, with no relative-import package."""
 
     class MyFilter(FilterSet):
         class Meta:
@@ -1151,9 +1144,22 @@ def test_filter_input_type_returns_forwardref_in_annotation_args() -> None:
             fields = {"name": ["exact"]}
 
     result = filter_input_type(MyFilter)
-    inner = _args(result)[0]
-    assert isinstance(inner, typing.ForwardRef)
-    assert inner.__forward_arg__ == "MyFilterInputType"
+    assert isinstance(result, strawberry.LazyType)
+    assert result.module == INPUTS_MODULE_PATH
+    assert result.package is None
+
+
+def test_filter_input_type_returns_lazy_type_named_for_the_input_class() -> None:
+    """The `LazyType` names the generated input class by its runtime-computed name."""
+
+    class MyFilter(FilterSet):
+        class Meta:
+            model = Category
+            fields = {"name": ["exact"]}
+
+    result = filter_input_type(MyFilter)
+    assert isinstance(result, strawberry.LazyType)
+    assert result.type_name == "MyFilterInputType"
 
 
 def test_filter_input_type_records_filterset_into_helper_referenced_set() -> None:
@@ -1167,7 +1173,7 @@ def test_filter_input_type_records_filterset_into_helper_referenced_set() -> Non
 
 
 def test_filter_input_type_is_idempotent_under_repeated_calls() -> None:
-    """Repeated calls converge on one entry and equivalent ForwardRef args."""
+    """Repeated calls converge on one ledger entry and equal `LazyType` annotations."""
 
     class MyFilter(FilterSet):
         class Meta:
@@ -1177,13 +1183,10 @@ def test_filter_input_type_is_idempotent_under_repeated_calls() -> None:
     first = filter_input_type(MyFilter)
     second = filter_input_type(MyFilter)
     third = filter_input_type(MyFilter)
-    assert len(_helper_referenced_filtersets) == 1
-    first_ref, second_ref, third_ref = (_args(arg)[0] for arg in (first, second, third))
-    assert isinstance(first_ref, typing.ForwardRef)
-    assert isinstance(second_ref, typing.ForwardRef)
-    assert isinstance(third_ref, typing.ForwardRef)
-    assert first_ref.__forward_arg__ == second_ref.__forward_arg__
-    assert second_ref.__forward_arg__ == third_ref.__forward_arg__
+    assert _helper_referenced_filtersets == {MyFilter}
+    assert isinstance(first, strawberry.LazyType)
+    assert first == second
+    assert second == third
 
 
 def test_filter_input_type_rejects_non_filterset() -> None:
@@ -1214,7 +1217,7 @@ def test_filter_input_type_rejects_non_filterset() -> None:
 
 
 def test_filter_input_subscript_returns_the_filter_input_type_annotation() -> None:
-    """`FilterInput[MyFilter]` is the same lazy `Annotated` the call form returns."""
+    """`FilterInput[MyFilter]` is the same `LazyType` the call form returns."""
 
     class MyFilter(FilterSet):
         class Meta:
@@ -1223,14 +1226,10 @@ def test_filter_input_subscript_returns_the_filter_input_type_annotation() -> No
 
     subscripted = FilterInput[MyFilter]
     called = filter_input_type(MyFilter)
-    assert get_origin(subscripted) is typing.Annotated
-    inner = _args(subscripted)[0]
-    assert isinstance(inner, typing.ForwardRef)
-    assert inner.__forward_arg__ == "MyFilterInputType"
-    assert inner == _args(called)[0]
-    assert [read_attr(marker, "module", None) for marker in _args(subscripted)[1:]] == [
-        INPUTS_MODULE_PATH,
-    ]
+    assert isinstance(subscripted, strawberry.LazyType)
+    assert subscripted.type_name == "MyFilterInputType"
+    assert subscripted.module == INPUTS_MODULE_PATH
+    assert subscripted == called
 
 
 def test_filter_input_subscript_records_filterset_into_helper_referenced_set() -> None:
@@ -1347,6 +1346,172 @@ def test_filter_input_helpers_propagate_a_rejected_value_whose_repr_raises(
     with pytest.raises(RuntimeError, match="hostile __repr__"):
         spell(_RaisingRepr())
     assert _helper_referenced_filtersets == set()
+
+
+# ---------------------------------------------------------------------------
+# filter_input_type / FilterInput[...] under PEP 563 deferred annotations
+# ---------------------------------------------------------------------------
+
+_PEP563_FILTER_PROGRAM = """
+from __future__ import annotations
+
+import strawberry
+from apps.library.models import Branch
+
+from django_strawberry_framework import DjangoType
+from django_strawberry_framework.filters import FilterInput, FilterSet, filter_input_type
+
+
+class Pep563BranchFilter(FilterSet):
+    class Meta:
+        model = Branch
+        fields = {"name": ["exact"]}
+
+
+class Pep563BranchType(DjangoType):
+    class Meta:
+        model = Branch
+        fields = ("id", "name")
+        filterset_class = Pep563BranchFilter
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    def by_call(self, filter: filter_input_type(Pep563BranchFilter)) -> list[Pep563BranchType]:
+        return []
+
+    @strawberry.field
+    def by_optional_call(
+        self,
+        filter: filter_input_type(Pep563BranchFilter) | None = None,
+    ) -> list[Pep563BranchType]:
+        return []
+
+    @strawberry.field
+    def by_subscript(
+        self,
+        filter: FilterInput[Pep563BranchFilter] | None = None,
+    ) -> list[Pep563BranchType]:
+        return []
+"""
+
+
+def test_filter_input_helpers_resolve_under_pep563_deferred_annotations() -> None:
+    """Every helper spelling in a ``from __future__ import annotations`` module builds its input.
+
+    Strawberry evaluates the annotation STRING in the consumer module's globals, where the
+    generated ``Pep563BranchFilterInputType`` is not a name; the helper's return must resolve
+    against the inputs module, not the consumer's globals.
+    """
+    with consumer_module("tests_filters_pep563_consumer", _PEP563_FILTER_PROGRAM) as namespace:
+        finalize_django_types()
+        sdl = str(strawberry.Schema(query=consumer_query(namespace)))
+    assert "byCall(filter: Pep563BranchFilterInputType!): [Pep563BranchType!]!" in sdl
+    assert "byOptionalCall(filter: Pep563BranchFilterInputType = null)" in sdl
+    assert "bySubscript(filter: Pep563BranchFilterInputType = null)" in sdl
+    assert _helper_referenced_filtersets == {namespace["Pep563BranchFilter"]}
+    assert sdl.count("input Pep563BranchFilterInputType {") == 1
+
+
+def test_filter_input_type_needs_its_filterset_in_module_globals_under_pep563() -> None:
+    """A ``TYPE_CHECKING``-only FilterSet import is the one name the build cannot resolve.
+
+    The deferred annotation is the helper CALL, evaluated in the consumer's globals at schema
+    build, so the FilterSet the call names must be a runtime global there. The generated input
+    name never needs to be: the field declared first, over a runtime FilterSet, resolves, and
+    the build fails only at the field whose FilterSet is a type-checking import.
+    """
+    program = """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import strawberry
+from apps.library.models import Branch
+
+from django_strawberry_framework import DjangoType
+from django_strawberry_framework.filters import FilterSet, filter_input_type
+
+if TYPE_CHECKING:
+    from tests.filters.fixtures.filtersets import ShelfFilter
+
+
+class Pep563GuardFilter(FilterSet):
+    class Meta:
+        model = Branch
+        fields = {"name": ["exact"]}
+
+
+class Pep563GuardType(DjangoType):
+    class Meta:
+        model = Branch
+        fields = ("id", "name")
+        filterset_class = Pep563GuardFilter
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    def branches(self, filter: filter_input_type(Pep563GuardFilter) | None = None) -> list[str]:
+        return []
+
+    @strawberry.field
+    def shelves(self, filter: filter_input_type(ShelfFilter) | None = None) -> list[str]:
+        return []
+"""
+    with consumer_module("tests_filters_pep563_type_checking", program) as namespace:
+        finalize_django_types()
+        with pytest.raises(
+            TypeError,
+            match=r"^Query fields cannot be resolved\. name 'ShelfFilter' is not defined$",
+        ):
+            strawberry.Schema(query=consumer_query(namespace))
+    assert _helper_referenced_filtersets == {namespace["Pep563GuardFilter"]}
+
+
+def test_filter_input_type_resolves_each_repeated_pep563_evaluation() -> None:
+    """Two resolvers re-evaluating one helper call share one input and one ledger entry."""
+    program = """
+from __future__ import annotations
+
+import strawberry
+from apps.library.models import Branch
+
+from django_strawberry_framework import DjangoType
+from django_strawberry_framework.filters import FilterSet, filter_input_type
+
+
+class Pep563RepeatFilter(FilterSet):
+    class Meta:
+        model = Branch
+        fields = {"name": ["exact"]}
+
+
+class Pep563RepeatType(DjangoType):
+    class Meta:
+        model = Branch
+        fields = ("id", "name")
+        filterset_class = Pep563RepeatFilter
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    def first(self, filter: filter_input_type(Pep563RepeatFilter) | None = None) -> list[str]:
+        return []
+
+    @strawberry.field
+    def second(self, filter: filter_input_type(Pep563RepeatFilter) | None = None) -> list[str]:
+        return []
+"""
+    with consumer_module("tests_filters_pep563_repeat", program) as namespace:
+        finalize_django_types()
+        sdl = str(strawberry.Schema(query=consumer_query(namespace)))
+    assert "first(filter: Pep563RepeatFilterInputType = null): [String!]!" in sdl
+    assert "second(filter: Pep563RepeatFilterInputType = null): [String!]!" in sdl
+    assert sdl.count("input Pep563RepeatFilterInputType {") == 1
+    assert _helper_referenced_filtersets == {namespace["Pep563RepeatFilter"]}
 
 
 # ---------------------------------------------------------------------------

@@ -285,10 +285,6 @@ Slice-0 rationale move is what moved them.
   `TODO-ALPHA-056-0.0.17`, which already owns the class-wide maintainer ruling
   and states the spec-side and source-side halves cannot be split. Its ledger row
   needs the count re-derived against `appx/` at that card's close.
-- **The file-column read-side `Meta.exclude` test** homes on
-  `TODO-ALPHA-054-0.0.16`, whose scope migrates the file family onto bundle
-  entries and deletes the hard-coded branches; its byte-identity DoD needs the
-  exclusion path pinned before that refactor, not after.
 - **`bld-037-final.md` deferred items 2 and 3** are struck by measurement, not
   carded: `docs/GLOSSARY.md` is already correct for `DjangoFileType`,
   `DjangoImageType`, `Meta.required_overrides`, `DjangoFilePathType` and

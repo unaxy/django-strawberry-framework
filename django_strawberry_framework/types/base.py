@@ -148,10 +148,9 @@ DEFAULT_RELATION_SHAPE = "connection"
 _RELAY_NODE_GATE_LEAD = "requires a Relay-Node-shaped type; add `relay.Node` to `Meta.interfaces`"
 # The tail appended beside the lead-in by every gate but the relation_shapes
 # gate, and by ``global_id_for`` in ``testing/relay.py``: byte-identical at
-# every compose site (spec-032 integration pass). The
-# ``_validate_relation_shapes`` gate's "or remove the key." tail and the
-# parenthesized fifth-guard variants in ``relay.py`` / ``connection.py`` are
-# a different byte shape and stay inline.
+# every compose site. The ``_validate_relation_shapes`` gate's "or remove the
+# key." tail and the parenthesized fifth-guard variants in ``relay.py`` /
+# ``connection.py`` are a different byte shape and stay inline.
 _RELAY_NODE_GATE_INHERIT_TAIL = "or inherit `relay.Node` directly."
 
 # The valid string-strategy set and the package default are the single source
@@ -1113,13 +1112,8 @@ def _format_unknown_fields_error(
     """Return the standard "unknown fields ... Available: ..." error message.
 
     Used by every validator that points at a typo in a ``Meta`` key naming
-    model fields: ``Meta.fields`` and ``Meta.exclude`` (from
-    ``_select_fields``), ``Meta.optimizer_hints`` (from
-    ``_validate_optimizer_hints``), and ``Meta.nullable_overrides``,
-    ``Meta.required_overrides``, ``Meta.filesystem_path_fields`` and
-    ``Meta.relation_shapes`` (from ``_selected_meta_targets``, which each of
-    their validators calls).  Centralizing the format keeps the
-    consumer-visible error shape consistent across typo-guard sites.
+    model fields; ``attr`` names the offending key.  Centralizing the format
+    keeps the consumer-visible error shape consistent across typo-guard sites.
     """
     return (
         f"{truth.name(model)}.Meta.{attr} names unknown fields: {unknown}. "

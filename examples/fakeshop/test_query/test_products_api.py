@@ -4672,13 +4672,12 @@ def test_create_item_with_file_via_form_multipart_upload_over_http(tmp_path: Pat
     file_map = {"0": ["variables.d.attachment"]}
 
     with override_settings(MEDIA_ROOT=str(tmp_path)):
-        # Raw-multipart exemption (spec-043): the subject is the
-        # hand-built GraphQL-multipart {operations, map, "0"} envelope with an
-        # arbitrary file label - the wire shape TestClient's path-keyed files=
-        # builder never emits. The files= upload path is covered live in
-        # test_uploads_api.py; keeping this raw pins the arbitrary-label envelope.
         client = Client()
         client.force_login(user)
+        # raw-envelope exemption: the hand-built GraphQL-multipart {operations, map,
+        # "0"} envelope with an arbitrary file label - the wire shape TestClient's
+        # path-keyed files= builder never emits. The files= upload path is covered
+        # live in test_uploads_api.py; keeping this raw pins the arbitrary-label envelope.
         response = client.post(
             "/graphql/",
             data={
@@ -4728,33 +4727,30 @@ def test_update_item_with_file_via_form_omitting_the_file_preserves_it(tmp_path:
         "mutation($d: ItemFileModelFormInput!) { createItemWithFileViaForm(data: $d) { "
         "node { id name } errors { field messages } } }"
     )
-    operations = {
-        "query": create_mutation,
-        "variables": {
-            "d": {
-                "name": "PreservedFormWidget",
-                "categoryId": _global_id("products.category", category.pk),
-                "attachment": None,
-            },
+    variables = {
+        "d": {
+            "name": "PreservedFormWidget",
+            "categoryId": _global_id("products.category", category.pk),
+            "attachment": None,
         },
     }
 
     with override_settings(MEDIA_ROOT=str(tmp_path)):
-        # Raw-multipart exemption (spec-043), as in the upload sibling above: the
-        # create leg needs the hand-built {operations, map, "0"} envelope to attach
-        # a file at all. The update leg below is an ordinary JSON POST.
-        response = client.post(
-            "/graphql/",
-            data={
-                "operations": json.dumps(operations),
-                "map": json.dumps({"0": ["variables.d.attachment"]}),
-                "0": SimpleUploadedFile(
+        # The create leg is a multipart upload through the client's path-keyed files=;
+        # the update leg below is an ordinary JSON POST.
+        upload = TestClient(client=client).query(
+            create_mutation,
+            variables,
+            files={
+                "d.attachment": SimpleUploadedFile(
                     "keepme.txt",
                     b"bytes that must survive",
                     content_type="text/plain",
                 ),
             },
+            assert_no_errors=False,
         )
+        response = upload.response
         assert response.status_code == 200
         created_payload = response_json(response)
         assert "errors" not in created_payload, created_payload
@@ -5475,13 +5471,14 @@ async def test_item_save_time_validation_error_returns_the_envelope_over_graphql
 # Serializer-mutation live surface (spec-039 / Decision 13)
 # ===========================================================================
 # Every consumer-reachable resolver branch is earned HERE over real `/graphql/`
-# (the README "Live-first, both verdicts"); `tests/rest_framework/
-# test_resolvers.py` holds ONLY the genuinely-unreachable residue. Each test's
-# first line is `create_users(N)` / `seed_data(N)` (AGENTS.md). The serializer
-# wire envelope is `{ node { ... } errors { field messages } }` (the same
-# `<Name>Payload` shape the model + form flavors return); the request-context
-# proof is the serializer's object `validate()` reading
-# `self.context["request"].user` - NOT a HiddenField.
+# (the README "Live-first, both verdicts");
+# `tests/rest_framework/test_resolvers.py` holds ONLY the genuinely-unreachable
+# residue. Each test's first line is `create_users(N)` / `seed_data(N)`
+# (AGENTS.md). The serializer wire envelope is
+# `{ node { ... } errors { field messages } }` (the same `<Name>Payload` shape
+# the model + form flavors return); the request-context proof is the
+# serializer's object `validate()` reading `self.context["request"].user` - NOT
+# a HiddenField.
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5980,13 +5977,12 @@ def test_create_item_via_serializer_multipart_upload_to_attachment(tmp_path: Pat
     file_map = {"0": ["variables.d.attachment"]}
 
     with override_settings(MEDIA_ROOT=str(tmp_path)):
-        # Raw-multipart exemption (spec-043): the subject is the
-        # hand-built GraphQL-multipart {operations, map, "0"} envelope with an
-        # arbitrary file label - the wire shape TestClient's path-keyed files=
-        # builder never emits. The files= upload path is covered live in
-        # test_uploads_api.py; keeping this raw pins the arbitrary-label envelope.
         client = Client()
         client.force_login(user)
+        # raw-envelope exemption: the hand-built GraphQL-multipart {operations, map,
+        # "0"} envelope with an arbitrary file label - the wire shape TestClient's
+        # path-keyed files= builder never emits. The files= upload path is covered
+        # live in test_uploads_api.py; keeping this raw pins the arbitrary-label envelope.
         response = client.post(
             "/graphql/",
             data={

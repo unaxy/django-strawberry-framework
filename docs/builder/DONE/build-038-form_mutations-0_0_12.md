@@ -560,15 +560,6 @@ cycle. Slice 2 then rewrote 33 stale contract statements across the spec's five 
 the integration pass cross-checked 26 contract classes and repaired 2 divergences; Review round 1
 retired the 32 stranded ordinal citations Slice 2's own label sweep had falsified.
 
-### The one finding no card carries
-
-**Rule 27's `#"substring"` half is as ungated as its ordinal half, and its unresolved population
-is already large.** Measured at the gate: **1,434** substring citations over the 709 readable of
-711 tracked paths, of which **~128 already do not resolve**, concentrated overwhelmingly in
-`docs/builder/DONE/` plans and archived specs. The ordinal half — 36 occurrences — is homed on
-`TODO-ALPHA-053-0.0.15` and `TODO-ALPHA-056-0.0.17`; this half is homed nowhere, and any gate
-written for the ordinal half should be scoped knowing it.
-
 ### Cleared by reading, and NOT defects — do not re-flag
 
 A literal-string citation resolver over-reports in both directions, so these were each graded to a
@@ -596,18 +587,6 @@ Discharged on the maintainer's instruction 2026-09-03, which widened the fence t
 - **Fixed outright** (in `cce37373`): item 1, `TODAY.md`'s three homes naming six of the eight
   shipped form mutations; item 7, `examples/fakeshop/apps/products/schema.py::Mutation`'s
   docstring omitting `submitPing`. Both now name all eight.
-- **Carded on `TODO-ALPHA-056-0.0.17`**: item 12, the ordinal gate — its existing
-  `check_citations.py` bullet was widened from `Decision <N>` to any ordinal token and now carries
-  the en-dash and numbered-list/abbreviation provisions plus the maintainer policy call. A new
-  bullet carries items 8, 10, 11, 15, 16 and 18's live row as 13 stranded sites in `tests/` and
-  `examples/`. Item 6's measurement was folded into that card's `TODO-ALPHA-` id sweep, corrected:
-  its own command now returns 34 rather than 75 because the companions moved to
-  `docs/SPECS/appx/`, and the spec-036 pair names three shipped cards over six occurrences with no
-  `TODO-ALPHA-037` among them.
-- **Carded on `TODO-ALPHA-053-0.0.15`**: a new bullet carries items 9, 13, 14 and the package half
-  of items 8 and 16 as 26 stranded sites in that card's own WP files. Item 17's `[spec-011]`
-  bullet was corrected there — the documentation half is `056`'s, not `057`'s, and the
-  re-derivation trap's `9` is now 42.
 - **Recorded in the rationale companion, no card owed**: item 3, the two `forms/inputs.py` guards
   the spec is deliberately silent about, under Decision 7; item 2, the concurrent session's five
   working-tree-only hunks, under `## Non-Decision deliberation`.

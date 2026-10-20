@@ -154,7 +154,7 @@ def strawberry_config(
     """Build a fresh ``StrawberryConfig`` registering django-strawberry-framework scalars.
 
     The returned config carries ``_PACKAGE_SCALAR_MAP`` merged with the
-    caller's ``extra_scalar_map``; pass it as ``strawberry.Schema(query=...,
+    caller's ``extra_scalar_map``; pass it as ``DjangoSchema(query=...,
     config=strawberry_config(), extensions=[...])``.
 
     The keyword-only ``extra_scalar_map`` lets consumers register their own

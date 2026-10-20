@@ -1080,10 +1080,10 @@ def test_sync_misuse_async_get_queryset_from_sync_path() -> None:
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution() -> None:
-    """An async mutation must not corrupt a later read-side optimizer execution (spec-036 FV-1).
+    """An async mutation must not corrupt a later read-side optimizer execution.
 
-    The durable regression pin for FV-1. ROOT CAUSE (bisected, not the
-    ContextVar-lifecycle hypothesis): the async pipeline runs its whole ORM body -
+    The regression pin for the async-ORM cross-test row leak. The cause is leaked
+    rows, not ContextVar lifecycle: the async pipeline runs its whole ORM body -
     the ``transaction.atomic()`` write included - inside one
     ``sync_to_async(thread_sensitive=True)`` call, so the ``save()``
     commits on asgiref's executor-thread connection, NOT the main-thread
@@ -1109,14 +1109,14 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
     * **Self-contained (catches its own regression):** it runs an async create
       then a read-side optimizer execution over a node type whose category target
       carries a user-narrowing ``get_queryset`` (the exact read shape that
-      surfaced FV-1), asserting the read plans + resolves the relation, sees
+      surfaced the leak), asserting the read plans + resolves the relation, sees
       exactly the row it wrote, and round-trips the relation. Flip this test's own
       decorator to plain ``django_db`` and the cross-test leak it documents
-      returns (proven during the fix).
+      returns.
     """
     # Canary entry guard: under ``transaction=True`` this connection sees any
     # committed-but-unrolled-back rows. A non-empty table here means an earlier
-    # async-ORM test escaped its rollback (the FV-1 leak) - fail loudly with the
+    # async-ORM test escaped its rollback (the row leak) - fail loudly with the
     # offending rows rather than letting the corruption surface downstream.
     leaked_cats = await sync_to_async(
         lambda: list(product_models.Category.objects.values_list("name", flat=True)),
@@ -1127,7 +1127,7 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
         thread_sensitive=True,
     )()
     assert (leaked_cats, leaked_items) == ([], []), (
-        f"FV-1 leak: an earlier async-ORM test committed rows that escaped "
+        f"Row leak: an earlier async-ORM test committed rows that escaped "
         f"per-test rollback (categories={leaked_cats}, items={leaked_items}). "
         f"Async-ORM tests must use @pytest.mark.django_db(transaction=True)."
     )
@@ -1148,7 +1148,7 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
         ) -> QuerySet[product_models.Category]:
             # Narrow the category by a request-user-derived predicate so a leaked
             # row's category (created under a DIFFERENT name) would NOT match,
-            # reproducing the read-side ``RelatedObjectDoesNotExist`` FV-1 hit.
+            # reproducing the read-side ``RelatedObjectDoesNotExist`` the leak caused.
             user_name = read_attr(read_attr(info.context, "user", None), "name", None)
             if user_name is not None:
                 queryset = queryset.filter(name=user_name)
@@ -1214,7 +1214,7 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
     # get_queryset means a leaked item (whose category was created under a name
     # that does not match this request's user) would re-raise
     # RelatedObjectDoesNotExist when the optimizer plans the relation. This is the
-    # exact read shape FV-1 corrupted, run as a SYNC execution (the failing
+    # exact read shape the leak corrupted, run as a SYNC execution (the failing
     # ``test_extension.py`` read used ``schema.execute_sync``); it is driven
     # through ``sync_to_async`` so the sync ORM runs off the event loop, the
     # suite's standard async-test idiom for a synchronous ORM read.
@@ -1230,7 +1230,7 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
         require_instance(_json_at(row, "name"), str) for row in _json_list(read.data, "allItems")
     )
     assert names == ["LeakProbe"], names
-    # The relation round-trips through the optimizer plan (the FV-1 failure mode
+    # The relation round-trips through the optimizer plan (the leak's failure mode
     # is a None relation -> RelatedObjectDoesNotExist; here it resolves).
     assert read.data["allItems"][0]["category"]["name"] == user_name
 

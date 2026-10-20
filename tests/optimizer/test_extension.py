@@ -1747,9 +1747,9 @@ def test_mixed_root_and_nested_pagination_variables() -> None:
 def test_root_fragment_pagination_variable_shares_cache() -> None:
     """A root connection through a ``Query`` fragment is still root: ``$n`` stays out.
 
-    Decision 7 line 346: depth is preserved at the spread SITE. The fragment
-    spreads at response-path depth 0, so its connection field is root and its
-    pagination variable does not key the cache.
+    spec-033 Decision 7: depth is preserved at the spread SITE. The fragment spreads at
+    response-path depth 0, so its connection field is root and its pagination
+    variable does not key the cache.
     """
     document = (
         "query Q($n: Int!) { ...RootFrag } "
@@ -1769,7 +1769,7 @@ def test_fragment_carried_nested_pagination_variable_collected() -> None:
 
     The fragment spreads inside ``node`` (response-path depth >= 1), so its
     ``booksConnection`` field is nested and its pagination variable keys the
-    cache - the positive spread-site-depth pin (Decision 7 line 346).
+    cache - the positive spread-site-depth pin (spec-033 Decision 7).
     """
     document = (
         "query Q($n: Int!) { parents { edges { node { ...BooksFrag } } } } "
@@ -1812,10 +1812,10 @@ def test_fragment_spread_at_two_depths_collects_nested_pagination_variable() -> 
 def test_pagination_var_collection_is_syntactic_superset() -> None:
     """A non-connection nested field with ``first: $n`` is still collected (over-collection).
 
-    Decision 7 line 347: the collection is a syntactic superset by design - any
-    non-root field's pagination-named variable keys the cache, even on a plain
-    resolver that is not a synthesized connection. Over-collection costs cheap
-    duplicate cache entries; under-collection would serve wrong data.
+    spec-033 Decision 7: the collection is a syntactic superset by design - any non-root
+    field's pagination-named variable keys the cache, even on a plain resolver
+    that is not a synthesized connection. Over-collection costs cheap duplicate
+    cache entries; under-collection would serve wrong data.
     """
     doc = parse("{ parents { someField(first: $n) { value } } }")
     names = _collect_cache_var_families(doc.definitions[0], {})[1]

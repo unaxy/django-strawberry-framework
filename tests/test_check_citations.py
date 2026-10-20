@@ -342,6 +342,251 @@ def test_substrings_flag_fails_the_run_and_warns_on_ambiguity(
     assert "WARN: 1 ambiguous pinpoint(s):" in out
 
 
+def test_a_pinpoint_wrapped_across_a_line_break_is_a_finding(tree: Path) -> None:
+    outcomes = _cite(
+        tree,
+        """\
+        # widgets.py::build #"scratch_total =
+        #   count * 2" doubles the count; widgets.py #"LIMIT = 3" closes.
+        # django/db/models/query.py #"reuse_all=
+        #   True" wraps an upstream pinpoint.
+        marker = '#"'  # widgets.py #"
+        heading = '#"' + "x"
+        """,
+    )
+    assert [(o.citation.line, o.citation.kind, o.citation.text) for o in outcomes] == [
+        (1, "symbol", "widgets.py::build"),
+        (1, "wrapped-pinpoint", 'widgets.py::build #"scratch_total ='),
+        (2, "substring", 'widgets.py #"LIMIT = 3"'),
+        (3, "wrapped-pinpoint", 'django/db/models/query.py #"reuse_all='),
+        (5, "wrapped-pinpoint", 'widgets.py #"'),
+    ]
+    assert [o.citation.kind for o in outcomes if o.violation] == ["wrapped-pinpoint"] * 3
+    assert "no closing quote on its line" in (outcomes[1].message or "")
+
+
+def test_a_wrapped_pinpoint_fails_the_default_run_in_every_corpus(
+    tree: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tree, "tests/test_citer.py", '# widgets.py::build #"scratch_total\n#   = count"\n')
+    _write(tree, "KANBAN.md", 'planned `later.md #"Retired\nheading"`\n')
+    assert check_citations.main(["--check"]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith(
+        "FAIL: 2 unresolvable citation(s) of 3 checked "
+        "(2 in 2 .py files, 1 in KANBAN.md, 0 in 1 spec files):",
+    )
+    assert 'tests/test_citer.py:1: cites `widgets.py::build #"scratch_total` --' in out
+    assert 'KANBAN.md:1: cites `later.md #"Retired` --' in out
+
+
+def test_a_citation_wrapped_before_its_double_colon_is_joined(tree: Path) -> None:
+    outcomes = _cite(
+        tree,
+        """\
+        # the proof is ``django_strawberry_framework/widgets.py``
+        #   ``::Widget.render``; ``widgets.py``
+        #   ``::retired`` is gone.
+        """,
+    )
+    assert [(o.citation.line, o.citation.text, o.resolved) for o in outcomes] == [
+        (1, "django_strawberry_framework/widgets.py::Widget.render", True),
+        (2, "widgets.py::retired", False),
+    ]
+
+
+def test_a_pinpoint_opening_the_comment_line_below_its_path_is_joined(tree: Path) -> None:
+    outcomes = _cite(
+        tree,
+        """\
+        # the count doubles at widgets.py::build
+        # #"scratch_total = count * 2", and widgets.py
+        # #"retired text" is gone; widgets.py::build
+        # #"scratch_total
+        #   = count" never closes.
+        """,
+    )
+    assert [
+        (
+            o.citation.line,
+            o.citation.kind,
+            o.citation.text,
+            o.resolved,
+        )
+        for o in outcomes
+    ] == [
+        (
+            1,
+            "symbol",
+            "widgets.py::build",
+            True,
+        ),
+        (
+            1,
+            "substring",
+            'widgets.py::build #"scratch_total = count * 2"',
+            True,
+        ),
+        (
+            2,
+            "substring",
+            'widgets.py #"retired text"',
+            False,
+        ),
+        (
+            3,
+            "symbol",
+            "widgets.py::build",
+            True,
+        ),
+        (
+            3,
+            "wrapped-pinpoint",
+            'widgets.py::build #"scratch_total',
+            False,
+        ),
+    ]
+
+
+def test_a_path_split_after_a_slash_is_joined_or_a_finding(tree: Path) -> None:
+    _write(tree, "docs/guide.md", "## Coverage rule\n")
+    outcomes = _cite(
+        tree,
+        """\
+        # `django_strawberry_framework/
+        # widgets.py` holds the residue; django_strawberry_framework/
+        #   widgets.py::build and docs/
+        #   guide.md #"Coverage rule" are joined.
+        """,
+    )
+    assert [
+        (
+            o.citation.line,
+            o.citation.kind,
+            o.citation.text,
+            o.resolved,
+        )
+        for o in outcomes
+    ] == [
+        (
+            1,
+            "wrapped-path",
+            "django_strawberry_framework/widgets.py",
+            False,
+        ),
+        (
+            2,
+            "symbol",
+            "django_strawberry_framework/widgets.py::build",
+            True,
+        ),
+        (
+            3,
+            "substring",
+            'docs/guide.md #"Coverage rule"',
+            True,
+        ),
+    ]
+    assert "split across a line break after a `/`" in (outcomes[0].message or "")
+
+
+SPEC_WITH_DECISIONS = """\
+# spec-001
+
+### Decision 1 \u2014 First
+
+### Decision 2: second
+
+## [Decision 7a \u2014 Third][spec-001-d7a]
+"""
+
+
+def test_a_spec_decision_citation_must_name_a_decision_heading(tree: Path) -> None:
+    _write(tree, "docs/SPECS/spec-001-x-0_0_1.md", SPEC_WITH_DECISIONS)
+    _write(tree, "docs/SPECS/appx/spec-001-x-0_0_1-rationale.md", "### Decision 9 \u2014 X\n")
+    outcomes = _cite(
+        tree,
+        """\
+        # spec-001 Decision 1, ``spec-001-x-0_0_1`` Decision 7a, Spec-001
+        # Decision 2, spec-001 Decisions 3 and 4, spec-001 Decision 9,
+        # spec-001 Decision 7, spec-002 Decision 1.
+        """,
+    )
+    assert [
+        (
+            o.citation.line,
+            o.citation.text,
+            o.resolved,
+            o.violation,
+        )
+        for o in outcomes
+    ] == [
+        (
+            1,
+            "spec-001 Decision 1",
+            True,
+            False,
+        ),
+        (
+            1,
+            "spec-001 Decision 7a",
+            True,
+            False,
+        ),
+        (
+            1,
+            "spec-001 Decision 2",
+            True,
+            False,
+        ),
+        (
+            2,
+            "spec-001 Decision 3",
+            False,
+            True,
+        ),
+        (
+            2,
+            "spec-001 Decision 9",
+            False,
+            True,
+        ),
+        (
+            3,
+            "spec-001 Decision 7",
+            False,
+            True,
+        ),
+        (
+            3,
+            "spec-002 Decision 1",
+            False,
+            True,
+        ),
+    ]
+    assert outcomes[3].message == (
+        "tests/test_citer.py:2: cites `spec-001 Decision 3` -- `docs/SPECS/spec-001-x-0_0_1.md` "
+        "has no `Decision 3` heading; it carries Decision 1, 2, 7a."
+    )
+    assert "no spec-002 under docs/ or docs/SPECS/" in (outcomes[6].message or "")
+
+
+def test_a_decision_citation_on_the_board_fails_only_on_a_missing_heading(
+    tree: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tree, "docs/spec-003-y-0_0_2.md", SPEC_WITH_DECISIONS)
+    _write(tree, "KANBAN.md", "planned spec-004 Decision 1; spec-003 Decision 2\n")
+    assert check_citations.main([]) == 0
+    assert capsys.readouterr().out == (
+        "OK: 2 citations resolve (0 in 1 .py files, 2 in KANBAN.md, 0 in 2 spec files).\n"
+    )
+    _write(tree, "KANBAN.md", "planned spec-004 Decision 1; spec-003 Decision 5\n")
+    assert check_citations.main([]) == 1
+    assert "KANBAN.md:1: cites `spec-003 Decision 5` --" in capsys.readouterr().out
+
+
 def test_cited_by_marks_gated_and_ungated_citers(
     tree: Path,
     capsys: pytest.CaptureFixture[str],

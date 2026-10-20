@@ -120,6 +120,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import call_method, is_tuple, read_attr
 from django_strawberry_framework.utils._queryset_private import (
+    queryset_db,
     set_queryset_query,
 )
 from django_strawberry_framework.utils.typing import object_result
@@ -814,14 +815,15 @@ def test_multi_db_subquery_pinned_to_caller_alias() -> None:
     """A ``.using("shard_b")`` caller pins every cascade subquery to ``"shard_b"`` (spec-034 Decision 8).
 
     Assert (via the composed subquery's ``.db``) that the cascade subquery binds to
-    the caller's *resolved* alias - ``queryset.db``, the property that falls back to
-    router resolution when no explicit ``.using`` was applied, not the private
-    ``_db``. Built on the ``tests/optimizer/test_multi_db.py`` in-test alias pattern;
+    the caller's EXPLICIT alias - the ``.using(...)`` routing the root carries (an
+    unrouted root composes unrouted subqueries instead:
+    ``test_unrouted_root_composes_unrouted_subqueries``). Built on the
+    ``tests/optimizer/test_multi_db.py`` in-test alias pattern;
     ``FAKESHOP_SHARDED``-gated, so it does not run under a bare ``uv run pytest``.
     The edge is ``apps/products/models.py::Item.category``.
     """
     # Capture the alias the cascade actually hands the target hook. The walk builds
-    # the RHS base as ``related_model._default_manager.using(queryset.db).all()``, so
+    # the RHS base as ``base_queryset(related_model, using=<root's explicit alias>)``, so
     # the queryset the hook receives carries the load-bearing alias. Observing that
     # REAL RHS - rather than reconstructing a fresh ``.using(result.db)`` queryset in
     # the assertion, which would still pass against a broken default-alias build - is
@@ -862,7 +864,7 @@ def test_multi_db_subquery_pinned_to_caller_alias() -> None:
     assert isinstance(compiled_sql, str)
     assert "IN (SELECT" in compiled_sql
     # ...and the queryset it ran the target hook against was pinned to the caller's
-    # resolved alias - the genuine RHS the walk built, observed inside the hook itself.
+    # explicit alias - the genuine RHS the walk built, observed inside the hook itself.
     assert received_dbs == ["shard_b"]
 
 
@@ -992,9 +994,7 @@ def test_proxy_hook_return_over_concrete_target_accepted() -> None:
     _make_type(
         "PcBranchType",
         Branch,
-        get_queryset=lambda _cls, qs, _info: ProxyBranch.objects.using(qs.db).exclude(
-            name="hidden",
-        ),
+        get_queryset=lambda _cls, _qs, _info: ProxyBranch.objects.exclude(name="hidden"),
     )
     shelf_type = _make_type("PcShelfType", Shelf, primary=False)
     finalize_django_types()
@@ -1508,11 +1508,11 @@ def test_hostile_hook_clone_override_is_neutralized_by_sealing_in_cascade() -> N
 
     def _hostile_hook(
         _cls: type[DjangoType],
-        qs: models.QuerySet[models.Model],
+        _qs: models.QuerySet[models.Model],
         _info: object,
     ) -> models.QuerySet[_CtTarget]:
         return models.QuerySet[_CtTarget].filter(
-            _StickyQuerySet(model=_CtTarget, using=qs.db),
+            _StickyQuerySet(model=_CtTarget),
             name="visible",
         )
 
@@ -1548,11 +1548,11 @@ def test_hostile_values_override_end_to_end_is_neutralized_by_sealing() -> None:
 
     def _hostile_hook(
         _cls: type[DjangoType],
-        qs: models.QuerySet[models.Model],
+        _qs: models.QuerySet[models.Model],
         _info: object,
     ) -> models.QuerySet[_CtTarget]:
         return models.QuerySet[_CtTarget].filter(
-            _ValuesEraser(model=_CtTarget, using=qs.db),
+            _ValuesEraser(model=_CtTarget),
             name="visible",
         )
 
@@ -1710,13 +1710,27 @@ def test_annotation_alias_shadow_to_field_cannot_bypass_visibility() -> None:
     assert _cascade_state.get() is None
 
 
-def test_nested_application_off_root_alias_fails_closed() -> None:
-    """A nested cascade whose queryset left the root alias raises before composing.
+@pytest.mark.parametrize(
+    ("root_alias", "nested_alias", "match"),
+    [
+        pytest.param("default", "bogus_alias", "pinned to 'default'", id="pinned-root"),
+        pytest.param(None, "bogus_alias", "root cascade is unrouted", id="unrouted-root"),
+        pytest.param(None, "default", "root cascade is unrouted", id="unrouted-root-router-alias"),
+    ],
+)
+def test_nested_application_off_root_alias_fails_closed(
+    root_alias: str | None,
+    nested_alias: str,
+    match: str,
+) -> None:
+    """A nested cascade whose queryset left the root's explicit alias raises before composing.
 
     A hook that re-aliases its queryset and then cascades would otherwise build
-    subqueries Django cannot legally execute cross-database (or, worse, compose
-    against the wrong data). The nested application validates ``queryset.db``
-    against the pinned root alias and fails closed.
+    subqueries Django refuses as cross-database once the outer query runs. The
+    nested application compares its own EXPLICIT alias with the root's: under an
+    unrouted root even the router's own answer (``"default"``) is off-alias,
+    because the composed query may still be bound elsewhere (a ``Prefetch`` onto
+    a sharded parent). Alias-state only, so no table is needed.
     """
 
     def _realiasing_hook(
@@ -1724,12 +1738,60 @@ def test_nested_application_off_root_alias_fails_closed() -> None:
         qs: models.QuerySet[models.Model],
         info: object,
     ) -> models.QuerySet[models.Model]:
-        return apply_cascade_permissions(cls, qs.using("bogus_alias"), info)
+        return apply_cascade_permissions(cls, qs.using(nested_alias), info)
 
     registry.clear()
     parent_type = _register_ct_pair(_realiasing_hook)
-    with pytest.raises(ConfigurationError, match="pinned to"):
+    with pytest.raises(ConfigurationError, match=match):
+        apply_cascade_permissions(parent_type, _CtParent.objects.using(root_alias), _INFO)
+    assert _cascade_state.get() is None
+
+
+def test_routed_hook_return_under_unrouted_root_fails_closed() -> None:
+    """Under an unrouted root, a hook return routed even to the router's own alias raises.
+
+    An unrouted root seeds every edge base unrouted, so each ``__in`` subquery
+    compiles on whichever connection the outer query finally runs on. A return
+    pinned with ``.using(...)`` cannot follow it: Django would refuse it as a
+    cross-database subquery the moment the outer query is bound to another alias.
+    The cascade refuses it at composition, naming the edge, instead.
+    """
+    registry.clear()
+    parent_type = _register_ct_pair(
+        lambda _cls, _qs, _info: _CtTarget.objects.using("default").filter(name="visible"),
+    )
+    with pytest.raises(
+        ConfigurationError,
+        match=r"on alias 'default' for the cascade subquery on _CtParent\.target, but the root "
+        r"cascade is unrouted",
+    ):
         apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
+    assert _cascade_state.get() is None
+
+
+def test_unrouted_root_composes_unrouted_subqueries() -> None:
+    """An unrouted root hands the target hook an unrouted base and composes an unrouted subquery.
+
+    The cascade's root alias is the root's EXPLICIT alias, never the router's
+    ``queryset.db`` answer, so the composed query carries no alias anywhere and
+    the inlined subquery follows whichever connection later runs the outer query.
+    """
+    received: list[object] = []
+
+    def _record_hook(
+        _cls: type[DjangoType],
+        qs: models.QuerySet[models.Model],
+        _info: object,
+    ) -> models.QuerySet[models.Model]:
+        received.append(queryset_db(qs))
+        return qs.filter(name="visible")
+
+    registry.clear()
+    parent_type = _register_ct_pair(_record_hook)
+    result = apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
+    assert received == [None]
+    assert queryset_db(result) is None
+    assert "IN (SELECT" in str(result.query).upper()
     assert _cascade_state.get() is None
 
 

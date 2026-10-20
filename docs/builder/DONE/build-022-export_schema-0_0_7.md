@@ -238,11 +238,10 @@ Re-measured rather than read, because the rationale's self-reported table re-con
 
 ### Deferred items that take no card
 
-Catalog items 7-9, which the homing table below marks "no action", kept here because deleting the artifact would otherwise drop their reasoning:
+Catalog items 7 and 8, which the homing table below marks "no action", kept here because deleting the artifact would otherwise drop their reasoning:
 
 - **7 — the two source-side `byte-identical` statements in `export_schema.py` are permitted, not violations.** `Command.handle`'s docstring states the equality at the *emitted* level and names no redirect and no platform, which is what Decision 4 obliges; the inline `break redirect-vs-file diffs` comment states what would break *without* `ending=""` — a counterfactual, not an equivalence — and is the text Decision 4's pinned block quotes verbatim, correctly, since that block's fidelity to source is the point. Recorded so a reader applying Decision 4's own "forbids a framing while using it" reasoning to the block does not re-raise it. Rewording the comment would be an escalation, not a cohort's fix.
 - **8 — instrument note.** The DB dump difference is 6 statements *or* 8 physical lines for the same 3 rows: `sqlite3.iterdump()` yields one string per SQL statement, while writing them out and running `diff` splits row 504's `INSERT` across the body's embedded newlines. Both readings are right; the load-bearing figure is the row set. State the instrument beside the digit.
-- **9 — a population defined over "standing surfaces" has to enumerate which directories those are.** Of the sites the F10 sweeps surfaced, three sat in per-cycle or regenerable trees (`docs/dry/`, `docs/bug_hunt/`) and two in shipped source. Without the enumeration the next sweep re-argues the boundary from scratch. A `BUILD.md` proposal at the maintainer's discretion, bound by `## The corpus ratchet`.
 
 ### Closed items, kept so a later pass does not re-open them as new
 
@@ -264,22 +263,10 @@ All six commands pass; no spec edit was owed at the gate and none was made. Re-d
 
 | Catalog item | Disposition | Where it now lives |
 | --- | --- | --- |
-| 1 — introspection entry's symmetric validator gap | homed | card 052 `scope` order 40 |
 | 2 — `CHANGELOG.md` `[0.0.7]` pre-renumber labels | already homed before this cycle | card 052 `scope` order 38 |
-| 3 — post-`0.0.7` `export_schema` behavior absent from every release section | homed | card 052 `scope` order 41 |
-| 4 — interpreter-versioned `.venv` citation paths | homed | card 052 `scope` order 42 |
-| 5 — citations whose target is a script-rendered doc | homed | card 052 `scope` order 43 |
 | 6 — non-unique `docs/GLOSSARY.md` citation substrings | homed as an amendment, not a new bullet | card 052 `scope` order 34, which already scopes the cited-substring uniqueness check; item 6 is a third measured instance of that rule |
 | 7 — source-side `byte-identical` statements | no action, graded permitted | — |
 | 8 — DB-dump instrument note | no action | — |
-| 9 — enumerate the directories a "standing surfaces" population covers | not card-shaped; a `BUILD.md` proposal at maintainer discretion | — |
-
-**Two published populations were wrong and are corrected in the card text rather than carried.** Re-deriving before homing is the standing rule and it earned its place twice here:
-
-- Item 4's population is **24 occurrences across 3 files**, not 5. The catalog's 5 counted only the two files this cycle owned; `docs/SPECS/spec-025-scalar_map_helper-0_0_7.md` carries 19 more and was never in view. Instrument: occurrences of `.venv/lib/python3.10` across `*.md` and `*.py`, excluding per-cycle `docs/builder/` artifacts.
-- Item 6's population is **5**, not 3 — already corrected inside the catalog, and the five sites are now enumerated by line so the next pass does not re-measure them.
-
-Item 5 is homed with **both** resolvers' figures and neither presented as the count. The catalog's resolver scored 47 tokens / 44 parsed / 11 resolve / 33 dead; an independent fence-aware resolver run at homing time parsed all 47 and scored 25 resolve / 22 dead. They diverge almost entirely on target attribution for a line naming two candidate files, which is the checker's first regression test rather than a number to publish.
 
 Gates re-run after the write: all three build scripts `--check` up to date, `manage.py check` clean, `manage.py import_spec_terms --check` OK for all 49 done cards.
 

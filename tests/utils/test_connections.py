@@ -607,14 +607,15 @@ def test_pagination_argument_error_is_a_graphql_error_and_a_framework_error() ->
 
     The production error policy passes an ``original_error`` that IS a
     ``GraphQLError`` through untouched; the package base keeps
-    ``except DjangoStrawberryFrameworkError`` covering it. The message is the
-    whole wire payload: no ``extensions`` ride along.
+    ``except DjangoStrawberryFrameworkError`` covering it. Every instance
+    carries the audited ``PAGINATION_INVALID`` code without the raise site
+    spelling it.
     """
     error = PaginationArgumentError("Argument 'first' must be a non-negative integer.")
     assert isinstance(error, GraphQLError)
     assert isinstance(error, DjangoStrawberryFrameworkError)
     assert error.message == "Argument 'first' must be a non-negative integer."
-    assert not error.extensions
+    assert error.extensions == {"code": "PAGINATION_INVALID"}
 
 
 _FOREIGN_CURSOR = to_base64("GenreType", "1")

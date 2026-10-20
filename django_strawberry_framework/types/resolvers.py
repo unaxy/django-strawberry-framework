@@ -298,7 +298,6 @@ def _check_n1(
     *,
     kind: RelationKind | Literal["connection_to_attr"] | None,
     cache_name: str | None = None,
-    to_attr: str | None = None,
     reason: str | None = None,
     planned: AbstractSet[str] | _PlanUnread | None = _PLAN_UNREAD,
     precomputed_key: str | None = None,
@@ -310,11 +309,12 @@ def _check_n1(
     ``kind`` is required (keyword-only) and accepts the ``relation_kind``
     of the field being resolved. ``"many"`` and ``"reverse_many_to_one"``
     use the many-side cache check; the special ``"connection_to_attr"``
-    value (spec-033 Decision 8) uses the windowed-prefetch ``to_attr``
-    probe; every other known relation shape uses the single-valued cache
-    check. Production ``_make_relation_resolver`` always supplies the
-    relation kind; the ``kind=None`` fallback is reserved for test-double
-    direct callers that exercise the single-valued cache check (see
+    value (spec-033 Decision 8) probes nothing, because its caller has
+    already decided the windowed page was not served; every other known
+    relation shape uses the single-valued cache check. Production
+    ``_make_relation_resolver`` always supplies the relation kind; the
+    ``kind=None`` fallback is reserved for test-double direct callers that
+    exercise the single-valued cache check (see
     ``tests/types/test_resolvers.py::test_check_n1_*``).
 
     ``field_name`` keys the PLAN lookup (the optimizer walker emits
@@ -328,18 +328,16 @@ def _check_n1(
 
     Connection contract (spec-033 Decision 8): the synthesized
     relation-connection resolver calls this with ``kind="connection_to_attr"``
-    and the windowed-prefetch ``to_attr`` it actually probed - the shared
-    ``_dst_<field>_connection``, or the per-response-key
-    ``_dst_<field>$<key>_connection`` when a divergent-alias window held
-    rows (the caller threads whichever attr its fast-path probe
-    found). The access truly queries iff that ``to_attr`` is ABSENT on
-    ``root`` - when present, the window already served the page, so no
-    lazy load happens and the check is silent. ``reason`` (the per-parent-fallback
-    cause, supplied by the connection call site) is appended to the
-    ``"raise"`` / ``"warn"`` message when present so a flagged fallback
-    reads as actionable rather than as an optimizer defect; the
-    list-relation calls pass no ``reason`` and produce the byte-identical
-    pre-slice message.
+    only on its per-parent branch, after it refused to serve whatever sits
+    under the windowed-prefetch ``to_attr`` (absent, not a list, rows without
+    the window row number, or a sidecar ``filter`` / ``order_by`` kwarg).
+    That branch always queries, so the access counts as lazy without
+    re-probing ``root``: an attribute that is present but refused is still a
+    per-parent query. ``reason`` (the per-parent-fallback cause, supplied by
+    the connection call site) is appended to the ``"raise"`` / ``"warn"``
+    message when present so a flagged fallback reads as actionable rather
+    than as an optimizer defect; the list-relation calls pass no ``reason``
+    and produce the byte-identical pre-slice message.
 
     ``planned`` / ``precomputed_key`` / ``strictness`` (keyword-only): a caller
     that already read the ``DST_OPTIMIZER_PLANNED`` sentinel, computed the resolver
@@ -384,18 +382,16 @@ def _check_n1(
     )
     if not force_unplanned and _relation_is_planned(key, planned):
         return
-    if kind == "connection_to_attr":
-        # The windowed page already landed under ``to_attr`` when present;
-        # only an absent ``to_attr`` means the per-parent pipeline will query.
-        lazy = getattr(root, to_attr, None) is None if isinstance(to_attr, str) else True
-    else:
+    # A connection caller arrives only on its per-parent branch, which always
+    # queries; every other kind asks the instance cache whether it will load.
+    if kind != "connection_to_attr":
         probe_name = cache_name or field_name
         if is_many_side_relation_kind(kind):
             lazy = _will_lazy_load_many(root, probe_name)
         else:
             lazy = _will_lazy_load_single(root, probe_name)
-    if not lazy:
-        return
+        if not lazy:
+            return
     suffix = f" ({reason})" if reason is not None else ""
     if strictness == "raise":
         raise OptimizerError(f"Unplanned N+1: {field_name}{suffix}")

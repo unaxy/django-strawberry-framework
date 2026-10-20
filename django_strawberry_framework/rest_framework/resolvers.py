@@ -148,7 +148,6 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.settings import api_settings
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError
 from django_strawberry_framework.mutations.resolvers import (
     StepFailure,
     make_resolver_entries,
@@ -172,6 +171,8 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
     FIELD_ERROR_CODE_TRUNCATED,
+    NON_FIELD_ERROR_KEY,
+    FieldError,
     build_error_key_map,
     empty_validation_error,
     field_error,

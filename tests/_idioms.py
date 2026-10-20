@@ -117,13 +117,24 @@ typed ``object``: channels annotates the decoded frame ``Any``.
 ``type_args`` is ``typing.get_args`` typed as returning ``tuple[object, ...]``: typeshed
 declares its members ``Any``, so every annotation argument a test inspects would read as
 ``Any`` without it.
+
+``consumer_module`` executes a consumer program as a real ``sys.modules`` entry for the
+length of a ``with`` block and yields its namespace. Strawberry evaluates a deferred
+annotation in the globals of the module its class names, so a PEP 563 consumer needs a
+module that exists, not a bare ``exec`` namespace. The program compiles with
+``dont_inherit=True``: ``exec`` of source text otherwise inherits the calling test module's
+own ``from __future__ import annotations``, and a program that omits the import would defer
+its annotations anyway. ``consumer_query`` reads the program's ``Query`` class out of that
+namespace as a ``type``.
 """
 
 import enum
 import inspect
 import json
 import pickle
-from collections.abc import Callable, Iterable, Mapping
+import sys
+from collections.abc import Callable, Generator, Iterable, Mapping
+from contextlib import contextmanager
 from types import FunctionType, ModuleType
 from typing import (
     TYPE_CHECKING,
@@ -451,6 +462,25 @@ def stub_module(name: str, **attributes: object) -> ModuleType:
     module = ModuleType(name)
     vars(module).update(attributes)
     return module
+
+
+@contextmanager
+def consumer_module(name: str, program: str) -> Generator[dict[str, object], None, None]:
+    """Execute ``program`` as the module ``name`` and yield its namespace until the block exits."""
+    module = ModuleType(name)
+    sys.modules[name] = module
+    try:
+        exec(compile(program, name, "exec", dont_inherit=True), vars(module))  # noqa: S102 - literal test program
+        yield vars(module)
+    finally:
+        del sys.modules[name]
+
+
+def consumer_query(namespace: Mapping[str, object]) -> type:
+    """Return the ``Query`` class a ``consumer_module`` program declares."""
+    query = namespace["Query"]
+    assert isinstance(query, type)
+    return query
 
 
 def _remove_databases_failures_descriptor(

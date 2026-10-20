@@ -1,12 +1,14 @@
-"""Governance tests for the CI workflow definitions.
+"""Governance tests for CI workflows, Dependabot, install floors and first-party source.
 
 Repo tooling: these rows pin YAML under ``.github/workflows/``, Dependabot
 ecosystems, the first-party ``DjangoOptimizerExtension`` ``extensions=`` form
-sweep, and install-floor constants against ``pyproject.toml``. A live
-``/graphql/`` request has no wire shape for a workflow permission block, an
-action SHA pin, a digest-pinned container image, a Dependabot ecosystem list,
-an AST classifier over every committable ``.py``, or a TOML dependency row,
-so none of these rows can move. There is no live sibling in
+sweep, the live tier's undeclared raw ``.post(`` / ``.generic(`` sweep,
+install-floor constants against ``pyproject.toml``, and every staged
+``TODO(spec-NNN ...)`` anchor against the spec corpus and ``KANBAN.md``. A
+live ``/graphql/`` request has no wire shape for a workflow permission block,
+an action SHA pin, a digest-pinned container image, a Dependabot ecosystem
+list, an AST classifier over every committable ``.py``, a TOML dependency row
+or a source comment, so none of these rows can move. There is no live sibling in
 ``examples/fakeshop/test_query/``. Plan-cache reuse across HTTP requests on
 the shipped schema lives in
 ``examples/fakeshop/test_query/test_library_api.py``; that row cannot audit
@@ -18,8 +20,10 @@ behavior, so this module adds no package coverage surface.
 """
 
 import ast
+import io
 import re
 import subprocess
+import tokenize
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
@@ -27,7 +31,12 @@ from typing import TYPE_CHECKING, TypeAlias
 import pytest
 import yaml
 
-from django_strawberry_framework.utils.imports import CHANNELS_FLOOR, STRAWBERRY_FLOOR
+from django_strawberry_framework.utils.imports import (
+    CHANNELS_FLOOR,
+    DEBUG_TOOLBAR_FLOOR,
+    DRF_FLOOR,
+    STRAWBERRY_FLOOR,
+)
 from django_strawberry_framework.utils.typing import object_result
 
 # The repo-wide Python sweep below borrows this repo's existing definition of the
@@ -40,7 +49,7 @@ from django_strawberry_framework.utils.typing import object_result
 # filesystem also excludes the gitignored ``docs/*/temp-tests/`` scratch by
 # construction, so the gate cannot pass in a clean CI checkout and fail on a
 # developer machine.
-from scripts.check_citations import SOURCE_TREES, iter_python_sources
+from scripts.check_citations import SOURCE_TREES, iter_python_sources, spec_files
 from tests._idioms import json_at, json_list
 
 if TYPE_CHECKING:
@@ -1014,6 +1023,167 @@ def test_no_active_source_uses_a_forbidden_optimizer_extensions_form() -> None:
     )
 
 
+#: A staged-slice anchor (AGENTS.md rule 27): ``TODO(spec-NNN ...)``, bare or with a
+#: slice tail in either case. Group ``number`` is the spec number, which is the
+#: KANBAN card number.
+STAGED_ANCHOR = re.compile(r"TODO\(spec-(?P<number>\d{3})\b[^)]*\)", re.IGNORECASE)
+
+KANBAN_PATH = REPO_ROOT / "KANBAN.md"
+
+#: One ``## Card index`` row of the rendered board, which lists every scheduled card.
+#: ``KANBAN.md`` is the board read without a database: CI's ``build_kanban_md.py
+#: --check`` holds it byte-equal to the kanban app's rows.
+CARD_INDEX_ROW = re.compile(
+    r"^\| \[`(?P<card>[A-Z]+(?:-[A-Z]+)?-(?P<number>\d{3})-[0-9.]+)`\]",
+    re.MULTILINE,
+)
+
+#: One card heading in the rendered board's column bodies.
+CARD_HEADING = re.compile(r"^### \[(?P<card>[A-Z]+(?:-[A-Z]+)?-\d{3}-[0-9.]+) - ", re.MULTILINE)
+
+#: The workflow-state prefix the card ID format gives a shipped card.
+DONE_PREFIX = "DONE-"
+
+
+def _board_cards(board: str) -> dict[str, str]:
+    """Return ``{card number: card id}`` for every row of the board's card index."""
+    return {match["number"]: match["card"] for match in CARD_INDEX_ROW.finditer(board)}
+
+
+def _stale_staged_anchors(paths: Iterable[Path], cards: dict[str, str]) -> list[str]:
+    """Return one formatted violation per staged anchor in ``paths`` that names no open spec.
+
+    An anchor is stale when no spec carries its number, when the board has no card
+    with that number, or when that card is done: a shipped spec's staged slice
+    either shipped and kept its anchor, or never will under that spec. A pure
+    function over a corpus and a board, so the rows below can feed it planted files
+    the live tree never holds.
+    """
+    violations: list[str] = []
+    for path in paths:
+        display = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for lineno, line in enumerate(lines, start=1):
+            for match in STAGED_ANCHOR.finditer(line):
+                number = match["number"]
+                card = cards.get(number)
+                if not spec_files(number):
+                    reason = f"no docs/spec-{number}-*.md or docs/SPECS/spec-{number}-*.md exists"
+                elif card is None:
+                    reason = f"no card {number} is on the board"
+                elif card.startswith(DONE_PREFIX):
+                    reason = f"card {card} is done"
+                else:
+                    continue
+                violations.append(f"{display}:{lineno}: {match[0]}: {reason}")
+    return violations
+
+
+def _live_board_cards() -> dict[str, str]:
+    """Return the live board's card index (see ``_board_cards``)."""
+    return _board_cards(KANBAN_PATH.read_text(encoding="utf-8"))
+
+
+def test_the_board_card_index_lists_every_card_heading() -> None:
+    """The card-index parse reads every scheduled card the board renders.
+
+    The anchor sweep looks a card up in ``_board_cards``, so a parse that narrowed
+    (a reformatted index row the pattern stops matching) would report a live card
+    as missing or, worse, miss the ``DONE-`` row that should have failed an anchor.
+    The column bodies' headings are a second rendering of the same card set,
+    matched by a different pattern.
+    """
+    board = KANBAN_PATH.read_text(encoding="utf-8")
+    headings = {match["card"] for match in CARD_HEADING.finditer(board)}
+    assert headings, "no card heading parsed from KANBAN.md"
+    assert set(_board_cards(board).values()) == headings
+
+
+def test_every_staged_todo_anchor_names_an_open_spec() -> None:
+    """Every ``TODO(spec-NNN ...)`` in first-party source names a spec whose card is open.
+
+    AGENTS.md rule 27 has the change that ships a staged slice remove its anchor.
+    Nothing else reads the anchors, so one left behind outlives its spec, or names a
+    spec that was renumbered away, and reads as planned work forever. Documentation
+    prose quoting the anchor form is outside the corpus: only ``.py`` sources are
+    read, the corpus the census rows above pin against git.
+    """
+    violations = _stale_staged_anchors(_sweep_corpus(), _live_board_cards())
+    assert not violations, (
+        "staged TODO(spec-NNN ...) anchor(s) naming no open spec:\n"
+        + "\n".join(violations)
+        + "\nRemove the anchor with the slice that shipped it, or retarget it at the "
+        "spec or BACKLOG entry that now owns the work."
+    )
+
+
+def _done_card_with_a_spec(cards: dict[str, str]) -> str:
+    """Return the number of a done card that has a spec, read from the live board."""
+    numbers = sorted(n for n, card in cards.items() if card.startswith(DONE_PREFIX))
+    found = next((number for number in numbers if spec_files(number)), None)
+    assert found is not None, "no done card on the board has a spec to plant against"
+    return found
+
+
+def _open_card_with_a_spec(cards: dict[str, str]) -> str:
+    """Return the number of an open card that has a spec, read from the live board."""
+    numbers = sorted(n for n, card in cards.items() if not card.startswith(DONE_PREFIX))
+    found = next((number for number in numbers if spec_files(number)), None)
+    assert found is not None, "no open card on the board has a spec to plant against"
+    return found
+
+
+def _number_without_a_spec() -> str:
+    """Return the lowest three-digit number no spec carries."""
+    return next(f"{n:03d}" for n in range(1, 1000) if not spec_files(f"{n:03d}"))
+
+
+def _plant(tmp_path: Path, number: str, tail: str) -> Path:
+    """Write a one-anchor corpus file; the anchor is assembled so this module holds none."""
+    planted = tmp_path / "planted_anchor.py"
+    anchor = "TODO(spec-" + number + tail + ")"
+    planted.write_text(f"# a planted corpus\n# {anchor}: wire the slice\nVALUE = 1\n")
+    return planted
+
+
+@pytest.mark.parametrize("tail", ["", " slice 1", " Slice 2"], ids=["bare", "slice", "Slice"])
+def test_the_anchor_sweep_reports_an_anchor_naming_a_done_card(tmp_path: Path, tail: str) -> None:
+    """An anchor whose spec exists but whose card shipped is reported, in every spelling."""
+    cards = _live_board_cards()
+    number = _done_card_with_a_spec(cards)
+    reported = _stale_staged_anchors([_plant(tmp_path, number, tail)], cards)
+    assert len(reported) == 1, reported
+    assert reported[0].endswith(f": card {cards[number]} is done"), reported[0]
+    assert reported[0].startswith(f"{tmp_path / 'planted_anchor.py'}:2: "), reported[0]
+
+
+def test_the_anchor_sweep_reports_an_anchor_naming_no_spec(tmp_path: Path) -> None:
+    """An anchor whose number no spec carries is reported."""
+    number = _number_without_a_spec()
+    reported = _stale_staged_anchors([_plant(tmp_path, number, " slice 1")], _live_board_cards())
+    assert len(reported) == 1, reported
+    assert f"no docs/spec-{number}-*.md" in reported[0], reported[0]
+
+
+def test_the_anchor_sweep_reports_a_spec_with_no_card(tmp_path: Path) -> None:
+    """An anchor whose spec exists but whose number has no card on the board is reported."""
+    cards = _live_board_cards()
+    number = _done_card_with_a_spec(cards)
+    without = {n: card for n, card in cards.items() if n != number}
+    reported = _stale_staged_anchors([_plant(tmp_path, number, " slice 1")], without)
+    location = f"{tmp_path / 'planted_anchor.py'}:2"
+    assert reported == [
+        f"{location}: TODO(spec-{number} slice 1): no card {number} is on the board",
+    ]
+
+
+def test_the_anchor_sweep_accepts_an_anchor_naming_an_open_spec(tmp_path: Path) -> None:
+    """The sweep's negative direction: an anchor on an open card's spec is not reported."""
+    cards = _live_board_cards()
+    number = _open_card_with_a_spec(cards)
+    assert _stale_staged_anchors([_plant(tmp_path, number, " Slice 1")], cards) == []
+
+
 def test_channels_floor_constant_matches_the_pyproject_dependency_row() -> None:
     """The one Channels floor the install hints name is the one the project pins.
 
@@ -1041,3 +1211,182 @@ def test_strawberry_floor_constant_matches_the_pyproject_dependency_row() -> Non
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     rows = re.findall(r'"strawberry-graphql>=([0-9][^"]*)"', text)
     assert rows == [STRAWBERRY_FLOOR], (rows, STRAWBERRY_FLOOR)
+
+
+def test_debug_toolbar_floor_constant_matches_the_pyproject_dependency_row() -> None:
+    """The debug-toolbar floor the middleware's hint names is the one the project pins.
+
+    The toolbar middleware's install hint interpolates ``DEBUG_TOOLBAR_FLOOR``,
+    and nothing else compares that constant to the ``django-debug-toolbar``
+    dev-group row in ``pyproject.toml``. A floor bump on either side would
+    otherwise be silent. Parsed exactly like the Channels row.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    rows = re.findall(r'"django-debug-toolbar>=([0-9][^"]*)"', text)
+    assert rows == [DEBUG_TOOLBAR_FLOOR], (rows, DEBUG_TOOLBAR_FLOOR)
+
+
+def test_drf_floor_constant_matches_the_pyproject_dependency_row() -> None:
+    """The DRF floor the serializer-mutation hint names is the one the project pins.
+
+    ``require_drf()``'s install hint interpolates ``DRF_FLOOR``, and nothing
+    else compares that constant to the ``djangorestframework`` dev-group row in
+    ``pyproject.toml``. A floor bump on either side would otherwise be silent.
+    Parsed exactly like the Channels row; the quote before ``>=`` keeps the
+    ``djangorestframework-stubs`` row out of the match.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    rows = re.findall(r'"djangorestframework>=([0-9][^"]*)"', text)
+    assert rows == [DRF_FLOOR], (rows, DRF_FLOOR)
+
+
+#: The live tier the raw-post sweep reads: every ``.py`` directly under it.
+LIVE_TIER = REPO_ROOT / "examples" / "fakeshop" / "test_query"
+
+#: The Django test-client methods that put a hand-built request on the wire.
+RAW_POST_METHODS = frozenset({"generic", "post"})
+
+#: The declaration a raw post carries (spec-043 Decision 11): a full-line comment
+#: naming what the raw envelope is, with a reason after the colon.
+RAW_POST_EXEMPTION = re.compile(r"^#\s*raw-envelope exemption:\s*\S")
+
+
+def _full_line_comments(source: str) -> dict[int, str]:
+    """Every comment that is alone on its line, keyed by its 1-based line number."""
+    comments: dict[int, str] = {}
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.COMMENT and not token.line[: token.start[1]].strip():
+            comments[token.start[0]] = token.string
+    return comments
+
+
+def _raw_posts(path: Path) -> tuple[list[str], list[str]]:
+    """``(undeclared, declared)`` ``file:line: callee`` entries for each raw post in ``path``.
+
+    A call is declared when the contiguous block of full-line comments directly
+    above the line it starts on carries ``RAW_POST_EXEMPTION``; a blank or code
+    line ends the block.
+    """
+    source = path.read_text(encoding="utf-8")
+    comments = _full_line_comments(source)
+    undeclared: list[tuple[int, str]] = []
+    declared: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source, filename=str(path))):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in RAW_POST_METHODS
+        ):
+            continue
+        line = node.lineno - 1
+        block: list[str] = []
+        while line in comments:
+            block.append(comments[line])
+            line -= 1
+        entry = (node.lineno, f"{path}:{node.lineno}: {ast.unparse(node.func)}(")
+        if any(RAW_POST_EXEMPTION.match(comment) for comment in block):
+            declared.append(entry)
+        else:
+            undeclared.append(entry)
+    return [text for _, text in sorted(undeclared)], [text for _, text in sorted(declared)]
+
+
+def _live_tier_modules() -> list[Path]:
+    paths = sorted(LIVE_TIER.glob("*.py"))
+    assert LIVE_TIER / "test_transport_api.py" in paths, f"live tier not found at {LIVE_TIER}"
+    return paths
+
+
+def test_no_live_tier_module_posts_raw_without_a_declared_exemption() -> None:
+    """Every raw ``.post(`` / ``.generic(`` in the live tier declares its exemption.
+
+    spec-043 Decision 11: a live row posts through ``TestClient`` /
+    ``AsyncTestClient`` (directly or through ``graphql_client.py``) unless the
+    raw envelope is its subject - a hand-built multipart envelope, a malformed or
+    byte-exact body, a content-type or charset probe, a header or CSRF shape the
+    client cannot carry. Such a call carries a ``# raw-envelope exemption:
+    <what the envelope is>`` comment in the comment block directly above the line
+    it starts on, sync or async alike.
+
+    Deliberate limits. Any ``.post(`` / ``.generic(`` attribute call counts,
+    whatever its receiver, so a non-client ``.post`` would have to declare too;
+    that false positive is loud and one line to fix. A ``getattr(client,
+    "post")`` lookup is not seen. The sanctioned paths sit outside the corpus by
+    construction: ``graphql_client.py::post_graphql_raw`` (the shared
+    raw-envelope helper) and the package client's own ``request``. The declared
+    count must be non-zero, so a corpus the sweep cannot read fails rather than
+    passes.
+    """
+    undeclared: list[str] = []
+    declared: list[str] = []
+    for path in _live_tier_modules():
+        found, ok = _raw_posts(path)
+        undeclared += found
+        declared += ok
+    assert declared, f"no declared raw post found under {LIVE_TIER}; the sweep read nothing"
+    assert not undeclared, (
+        "raw .post( / .generic( without a declared exemption in the live tier:\n"
+        + "\n".join(undeclared)
+        + "\nRoute it through TestClient / AsyncTestClient, or declare the raw envelope"
+        " with a '# raw-envelope exemption: <reason>' comment directly above the call."
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "callee"),
+    [
+        ("response = Client().post('/graphql/', data=raw)\n", "Client().post"),
+        ("response = await AsyncClient().post('/graphql/', data=raw)\n", "AsyncClient().post"),
+        ("response = client.generic('POST', '/graphql/', data=raw)\n", "client.generic"),
+        (
+            "# raw-envelope exemption: a byte-exact body\n\nresponse = client.post('/g/')\n",
+            "client.post",
+        ),
+        (
+            (
+                "# raw-envelope exemption: a byte-exact body\nclient = Client()\n"
+                "response = client.post('/g/')\n"
+            ),
+            "client.post",
+        ),
+        ("# raw-envelope exemption:\nresponse = client.post('/g/')\n", "client.post"),
+        ("response = client.post('/g/')  # raw-envelope exemption: inline\n", "client.post"),
+    ],
+    ids=[
+        "sync-post",
+        "async-post",
+        "generic",
+        "blank-line-breaks-the-block",
+        "code-line-breaks-the-block",
+        "no-reason",
+        "trailing-comment",
+    ],
+)
+def test_the_raw_post_sweep_reports_an_undeclared_call(
+    tmp_path: Path,
+    body: str,
+    callee: str,
+) -> None:
+    """Each undeclared shape is reported with its file, its line and its callee."""
+    planted = tmp_path / "test_planted_api.py"
+    planted.write_text(f"# a planted live module\n{body}")
+    undeclared, declared = _raw_posts(planted)
+    assert declared == [], declared
+    assert len(undeclared) == 1, undeclared
+    assert undeclared[0].startswith(f"{planted}:"), undeclared[0]
+    assert undeclared[0].endswith(f": {callee}("), undeclared[0]
+
+
+def test_the_raw_post_sweep_accepts_a_declared_call(tmp_path: Path) -> None:
+    """The negative direction: a marker anywhere in the block directly above declares it."""
+    planted = tmp_path / "test_planted_api.py"
+    planted.write_text(
+        "async def row(client):\n"
+        "    # raw-envelope exemption: a hand-built multipart envelope\n"
+        "    # with an arbitrary file label.\n"
+        "    response = await client.post(\n"
+        "        '/g/',\n"
+        "    )\n"
+        "    return client.query('{ x }')\n",
+    )
+    assert _raw_posts(planted) == ([], [f"{planted}:4: client.post("])

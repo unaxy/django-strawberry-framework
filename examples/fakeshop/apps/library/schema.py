@@ -460,7 +460,7 @@ class IssueType(DjangoType):
     ``cursor_field = ("-number", "id")`` makes every connection over issues
     KEYSET-MODE: newest-number-first ordering (the canonical feed shape and
     the mixed-direction seek arm - DESC ordering column, ASC pk tiebreak),
-    value-encoded signed cursors that survive inserts/deletes, offset
+    AES-SIV-encrypted value cursors that survive inserts/deletes, offset
     cursors rejected. ``get_queryset`` hides embargoed issues from
     non-staff viewers - the permission-aware cursor-decode substrate: a
     cursor minted under staff visibility replays for anonymous viewers over

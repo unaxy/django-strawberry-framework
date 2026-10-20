@@ -24,12 +24,9 @@ import importlib
 import inspect
 import itertools
 import json
-import subprocess
-import sys
 import threading
 from collections.abc import Callable, Generator, Iterable, Iterator, MutableMapping
 from enum import Enum
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, runtime_checkable
 
@@ -133,6 +130,7 @@ from tests._idioms import (
     resolver_function,
 )
 from tests._info import make_info, unread_info
+from tests._subprocess import run_in_fresh_process
 from tests.auth._helpers import _drain_until, _session_request
 
 if TYPE_CHECKING:
@@ -373,34 +371,6 @@ def _channels_adapter(
     return _channels_adapter_over(_channels_scope(scope_type, store=store, user=user))
 
 
-def _auth_free_subprocess(body: str) -> None:
-    """Run ``body`` in a fresh Django-configured process that has not imported ``auth``.
-
-    The prologue puts ``examples/fakeshop`` on ``sys.path``, points
-    ``DJANGO_SETTINGS_MODULE`` at its settings and calls ``django.setup()``;
-    ``body`` is appended to it verbatim. A separate process is what makes a
-    ``sys.modules`` assertion deterministic - inside the test worker the auth
-    module is long since imported by this file's own imports.
-    """
-    fakeshop = Path(__file__).resolve().parents[2] / "examples" / "fakeshop"
-    prologue = (
-        "import django; "
-        "import os; "
-        f"import sys; sys.path.insert(0, {str(fakeshop)!r}); "
-        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings'); "
-        "django.setup(); "
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", prologue + body],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"subprocess failed: stdout={result.stdout!r}, stderr={result.stderr!r}"
-    )
-
-
 _LOGIN_Q = (
     'mutation($p: String!){ login(username: "probe", password: $p){ '
     "node{ username } errors{ field messages } } }"
@@ -566,7 +536,7 @@ def test_registry_clear_does_not_import_the_auth_subsystem() -> None:
     ``::test_finalize_in_an_auth_free_process_never_imports_the_auth_subsystem``,
     which actually finalizes; this row does not.
     """
-    _auth_free_subprocess(
+    run_in_fresh_process(
         "import django_strawberry_framework.registry as r; "
         "r.registry.clear(); "
         "assert 'django_strawberry_framework.auth.mutations' not in sys.modules",
@@ -634,7 +604,7 @@ def test_finalize_in_an_auth_free_process_never_imports_the_auth_subsystem(drive
     not because the two can fail apart. A plain function-local import in the
     finalizer would load the subsystem under either one.
     """
-    _auth_free_subprocess(driver + _AUTH_UNIMPORTED_ASSERT)
+    run_in_fresh_process(driver + _AUTH_UNIMPORTED_ASSERT)
 
 
 def test_factory_after_finalize_raises_the_standing_configuration_error() -> None:

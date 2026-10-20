@@ -148,11 +148,12 @@ class FieldMeta:
         auto_created: Django's auto-created flag. ``True`` for reverse
             descriptors and concrete MTI parent links.
         accessor_name: The attribute name relation rows are reached
-            through on a model INSTANCE (``utils.relations
-            .instance_accessor``). Diverges from ``name`` for reverse
-            relations without ``related_name`` (query name ``"book"`` vs
-            accessor ``"book_set"``); the optimizer's prefetch lookups
-            and the strictness cache probes consume this slot because
+            through on a model INSTANCE
+            (``django_strawberry_framework/utils/relations.py::instance_accessor``).
+            Diverges from ``name`` for reverse relations without
+            ``related_name`` (query name ``"book"`` vs accessor
+            ``"book_set"``); the optimizer's prefetch lookups and the
+            strictness cache probes consume this slot because
             ``FieldMeta`` carries no ``get_accessor_name`` to ask live.
             ``None`` only on hand-built instances; both builders always
             populate it.
@@ -395,10 +396,10 @@ def _target_pk_name(model: type[models.Model] | None) -> str | None:
     """Return ``model``'s concrete primary-key field name, or ``None``.
 
     ``FieldMeta`` is also built from fabricated field shapes on the resolver
-    path (``_field_meta_for_resolver``), whose ``related_model`` may be a
-    lightweight stand-in without ``_meta``. A missing ``_meta`` simply means
-    "no resolvable target pk", which disables FK-id elision rather than
-    raising.
+    path (``types/resolvers.py::_field_meta_for_resolver``), whose
+    ``related_model`` may be a lightweight stand-in without ``_meta``. A
+    missing ``_meta`` simply means "no resolvable target pk", which disables
+    FK-id elision rather than raising.
     """
     if model is None:
         return None

@@ -1587,18 +1587,15 @@ def test_document_over_the_token_bound_is_rejected() -> None:
 
 
 def _post_named(mount: str, query: str, operation_name: str) -> JSONObject:
-    """POST a document with an ``operationName``, which the shared client cannot express.
-
-    The raw-envelope exemption (spec-043): the subject IS the wire field, so the
-    body is hand-built rather than replaced by the client's body-builder.
-    """
-    response = Client().post(
-        mount,
-        data=json.dumps({"query": query, "operationName": operation_name}),
-        content_type="application/json",
+    """POST a document with an ``operationName`` and return the decoded payload."""
+    res = TestClient().query(
+        query,
+        assert_no_errors=False,
+        operation_name=operation_name,
+        url=mount,
     )
-    assert response.status_code == 200
-    return response_json(response)
+    assert res.response.status_code == 200
+    return response_json(res.response)
 
 
 #: One persisted document carrying a small operation and an oversized one. The

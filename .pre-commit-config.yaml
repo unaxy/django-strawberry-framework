@@ -135,7 +135,7 @@ repos:
 
       - id: check-citations
         name: citations resolve (AGENTS.md rule 27 path::Symbol refs)
-        entry: uv run python scripts/check_citations.py
+        entry: uv run python scripts/check_citations.py --substrings
         language: system
         # Runs last: it resolves citations against the tree the earlier hooks have
         # finished rewriting. `pass_filenames: false` is required, not an
@@ -143,7 +143,8 @@ repos:
         # citations in files you are not, so only a full sweep can see it. And
         # `always_run` because DELETING a .py file is a prime rot source yet a
         # deleted path never appears in pre-commit's staged-file list; the sweep
-        # costs under a second.
+        # costs under a second. `--substrings` also checks every `#"substring"`
+        # pinpoint, which a reflow or a reword of the cited line kills.
         always_run: true
         pass_filenames: false
         require_serial: true

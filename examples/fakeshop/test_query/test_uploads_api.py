@@ -8,6 +8,8 @@ model. They cover:
 - the **read** output objects (`DjangoFileType` / `DjangoImageType`) over HTTP,
   the default-nullable SDL shape (a *required* column still renders nullable),
   populated subfield serialization, and the empty-file object-null behavior;
+- the **selection** of file columns: a ``FileField`` / ``ImageField`` dropped by
+  ``Meta.fields`` or ``Meta.exclude`` publishes no field on the read type;
 - the **degradation** contract each subfield carries: a backend that cannot
   produce a filesystem path nulls only ``path``, a file gone from storage nulls
   only ``size``, unparseable image bytes null ``width`` / ``height``, and a
@@ -197,6 +199,41 @@ def test_filesystem_path_opt_in_is_absent_unless_declared_over_http() -> None:
         if json_at(field, "name") == "path"
     )
     assert "SECURITY" in json_str(path_field, "description")
+
+
+@pytest.mark.parametrize(
+    ("type_name", "attachment_type"),
+    [("MediaSpecimenType", "DjangoFileType"), ("MediaSpecimenWithPathType", "DjangoFilePathType")],
+    ids=["meta_fields", "meta_exclude"],
+)
+def test_file_and_image_columns_left_out_of_the_selection_are_absent_over_http(
+    type_name: str,
+    attachment_type: str,
+) -> None:
+    """A file / image column the type's selection drops publishes no field.
+
+    ``MediaSpecimenType`` narrows by ``Meta.fields`` and
+    ``MediaSpecimenWithPathType`` by ``Meta.exclude``; each leaves out the
+    ``optional_attachment`` ``FileField`` and the ``spare_image`` ``ImageField``.
+    The generated file resolvers attach only to the selected columns, so neither
+    dropped column surfaces as a resolver-backed field, while the selected
+    ``attachment`` / ``image`` beside them keep their output objects.
+    """
+    fields = {
+        json_str(field, "name"): json_at(field, "type")
+        for field in json_list(
+            _introspect_type(type_name, "fields { name type { kind name } }"),
+            "fields",
+        )
+    }
+    assert set(fields) == {
+        "id",
+        "label",
+        "attachment",
+        "image",
+    }
+    assert fields["attachment"] == {"kind": "OBJECT", "name": attachment_type}
+    assert fields["image"] == {"kind": "OBJECT", "name": "DjangoImageType"}
 
 
 @pytest.mark.django_db

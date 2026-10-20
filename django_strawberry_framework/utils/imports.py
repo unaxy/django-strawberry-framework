@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CHANNELS_FLOOR",
+    "DEBUG_TOOLBAR_FLOOR",
+    "DRF_FLOOR",
     "STRAWBERRY_FLOOR",
     "import_attr",
     "import_attr_if_importable",
@@ -54,6 +56,20 @@ CHANNELS_FLOOR = "4.3.2"
 # ``strawberry-graphql`` row in ``pyproject.toml``. That row is the only other
 # place the floor is written and must be bumped with this one.
 STRAWBERRY_FLOOR = "0.322.2"
+
+# The verified django-debug-toolbar floor, interpolated into the toolbar
+# middleware's one install hint (``middleware/debug_toolbar.py``). The
+# ``django-debug-toolbar`` dev-group row in ``pyproject.toml`` is the other place
+# it is written and must be bumped with this one; a governance row compares the
+# two, as it does for the Channels and Strawberry floors above.
+DEBUG_TOOLBAR_FLOOR = "7.0.0"
+
+# The verified ``djangorestframework`` floor, interpolated into the
+# serializer-mutation guard's one install hint (``rest_framework/__init__.py``).
+# The ``djangorestframework`` dev-group row in ``pyproject.toml`` is the other
+# place it is written and must be bumped with this one; a governance row
+# compares the two.
+DRF_FLOOR = "3.17.0"
 
 _T = TypeVar("_T")
 
