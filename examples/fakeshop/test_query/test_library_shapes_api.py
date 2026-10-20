@@ -1345,15 +1345,40 @@ def _seed_profiles_sharing_emails() -> None:
         )
 
 
-#: The order a patron profile's one-to-one primary key compiles into under
-#: ``Patron.Meta.ordering = ["email"]``, made total by that key.
-_PROFILE_EMAIL_ORDER = '"library_patron"."email" ASC, "library_patronprofile"."patron_id" ASC'
+#: Each order a profile's ``get_queryset`` names for its one-to-one primary key under
+#: ``Patron.Meta.ordering = ["email"]``: the root page and the ``ORDER BY`` it compiles
+#: into. The NAME ``patron`` orders by the shared ``email``, made total by the key;
+#: ``pk`` is never substituted, so it orders by the key column alone.
+_PROFILE_KEY_ORDERS = {
+    "patron": (
+        ("patron",),
+        [
+            "00001",
+            "00002",
+            "00005",
+            "00000",
+        ],
+        '"library_patron"."email" ASC, "library_patronprofile"."patron_id" ASC',
+    ),
+    "pk": (
+        ("pk",),
+        [
+            "00000",
+            "00001",
+            "00002",
+            "00003",
+        ],
+        '"library_patronprofile"."patron_id" ASC',
+    ),
+}
 
 
+@pytest.mark.parametrize("key", list(_PROFILE_KEY_ORDERS))
 @pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
 @pytest.mark.django_db
 def test_one_to_one_key_name_order_is_made_total_and_pages_like_the_pipeline(
     window: str,
+    key: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A profile order naming its one-to-one primary key gets the key as its tiebreaker.
@@ -1363,8 +1388,10 @@ def test_one_to_one_key_name_order_is_made_total_and_pages_like_the_pipeline(
     the key is appended as the tiebreaker on every path: the root ``children``
     connection, the window planning a genre's ``favoringProfilesConnection`` (two
     statements, one ``ROW_NUMBER``) and each per-parent statement without the
-    optimizer, which serves exactly the optimized pages.
+    optimizer, which serves exactly the optimized pages. ``pk`` names the same key
+    but is never substituted, so it stays the key column on every path.
     """
+    order, rows, compiled = _PROFILE_KEY_ORDERS[key]
     _seed_profiles_sharing_emails()
     monkeypatch.setattr(models.Patron._meta, "ordering", ["email"])
     optimized, unoptimized = _hold(
@@ -1372,7 +1399,7 @@ def test_one_to_one_key_name_order_is_made_total_and_pages_like_the_pipeline(
         ("postal_code",),
         models.Genre,
         "favoring_profiles",
-        ("patron",),
+        order,
     )
 
     with CaptureQueriesContext(connection) as captured:
@@ -1393,17 +1420,13 @@ def test_one_to_one_key_name_order_is_made_total_and_pages_like_the_pipeline(
     assert [
         json_at(edge, "node", "postalCode")
         for edge in json_list(root, "data", "children", "edges")
-    ] == [
-        "00001",
-        "00002",
-        "00005",
-        "00000",
-    ]
-    assert [_PROFILE_EMAIL_ORDER in entry["sql"] for entry in captured.captured_queries] == [True]
+    ] == rows
+    order_by = f"ORDER BY {compiled}"
+    assert [order_by in entry["sql"] for entry in captured.captured_queries] == [True]
     assert len(planned_sql) == 2, planned_sql
     assert ["ROW_NUMBER" in sql.upper() for sql in planned_sql] == [False, True], planned_sql
-    assert _PROFILE_EMAIL_ORDER in planned_sql[1], planned_sql
-    assert [_PROFILE_EMAIL_ORDER in sql for sql in served_sql[1:]] == [True, True], served_sql
+    assert order_by in planned_sql[1], planned_sql
+    assert [order_by in sql for sql in served_sql[1:]] == [True, True], served_sql
     assert planned == served
 
 

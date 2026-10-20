@@ -4006,6 +4006,41 @@ def test_relay_global_id_filter_on_a_relation_primary_key_validates_its_target()
     assert "GlobalID type mismatch" in json_str(rejected, "errors", 0, "message"), rejected
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("input_name", ["card", "pkCard"])
+def test_relay_global_id_filter_through_a_relation_primary_key_reads_the_hidden_card(
+    input_name: str,
+) -> None:
+    """A leaf walking through a relation primary key answers to the card type's visibility.
+
+    ``pk__card`` records its ``pk`` hop under the key's real name (``patron``), as
+    ``patron__card`` does, so both reach ``MembershipCard`` and the hiding
+    ``HolderRelationPkCardType.get_queryset`` admits no profile through the hidden card.
+    """
+    _ada, ada_card = _relation_pk_global_id_rows()
+    card_label = models.MembershipCard._meta.label_lower
+    wire = str(relay.GlobalID(type_name=card_label, node_id=str(ada_card.pk)))
+
+    registry.clear()
+    try:
+        visible = _post_relation_pk_filter(
+            _relation_pk_global_id_holder_schema(hidden_barcode="BO-1"),
+            input_name,
+            wire,
+        )
+        registry.clear()
+        hidden = _post_relation_pk_filter(
+            _relation_pk_global_id_holder_schema(hidden_barcode="ADA-1"),
+            input_name,
+            wire,
+        )
+    finally:
+        registry.clear()
+
+    assert visible == {"data": {"profiles": [{"postalCode": "02101"}]}}, visible
+    assert hidden == {"data": {"profiles": []}}, hidden
+
+
 # ---------------------------------------------------------------------------
 # Live HTTP order coverage (spec-028 test plan), plus the row-preserving
 # to-many aggregate cases from ``spec-030-connection_field-0_0_9`` Decision 11
@@ -7419,7 +7454,7 @@ def _relay_relation_isnull_holder_schema() -> strawberry.Schema:
     return strawberry.Schema(query=Query, config=strawberry_config())
 
 
-def _relation_pk_global_id_holder_schema() -> strawberry.Schema:
+def _relation_pk_global_id_holder_schema(hidden_barcode: str | None = None) -> strawberry.Schema:
     """Holder schema filtering ``PatronProfile`` by GlobalID through its relation primary key.
 
     ``PatronProfile``'s primary key is the ``patron`` one-to-one key. Shipped
@@ -7428,9 +7463,22 @@ def _relation_pk_global_id_holder_schema() -> strawberry.Schema:
     nodes and declares the leaves a consumer would: ``patron`` (the key itself,
     a Meta.fields relation lookup), ``card`` (``patron__card``) and ``pkCard``
     (``pk__card``, the same hop spelled through the ``pk`` alias).
+    A ``hidden_barcode`` gives the card type a ``get_queryset`` hiding that card;
+    without one the type keeps the identity default.
     """
 
     class HolderRelationPkCardType(DjangoType):
+        if hidden_barcode is not None:
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[models.MembershipCard],
+                info: strawberry.Info,
+            ) -> QuerySet[models.MembershipCard]:
+                return queryset.exclude(barcode=hidden_barcode)
+
         class Meta:
             model = models.MembershipCard
             fields = ("id", "barcode")
