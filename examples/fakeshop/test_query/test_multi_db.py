@@ -15,7 +15,9 @@ Resolver isolation and debug capture (per spec Goals item 3 + Test plan
   ``get_queryset`` returning ``.using("shard_b")`` under a ``default`` parent
   fails the relation closed before either alias runs a ``library_book`` read,
   while the same hook without the routing call follows whichever alias the
-  parent was pinned to.
+  parent was pinned to, and a hook running ``apply_cascade_permissions`` under
+  a ``.using("shard_b")`` parent composes its membership subquery on
+  ``shard_b`` too.
 
 The suite also owns the alias pins that only a second database can prove: the
 row-preserving relational leaf predicate executing wholly on ``shard_b``, the write
@@ -121,6 +123,7 @@ from django_strawberry_framework import (
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
+    apply_cascade_permissions,
     finalize_django_types,
     strawberry_config,
 )
@@ -854,7 +857,7 @@ def _seed_book_chain(alias: str, *, title: str) -> "models.Book":
     """Seed a full ``Branch -> Shelf -> Book`` chain on ``alias``.
 
     ``Branch.name`` is ``unique=True``
-    (``examples/fakeshop/apps/library/models.py::Branch #"name = models.TextField(unique=True)"``),
+    (``examples/fakeshop/apps/library/models.py::Branch #"models.TextField(unique=True)"``),
     so the branch / shelf field values are varied by ``title`` to keep two calls
     on the same alias from colliding when a test seeds multiple chains.
     """
@@ -1723,3 +1726,37 @@ def test_planned_prefetch_child_follows_a_routed_parent_onto_its_shard() -> None
     assert titles == ["on-shard-b"]
     assert len(book_sql["shard_b"]) == 1, book_sql
     assert book_sql["default"] == []
+
+
+@pytest.mark.django_db(databases=["default", "shard_b"])
+def test_planned_prefetch_child_cascade_subquery_follows_a_routed_parent_onto_its_shard() -> None:
+    """A child hook's cascade composes its ``Book.shelf`` subquery on the parent's shard.
+
+    The child queryset the walker builds carries no alias, so the cascade inside
+    the child hook runs while the child has not yet been bound to a connection.
+    Under a ``.using('shard_b')`` parent the whole child read - the outer
+    ``library_book`` SELECT and the inlined ``library_shelf`` membership subquery -
+    must execute on ``shard_b``: a subquery pinned anywhere else is either refused
+    by Django as a cross-database subquery or reads another shard's visibility.
+    """
+    _seed_book_chain("default", title="on-default")
+    _seed_book_chain("shard_b", title="on-shard-b")
+
+    payload, book_sql = _post_prefetch_alias_query(
+        _prefetch_alias_schema(
+            apply_cascade_permissions,
+            root_alias="shard_b",
+        ),
+    )
+
+    assert payload.get("errors") is None, payload
+    titles = [
+        json_at(row, "title")
+        for shelf in json_list(payload, "data", "shelves")
+        for row in json_list(shelf, "books")
+    ]
+    assert titles == ["on-shard-b"]
+    assert book_sql["default"] == []
+    assert len(book_sql["shard_b"]) == 1, book_sql
+    assert "IN (SELECT" in book_sql["shard_b"][0]
+    assert 'FROM "library_shelf"' in book_sql["shard_b"][0]

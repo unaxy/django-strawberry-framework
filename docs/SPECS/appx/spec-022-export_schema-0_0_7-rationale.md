@@ -20,7 +20,7 @@ Django's `manage.py` walks `<app>.management.commands.*` for every `<app>` in `I
 
 Two attributes and one method is the entire surface strawberry-django ships behaviorally, and the card's job is parity. Every attribute the command adds is one the test plan has to pin.
 
-The annotation on `*args` is documentation-quality rather than gate-forced: `ANN002` / `ANN003` / `ANN401` / `D107` / `D417` are globally ignored at `pyproject.toml #"ANN002"`. `**options: Any` matches django-stubs' `BaseCommand.handle` so the argparse-populated `options["schema"]` can be passed on as a `str`.
+The annotations on `*args` and `**options` are gate-forced: the whole `ANN` family is selected at `pyproject.toml #"# flake8-annotations"`, so `ANN002` / `ANN003` reject a bare star argument. Both are typed `object`, not django-stubs' `Any`: a direct `handle` call bypasses argparse's `type=str`, so `handle` narrows `options["schema"]` to a `str` itself and raises `CommandError` otherwise (`django_strawberry_framework/management/commands/export_schema.py::Command.handle #"must be a string"`).
 
 **Deliberately NOT declared.** No `requires_system_checks` override — the default `("__all__",)` runs Django's system checks before `handle()`, which is fine. No `requires_migrations_checks` override — the command does not touch the database, so the default `False` is correct. No `stealth_options` — every option the command takes is documented.
 

@@ -82,12 +82,12 @@ from django_strawberry_framework.keyset import (
     order_fingerprint,
 )
 from django_strawberry_framework.optimizer.nested_planner import (
-    _extend_only_projection,
     _keyset_window_slice_from_arguments,
 )
 from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
     WINDOW_TOTAL_COUNT,
+    _extend_only_projection,
     _keyset_order_ref,
     _resolve_order_path_field,
     deferred_loading_of,

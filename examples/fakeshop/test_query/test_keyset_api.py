@@ -56,8 +56,8 @@ The hook-order rows mount test-local ``Issue`` / ``Book`` children
 (``cursor_field = ("id",)`` plus an ordering ``get_queryset``) under
 ``Periodical`` / ``Genre`` parents on the same holder, and the one-name rows mount ``CirculationDesk`` /
 ``ScalarSpecimen`` ``children`` the same way.
-Async rows are exempt from ``graphql_client.py`` (sync-only) and use
-``AsyncTestClient`` with ``django_db(transaction=True)``.
+Async rows drive ``AsyncTestClient`` (``graphql_client.py`` is sync-only) with
+``django_db(transaction=True)``.
 
 Cursors are always MINTED then round-tripped - never pinned as literals -
 because the payload is authenticated-encrypted opaque bytes (the codec contract).

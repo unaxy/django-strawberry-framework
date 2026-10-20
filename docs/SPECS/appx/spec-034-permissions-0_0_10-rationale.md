@@ -114,17 +114,17 @@ Lazy composition is upstream's actual design (its docstring's multi-DB note pres
 - **A single annotated pass (`Exists()` per edge instead of `__in`).** Not rejected on round-trips (both are single-query) but on fidelity: `__in` against a subquery is the upstream-proven shape with known planner behavior across backends; `Exists()` is the fallback if real-world nesting depth produces measurably bad plans ([Risks and open questions](#risks-and-open-questions)).
 - **Eager PK materialization (`pk__in=list(...)`)** — an actual extra round-trip per edge plus an unbounded `IN` list; strictly worse.
 
-## Decision 8 — Multi-DB pinning: `.using(queryset.db)` — the resolved alias, not `_db`
+## Decision 8 — Multi-DB pinning: the root's explicit alias (`_db`), not `queryset.db`
 
-Spec: [Decision 8 — Multi-DB pinning: `.using(queryset.db)` — the resolved alias, not `_db`][spec-034-d8].
+Spec: [Decision 8 — Multi-DB pinning: the root's explicit alias (`_db`), not `queryset.db`][spec-034-d8].
 
 ### Justification
 
-The upstream uses `queryset.db` (its docstring: "pinned to the caller queryset's DB alias via `queryset.db`"); the card's `_db` spelling is shorthand for the same intent. Enforcing the root alias on nested applications and hook returns, rather than only propagating it, is the same pin read in the other direction: a subquery the router would send elsewhere is precisely the cross-database `__in` the pin exists to prevent, so it raises rather than silently resolving.
+The upstream uses `queryset.db` (its docstring: "pinned to the caller queryset's DB alias via `queryset.db`"). That pin is sound only while the outer query keeps the alias the router answered at walk time. Django moves an unrouted outer query after the walk - the optimizer's prefetch child is seeded unrouted and Django's related-descriptor prefetch re-pins it onto the parent instance's database - and an inner subquery with an explicit `_db` different from the outer connection is refused (`In.process_rhs`), while an unrouted one compiles on the outer connection. Reading the explicit `_db` keeps a direct sharded call's `.using("shard_b")` pin and leaves an unrouted caller's subqueries unrouted, so they follow the outer query wherever Django sends it. Enforcing the root alias on nested applications and hook returns, comparing explicit aliases, is the same rule read in the other direction: a pinned subquery beside an unrouted outer query is the cross-database `__in` the rule exists to prevent, so it raises rather than silently resolving.
 
 ### Alternatives considered (and rejected)
 
-**`.using(queryset._db)` verbatim from the card** — under-pins the routed case (the spec's Decision body). **No pinning (let the router route each subquery)** — rejected: cross-DB `__in` is backend-undefined; the upstream invariant exists because this bit real shards.
+**`.using(queryset.db)` (upstream)** — rejected: it pins an unrouted caller's subqueries to the walk-time router answer, which Django refuses to compose once the outer query is routed elsewhere (a prefetch child following its parent onto a shard). **Routing each subquery independently through the router** — rejected: a subquery routed apart from its outer query is a cross-database `__in`; an unrouted subquery is not routed independently, it compiles on the outer query's connection.
 
 ## Decision 9 — `fields=` scoping validates loudly with `ConfigurationError`
 
@@ -194,7 +194,7 @@ The [`docs/SPECS/NEXT.md`][next] Step 6 mandate for multi-card patch versions, t
 Each item names the shipped answer and the fallback if it proves wrong.
 
 - **Card-premise correction: "one extra round-trip per FK".** The card's open question #2 frames subquery-per-FK as round-trip-costed; lazy `__in` composition compiles into the caller's single query ([Decision 7](#decision-7--cascade-performance-lazy-subquery-composition--zero-added-round-trips)), so the benchmark-both gate dissolves. Fallback: if a real consumer graph produces measurably bad plans from deep subquery nesting, swap the constraint shape to per-edge `Exists()` — a contained, semantics-preserving change; the public contract names no SQL shape.
-- **Card-premise correction: `.using(qs._db)`.** The private `_db` is `None` for routed querysets and would leave target subqueries to route independently ([Decision 8](#decision-8--multi-db-pinning-usingquerysetdb--the-resolved-alias-not-_db)); the resolved `queryset.db` is the upstream-faithful pin. No fallback needed — `_db` has no advantage in any case examined.
+- **Card-premise confirmed: `qs._db`, not `queryset.db`.** The card's private `_db` is the right root alias ([Decision 8](#decision-8--multi-db-pinning-the-roots-explicit-alias-_db-not-querysetdb)): an unrouted subquery compiles on the outer query's connection rather than routing independently, so `_db` being `None` for an unrouted caller is what keeps the subqueries beside the outer query; the router-resolved `queryset.db` pins them to a walk-time guess.
 - **The card's "upstream uses sentinels" sentence vs. the upstream cascade's row exclusion.** Read as describing graphene-django's resolver-level hidden-target behavior, not the cascade helper ([Decision 6](#decision-6--hidden-fk-semantics-row-exclusion-is-the-cascade-contract-resolver-level-nulling-stays-the-relation-contract)). Fallback: a `mode=` flag is expressible later without breaking the default; rejected per Decision 6.
 - **M2M / reverse-relation cascade.** Out of scope here; the to-many design question (hide the parent vs. narrow the list) is decided by the graph-substrate card [`TODO-BETA-058-0.1.1`][kanban], whose edge-scope predicates compile child visibility.
 - **Async-hooked cascade targets dead-end.** Both variants raise [`SyncMisuseError`][glossary-syncmisuseerror] for an `async def` target hook ([Decision 10](#decision-10--syncasync-contract-syncmisuseerror-on-async-hooks-from-the-sync-walk-the-async-variant-wraps-the-walk-in-sync_to_async)); no fakeshop type declares one, and the package's other nested-visibility surfaces share the posture. Fallback: an async-native walk (`apply_type_visibility_async` per edge inside `aapply_cascade_permissions`) is additive and contained if a real consumer hits the wall — on the card that brings async hooks to the filter child-branch derivation too, since the surfaces should move together.
@@ -235,7 +235,7 @@ Each item names the shipped answer and the fallback if it proves wrong.
 [spec-034-d5]: ../spec-034-permissions-0_0_10.md#decision-5--the-cascade-walk-call-time-model-graph-walk-registry-primary-lookup-every-registered-target-composes-subquery-intersection
 [spec-034-d6]: ../spec-034-permissions-0_0_10.md#decision-6--hidden-fk-semantics-row-exclusion-is-the-cascade-contract-resolver-level-nulling-stays-the-relation-contract
 [spec-034-d7]: ../spec-034-permissions-0_0_10.md#decision-7--cascade-performance-lazy-subquery-composition--zero-added-round-trips
-[spec-034-d8]: ../spec-034-permissions-0_0_10.md#decision-8--multi-db-pinning-usingquerysetdb--the-resolved-alias-not-_db
+[spec-034-d8]: ../spec-034-permissions-0_0_10.md#decision-8--multi-db-pinning-the-roots-explicit-alias-_db-not-querysetdb
 [spec-034-d9]: ../spec-034-permissions-0_0_10.md#decision-9--fields-scoping-validates-loudly-with-configurationerror
 
 <!-- docs/builder/ -->

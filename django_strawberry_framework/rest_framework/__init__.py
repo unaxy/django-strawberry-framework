@@ -8,21 +8,27 @@ import behind one guard so every ``rest_framework/`` module + the root
 ``__getattr__`` route a DRF-absent build through the SAME install-hint
 ``ImportError``.
 
-The install hint names ``djangorestframework>=3.17.0`` - the verified
-floor (place 2 of the three-places-that-must-agree: place 1 is the
-``[dependency-groups].dev`` pin in ``pyproject.toml``, place 3 is the spec-039
-soft-dependency Decision; all three say ``>=3.17.0``). Importing THIS package runs
-``require_drf()`` as its guard, so ``import
-django_strawberry_framework.rest_framework`` raises the
-guarded ``ImportError`` when DRF is absent. Generalizes the
-``types/converters.py`` soft-import precedent (return-``None``) to a RAISING guard.
+The install hint names the verified floor, interpolated from
+``utils/imports.py::DRF_FLOOR``. The floor is written in three gated places
+that must agree: that constant, the ``[dependency-groups].dev`` row in
+``pyproject.toml``, and the ``_HINT_SUBSTRING`` literal re-typed in
+``tests/rest_framework/test_soft_dependency.py``. ``tests/test_ci_governance.py``
+compares the constant to the dependency row and the soft-dependency tests
+compare the hint to the literal, so none of the three can move alone.
+spec-039 Decision 12 records why the floor is where it is; it is the
+rationale, not a gated site, and like any other restatement it is gated by
+nothing, so a floor bump sweeps the tree for the package name and reads each
+hit. Importing THIS package runs ``require_drf()`` as its guard, so ``import
+django_strawberry_framework.rest_framework`` raises the guarded ``ImportError``
+when DRF is absent. Generalizes the ``types/converters.py`` soft-import
+precedent (return-``None``) to a RAISING guard.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from django_strawberry_framework.utils.imports import require_optional_module
+from django_strawberry_framework.utils.imports import DRF_FLOOR, require_optional_module
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -32,7 +38,7 @@ if TYPE_CHECKING:
 # exactly one source location and names the verified floor.
 _DRF_INSTALL_HINT: str = (
     "SerializerMutation requires djangorestframework, which is not installed. Install it "
-    "with `pip install 'djangorestframework>=3.17.0'` (the package's verified DRF floor)."
+    f"with `pip install 'djangorestframework>={DRF_FLOOR}'` (the package's verified DRF floor)."
 )
 
 

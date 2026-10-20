@@ -56,18 +56,19 @@ _PARENT = "django_strawberry_framework.middleware"
 # ``_HINT_SUBSTRING`` drift-catch discipline: a test comparing the imported
 # constant against itself could never notice the hint drifting). The floor is
 # GATED in three places that must agree - this literal,
-# ``_DEBUG_TOOLBAR_INSTALL_HINT``, and the ``[dependency-groups].dev``
-# specifier in ``pyproject.toml`` - and this file compares all of them (the
-# hint-matching rows below against the literal,
-# ``test_install_hint_floor_matches_the_pyproject_dev_group_row`` against the
-# dependency row), which is what makes the three-places-that-must-agree rule a
-# gate rather than a note. Those are the GATED sites, not a census of where the
-# floor is written: anything else restating it, documentation included, is
-# gated by nothing, so a floor bump
-# sweeps the tree for the package NAME and reads each hit, rather than trusting
-# this enumeration or sweeping for the ``django-debug-toolbar>=`` specifier - a
-# restatement that separates the name from the constraint with a backtick or a
-# space does not match it.
+# ``utils/imports.py::DEBUG_TOOLBAR_FLOOR`` (which ``_DEBUG_TOOLBAR_INSTALL_HINT``
+# interpolates), and the ``[dependency-groups].dev`` specifier in
+# ``pyproject.toml``. This file compares the hint and the dependency row to the
+# literal (the hint-matching rows below,
+# ``test_install_hint_floor_matches_the_pyproject_dev_group_row``), and
+# ``tests/test_ci_governance.py`` compares the constant to the dependency row,
+# which is what makes the three-places-that-must-agree rule a gate rather than
+# a note. Those are the GATED sites, not a census of where the floor is
+# written: anything else restating it, documentation included, is gated by
+# nothing, so a floor bump sweeps the tree for the package NAME and reads each
+# hit, rather than trusting this enumeration or sweeping for the
+# ``django-debug-toolbar>=`` specifier - a restatement that separates the name
+# from the constraint with a backtick or a space does not match it.
 _HINT_SUBSTRING = "django-debug-toolbar>=7.0.0"
 
 
@@ -235,23 +236,24 @@ def test_require_debug_toolbar_guard_unit(toolbar_leaf: ModuleType) -> None:
 
 
 def test_install_hint_floor_matches_the_pyproject_dev_group_row(toolbar_leaf: ModuleType) -> None:
-    """The floor's three gated sites agree, including the one nothing imports.
+    """The re-typed literal agrees with the hint and with the row nothing imports.
 
-    The hint-matching rows above compare the install hint against the re-typed
-    ``_HINT_SUBSTRING`` literal, so those two cannot drift apart. What none of
-    them can see is the third gated site: the ``django-debug-toolbar`` row in
-    ``pyproject.toml``'s dev group. Nothing imports a TOML dependency row, so
-    until this row existed the specifier could move alone and the install hint
-    would go on advising a floor the project no longer pins. Parsed with the
-    same regex-over-``pyproject.toml`` idiom the suite's Channels and Strawberry
-    governance rows use, so the three floor pins cannot diverge in method.
+    The hint-matching rows above compare the install hint, which interpolates
+    ``DEBUG_TOOLBAR_FLOOR``, against the re-typed ``_HINT_SUBSTRING`` literal,
+    so those two cannot drift apart. What none of them can see is the
+    ``django-debug-toolbar`` row in ``pyproject.toml``'s dev group. Nothing
+    imports a TOML dependency row, so the specifier could otherwise move alone
+    and the install hint would go on advising a floor the project no longer
+    pins. Parsed with the same regex-over-``pyproject.toml`` idiom as the
+    suite's floor governance rows, so the floor pins cannot diverge in method.
 
-    It gates exactly those three. Documentation that restates the floor is
-    behind no gate at all, and this row says nothing about it: a floor bump
-    sweeps the tree for the package name and reads each hit, rather than
-    trusting any enumeration of where the floor is written or sweeping for the
-    ``django-debug-toolbar>=`` specifier, which a restatement separating the
-    name from the constraint with a backtick or a space does not match.
+    It gates the literal, the hint and the dependency row. Documentation that
+    restates the floor is behind no gate at all, and this row says nothing
+    about it: a floor bump sweeps the tree for the package name and reads each
+    hit, rather than trusting any enumeration of where the floor is written or
+    sweeping for the ``django-debug-toolbar>=`` specifier, which a restatement
+    separating the name from the constraint with a backtick or a space does not
+    match.
     """
     text = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(encoding="utf-8")
     rows = re.findall(r'"(django-debug-toolbar>=[0-9][^"]*)"', text)

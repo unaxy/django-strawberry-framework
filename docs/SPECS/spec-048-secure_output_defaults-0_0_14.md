@@ -169,7 +169,7 @@ returns unhandled resolver and hook exceptions verbatim unless something masks t
 `ValueError("internal tenant secret /srv/private")` raised inside a resolver arrives at the
 client with that message intact. On a plain Strawberry schema the remedy is opt-in
 (`MaskErrors`, or a `Schema.process_errors` override). The package's *required* schema
-class, [`DjangoSchema`][glossary-execution-resource-policy], already centralizes mutation
+class, [`DjangoSchema`][glossary-djangoschema], already centralizes mutation
 integrity and the execution resource policy ([`spec-047`][spec-047]), so it is precisely the
 place a production error policy belongs. A production deployment should not become unsafe
 by forgetting one Strawberry extension.
@@ -744,8 +744,9 @@ behind them.
 The second row is the whole decision. **Every framework rejection in this package is raised
 as a `GraphQLError`** — the GlobalID rejections (`GLOBALID_INVALID`), `ResourceLimitExceeded`
 (`RESOURCE_LIMIT_EXCEEDED`, which multiple-inherits `GraphQLError` on the
-[`SyncMisuseError`][glossary-syncmisuseerror] precedent), the connection / keyset / filter
-rejections, and `mutations/resolvers.py`'s `"Not authorized to ..."` permission denial. A
+[`SyncMisuseError`][glossary-syncmisuseerror] precedent), the connection / keyset pagination
+argument rejections (`PAGINATION_INVALID`), the other connection / keyset / filter rejections,
+and `mutations/resolvers.py`'s `"Not authorized to ..."` permission denial. A
 consumer who raises a `GraphQLError` from their own resolver is making the identical
 statement: *this message is for the client*. So the rule is not a heuristic about this
 package's internals; it is the GraphQL type system's own way of saying "client-facing".
@@ -950,10 +951,13 @@ do not take that path. The package validates every offset `after` / `before` / `
 reached, and the keyset fork applies the same bound check
 (`utils/connections.py::assert_relay_pagination_bound`). Each rejection is raised as
 `PaginationArgumentError`, a deliberate `GraphQLError`, so it passes the policy unmasked with
-its fixed message (the engine's own wording, no `extensions.code`), as does the package's
-`first` + `last` mutual-exclusivity guard. What the policy masks on a connection is only what
-did not come from that validation: an exception from a consumer source or from row hydration,
-which the package never catches and re-raises as client-facing text.
+its fixed message (the engine's own wording) and `extensions.code` `PAGINATION_INVALID`
+(`utils/errors.py::PAGINATION_INVALID_ERROR_CODE`, set by the class so no raise site spells
+it), as do the keyset codec's cursor rejection (`keyset.py::decode_keyset_cursor`) and the
+package's `first` + `last` mutual-exclusivity guard (`connection.py::_guard_first_and_last`).
+What the policy masks on a connection is only what did not come from that validation: an
+exception from a consumer source or from row hydration, which the package never catches and
+re-raises as client-facing text.
 
 **A consumer-built plain `GraphQLWSConsumer` gets no per-event masking.** The seam is
 installed by the consumer class `consumers.py::build_revalidating_consumer_class` builds for
@@ -1142,7 +1146,8 @@ surface has one live home, so the rows live there:
   carries the same id in its message, and has `exc_info` set.
 - Untouched classes, one row each: a parse error, a validation error, a
   `GLOBALID_INVALID` rejection, a `RESOURCE_LIMIT_EXCEEDED` rejection, a
-  `"Not authorized to ..."` permission denial, and a
+  `PAGINATION_INVALID` rejection (an offset page size, an offset cursor, `first` with `last`,
+  and a keyset cursor), a `"Not authorized to ..."` permission denial, and a
   [`FieldError` envelope][glossary-fielderror-envelope] returned in `data`.
 - A consumer resolver raising its own `GraphQLError` is untouched.
 - Two unexpected failures in one response carry **two different** ids and produce two log
@@ -1348,6 +1353,7 @@ Each risk's pre-planned fallback position, should a real consumer need appear, i
 [glossary-djangomodelformmutation]: ../GLOSSARY.md#djangomodelformmutation
 [glossary-djangomutation]: ../GLOSSARY.md#djangomutation
 [glossary-djangoresourcepolicyextension]: ../GLOSSARY.md#djangoresourcepolicyextension
+[glossary-djangoschema]: ../GLOSSARY.md#djangoschema
 [glossary-djangotype]: ../GLOSSARY.md#djangotype
 [glossary-errorpolicy]: ../GLOSSARY.md#errorpolicy
 [glossary-execution-resource-policy]: ../GLOSSARY.md#execution-resource-policy

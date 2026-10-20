@@ -1,10 +1,13 @@
-"""Neutral ``FieldError`` / write-error constructors shared by every write flavor.
+"""The ``FieldError`` envelope type and the write-error constructors shared by every write flavor.
 
-The flavor-neutral owner of the write-error envelope's leaf construction
-(promoted from ``mutations/resolvers.py`` so the model mutation resolver is
-not the utility module for the form, serializer, auth, and future write
-flavors):
+The flavor-neutral owner of the write-error envelope's type and leaf
+construction (promoted from ``mutations/resolvers.py`` so the model mutation
+resolver is not the utility module for the form, serializer, auth, and future
+write flavors):
 
+- ``FieldError`` / ``NON_FIELD_ERROR_KEY`` - the public envelope member type
+  and its ``"__all__"`` non-field sentinel (re-exported by
+  ``mutations/inputs.py``, the ``mutations`` package and the package root);
 - ``field_error`` - the single ``FieldError`` leaf constructor;
 - ``relation_field_error`` - the uniform relation-decode error;
 - ``validation_error_to_field_errors`` - the Django ``ValidationError`` mapper;
@@ -25,17 +28,16 @@ flavors):
 - ``coded_error_extensions`` + ``*_ERROR_CODE`` - the ``extensions={"code": ...}``
   shape and code vocabulary every framework ``GraphQLError`` carries.
 
-Layering: ``FieldError`` and ``NON_FIELD_ERROR_KEY`` live in
-``mutations/inputs.py`` (the single source); utils must not import the
-mutations package at module import time, so each constructor imports them
-function-locally (the repo's established cross-package seam, see
-``auth/*.py``).
+Layering: ``FieldError`` and ``NON_FIELD_ERROR_KEY`` live here, below every
+write flavor, so the constructors import nothing from ``mutations/`` and every
+flavor depends downward on this module.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+import strawberry
 from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, ValidationError
 from django.db import models
 from django.utils.functional import Promise
@@ -46,8 +48,6 @@ from ._narrowing import is_char_wise, is_iterable
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from typing import TypeAlias
-
-    from django_strawberry_framework.mutations.inputs import FieldError
 
     from .inputs import InputFieldSpec
     from .typing import ModelField
@@ -68,6 +68,9 @@ __all__ = [
     "FILTER_INVALID_ERROR_CODE",
     "GLOBALID_INVALID_ERROR_CODE",
     "GLOBALID_UNVALIDATABLE_ERROR_CODE",
+    "NON_FIELD_ERROR_KEY",
+    "PAGINATION_INVALID_ERROR_CODE",
+    "FieldError",
     "build_error_key_map",
     "coded_error_extensions",
     "empty_validation_error",
@@ -81,6 +84,62 @@ __all__ = [
     "save_time_error_key_map",
     "validation_error_to_field_errors",
 ]
+
+# The non-field error key Django's ``full_clean`` uses for model-wide
+# (multi-field-constraint) errors (Django's ``"__all__"`` sentinel). Pinned here
+# as the single source of truth so the resolver keys a
+# multi-field-constraint ``ValidationError`` to the same sentinel the read of
+# ``error_dict`` produces.
+NON_FIELD_ERROR_KEY: str = NON_FIELD_ERRORS
+
+
+@strawberry.type
+class FieldError:
+    """A field-keyed validation error in the shared mutation error envelope.
+
+    Every mutation flavor returns ``errors: list[FieldError]`` on its generated
+    payload; a ``FieldError`` carries a ``field`` path and the list of human
+    messages for that field.
+    Every flavor keys ``field`` to the GraphQL input field the client sent
+    (``categoryId``, ``isPrivate``, a ``Meta.input_class`` rename), whether the
+    error came from the input decode, ``serializer.errors``, or a validator
+    (``full_clean()``, ``form.errors``, a Django ``ValidationError`` raised by
+    save-time code: a ``save()`` / ``delete()`` override, a signal receiver,
+    ``perform_mutate`` or a serializer save). A non-field error keys to the
+    ``"__all__"`` sentinel. An error on a field the input does not expose keeps
+    its validator-side name (the model, form or serializer field name), since
+    there is no input field to report; when an input renames a field onto such a
+    name, two errors can share one key. Defined here (spec-036 Decision 7) as the ONE
+    envelope member type: the form-based (0.0.12) and DRF-serializer / auth
+    (0.0.13) flavors return this same class rather than a per-flavor mirror,
+    so a client's error branch is written once. The type is ADDITIVE, not
+    frozen - a member may be added (``codes`` / ``path`` below were), never
+    removed or retyped. Mirrors graphene-django's ``ErrorType``.
+
+    **Additive client-ergonomics fields.** Two optional,
+    default-empty lists sit alongside the legacy ``field`` / ``messages`` (both kept
+    intact for compatibility), so a client can branch WITHOUT parsing localized human
+    text or the dotted ``field`` string:
+
+    - ``codes`` - the structured error codes. For a serializer failure these are DRF
+      ``ErrorDetail.code``s (``required`` / ``invalid`` / ``unique`` / ``blank`` / ...); for a
+      Django ``ValidationError`` they are its ``.code``s; framework-generated errors carry a
+      deliberate code (``invalid`` for a bad relation id, ``null`` for an explicit null,
+      ``not_found`` for a locate miss, ``constraint`` for an integrity fallback).
+    - ``path`` - the ``field`` dotted string split into SEGMENTS (``items.0.name`` ->
+      ``["items", "0", "name"]``), so a client walks structured paths instead of parsing
+      strings. A ROOT non-field error is ``field="__all__"`` with an EMPTY ``path`` (``[]``);
+      a NESTED non-field error keeps its segments (``["items", "0", "__all__"]``).
+
+    Both default to ``[]`` so every existing construction site (and a client selecting only
+    ``field`` / ``messages``) is unaffected.
+    """
+
+    field: str
+    messages: list[str]
+    codes: list[str] = strawberry.field(default_factory=list)
+    path: list[str] = strawberry.field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # ``FieldError.codes`` vocabulary
@@ -119,6 +178,7 @@ FIELD_ERROR_CODE_TRUNCATED = "truncated"
 GLOBALID_INVALID_ERROR_CODE = "GLOBALID_INVALID"
 GLOBALID_UNVALIDATABLE_ERROR_CODE = "GLOBALID_UNVALIDATABLE"
 FILTER_INVALID_ERROR_CODE = "FILTER_INVALID"
+PAGINATION_INVALID_ERROR_CODE = "PAGINATION_INVALID"
 
 
 def coded_error_extensions(code: str, **detail: object) -> dict[str, object]:
@@ -134,7 +194,7 @@ def coded_error_extensions(code: str, **detail: object) -> dict[str, object]:
     Layering: this owns the SHAPE, never the vocabulary of any one subsystem -
     ``errors.py`` sits below ``filters/`` and ``relay.py`` and must never import
     from them. Codes flow downward: a subsystem's code constant either lives
-    here (the three below) or stays at its own owner and is passed in.
+    here (the four below) or stays at its own owner and is passed in.
     """
     return {"code": code, **detail}
 
@@ -149,7 +209,7 @@ def field_error(path: str, messages: object, *, codes: object = None) -> FieldEr
     structured ``path`` / ``codes`` derivation cannot drift between the two flatteners
     (nor across the three write flavors). An empty ``path`` (a model-wide / non-field
     error) is normalized to the ``NON_FIELD_ERROR_KEY`` sentinel (pinned to Django's
-    ``"__all__"`` in ``mutations/inputs.py`` - the single source). ``messages`` is
+    ``"__all__"`` above - the single source). ``messages`` is
     coerced to a ``list[str]``: a bare string becomes a one-element list, any other
     iterable (a DRF ``ErrorDetail`` list, a tuple) is materialized as a list.
 
@@ -160,8 +220,6 @@ def field_error(path: str, messages: object, *, codes: object = None) -> FieldEr
     ``ErrorDetail.code``s / Django ``ValidationError.code``s (or a framework code); ``None``
     yields ``[]``.
     """
-    from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError  # noqa: PLC0415 - import cycle
-
     normalized_path = truth.text(path)
     key = normalized_path or NON_FIELD_ERROR_KEY
     # Root rule: a model-wide / non-field error (an empty path, or the bare
@@ -410,7 +468,7 @@ def validation_error_to_field_errors(
 
     Uses ``exc.error_dict`` when present (per-field), keying the model's
     ``NON_FIELD_ERRORS`` bucket to the ``NON_FIELD_ERROR_KEY`` sentinel (pinned to
-    ``"__all__"`` in ``mutations/inputs.py`` - the single source) so a
+    ``"__all__"`` above - the single source) so a
     multi-field-constraint error surfaces under ``"__all__"``. Falls back to
     ``exc.messages`` under the sentinel for a non-dict ``ValidationError``. The
     single source for the ``full_clean()`` failure, the ``form.errors`` mapping,

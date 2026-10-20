@@ -133,9 +133,10 @@ it, while the "top-level package only" scope still governs `require_debug_toolba
 guard — a separate concern from the *wiring* gate.
 
 **Why the three-places rule names the gated trio by mechanism, not by count.** The dev-group
-specifier, `_DEBUG_TOOLBAR_INSTALL_HINT`, and the re-typed test literal are compared to each other
-by the package test; everything else that restates the floor (the glossary body, the consumer
-README, the changelog) is compared to nothing. A count of "the places the floor is written" is
+specifier, `DEBUG_TOOLBAR_FLOOR` (which `_DEBUG_TOOLBAR_INSTALL_HINT` interpolates), and the
+re-typed test literal are compared to each other by the package test and a governance row;
+everything else that restates the floor (the glossary body, the consumer README, the changelog)
+is compared to nothing. A count of "the places the floor is written" is
 right on the day it is written and wrong the day a doc restates the floor, so the rule tells a
 floor bump to sweep the tree instead — for the package **name** with each hit read, never for the
 `>=` specifier, which is bounded by one spelling and misses a restatement that puts a backtick or

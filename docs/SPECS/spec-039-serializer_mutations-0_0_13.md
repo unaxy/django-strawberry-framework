@@ -246,10 +246,16 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     **warning-free** across the [`django.yml`][django-workflow] CI matrix under
     [`pytest.ini`][pytest-ini]'s `filterwarnings = error`
     ([Decision 12](#decision-12--soft-djangorestframework-dependency-and-the-100-coverage-strategy)).
-    The floor (`>=3.17.0`) is recorded in **three places that must agree**: the
-    `[dependency-groups].dev` `djangorestframework>=3.17.0` pin in
-    [`pyproject.toml`][pyproject], the `require_drf()` guard's **install hint**, and
-    [Decision 12](#decision-12--soft-djangorestframework-dependency-and-the-100-coverage-strategy).
+    The floor (`>=3.17.0`) is written in **three gated places that must agree**:
+    the `[dependency-groups].dev` `djangorestframework>=3.17.0` pin in
+    [`pyproject.toml`][pyproject], `django_strawberry_framework/utils/imports.py::DRF_FLOOR`
+    (interpolated into the `require_drf()` guard's **install hint**), and the
+    `_HINT_SUBSTRING` literal re-typed in `tests/rest_framework/test_soft_dependency.py`.
+    `tests/test_ci_governance.py::test_drf_floor_constant_matches_the_pyproject_dependency_row`
+    compares the constant to the pin and the absence tests match the hint against the
+    literal.
+    [Decision 12](#decision-12--soft-djangorestframework-dependency-and-the-100-coverage-strategy)
+    records why the floor is `3.17.0`; it is the rationale, not a gated place.
   - [ ] **The dev dependency:** `djangorestframework` is in `[dependency-groups].dev`
     (NOT `[project].dependencies` — it stays a soft runtime dep) in
     [`pyproject.toml`][pyproject], resolved in `uv.lock`; [`pytest.ini`][pytest-ini]
@@ -2359,10 +2365,12 @@ with `require_channels()` and `require_debug_toolbar()`, each delegating to
    DRF's Django support lags Django releases. **The verified floor is
    `djangorestframework>=3.17.0`** — the first release adding Django 6.0 + Python 3.14
    support, warning-free under `-W error` across the matrix with **no** DRF-origin
-   `ignore::` line. That floor is one of the **three places
-   that must agree**: the `[dependency-groups].dev` `djangorestframework>=<floor>` pin in
-   [`pyproject.toml`][pyproject], the `require_drf()` guard's install hint, and this
-   Decision.
+   `ignore::` line. That floor is written in **three gated places that must agree**: the
+   `[dependency-groups].dev` `djangorestframework>=<floor>` pin in
+   [`pyproject.toml`][pyproject], `utils/imports.py::DRF_FLOOR` (which the `require_drf()`
+   guard's install hint interpolates), and the re-typed `_HINT_SUBSTRING` test literal; a
+   governance row compares the constant to the pin. This Decision is the floor's
+   rationale, not one of the gated places.
 3. **The DRF-absent import-guard path is covered by simulated absence** — a package test
    forces the `ImportError` branch through the importlib-native **`sys.modules["rest_framework"]
    = None` sentinel** ([`tests/_soft_dependency.py`][test-soft-dependency]`::simulated_absence`,
@@ -2452,7 +2460,7 @@ Field-sequence normalization has one home,
 `utils/inputs.py::normalize_field_name_sequence(..., flavor=…)`, which every flavor calls
 directly; the leaf-error constructor
 `utils/errors.py::field_error(path, messages, *, codes=None)` is the shared base case both
-flatteners call, alongside the `mutations/inputs.py::NON_FIELD_ERROR_KEY` sentinel; and
+flatteners call, alongside the `utils/errors.py::NON_FIELD_ERROR_KEY` sentinel; and
 [`registry.py`][registry]`::register_subsystem_clear` is the one clear-registration seam.
 
 ### Confirmed reuse — lock as import obligations
@@ -2475,7 +2483,7 @@ held by the identity ratchet where a symbol is shared:
   primitives, including `raw_choice_value`, `coerce_relation_pk_or_none`, and
   `type_check_relation_id`; and the `utils/errors.py` leaf constructors.
 - **Conceptual contracts reused:** the [`FieldError`][glossary-fielderror-envelope]
-  envelope + the `mutations/inputs.py::NON_FIELD_ERROR_KEY` (`"__all__"`) sentinel, the
+  envelope + the `utils/errors.py::NON_FIELD_ERROR_KEY` (`"__all__"`) sentinel, the
   `<Name>Payload` `node` / `result` slot (`payload_object_slot` / `build_payload_type`),
   the `_resolve_model` / `_validate_meta` / `build_input` / `input_type_name` /
   `input_module_path` / `resolve_sync` / `resolve_async` seams, `bind_mutations()`, and the
@@ -2531,7 +2539,7 @@ held by the identity ratchet where a symbol is shared:
   walk DRF's nested tree. Its **base case** — construct a `FieldError(field=<path>,
   messages=[...])` and map DRF's `non_field_errors` bucket to the package's `"__all__"`
   sentinel — is the convention the `036` mapper encodes (`NON_FIELD_ERRORS` →
-  `mutations/inputs.py::NON_FIELD_ERROR_KEY`). Both flatteners share
+  `utils/errors.py::NON_FIELD_ERROR_KEY`). Both flatteners share
   `NON_FIELD_ERROR_KEY` (no re-spelling `"__all__"`) and the leaf constructor
   `utils/errors.py::field_error(path, messages, *, codes=None)`, so the sentinel
   convention — and the `codes` and `path` derivation — cannot drift. That module is the
@@ -3664,7 +3672,7 @@ help_text / converter extras; a stable hook binds cleanly).
 
 ### Preserve DRF `ErrorDetail.code` in the error envelope
 
-The shared `FieldError` (`mutations/inputs.py`) carries an additive, default-empty
+The shared `FieldError` (`utils/errors.py`) carries an additive, default-empty
 `codes: [String!]` alongside `field` / `messages`. The single leaf ctor
 `utils/errors.py::field_error(path, messages, *, codes=None)` (the one both flatteners call)
 populates it: the DRF flattener passes each leaf `ErrorDetail.code`

@@ -18,11 +18,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import subprocess
 import sys
 import weakref
 from collections.abc import Callable, Mapping
-from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest import mock
 
@@ -55,6 +53,7 @@ from django_strawberry_framework.utils.permissions import (
 )
 from tests._idioms import stub_module
 from tests._soft_dependency import simulated_absence
+from tests._subprocess import run_in_fresh_process
 from tests.auth._helpers import _drain_until
 
 _SIGNED_COOKIES_ENGINE = "django.contrib.sessions.backends.signed_cookies"
@@ -171,27 +170,10 @@ def test_auth_submodule_import_stays_channels_free() -> None:
     the running worker already imported (the router suite imports channels at
     module import time in this same process).
     """
-    fakeshop = Path(__file__).resolve().parents[2] / "examples" / "fakeshop"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import django, os, sys; "
-                f"sys.path.insert(0, {str(fakeshop)!r}); "
-                "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings'); "
-                "django.setup(); "
-                "import django_strawberry_framework.auth; "
-                "import django_strawberry_framework.auth.sessions; "
-                "assert 'channels' not in sys.modules, sorted(sys.modules)"
-            ),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"subprocess failed: stdout={result.stdout!r}, stderr={result.stderr!r}"
+    run_in_fresh_process(
+        "import django_strawberry_framework.auth; "
+        "import django_strawberry_framework.auth.sessions; "
+        "assert 'channels' not in sys.modules, sorted(sys.modules)",
     )
 
 

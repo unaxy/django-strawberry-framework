@@ -981,12 +981,13 @@ in **one** module, `_request_body.py`, which hands the view a single boolean: th
 version-divergent knowledge is the risk, so it is single-sited beside the documented Django
 contract it depends on rather than spread across the two view classes.
 
-**An unmeasurable stream has three outcomes, not two.** The size probe reaches for four
-capabilities of an object the package did not create — `seekable()`, a seek to the end, a
-seek back to the original position, and the subtraction of the two answers — and a stream
-supplied by consumer middleware or a custom ASGI server may raise from any of them.
-Letting such a failure fall through as an unrelated `500` is the wrong answer at the one
-seam this design deliberately centralizes, so the probe reports exactly three outcomes:
+**An unmeasurable stream has three outcomes, not two.** The size probe calls into an
+object the package did not create — `seekable()`, the `tell()` that reads the starting
+position, a seek to the end, the seek back to that position, and the `tell()` that verifies
+it — and a stream supplied by consumer middleware or a custom ASGI server may raise from any
+of them; an answer that is not a built-in `int` is never used in arithmetic. Letting such a
+failure fall through as an unrelated `500` is the wrong answer at the one seam this design
+deliberately centralizes, so the probe reports exactly three outcomes:
 
 1. **Measurable** — a coherent position/end pair, the original position restored, nothing
    read. The count decides.
@@ -1057,12 +1058,13 @@ with a controlled `413`. The un-fixable half is [Decision 8](#decision-8--the-de
 
 **Decision.** An explicit reverse-proxy / ASGI-server body cap is a **required** part of the
 deployment contract, with concrete directions (`client_max_body_size` on nginx, and the
-statement that **no mainstream ASGI server bounds the total body at all** — Uvicorn,
-Hypercorn, and Daphne ship no total-request-body limit, the size knobs they do expose bound the request
-line and headers rather than the body, and Daphne's request-buffer size controls fragment
-delivery rather than total accepted body). Naming a header-shaped knob as if it capped the
-body would hand the reader exactly the false comfort this decision exists to remove: the
-proxy line is load-bearing **because** the layer below the application supplies nothing.
+statement that **the package relies on no ASGI server's body cap** — Daphne, the server
+verified, ships no total-request-body limit: its size knobs bound the request line and
+headers rather than the body, and its request-buffer size controls fragment delivery rather
+than total accepted body). Naming a header-shaped knob as if it capped the body would hand
+the reader exactly the false comfort this decision exists to remove: the proxy line is
+load-bearing **because** the package assumes the layer below the application supplies
+nothing.
 Routing through Django restores the authoritative middleware lifecycle but **does not**
 provide every transport resource bound, and the package's view cap bounds what the
 application *processes*, not what the server *accepts*.
@@ -2276,7 +2278,12 @@ and nothing else.
 **Only `DisallowedHost` becomes a denial.** The validator catches `DisallowedHost` and denies
 the handshake **before authentication and before the consumer is constructed**. Any other
 exception propagates: a bug in the projection must stay visible rather than being normalized
-into "that host is not allowed", which would be indistinguishable from correct operation.
+into "that host is not allowed", which would be indistinguishable from correct operation. The
+denial is logged where Django logs the same refusal on HTTP
+(`django/core/handlers/exception.py::response_for_exception`): on
+`django.security.DisallowedHost` at `ERROR`, with the exception's message and the exception
+attached, so a deployment that already routes or silences that logger covers the handshake
+too. The record is server-side only; the wire stays identical to an `Origin` refusal.
 
 **Why call Django rather than narrow the claim.**
 `channels.security.websocket.OriginValidator.__call__` reads the `Origin` header and nothing
@@ -2411,10 +2418,11 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   `strawberry.django.views.GraphQLView` / `AsyncGraphQLView`.
 - **The UTF-8 decode is one `parse_json` override that delegates with `super()`**, so
   upstream stays the only JSON parser in the path. `_patched_parse_json` has its own
-  `UnicodeDecodeError` → `HTTPException(400, ...)` translation and its
-  `_validate_upstream_shape` gate for the upstream-mounted path; no new patch module, no
-  second patched method, and no reimplemented parser anywhere. The `400` reason string is
-  deliberately named in **both** places rather than imported: an import would make
+  `UnicodeDecodeError` → `HTTPException(400, ...)` translation for the upstream-mounted
+  path, and `_validate_upstream_shape` decides whether the patch installs at all, for every
+  mount; no new patch module, no second patched method, and no reimplemented parser
+  anywhere. The `400` reason string is deliberately named in **both** places rather than
+  imported: an import would make
   `apps.py::DjangoStrawberryFrameworkConfig.ready` load `views.py` (and
   `strawberry.django.views`) at every consumer's startup, channels-only ones included, and
   would cost the patch module the import-time
@@ -2527,15 +2535,15 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   measurement without reading the bytes it describes, which is the work the probe exists to
   avoid.
 - **A capability call that *raises* is a third outcome, not a variant of the second.** Every
-  call the probe makes into a stream it did not create — `seekable()`, the seek to the end,
-  the restoring seek, and the subtraction of the two answers — is guarded, and the guard
-  branches on *what has already been mutated*. A failure before anything moved leaves the
-  original position intact, so the bounded read supplies the bound; a **restore the probe
-  cannot prove** — the restoring seek raised, or the `tell()` that verifies it answered
-  something other than the position the probe started from — leaves the position unknown, so
-  the request is refused with the
-  package's own controlled rejection rather than read from an unknown offset, guessed back to
-  zero, or allowed to escape as an unrelated `500`
+  call the probe makes into a stream it did not create — `seekable()`, the `tell()` that
+  reads the starting position, the seek to the end, the restoring seek, and the `tell()` that
+  verifies it — is guarded, and the guard branches on *what has already been mutated*. A
+  failure before anything moved leaves the original position intact, so the bounded read
+  supplies the bound; a **restore the probe cannot prove** — the restoring seek raised, or
+  the `tell()` that verifies it answered something other than the position the probe started
+  from — leaves the position unknown, so the request is refused with the package's own
+  controlled rejection rather than read from an unknown offset, guessed back to zero, or
+  allowed to escape as an unrelated `500`
   ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
   #"An unmeasurable stream has three outcomes, not two"). Production streams never take this
   path; consumer middleware and custom ASGI servers are exactly where it would otherwise be
@@ -2649,7 +2657,8 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   `disconnect` so it never outlives the connection
   ([Decision 16](#decision-16--revocation-is-connection-scoped-and-gated-at-the-websocket-adapters-outbound-frame-seam)).
 - **The Host projection must not swallow its own bugs.** Only `DisallowedHost` becomes a
-  denial; every other exception propagates
+  denial, logged on `django.security.DisallowedHost` as Django logs it for HTTP; every other
+  exception propagates
   ([Decision 19](#decision-19--a-django-backed-websocket-host-boundary-beside-channels-origin-check)).
   A projection bug that silently denied every handshake would be indistinguishable from
   correct `ALLOWED_HOSTS` enforcement, which is the worst possible failure mode for a check
@@ -3023,7 +3032,8 @@ package, communicator-driven):
 47. An **allowed `Origin`** with a **hostile
     `Host`** is denied. Plus the converse control (allowed `Host`, hostile `Origin` → denied
     by Channels' validator) and the both-allowed control, so neither check is shown to be
-    doing the other's work.
+    doing the other's work. The Host denial writes exactly one `ERROR` record carrying the
+    `DisallowedHost` on `django.security.DisallowedHost`, and both controls write none there.
 48. Django owns the matching, proven by delegation rather than by re-assertion: under
     `override_settings(ALLOWED_HOSTS=[...])` a wildcard entry, a leading-dot subdomain entry,
     a `Host` carrying an explicit port, an IPv6 literal, and a trailing-dot form each behave
@@ -3079,10 +3089,15 @@ Every generated doc is regenerated from its source, never hand-edited.
   the [`DjangoGraphQLProtocolRouter`][glossary-djangographqlprotocolrouter] entry's
   composition and constructor, the [Channels request adapter][glossary-channels-request-adapter]
   entry's WebSocket scope, the [auth-mutation][glossary-auth-mutations] transport matrix,
-  and the new terms this card authors: `DjangoGraphQLView`, Request-body cap, UTF-8 wire
-  contract, WebSocket consumer-injection seam, WebSocket revalidation window,
-  Connection-scoped revocation, WebSocket Host boundary, and
-  `GraphQLRequestBodyBoundaryMiddleware`.
+  and the new terms this card authors:
+  [`DjangoGraphQLView`][glossary-djangographqlview],
+  [Request-body cap][glossary-request-body-cap],
+  [UTF-8 wire contract][glossary-utf-8-wire-contract],
+  [WebSocket consumer-injection seam][glossary-websocket-consumer-injection-seam],
+  [WebSocket revalidation window][glossary-websocket-revalidation-window],
+  [Connection-scoped revocation][glossary-connection-scoped-revocation],
+  [WebSocket Host boundary][glossary-websocket-host-boundary], and
+  [`GraphQLRequestBodyBoundaryMiddleware`][glossary-graphqlrequestbodyboundarymiddleware].
 - **[`docs/TREE.md`][tree]** via `scripts/build_tree_md.py` — the `views.py`,
   `_request_body.py`, `consumers.py`, `utils/sessions.py` and `middleware/request_body.py`
   rows, plus the test modules. The render reads each module docstring's first line, and a
@@ -3301,6 +3316,7 @@ Every generated doc is regenerated from its source, never hand-edited.
 [glossary-auth-mutations]: ../GLOSSARY.md#auth-mutations
 [glossary-channels-request-adapter]: ../GLOSSARY.md#channels-request-adapter
 [glossary-configurationerror]: ../GLOSSARY.md#configurationerror
+[glossary-connection-scoped-revocation]: ../GLOSSARY.md#connection-scoped-revocation
 [glossary-cookbook-parity]: ../GLOSSARY.md#cookbook-parity
 [glossary-debug-toolbar-middleware]: ../GLOSSARY.md#debug-toolbar-middleware
 [glossary-developer-only-debug-posture]: ../GLOSSARY.md#developer-only-debug-posture
@@ -3308,6 +3324,7 @@ Every generated doc is regenerated from its source, never hand-edited.
 [glossary-djangodebugextension]: ../GLOSSARY.md#djangodebugextension
 [glossary-djangofiletype]: ../GLOSSARY.md#djangofiletype
 [glossary-djangographqlprotocolrouter]: ../GLOSSARY.md#djangographqlprotocolrouter
+[glossary-djangographqlview]: ../GLOSSARY.md#djangographqlview
 [glossary-djangoimagetype]: ../GLOSSARY.md#djangoimagetype
 [glossary-djangomodelpermission]: ../GLOSSARY.md#djangomodelpermission
 [glossary-djangomutation]: ../GLOSSARY.md#djangomutation
@@ -3318,6 +3335,7 @@ Every generated doc is regenerated from its source, never hand-edited.
 [glossary-fielderror-envelope]: ../GLOSSARY.md#fielderror-envelope
 [glossary-filterset]: ../GLOSSARY.md#filterset
 [glossary-get_queryset-visibility-hook]: ../GLOSSARY.md#get_queryset-visibility-hook
+[glossary-graphqlrequestbodyboundarymiddleware]: ../GLOSSARY.md#graphqlrequestbodyboundarymiddleware
 [glossary-graphqltestcase]: ../GLOSSARY.md#graphqltestcase
 [glossary-hard-dependency]: ../GLOSSARY.md#hard-dependency
 [glossary-joint-version-cut]: ../GLOSSARY.md#joint-version-cut
@@ -3326,6 +3344,7 @@ Every generated doc is regenerated from its source, never hand-edited.
 [glossary-orderset]: ../GLOSSARY.md#orderset
 [glossary-pep-562-lazy-export]: ../GLOSSARY.md#pep-562-lazy-export
 [glossary-probe-urlconf]: ../GLOSSARY.md#probe-urlconf
+[glossary-request-body-cap]: ../GLOSSARY.md#request-body-cap
 [glossary-request_from_info]: ../GLOSSARY.md#request_from_info
 [glossary-require_optional_module]: ../GLOSSARY.md#require_optional_module
 [glossary-schema-reload-discipline]: ../GLOSSARY.md#schema-reload-discipline
@@ -3335,6 +3354,10 @@ Every generated doc is regenerated from its source, never hand-edited.
 [glossary-strawberry_config]: ../GLOSSARY.md#strawberry_config
 [glossary-testclient]: ../GLOSSARY.md#testclient
 [glossary-upload-scalar]: ../GLOSSARY.md#upload-scalar
+[glossary-utf-8-wire-contract]: ../GLOSSARY.md#utf-8-wire-contract
+[glossary-websocket-consumer-injection-seam]: ../GLOSSARY.md#websocket-consumer-injection-seam
+[glossary-websocket-host-boundary]: ../GLOSSARY.md#websocket-host-boundary
+[glossary-websocket-revalidation-window]: ../GLOSSARY.md#websocket-revalidation-window
 [tree]: ../TREE.md
 
 <!-- docs/SPECS/ -->

@@ -305,7 +305,8 @@ Worker 0. Round 1's custodian had to re-derive that list because the detail neve
 
 `docs/builder/bld-review-2-w3_review.md` returned **revision-needed** with five Medium findings.
 M1 / M2 / M3 were remediated in source and tests and committed (`10c50722`); M4 and M5 are process
-calibrations escalated to the maintainer and are recorded under `## Open maintainer decisions`.
+calibrations escalated to the maintainer; M4 now lives in `docs/builder/TODO.md` and M5 is recorded
+under `## Open maintainer decisions`.
 
 **A custodian pass ran on 2026-07-28 and closed a real spec/code divergence** that the round-2
 amendment pass had left open. It is recorded here because the *code* was already right and only
@@ -388,12 +389,6 @@ re-confirmed by Worker 0 against the tree.
   authors* — the package Django view, the body cap, the UTF-8 wire contract, the consumer-injection
   seam, the revalidation window, the connection-scoped revocation contract, and the WebSocket Host
   boundary — and none of the seven exists in `docs/GLOSSARY.md` today.
-
-**Retrospective candidate for closeout:** a finding stated in a dispatch prompt is a *hypothesis to
-re-verify*, exactly like a review's prescribed remediation. `BUILD.md` already says a worker may not
-treat a review's prescription as authority; it does not say the same of Worker 0's own pre-verified
-findings, and it should. The saving grace here was that pre-verification is offered to save
-re-derivation, not to forbid it.
 
 ### Round 2 is CLOSED — `bld-review-2-w3_residual.md` reads `final-accepted`
 
@@ -607,10 +602,8 @@ neighbouring `routers.py` sentences are "true and must survive" when they carry 
 it four sentences rather than one. Both were passed as *hypotheses to re-verify*, with the count it
 actually finds requested back — per `### Three Worker-0 dispatch findings the Slice 5 planning pass
 refuted`, a finding stated in a dispatch prompt is not evidence.
-Two audit items stay **open and are not findings**: the Uvicorn and Hypercorn thirds of Decision 8's
-"no mainstream ASGI server bounds the total body" (absent from the venv; installing is barred, and the
-error direction is safe — if either *did* cap, the spec would be understating protection). Daphne's
-third is **closed as true** by Worker 0: `daphne/http_protocol.py:200-210` uses `request_buffer_size`
+Daphne's third of Decision 8's "no mainstream ASGI server bounds the total body" is **closed as
+true** by Worker 0: `daphne/http_protocol.py:200-210` uses `request_buffer_size`
 purely to chunk reads into `more_body` fragments, with no total accumulation bound.
 
 **Process note for the closeout.** This audit ran entirely outside the `Status:` chain and found a
@@ -618,7 +611,7 @@ high-severity inversion in a spec that had already passed two review rounds, a c
 Slice 5 final verification. That is the third independent confirmation of `worker-0.md`'s standing
 pattern — *a green `Status:` chain does not prove the spec matches the code* — and the first evidence
 that an auditor with **no stake in the artifact passing** finds a class of defect the in-flow reviewers
-did not. Worth a `BUILD.md` consideration: an out-of-flow claim audit before the final gate.
+did not.
 
 ### W3 adversarial review of the integration + custodian cohorts -> `bld-review-3-integration.md`
 
@@ -640,8 +633,7 @@ HEAD:`, proving zero executable production change. Both verdicts were nonetheles
 Two Worker-0 flags were **refuted** and are withdrawn: W1's "zero chronology phrases" claim is
 phrase-specific and grep-true (the single hit is `pytest-xdist` in a test-plan row), and
 not-fixed item 7's two phrases legitimately describe shipped 0.0.14 behavior — W3 recommends W1
-close item 7 as no-change. The partition held; `conf.py:117` remains genuinely open as the
-maintainer's; `bld-slice-4-ws_revalidation.md:9`'s `Status: planned` lapse was left alone as
+close item 7 as no-change. The partition held; `bld-slice-4-ws_revalidation.md:9`'s `Status: planned` lapse was left alone as
 recorded. W3 flagged for the final verification: W2's tenth box (`### Item C`) sits in its build
 report rather than the dispatched checklist and should be audited as a tenth tick.
 
@@ -650,8 +642,8 @@ Remediation was dispatched as two concurrent single-finding fixes (disjoint file
 
 ## Open maintainer decisions (do not let a worker re-litigate these)
 
-Both were escalated by `bld-review-2-w3_review.md` as **process calibrations, not review findings**,
-and neither blocks Slice 5. Workers are told they are pending so they do not re-raise them.
+M5 was escalated by `bld-review-2-w3_review.md` as a **process calibration, not a review finding**,
+and it does not block Slice 5. Workers are told it is pending so they do not re-raise it.
 
 - **M5 — the plan carries no hot-path declaration, and the round owes a number.** The WS-revocation
   design holds one connection-local lock **through** the outbound send, which meets `BUILD.md`
@@ -659,18 +651,6 @@ and neither blocks Slice 5. Workers are told they are pending so they do not re-
   calls it a hot path. Options: (a) declare the slice hot-path and re-loop the cohort for a
   before/after number — `_instrument_revalidation`'s `probe.reads` is already the instrument, so it
   is cheap; or (b) an explicit maintainer waiver naming the number as not required for this card.
-- **M4 — whether the weakly-pinned rule is applied literally.** Twelve boundaries in round 2 fail
-  the 0-1-row test. The reviewer's own merit ruling: M2 and M3 were genuine gaps (both since
-  remediated), four more deserve a second row on merit, and the remaining six are adequate on merit
-  and fail only the rule as written. Applying it literally re-loops all twelve. Related: the rule
-  says "never a recorded exception" while `bld-review-2-w3_review.md` Q7 records one
-  ("weakly pinned but adequate"), so the rule needs either a narrow carve-out or that entry
-  becomes `revision-needed`.
-- **`AGENTS.md:15` vs. scoped `ruff`.** All four role files now tell workers to scope `ruff format`
-  / `ruff check --fix` to their own files, because this tree carries concurrent uncommitted work and
-  a repo-wide write-mode run reformats it. `AGENTS.md:15` mandates the repo-wide form and the role
-  files defer to `AGENTS.md` on conflict, so **the scoping instruction is inert until this is
-  reconciled.** Recorded in commit `84c6075b`'s message as well.
 
 ### Artifact `Status:` hygiene lapse in round 2 — recorded, not silently repaired
 
@@ -1196,7 +1176,5 @@ closes with it.
 ## Closeout checklist
 
 - [x] R1: Remediation review of `2701f41a` + `ba66ab49` against the four open findings -> `docs/builder/bld-046-r1-remediation_review.md`
-- [ ] R1b: Boundary-recognition contract enactment (`## Maintainer decision M-B`) -> `docs/builder/bld-046-r1b-recognition_contract.md`
-- [ ] R2: Rationale reconciliation + spec reconciliation -> `docs/builder/bld-046-r2-rationale_reconciliation.md`
-- [ ] R3: Documentation completion + spec archive to `docs/SPECS/` -> `docs/builder/bld-046-r3-doc_completion_and_archive.md`
-- [ ] Final test-run gate -> `docs/builder/bld-046-final.md`
+- [x] R1b: Boundary-recognition contract enactment (`## Maintainer decision M-B`) -> `docs/builder/bld-046-r1b-recognition_contract.md`
+- [x] R2: Rationale reconciliation + spec reconciliation -> `docs/builder/bld-046-r2-rationale_reconciliation.md`

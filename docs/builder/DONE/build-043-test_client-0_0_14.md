@@ -733,9 +733,7 @@ census that was checking for it.
 
 **`test_list_field_async_api.py` is excluded from Cohort D.** It appears in five
 live spec-050 artifacts and its last three commits are all spec-050 work; it is
-the concurrent cycle's territory (`AGENTS.md` rule 34). Its declaration also
-names the `graphql_client.py` sync-only exemption — a different regime this spec
-never names, which is a note for a later card, not this cycle.
+the concurrent cycle's territory (`AGENTS.md` rule 34).
 
 ## Ownership partition — correction applied
 
@@ -779,19 +777,7 @@ including the three its own premises got wrong, corrected above.
 
 ## Items Cohort D routed to Worker 0
 
-1. **The live-tier README's `Async` bullet is falsified by Cohort D's diff, and
-   sits in no cohort's write set.** `examples/fakeshop/test_query/README.md` is a
-   `.md`, so the maintainer's fence — **spec files and code `.py` files only** —
-   puts it out of bounds for every cohort in this cycle. It cannot be fixed here
-   and it must not be left unhomed (`AGENTS.md` `## Past mistakes`: an item
-   routed forward without a named owner dies). Homing it needs a KANBAN DB edit,
-   which the same fence excludes. **Carried to the maintainer as the cycle's one
-   genuinely undischargeable item**. It is now **homed** on
-   `TODO-ALPHA-053-0.0.15` (scope order 68), bound to the async-helper decision
-   because the bullet's correct text depends on that decision's outcome, with
-   `TODO-ALPHA-056-0.0.17` named as its fallback home; the reasoning travelled
-   with it, so the next reader inherits the constraint rather than the omission.
-2. **Cohorts C and D share the three `worker-memory/043-worker-{1,2,3}.md`
+1. **Cohorts C and D share the three `worker-memory/043-worker-{1,2,3}.md`
    files.** Not a partition defect: `BUILD.md` `### Worker memory` scopes the
    notebook **per role**, not per cohort, so two concurrent Worker 1s sharing
    `043-worker-1.md` is the documented shape. Worth recording because it means
@@ -828,23 +814,6 @@ sees it before a `git add -A` sweeps an untracked probe into a commit.
 **Not this cycle's to remove.** Flagged to the maintainer; the no-revert rule
 covers dirty and untracked files a cycle did not author, and deleting another
 session's in-progress scratch is the same mistake as reverting its edits.
-
-## Escalation pending: the async-helper extraction (Cohort D, final verification)
-
-Cohort D's custodian **retired** its plan's "defer until a sixth async site"
-trigger — the sixth site exists today (`test_list_field_async_api.py`'s
-unconverted raw post), so the condition could never fire and a trigger that
-cannot fire is worse than none. It kept the DRY reading and **escalated the
-extraction itself**, correctly: extracting a shared async post helper reverses
-`examples/fakeshop/graphql_client.py`'s stated sync-only contract and runs into
-`AGENTS.md`'s async-exemption rule. That is a contract choice, not a worker's
-call (`BUILD.md` `### Contract-level findings are escalated as maintainer
-decisions before dispatch`).
-
-Both options and their costs are recorded in
-`docs/builder/bld-043-review-4-live_conversion.md`. **Carried to the maintainer
-with the final gate**, not decided here. It blocks nothing: the sixth site is the
-concurrent spec-050 cycle's file and out of bounds this cycle either way.
 
 ## Cohort D's corrections to its own artifact, and to Worker 3
 

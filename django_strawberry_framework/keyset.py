@@ -104,6 +104,7 @@ from strawberry.relay.utils import from_base64, to_base64
 from .exceptions import ConfigurationError
 from .utils import truth
 from .utils._narrowing import is_dict, is_list, list_of, read_attr
+from .utils.connections import PaginationArgumentError
 from .utils.imports import require_optional_module
 from .utils.relations import _resolve_segment_field
 from .utils.typing import object_result
@@ -451,9 +452,9 @@ def keyset_contract_error(detail: str) -> GraphQLError:
     )
 
 
-def _invalid_cursor_error(argument: str) -> GraphQLError:
+def _invalid_cursor_error(argument: str) -> PaginationArgumentError:
     """Build the one malformed / tampered / mismatched keyset-cursor error shape."""
-    return GraphQLError(
+    return PaginationArgumentError(
         f"Argument '{argument}' contains an invalid cursor for this connection.",
     )
 
@@ -584,14 +585,14 @@ def decode_keyset_cursor(
 ) -> KeysetCursor:
     """Verify + decode one ``after:`` / ``before:`` keyset cursor.
 
-    Rejections all surface as the same ``GraphQLError`` (never a crypto
-    traceback): non-base64 input, a foreign prefix (an ``arrayconnection``
-    offset cursor replayed on a keyset connection), invalid authenticated
-    ciphertext (tampering or a rotated-out ``SECRET_KEY``), an
-    order-fingerprint mismatch (replay under a different ``orderBy:``), and
-    a value-arity or value-shape mismatch. The error is deliberately uniform:
-    distinguishing "tampered" from "stale order" would leak oracle detail
-    about the opaque payload.
+    Rejections all surface as the same ``PaginationArgumentError`` (never a
+    crypto traceback, always ``extensions.code`` ``PAGINATION_INVALID``):
+    non-base64 input, a foreign prefix (an ``arrayconnection`` offset cursor
+    replayed on a keyset connection), invalid authenticated ciphertext
+    (tampering or a rotated-out ``SECRET_KEY``), an order-fingerprint mismatch
+    (replay under a different ``orderBy:``), and a value-arity or value-shape
+    mismatch. The error is deliberately uniform: distinguishing "tampered"
+    from "stale order" would leak oracle detail about the opaque payload.
     """
     try:
         prefix, encrypted = from_base64(value)

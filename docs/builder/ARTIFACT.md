@@ -12,7 +12,7 @@ The artifact's `Status:` line is set by exactly one worker per transition:
 - `review-accepted` — set by Worker-3 when accepting the diff; signals Worker-0 to spawn Worker-1 for final verification. May carry Medium-or-higher findings escalated to Worker-1 (`worker-3.md` `### Acceptance gate`); Worker-1's final verification owns the decision.
 - `final-accepted` — set by Worker-1 at the end of final verification; signals Worker-0 to mark the checklist box.
 
-Worker-0 never writes to `Status:`. Worker-0 reads it to drive dispatch.
+Worker-0 never writes to `Status:`. Worker-0 reads it to drive dispatch, and only after the worker's agent call has returned: a worker writes the line before it finishes appending, so a changed file is not a completion signal.
 
 ````text
 # Build: Slice <N> — <slice title>
@@ -81,7 +81,7 @@ One entry per new boundary / guard / gate / rejection path this pass introduced,
 
 - `path/to/file.py::Symbol` — mutation applied: <what was removed, inverted, or weakened>; scope as run: <the exact pytest invocation>; pre-mutation state of that scope: <green, or the node ids the mutant's set is differenced against>; failing node ids: <listed, one per row — the count is their `len()`, never asserted>; collection/setup errors: <N; a valid count requires 0>; revert proved by byte-comparison: <command and result>.
 
-A boundary whose removal fails 0 or 1 rows is **weakly pinned** and is `revision-needed`, not a recorded exception. A proof carrying collection or setup errors is no valid count at all. Every zero-row entry carries a one-line **why 0** naming which case it is; when the harness is what cannot exhibit the failure, name the limitation and record the production-call-site invariant assertion that replaced the wire-level one.
+A boundary whose removal fails 0 or 1 rows is **weakly pinned** and is `revision-needed`, not a recorded exception. A row-isolation entry declares its one row as `isolates` and is graded **row isolated** or **ROW ISOLATION NOT MET** instead. A proof carrying collection or setup errors is no valid count at all. Every zero-row entry carries a one-line **why 0** naming which case it is; when the harness is what cannot exhibit the failure, name the limitation and record the production-call-site invariant assertion that replaced the wire-level one.
 
 ### Hot-path budget
 

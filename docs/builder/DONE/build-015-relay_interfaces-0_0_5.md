@@ -259,12 +259,11 @@ dirty with concurrent work.
 
 | Catalog item | Home | Row |
 |---|---|---|
-| 2 (stranded Risk-note citation) + 5 (stale test docstring) | `TODO-ALPHA-051-0.0.15` Scope | pk 1361, order 29 |
-| 4 (unpinned A/B relation-planning row) | `TODO-ALPHA-051-0.0.15` Scope | pk 1362, order 30 |
+| 2 (stranded Risk-note citation) | `TODO-ALPHA-051-0.0.15` Scope | pk 1361, order 29 |
 | 6 (two non-unique `#"substring"` anchors) | `TODO-ALPHA-052-0.1.0` Scope | pk 1363, order 34 |
 
-Items 2, 4 and 5 went to card 051 because its WP batches already open `types/relay.py` and
-`tests/types/`, and because it already carries three items of exactly this shape
+Item 2 went to card 051 because its WP batches already open `types/relay.py`, and because it
+already carries three items of exactly this shape
 (`_optimizer_field_map`, `convert_relation`, `[spec-011]`) under the same boundary: *fold into
 whichever WP batch legitimately opens the file; do not widen into a documentation sweep*. Each new row
 restates that boundary rather than assuming it carries. Item 6 went to card 052 as a **checker**
@@ -274,8 +273,7 @@ rule lands beside the tool that would enforce it rather than as a fourth restate
 
 Item 3 needed no move: the `[spec-011]` cluster is already homed on card 051, doc half on card 052.
 Item 8 is a record with no action. Every fact in the three rows was re-derived at `852de2d6` before
-being written — the reflow at `types/relay.py:154-155`, the zero Relay coverage in
-`test_definition_order_schema.py`, the absent A/B row, and both anchor multiplicities (2 and 3).
+being written — the reflow at `types/relay.py:154-155` and both anchor multiplicities (2 and 3).
 
 ### Item 7 fixed in the spec
 
@@ -348,8 +346,8 @@ the section itself applies to R1's and R2's closed artifacts:
 - "`check_spec_glossary` (**`OK: 19 terms`**, up from 18)" — it reads `OK: 18 terms`, the original
   figure, for the same reason.
 - "**Eight items are deferred**, catalogued in `bld-015-final.md`. Two matter at commit: **F13 is only
-  half closed** … " — F13 is closed as *no change owed*, item 7 is fixed in the spec, and items 2, 4,
-  5 and 6 are homed on cards 051 and 052. Nothing in the catalog is still owed to a future cycle
+  half closed** … " — F13 is closed as *no change owed*, item 7 is fixed in the spec, and items 2 and
+  6 are homed on cards 051 and 052. Nothing in the catalog is still owed to a future cycle
   except through those cards. `## Post-gate disposition of the deferred catalog` is the current
   record.
 

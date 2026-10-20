@@ -188,7 +188,7 @@ Spec: [Decision 11 — `order_input_type(OrderSet)` consumer helper][spec-028-d1
 
 ### Justification
 
-- The helper is deliberately the same shape as `filter_input_type`, and both bodies are one function, [`utils/inputs.py::build_lazy_input_annotation`][utils-inputs]. The families differ only in the arguments they pass; the identical parts (eager validation, the orphan-ledger write, the `ForwardRef` form) are the subtle ones, and two copies would be two places to fix a bug.
+- The helper is deliberately the same shape as `filter_input_type`, and both bodies are one function, [`utils/inputs.py::build_lazy_input_annotation`][utils-inputs]. The families differ only in the arguments they pass; the identical parts (eager validation, the orphan-ledger write, the `LazyType` return that resolves under deferred annotations) are the subtle ones, and two copies would be two places to fix a bug.
 - Eager `TypeError` validation catches misuse at the resolver signature instead of as a cryptic schema-build error.
 - The helper returns the element type; resolvers wrap it as `list[...] | None` because `orderBy:` is a list on the wire.
 - `OrderInput[MyOrder]` exists beside the call because a call is not a valid type expression: the generic spelling is what a type checker accepts in an annotation, and its `OrderSet` bound rejects a non-`OrderSet` statically.

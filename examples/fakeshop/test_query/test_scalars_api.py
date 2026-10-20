@@ -1368,6 +1368,65 @@ def test_scalars_optimizer_fk_id_elision_does_not_leak_to_sibling_root_in_http_q
 
 
 @pytest.mark.django_db
+def test_scalars_optimizer_fk_id_elision_does_not_leak_to_sibling_nested_branch_in_http_query() -> (
+    None
+):
+    """FK-id elision on one nested branch does not poison its sibling under the same parent.
+
+    Both siblings hang off ``ScalarSpecimenType`` and both end in the same
+    forward key, ``ScalarSpecimenType.parent``. ``children { parent { id } }``
+    selects only the target pk, so that branch is elided: the ``children``
+    prefetch answers it from its own ``parent_id`` column with no JOIN.
+    ``parent { parent { label } }`` needs the related row, so the root query
+    joins the grandparent. The two branches differ only by runtime path, which
+    the optimizer's resolver key carries; a key without it would hand the
+    sibling the pk-only stub and serve the wrong ``label``. Aliases of one
+    field cannot pin this: the walker merges same-named selections into one
+    plan before deciding elision.
+    """
+    grand = _seed_specimen(label="grand")
+    mid = _seed_specimen(label="mid", parent=grand)
+    _seed_specimen(label="leaf", parent=mid)
+
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_graphql(
+            """
+            query {
+              allScalarSpecimens {
+                label
+                children { label parent { id } }
+                parent { label parent { label } }
+              }
+            }
+            """,
+        )
+
+    assert response.status_code == 200
+    body = response_json(response)
+    assert "errors" not in body, body
+    specimens = {
+        json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")
+    }
+    assert json_at(specimens, "grand", "children") == [
+        {"label": "mid", "parent": {"id": grand.pk}},
+    ]
+    assert json_at(specimens, "grand", "parent") is None
+    assert json_at(specimens, "mid", "children") == [
+        {"label": "leaf", "parent": {"id": mid.pk}},
+    ]
+    assert json_at(specimens, "mid", "parent") == {"label": "grand", "parent": None}
+    assert json_at(specimens, "leaf", "children") == []
+    assert json_at(specimens, "leaf", "parent") == {"label": "mid", "parent": {"label": "grand"}}
+
+    assert len(captured) == 2, [q["sql"] for q in captured]
+    root_sql = captured[0]["sql"]
+    children_sql = captured[1]["sql"]
+    assert root_sql.upper().count("JOIN") == 2, root_sql
+    assert "JOIN" not in children_sql.upper(), children_sql
+    assert "parent_id" in children_sql, children_sql
+
+
+@pytest.mark.django_db
 def test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_http_query() -> (
     None
 ):

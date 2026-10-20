@@ -110,14 +110,13 @@ This cycle changed **no source and no tests**. It wrote exactly six files, all M
 
 Everything else dirty in the tree is a concurrent session's and is listed under `## Baseline-dirty out-of-scope files`. Stage explicitly per `START.md` — never `git add -A`.
 
-Three items need a maintainer decision rather than a worker, and each is enumerated inline below under `## Surviving record of the final gate` (they were carried there when `docs/builder/bld-017-final.md` was deleted): the DB-backed `KANBAN.md` `DONE-017-0.0.6` suppression claim (**MF-1** — 4 occurrences: `CardItem` 703/713/715 plus `CardReference` 62 on card 39, with 715 and 62 byte-identical and amendable only together), the `CHANGELOG.md:210` pre-renumber label (**MF-2**), and the already-carded `[spec-013]` ref-id cluster in `docs/SPECS/spec-025-scalar_map_helper-0_0_7.md` (6 occurrences: 5 uses plus the definition line at `:706`). A fourth, `docs/TREE.md`'s pending regenerate, is owed by whoever commits the concurrent session's `django_strawberry_framework/utils/converters.py` docstring edit — not by this cycle.
+Two items need a maintainer decision rather than a worker: the `CHANGELOG.md:210` pre-renumber label (**MF-2**), and the already-carded `[spec-013]` ref-id cluster in `docs/SPECS/spec-025-scalar_map_helper-0_0_7.md` (6 occurrences: 5 uses plus the definition line at `:706`). A third, `docs/TREE.md`'s pending regenerate, is owed by whoever commits the concurrent session's `django_strawberry_framework/utils/converters.py` docstring edit — not by this cycle.
 
-**All three were subsequently homed on `TODO-ALPHA-052-0.1.0` at the maintainer's instruction (2026-08-17), so none of them now depends on this artifact surviving.** The board was read first to establish the routing: `TODO-ALPHA-051-0.0.15` takes only occurrences its WP batches open in live code, and every spec-017 residual is documentation-only, so nothing went to 051. Two `CardItem` writes plus a `scripts/build_kanban_md.py` / `scripts/build_kanban_html.py` regenerate:
+**Both were subsequently homed on `TODO-ALPHA-052-0.1.0` at the maintainer's instruction (2026-08-17), so neither now depends on this artifact surviving.** The board was read first to establish the routing: `TODO-ALPHA-051-0.0.15` takes only occurrences its WP batches open in live code, and every spec-017 residual is documentation-only, so nothing went to 051. A `CardItem` write plus a `scripts/build_kanban_md.py` / `scripts/build_kanban_html.py` regenerate:
 
-- **MF-1** — a new `scope` bullet on card 052 (`CardItem` 1368, order 36), placed beside that card's board-DB spec-path-rot bullet because both are ORM-edit-plus-regenerate work. It carries the full population, the 715 ≡ 62 byte-identity constraint (re-verified by direct string comparison before the bullet was written, not carried on the gate's word), the FK-backed-placeholder warning, and the post-edit verification. It also records the grading difference from its neighbour: the spec-path-rot bullet's (c) sites are true as history, whereas this claim is present-tense and false.
 - **MF-2 and the `[spec-013]` count correction** — folded into card 052's existing `[spec-011]` renumber-sweep bullet (`CardItem` 1345), which already owned the cluster. The bullet said "five links"; it now says **six occurrences — five uses plus the definition line all five depend on**, enumerated by section rather than by line, and names `CHANGELOG.md` as a fourth surface with the `AGENTS.md` rule 21 reason it cannot be fixed alone.
 
-Both bullets cite by `path #"substring"` and section heading rather than `path:NN`: `KANBAN.md` is a standing doc, and `AGENTS.md` rule 27 confines raw line citations to per-cycle scratchpads. Gates after the regenerate: `scripts/build_kanban_tracked_path_constants.py --check` exit 0, `scripts/check_trailing_commas.py --check KANBAN.md` exit 0, `git diff --check` exit 0, and the kanban app's own suite `157 passed`. The rendered diff is exactly the two bullets, `KANBAN.html`'s change is confined to its data block, and the `DONE-017-0.0.6` card body still measures 4 `suppress*` occurrences — MF-1 is homed, not yet fixed.
+The bullet cites by `path #"substring"` and section heading rather than `path:NN`: `KANBAN.md` is a standing doc, and `AGENTS.md` rule 27 confines raw line citations to per-cycle scratchpads. Gates after the regenerate: `scripts/build_kanban_tracked_path_constants.py --check` exit 0, `scripts/check_trailing_commas.py --check KANBAN.md` exit 0, `git diff --check` exit 0, and the kanban app's own suite `157 passed`. The rendered diff is exactly that one bullet and `KANBAN.html`'s change is confined to its data block.
 
 ## Worker memory
 
@@ -144,54 +143,3 @@ Two live pointers existed and were resolved before the deletion rather than left
 - **No archive move is owed.** The spec sits at `docs/SPECS/spec-017-deferred_scalars-0_0_6.md` and both companions at `docs/SPECS/appx/`. Do not "re-archive".
 - **No `docs/GLOSSARY.md`, `docs/README.md`, root `README.md` or `TODAY.md` work is owed.** All four were audited correct and current on every point this card's contract reaches, including the two GLOSSARY entries suspected of carrying suppression wording - both had already been corrected.
 - **`scripts/build_tree_md.py --check` exiting 1 is not this cycle's.** The entire drift is `django_strawberry_framework/utils/converters.py`'s module docstring, uncommitted in a concurrent session's tree. `docs/TREE.md` matches `HEAD` exactly, so this is not a pre-existing defect at `HEAD` either; the regenerate is owed by whoever commits that file.
-
-### MF-1 replacement text - the kanban rows `TODO-ALPHA-052-0.1.0` needs
-
-Card 052's MF-1 bullet cites this block so the fix is executable without rediscovery. `kanban.Card` `id=39`, `number=17`. Four rows; **rows 3 and 4 are byte-identical and must change together** or the rendered card contradicts itself.
-
-**1. `kanban.CardItem` `id=703`** (section `note`, order `1`). Current:
-
-```text
-Public `BigInt` scalar (`django_strawberry_framework/scalars.py`, `NewType`-based) with the Strawberry class-direct-to-`scalar()` `DeprecationWarning` suppressed at the definition site so consumers see no warning at import time.
-```
-
-Replacement:
-
-```text
-Public `BigInt` scalar (`django_strawberry_framework/scalars.py`, `NewType`-based). At `0.0.6` the Strawberry class-direct-to-`scalar()` `DeprecationWarning` was suppressed at the definition site so consumers saw no warning at import time; that suppression no longer exists — see the registration note below.
-```
-
-**2. `kanban.CardItem` `id=713`** (section `test_plan`, order `0`). Current:
-
-```text
-100% coverage via `tests/test_scalars.py` (new flat file) and `tests/types/test_converters.py` (extended). Includes a `test_package_import_does_not_emit_strawberry_deprecation_warning` guard so future regressions to the suppression are explicit.
-```
-
-Replacement:
-
-```text
-100% coverage via `tests/test_scalars.py` (new flat file) and `tests/types/test_converters.py` (extended). Includes a `test_package_import_does_not_emit_strawberry_deprecation_warning` guard so future regressions to the warning-free import surface are explicit.
-```
-
-The test survives under that name; only what it guards changed.
-
-**3. `kanban.CardItem` `id=715`** (section `note`, order `12`) **and 4. `kanban.CardReference` `id=62`** (`source_card_id=39`, `target_card_id=47`), field `raw_text`. Current text of **both** (the `{{card_ref:1}}` placeholder is FK-backed — keep it verbatim):
-
-```text
-The internal Strawberry deprecation about passing a class (or `NewType`) to `strawberry.scalar(...)` is suppressed at the definition site (tight `warnings.catch_warnings()` filter). The package import surface is therefore clean. Migration to a `StrawberryConfig.scalar_map`-based design is roadmapped as `{{card_ref:1}}` — that path is a real public-API change (consumers using `BigInt` directly will merge a package-provided `StrawberryConfig` into their `strawberry.Schema(...)`), not an internal-only refactor.
-```
-
-Replacement for **both**:
-
-```text
-The internal Strawberry deprecation about passing a class (or `NewType`) to `strawberry.scalar(...)` was suppressed at the definition site at `0.0.6` (tight `warnings.catch_warnings()` filter), keeping the package import surface clean. `{{card_ref:1}}` replaced that suppression: `BigInt` is now a bare `NewType` bound to a `ScalarDefinition` built from Strawberry's no-warning `strawberry.scalar(name=...)` overload and registered through the package scalar map that the public `strawberry_config()` factory merges into a consumer's `strawberry.Schema(...)` — the real public-API change this note anticipated, not an internal-only refactor.
-```
-
-Edit through the Django ORM against `examples/fakeshop/db.sqlite3` (never raw SQL — `post_save` writes the side rows the render needs), then regenerate both rendered surfaces:
-
-```shell
-uv run python scripts/build_kanban_md.py
-uv run python scripts/build_kanban_html.py
-```
-
-Verify by re-running the occurrence count: `awk` over the `DONE-017-0.0.6` card range piped through `grep -o 'suppress[a-z]*'` must report **3 occurrences**, all past-tense inside the amended sentences, and zero occurrences of `is suppressed at the definition site`. `KANBAN.html`'s hand-edited Vue shell is untouched by the regenerate; only its data block moves.

@@ -3,8 +3,9 @@
 Opt-in at schema construction::
 
     _optimizer = DjangoOptimizerExtension()
-    schema = strawberry.Schema(
+    schema = DjangoSchema(
         query=Query,
+        config=strawberry_config(),
         extensions=[lambda: _optimizer],
     )
 
@@ -929,8 +930,9 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
     warning (the entry is a callable, not an instance)::
 
         _optimizer = DjangoOptimizerExtension()
-        schema = strawberry.Schema(
+        schema = DjangoSchema(
             query=Query,
+            config=strawberry_config(),
             extensions=[lambda: _optimizer],  # singleton wrapped in a factory
         )
 

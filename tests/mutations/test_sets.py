@@ -1213,13 +1213,13 @@ def test_bind_dedupes_identical_full_shapes() -> None:
 def test_bind_dedupes_full_set_fields_with_bare_create() -> None:
     """A ``fields`` list naming the full editable set dedupes with a bare create.
 
-    The type identity is the EFFECTIVE field set (spec-036 Decision 6 line 334),
-    not the raw ``(fields, exclude)`` declaration. ``Item``'s full editable set is
+    The type identity is the EFFECTIVE field set (spec-036 Decision 6), not the raw
+    ``(fields, exclude)`` declaration. ``Item``'s full editable set is
     ``("name", "description", "category", "attachment", "is_private")``; a
     ``fields`` list naming exactly that set IS the canonical shape, so it must
     resolve to the same materialized ``ItemInput`` as an un-narrowed create
-    (spec-036 Edge cases line 509) rather than spuriously raising a distinct-shape
-    collision on the shared name.
+    (spec-036 Edge cases and constraints) rather than spuriously raising a
+    distinct-shape collision on the shared name.
     """
     _declare_products_primaries()
 
@@ -1252,8 +1252,8 @@ def test_bind_dedupes_fields_with_complementary_exclude() -> None:
     Two narrowings that select the same effective set ``{name}`` via different
     spellings - ``fields=("name",)`` vs ``exclude`` naming every OTHER editable
     column - resolve to the same shape-derived ``<Model>...Input`` name and must
-    dedupe to one materialized type (spec-036 Decision 6 line 334 / Edge cases line
-    509), not raise a spurious distinct-shape collision on the shared name.
+    dedupe to one materialized type (spec-036 Decision 6 / Edge cases and
+    constraints), not raise a spurious distinct-shape collision on the shared name.
     """
     _declare_products_primaries()
 

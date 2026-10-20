@@ -144,10 +144,9 @@ class OptimizerHint:
             time through ``optimizer/nested_fetch.py::resolve_strategy``, so a
             typo raises ``ConfigurationError`` at ``Meta.optimizer_hints`` build
             time. The knob is schema-static and needs NO plan-cache-key change:
-            the plan cache is instance-bound (``optimizer/extension.py``
-            Decision 11), so strategy selection never depends on request-varying
-            data. Strategy selection MUST never depend on request-varying data
-            outside the cache key.
+            the plan cache is instance-bound (spec-029 Decision 3), so strategy
+            selection never depends on request-varying data. Strategy selection
+            MUST never depend on request-varying data outside the cache key.
 
     """
 

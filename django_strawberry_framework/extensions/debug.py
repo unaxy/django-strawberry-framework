@@ -16,12 +16,12 @@ deployment acknowledged the disclosure. The payload is also capped - bounded row
 counts and a bounded serialized size, with deterministic marked truncation - so
 the diagnostic cannot amplify a large operation into an enormous response.
 
-The opt-in is passing the **class** in ``strawberry.Schema``'s
+The opt-in is passing the **class** in ``DjangoSchema``'s
 ``extensions=`` list (one fresh instance per operation - requires the
 package's ``strawberry-graphql>=0.322.2`` floor)::
 
     _optimizer = DjangoOptimizerExtension()
-    schema = strawberry.Schema(
+    schema = DjangoSchema(
         query=Query,
         config=strawberry_config(),
         extensions=[

@@ -277,9 +277,7 @@ No `bld-integration.md`-equivalent: a cross-slice integration pass exists to fin
 ## Checklist
 
 - [x] R1: Spec rationale extraction into `docs/SPECS/appx/spec-005-django_type_contract-0_0_3-rationale.md` (Worker 1 performs the move; Worker 3 audits it; Worker 1 final-verifies) -> `docs/builder/bld-005-r1-rationale_move.md`
-- [ ] R2: Reconcile the spec with HEAD — every claim the package falsifies is restated as the contract that actually holds, or handed to the spec that now owns it; the explanation of each change lands in the rationale, never in the spec -> `docs/builder/bld-005-r2-spec_reconciliation.md`
-- [ ] R3: Finish the documentation and audit the archive — durable-doc audit of the shipped contract, the three-direction cross-reference sweep, `SpecDoc.path` / terms-CSV verification, and the `TODO(spec-005` / `TODO-<MILESTONE>-005` staged-anchor sweep -> `docs/builder/bld-005-r3-doc_completion_archive.md`
-- [ ] Final test-run gate -> `docs/builder/bld-005-final.md`
+- [x] R2: Reconcile the spec with HEAD — every claim the package falsifies is restated as the contract that actually holds, or handed to the spec that now owns it; the explanation of each change lands in the rationale, never in the spec -> `docs/builder/bld-005-r2-spec_reconciliation.md`
 
 <!-- LINK DEFINITIONS -->
 

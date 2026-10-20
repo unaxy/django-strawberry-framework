@@ -2136,6 +2136,7 @@ def _strawberry_patch_opted_out() -> Generator[None, None, None]:
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(BaseView, "parse_json", patches._original_parse_json)
         patch.setattr(BaseView, "parse_query_params", patches._original_parse_query_params)
+        assert patches._patch_is_installed() is False
         with override:
             yield
 

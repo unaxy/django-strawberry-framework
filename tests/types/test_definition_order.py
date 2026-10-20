@@ -87,9 +87,9 @@ def _introspected_field_types(
 class _FakeUnsupportedField(models.Field[object, object]):
     """One-line Django Field subclass with no SCALAR_MAP match.
 
-    Pins the unsupported-field-type bypass test for spec-015
-    Decision 7a - the consumer's annotation override is a recourse
-    parallel to ``Meta.exclude`` for unsupported scalar field types.
+    Pins the unsupported-field-type bypass test for spec-019 Decision 7a -
+    the consumer's annotation override is a recourse parallel to
+    ``Meta.exclude`` for unsupported scalar field types.
     """
 
 

@@ -81,7 +81,7 @@ from django_strawberry_framework.resource_policy import (
     policy_from_info,
 )
 from django_strawberry_framework.schema import SCHEMA_CONFIGURATION_ERROR_CODE
-from django_strawberry_framework.testing import TestClient
+from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
@@ -92,31 +92,33 @@ async def _post_async(
     client: AsyncClient,
     document: str,
     mount: str = "/iso-survivor/",
-    **body: str,
+    operation_name: str | None = None,
 ) -> JSONObject:
     """Post one document to an async mount and return the decoded payload."""
-    response = await client.post(
-        mount,
-        data=json.dumps({"query": document, **body}),
-        content_type="application/json",
+    res = await AsyncTestClient(client=client).query(
+        document,
+        assert_no_errors=False,
+        operation_name=operation_name,
+        url=mount,
     )
-    assert response.status_code == 200, response.content
-    return response_json(response)
+    assert res.response.status_code == 200, res.response.content
+    return response_json(res.response)
 
 
 def _post_sync(
     client: Client,
     document: str,
     mount: str,
-    **body: str,
+    operation_name: str | None = None,
 ) -> "tuple[_MonkeyPatchedWSGIResponse, bytes]":
-    """Post one document to a sync mount and return ``(response, decoded payload)``."""
-    response = client.post(
-        mount,
-        data=json.dumps({"query": document, **body}),
-        content_type="application/json",
+    """Post one document to a sync mount and return ``(response, response body)``."""
+    res = TestClient(client=client).query(
+        document,
+        assert_no_errors=False,
+        operation_name=operation_name,
+        url=mount,
     )
-    return response, response.content
+    return res.response, res.response.content
 
 
 pytestmark = pytest.mark.urls(__name__)
@@ -854,7 +856,7 @@ def test_a_refused_schema_answers_every_operation_name_the_same_way(name: str) -
     """
     requested = _REFUSED_OPERATION_NAMES[name]
 
-    response, body = _post_sync(Client(), "{ hello }", "/iso-chain/", operationName=requested)
+    response, body = _post_sync(Client(), "{ hello }", "/iso-chain/", operation_name=requested)
 
     payload = _assert_refused_envelope(response, body)
     assert "Unknown operation" not in json.dumps(payload), payload
@@ -874,7 +876,7 @@ def test_a_refused_schema_still_bounds_a_document_sent_under_any_operation_name(
         Client(),
         "{ a: hello b: hello c: hello }",
         "/iso-chain/",
-        operationName=requested,
+        operation_name=requested,
     )
 
     assert response.status_code == 200, body
@@ -897,7 +899,7 @@ async def test_a_refused_schema_answers_every_operation_name_asynchronously_too(
         AsyncClient(),
         "{ hello }",
         mount="/iso-chain-async/",
-        operationName=requested,
+        operation_name=requested,
     )
 
     assert payload["data"] is None, payload

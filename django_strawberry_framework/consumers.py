@@ -354,7 +354,10 @@ server authority the client addressed, Origin answers which browser origin
 initiated the socket, and passing one never substitutes for passing the other.
 Only Django's ``DisallowedHost`` becomes a denial, and the denial is Channels' own
 ``WebsocketDenier`` so a refused ``Host`` is byte-identical on the wire to a
-refused ``Origin``. Every other exception propagates: a projection bug that
+refused ``Origin``. The refusal is logged where Django logs the same refusal on
+HTTP, on ``django.security.DisallowedHost`` at ``ERROR``, so the deployment's
+existing handling of that logger covers the handshake too; the record stays
+server-side. Every other exception propagates: a projection bug that
 silently denied every handshake would be indistinguishable from correct
 ``ALLOWED_HOSTS`` enforcement, which is the worst available failure mode for a
 check whose entire value is that it rejects.
@@ -364,6 +367,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import math
 import time
 from typing import TYPE_CHECKING, TypeVar, cast, get_origin
@@ -1028,9 +1032,9 @@ async def send_revalidated_operation_frame(
     """Outbound checkpoint: send one information-bearing frame, or revoke.
 
     The ENTIRE critical section lives here rather than in the adapter, which is
-    what lets the derived adapter stay a two-line delegation (the shape the two
-    handler subclasses already have) and what puts the lock discipline in one
-    place: the connection's actor lease spans the validation / cache decision, the
+    what lets the derived adapter stay a thin delegation (the shape the two handler
+    subclasses already have) and what puts the lock discipline in one place: the
+    connection's actor lease spans the validation / cache decision, the
     revoked-state transition, and ``send`` itself. See the module docstring for why
     holding it through the send - and the per-connection head-of-line blocking that
     buys - is the point rather than an oversight. ``send`` is the LAST thing inside
@@ -1825,6 +1829,13 @@ def build_revalidating_consumer_class(
 #: what makes the WebSocket answer follow the HTTP one for free.
 _HOST_META_KEYS_BY_HEADER = {"host": "HTTP_HOST", "x-forwarded-host": "HTTP_X_FORWARDED_HOST"}
 
+#: The logger Django's HTTP handler reports a ``DisallowedHost`` on
+#: (``django/core/handlers/exception.py::response_for_exception`` names it
+#: ``"django.security."`` plus the exception's class name). Reusing it, rather than
+#: this package's logger, means a deployment that already routes or silences that
+#: logger for HTTP gets the same treatment for a refused handshake.
+_DISALLOWED_HOST_LOGGER = logging.getLogger("django.security.DisallowedHost")
+
 
 def _host_validation_request(scope: WebSocketScope) -> HttpRequest:
     """Project one handshake scope's Host metadata into a minimal Django request.
@@ -1937,7 +1948,12 @@ class DjangoWebSocketHostValidator:
         """Validate the handshake's ``Host`` through Django, then delegate or deny."""
         try:
             _ = _host_validation_request(scope).get_host()
-        except DisallowedHost:
+        except DisallowedHost as exc:
+            # Recorded the way Django records the same refusal on HTTP: the
+            # exception's own message at ``ERROR`` with the exception attached, on
+            # ``django.security.DisallowedHost``. Server-side only; the wire below
+            # is unchanged.
+            _DISALLOWED_HOST_LOGGER.exception(str(exc))  # noqa: TRY401 - Django's HTTP message
             # The ONLY exception normalized into a denial, and the denial is
             # Channels' own consumer rather than a package-authored close, so a
             # refused ``Host`` is byte-identical on the wire to a refused

@@ -433,7 +433,9 @@ def test_relay_node_strips_django_id_annotation() -> None:
     The unit-level test calls ``_build_annotations`` directly with a
     synthetic host class to keep the boundary tight. End-to-end
     coverage of the same suppression path lives in
-    ``tests/types/test_definition_order_schema.py``.
+    ``examples/fakeshop/test_query/test_library_api.py``
+    (``test_relay_genre_type_emits_node_interface_and_global_id_live`` and
+    ``test_mixed_relay_and_non_relay_no_interface_bleed_live``).
     """
     fields = tuple(Category._meta.get_fields())
 

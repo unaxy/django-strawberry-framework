@@ -825,16 +825,15 @@ def test_get_form_kwargs_queryset_scoping_leaves_the_generated_input_shape_uncha
 
 @pytest.mark.django_db
 def test_partial_update_preserves_unprovided_m2m_with_to_field_name() -> None:
-    """An omitted M2M whose form field sets ``to_field_name`` survives a partial update (Finding 3).
+    """An omitted M2M whose form field sets ``to_field_name`` survives a partial update.
 
     The decode lands a PROVIDED M2M as ``to_field_name`` values
     (``_to_form_key_value``); ``model_to_dict`` would reconstruct an OMITTED one as
     related INSTANCES (effectively pks), which a ``ModelMultipleChoiceField`` keyed
     by ``to_field_name`` cannot resolve - so an omitted M2M would spuriously fail
-    validation on a one-field update (``spec-038-form_mutations-0_0_12`` Finding 3).
-    Reconstruction now converts each member by ``to_field_name`` too, so omitted and
-    provided M2M bind in the same shape. Fails on the pre-fix ``model_to_dict``
-    reconstruction.
+    validation on a one-field update. Reconstruction converts each member by
+    ``to_field_name`` too, so omitted and provided M2M bind in the same shape; a
+    plain ``model_to_dict`` reconstruction fails this test.
     """
 
     class BookForm(forms.ModelForm[library_models.Book]):
@@ -1113,8 +1112,7 @@ def test_partial_reconstruction_excludes_every_file_field_flavor(file_field_name
 def test_required_extra_field_omitted_on_update_is_coercion_error() -> None:
     """A required non-model extra field stays required in the partial input.
 
-    Omitting it is a GraphQL coercion error BEFORE the resolver
-    (``spec-038-form_mutations-0_0_12`` Finding 2).
+    Omitting it is a GraphQL coercion error BEFORE the resolver.
 
     The partial input keeps a required non-model extra field required (it
     is not a model-backed field forced optional). Now that a required generated
@@ -1679,8 +1677,7 @@ def test_narrowed_update_preserves_excluded_required_fk_and_validates_constraint
     narrows the GraphQL input to ``('name',)``. A name-only update must preserve
     the located row's ``category`` (the bound ModelForm validates ``category`` even
     though it is off the wire), and the ``unique_item_per_category`` constraint
-    must still validate against that preserved FK
-    (``spec-038-form_mutations-0_0_12`` Finding 3).
+    must still validate against that preserved FK.
     """
 
     class NameCategoryForm(forms.ModelForm[product_models.Item]):
@@ -1757,7 +1754,7 @@ def test_narrowed_update_preserves_excluded_required_fk_and_validates_constraint
 
 @pytest.mark.django_db
 def test_decode_relation_single_empty_value_passes_through() -> None:
-    """An explicit ``null`` single-relation value passes through unchanged (Finding 4).
+    """An explicit ``null`` single-relation value passes through unchanged.
 
     The decode does NOT decide required-ness or report a bogus 'Invalid id' for an
     empty value; it hands the empty value to the bound form, which clears (optional)
@@ -1778,7 +1775,7 @@ def test_decode_relation_single_empty_value_passes_through() -> None:
 
 @pytest.mark.django_db
 def test_decode_relation_multi_empty_values_return_empty_list() -> None:
-    """An explicit ``null`` or empty list on an M2M returns ``[]`` and never iterates ``None`` (Finding 4)."""
+    """An explicit ``null`` or empty list on an M2M returns ``[]`` and never iterates ``None``."""
     field = forms.ModelMultipleChoiceField(queryset=library_models.Genre.objects.all())
     empties: tuple[None, list[object]] = (None, [])
     for empty in empties:

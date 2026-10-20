@@ -1086,8 +1086,11 @@ real request:
 **The live-tier conversion rule.** A live test posts raw only when the raw
 envelope is its subject (an arbitrary-label multipart `operations` / `map`
 envelope, malformed bodies, content-type probes, GET); such a post carries a
-comment naming the exemption, and a call that meets no exemption class goes
-through the client. A conversion never weakens an assertion — the raw
+`# raw-envelope exemption: <what the envelope is>` comment in the comment block
+directly above the call, and a call that meets no exemption class goes through
+the client.
+`tests/test_ci_governance.py::test_no_live_tier_module_posts_raw_without_a_declared_exemption`
+fails any `.post(` / `.generic(` in the live tier, sync or async, without one. A conversion never weakens an assertion — the raw
 `response` field exists so none needs to — and `CaptureQueriesContext` counts
 are unchanged because the helper adds no queries.
 

@@ -3,9 +3,10 @@
 This is the generation substrate for the write side (spec-036). It is
 pure, finalizer-free machinery: given a Django model + an operation kind + an
 effective field set + the resolved primary ``DjangoType``, it produces the
-``<Model>Input`` / ``<Model>PartialInput`` ``@strawberry.input`` classes, the
-public ``FieldError`` ``@strawberry.type``, and a generated ``<Name>Payload``
-``@strawberry.type``. No metaclass, no resolver, no finalizer wiring lives here
+``<Model>Input`` / ``<Model>PartialInput`` ``@strawberry.input`` classes and a
+generated ``<Name>Payload`` ``@strawberry.type`` whose ``errors`` member is the
+public ``FieldError`` (defined in ``utils/errors.py`` with ``NON_FIELD_ERROR_KEY``
+and re-exported here). No metaclass, no resolver, no finalizer wiring lives here
 - those live in ``sets.py`` (the base + the phase-2.5 bind) and in
 ``resolvers.py`` + ``fields.py``. The generators here are callable and
 unit-testable in isolation; the bind calls them.
@@ -40,7 +41,7 @@ from types import GenericAlias
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 import strawberry
-from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist
+from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from strawberry import relay
 from strawberry.utils.str_converters import to_camel_case
@@ -51,6 +52,13 @@ from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar, scalar_for_field
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
+
+# ``FieldError`` and ``NON_FIELD_ERROR_KEY`` are defined in ``utils/errors.py``
+# (below every write flavor, so the shared constructors import nothing upward);
+# re-exported here (the ``as`` form marks the explicit re-export) so
+# ``mutations.inputs`` keeps addressing the same class object and sentinel.
+from django_strawberry_framework.utils.errors import NON_FIELD_ERROR_KEY as NON_FIELD_ERROR_KEY  # noqa: PLC0414 - explicit re-export
+from django_strawberry_framework.utils.errors import FieldError as FieldError  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import (
     FILE,
     RELATION_MULTI,
@@ -91,13 +99,6 @@ if TYPE_CHECKING:
 # stay in sync. Mirrors
 # ``django_strawberry_framework/orders/inputs.py::INPUTS_MODULE_PATH``.
 INPUTS_MODULE_PATH: str = "django_strawberry_framework.mutations.inputs"
-
-# The non-field error key Django's ``full_clean`` uses for model-wide
-# (multi-field-constraint) errors (Django's ``"__all__"`` sentinel). Pinned here
-# as the single source of truth so the resolver keys a
-# multi-field-constraint ``ValidationError`` to the same sentinel the read of
-# ``error_dict`` produces.
-NON_FIELD_ERROR_KEY: str = NON_FIELD_ERRORS
 
 # Model-local decode kind: a provided input attr captured out of model
 # construction (the spec-040 D6 exclusion seam; the register flavor's ``password``).
@@ -148,54 +149,6 @@ def _frozenset_of_attr_names(value: Iterable[str] | None, *, parameter: str) -> 
             "iterate as characters, silently matching no input attribute.",
         )
     return frozenset(value or ())
-
-
-@strawberry.type
-class FieldError:
-    """A field-keyed validation error in the shared mutation error envelope.
-
-    The single public symbol this module exports. Every mutation flavor returns
-    ``errors: list[FieldError]`` on its generated payload; a ``FieldError``
-    carries a ``field`` path and the list of human messages for that field.
-    Every flavor keys ``field`` to the GraphQL input field the client sent
-    (``categoryId``, ``isPrivate``, a ``Meta.input_class`` rename), whether the
-    error came from the input decode, ``serializer.errors``, or a validator
-    (``full_clean()``, ``form.errors``, a Django ``ValidationError`` raised by
-    save-time code: a ``save()`` / ``delete()`` override, a signal receiver,
-    ``perform_mutate`` or a serializer save). A non-field error keys to the
-    ``"__all__"`` sentinel. An error on a field the input does not expose keeps
-    its validator-side name (the model, form or serializer field name), since
-    there is no input field to report; when an input renames a field onto such a
-    name, two errors can share one key. Defined here (spec-036 Decision 7) as the ONE
-    envelope member type: the form-based (0.0.12) and DRF-serializer / auth
-    (0.0.13) flavors return this same class rather than a per-flavor mirror,
-    so a client's error branch is written once. The type is ADDITIVE, not
-    frozen - a member may be added (``codes`` / ``path`` below were), never
-    removed or retyped. Mirrors graphene-django's ``ErrorType``.
-
-    **Additive client-ergonomics fields.** Two optional,
-    default-empty lists sit alongside the legacy ``field`` / ``messages`` (both kept
-    intact for compatibility), so a client can branch WITHOUT parsing localized human
-    text or the dotted ``field`` string:
-
-    - ``codes`` - the structured error codes. For a serializer failure these are DRF
-      ``ErrorDetail.code``s (``required`` / ``invalid`` / ``unique`` / ``blank`` / ...); for a
-      Django ``ValidationError`` they are its ``.code``s; framework-generated errors carry a
-      deliberate code (``invalid`` for a bad relation id, ``null`` for an explicit null,
-      ``not_found`` for a locate miss, ``constraint`` for an integrity fallback).
-    - ``path`` - the ``field`` dotted string split into SEGMENTS (``items.0.name`` ->
-      ``["items", "0", "name"]``), so a client walks structured paths instead of parsing
-      strings. A ROOT non-field error is ``field="__all__"`` with an EMPTY ``path`` (``[]``);
-      a NESTED non-field error keeps its segments (``["items", "0", "__all__"]``).
-
-    Both default to ``[]`` so every existing construction site (and a client selecting only
-    ``field`` / ``messages``) is unaffected.
-    """
-
-    field: str
-    messages: list[str]
-    codes: list[str] = strawberry.field(default_factory=list)
-    path: list[str] = strawberry.field(default_factory=list)
 
 
 # The mutation-input namespace lifecycle trio, single-sited via

@@ -24,7 +24,6 @@ so only function-local references observe the current type classes.
 """
 
 import importlib
-import json
 
 import pytest
 import strawberry
@@ -37,7 +36,6 @@ from asgiref.sync import sync_to_async
 from django.db import connection
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
-from django.test import AsyncClient
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django.views.decorators.csrf import csrf_exempt
@@ -54,6 +52,7 @@ from django_strawberry_framework import (
     DjangoSchema,
     strawberry_config,
 )
+from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 importlib.import_module("config.schema")  # finalizes DjangoTypes for the hand roots
@@ -167,13 +166,13 @@ def test_a_passed_deadline_stops_a_nested_reverse_o2o_before_its_lazy_load() -> 
 async def test_a_passed_deadline_stops_an_async_nested_forward_single() -> None:
     await sync_to_async(seed_data)(1)
 
-    response = await AsyncClient().post(
-        "/rd-hand-deadline-async/",
-        data=json.dumps({"query": "{ handItemsAsync { name category { name } } }"}),
-        content_type="application/json",
+    res = await AsyncTestClient().query(
+        "{ handItemsAsync { name category { name } } }",
+        assert_no_errors=False,
+        url="/rd-hand-deadline-async/",
     )
-    assert response.status_code == 200
-    _deadline_rejection(response_json(response))
+    assert res.response.status_code == 200
+    _deadline_rejection(response_json(res.response))
 
 
 @pytest.mark.django_db

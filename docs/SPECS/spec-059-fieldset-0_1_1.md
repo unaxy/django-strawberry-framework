@@ -128,8 +128,7 @@ Terms this spec relies on (statuses per [`docs/GLOSSARY.md`][glossary]):
   `examples/fakeshop/apps/products/fields.py` and owns the stale-comment sweep
   that activation implies: retire every pre-renumber `TODO-BETA-046-0.1.1`
   fieldset comment in `apps/products/schema.py` (7 occurrences); the sibling
-  search / aggregate comments (`TODO-BETA-047-0.1.2` / `TODO-BETA-049-0.1.3`,
-  the pre-renumber ids of cards 060 / 062) stay for those cards.
+  search / aggregate comments stay for cards 060 / 062.
 - [ ] **Slice 5 — docs + version cut + card wrap.** GLOSSARY status flips
   (DB + regen), `docs/README.md` / `README.md` / `GOAL.md` / `TODAY.md`
   touch-ups where the surface change is reflected, `docs/TREE.md` regen,

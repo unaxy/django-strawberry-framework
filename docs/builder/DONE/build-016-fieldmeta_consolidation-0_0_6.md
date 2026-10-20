@@ -160,16 +160,8 @@ retirement. Prior cycles' final artifacts are deleted at close while cards keep 
 (`bld-009-final.md`, `bld-011-final.md` and `bld-013-final.md` are all already gone and all still
 cited), which is why each bullet enumerates its population inline rather than pointing at a file.
 
-- `TODO-ALPHA-051-0.0.15` gained three rows: catalog item 9 as a constraint on WP-D's own
-  `_resolve_field_map` dual-contract retirement (**delete** the paragraph, its cross-reference and the
-  spec's first bounded exception -- never re-point them); catalog items 1, 5 and 6 as one rule-27
-  fold-in row over `optimizer/walker.py`, `optimizer/field_meta.py` and `tests/test_registry.py`; and
-  catalog item 7 as the corrected bare-basename census.
-- `TODO-ALPHA-052-0.1.0` gained one row: catalog items 3 and 4, whose two files no `051` WP batch
-  opens, folded into that card's existing repo-wide rule-27 sweep.
-
-Item 2 stays with the maintainer (`AGENTS.md` rule 21 bars the `CHANGELOG.md` edit) and items 8 and
-10-18 are decided rulings or standing method notes that own no work, so they were not carded.
+Items 8 and 10-18 are decided rulings or standing method notes that own no work, so they were not
+carded.
 
 **Two catalog figures were re-derived at homing time and came back different, both understated.**
 Recording the mechanism, because in each case the instrument -- not the tree -- was the cause:
@@ -205,26 +197,13 @@ files, which are untracked and therefore outside `git diff` entirely; `AGENTS.md
 them regardless. The gate's staging note is also spent -- the mixed index it warned about was cleared
 and this cycle's work committed by targeted path at `7e43cd10`, `88e6a410` and `6dfd9ef5`.
 
-Its `### Deferred work catalog` survives in three places rather than one: **items 1, 3, 4, 5, 6, 7 and
-9** are homed on cards 051 and 052 (above); **items 8, 10, 11 and 13** are recorded as rulings in
-`docs/SPECS/appx/spec-016-fieldmeta_consolidation-0_0_6-rationale.md`, which is a shipped document and
-the right home for them -- the deliberately-stale `DONE/build-004` citation with its executable
-re-point target, the `[backlog]` keep-ruling, the raw `path:NN` exception, and the card-body
-non-restatement with its flip condition; and **item 17** is carded on 052 as the checker's reflow
-obligation. **Item 18** is the staging note, spent. That leaves four entries with no other home:
+Its `### Deferred work catalog` survives as rulings rather than open work: **items 8, 10, 11 and 13**
+are recorded in `docs/SPECS/appx/spec-016-fieldmeta_consolidation-0_0_6-rationale.md`, which is a
+shipped document and the right home for them -- the deliberately-stale `DONE/build-004` citation with
+its executable re-point target, the `[backlog]` keep-ruling, the raw `path:NN` exception, and the
+card-body non-restatement with its flip condition. **Item 18** is the staging note, spent. That leaves
+three entries with no other home:
 
-- **The `CHANGELOG.md` cluster -- six stale elements on one line, still undecided.** Cited by
-  substring per rule 27: `CHANGELOG.md` #"Consolidated field metadata onto". Each element verified at
-  exactly one occurrence: (a) the pre-renumber card id
-  `012-fieldmeta_single_source_of_truth_consolidation_and_mirror_retirement-0.0.6` as the link **text**,
-  written by the board-graduation commit before the 2026-07-30 renumber; (b) `_record_pending_relation`,
-  deleted; (c) `resolved_relation_annotation` named as the `types/` reader, true but the canonical read
-  moved upstream; (d) `walker._walk_selections`, now `_resolve_optimizer_hints`; (e)
-  `extension.check_schema`, bare where the symbol carries its class; (f) four dotted `module.symbol`
-  forms where rule 27 requires `path/file.py::QualifiedName`. **The link target is acquitted** -- the
-  `KANBAN.md#...` anchor resolves, so only the text is stale. `AGENTS.md` rule 21 makes this a
-  maintainer decision, and the likely answer is **partial**: element (a) is true as history and matches
-  the decided-non-edit class `TODO-ALPHA-052-0.1.0` already protects for twelve similar citations.
 - **`verified_upstream` `CardItem` rows are incomplete on 82 of 96 rows across the 49 done cards**
   (re-derived exactly at the gate). Not a defect -- a board convention. Recorded because **any future
   "every card item is complete" invariant must exclude that section or it will fail on almost every

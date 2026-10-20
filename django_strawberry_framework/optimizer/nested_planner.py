@@ -40,6 +40,7 @@ from django_strawberry_framework.utils.connections import (
     derive_connection_window_bounds,
     derive_keyset_window_bounds,
     has_connection_sidecar_kwargs,
+    relation_connection_to_attr,
     window_range_plan,
 )
 
@@ -65,10 +66,10 @@ from .nested_fetch import (
 )
 from .plans import (
     OptimizationPlan,
+    _extend_only_projection,
     append_unique,
     append_unique_many,
     apply_projection,
-    deferred_loading_of,
     effective_connection_order,
     effective_cursor_state,
     has_random_term,
@@ -119,7 +120,6 @@ if TYPE_CHECKING:
     ]
 
 _M = TypeVar("_M", bound=models.Model)
-_RowT = TypeVar("_RowT")
 
 # The exact ``Index`` types proven to build an ordinary ORDER-serving B-tree:
 # the plain ``models.Index`` and PostgreSQL's ``BTreeIndex``. ``GinIndex`` /
@@ -363,7 +363,7 @@ def _index_leading_terms(
     - a PARTIAL index carries a ``.condition`` - PostgreSQL uses it only for
       queries whose predicate implies that condition, which the nested window
       does not, so a partial index on the right columns must NOT be read as
-      covering the general page (the P2-3 false-coverage defect);
+      covering the general page;
     - a name that no longer resolves is a migration lag;
     - a DESCENDING index column when any configured backend cannot store
       index-column ordering (Django then silently builds a plain ascending index,
@@ -733,7 +733,7 @@ def _advise_composite_index(
     # comparison and rendering, or an order like ``parent_id, title, id`` would
     # be checked against - and recommended as - ``(parent_id, parent_id, title,
     # id)``, falsely reporting the real ``(parent_id, title, id)`` index absent
-    # and naming a duplicated column (the P2-3 defect).
+    # and naming a duplicated column.
     equality_columns = set(equality)
     effective_order = [term for term in order_terms if term[0] not in equality_columns]
     if _index_coverage(related_model, equality, effective_order) != _INDEX_ABSENT:
@@ -797,55 +797,6 @@ def _project_scalar_only_window(
     for column in _concrete_order_columns(order_by, related_model):
         append_unique(fields, column)
     return apply_projection(child_queryset, fields)
-
-
-def _extend_only_projection(
-    child_queryset: QuerySet[_M, _RowT],
-    attnames: tuple[str, ...],
-) -> QuerySet[_M, _RowT]:
-    """Ensure ``attnames`` load under an existing ``.only()`` / ``.defer()`` projection.
-
-    The keyset cursor-column loader: a keyset page mints edge cursors from
-    the rows' ordering-column VALUES, so those columns must survive the
-    ``.only()`` mask even when the query never selects them as GraphQL
-    fields. Django's ``.only()`` chaining REPLACES the load-only set, so the
-    extension re-applies the UNION read through the shared
-    ``deferred_loading_of`` unpack. A ``.defer()`` mask needs the inverse:
-    clear it, then re-apply every deferred field EXCEPT the cursor columns.
-    Otherwise cursor minting lazy-loads once per edge in sync execution and
-    raises ``SynchronousOnlyOperation`` in async execution.
-    """
-    loading = deferred_loading_of(child_queryset)
-    if loading is None:
-        return child_queryset
-    names, defer_flag = loading
-    if defer_flag:
-        remaining = sorted(set(names) - set(attnames))
-        if len(remaining) == len(names):
-            return child_queryset
-        cleared = child_queryset.defer(None)
-        return cleared.defer(*remaining) if remaining else cleared
-    if not names:
-        return child_queryset
-    missing = [attname for attname in attnames if attname not in names]
-    if not missing:
-        return child_queryset
-    return child_queryset.only(*names, *missing)
-
-
-def relation_connection_to_attr(relation_field_name: str, response_key: str | None = None) -> str:
-    """Return the package-reserved ``to_attr`` for a relation connection window.
-
-    Single authoritative owner of the ``_dst_<field>..._connection`` attribute
-    grammar. When ``response_key`` is ``None``, returns the default
-    ``_dst_<field>_connection``. When ``response_key`` is provided (for divergent
-    aliases), escapes underscores to ``$`` and returns
-    ``_dst_<field>$<key>_connection``.
-    """
-    if response_key is None:
-        return f"_dst_{relation_field_name}_connection"
-    escaped_key = response_key.replace("_", "$")
-    return f"_dst_{relation_field_name}${escaped_key}_connection"
 
 
 def _connection_node_selections(
@@ -994,9 +945,9 @@ def _keyset_window_slice_from_arguments(
     construction) and the ``after:`` cursor decodes through the canonical
     codec. Error contract mirrors the offset adapter:
 
-    - ``None`` for malformed pagination - a negative / over-cap ``first``
-      (``PaginationArgumentError``) or an invalid / tampered / wrong-order
-      cursor (the codec's ``GraphQLError``). The caller records the field as
+    - ``None`` for malformed pagination - a negative / over-cap ``first`` or
+      an invalid / tampered / wrong-order cursor (both a
+      ``PaginationArgumentError``). The caller records the field as
       accounted-for and the per-parent pipeline raises the SAME error at
       the field's own locality.
     - ``UnwindowableConnection`` propagates for the valid backward shapes
