@@ -588,11 +588,11 @@ def test_deeply_nested_self_referential_dependency_filter_is_capped() -> None:
     ``_MAX_LOGIC_DEPTH`` and surfaces a catchable ``ConfigurationError``.
 
     The cap is a ``ConfigurationError``, so the spec-048 error policy classifies it
-    as unexpected and would replace its wording with the stable production message -
-    and the whole point of this row is that the wording says "depth"/"nesting"
-    rather than "recursion". ``DEBUG=True`` opens the policy's pass-through gate so
-    the live request returns the cap's own message; this is a live HTTP test against
-    the project schema, so the schema constructor is not ours to pass an opt-out to.
+    as unexpected and would replace its wording with the stable production message,
+    and this row pins the cap's own sentence. ``DEBUG=True`` opens the policy's
+    pass-through gate so the live request returns the cap's own message; this is a
+    live HTTP test against the project schema, so the schema constructor is not ours
+    to pass an opt-out to.
     """
     _seed_board()
     query = "query { allCards(filter: { " + _nested_dependency_filter(10) + " }) { title } }"
@@ -603,11 +603,13 @@ def test_deeply_nested_self_referential_dependency_filter_is_capped() -> None:
     payload = response_json(response)
     # A top-level resolver error nulls ``data`` and reports under ``errors``.
     assert payload["data"] is None
-    messages = " ".join(
-        json_str(error, "message") for error in json_list(payload, "errors")
-    ).lower()
-    assert "recursion" not in messages
-    assert "nesting" in messages or "depth" in messages
+    messages = [json_str(error, "message") for error in json_list(payload, "errors")]
+    assert messages == [
+        (
+            "FilterSet CardFilter: logical-branch nesting exceeded _MAX_LOGIC_DEPTH=8. Flatten "
+            "the filter input or split into multiple queries."
+        ),
+    ]
 
 
 @pytest.mark.django_db
