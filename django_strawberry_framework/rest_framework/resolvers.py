@@ -217,6 +217,7 @@ from .hook_context import SerializerHookContext, UploadMetadata
 from .inputs import (
     raise_writable_source_ownership_errors,
     runtime_validated_data_fields,
+    serializer_canonical_input_name,
     serializer_model,
 )
 from .serializer_converter import (
@@ -1383,7 +1384,7 @@ def _assert_field_agreement(
         _python_attr, runtime_annotation, _runtime_spec = resolve_serializer_field(
             runtime,
             None if snapshot_model is None else require(snapshot_model, is_model_class),
-            f"{truth.name(type(serializer))}{'PartialInput' if operation == 'update' else 'Input'}",
+            serializer_canonical_input_name(type(serializer), is_partial=operation == "update"),
         )
         runtime_annotation, _field_kwargs = optional_input_field(
             runtime_annotation,
