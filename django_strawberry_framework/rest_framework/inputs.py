@@ -54,7 +54,6 @@ The shape is the ``038`` form discipline adapted to DRF (spec-039 Decision 7):
 from __future__ import annotations
 
 import hashlib
-import keyword
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import GenericAlias
@@ -67,13 +66,13 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import CREATE, PARTIAL
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_str
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     build_strawberry_input_class,
     generated_input_type_name,
     get_or_store_shape_build,
     guard_dropped_required,
+    is_input_attribute_name,
     iter_input_field_collisions,
     make_input_namespace,
     make_shape_build_cache,
@@ -838,7 +837,7 @@ def resolve_effective_serializer_fields(
        no per-flavor wrapper, spec-039; an unknown name raises);
     4. an empty effective set raises (the ``036`` / ``038`` empty-input guard);
     5. a kept name that is not a Python identifier, or is a keyword, raises
-       (``_is_input_attribute_name``): each kept field becomes a generated input attribute.
+       (``is_input_attribute_name``): each kept field becomes a generated input attribute.
        Only the kept set is checked, so a read-only or narrowed-away field may carry any name.
        This is the one place both the root and every opted-in nested level pass at class
        creation (``SerializerMutation._validate_meta`` and the nested ownership walk).
@@ -889,7 +888,7 @@ def resolve_effective_serializer_fields(
             else frozenset()
         ),
     )
-    unusable = [name for name in effective if not _is_input_attribute_name(name)]
+    unusable = [name for name in effective if not is_input_attribute_name(name)]
     if unusable:
         raise ConfigurationError(
             f"SerializerMutation for {truth.name(serializer_class)} keeps input field name(s) "
@@ -900,19 +899,6 @@ def resolve_effective_serializer_fields(
             "serializer).",
         )
     return effective
-
-
-def _is_input_attribute_name(name: object) -> bool:
-    """Return whether ``name`` can be a generated input attribute: an identifier, not a keyword.
-
-    The generated input is a dataclass whose ``__init__`` source renders every attribute name,
-    so any other name (``"with space"``, ``"9lead"``, ``"a-b"``, ``""``, ``"class"``) detonates
-    as a raw ``SyntaxError`` out of that source at finalization. Each test reads the real
-    ``str`` value through base slots: ``is_str`` asks the real type, ``str.isidentifier`` is
-    the base method, and ``keyword.iskeyword`` receives the exact ``str`` copy
-    ``str.__str__`` returns, so no ``str`` subclass override runs here.
-    """
-    return is_str(name) and str.isidentifier(name) and not keyword.iskeyword(str.__str__(name))
 
 
 def resolve_optional_fields(

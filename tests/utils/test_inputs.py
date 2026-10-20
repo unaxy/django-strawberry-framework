@@ -54,6 +54,7 @@ from django_strawberry_framework.utils.inputs import (
     emit_set_input_field_triples,
     get_or_store_shape_build,
     graphql_camel_name,
+    is_input_attribute_name,
     iter_input_field_collisions,
     iter_provided_input_fields,
     iter_set_subclasses,
@@ -219,6 +220,50 @@ def test_builder_rejects_malformed_field_kwargs_with_configuration_error() -> No
 def test_graphql_camel_name(value: str, expected: str) -> None:
     """Head lowercased, rest PascalCased; no-word-token inputs pass through."""
     assert graphql_camel_name(value) == expected
+
+
+# ---------------------------------------------------------------------------
+# is_input_attribute_name
+# ---------------------------------------------------------------------------
+
+
+class _IsIdentifierRaisesStr(str):
+    """A ``str`` whose ``isidentifier`` override raises."""
+
+    __slots__ = ()
+
+    @override
+    def isidentifier(self) -> NoReturn:
+        raise RuntimeError("hostile isidentifier boom")
+
+
+class _HashRaisesStr(str):
+    """A ``str`` whose ``__hash__`` override raises, so a set membership test on it raises."""
+
+    __slots__ = ()
+
+    @override
+    def __hash__(self) -> NoReturn:
+        raise RuntimeError("hostile hash boom")
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("good", True),
+        ("match", True),
+        ("class", False),
+        ("9lead", False),
+        pytest.param(5, False, id="int"),
+        pytest.param(None, False, id="none"),
+        pytest.param(_IsIdentifierRaisesStr("ok"), True, id="isidentifier-override"),
+        pytest.param(_HashRaisesStr("ok"), True, id="hash-override"),
+        pytest.param(_HashRaisesStr("class"), False, id="hash-override-keyword"),
+    ],
+)
+def test_is_input_attribute_name(name: object, *, expected: bool) -> None:
+    """A non-keyword identifier passes; a soft keyword is one; a ``str`` subclass's overrides never run."""
+    assert is_input_attribute_name(name) is expected
 
 
 # ---------------------------------------------------------------------------

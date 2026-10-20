@@ -31,6 +31,7 @@ cycle (same contract as ``utils/connections.py``).
 
 from __future__ import annotations
 
+import keyword
 import sys
 from collections import Counter
 from collections.abc import Collection
@@ -43,7 +44,7 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
-from ._narrowing import dict_items, is_mapping, list_of
+from ._narrowing import dict_items, is_mapping, is_str, list_of
 from .canonical import base_container_values, canonical_sort_key
 from .imports import import_attr_if_importable
 from .input_values import UNSET
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from django.db import models as django_models
     from strawberry.types.base import StrawberryObjectDefinition, WithStrawberryObjectDefinition
     from strawberry.types.field import StrawberryField
+    from typing_extensions import TypeIs
 
     from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
@@ -1144,6 +1146,22 @@ def iter_provided_input_fields(data: object) -> Iterator[tuple[str, object, Stra
         if value is UNSET:
             continue
         yield python_name, value, field
+
+
+def is_input_attribute_name(name: object) -> TypeIs[str]:
+    """Return whether ``name`` can be an attribute of a generated class: an identifier, not a keyword.
+
+    Every input and payload the package generates is a dataclass whose ``__init__``
+    source renders each attribute name, so any other name (``"with space"``, ``"9lead"``,
+    ``"a-b"``, ``""``, ``"class"``) detonates as a raw ``SyntaxError`` out of that source
+    at class construction. A soft keyword (``match``, ``type``, ``_``) is an identifier
+    and passes. A caller whose names come from consumer code asks this before building
+    and keeps its own diagnostic. Each test reads the real ``str`` value through base
+    slots: ``is_str`` asks the real type, ``str.isidentifier`` is the base method, and
+    ``keyword.iskeyword`` receives the exact ``str`` copy ``str.__str__`` returns, so no
+    ``str`` subclass override (``isidentifier``, ``__hash__``, ``__eq__``) runs.
+    """
+    return is_str(name) and str.isidentifier(name) and not keyword.iskeyword(str.__str__(name))
 
 
 def build_strawberry_input_class(
