@@ -70,7 +70,7 @@ from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.hints import OptimizerHint
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import dict_of, list_of, optional_instance
+from django_strawberry_framework.utils._narrowing import dict_of, list_of
 from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 from django_strawberry_framework.utils.typing import is_async_callable
@@ -703,7 +703,7 @@ class DjangoType:
         # still flips the flag - concrete subclasses inheriting from it then
         # report ``has_custom_get_queryset() is True`` correctly. Pinned by
         # ``test_has_custom_get_queryset_inherits_through_abstract_base_without_meta``.
-        has_custom_get_queryset = _detect_custom_get_queryset(cls)
+        has_custom_get_queryset = truth.overrides(cls, DjangoType, "get_queryset")
         cls._is_default_get_queryset = not has_custom_get_queryset
         # The class's own namespace, read from the interpreter: an inherited
         # ``Meta`` does not make an intermediate base concrete.
@@ -949,9 +949,9 @@ class DjangoType:
 
         ``True`` means the type's rows are scoped, so a reader crossing a
         relation into this type applies the hook rather than reading the raw
-        relation. An override of ``get_queryset`` anywhere in the MRO below
-        ``DjangoType``, an inherited intermediate base included, is what makes
-        it ``True``.
+        relation. A ``get_queryset`` other than ``DjangoType``'s own, declared on
+        the type or inherited from an intermediate base, is what makes it
+        ``True``.
 
         Readers: the optimizer walker (downgrades a join to a ``Prefetch``,
         disables FK-id elision, marks the plan uncacheable); the generated
@@ -963,41 +963,11 @@ class DjangoType:
         ``FilterSet`` / ``OrderSet`` bound to two owners when either owner's hook
         is not the identity).
 
-        Implementation: ``__init_subclass__`` stamps
-        ``_is_default_get_queryset`` on every subclass at class-creation
-        time, ``False`` when the subclass or any base between it and
-        ``DjangoType`` declares ``get_queryset`` (``_detect_custom_get_queryset``
-        walks the MRO), so a subclass without its own ``get_queryset`` whose
-        parent declared one answers ``True``. This method reads the
-        definition's copy of that answer, or the negated flag on a class with
-        no definition, for a constant-time attribute read.
+        Implementation: ``__init_subclass__`` stamps ``_is_default_get_queryset``
+        on every subclass, ``Meta`` or not, from ``utils/truth.py::overrides``;
+        this method reads the class's own stamp.
         """
-        # Only a subclass that declares ``Meta`` carries a definition; an
-        # abstract base without one answers from its own stamped ``ClassVar``.
-        definition = optional_instance(
-            truth.static_attr(cls, "__django_strawberry_definition__"),
-            DjangoTypeDefinition,
-        )
-        if definition is None:
-            return not truth.static_attr(cls, "_is_default_get_queryset", default=True)
-        return definition.has_custom_get_queryset
-
-
-def _detect_custom_get_queryset(cls: object) -> bool:
-    """Return whether ``cls`` or an intermediate base overrides ``get_queryset``.
-
-    Walks the real MRO and each base's real namespace, so the answer is what
-    the class bodies declared.
-    """
-    # Any object is answered: a non-class, or a class outside ``DjangoType``, overrides nothing.
-    if not truth.is_subclass(cls, DjangoType):
-        return False
-    for base in truth.mro(cls):
-        if base is DjangoType:
-            break
-        if "get_queryset" in truth.class_dict(base):
-            return True
-    return False
+        return not truth.static_attr(cls, "_is_default_get_queryset", default=True)
 
 
 def _normalize_fields_spec(value: object) -> tuple[str, ...] | Literal["__all__"] | None:

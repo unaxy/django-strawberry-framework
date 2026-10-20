@@ -60,7 +60,6 @@ from django_strawberry_framework.mutations.sets import (
     COMMON_WRITE_META_KEYS,
     MODEL_BACKED_WRITE_META_KEYS,
     DjangoMutation,
-    _hook_overridden,
     _validate_permission_classes,
     _ValidatedMutationMeta,
     bind_write_declarations,
@@ -445,8 +444,8 @@ def _form_kwargs_overridden(
     defaulted column), the create-required-narrowing guard cannot know WHICH fields
     the override supplies, so it trusts the override and waives the guard.
 
-    Rides the promoted ``mutations/sets.py::_hook_overridden(cls, base, name)``
-    for each hook - the per-hook identity comparison is single-sited there.
+    Asks ``utils/truth.py::overrides(cls, base, name)`` for each hook, which
+    compares the stored functions by identity.
     Serializer mutations do not ride this waiver (they subtract via
     ``Meta.injected_fields`` only).
 
@@ -461,7 +460,7 @@ def _form_kwargs_overridden(
     trust; a consumer who hits the hole keeps the narrowed-away field in the input
     instead.
     """
-    return _hook_overridden(cls, base, "get_form_kwargs") or _hook_overridden(
+    return truth.overrides(cls, base, "get_form_kwargs") or truth.overrides(
         cls,
         base,
         "get_form",

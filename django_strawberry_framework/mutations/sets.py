@@ -213,20 +213,6 @@ def normalize_meta_field_selection(
     return fields, exclude
 
 
-def _hook_overridden(cls: type[object], base: type[object], name: str) -> bool:
-    """Return whether ``cls`` overrides the ``name`` method relative to ``base``.
-
-    The identity check ``forms/sets.py::_form_kwargs_overridden`` uses for the
-    form construction-hook waiver (``get_form_kwargs`` / ``get_form``). Both
-    hooks are plain instance methods, so the real-MRO read (``truth.static_attr``)
-    resolves to the stored function; a concrete override makes it ``is not`` the base's.
-    Serializer mutations do NOT ride this primitive: they waive create-required
-    only via auditable ``Meta.injected_fields``, never a constructor-hook
-    override (spec-039 Decision 7).
-    """
-    return truth.static_attr(cls, name) is not truth.static_attr(base, name)
-
-
 def cached_build_input(
     cache: dict[_KeyT, tuple[type[object], _PayloadT]],
     shape_key: _KeyT,
