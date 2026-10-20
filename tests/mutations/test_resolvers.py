@@ -592,7 +592,9 @@ class LinkedDesk(LinkedVenue):
         parent_link=True,
     )
     seats: _Int = models.IntegerField(default=0)
-    double_seats: models.GeneratedField = models.GeneratedField(
+    # Unannotated: django-stubs declares ``GeneratedField`` without type parameters, so it
+    # has no field generic to spell.
+    double_seats = models.GeneratedField(
         expression=models.F("seats") * 2,
         output_field=models.IntegerField(),
         db_persist=True,
