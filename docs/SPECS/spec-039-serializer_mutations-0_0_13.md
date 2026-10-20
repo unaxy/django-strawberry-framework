@@ -506,8 +506,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     `utils/inputs.py::normalize_field_name_sequence(..., flavor="SerializerMutation")`
     **directly** — the one entry point all three flavors call, with no per-flavor
     re-binding wrapper anywhere (the required keyword-only `flavor` arg exists
-    for exactly this); the `build_input` /
-    `input_type_name` cluster rides the shared `build_and_stash_input` core
+    for exactly this); `build_input` rides the shared `build_and_stash_input` core
     (materialize-then-stash) — but its per-shape dedupe is keyed on the
     `SerializerInputShape` DESCRIPTOR,
     which is only knowable AFTER the build, so it does NOT route through
@@ -1193,8 +1192,14 @@ write family on three axes:
    `resolve_sync` / `resolve_async` overrides.
 3. **The `data:` input-ref.** `_synthesized_mutation_signature` consults
    `mutation_cls.input_type_name(meta)` + `mutation_cls.input_module_path`, so the
-   serializer-derived input (in the `rest_framework` input namespace under a
-   serializer-derived name, e.g. `ItemSerializerInput`) resolves through the overrides.
+   serializer-derived input resolves through the overrides: the ref names the mutation's
+   own `<Mutation>Data` slot in the `rest_framework` input namespace
+   (`rest_framework/inputs.py::serializer_input_slot`), and `SerializerMutation.build_input`
+   materializes the bound input (e.g. `ItemSerializerInput`) under that slot beside its own
+   name. The ref is built when the root `Mutation` class body runs, before finalization,
+   and the descriptor-derived name reads finalized registry state (a relation to a
+   `Meta.interfaces` Relay target is a `GlobalID` only once finalization makes it a node), so
+   the ref never derives that name itself.
 
 [`tests/mutations/test_fields.py`][test-mutations] pins the factory for
 `SerializerMutation`.
@@ -1250,7 +1255,7 @@ field-sequence normalize, the shared non-delete ops set, and returns a
 `_ALLOWED_SERIALIZER_META_KEYS`, and the field-sequence call is
 `normalize_field_name_sequence(..., flavor="SerializerMutation")` **directly** — the one
 entry point all three flavors call, with no per-flavor re-binding wrapper; the
-build/stash/name seam rides the shared `build_and_stash_input` core, but its
+build/stash seam rides the shared `build_and_stash_input` core, but its
 descriptor-keyed per-shape dedupe —
 the `SerializerInputShape` is only knowable AFTER the build — is an inline lookup-or-store,
 NOT `cached_build_input` (whose pre-build key lookup would force building the shape twice);
@@ -3627,13 +3632,12 @@ target model, the description inputs (`help_text` + the constraint summary), the
 choice MEMBERS (the choice values and `allow_blank`), and the converter discriminants
 (`ModelField` wrapped field / `ListField` child class and its `allow_null`) — so a hook that changes a description, enum members, or converter behavior without
 changing the coarse identity still trips the guard. `_validate_meta` captures it on
-`_ValidatedMutationMeta.schema_fingerprint` at class validation; both `build_input` AND
-`input_type_name` read the hook through the ONE guarded path
-`rest_framework/sets.py::_checked_schema_field_map` (the type-name derivation never reads an
-unguarded field map), raising `ConfigurationError` on drift. graphene-django has no
-equivalent (no schema/runtime hook split). Package-tested (drift raises at bind AND via
-`input_type_name`; the fingerprint is sensitive to choices / help_text / converter extras; a
-stable hook binds cleanly).
+`_ValidatedMutationMeta.schema_fingerprint` at class validation; `build_input` reads the
+hook through the ONE guarded path `rest_framework/sets.py::_checked_schema_field_map` (neither
+the build nor the descriptor-derived name reads an unguarded field map), raising
+`ConfigurationError` on drift. graphene-django has no equivalent (no schema/runtime hook
+split). Package-tested (drift raises at bind; the fingerprint is sensitive to choices /
+help_text / converter extras; a stable hook binds cleanly).
 
 ### Preserve DRF `ErrorDetail.code` in the error envelope
 

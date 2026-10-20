@@ -14,7 +14,8 @@ Covers ``django_strawberry_framework/rest_framework/sets.py``:
   registry, NOT the plain-form registry; the abstract base registers nowhere;
   late declaration after finalize rejected);
 - the phase-2.5 bind (the ``bind_mutations()`` path - the serializer-derived input
-  materializes into ``rest_framework.inputs``, the model-backed ``<Name>Payload``
+  materializes into ``rest_framework.inputs`` under its own name and the mutation's
+  ``<Name>Data`` slot the ``data:`` reference names, the model-backed ``<Name>Payload``
   into ``mutations.inputs``);
 - the retry-idempotence seam lock (the serializer ledger clears in the pre-bind
   reset via ``register_subsystem_clear``, not a per-pass clear);
@@ -100,7 +101,7 @@ from django_strawberry_framework.rest_framework.sets import (
     _validate_serializer_nested_fields,
 )
 from django_strawberry_framework.types import base as types_base
-from django_strawberry_framework.utils._narrowing import class_dict, dict_of, read_attr
+from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
 from tests._idioms import (
     ClassReadRaises,
@@ -506,8 +507,9 @@ def test_bind_materializes_one_shot_meta_field_selector() -> None:
 
     finalize_django_types()
 
-    assert CreateItem._input_type_name.startswith("ItemSerializer")
-    assert CreateItem._input_type_name.endswith("Input")
+    assert CreateItem._input_class is not None
+    assert CreateItem._input_class.__name__.startswith("ItemSerializer")
+    assert CreateItem._input_class.__name__.endswith("Input")
     assert {spec.target_name for spec in CreateItem._input_field_specs or ()} == {
         "name",
         "category",
@@ -1051,7 +1053,6 @@ def test_update_meta_fields_naming_the_primary_key_raises_at_class_creation() ->
     finalize_django_types()
     # The key is no update input, so the un-narrowed update keeps the canonical name.
     partial_name = "ProfileSerializerPartialInput"
-    assert UpdateProfileWhole.input_type_name(UpdateProfileWhole._mutation_meta) == partial_name
     assert UpdateProfileWhole._input_class is not None
     assert UpdateProfileWhole._input_class.__name__ == partial_name
     assert UpdateProfileExcludingKey._input_class is not None
@@ -2447,34 +2448,12 @@ def test_meta_injected_fields_unknown_name_raises_at_class_creation() -> None:
                 permission_classes = []
 
 
-def test_input_type_name_runs_the_determinism_guard() -> None:
-    """``input_type_name`` reads the hook through the SAME guarded path; a drifted hook raises."""
-    _declare_products_primaries()
-    serializer_cls = _item_serializer()
-    drift = {"drop": False}
+def test_data_reference_resolves_the_bound_input_through_the_mutation_slot() -> None:
+    """``input_type_name`` names the mutation's slot; the bind fills it with the class it built.
 
-    class DriftNameMut(SerializerMutation):
-        class Meta:
-            serializer_class = serializer_cls
-            operation = "create"
-            permission_classes = []
-
-        @classmethod
-        @override
-        def get_serializer_for_schema(cls) -> dict[str, DRFField]:
-            fields = dict(bound_fields(serializer_cls()))
-            if drift["drop"]:
-                del fields["description"]
-            return fields
-
-    # The class-validation fingerprint captured the full shape; now make the hook drift.
-    drift["drop"] = True
-    with pytest.raises(ConfigurationError, match="DIFFERENT field shape"):
-        DriftNameMut.input_type_name(DriftNameMut._mutation_meta)
-
-
-def test_input_type_name_reads_bound_name_after_finalize() -> None:
-    """After bind, ``input_type_name`` reuses the materialized name stashed by ``build_input``."""
+    The slot is all the field factory reads before finalization: nothing is materialized
+    there until the bind, which pins the bound class under the slot beside its own name.
+    """
     _declare_products_primaries()
     serializer_cls = _item_serializer()
 
@@ -2482,17 +2461,20 @@ def test_input_type_name_reads_bound_name_after_finalize() -> None:
         class Meta:
             serializer_class = serializer_cls
             operation = "create"
+            fields = ("name", "category")
             permission_classes = []
+
+    slot = CreateItemViaSerializer.input_type_name(CreateItemViaSerializer._mutation_meta)
+    assert slot == "CreateItemViaSerializerData"
+    assert slot not in serializer_materialized_names
 
     finalize_django_types()
 
-    bound_name = class_dict(CreateItemViaSerializer)["_input_type_name"]
-    assert CreateItemViaSerializer._input_class is not None
-    assert bound_name == CreateItemViaSerializer._input_class.__name__
-    assert (
-        CreateItemViaSerializer.input_type_name(CreateItemViaSerializer._mutation_meta)
-        == bound_name
-    )
+    bound = CreateItemViaSerializer._input_class
+    assert bound is not None
+    assert serializer_materialized_names[slot] is bound
+    assert serializer_materialized_names[bound.__name__] is bound
+    assert getattr(sys.modules[SERIALIZER_INPUTS_MODULE_PATH], slot) is bound
 
 
 # ---------------------------------------------------------------------------
@@ -3007,7 +2989,7 @@ def _nested_category_serializer() -> type[ModelSerializerBase[product_models.Cat
 
 
 def test_nested_input_materialized_in_ledger_after_finalize() -> None:
-    """Pre-bind name discovery cannot make a nested input disappear during finalization."""
+    """Exposing the mutation before finalization builds nothing; the bind materializes every input."""
     _declare_products_primaries()
 
     class CreateCategory(SerializerMutation):
@@ -3017,22 +2999,175 @@ def test_nested_input_materialized_in_ledger_after_finalize() -> None:
             nested_fields = {"items": NestedSerializerConfig()}
             permission_classes = []
 
-    # The field factory discovers the name before finalization and primes both the
-    # shape cache and the nested-input ledger.
+    # The field factory reads only the mutation's slot name: no walk, no build.
     @strawberry.type
     class Mutation:
         create_category = DjangoMutationField(CreateCategory)
 
-    assert "ItemInlineInput" in serializer_materialized_names
-    prebind_nested = serializer_materialized_names["ItemInlineInput"]
+    assert serializer_materialized_names == {}
     finalize_django_types()
 
     assert CreateCategory._input_class is not None
     top_name = CreateCategory._input_class.__name__
     assert top_name in serializer_materialized_names
     assert "ItemInlineInput" in serializer_materialized_names
-    assert serializer_materialized_names["ItemInlineInput"] is not prebind_nested
     assert get_object_definition(Mutation) is not None
+
+
+def _relay_interfaces_category() -> type[DjangoType]:
+    """A primary ``Category`` type that is Relay through ``Meta.interfaces`` (a node only once finalized)."""
+
+    class CategoryT(DjangoType):
+        class Meta:
+            model = product_models.Category
+            fields = ("id", "name")
+            interfaces = (strawberry.relay.Node,)
+            primary = True
+
+    return CategoryT
+
+
+def _relay_item_mutation(shape: str) -> type[SerializerMutation]:
+    """A create ``SerializerMutation`` over ``Item`` keeping its ``category`` relation, per shape."""
+    if shape == "nested":
+
+        class ItemInline(ModelSerializerBase[product_models.Item]):
+            class Meta:
+                model = product_models.Item
+                fields = ("name", "category")
+
+        class CategoryWithItems(ModelSerializerBase[product_models.Category]):
+            items = ItemInline(many=True)
+
+            class Meta:
+                model = product_models.Category
+                fields = ("name", "items")
+
+            @override
+            def create(self, validated_data: dict[str, object]) -> NoReturn:
+                raise AssertionError(
+                    "the nested-write check reads this override; nothing calls it",
+                )
+
+        meta: dict[str, object] = {
+            "serializer_class": CategoryWithItems,
+            "nested_fields": {"items": NestedSerializerConfig(fields=("name", "category"))},
+        }
+    else:
+        narrowing = {
+            "fields": {"fields": ("name", "category")},
+            "exclude": {"exclude": ("description",)},
+            "optional_fields": {"optional_fields": ("name",)},
+        }[shape]
+        meta = {"serializer_class": _item_serializer(), **narrowing}
+    meta |= {"operation": "create", "permission_classes": []}
+    return type("CreateViaRelayTarget", (SerializerMutation,), {"Meta": type("Meta", (), meta)})
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "fields",
+        "exclude",
+        "optional_fields",
+        "nested",
+    ],
+)
+@pytest.mark.parametrize("target_declared", ["before_root", "after_root"])
+def test_data_reference_survives_finalization_making_the_target_relay(
+    shape: str,
+    target_declared: str,
+) -> None:
+    """A descriptor-named input relating to a ``Meta.interfaces`` Relay target builds with ``ID``.
+
+    The input's descriptor-derived name folds in each relation's generated type, which is a
+    ``GlobalID`` only once finalization makes the target a node, and the target's type may be
+    declared after the root ``Mutation``: the ``data:`` argument still names the class the bind
+    built, and its relation is ``ID``.
+    """
+
+    class ItemT(DjangoType):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name")
+            primary = True
+
+    if target_declared == "before_root":
+        _relay_interfaces_category()
+    mutation = _relay_item_mutation(shape)
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        create_via_relay_target = DjangoMutationField(mutation)
+
+    if target_declared == "after_root":
+        _relay_interfaces_category()
+    finalize_django_types()
+    sdl = DjangoSchema(query=Query, mutation=Mutation).as_str()
+
+    bound = mutation._input_class
+    assert bound is not None
+    assert not bound.__name__.endswith(("ItemSerializerInput", "CategoryWithItemsInput"))
+    assert f"createViaRelayTarget(data: {bound.__name__}!)" in sdl
+    assert "categoryId: ID" in sdl
+    assert "categoryId: Int" not in sdl
+    assert ItemT is registry.get(product_models.Item)
+
+
+def test_rebuild_resolves_the_current_bind_not_a_parked_input() -> None:
+    """A rebuild whose relation becomes Relay resolves this bind's input, never a parked one.
+
+    The first build's plain-pk input stays parked in the input namespace after
+    ``registry.clear()``; the rebuilt mutation's ``data:`` argument names the class the
+    second bind built, whose relation is ``ID``.
+    """
+
+    def build(*, category_relay: bool) -> str:
+        class ItemT(DjangoType):
+            class Meta:
+                model = product_models.Item
+                fields = ("id", "name")
+                primary = True
+
+        if category_relay:
+            _relay_interfaces_category()
+        else:
+
+            class CategoryT(DjangoType):
+                class Meta:
+                    model = product_models.Category
+                    fields = ("id", "name")
+                    primary = True
+
+            del CategoryT
+
+        mutation = _relay_item_mutation("fields")
+
+        @strawberry.type
+        class Query:
+            @strawberry.field
+            def ping(self) -> int:
+                return 1
+
+        @strawberry.type
+        class Mutation:
+            create_via_relay_target = DjangoMutationField(mutation)
+
+        finalize_django_types()
+        assert ItemT is registry.get(product_models.Item)
+        return DjangoSchema(query=Query, mutation=Mutation).as_str()
+
+    assert "categoryId: Int" in build(category_relay=False)
+    registry.clear()
+    sdl = build(category_relay=True)
+    assert "categoryId: ID" in sdl
+    assert "categoryId: Int" not in sdl
 
 
 def test_nested_input_rematerialized_after_recover_in_place(

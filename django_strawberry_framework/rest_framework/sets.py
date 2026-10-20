@@ -108,6 +108,7 @@ from .inputs import (
     resolve_injected_field_specs,
     resolve_optional_fields,
     runtime_validated_data_fields,
+    serializer_input_slot,
     serializer_model,
     serializer_schema_fingerprint,
     validate_nested_config_keys,
@@ -230,9 +231,9 @@ def _checked_schema_field_map(
     The single authoritative read of the schema hook for the bind window: calls the overridable
     ``get_serializer_for_schema()`` and, when the class-validation fingerprint is present on the
     snapshot, verifies the returned shape has NOT DRIFTED (a nondeterministic hook that validates
-    one shape and binds / names another is a clear ``ConfigurationError``). Both ``build_input``
-    and ``input_type_name`` route through here, so the type-name derivation cannot read an
-    unguarded field map behind the fingerprint's back.
+    one shape and binds / names another is a clear ``ConfigurationError``). ``build_input`` is
+    the one caller, so neither the build nor the descriptor-derived name reads an unguarded
+    field map behind the fingerprint's back.
 
     The fingerprint is over the EFFECTIVE (writable + narrowed) field set - the SAME set the
     input build uses - so a read-only / narrowed-away nested serializer is
@@ -485,14 +486,6 @@ class SerializerMutation(DjangoMutation):
         _injected_field_specs: ClassVar[list[InputFieldSpec]]
     else:
         _injected_field_specs = None
-
-    # The bound serializer-input type name, stashed after successful materialization.
-    # Before bind, ``input_type_name`` derives the descriptor through the shared
-    # cache helper; after bind, it can read this once the determinism guard passes.
-    if TYPE_CHECKING:
-        _input_type_name: ClassVar[str]
-    else:
-        _input_type_name = None
 
     # The consumer's nested ``Meta`` (declared on every concrete subclass; the metaclass
     # validates it before the snapshot exists).
@@ -854,10 +847,10 @@ class SerializerMutation(DjangoMutation):
         operation_kind = NON_DELETE_OPERATION_INPUT_KIND[meta.operation]
         # The serializer flavor's ``_validate_meta`` stored a validated serializer class.
         serializer_class = cast("type[DRFSerializer]", meta.serializer_class)
-        # Read the schema hook through the ONE guarded path, so the
-        # determinism fingerprint is checked HERE and in ``input_type_name`` alike (no unguarded
-        # second read). Then stash the schema-time specs for ``Meta.injected_fields``
-        # so the resolver can hold each injected field to the runtime-agreement contract.
+        # Read the schema hook through the ONE guarded path, so the determinism
+        # fingerprint is checked before the build reads it. Then stash the schema-time
+        # specs for ``Meta.injected_fields`` so the resolver can hold each injected field
+        # to the runtime-agreement contract.
         field_map = _checked_schema_field_map(cls, meta)
         cls._injected_field_specs = resolve_injected_field_specs(
             serializer_class,
@@ -904,38 +897,20 @@ class SerializerMutation(DjangoMutation):
             materialize=materialize_serializer_input_class,
             specs_of=lambda shape: list(shape.field_specs),
         )
-        cls._input_type_name = truth.name(input_cls)
+        # The ``data:`` reference names this mutation's slot (``input_type_name``).
+        materialize_serializer_input_class(serializer_input_slot(cls), input_cls)
         return input_cls
 
     @classmethod
     @override
     def input_type_name(cls, meta: _ValidatedMutationMeta) -> str:
-        """Return the generated serializer-input class name (the name seam override).
+        """Return the name the ``data:`` reference resolves: this mutation's input slot.
 
-        The serializer-flavor name single-sourced with ``build_input``'s name choice:
-        before bind it resolves the descriptor through
-        ``_serializer_input_shape_for``; after bind it reads the materialized name
-        stashed by ``build_input``. The generator owns the name derivation;
-        there is no second name deriver here (the descriptor carries
-        ``type_name``), so the bind's materialized name and the field-factory's
-        ``data:`` ref cannot drift.
+        The field factory calls this before finalization, so it reads nothing the bind
+        decides; see ``serializer_input_slot``.
         """
-        operation_kind = NON_DELETE_OPERATION_INPUT_KIND[meta.operation]
-        # The SAME guarded hook read as ``build_input`` (fingerprint-checked), so
-        # the type-name derivation never reads an unguarded field map. Run this even
-        # when the bound name is already stashed; explicit calls to this seam still
-        # enforce the determinism contract.
-        field_map = _checked_schema_field_map(cls, meta)
-        bound_name = truth.class_dict(cls).get("_input_type_name")
-        if bound_name is not None:
-            # ``build_input`` stashes the materialized class name here (own dict only).
-            return cast("str", bound_name)
-        _input_cls, shape = _serializer_input_shape_for(
-            meta,
-            operation_kind=operation_kind,
-            field_map=field_map,
-        )
-        return shape.type_name
+        del meta
+        return serializer_input_slot(cls)
 
     def get_serializer_kwargs(
         self,

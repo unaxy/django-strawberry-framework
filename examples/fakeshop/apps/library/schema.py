@@ -2450,6 +2450,22 @@ class UpdatePatronProfileViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class UpdatePatronProfileGenreViaSerializer(SerializerMutation):
+    """``UpdatePatronProfileViaSerializer`` narrowed by ``Meta.fields`` to the mailing line and genre.
+
+    The narrowing gives the input a descriptor-derived name that folds in each field's
+    generated type, and ``favoriteGenreId`` is a ``GenreType`` ``GlobalID`` only once
+    finalization makes the ``Meta.interfaces`` Relay type a node: the field's ``data:``
+    reference still resolves to the input the bind generated.
+    """
+
+    class Meta:
+        serializer_class = serializers.PatronProfileSerializer
+        operation = "update"
+        fields = ("address_2", "favorite_genre")
+        permission_classes = []
+
+
 class UpdateCirculationDeskHoldViaSerializer(SerializerMutation):
     """Update a circulation desk's hold, a ``GenericForeignKey`` bound to books by its queryset.
 
@@ -2688,6 +2704,9 @@ class Mutation:
     ``createPatronProfileReplacingGenreRenamed`` (a custom ``create()`` re-pointing the
     validated genre, own-name and renamed) and ``createPatronProfileRepointingGenre``
     (a field validator renaming the validated genre in place) are refused.
+    ``updatePatronProfileGenreViaSerializer`` narrows that update by ``Meta.fields``, so its
+    input takes a descriptor-derived name while ``favoriteGenreId`` stays a ``GenreType``
+    ``GlobalID``.
     ``updatePatronProfile`` is the model-flavor write of the same key: the genre id it is
     sent is resolved to the genre name the column stores. ``createPatronProfile`` and
     ``createEdition`` are model-flavor creates over a client-assigned primary key (the
@@ -2794,6 +2813,9 @@ class Mutation:
     )
     create_patron_profile_via_serializer = DjangoMutationField(CreatePatronProfileViaSerializer)
     update_patron_profile_via_serializer = DjangoMutationField(UpdatePatronProfileViaSerializer)
+    update_patron_profile_genre_via_serializer = DjangoMutationField(
+        UpdatePatronProfileGenreViaSerializer,
+    )
     update_circulation_desk_hold_via_serializer = DjangoMutationField(
         UpdateCirculationDeskHoldViaSerializer,
     )
