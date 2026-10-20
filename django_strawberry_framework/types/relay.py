@@ -11,9 +11,9 @@ lifecycle phase:
   ``types/base.py``).
 - Finalization Phase 2.5 (``finalize_django_types()``): ``apply_interfaces``,
   ``_check_composite_pk_for_relay_node``, ``install_relay_node_resolvers``.
-  The last uses the ``__func__`` identity test that distinguishes
-  consumer-overridden ``resolve_*`` methods from the ``relay.Node`` defaults
-  inherited through MRO.
+  The last uses the stored-function identity test (``truth.stored_function``)
+  that distinguishes consumer-overridden ``resolve_*`` methods from the
+  ``relay.Node`` defaults inherited through MRO.
 - Request time: the ``type``-strategy GlobalID naming authority -
   ``published_node_type_name`` / ``node_definition_for_published_name`` read
   the type names the executing schema published (a lazy per-schema table), so
@@ -26,7 +26,7 @@ package is not imported at runtime.
 
 from __future__ import annotations
 
-from types import GetSetDescriptorType, MethodType
+from types import GetSetDescriptorType
 from typing import TYPE_CHECKING, TypeGuard, TypeVar, cast
 from weakref import WeakKeyDictionary
 
@@ -391,18 +391,6 @@ def _coerce_node_id(node_id: object) -> object:
     if truth.is_instance(node_id, relay.GlobalID):
         return node_id.node_id
     return node_id
-
-
-def _classmethod_function(value: object) -> object:
-    """Return the function a stored ``classmethod`` (or bound method) wraps, else ``None``.
-
-    ``value`` is a class-namespace entry read by ``truth.static_attr``; only the
-    exact builtin wrapper types are unwrapped, so the ``__func__`` read is the
-    builtin's own slot.
-    """
-    if truth.is_exact(value, classmethod) or truth.is_exact(value, MethodType):
-        return value.__func__
-    return None
 
 
 def _node_value_or_none(
@@ -821,10 +809,12 @@ def node_definition_for_published_name(schema: Schema, name: str) -> DjangoTypeD
 # so a framework closure inherited from a CONCRETE Relay parent through the MRO
 # is never mistaken for a consumer override - without the marker, a concrete
 # Relay child of a concrete Relay parent would see the parent's installed
-# closure fail the ``__func__`` identity test and be misclassified ``custom``
+# closure fail the stored-function identity test and be misclassified ``custom``
 # (silently encode-only, audit-blind, and spuriously both-declared when the
 # child carries its own ``Meta.globalid_strategy``). The attribute lives on the
-# plain function so it survives ``classmethod.__func__`` retrieval.
+# plain function, which ``truth.stored_function`` reads out of any wrapper, and is
+# read back with ``truth.static_attr`` so a consumer override object's own
+# ``__getattr__`` never runs.
 _FRAMEWORK_CLOSURE_MARKER = "_dsf_globalid_framework_closure"
 
 
@@ -839,33 +829,36 @@ def _inherits_framework_closure(type_cls: type[relay.Node]) -> bool:
     emit the PARENT's payload (the parent ``definition`` is captured in the
     inherited closure).
     """
-    existing_func = _classmethod_function(truth.static_attr(type_cls, "resolve_typename"))
-    return getattr(existing_func, _FRAMEWORK_CLOSURE_MARKER, False)
+    existing_func = truth.stored_function(truth.static_attr(type_cls, "resolve_typename"))
+    return truth.static_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER) is True
 
 
 def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     """Return whether ``type_cls`` declares its own ``resolve_typename``.
 
-    MRO-aware ``existing.__func__ is relay.Node.resolve_typename.__func__``
-    identity test - the same discriminator ``install_relay_node_resolvers``
-    uses for the four ``resolve_*`` defaults. ``resolve_typename`` is a
-    ``@classmethod`` on ``relay.Node`` so it carries ``__func__`` exactly like
-    those. A method inherited unchanged from ``relay.Node`` (or absent) is NOT
-    an override - and neither is a framework closure installed on a concrete
-    Relay PARENT and inherited through the MRO (discriminated by
+    MRO-aware identity test over ``truth.stored_function`` of the stored
+    attribute and of ``relay.Node``'s ``resolve_typename`` - the same
+    discriminator ``install_relay_node_resolvers`` uses for the four
+    ``resolve_*`` defaults. Every declared shape counts: a ``classmethod``, a
+    ``staticmethod`` and a plain function taking ``(root, info)`` are all
+    overrides, since Strawberry reads ``resolve_typename`` off the class and
+    calls it with ``(root, info)``. A method inherited unchanged from
+    ``relay.Node`` (or a re-export of it, such as
+    ``resolve_typename = relay.Node.resolve_typename``), or an absent one, is
+    NOT an override - and neither is a framework closure installed on a
+    concrete Relay PARENT and inherited through the MRO (discriminated by
     ``_FRAMEWORK_CLOSURE_MARKER``; the step-0 re-entrancy guard protects the
     same definition across finalize re-runs, but only the marker protects a
     DIFFERENT definition inheriting the installed closure). A consumer override
     inherited from an abstract base lacks the marker, so it still classifies
-    ``custom`` - the intended semantics. Only a consumer-declared method is an
-    override.
+    ``custom``.
     """
-    existing_func = _classmethod_function(truth.static_attr(type_cls, "resolve_typename"))
+    existing_func = truth.stored_function(truth.static_attr(type_cls, "resolve_typename"))
     if existing_func is None:
         return False
-    if read_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER, False):
+    if truth.static_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER) is True:
         return False
-    node_func = _classmethod_function(truth.class_dict(relay.Node).get("resolve_typename"))
+    node_func = truth.stored_function(truth.class_dict(relay.Node).get("resolve_typename"))
     return existing_func is not node_func
 
 
@@ -885,7 +878,7 @@ def install_globalid_typename_resolver(
        the recorded classification and any installed closure intact
        (spec-031 Decision 10). Load-bearing: a Phase-2.5 raise (including the
        model-label-routing audit) leaves every type ``finalized = False``, so a
-       re-run re-enters the finalizer loop; without this guard the ``__func__``
+       re-run re-enters the finalizer loop; without this guard the override
        test would re-run against the *now-installed framework closure* and
        misclassify the type ``custom``.
     1. **Override detection.** If the consumer overrode ``resolve_typename``:
@@ -1346,7 +1339,7 @@ _RELAY_RESOLVER_DEFAULTS: tuple[tuple[str, Callable[..., object]], ...] = (
 
 
 def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
-    """Inject the four ``resolve_*`` defaults via the ``__func__`` identity test.
+    """Inject the four ``resolve_*`` defaults via the stored-function identity test.
 
     Step 0 stamps the type's resolved Relay id attribute
     (``_stamp_relay_id_attr``) - the one-time scan whose result the
@@ -1357,14 +1350,15 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
 
     - Look up the inherited method on ``type_cls`` (resolves through MRO
       to ``relay.Node``'s default if no consumer override exists).
-    - Compare ``existing.__func__`` to ``relay.Node.<attr>.__func__``.
-      When they match (or ``existing`` is ``None``), the consumer has
-      not overridden the method and the framework default is installed
-      via ``setattr(type_cls, attr, classmethod(default))``.
+    - Compare ``truth.stored_function(existing)`` to the function
+      ``relay.Node``'s own ``<attr>`` wraps. When they match (or
+      ``existing`` is ``None``), the consumer has not overridden the
+      method and the framework default is installed via
+      ``setattr(type_cls, attr, classmethod(default))``.
     - When they differ, the consumer's override wins and is preserved.
 
     Direct port of ``strawberry_django/type.py::_process_type``
-    (the ``if issubclass(cls, relay.Node)`` branch). The ``__func__``
+    (the ``if issubclass(cls, relay.Node)`` branch). The stored-function
     discriminator is structurally distinct from the ``__dict__``
     membership discriminator (``is_type_of`` injection) and the
     tuple-membership discriminator (``relay.Node in interfaces``) - the
@@ -1373,7 +1367,6 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
     _stamp_relay_id_attr(type_cls)
     for attr, default_impl in _RELAY_RESOLVER_DEFAULTS:
         existing = truth.static_attr(type_cls, attr)
-        existing_func = _classmethod_function(existing)
-        node_func = _classmethod_function(truth.class_dict(relay.Node).get(attr))
-        if existing is None or (existing_func is not None and existing_func is node_func):
+        node_func = truth.stored_function(truth.class_dict(relay.Node).get(attr))
+        if existing is None or truth.stored_function(existing) is node_func:
             setattr(type_cls, attr, classmethod(default_impl))

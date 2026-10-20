@@ -10,6 +10,7 @@ none of those are a JSON selection.
 
 import enum
 import functools
+from types import MethodType
 from typing import TYPE_CHECKING, Literal, NoReturn
 
 import pytest
@@ -34,7 +35,10 @@ from django_strawberry_framework.types.base import (
     _build_annotations,
     _validate_interfaces,
 )
-from django_strawberry_framework.types.definition import DjangoTypeDefinition
+from django_strawberry_framework.types.definition import (
+    DjangoTypeDefinition,
+    origin_has_custom_id_resolver,
+)
 from django_strawberry_framework.types.relay import (
     SyncMisuseError,
     _published_node_name_table,
@@ -2468,16 +2472,40 @@ def test_routing_audit_sees_child_true_recorded_strategy() -> None:
     assert _definition_of(DefaultChild).effective_globalid_strategy == "model"
 
 
-def test_plain_function_resolve_typename_is_not_classified_override() -> None:
-    """A plain-function ``resolve_typename`` (no ``__func__``) is not an override.
+def _plant_resolve_typename(type_cls: type[DjangoType], shape: str) -> object:
+    """Store a ``(root, info)`` ``resolve_typename`` on ``type_cls`` as ``shape``; return it.
 
-    Such an override is already broken under Strawberry's classmethod call
-    shape, so the framework classifies "no override" and installs its closure
-    over it - pinned here so the marker-based discrimination stays explicit.
+    ``shape`` is ``"plain-function"`` or ``"staticmethod"``: the two non-classmethod spellings a
+    consumer can declare, each of which Strawberry calls as ``resolve_typename(root, info)``.
     """
 
     def resolve_typename(_root: object, _info: object) -> str:
-        return "PlainFunction"
+        return "ConsumerOwned"
+
+    stored: object = (
+        resolve_typename if shape == "plain-function" else staticmethod(resolve_typename)
+    )
+    # basedpyright: the planted resolve_typename is the override shape under test;
+    # finalize_django_types() has not yet injected relay.Node, so the declared class has no such
+    # attribute
+    type_cls.resolve_typename = stored  # pyright: ignore[reportAttributeAccessIssue]
+    return stored
+
+
+_NON_CLASSMETHOD_OVERRIDES = [
+    pytest.param("plain-function", id="plain-function"),
+    pytest.param("staticmethod", id="staticmethod"),
+]
+
+
+@pytest.mark.parametrize("shape", _NON_CLASSMETHOD_OVERRIDES)
+def test_plain_or_static_resolve_typename_is_classified_override(shape: str) -> None:
+    """A plain-function or ``staticmethod`` ``resolve_typename`` is an override: ``custom``.
+
+    Strawberry reads ``resolve_typename`` off the class and calls it with
+    ``(root, info)``, so both shapes run; the framework records ``custom``,
+    installs no closure over it, and the type emits the consumer's slot.
+    """
 
     class CategoryNode(DjangoType):
         class Meta:
@@ -2485,13 +2513,54 @@ def test_plain_function_resolve_typename_is_not_classified_override() -> None:
             fields = ("id", "name")
             interfaces = (relay.Node,)
 
-    # basedpyright: the planted plain-function resolve_typename is the override shape under test;
-    # finalize_django_types() has not yet injected relay.Node, so the declared class has no such
-    # attribute
-    CategoryNode.resolve_typename = resolve_typename  # pyright: ignore[reportAttributeAccessIssue]
+    stored = _plant_resolve_typename(CategoryNode, shape)
     finalize_django_types()
+    assert _definition_of(CategoryNode).effective_globalid_strategy == "custom"
+    assert class_dict(CategoryNode)["resolve_typename"] is stored
+    assert _emitted_typename(CategoryNode) == "ConsumerOwned"
+
+
+@pytest.mark.parametrize("shape", _NON_CLASSMETHOD_OVERRIDES)
+def test_plain_or_static_resolve_typename_plus_meta_strategy_raises(shape: str) -> None:
+    """A plain-function or ``staticmethod`` override plus ``Meta.globalid_strategy`` is both-declared."""
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            globalid_strategy = "model"
+
+    _plant_resolve_typename(CategoryNode, shape)
+    with pytest.raises(ConfigurationError, match="CategoryNode: declares both a resolve_typename"):
+        finalize_django_types()
+
+
+def test_relay_node_default_re_export_is_not_an_override() -> None:
+    """A body re-exporting ``relay.Node``'s defaults declares no override.
+
+    ``relay.Node.resolve_id`` read off the class is a bound method, so the
+    namespace stores a ``MethodType`` holding ``relay.Node``'s own function: the
+    id-resolver check reads it as the framework default, the installer replaces
+    it with the framework's ``resolve_id``, and the re-exported
+    ``resolve_typename`` leaves the type on its resolved strategy.
+    """
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+        resolve_id = relay.Node.resolve_id
+        resolve_typename = relay.Node.resolve_typename
+
+    assert type(class_dict(CategoryNode)["resolve_id"]) is MethodType
+    assert type(class_dict(CategoryNode)["resolve_typename"]) is MethodType
+    assert origin_has_custom_id_resolver(CategoryNode, "id") is False
+    finalize_django_types()
+    assert _classmethod_func(CategoryNode, "resolve_id") is _resolve_id_default
     assert _definition_of(CategoryNode).effective_globalid_strategy == "model"
-    assert _framework_closure_func(CategoryNode) is not None
     assert _emitted_typename(CategoryNode) == "products.category"
 
 

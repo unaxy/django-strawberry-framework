@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from types import MethodType
 from typing import TYPE_CHECKING, Literal
 
 from django.core.exceptions import FieldDoesNotExist
@@ -430,23 +429,8 @@ def _class_has_custom_id_resolver(type_cls: type[object], name: str) -> bool:
 
 def _is_framework_relay_id_resolver(value: object) -> bool:
     """Return whether ``value`` is the framework-installed Relay id resolver."""
-    resolver_func = _unwrap_method(value)
-    node_default_func = _unwrap_method(truth.class_dict(relay.Node).get("resolve_id"))
+    resolver_func = truth.stored_function(value)
+    node_default_func = truth.stored_function(truth.class_dict(relay.Node).get("resolve_id"))
     return resolver_func is _resolve_id_default or (
         node_default_func is not None and resolver_func is node_default_func
     )
-
-
-def _unwrap_method(value: object) -> object:
-    """Return what a ``classmethod`` / ``staticmethod`` / bound method wraps, else ``value``.
-
-    Only the exact builtin wrapper types are unwrapped, so the ``__func__``
-    read is the builtin's own slot.
-    """
-    if (
-        truth.is_exact(value, classmethod)
-        or truth.is_exact(value, staticmethod)
-        or truth.is_exact(value, MethodType)
-    ):
-        return value.__func__
-    return value

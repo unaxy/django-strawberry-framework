@@ -36,7 +36,7 @@ Spec: [Decision 3 — The encode seam: a strategy-parameterized `resolve_typenam
 ### Justification
 
 - [`START.md`][start]'s "Strawberry = engine" rule: re-rooting via the documented `resolve_typename` seam reuses Strawberry's correct `GlobalID` plumbing; hand-rolling a base64 scheme would duplicate engine behavior and drift from the Relay spec.
-- The seam is the exact analogue of the `0.0.5` `resolve_*` injection, so the consumer-override-preservation contract (`__func__` identity test) and the Phase-2.5 timing are reused, not reinvented.
+- The seam is the exact analogue of the `0.0.5` `resolve_*` injection, so the consumer-override-preservation contract (stored-function identity test) and the Phase-2.5 timing are reused, not reinvented.
 
 ### Alternatives considered (and rejected)
 
@@ -144,15 +144,15 @@ Spec: [Decision 10 — `resolve_typename` injection via the `__func__` identity 
 
 ### Justification
 
-- Phase 2.5 is where Relay resolver injection already happens, and the `__func__` identity test is the shipped, tested mechanism for preserving consumer overrides; reusing both keeps one source of truth for Relay-method injection.
-- Keeping `resolve_typename` out of `_RELAY_RESOLVER_DEFAULTS` respects that table's invariant (name → one static default) while still installing through the same `__func__`-gated discipline.
+- Phase 2.5 is where Relay resolver injection already happens, and the stored-function identity test is the shipped, tested mechanism for preserving consumer overrides; reusing both keeps one source of truth for Relay-method injection.
+- Keeping `resolve_typename` out of `_RELAY_RESOLVER_DEFAULTS` respects that table's invariant (name → one static default) while still installing through the same identity-gated discipline.
 - Classifying an override as `custom`/encode-only (rather than letting the override emit while the type's `Meta`/default strategy drives decode) is the only rule that keeps the package's emit and decode in agreement — the framework never emits an ID its own decoder refuses, because for a `custom` type the decoder explicitly declines (encode-only), exactly as for `callable`.
-- Recording the effective strategy at finalization (pre-install) is required precisely because installing the framework closure erases the `__func__` signal decode would otherwise need.
+- Recording the effective strategy at finalization (pre-install) is required precisely because installing the framework closure erases the override signal decode would otherwise need.
 
 ### Alternatives considered (and rejected)
 
 - **Add `resolve_typename` to `_RELAY_RESOLVER_DEFAULTS`.** Rejected: that table's entries are static `(name, default_impl)` pairs; the typename default varies by resolved strategy, so it cannot be a single static impl.
-- **Inject at class-creation time (`__init_subclass__`) instead of Phase 2.5.** Rejected: the effective strategy depends on the `RELAY_GLOBALID_STRATEGY` setting and the registry being stable; finalization is the package's "registry is stable now" point, matching where the other Relay defaults install. (The MRO-aware `__func__` override test also belongs here — an override inherited from a non-`Meta` base is invisible to a `cls.__dict__`-only check at class creation.)
+- **Inject at class-creation time (`__init_subclass__`) instead of Phase 2.5.** Rejected: the effective strategy depends on the `RELAY_GLOBALID_STRATEGY` setting and the registry being stable; finalization is the package's "registry is stable now" point, matching where the other Relay defaults install. (The MRO-aware stored-function override test also belongs here — an override inherited from a non-`Meta` base is invisible to a `cls.__dict__`-only check at class creation.)
 - **Let a `resolve_typename` override silently win and the `Meta.globalid_strategy` drive decode anyway.** Rejected: the override would emit a label the (`model`-default) decoder then rejects. The two are contradictory; the override wins for encode and forces `custom`/encode-only decode, and declaring both explicitly fails loud.
 
 ## Decision 11 — Module location: encode/decode in `types/relay.py`, no public export in `0.0.9`

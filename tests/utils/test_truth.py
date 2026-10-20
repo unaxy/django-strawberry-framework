@@ -671,6 +671,52 @@ def test_static_attr_data_descriptor_beats_instance_dict() -> None:
     assert type(truth.static_attr(holder, "value")) is property
 
 
+def _wrapped(_owner: type[object]) -> None:
+    """The function each builtin wrapper below holds in its ``__func__`` slot."""
+
+
+class _LyingClassmethod(classmethod[object, ..., object]):
+    """A ``classmethod`` subclass whose ``__func__`` lies; never an exact builtin wrapper."""
+
+    @property
+    @override
+    def __func__(self) -> NoReturn:
+        DISPATCHED.append("lie:__func__")
+        raise RuntimeError("__func__")
+
+
+_LYING_CLASSMETHOD = _LyingClassmethod(_wrapped)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(classmethod(_wrapped), _wrapped, id="classmethod"),
+        pytest.param(staticmethod(_wrapped), _wrapped, id="staticmethod"),
+        pytest.param(
+            types.MethodType(_wrapped, _Base),
+            _wrapped,
+            id="bound-method",
+        ),
+        pytest.param(_wrapped, _wrapped, id="plain-function"),
+        pytest.param(_LYING_CLASSMETHOD, _LYING_CLASSMETHOD, id="wrapper-subclass"),
+        pytest.param("not callable", "not callable", id="non-callable"),
+        pytest.param(None, None, id="none"),
+    ],
+)
+def test_stored_function_reads_the_builtin_wrapper_slot(value: object, expected: object) -> None:
+    DISPATCHED.clear()
+    assert truth.stored_function(value) is expected
+    assert DISPATCHED == []
+
+
+def test_lying_wrapper_subclass_intercepts_the_ordinary_read() -> None:
+    DISPATCHED.clear()
+    with pytest.raises(RuntimeError, match="__func__"):
+        read_attr(_LYING_CLASSMETHOD, "__func__")
+    assert DISPATCHED == ["lie:__func__"]
+
+
 def test_instance_dict_reads_the_real_namespace_slot() -> None:
     plain = _Base()
     plain.stored = "value"
