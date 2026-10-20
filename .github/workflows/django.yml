@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: ["main"]
   workflow_dispatch:
+  schedule:
+    # 05:41 UTC every Monday: the full matrix with no commit. The newest Django
+    # patch releases install on every run, and a patch release can change what
+    # the version-audited SQLCompiler table depends on while this repository
+    # stays still; the weekly run reports that drift within a week, apart from
+    # any commit. An off-the-hour minute avoids the top-of-hour scheduling queue.
+    - cron: "41 5 * * 1"
 
 # Least privilege by default: every job in this workflow reads the repository and
 # nothing more. A job that genuinely needs a wider scope re-declares `permissions`
@@ -134,11 +141,11 @@ jobs:
       # If one version fails, don't stop the others
       fail-fast: false
       matrix:
-        # Manual dispatch (workflow_dispatch) runs the full matrix AND exercises
-        # both the default single-DB settings and the sharded fakeshop DATABASES
-        # layout (FAKESHOP_SHARDED=1) on every Python/Django node — the multi-DB
-        # contract is gated only at the dispatch tier so push/PR feedback stays
-        # fast. Push/PR runs only the minimum-support combo and the latest combo,
+        # Manual dispatch (workflow_dispatch) and the weekly schedule run the full
+        # matrix AND exercise both the default single-DB settings and the sharded
+        # fakeshop DATABASES layout (FAKESHOP_SHARDED=1) on every Python/Django
+        # node — the multi-DB contract is gated only at those tiers so push/PR
+        # feedback stays fast. Push/PR runs only the minimum-support combo and the latest combo,
         # single-DB only (covers both ends without doubling CI wall-clock).
         #
         # `compatibility_only: "1"` marks the exact-Django-5.2.16 nodes. They
@@ -164,7 +171,7 @@ jobs:
         # extension isolation) is durably exercised on every push/PR,
         # coverage-free (the latest node keeps the coverage gate).
         include: >-
-          ${{ github.event_name == 'workflow_dispatch' && fromJSON('[
+          ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && fromJSON('[
             {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1"},
             {"django": "5.2.16", "python": "3.10", "database": "multi DB", "fakeshop_sharded": "1", "strawberry": "0.322.2", "compatibility_only": "1"},
             {"django": "5.2.*", "python": "3.11", "database": "single DB", "fakeshop_sharded": "0"},
