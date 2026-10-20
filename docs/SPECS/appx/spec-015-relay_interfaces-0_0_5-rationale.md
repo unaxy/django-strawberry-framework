@@ -103,8 +103,8 @@ Spec: [Decision 3][spec-015-decision-3].
 **Rejected: `super(cls, cls).resolve_id_attr()` with a `"pk"` fallback**, the faithful upstream port.
 With `cls` bound at runtime, a Relay-shaped `DjangoType` subclassing another inherits the parent's
 installed default, and the MRO walk from the child lands back on it re-bound to the child: infinite
-recursion. The default instead reads the Phase-2.5 stamp `_stamp_relay_id_attr` writes, falling back
-to a direct `relay.Node.resolve_id_attr.__func__(cls)` call for unstamped callers.
+recursion. The default instead reads the Phase-2.5 stamp `_stamp_relay_id_attr` writes, stamping an
+unstamped caller (a subclass defined after finalization) on its first read with the same call.
 
 **Why the stamp.** Upstream caches the scan only on success, so the common `"pk"` fallback would re-run
 the full MRO annotation scan on every `resolve_id` call, once per row. Seeding `_id_attr = None` on the
