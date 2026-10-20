@@ -61,6 +61,7 @@ from django_strawberry_framework.filters.base import (
     _coerce_int_in_members,
     _decode_and_validate_global_id,
     _filter_schema,
+    _filterset_model_field,
     _marked_pk_field_name,
     _relation_uses_non_pk_to_field,
     _target_definition_for,
@@ -580,6 +581,56 @@ def test_bound_field_name_refuses_a_filter_with_no_path() -> None:
     """A ``None`` path is refused by name, never handed to a model-field walk."""
     with pytest.raises(ConfigurationError, match=r"^Filter has no field_name;"):
         _bound_field_name(Filter())
+
+
+@pytest.mark.parametrize(
+    ("filter_instance", "value"),
+    [(IntegerInFilter(), [1]), (RelationPkFilter(), 1)],
+    ids=["integer-in", "relation-identity"],
+)
+def test_bound_filters_with_no_field_name_are_refused(
+    filter_instance: Filter,
+    value: object,
+) -> None:
+    """A filter bound to a filterset with a model but no ``field_name`` is refused, not skipped."""
+    # django-filter stamps ``parent`` on every per-request filter; the stubs omit it.
+    setattr(filter_instance, "parent", ShelfFilter())  # noqa: B010
+    with pytest.raises(ConfigurationError, match=r"has no field_name;"):
+        filter_instance.filter(models.Shelf.objects.none(), value)
+
+
+def test_filterset_model_field_returns_none_without_model() -> None:
+    """A filterset-shaped object with no ``_meta.model`` yields ``None``."""
+
+    class _NoMeta:
+        pass
+
+    # basedpyright: the class without _meta is the hostile input under test;
+    # _filterset_model_field types the parameter as a FilterSet class or instance
+    assert _filterset_model_field(_NoMeta, GlobalIDFilter(field_name="id")) is None  # pyright: ignore[reportArgumentType]
+
+
+def test_filterset_model_field_returns_none_without_field_name() -> None:
+    """An empty ``field_name`` names no field, so it yields ``None`` even on a real model."""
+    f = GlobalIDFilter()
+    f.field_name = ""
+    assert _filterset_model_field(ShelfFilter, f) is None
+
+
+def test_filterset_model_field_returns_none_for_unknown_field_name() -> None:
+    """A typo in ``Filter(field_name=...)`` surfaces as ``None``, not a crash.
+
+    Path resolution is ``django_filters.utils.get_model_field``; an unknown hop
+    returns ``None``.
+    """
+    f = GlobalIDFilter(field_name="nonexistent_field")
+    assert _filterset_model_field(ShelfFilter, f) is None
+
+
+def test_filterset_model_field_walks_related_path() -> None:
+    """A ``__``-separated ``field_name`` resolves to the terminal model field."""
+    f = GlobalIDFilter(field_name="branch__name")
+    assert _filterset_model_field(ShelfFilter, f) is models.Branch._meta.get_field("name")
 
 
 # ---------------------------------------------------------------------------
