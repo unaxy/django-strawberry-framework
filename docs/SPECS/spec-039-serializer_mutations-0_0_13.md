@@ -1884,7 +1884,12 @@ The pipeline steps:
    field name** (the public `data` key DRF maps to `source` internally,
    [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth));
    a hidden / wrong-type target → field-keyed
-   [`FieldError`][glossary-fielderror-envelope]. **The decode consumes the recorded Relay
+   [`FieldError`][glossary-fielderror-envelope]. A relation whose column stores a
+   `to_field` value (the spec's `key_attname`, recorded at build at every nesting level and
+   under a renamed `source`) reads only rows whose key is set
+   (`django_strawberry_framework/utils/querysets.py::linkable_rows`): a visible row whose
+   key is `NULL` would be stored as an empty relation, so it is the same field-keyed
+   error, single and many. **The decode consumes the recorded Relay
    GlobalID strategy, never the live setting:** a `GlobalID` is decoded through the
    existing Relay decode helpers against the target type's recorded
    `effective_globalid_strategy` ([`types/relay.py`][types-relay] /
@@ -1954,7 +1959,9 @@ The pipeline steps:
      queryset ∩ target visibility** (`_scope_relation_querysets_to_visibility` /
      `_scope_specs_over_serializer`), pinned to the operation's write alias and
      locked when `Meta.select_for_update` locks; a cross-alias author queryset **fails
-     closed**.
+     closed**. A `to_field` relation's queryset also admits only rows whose key is set
+     (`linkable_rows`), the set the decode admits, so DRF's lookup refuses a `NULL`-key
+     row for a decoded and a `Meta.injected_fields` value alike.
 5. **Validate** via `serializer.is_valid()` — a failure maps the nested
    `serializer.errors` structure onto the
    [`FieldError` envelope][glossary-fielderror-envelope] via a **dedicated recursive

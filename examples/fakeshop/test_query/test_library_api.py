@@ -18607,3 +18607,157 @@ def test_form_partial_update_after_a_kept_genre_was_deleted_keeps_required_over_
         '"library_book"',
     ]
     assert case.stored() == before
+
+
+# ===========================================================================
+# A ``to_field`` key whose target column may be NULL: ``InterlibraryLoan.lender``
+# ===========================================================================
+
+# ``lender`` stores ``Branch.isil``, which a branch may leave NULL. ``lenderId`` names the
+# branch by raw id in every flavor: the model's generated input, the form's declared
+# id-keyed ``ModelChoiceField`` and the serializer's declared ``PrimaryKeyRelatedField``.
+_LOAN_MUTATIONS = {
+    ("create", "model"): ("createInterlibraryLoan", "InterlibraryLoanInput"),
+    ("create", "form"): ("createInterlibraryLoanViaForm", "InterlibraryLoanFormInput"),
+    ("create", "serializer"): (
+        "createInterlibraryLoanViaSerializer",
+        "InterlibraryLoanSerializerInput",
+    ),
+    ("update", "model"): ("updateInterlibraryLoan", "InterlibraryLoanPartialInput"),
+    ("update", "form"): ("updateInterlibraryLoanViaForm", "InterlibraryLoanFormPartialInput"),
+    ("update", "serializer"): (
+        "updateInterlibraryLoanViaSerializer",
+        "InterlibraryLoanSerializerPartialInput",
+    ),
+}
+_LOAN_RELATION_ERROR = {
+    "result": None,
+    "errors": [
+        {
+            "field": "lenderId",
+            "messages": ["Invalid id for relation 'lenderId'."],
+            "codes": ["invalid"],
+            "path": ["lenderId"],
+        },
+    ],
+}
+
+
+def _seed_lenders() -> dict[str, models.Branch]:
+    """Seed a branch per lender shape: with an ISIL, a second one, none, and hidden.
+
+    ``BranchType.get_queryset`` hides ``city="restricted"`` from the anonymous client, so
+    ``hidden`` exists and carries an ISIL but is not visible.
+    """
+    return {
+        "isil": models.Branch.objects.create(name="Lender Main", isil="US-LM"),
+        "other": models.Branch.objects.create(name="Lender Annex", isil="US-LA"),
+        "no_isil": models.Branch.objects.create(name="Lender Without ISIL"),
+        "hidden": models.Branch.objects.create(
+            name="Lender Restricted",
+            city="restricted",
+            isil="US-LR",
+        ),
+    }
+
+
+def _post_loan(
+    operation: str,
+    flavor: str,
+    lender_id: object,
+    loan_pk: int | None,
+) -> object:
+    """Write a loan naming ``lender_id`` through the ``flavor`` mutation; return its payload.
+
+    An update targets ``loan_pk`` and renames the title, so a refused write is visible on
+    both columns.
+    """
+    mutation, input_type = _LOAN_MUTATIONS[operation, flavor]
+    data = {"lenderId": lender_id, "title": "Atlas"}
+    if operation == "create":
+        query = f"mutation($d: {input_type}!) {{ {mutation}(data: $d) {{ "
+        variables: dict[str, object] = {"d": data}
+    else:
+        query = f"mutation($id: ID!, $d: {input_type}!) {{ {mutation}(id: $id, data: $d) {{ "
+        variables = {"id": loan_pk, "d": data}
+    payload = _graphql_payload(
+        query + "result { title lender { name } } errors { field messages codes path } } }",
+        variables=variables,
+    )
+    assert "errors" not in payload, payload
+    return json_at(payload, "data", mutation)
+
+
+def _loans() -> list[tuple[str | None, str]]:
+    """Every stored loan's ``(lender_id, title)``: the ISIL the column holds, never a branch id."""
+    return list(models.InterlibraryLoan.objects.order_by("pk").values_list("lender_id", "title"))
+
+
+def _prior_loan(operation: str, lenders: dict[str, models.Branch]) -> int | None:
+    """For an update, store a loan lent by ``lenders["other"]``; return its pk."""
+    if operation == "create":
+        return None
+    loan = models.InterlibraryLoan.objects.create(lender=lenders["other"], title="Prior")
+    assert loan.pk is not None
+    return loan.pk
+
+
+_LOAN_CASES = list(_LOAN_MUTATIONS)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("operation", "flavor"), _LOAN_CASES)
+def test_loan_lender_with_an_isil_stores_that_isil(operation: str, flavor: str) -> None:
+    """A visible branch with an ISIL is linked: the column stores its ISIL, not its id."""
+    lenders = _seed_lenders()
+    loan_pk = _prior_loan(operation, lenders)
+
+    result = _post_loan(operation, flavor, lenders["isil"].pk, loan_pk)
+
+    assert result == {
+        "result": {"title": "Atlas", "lender": {"name": "Lender Main"}},
+        "errors": [],
+    }
+    assert _loans() == [("US-LM", "Atlas")]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("operation", "flavor"), _LOAN_CASES)
+@pytest.mark.parametrize("lender", ["no_isil", "hidden", "missing"])
+def test_loan_lender_that_names_no_linkable_branch_is_the_relation_error(
+    operation: str,
+    flavor: str,
+    lender: str,
+) -> None:
+    """A visible branch with no ISIL is refused like a hidden or a missing one.
+
+    Its key is ``NULL``, so storing it would clear the relation the client named. Every
+    flavor answers the ``lenderId`` relation error and writes nothing: a create stores no
+    loan, an update keeps the prior lender's ISIL and title.
+    """
+    lenders = _seed_lenders()
+    loan_pk = _prior_loan(operation, lenders)
+    last = models.Branch.objects.order_by("pk").last()
+    assert last is not None
+    assert last.pk is not None
+    lender_id = last.pk + 1 if lender == "missing" else lenders[lender].pk
+    before = _loans()
+
+    result = _post_loan(operation, flavor, lender_id, loan_pk)
+
+    assert result == _LOAN_RELATION_ERROR
+    assert _loans() == before
+    assert before == ([] if operation == "create" else [("US-LA", "Prior")])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("operation", "flavor"), _LOAN_CASES)
+def test_loan_lender_null_stores_no_lender(operation: str, flavor: str) -> None:
+    """An explicit ``null`` is the clear: a create stores no lender, an update clears it."""
+    lenders = _seed_lenders()
+    loan_pk = _prior_loan(operation, lenders)
+
+    result = _post_loan(operation, flavor, None, loan_pk)
+
+    assert result == {"result": {"title": "Atlas", "lender": None}, "errors": []}
+    assert _loans() == [(None, "Atlas")]

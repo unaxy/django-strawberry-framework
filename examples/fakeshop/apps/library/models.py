@@ -85,6 +85,8 @@ class Branch(models.Model):
 
     name: _Text = models.TextField(unique=True)
     city: _Text = models.TextField(blank=True, default="")
+    # The branch's ISIL (ISO 15511 library code); a branch may have none.
+    isil: _NullText = models.TextField(unique=True, null=True, blank=True)
     # Test substrate: package tests use this virtual relation to pin
     # GenericRelation support without exposing it in the public example schema.
     tags = GenericRelation(
@@ -94,6 +96,7 @@ class Branch(models.Model):
     # Reverse accessors Django adds at class creation, declared for the type checker.
     shelves: RelatedManager[Shelf]
     circulation_desks: RelatedManager[CirculationDesk]
+    loans_lent: RelatedManager[InterlibraryLoan]
 
     class Meta:
         verbose_name = "Branch"
@@ -879,6 +882,32 @@ class KioskFault(models.Model):
     @override
     def __str__(self) -> str:
         return self.note
+
+
+class InterlibraryLoan(models.Model):
+    """A title one branch lends another, naming the lender by its ISIL.
+
+    ``lender`` is a ``ForeignKey(Branch, to_field="isil")``: the column stores the
+    lending branch's ISIL, not its id. ``Branch.isil`` is nullable, so a branch without
+    one cannot be stored as a lender: its key would be ``NULL``, an empty relation.
+    """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
+    lender: _NullFK[Branch] = models.ForeignKey(
+        Branch,
+        to_field="isil",
+        related_name="loans_lent",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    title: _Text = models.TextField()
+
+    @override
+    def __str__(self) -> str:
+        return self.title
 
 
 class VenueBadge(models.Model):

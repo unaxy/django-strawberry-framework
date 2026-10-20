@@ -1756,6 +1756,7 @@ def test_raw_pk_m2m_existence_check_coerces_out_of_range_pk_no_overflow() -> Non
         [9223372036854775808],
         graphql_name="genres",
         related_model=related_model,
+        key_attname=None,
         info=unread_info(),
         relation_field=m2m_field,
     )
@@ -1789,6 +1790,7 @@ def test_single_fk_explicit_null_on_nullable_clears_not_relation_error() -> None
             None,
             graphql_name="categoryId",
             related_model=related_model,
+            key_attname=None,
             info=unread_info(),
             relation_field=fk_field,
         )

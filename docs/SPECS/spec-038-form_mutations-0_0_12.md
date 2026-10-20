@@ -318,8 +318,9 @@ package-internal; Slice 4 is the live consumer surface.
     — `GlobalID` *or* **raw pk** — type-checked, resolved to the **visible** object
     through the related primary `DjangoType.get_queryset` (both branches) and
     converted by `to_field_name`
-    (`obj.serializable_value(field.to_field_name)` else `obj.pk`) before landing
-    under the form field name, a hidden target → field-keyed `FieldError`;
+    (`obj.serializable_value(field.to_field_name)`, or `obj.pk` when the field sets
+    none) before landing under the form field name, a hidden target, or a visible one
+    whose stored `to_field` key is `NULL`, → field-keyed `FieldError`;
     **construct** the form once via the overridable
     `get_form_kwargs(info, *, data, files, instance=None)` hook — create:
     `form_class(**get_form_kwargs(info, data=provided_data, files=provided_files))`;
@@ -1124,7 +1125,19 @@ GraphQL id fail form validation. So after the visibility query yields the visibl
 **object**, the decoder converts it with the form field's own key:
 `obj.serializable_value(field.to_field_name)` when `to_field_name` is set, else
 `obj.pk`, and places that under the form field name (per element for
-`ModelMultipleChoiceField`). A hidden-`Category` id (Relay or raw pk) therefore returns
+`ModelMultipleChoiceField`). The input build admits only a `to_field_name` the row
+carries: unset, `"pk"`, or a concrete field of the target by name or attname
+(`django_strawberry_framework/forms/inputs.py::require_readable_choice_keys`, run over
+the fields the operation binds: the full declared field set for an update, whose
+reconstruction rebinds every declared field, and the input's own fields for a create). A lookup path, an annotation, a property or an unknown name is a schema-build
+`ConfigurationError`, never a fall back to `obj.pk`, which the form's
+`queryset.get(<to_field_name>=pk)` would resolve to another row; an annotation
+`to_field_name`, which plain Django accepts, is refused for that reason. A visible row
+whose stored key (the column a `ForeignKey(to_field=…)` stores) is `NULL` names no row,
+whatever column the form field is keyed by: the spine's visibility read admits only rows
+whose key is set (`django_strawberry_framework/utils/querysets.py::linkable_rows`), so it
+is the uniform relation `FieldError`, never a bound key that stores `NULL` and clears the
+relation. A hidden-`Category` id (Relay or raw pk) therefore returns
 the **identical** field-keyed `FieldError` the model-driven mutation returns — proven
 by live + package tests over a Relay primary AND a non-Relay (raw-pk) primary, for both
 single and multi relations. A single `ModelChoiceField` cannot name a visible row whose
@@ -1337,8 +1350,8 @@ write flavor rides.
    uncoercible / unencodable text → field-keyed `FieldError`, the `036` id-type-check contract), **resolves the
    visible object through the related primary `DjangoType.get_queryset` for BOTH
    branches** (a hidden / unseeable target is the same field-keyed `FieldError`, no
-   existence leak), and lands the object's `to_field_name` value (default `obj.pk`)
-   under the form field name (`{form_field_name: value}` / `{form_field_name: [value,
+   existence leak; so is a visible target whose stored `to_field` key is `NULL`), and
+   lands the object's `to_field_name` value (default `obj.pk`) under the form field name (`{form_field_name: value}` / `{form_field_name: [value,
    …]}`); a `file` field lands its uploaded value in **`provided_files`**, not
    `provided_data` (the file-routing fix below); a `scalar` choice-enum member is
    unwrapped to its raw value. The split by `kind` is the single point that keeps
@@ -1870,7 +1883,11 @@ Rationale companion: [Decision 14][rationale-d14].
   object, the decoder feeds the form `obj.serializable_value(field.to_field_name)`
   (else `obj.pk`), so a valid GraphQL id does not fail form validation
   ([Decision 7](#decision-7--form-field--strawberry-input-mapping-the-form-is-the-input-source-of-truth)).
-  An `update` that omits the field rebinds the located row's related object the same
+  A `to_field_name` that is not `pk` or a concrete field of the target (a lookup path,
+  an annotation, a property) is a schema-build `ConfigurationError`, on an update even on a
+  field the input leaves out; a create never binds such a field and builds. A row whose stored `to_field` key is `NULL` is the relation error,
+  whatever the field is keyed by, including a field keyed by the stored column itself;
+  a key `""` stays the field's `invalid_choice` error (below). An `update` that omits the field rebinds the located row's related object the same
   way whenever the form's key is not the column the relation stores, including a
   `to_field_name`-less field over a `ForeignKey(to_field=…)`
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
@@ -2017,7 +2034,13 @@ behavior reachable through `/graphql/`, package tests own internals.
   edition ISBN `""` is the `editionId`-keyed `invalid_choice` error decided without
   reading the edition by its key, while a `boundWith` member keyed `""` stays linked,
   omitted or supplied, and a `boundWith` element `""` naming no edition is the
-  `boundWith`-keyed relation error with nothing written.
+  `boundWith`-keyed relation error with nothing written. **A `to_field` key that may be
+  `NULL`** — `createInterlibraryLoanViaForm` / `updateInterlibraryLoanViaForm`, whose
+  declared `lender` resolves a branch by id while `InterlibraryLoan.lender` stores
+  `Branch.isil`, link a branch with an ISIL and store it, and answer a branch with no ISIL
+  like a hidden or missing one: the `lenderId` relation error with nothing written and the
+  prior ISIL kept; `null` clears
+  (`test_library_api.py::test_loan_lender_that_names_no_linkable_branch_is_the_relation_error`).
   **Write-time `IntegrityError`** — a valid
   `ModelForm.save()` that hits a constraint the form's validation excluded
   (`createDefaultCategoryItemViaForm`) surfaces the **`FieldError` envelope**, not a
@@ -2103,7 +2126,15 @@ behavior reachable through `/graphql/`, package tests own internals.
     `ModelMultipleChoiceField`; **a raw-pk /
     wrong-model relation id** → `FieldError`; **`to_field_name`** — a `ModelChoiceField`
     / `ModelMultipleChoiceField` with `to_field_name` set validates the decoded value
-    by the target field, not pk; **write-time `IntegrityError`** — a valid
+    by the target field, not pk, and a path, annotation, unknown, reverse-relation or
+    M2M `to_field_name` is refused at build, a narrowed-out field included on an update
+    but not on a create, which never binds it
+    (`tests/forms/test_inputs.py::test_require_readable_choice_keys_refuses_a_key_the_row_does_not_carry`,
+    `::test_update_input_refuses_an_unreadable_key_on_a_narrowed_out_field`,
+    `::test_create_input_admits_an_unreadable_key_on_a_narrowed_out_field`);
+    a row whose stored key is `NULL` is the relation error, single and multi
+    (`tests/forms/test_resolvers.py::test_decode_form_relation_refuses_a_row_whose_stored_key_is_null`);
+    **write-time `IntegrityError`** — a valid
     `form.save()` raising `IntegrityError` (and the plain-form `perform_mutate` save
     path) → `FieldError` envelope, not a top-level error (via `save_or_field_errors`;
     `forced_save_or_field_errors` on a `ModelForm` update);
@@ -2283,9 +2314,12 @@ The completion contract.
    *or* **raw pk** — is type-checked, resolved to the **visible** object through the
    related primary `DjangoType.get_queryset` (both branches), and converted by
    `to_field_name`
-   (`obj.serializable_value(field.to_field_name)` else
-   `obj.pk`) before landing under the form field name; a hidden target → field-keyed
-   `FieldError` + a **separate `provided_files`** (uploaded `Upload` values, never in
+   (`obj.serializable_value(field.to_field_name)`, or `obj.pk` when the field sets
+   none) before landing under the form field name; a hidden target, or a visible one
+   whose stored `to_field` key is `NULL`, → field-keyed `FieldError`; a `to_field_name`
+   that is not `pk` or a concrete field of the target is a schema-build
+   `ConfigurationError` on any field the operation binds (every declared field for an
+   update) + a **separate `provided_files`** (uploaded `Upload` values, never in
    `data=`); construction goes through the overridable `get_form_kwargs(info, *, data,
    files, instance=None)` hook — `create` builds `form_class(**get_form_kwargs(…,
    data=provided_data, files=provided_files))`, `update` reconstructs the **full partial

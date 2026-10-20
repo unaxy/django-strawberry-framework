@@ -1688,6 +1688,29 @@ def test_mutation_input_field_specs_covers_generated_input() -> None:
     assert model_fields["name"] is product_models.Item._meta.get_field("name")
 
 
+def test_mutation_input_field_specs_record_the_column_a_to_field_relation_stores() -> None:
+    """A relation into a ``to_field`` key records the stored column; a pk-keyed one records none.
+
+    ``PatronProfile.favorite_genre`` stores ``Genre.name``; ``patron`` stores the patron pk,
+    and a scalar records nothing.
+    """
+
+    @strawberry.input
+    class ProfileInput:
+        patron_id: int
+        favorite_genre_id: int | None
+        address_2: str
+
+    assert has_object_definition(ProfileInput)
+    specs, _model_fields = mutation_input_field_specs(library_models.PatronProfile, ProfileInput)
+
+    assert {spec.input_attr: spec.key_attname for spec in specs} == {
+        "patron_id": None,
+        "favorite_genre_id": "name",
+        "address_2": None,
+    }
+
+
 def test_mutation_input_field_specs_rejects_non_column_attr() -> None:
     """A merged-input attr that is not a concrete column fails at spec synthesis."""
 

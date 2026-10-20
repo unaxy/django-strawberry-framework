@@ -2629,3 +2629,70 @@ def test_set_valued_builder_fields_fail_loud() -> None:
 
     with pytest.raises(ConfigurationError, match="ordered sequence of field name strings"):
         _build_serializer_inputs(serializer_class, fields={"name", "category"})
+
+
+def _favorite_genre(source: str | None = None) -> DRFField:
+    """An optional ``Genre`` relation over the ``to_field`` key, bound to ``source`` if given."""
+    queryset = Genre.objects.all()
+    relation: _PkRelation[Genre] = (
+        serializers.PrimaryKeyRelatedField(queryset=queryset, allow_null=True, required=False)
+        if source is None
+        else serializers.PrimaryKeyRelatedField(
+            queryset=queryset,
+            allow_null=True,
+            required=False,
+            source=source,
+        )
+    )
+    return relation
+
+
+@pytest.mark.parametrize(("name", "source"), [("favorite_genre", None), ("fav", "favorite_genre")])
+@pytest.mark.parametrize("depth", ["top-level", "nested"])
+def test_relation_spec_records_the_column_a_to_field_relation_stores(
+    name: str,
+    source: str | None,
+    depth: str,
+) -> None:
+    """A relation into a ``to_field`` key records the stored column; a pk-keyed one records none.
+
+    ``PatronProfile.favorite_genre`` stores ``Genre.name``, so its spec carries
+    ``key_attname="name"`` under its own name or a renamed ``source``, at every nesting
+    depth (the nested level resolves the column against its own ``Meta.model``); ``patron``
+    stores the patron pk and records ``None``.
+    """
+
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name")
+
+    class PatronType(DjangoType):
+        class Meta:
+            model = library_models.Patron
+            fields = ("id", "name")
+
+    del GenreType, PatronType
+    profile = _profile_serializer(**{name: _favorite_genre(source), "patron": _patron_key()})
+    if depth == "nested":
+
+        class Parent(serializers.Serializer[object]):
+            title = serializers.CharField()
+            profile_detail = profile()
+
+        _cls, shape = build_serializer_input_class(
+            Parent,
+            operation_kind="create",
+            nested_configs={"profile_detail": NestedSerializerConfig()},
+        )
+        nested_spec = next(s for s in shape.field_specs if s.target_name == "profile_detail")
+        assert nested_spec.nested_specs is not None
+        specs = nested_spec.nested_specs
+    else:
+        _cls, shape = build_serializer_input_class(profile, operation_kind="create")
+        specs = shape.field_specs
+
+    assert {spec.target_name: spec.key_attname for spec in specs if spec.related_model} == {
+        name: "name",
+        "patron": None,
+    }

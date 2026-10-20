@@ -24,6 +24,8 @@ inputs carry ISBN text; ``EditionImprintForm`` updates an ``Edition`` located by
 ``LendingDeskForm`` updates a multi-table ``LendingDesk`` through a column of its ``Venue``
 parent table and one of its own, so the update writes both tables.
 ``KioskFaultForm`` names a ``SelfServeDesk``, whose primary key is a parent-link chain.
+``InterlibraryLoanForm`` declares a branch-id-keyed ``lender`` over the ``to_field`` key
+``InterlibraryLoan.lender`` (``Branch.isil``, which may be ``NULL``).
 ``BranchWithShelfForm`` and ``BranchPairForm`` add model-less plain-form
 ``perform_mutate`` write-hook and transaction-rollback cases.
 """
@@ -210,6 +212,26 @@ class KioskFaultForm(forms.ModelForm[models.KioskFault]):
     class Meta:
         model = models.KioskFault
         fields = ("kiosk", "note")
+
+
+class InterlibraryLoanForm(forms.ModelForm[models.InterlibraryLoan]):
+    """An ``InterlibraryLoan`` ``ModelForm`` whose ``lender`` choices are keyed by branch id.
+
+    ``lender`` is a ``ForeignKey(Branch, to_field="isil")``: the column stores the branch's
+    ISIL. The form declares the field itself to list the branches by name and sets no
+    ``to_field_name``, so it resolves a choice by branch id, not by the ISIL the column
+    stores. A branch with no ISIL is a choice the field accepts, but storing its key would
+    clear the relation.
+    """
+
+    lender: forms.ModelChoiceField[models.Branch] = forms.ModelChoiceField(
+        queryset=models.Branch.objects.order_by("name"),
+        required=False,
+    )
+
+    class Meta:
+        model = models.InterlibraryLoan
+        fields = ("lender", "title")
 
 
 class BranchWithShelfForm(forms.Form):
