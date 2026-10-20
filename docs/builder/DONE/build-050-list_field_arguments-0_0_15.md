@@ -606,11 +606,6 @@ card.
   `FilterSet.apply_*` half was carried by `TODO-ALPHA-053-0.0.15`. Both fields seal `get_queryset`
   under the one `_DEFAULT_SEAL_POLICY`, whether or not a sidecar input or list argument is
   supplied.
-- **An exact `QuerySet` carrying a foreign `_result_cache` escapes the raw-list ceiling** - only
-  in-process application Python can write that slot, so the wire-input condition fails; a
-  robustness row. Owner: `maintainer`, recorded in this catalog only: `BACKLOG.md` holds
-  scored strategic-differentiation cards, not robustness rows
-  (`git show 58e7ffc4:docs/builder/bld-050-close-row_carry.md`, final verification).
 - **Retired "unresolved deferred filter" vocabulary** was identified by the historical review at
   the first-party visibility messages and module boundary. The live sites now name the refused
   condition as **malformed deferred-filter state**; the archived

@@ -87,10 +87,11 @@ jobs:
         # Every `path.py::Symbol` reference in first-party source must name a file
         # that exists and a symbol that file still defines; on the board and in the
         # spec corpus (docs/spec-*.md, docs/SPECS/**/*.md) a cited file that exists
-        # must still define the symbol. The `check-citations` pre-commit hook runs
+        # must still define the symbol, and every `#"substring"` pinpoint's text must
+        # still occur in what it cites. The `check-citations` pre-commit hook runs
         # the same sweep on every commit; this step is the backstop for commits made
         # with hooks skipped.
-        run: uv run python scripts/check_citations.py --check
+        run: uv run python scripts/check_citations.py --check --substrings
 
       - name: Kanban tracked-path constants
         # Parity with the `kanban-tracked-path-constants` pre-commit hook, which

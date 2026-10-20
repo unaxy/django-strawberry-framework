@@ -23,13 +23,10 @@ import dataclasses
 import datetime
 import enum
 import inspect
-import subprocess
-import sys
 import threading
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NamedTuple, NoReturn, TypeAlias, TypeVar, cast
 from unittest import mock
@@ -177,6 +174,7 @@ from tests._idioms import (
     saved_pk,
     str_subclass_name,
 )
+from tests._subprocess import run_in_fresh_process
 from tests.optimizer import _link_models
 
 if TYPE_CHECKING:
@@ -11606,13 +11604,7 @@ def test_import_order_does_not_capture_consumer_global_mutation() -> None:
     OWN table and never reads the global. Process isolation makes global-state
     restoration in the parent unnecessary (the child is disposable); the child exits 0.
     """
-    fakeshop = Path(__file__).resolve().parents[2] / "examples" / "fakeshop"
-    child = (
-        "import os, sys\n"
-        f"sys.path.insert(0, {str(fakeshop)!r})\n"
-        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')\n"
-        "import django\n"
-        "django.setup()\n"
+    run_in_fresh_process(
         "from django.db import models\n"
         "from django_filters import CharFilter, filterset\n"
         "Consumer = type('Consumer', (CharFilter,), {})\n"
@@ -11625,16 +11617,7 @@ def test_import_order_does_not_capture_consumer_global_mutation() -> None:
         "assert pub[models.TextField]['filter_class'] is CharFilter, pub[models.TextField]\n"
         "assert pub[models.TextField]['filter_class'] is not Consumer\n"
         "assert 'extra' not in pub[models.CharField], pub[models.CharField]\n"
-        "assert S._PACKAGE_POLICY_BASELINE[models.TextField].filter_class is CharFilter\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", child],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"subprocess failed: stdout={result.stdout!r}, stderr={result.stderr!r}"
+        "assert S._PACKAGE_POLICY_BASELINE[models.TextField].filter_class is CharFilter\n",
     )
 
 

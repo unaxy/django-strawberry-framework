@@ -151,10 +151,9 @@ Two spec defects Worker 1 should also resolve while in the file, both noted by t
 
 ### Escalated to the maintainer — NOT dispatched to any worker
 
-Both are multi-surface reference clusters. `worker-0.md` "Closing out a kanban card" is explicit that a reference wrong across multiple surfaces must not be partial-fixed, because a spec-only correction that diverges from un-editable copies is worse than uniformly-wrong. Both go to `bld-020-final.md`'s `### Deferred work catalog`.
+It is a multi-surface reference cluster. `worker-0.md` "Closing out a kanban card" is explicit that a reference wrong across multiple surfaces must not be partial-fixed, because a spec-only correction that diverges from un-editable copies is worse than uniformly-wrong. It goes to `bld-020-final.md`'s `### Deferred work catalog`.
 
 1. **`CHANGELOG.md`'s `0.0.7` section labels every card by its pre-renumber number.** Line 168 tracks this card as `016-djangolistfield_non_relay_list-0.0.7`; the same section also carries `017-appspy…`, `018-schema_export…`, `019-multi_database…`, `046-django_trac_37064…` (twice), `047-warning_free_scalar…`, and `048-scalar_conversion…`. The board numbers are now `020`-`026`. The link definitions still resolve — `KANBAN.md#djangolistfield_non_relay_list` is slug-based, not number-based — so nothing is broken; the visible labels are uniformly stale across the whole section, which is the shape the no-partial-fix rule covers.
-2. **`KANBAN.md`'s `DONE-020-0.0.7` card lists `django_strawberry_framework/apps.py` under `#### Package files`.** That file is `DONE-021-0.0.7`'s subject, not this card's. The card-files data is DB-backed and replaced wholesale by `manage.py import_card_files`, so correcting one entry by hand would be overwritten by the next import; the fix belongs with whoever re-runs that command.
 
 ## Dispatch-routing deviation, recorded once for both rounds
 
@@ -177,23 +176,18 @@ The maintainer authorized this shape for this cycle: "if it's just the spec file
 
 ## Deferred-work homing (post-gate, maintainer-requested)
 
-The six-item `### Deferred work catalog` in the since-deleted `docs/builder/bld-020-final.md` was homed on the board after the final gate, at the maintainer's request. Five of the six became `CardItem` scope bullets; the sixth needed none. Baseline verified first: `scripts/build_kanban_md.py --check` and `scripts/build_kanban_html.py --check` both exited 0 and neither generated file was dirty, so the regenerate publishes only these edits.
+The six-item `### Deferred work catalog` in the since-deleted `docs/builder/bld-020-final.md` was homed on the board after the final gate, at the maintainer's request. Baseline verified first: `scripts/build_kanban_md.py --check` and `scripts/build_kanban_html.py --check` both exited 0 and neither generated file was dirty, so the regenerate publishes only these edits.
 
 | Catalog item | Homed on | Why that card |
 | --- | --- | --- |
 | 1 — `CHANGELOG.md`'s `0.0.7` pre-renumber card labels | `TODO-ALPHA-052-0.1.0` scope | That card owns the CHANGELOG promotion (`AGENTS.md` rule 21 closes `CHANGELOG.md` to a build cycle) and already carries two `0.0.6`-section label surfaces of the same shape. |
-| 2 — `DONE-020-0.0.7` listing `apps.py` under `#### Package files` | `TODO-ALPHA-052-0.1.0` scope | That card owns the board-DB corrections; same ORM-edit-plus-regenerate mechanism as its 20-occurrence spec-path-rot item. |
-| 3 — the `orderBy` / pk-tiebreaker bundle | `TODO-ALPHA-051-0.0.15` scope | Take-whole-or-not-at-all, and one of its three files is a `.py` docstring — only a card whose WP batches open source can execute it. Its Slice 5 already owns a glossary flip. |
-| 4 — glossary `SyncMisuseError` omits `DjangoListField` | `TODO-ALPHA-051-0.0.15` scope | Shares one `GlossaryTerm.body` ORM edit and one `scripts/build_glossary_md.py` run with items 3 and 5's glossary halves. |
-| 5 — the retired `one-hop` / three-shape `is_async_callable` characterisation | `TODO-ALPHA-051-0.0.15` scope | Same two files as item 3; the bullet says to fold them together. |
 | 6 — the two baseline gate exceptions | no card | Exception (a) is already homed on `TODO-ALPHA-052-0.1.0`, whose `scripts/check_trailing_commas.py` bullet states the gitignored-path defect and its two fixes. Exception (b) is transient — it clears the moment the concurrent session's `django_strawberry_framework/utils/converters.py` change lands and `docs/TREE.md` is regenerated with it. |
 
-### Two catalog claims re-derived at homing time and found wrong
+### A catalog claim re-derived at homing time and found wrong
 
-Both corrections are carried in the board bullets themselves, because `docs/builder/` artifacts are deleted at closeout and the board is what survives.
+The correction is carried in the board bullet itself, because `docs/builder/` artifacts are deleted at closeout and the board is what survives.
 
-1. **Catalog item 1 understated its population by nearly half.** It stated one occurrence per label with `046` twice — effectively 8. The measured population is **14 occurrences across 7 labels**: `018-schema_export_management_command-0.0.7` occurs 5 times and `047-warning_free_scalar_registration_via_strawberryconfigscalar_map-0.0.7` 3. The catalog enumerated distinct labels and spot-checked only the one repeat it happened to see. This is the cycle's own standing lesson landing a seventh time — a label list is not a population — and it matters here because the item is governed by the no-partial-fix rule, so a fixer working from "8" would leave six sites stale and believe the cluster closed.
-2. **Catalog item 2's durability claim was too strong.** It said a DB fix "would be overwritten by the next `manage.py import_card_files`". That command does replace each named card's linked file set exactly, but **no card-files JSON is checked into the repo** — the only `"cards"`-keyed JSON anywhere is written into `tmp_path` by `examples/fakeshop/apps/kanban/tests/test_commands.py` — so no stored input would re-apply the error and a DB fix is durable. The real residual risk is narrower: that whoever next hand-authors a JSON for card 20 copies the same wrong file list.
+**Catalog item 1 understated its population by nearly half.** It stated one occurrence per label with `046` twice — effectively 8. The measured population is **14 occurrences across 7 labels**: `018-schema_export_management_command-0.0.7` occurs 5 times and `047-warning_free_scalar_registration_via_strawberryconfigscalar_map-0.0.7` 3. The catalog enumerated distinct labels and spot-checked only the one repeat it happened to see. This is the cycle's own standing lesson landing a seventh time — a label list is not a population — and it matters here because the item is governed by the no-partial-fix rule, so a fixer working from "8" would leave six sites stale and believe the cluster closed.
 
 ### Verification
 

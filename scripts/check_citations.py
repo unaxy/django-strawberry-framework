@@ -10,6 +10,13 @@ This gate resolves both halves. For every ``<path>.py::<Symbol>`` reference it
 locates the file, parses it, and asserts the symbol is actually defined (or
 imported, so re-export citations such as ``__init__.py::SomeName`` resolve).
 
+``--substrings`` also checks the rule's pinpoints:
+``path::Symbol #"unique substring"`` (the text must occur inside the symbol's
+source span) and ``path #"substring"`` (anywhere in the file). A reflow or a reword
+of the cited line kills a pinpoint with no edit to the citer. A pinpoint that
+occurs more than once is a warning, not a failure. The pre-commit hook and CI pass
+the flag.
+
 What resolves: a name bound at module or class scope (``def``, ``class``,
 assignment, import), bare or qualified by its enclosing classes, including one
 bound inside a compound statement's block (``if``, ``try`` / ``except``, ``with``,
@@ -19,26 +26,48 @@ such as a resolver factory's inner function is a real citable callable); a
 function-local variable is not a citable symbol. A
 dunder (``Class.__init_subclass__``, ``__all__``) is one symbol and is resolved
 like any other name; only a trailing ``_`` or ``.`` on a non-dunder names a
-family of symbols by prefix and is skipped. A citation wrapped across two lines
-(``path.py::`` at a line end with the symbol on the next line, or a path split
-after a ``/``) is joined and checked at the line it starts on.
+family of symbols by prefix and is skipped.
+
+A ``spec-NNN Decision N`` citation (also ``spec-NNN-<stem>`` and ``Decisions``)
+resolves when the spec numbered ``NNN`` (``docs/spec-NNN-*.md`` or
+``docs/SPECS/spec-NNN-*.md``, rationale companions excluded) carries a heading
+``Decision N`` at any level (``### Decision 8 ...``, ``### Decision 8: ...``,
+``## [Decision 7a ...][ref]``). Only the numeral right after ``Decision`` is
+checked: the second half of ``Decision 4 / Decision 5`` or ``Decisions 3 and 4``
+is not.
+
+A citation wrapped across two lines is joined and checked at the line it starts on.
+A break may fall after ``path.py::``, before ``::Symbol``, after a ``/`` inside a
+``path.py::Symbol`` or a pinpoint's path, between a pinpoint's head and its ``#"``,
+and around ``Decision``; the continuation line may open with indentation, a ``#``
+comment marker and code-span backticks. A split inside a name, or after a ``.``
+inside a symbol (indistinguishable from a sentence's closing period), is not
+joined.
+
+A citation spelled so that no resolver can parse it is a finding on every run, in
+every corpus and whatever it cites (``MALFORMED_FORMS``): a ``path #"text`` pinpoint
+whose quote does not close on its line was wrapped across a line break, and would
+otherwise read as no citation at all; a file path split after a ``/`` whose
+continuation is no joinable citation is a bare path the gate cannot check and no
+search for the whole path finds. Reflowing the citing text is the fix.
 
 Two corpora, deliberately different strictness:
 
 * **First-party ``.py`` sources** (``django_strawberry_framework/``, ``tests/``,
-  ``examples/``, ``scripts/``) are fail-closed: an unresolvable *file* is a
-  violation too, because a bare upstream basename is exactly the ambiguity rule 27
-  exists to remove -- cite ``django_graphene_filters/connection_field.py::x``, not
-  ``connection_field.py::x``.
+  ``examples/``, ``scripts/``) are fail-closed: an unresolvable *file* (or spec
+  number) is a violation too, because a bare upstream basename is exactly the
+  ambiguity rule 27 exists to remove -- cite
+  ``django_graphene_filters/connection_field.py::x``, not ``connection_field.py::x``.
 * **``KANBAN.md`` and the spec corpus** (the in-flight ``docs/spec-*.md`` and every
   ``docs/SPECS/**/*.md``, ``appx/`` companions included) fail only on real rot -- a
   cited file that exists whose symbol does not. TODO cards and planned specs
   legitimately cite files that are not written yet, and parity notes cite upstream
   trees that are not vendored here, so an unresolvable file carries no signal there.
   Every spec describes the code as it is now, so a spec citing a symbol its file no
-  longer defines is rot like any other. ``docs/SPECS/NEXT.md`` is the spec-authoring
-  process doc, not a spec: its ``e.g.`` citations illustrate the citation form over
-  symbols that need not exist, so it is the one file under ``docs/SPECS/`` left out.
+  longer defines is rot like any other, as is a ``Decision N`` its spec does not
+  carry. ``docs/SPECS/NEXT.md`` is the spec-authoring process doc, not a spec: its
+  ``e.g.`` citations illustrate the citation form over symbols that need not exist,
+  so it is the one file under ``docs/SPECS/`` left out.
 
 A citation inside an absolute path (``~/projects/...`` or ``/Users/...``) names a
 file in a checkout outside this repo and is skipped like an upstream prefix.
@@ -53,17 +82,15 @@ file you are committing rots citations in files you are not, so a staged-paths-o
 sweep would be blind to the failure this gate exists to catch. ``--paths`` exists for
 a reviewer holding one file, never for the hook.
 
-Reviewer flags (none changes the default run):
+Reviewer flags (none changes what the hook and CI check):
 
 * ``--paths PATH...`` checks only the citations found in the named files (any
   ``.py`` or ``.md``; resolution still runs against the whole tree). A named
   ``KANBAN.md`` or spec keeps its soft rule; every other named file is fail-closed.
 * ``--json`` prints every checked citation with its file, line, kind (``symbol`` /
-  ``dunder`` / ``substring``), resolved flag, target file and, for a failure, the
-  "now lives in" hint. The summary line goes to stderr so stdout stays JSON.
-* ``--substrings`` also checks ``path::Symbol #"unique substring"`` (the text must
-  occur inside the symbol's source span) and ``path #"substring"`` (anywhere in the
-  file). A pinpoint that occurs more than once is a warning, not a failure.
+  ``dunder`` / ``decision`` / ``substring`` / ``wrapped-pinpoint`` /
+  ``wrapped-path``), resolved flag, target file and, for a failure, the "now lives
+  in" hint. The summary line goes to stderr so stdout stays JSON.
 * ``--cited-by PATH[::Symbol]`` lists every file and line that cites that path (or
   that symbol, or a member of it) across the gate corpus and the standing ``docs/``
   markdown (per-cycle ``rev-*`` / ``review-*`` / ``dry-*`` / ``bld-*`` /
@@ -73,7 +100,7 @@ Reviewer flags (none changes the default run):
 
 Usage::
 
-    uv run python scripts/check_citations.py
+    uv run python scripts/check_citations.py --substrings
     uv run python scripts/check_citations.py --paths <file>... --substrings --json
     uv run python scripts/check_citations.py --cited-by <path>::<Symbol>
 
@@ -163,20 +190,56 @@ DUNDER_RE = re.compile(r"__[A-Za-z0-9]\w*?__")
 
 CITATION_RE = re.compile(r"([\w][\w./]*\.py)::([A-Za-z_][\w.]*)")
 
-# `path.py::` closing one line, the symbol opening the next (after indentation, an
-# optional comment marker and optional code-span backticks).
-WRAPPED_SYMBOL_RE = re.compile(
-    r"([\w][\w./]*\.py)::`*[ \t]*\r?\n[ \t]*(?:#[ \t]*)?`*([A-Za-z_][\w.]*)",
-)
+# A line break inside a citation: the line's trailing blanks, the break, the next
+# line's indentation and an optional comment marker.
+_LINE_BREAK = r"[ \t]*\r?\n[ \t]*(?:#[ \t]*)?"
+# The same break with optional code-span backticks closing and reopening around it.
+_BREAK = r"`*" + _LINE_BREAK + r"`*"
+_LINE_BREAK_RE = re.compile(_LINE_BREAK)
+
+# `path.py::` closing one line, the symbol opening the next.
+WRAPPED_SYMBOL_RE = re.compile(r"([\w][\w./]*\.py)::" + _BREAK + r"([A-Za-z_][\w.]*)")
+# `path.py` closing one line, `::Symbol` opening the next: a line cannot open with
+# `::` except as the rest of the citation the line above ends with.
+WRAPPED_COLON_RE = re.compile(r"([\w][\w./]*\.py)" + _BREAK + r"::([A-Za-z_][\w.]*)")
 # A path split after a `/`: `utils/` closing one line, `querysets.py::x` the next.
 WRAPPED_PATH_RE = re.compile(
-    r"([\w][\w./]*/)[ \t]*\r?\n[ \t]*(?:#[ \t]*)?(([\w./]*\.py)::([A-Za-z_][\w.]*))",
+    r"([\w][\w./]*/)" + _LINE_BREAK + r"(([\w./]*\.py)::([A-Za-z_][\w.]*))",
+)
+_FILE_EXTENSIONS = r"\.(?:py|md|toml|ya?ml|json|html|csv|txt|cfg|ini)"
+# The `path` or `path::Symbol` a `#"text"` pinpoint follows, on its line or ending
+# the line above. The path may itself be split after a `/` (`_joined` removes the
+# break).
+_PINPOINT_HEAD = (
+    r"((?:[\w][\w./-]*/" + _LINE_BREAK + r")?[\w][\w./-]*" + _FILE_EXTENSIONS + r")"
+    r"(?:::([A-Za-z_][\w.]*))?(?:[ \t]+|" + _BREAK + r")"
 )
 # `path::Symbol #"text"` and `path #"text"`, quoted text on one source line.
-SUBSTRING_RE = re.compile(
-    r"([\w][\w./-]*\.(?:py|md|toml|ya?ml|json|html|csv|txt|cfg|ini))"
-    r"(?:::([A-Za-z_][\w.]*))?[ \t]+#\"([^\"\n]+)\"",
+SUBSTRING_RE = re.compile(_PINPOINT_HEAD + r'#"([^"\n]+)"')
+# A pinpoint whose opening quote runs to the end of its line: the quoted text was
+# wrapped across a line break, so `SUBSTRING_RE` never parses it.
+WRAPPED_PINPOINT_RE = re.compile(_PINPOINT_HEAD + r'#"([^"\n]*)$', re.MULTILINE)
+# A file path split after a `/` whose continuation is not a citation the scanner
+# joins (`file.py::Symbol`, or a path a `#"` pinpoint follows): the gate reads no
+# bare path, so a join has nothing to check, and the split hides the path from
+# every grep a rename sweep runs.
+WRAPPED_FILE_PATH_RE = re.compile(
+    r"([\w][\w./-]*/" + _LINE_BREAK + r"`*[\w][\w./-]*" + _FILE_EXTENSIONS + r")"
+    r"(?![\w/-])(?!`*::|(?:[ \t]+|" + _BREAK + r')#")',
 )
+
+# `spec-NNN Decision N` (also `spec-NNN-<stem>` and `Decisions`, either break
+# wrapped): the spec found by number must carry a `Decision N` heading.
+DECISION_RE = re.compile(
+    r"\b[Ss]pec-(\d{3})(?:-[\w-]*?\d+_\d+_\d+)?(?:\.md)?`*"
+    r"(?:[ \t]+|" + _BREAK + r")Decisions?(?:[ \t]+|" + _LINE_BREAK + r")(\d+[a-z]?)\b",
+)
+# A spec's decision heading at any level, its number then a dash, a colon or a
+# link's closing bracket: `### Decision 8: ...`, `## [Decision 7a - ...][ref]`.
+DECISION_HEADING_RE = re.compile(r"^#{1,6}[ \t]+\[?Decision[ \t]+(\d+[a-z]?)\b", re.MULTILINE)
+# Where a spec is found by number: the in-flight spec beside `docs/`, the archive.
+SPEC_FILE_GLOBS = ("docs/spec-{number}-*.md", "docs/SPECS/spec-{number}-*.md")
+RATIONALE_SUFFIX = "-rationale.md"
 
 # `--cited-by` reads standing docs but not the per-cycle artifacts that close with
 # their cycle or untracked scratch folders; the spec archive is read as gate corpus
@@ -204,6 +267,9 @@ PRUNED_DIRS = frozenset({"node_modules", "__pycache__", "htmlcov"})
 KIND_SYMBOL = "symbol"
 KIND_DUNDER = "dunder"
 KIND_SUBSTRING = "substring"
+KIND_WRAPPED_PINPOINT = "wrapped-pinpoint"
+KIND_WRAPPED_PATH = "wrapped-path"
+KIND_DECISION = "decision"
 
 
 class CitationCheckError(RuntimeError):
@@ -223,8 +289,51 @@ class Citation:
     @property
     def text(self) -> str:
         """Return the citation as it would be written in a source."""
+        if self.kind == KIND_DECISION:
+            return f"{self.cited} Decision {self.symbol}"
         base = f"{self.cited}::{self.symbol}" if self.symbol else self.cited
-        return f'{base} #"{self.substring}"' if self.substring is not None else base
+        if self.substring is None:
+            return base
+        closing = '"' if self.kind == KIND_SUBSTRING else ""
+        return f'{base} #"{self.substring}{closing}'
+
+
+@dataclass(frozen=True)
+class MalformedForm:
+    """A citation spelling no resolver can parse, reported as a finding wherever it occurs.
+
+    A malformed citation is a defect in the citing file whatever it cites, so it
+    fails in every corpus, upstream and absolute-path targets included.
+    """
+
+    kind: str
+    anchor: str
+    pattern: re.Pattern[str]
+    fix: str
+
+
+# Every form is scanned on every run, independent of `--substrings`. A form's
+# pattern captures the cited path, then the optional symbol and the text fragment
+# when the form has them, in that group order. Each form's anchor sits on the line
+# its match ends on or the one before.
+MALFORMED_FORMS = (
+    MalformedForm(
+        KIND_WRAPPED_PINPOINT,
+        '#"',
+        WRAPPED_PINPOINT_RE,
+        "the quoted text has no closing quote on its line, so the pinpoint is wrapped "
+        "across a line break and never resolved. Reflow the citing text so the whole "
+        "pinpoint sits on one line.",
+    ),
+    MalformedForm(
+        KIND_WRAPPED_PATH,
+        "/\n",
+        WRAPPED_FILE_PATH_RE,
+        "the path is split across a line break after a `/`, so no search for it finds "
+        "this citer. Reflow the citing text so the whole path sits on one line.",
+    ),
+)
+MALFORMED_KINDS = {form.kind: form for form in MALFORMED_FORMS}
 
 
 @dataclass(frozen=True)
@@ -535,6 +644,11 @@ def _inside_absolute_path(text: str, offset: int) -> bool:
     return start < offset and text[start] in "~/"
 
 
+def _joined(cited: str) -> str:
+    """Return ``cited`` with the line break of a path split after a ``/`` removed."""
+    return _LINE_BREAK_RE.sub("", cited).replace("`", "")
+
+
 def _line_of(text: str, offset: int) -> int:
     """Return the 1-based line number of ``offset`` in ``text``."""
     return text.count("\n", 0, offset) + 1
@@ -588,7 +702,7 @@ def iter_citation_records(text: str, *, substrings: bool = False) -> Iterator[Ci
 
     Yields:
         One ``Citation`` per checkable reference; upstream and family citations
-        are skipped.
+        are skipped. A ``MALFORMED_FORMS`` match is yielded whatever its target.
 
     """
     found: list[tuple[int, Citation]] = []
@@ -608,19 +722,48 @@ def iter_citation_records(text: str, *, substrings: bool = False) -> Iterator[Ci
         found.append(
             (match.start(), _symbol_citation(text, match.start(), match.group(1), match.group(2))),
         )
+    for match in _finditer_in(WRAPPED_COLON_RE, text, _scan_windows(text, "::", wrap=True)):
+        found.append(
+            (match.start(), _symbol_citation(text, match.start(), match.group(1), match.group(2))),
+        )
+    for match in _finditer_in(DECISION_RE, text, _scan_windows(text, "Decision", wrap=True)):
+        record = Citation(
+            _line_of(text, match.start()),
+            f"spec-{match.group(1)}",
+            match.group(2),
+            KIND_DECISION,
+        )
+        found.append((match.start(), record))
+    pinpoint_spans = _scan_windows(text, '#"', wrap=True)
     if substrings:
-        for match in _finditer_in(SUBSTRING_RE, text, _scan_windows(text, '#"', wrap=False)):
-            cited, symbol, substring = match.group(1), match.group(2), match.group(3)
+        for match in _finditer_in(SUBSTRING_RE, text, pinpoint_spans):
             record = Citation(
                 _line_of(text, match.start()),
-                cited,
-                symbol,
+                _joined(match.group(1)),
+                match.group(2),
                 KIND_SUBSTRING,
-                substring,
+                match.group(3),
+            )
+            found.append((match.start(), record))
+    for form in MALFORMED_FORMS:
+        spans = (
+            pinpoint_spans if form.anchor == '#"' else _scan_windows(text, form.anchor, wrap=True)
+        )
+        for match in _finditer_in(form.pattern, text, spans):
+            cited, symbol, fragment = (*match.groups(), None, None)[:3]
+            record = Citation(
+                _line_of(text, match.start()),
+                _joined(cited or ""),
+                symbol,
+                form.kind,
+                fragment,
             )
             found.append((match.start(), record))
     found.sort(key=lambda item: (item[0], item[1].kind == KIND_SUBSTRING))
     for offset, citation in found:
+        if citation.kind in MALFORMED_KINDS:
+            yield citation
+            continue
         if citation.cited.startswith(UPSTREAM_PREFIXES) or _inside_absolute_path(text, offset):
             continue
         if citation.kind != KIND_SUBSTRING and is_family(citation.symbol or ""):
@@ -639,8 +782,10 @@ def _symbol_citation(
 
 
 def iter_citations(text: str) -> Iterator[tuple[int, str, str]]:
-    """Yield ``(line number, cited path, symbol)`` for every checkable citation."""
+    """Yield ``(line number, cited path, symbol)`` for every checkable symbol citation."""
     for citation in iter_citation_records(text):
+        if citation.kind in MALFORMED_KINDS or citation.kind == KIND_DECISION:
+            continue
         yield citation.line, citation.cited, citation.symbol or ""
 
 
@@ -816,6 +961,112 @@ def _substring_outcome(
     )
 
 
+_DECISION_CACHE: dict[Path, frozenset[str]] = {}
+
+
+def spec_files(number: str) -> tuple[Path, ...]:
+    """Return the spec files numbered ``number``, rationale companions excluded."""
+    found = {
+        path
+        for pattern in SPEC_FILE_GLOBS
+        for path in REPO_ROOT.glob(pattern.format(number=number))
+        if path.is_file() and not path.name.endswith(RATIONALE_SUFFIX)
+    }
+    return tuple(sorted(found))
+
+
+def spec_decisions(path: Path) -> frozenset[str]:
+    """Return the ``N`` of every ``Decision N`` heading in the spec at ``path`` (cached)."""
+    cached = _DECISION_CACHE.get(path)
+    if cached is None:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        cached = frozenset(DECISION_HEADING_RE.findall(text))
+        _DECISION_CACHE[path] = cached
+    return cached
+
+
+def _decision_outcome(
+    citation: Citation,
+    relative: str,
+    source: Path,
+    corpus: Sequence[Path],
+    index: dict[str, tuple[Path, ...]],
+    *,
+    require_file: bool,
+) -> Outcome:
+    """Resolve one ``spec-NNN Decision N`` citation against the spec's headings."""
+    del source, corpus, index
+    number = citation.cited.removeprefix("spec-")
+    at = f"{relative}:{citation.line}: cites `{citation.text}` --"
+    specs = spec_files(number)
+    names = tuple(_relative(path) for path in specs)
+    if not specs:
+        message = None
+        if require_file:
+            message = f"{at} no spec-{number} under docs/ or docs/SPECS/."
+        return Outcome(
+            relative,
+            citation,
+            resolved=False,
+            violation=require_file,
+            target=None,
+            candidates=names,
+            message=message,
+        )
+    for path in specs:
+        if citation.symbol in spec_decisions(path):
+            return Outcome(
+                relative,
+                citation,
+                resolved=True,
+                violation=False,
+                target=_relative(path),
+                candidates=names,
+            )
+    headings = sorted(
+        {decision for path in specs for decision in spec_decisions(path)},
+        key=lambda decision: (int(decision.rstrip(string.ascii_lowercase)), decision),
+    )
+    carries = (
+        f"it carries Decision {', '.join(headings)}"
+        if headings
+        else "it has no numbered `Decision N` heading"
+    )
+    return Outcome(
+        relative,
+        citation,
+        resolved=False,
+        violation=True,
+        target=None,
+        candidates=names,
+        message=f"{at} `{names[0]}` has no `Decision {citation.symbol}` heading; {carries}.",
+    )
+
+
+def _malformed_outcome(
+    citation: Citation,
+    relative: str,
+    source: Path,
+    corpus: Sequence[Path],
+    index: dict[str, tuple[Path, ...]],
+    *,
+    require_file: bool,
+) -> Outcome:
+    """Report one ``MALFORMED_FORMS`` match: a violation in every corpus."""
+    del corpus, require_file
+    names = tuple(_relative(path) for path in candidate_files(citation.cited, source, index))
+    form = MALFORMED_KINDS[citation.kind]
+    return Outcome(
+        relative,
+        citation,
+        resolved=False,
+        violation=True,
+        target=None,
+        candidates=names,
+        message=f"{relative}:{citation.line}: cites `{citation.text}` -- {form.fix}",
+    )
+
+
 def evaluate_source(
     source: Path,
     corpus: Sequence[Path],
@@ -845,7 +1096,11 @@ def evaluate_source(
         text = source.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as error:
         raise CitationCheckError(f"{relative}: {error}") from error
-    resolve = {KIND_SUBSTRING: _substring_outcome}
+    resolve = {
+        KIND_SUBSTRING: _substring_outcome,
+        KIND_DECISION: _decision_outcome,
+        **dict.fromkeys(MALFORMED_KINDS, _malformed_outcome),
+    }
     return [
         resolve.get(citation.kind, _symbol_outcome)(
             citation,

@@ -40,6 +40,8 @@ Terms this spec relies on (statuses per [`docs/GLOSSARY.md`][glossary]):
   [Plan cache][glossary-plan-cache],
   [Strictness mode][glossary-strictness-mode] — the subsystem whose request-context seam
   the policy mirrors.
+- [`DjangoSchema`][glossary-djangoschema] — the schema class that resolves the policy once
+  at construction and builds the enforcement extension into every operation's chain.
 - [`ConfigurationError`][glossary-configurationerror] — the typed construction-time
   failure for an invalid bound.
 - [`SerializerMutation`][glossary-serializermutation],
@@ -1561,6 +1563,7 @@ is in the [rationale][rationale].*
 [glossary-djangonodesfield]: ../GLOSSARY.md#djangonodesfield
 [glossary-djangooptimizerextension]: ../GLOSSARY.md#djangooptimizerextension
 [glossary-djangoresourcepolicyextension]: ../GLOSSARY.md#djangoresourcepolicyextension
+[glossary-djangoschema]: ../GLOSSARY.md#djangoschema
 [glossary-execution-resource-policy]: ../GLOSSARY.md#execution-resource-policy
 [glossary-filter_input_type]: ../GLOSSARY.md#filter_input_type
 [glossary-filterset]: ../GLOSSARY.md#filterset

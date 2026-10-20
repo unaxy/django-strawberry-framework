@@ -351,7 +351,7 @@ def _scalar_from_form_field(form_field: object) -> OptionalWidenable:
 def _scalar_from_model_field(model_field: ModelField | None) -> OptionalWidenable:
     """Map a Django model field to its scalar via the shared ``SCALAR_MAP`` lookup.
 
-    Delegates to ``types.converters.scalar_for_field`` -- a LOCAL import, to
+    Delegates to ``types/converters.py::scalar_for_field`` -- a LOCAL import, to
     avoid the top-level cycle through ``converters`` (same pattern as
     ``_choice_enum_from_filter``) -- so a filter input and the selected
     ``DjangoType`` field resolve a column to the SAME GraphQL scalar, including
@@ -436,7 +436,7 @@ def _choice_enum_from_filter(
     Django ``Choices``-derived enum raises ``ConfigurationError``
     (the consumer is expected to wrap the choices through the existing
     converter pipeline). When the underlying model field is available
-    the pipeline at ``types.converters.convert_choices_to_enum`` is
+    the pipeline at ``types/converters.py::convert_choices_to_enum`` is
     consulted so the GraphQL enum is shared with any sibling
     ``DjangoType`` reading the same column.
 

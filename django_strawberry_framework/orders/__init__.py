@@ -53,9 +53,8 @@ def _order_input_annotation(orderset_class: object, *, helper_spelling: str) -> 
     # spec-028 Decision 11 consumer-helper body shared with ``filters/__init__.py::
     # _filter_input_annotation`` via ``utils/inputs.py::build_lazy_input_annotation``
     # The return is the **element type** -- consumers wrap as
-    # ``list[OrderInput[MyOrder]] | None``. The shared helper preserves the
-    # ForwardRef-wrapped ``Annotated[<runtime str>, strawberry.lazy(...)]``
-    # form ``LazyType.resolve_type`` requires.
+    # ``list[OrderInput[MyOrder]] | None``. The shared helper returns the
+    # ``strawberry.LazyType`` that resolves under deferred annotations too.
     return build_lazy_input_annotation(
         orderset_class,
         expected_base=OrderSet,
@@ -68,18 +67,19 @@ def _order_input_annotation(orderset_class: object, *, helper_spelling: str) -> 
 
 
 def order_input_type(orderset_class: type[OrderSet]) -> object:
-    """Return the ``Annotated[...]`` forward-reference for an orderset's input class.
+    """Return the ``strawberry.LazyType`` naming an orderset's generated input class.
 
-    The returned annotation is the canonical Strawberry forward-
-    reference idiom for the **element type** of an order argument:
-    ``Annotated["<Name>OrderInputType", strawberry.lazy("django_strawberry_framework.orders.inputs")]``.
+    The returned annotation is the lazy reference Strawberry itself
+    resolves a ``strawberry.lazy(...)`` annotation into, for the
+    **element type** of an order argument:
+    ``strawberry.LazyType("<Name>OrderInputType", "django_strawberry_framework.orders.inputs")``.
     Per spec-028, consumers wrap the helper's return as
     ``list[order_input_type(MyOrder)] | None`` at the resolver site so
     the GraphQL argument shape is ``orderBy: [MyOrderInputType!]``
     (list-of-non-null per spec-028 Decision 5).
 
-    Strawberry collects the annotation at ``@strawberry.type``
-    decoration time, defers resolution, and resolves it via
+    The annotation works eagerly or under ``from __future__ import
+    annotations``; Strawberry resolves it via
     ``LazyType.resolve_type`` at schema-build time -- by which point
     ``finalize_django_types()`` has materialized the input class as a
     module global of ``django_strawberry_framework.orders.inputs``.

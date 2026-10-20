@@ -309,6 +309,53 @@ def test_delete_users_all_mode_wipes_non_superusers() -> None:
 
 
 # ---------------------------------------------------------------------------
+# seed_cascade_split
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_seed_cascade_split_builds_the_fixed_privacy_split() -> None:
+    """Only the two categories differ in privacy; each entry's hops land as documented.
+
+    The cascade live tests read meaning off this shape: the private category is the
+    only private row, the control chain sits wholly under the public category, and
+    each mixed-edge entry crosses into the private category through exactly one hop.
+    """
+    rows = services.seed_cascade_split()
+
+    assert Category.objects.count() == 2
+    assert Property.objects.count() == 2
+    assert Item.objects.count() == 2
+    assert Entry.objects.count() == 4
+    assert list(Category.objects.filter(is_private=True)) == [rows["private_cat"]]
+    assert not Property.objects.filter(is_private=True).exists()
+    assert not Item.objects.filter(is_private=True).exists()
+    assert not Entry.objects.filter(is_private=True).exists()
+
+    private_cat = rows["private_cat"]
+    public_cat = rows["public_cat"]
+    assert rows["priv_prop"].category == private_cat
+    assert rows["pub_prop"].category == public_cat
+    assert rows["item_under_private"].category == private_cat
+    assert rows["item_under_public"].category == public_cat
+
+    hops = {
+        name: (entry.item.category, entry.property.category)
+        for name, entry in rows.items()
+        if isinstance(entry, Entry)
+    }
+    assert hops == {
+        "entry_under_private": (private_cat, private_cat),
+        "entry_under_public": (public_cat, public_cat),
+        "entry_via_private_item": (private_cat, public_cat),
+        "entry_via_private_property": (public_cat, private_cat),
+    }
+    for entry in Entry.objects.select_related("item__category", "property__category"):
+        role = entry.value.removeprefix("zzz_")
+        assert (entry.item.category, entry.property.category) == hops[role], role
+
+
+# ---------------------------------------------------------------------------
 # Named fixture helpers
 # ---------------------------------------------------------------------------
 

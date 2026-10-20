@@ -52,10 +52,18 @@ depends on:
   a consumer ``.values("name")`` / ``.values_list(...)`` projection (or a
   ``ForeignKey(to_field=...)`` edge fed a pk projection) cannot compare the
   wrong column.
-- **One database.** The root call pins ``queryset.db``; every nested cascade
-  application and every hook return must stay on that alias, raising
-  ``ConfigurationError`` before Django would attempt (or silently mis-compose)
-  a cross-database subquery.
+- **One database.** The root alias is the root queryset's EXPLICIT alias (its
+  ``.using(...)`` routing, or the active write pipeline's alias), never the
+  router's answer to ``queryset.db``: each ``__in`` subquery compiles inline on
+  whatever connection the outer query finally runs on, and Django refuses only
+  an inner query whose explicit alias differs from that connection. A pinned
+  root seeds every edge base on its alias; an unrouted root (``None``) seeds
+  every edge base unrouted, so the subqueries follow the outer query wherever
+  it is bound later (a ``Prefetch`` child moved onto its parent's shard).
+  Every nested cascade application and every hook return must carry that same
+  explicit alias -- under an unrouted root, an explicitly ``.using(...)``-routed
+  one is off-alias -- raising ``ConfigurationError`` before Django would refuse
+  the cross-database subquery at fetch time.
 - **MTI parent links cascade.** The auto-generated ``<parent>_ptr``
   ``OneToOneField(parent_link=True)`` is a real single-column concrete forward
   edge; a child row whose MTI parent the parent type hides is dropped
@@ -102,6 +110,7 @@ from django.db.models.fields.reverse_related import ForeignObjectRel
 from .exceptions import ConfigurationError
 from .registry import registry
 from .utils import truth
+from .utils._queryset_private import queryset_db
 
 # ``apply_type_visibility_sync`` runs a target's ``get_queryset`` and rejects an
 # async hook with ``SyncMisuseError`` (the coroutine closed first); the cascade
@@ -158,8 +167,10 @@ _ASYNC_RECOURSE = (
 class _TraversalState:
     """Immutable per-walk traversal state carried by the ``ContextVar``.
 
-    ``alias`` is the root call's resolved DB alias (``queryset.db``) -- every
-    nested application and hook return is validated against it. ``active`` is
+    ``alias`` is the root call's explicit DB alias (the sealed root's ``_db``
+    or the write pipeline's alias; ``None`` for an unrouted root) -- every edge
+    base is seeded on it and every nested application and hook return is
+    validated against it. ``active`` is
     the ordered tuple of in-flight ``DjangoType`` classes; re-entry into a
     member raises the fail-closed cycle error. ``path`` is the ordered
     ``"TypeName.edge"`` frame tuple rendering the path-rich cycle message.
@@ -168,7 +179,7 @@ class _TraversalState:
     leak into a sibling frame.
     """
 
-    alias: str
+    alias: str | None
     active: tuple[type[DjangoType], ...]
     path: tuple[str, ...]
 
@@ -231,7 +242,7 @@ def _is_unsupported_forward_edge(field: ModelField) -> bool:
     (they do not select a parent row's single target) and stay skippable.
     """
     return (
-        getattr(field, "is_relation", False)
+        field.is_relation
         and not isinstance(field, ForeignObjectRel)
         and not field.many_to_many
         and not field.one_to_many
@@ -395,7 +406,7 @@ def _root_error_renderer(
 def _edge_error_renderer(
     target_type: type[DjangoType],
     field: ForeignKeyField,
-    alias: str,
+    alias: str | None,
 ) -> Callable[[str, str], str]:
     """Build the cascade's error renderer for the shared visibility boundary.
 
@@ -455,8 +466,8 @@ def _edge_error_renderer(
                 "alias": (
                     f"{name}.get_queryset returned a queryset on alias "
                     f"{detail!r} for the cascade subquery on "
-                    f"{edge}, but the cascade is pinned to "
-                    f"{alias!r}; a cascade cannot compose cross-database subqueries."
+                    f"{edge}, but {_root_alias_phrase(alias)}; a cascade cannot "
+                    f"compose cross-database subqueries."
                 ),
             },
             (code, detail),
@@ -483,7 +494,7 @@ def _validated_target_subquery(
     re-projection-specific (``sliced`` refused; a combinator rewritten to its
     primary-key set, or refused as ``combined`` when that set would change its
     rows): by the time a return reaches this function it is a real ``QuerySet``
-    on the target's concrete table, pinned to the root alias, unsliced, and
+    on the target's concrete table, on the root's explicit alias, unsliced, and
     never a combinator. What stays
     cascade-local is the RE-PROJECTION battery, the rejections with no boundary
     analogue because they exist only because this function calls
@@ -549,6 +560,16 @@ def _validated_target_subquery(
     return target_qs.values(attname)
 
 
+def _root_alias_phrase(alias: str | None) -> str:
+    """Describe the cascade root's explicit alias for an off-alias error."""
+    if alias is None:
+        return (
+            "the root cascade is unrouted, so its subqueries compile on whichever "
+            "database the outer query runs on and must stay unrouted too"
+        )
+    return f"the root cascade is pinned to {alias!r}"
+
+
 def _cycle_error(state: _TraversalState, cls: type[DjangoType]) -> ConfigurationError:
     """Build the path-rich fail-closed cycle error for re-entry into ``cls``."""
     path = " -> ".join((*state.path, truth.name(cls)))
@@ -572,8 +593,9 @@ def apply_cascade_permissions(
     model single-column concrete forward FK / OneToOne edges (MTI parent links
     included), resolves each edge's target type through the registry primary
     lookup, runs that type's ``get_queryset`` against the target model's
-    ``_default_manager`` rows (pinned to the root call's resolved DB alias --
-    identity hooks included, so a filtered default manager still narrows), and
+    ``_default_manager`` rows (seeded on the root call's explicit DB alias, or
+    unrouted under an unrouted root -- identity hooks included, so a filtered
+    default manager still narrows), and
     intersects ``Q(<edge>__in=<visible>)`` (plus ``| Q(<edge>__isnull=True)``
     when the edge is nullable) into ``queryset``. Edges whose target model has
     no registered type are skipped -- there is no visibility policy to apply.
@@ -603,9 +625,11 @@ def apply_cascade_permissions(
             relation; a full walk over a model carrying an unsupported forward
             relation (``GenericForeignKey`` / ``ForeignObject`` -- preflighted before
             any hook runs); a cascade cycle (fail-closed, path-rich); a nested
-            application or a hook return EXPLICITLY routed off the root DB
-            alias (an unrouted hook return is repinned onto it -- the shared
-            visibility boundary's alias contract); a hook return that is not
+            application or a hook return EXPLICITLY routed off the root's
+            explicit DB alias, including any explicitly routed one under an
+            unrouted root (an unrouted hook return under a pinned root is
+            repinned onto it -- the shared visibility boundary's alias
+            contract); a hook return that is not
             an unsliced, ungrouped, non-``distinct(...)``,
             non-column-shadowing queryset (a ``Manager`` is coerced through
             ``.all()``) over the edge target's concrete table.
@@ -628,7 +652,7 @@ def apply_cascade_permissions(
     # a ``.values()`` root is supported input, a sliced root (which ``.filter(...)``
     # cannot narrow) is rejected by the seal itself rather than by a second battery
     # after it, and a combined root arrives as its primary-key set, which it can.
-    queryset, _required_alias = _prepared_visibility_source(
+    queryset, root_alias = _prepared_visibility_source(
         cls,
         queryset,
         render_error=_root_error_renderer(cls, model),
@@ -650,14 +674,17 @@ def apply_cascade_permissions(
 
     state = _cascade_state.get()
     if state is None:
-        state = _TraversalState(alias=queryset.db, active=(cls,), path=())
+        # The EXPLICIT alias, never ``queryset.db``: an unrouted root's router
+        # answer here is not where the composed query runs once a caller (a
+        # ``Prefetch`` onto a sharded parent) binds it, and a subquery pinned
+        # to that answer would be refused there as cross-database.
+        state = _TraversalState(alias=root_alias, active=(cls,), path=())
     else:
-        if queryset.db != state.alias:
+        if root_alias != state.alias:
             raise ConfigurationError(
                 f"apply_cascade_permissions nested walk for {truth.name(cls)} runs on "
-                f"alias {queryset.db!r} but the root cascade is pinned to "
-                f"{state.alias!r}; a cascade cannot compose cross-database "
-                f"subqueries.",
+                f"alias {root_alias!r} but {_root_alias_phrase(state.alias)}; a cascade "
+                f"cannot compose cross-database subqueries.",
             )
         # Identity scan, not ``in``: ``state.active`` is a chain of class objects, and
         # ``tuple.__contains__`` would dispatch a consumer metaclass ``__eq__``.
@@ -721,6 +748,14 @@ def _walk(
             )
         finally:
             _cascade_state.reset(edge_token)
+        # The seal repins an unrouted return onto a pinned root and refuses a
+        # divergent one; under an unrouted root it keeps the hook's own routing,
+        # which an inline subquery cannot honor, so refuse it here.
+        routed = queryset_db(target_qs)
+        if state.alias is None and routed is not None:
+            raise ConfigurationError(
+                _edge_error_renderer(target_type, field, state.alias)("alias", routed),
+            )
         subquery = _validated_target_subquery(target_type, target_qs, field)
         condition = Q(**{f"{field.name}__in": subquery})
         if field.null:

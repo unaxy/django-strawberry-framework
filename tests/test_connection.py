@@ -1802,7 +1802,7 @@ def test_apply_connection_optimization_short_circuits_without_optimizer() -> Non
     ``active_optimizer()`` returns ``None`` and the helper short-circuits
     (``spec-030-connection_field-0_0_9`` Decision 11).
     """
-    node = _make_node_type("P3aNode", total_count=None)
+    node = _make_node_type("NoOptimizerNode", total_count=None)
     qs = Category.objects.all()
     assert apply_connection_optimization(node, qs, make_info()) is qs
 
@@ -2175,7 +2175,7 @@ def test_connection_async_seal_rejects_a_sliced_apply_async_result(
 
 def test_clear_connection_type_cache_empties_the_cache() -> None:
     """``clear_connection_type_cache`` drops the generated-connection-class cache."""
-    node_type = _make_node_type("P3bDirectNode", total_count=True)
+    node_type = _make_node_type("CacheClearDirectNode", total_count=True)
     _connection_type_for(node_type, node_type.__django_strawberry_definition__)
     assert _connection_type_cache
     clear_connection_type_cache()
@@ -2184,7 +2184,7 @@ def test_clear_connection_type_cache_empties_the_cache() -> None:
 
 def test_registry_clear_also_clears_connection_type_cache() -> None:
     """``registry.clear()`` resets the connection-type cache too."""
-    node_type = _make_node_type("P3bRegistryNode", total_count=True)
+    node_type = _make_node_type("CacheClearRegistryNode", total_count=True)
     _connection_type_for(node_type, node_type.__django_strawberry_definition__)
     assert _connection_type_cache
     registry.clear()

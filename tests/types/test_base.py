@@ -34,7 +34,7 @@ from typing import NoReturn
 import pytest
 import pytest_django
 import strawberry
-from apps.library.models import Patron
+from apps.library.models import Patron, PatronProfile
 from apps.products.models import Category, Entry, Item, Property
 from apps.scalars.models import MediaSpecimen
 from django.db import models
@@ -2600,6 +2600,26 @@ def test_override_relay_suppressed_pk_raises() -> None:
                 fields = ("id", "name")
                 interfaces = (relay.Node,)
                 required_overrides = ("id",)
+
+
+def test_override_relay_relation_pk_reports_relay_reason() -> None:
+    """A relation pk on a Relay-shaped type raises with the Relay reason, not the relation one.
+
+    ``PatronProfile`` is keyed by its ``OneToOneField(primary_key=True)`` to ``Patron``, so
+    ``patron`` is both the Relay-Node-suppressed pk and a relation field; the Relay-pk check
+    runs first (Decision 8 rule e).
+    """
+    with pytest.raises(ConfigurationError, match="Relay-Node-suppressed pk") as excinfo:
+
+        @definition_raises
+        class PatronProfileNodeOverride(DjangoType):
+            class Meta:
+                model = PatronProfile
+                fields = ("patron", "postal_code")
+                interfaces = (relay.Node,)
+                nullable_overrides = ("patron",)
+
+    assert "relation field" not in str(excinfo.value)
 
 
 def test_override_both_sets_collision_raises() -> None:

@@ -104,6 +104,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 _M = TypeVar("_M", bound="models.Model")
+_RowT = TypeVar("_RowT")
 _O = TypeVar("_O")
 
 
@@ -706,6 +707,40 @@ def deferred_loading_of(queryset: object) -> tuple[frozenset[str], bool] | None:
         return frozenset(require(name, is_str) for name in list_of(field_set)), bool(defer_flag)
     except (TypeError, ValueError):
         return None
+
+
+def _extend_only_projection(
+    child_queryset: QuerySet[_M, _RowT],
+    attnames: tuple[str, ...],
+) -> QuerySet[_M, _RowT]:
+    """Ensure ``attnames`` load under an existing ``.only()`` / ``.defer()`` projection.
+
+    The keyset cursor-column loader: a keyset page mints edge cursors from
+    the rows' ordering-column VALUES, so those columns must survive the
+    ``.only()`` mask even when the query never selects them as GraphQL
+    fields. Django's ``.only()`` chaining REPLACES the load-only set, so the
+    extension re-applies the UNION read through the shared
+    ``deferred_loading_of`` unpack. A ``.defer()`` mask needs the inverse:
+    clear it, then re-apply every deferred field EXCEPT the cursor columns.
+    Otherwise cursor minting lazy-loads once per edge in sync execution and
+    raises ``SynchronousOnlyOperation`` in async execution.
+    """
+    loading = deferred_loading_of(child_queryset)
+    if loading is None:
+        return child_queryset
+    names, defer_flag = loading
+    if defer_flag:
+        remaining = sorted(set(names) - set(attnames))
+        if len(remaining) == len(names):
+            return child_queryset
+        cleared = child_queryset.defer(None)
+        return cleared.defer(*remaining) if remaining else cleared
+    if not names:
+        return child_queryset
+    missing = [attname for attname in attnames if attname not in names]
+    if not missing:
+        return child_queryset
+    return child_queryset.only(*names, *missing)
 
 
 def _projection_aliases(entry: str, model: type[models.Model] | None) -> set[str]:
@@ -2238,7 +2273,12 @@ def _lookup_paths_from_parts(
 
 
 def _prefetch_lookup_paths(entries: Iterable[PrefetchLookup], prefix: str = "") -> set[str]:
-    """Recursively flatten prefetch strings and nested ``Prefetch`` objects."""
+    """Recursively flatten prefetch strings and nested ``Prefetch`` objects.
+
+    Unlike ``runtime_path_from_path`` the recursion carries no depth cap: its
+    input is consumer-authored ``Prefetch`` objects, finite and unreachable from
+    the wire, whereas that sibling walks the wire-derived ``info.path``.
+    """
     paths: set[str] = set()
     for entry in entries:
         if isinstance(entry, str):

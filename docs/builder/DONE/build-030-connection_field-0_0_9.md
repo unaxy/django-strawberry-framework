@@ -194,7 +194,7 @@ section records `None`.
 - **The terms-CSV `notes` content half.** 12 drifted cells reconciled by the integration pass, and
   the parser bug behind them fixed: `csv.DictReader` — used by both `check_spec_glossary.py` and
   the fakeshop `import_spec_terms` command — was silently truncating 8 of 50 `notes` cells at the
-  first unquoted comma. Post-fix 0 of 50 truncate. The **gate** half stays open below.
+  first unquoted comma. Post-fix 0 of 50 truncate.
 - **The `DONE-032-0.0.9` parity row**, the `finalize_django_types()` auto-trigger deferral, and the
   unused `[goal]` link definition — all resolved in the integration pass against four independent
   sources apiece.
@@ -210,27 +210,11 @@ section records `None`.
 
 ### Open — homed on `TODO-ALPHA-052-0.0.16` as scope bullets
 
-- **MF-1** — the three `030` glossary entries never say `totalCount` gating is directive-resolved
-  (`optimizer/selections.py::should_include`). DB-backed regenerate.
-- **MF-2 + MF-3 + MF-7 are ONE maintainer decision, not three** — the keyset / `Meta.cursor_field`
-  feature is missing all three of its documentation homes: no owning spec, no glossary heading, no
-  CHANGELOG entry. The surface is real (`ALLOWED_META_KEYS`, two-stage validation, 31 occurrences
-  in `keyset.py`, four `GraphQLError` raise sites in `connection.py`).
-- **MF-4** — the already-sliced-`QuerySet` `GraphQLError` is undocumented in both `CHANGELOG.md` and
-  `docs/GLOSSARY.md`, under five tested spellings.
-- **MF-5's gate half** — `check_spec_glossary.py` validates only `term,anchor` and never reads
-  `notes`, so that column can assert arbitrary statuses indefinitely. One decision: either `notes`
-  is contract text and needs a gate, or it is scratch and must stop asserting statuses.
 - **MF-6** — stale `docs/spec-…` paths inside kanban card **bodies**, re-derived materially wider
   than recorded: 8 archived specs at 11 occurrences across 8 cards, against 154 correct
   `docs/SPECS/` occurrences. **The fix needs a three-way classification, never a global replace** —
   six further tokens must NOT be swept, three naming specs that do not exist yet (correct-in-advance
   under `AGENTS.md` rule 26) and three pre-canonical historical names.
-- **The archive-wide inline-link-TEXT rot**, which a resolution-based checker structurally cannot
-  find: the definitions resolve while the visible text names the pre-archival path. The same
-  archival sweep produced every archived spec.
-- **The rationale-companion coverage gap** — closing `030`'s hole makes `031` the leading edge of a
-  21-spec gap (`031`-`043`, `049`-`055`, `063`); two specs carry no terms CSV either.
 
 ### Open — method notes, preserved outside the board
 

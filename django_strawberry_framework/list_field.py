@@ -1551,10 +1551,10 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
     A ``DjangoListField`` provides ordered-offset paging, NOT stable or repeatable
     pagination. An active order fixes the sort expression, not which of two tied rows
     falls on either side of a page boundary. Unlike Relay connection fields, which
-    close the order with a primary-key tiebreaker, flat lists inject no tiebreaker
-    and no ``DISTINCT``. Consumers wanting
-    deterministic pagination across pages with duplicate values must add a unique
-    final term to the ordering themselves.
+    make their order total (appending a primary-key tiebreaker unless the order
+    already ends in a unique column), flat lists inject no tiebreaker and no
+    ``DISTINCT``. Consumers wanting deterministic pagination across pages with
+    duplicate values must add a unique final term to the ordering themselves.
 
     Non-zero offset precondition:
     A published ``offset`` argument is a runtime precondition rather than a per-field
@@ -1601,13 +1601,12 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
     # "Async-detection asymmetry - intentional, not a harmonization candidate"):
     # ``_default`` reads the operation's executor per call
     # (``utils/execution_mode.py::async_execution``) so the same factory output
-    # dispatches correctly under both ``schema.execute_sync``
-    # and ``await schema.execute``. The consumer-wrapper branch below commits
-    # per-construction via ``is_async_callable(user_resolver)`` (the
-    # ``__call__``/``functools.partial``-aware superset of
-    # ``inspect.iscoroutinefunction``) because Strawberry inspects the resolver
-    # signature once at schema
-    # construction and freezes the sync-vs-async handling.
+    # dispatches correctly under both ``schema.execute_sync`` and
+    # ``await schema.execute``. The consumer-wrapper branch below commits
+    # per-construction via ``is_async_callable(user_resolver)`` (contract in
+    # ``utils/typing.py::is_async_callable``) because Strawberry inspects the
+    # resolver signature once at schema construction and freezes the
+    # sync-vs-async handling.
     #
     # That commitment is per-RESOLVER, not per-request, so the sync wrapper is
     # the one that runs when a sync consumer resolver is executed inside an

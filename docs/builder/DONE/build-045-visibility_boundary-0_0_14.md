@@ -54,12 +54,10 @@ Sequential rounds, so each round owns every file it writes and no two rounds run
 
 ## Checklist
 
-- [ ] R1: Rationale extraction + spec/code reconciliation -> `docs/builder/bld-045-r1-rationale_reconciliation.md`
-- [ ] R1b: Expression-owned bound-payload retention (code) -> `docs/builder/bld-045-r1b-bound_payload_retention.md`
-- [ ] R2: Documentation completion (glossary bodies, terms CSV, card body, standing-doc claims) -> `docs/builder/bld-045-r2-doc_completion.md`
-- [ ] R3: Spec archive to `docs/SPECS/` + companions to `docs/SPECS/appx/` + cross-reference sweep -> `docs/builder/bld-045-r3-spec_archive.md`
-- [ ] Cross-round integration pass -> `docs/builder/bld-045-integration.md`
-- [ ] Final test-run gate -> `docs/builder/bld-045-final.md`
+- [x] R1: Rationale extraction + spec/code reconciliation -> `docs/builder/bld-045-r1-rationale_reconciliation.md`
+- [x] R1b: Expression-owned bound-payload retention (code) -> `docs/builder/bld-045-r1b-bound_payload_retention.md`
+- [x] R2: Documentation completion (glossary bodies, terms CSV, card body, standing-doc claims) -> `docs/builder/bld-045-r2-doc_completion.md`
+- [x] R3: Spec archive to `docs/SPECS/` + companions to `docs/SPECS/appx/` + cross-reference sweep -> `docs/builder/bld-045-r3-spec_archive.md`
 
 ## Worker-0 pre-dispatch verification (`BUILD.md` `### Worker 0 verifies every finding against source before dispatching`)
 

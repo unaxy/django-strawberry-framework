@@ -291,15 +291,7 @@ Django / Strawberry / channels integration seam was opened and no floor run was 
 claim in this cycle rests on an unrun gate, and the shared `.venv` was never installed into,
 downgraded, or otherwise mutated. The floor read from `docs/builder/BUILD.md` and never from
 memory: Django 5.2.16 on Python 3.10 with strawberry-graphql 0.316.0. The shared `.venv` is not
-the floor; it read `channels 4.3.2`, `daphne 4.2.2`, `django 6.1`, `strawberry-graphql 0.324.0`,
-and that reading is load-bearing for the dependency finding now on the boundary-hardening card.
+the floor; it read `channels 4.3.2`, `daphne 4.2.2`, `django 6.1`, `strawberry-graphql 0.324.0`.
 
 **Hot-path budget: scope `none`**, for the same reason — no serialization point, no lock, no extra
 pass over a result set, no per-item work, because no executable code changed.
-
-**Deferred work catalog: superseded, all four items homed on the board.** The dependency decision
-and its parallel sites went to the boundary-hardening / DRY-squeeze card, which owns the
-dependency-group and extras surface; the two card-id populations and the `-terms.csv` `notes`
-ruling went to the alpha documentation-debt card. The catalog itself carried two count errors,
-both corrected before it was retired: a phrase count reported as a claim count, and an inverted
-statement of which `pyproject.toml` row the classifier comment belongs to.

@@ -1,6 +1,6 @@
 """Shared connection contracts for sidecars, fetch modes, offset cursors, windows, and page bounds.
 
-A cycle-safe home for three correctness contracts that the optimizer planner
+A cycle-safe home for four correctness contracts that the optimizer planner
 (``optimizer/walker.py``) and the Relay resolver (``connection.py``) must spell
 IDENTICALLY, or optimizer-on and optimizer-off behavior can split:
 
@@ -32,6 +32,11 @@ IDENTICALLY, or optimizer-on and optimizer-off behavior can split:
   edit: ``connection_sidecar_inputs_from_kwargs`` returns a NAMED pair and
   every caller destructures it, so a third member is a deliberate signature
   change that surfaces at each consumer instead of being silently absorbed.
+* The window ``to_attr`` grammar (``relation_connection_to_attr``) - the
+  planner lands a nested connection's window rows on the attribute it names,
+  and the resolver probes the parent for that same attribute; a spelling the
+  two disagree on reads as an unplanned connection and silently falls back
+  per parent.
 
 This module depends on neither ``connection.py`` nor ``optimizer/walker.py`` so
 both can import it without a cycle. Plan-time argument coercion (an inline Int
@@ -56,6 +61,7 @@ from strawberry.relay.utils import SliceMetadata, from_base64, to_base64
 from django_strawberry_framework.exceptions import DjangoStrawberryFrameworkError, OptimizerError
 from django_strawberry_framework.resource_policy import effective_bound, policy_from_info
 
+from .errors import PAGINATION_INVALID_ERROR_CODE, coded_error_extensions
 from .input_values import UNSET, is_inactive_value
 from .typing import schema_config_from_info
 
@@ -98,27 +104,38 @@ NEXT_PAGE_PROBE_ROWS = 1
 # basedpyright: ``GraphQLError.__init__`` calls ``super().__init__(message)``, which reaches
 # ``BaseException.__init__`` through the package base (it defines no ``__init__``)
 class PaginationArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyright: ignore[reportUnsafeMultipleInheritance]
-    """An offset cursor or a connection page size was invalid.
+    """A connection's pagination argument was invalid.
 
-    Two rejections raise it: an offset ``after`` / ``before`` cursor that
-    ``decode_offset_cursor`` does not accept, and a negative or over-cap
-    ``first`` / ``last`` that ``assert_relay_pagination_bound`` refuses on an
-    offset page, a keyset page or a planned window. A keyset (``Meta.cursor_field``)
-    cursor is not one of them: its rejection is the keyset codec's own
-    ``GraphQLError`` (``keyset.py::_invalid_cursor_error``), with its own wording.
+    Four rejections raise it: an offset ``after`` / ``before`` cursor that
+    ``decode_offset_cursor`` does not accept, a negative or over-cap ``first`` /
+    ``last`` that ``assert_relay_pagination_bound`` refuses on an offset page, a
+    keyset page or a planned window, a keyset (``Meta.cursor_field``) cursor that
+    ``keyset.py::decode_keyset_cursor`` refuses, and ``first`` supplied together
+    with ``last`` (``connection.py::_guard_first_and_last``).
 
     Dual-inherits ``GraphQLError`` (so the rejection travels the wire as the
     field's own error entry, which the production error policy treats as a
     deliberate client-facing statement) and ``DjangoStrawberryFrameworkError``
     (so consumers can catch it alongside any other framework error). The
-    ``ListArgumentError`` precedent, without ``extensions``: the message is
-    Strawberry's own ``SliceMetadata.from_arguments`` wording, byte for byte, so
-    one invalid page size gets one message on every path.
+    ``ListArgumentError`` precedent: every instance carries
+    ``extensions={"code": "PAGINATION_INVALID"}``
+    (``utils/errors.py::PAGINATION_INVALID_ERROR_CODE``), set here so no raise
+    site spells it, and a client branches on the code rather than the prose. The
+    offset-cursor and page-size messages are Strawberry's own
+    ``SliceMetadata.from_arguments`` wording, byte for byte, so one invalid page
+    size gets one message on every path.
 
     Raised only where the package validates an argument, never by catching an
     exception and re-raising its text: an exception from a consumer source or
     from row hydration is not a pagination statement, so the policy masks it.
     """
+
+    def __init__(self, message: str) -> None:
+        """Build the rejection with ``message`` and the pagination error code."""
+        super().__init__(
+            message,
+            extensions=coded_error_extensions(PAGINATION_INVALID_ERROR_CODE),
+        )
 
 
 class UnwindowableConnection(Exception):  # noqa: N818 - control-flow signal, not a surfaced error
@@ -227,6 +244,24 @@ def has_connection_sidecar_kwargs(kwargs: Mapping[str, object] | None) -> bool:
     """
     filter_input, order_by_input = connection_sidecar_inputs_from_kwargs(kwargs)
     return has_connection_sidecar_input(filter_input=filter_input, order_by_input=order_by_input)
+
+
+def relation_connection_to_attr(relation_field_name: str, response_key: str | None = None) -> str:
+    """Return the package-reserved ``to_attr`` a relation connection window lands on.
+
+    The one owner of the ``_dst_<field>..._connection`` attribute grammar, which
+    the planner writes (the ``Prefetch`` ``to_attr``) and the resolver reads back
+    (its window probe), so the two cannot spell it apart. With no
+    ``response_key`` it returns the shared ``_dst_<field>_connection``; with one
+    (a divergent-alias window) it returns ``_dst_<field>$<key>_connection``,
+    escaping the key's underscores to ``$``. ``$`` is the delimiter because
+    Django splits ``prefetch_to`` on ``LOOKUP_SEP``, so a ``__`` in a ``to_attr``
+    would read as a lookup path.
+    """
+    if response_key is None:
+        return f"_dst_{relation_field_name}_connection"
+    escaped_key = response_key.replace("_", "$")
+    return f"_dst_{relation_field_name}${escaped_key}_connection"
 
 
 class FetchMode(Enum):

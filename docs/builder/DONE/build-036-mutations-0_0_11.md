@@ -95,7 +95,6 @@ Performed by Worker 1 as a procedural-closure pass before this plan existed. Rec
 - **Population established with four grammars**, and the finding is load-bearing: `grep -on 'Revision [0-9]'` → 6 occurrences; the shortest distinctive token `evision` → 7, the extra being the block's own preamble; a 20-word chronology sweep → 18 occurrences (14 in moved text, 2 in the deleted parenthetical, 2 false positives). Unlike `034` (4 surviving cross-reference sites) and `035` (11), **spec-036 carried no `Revision N` cross-reference outside the block**, so it lifted whole.
 - **Repair A (not byte-verbatim, deliberate):** the spec carried a broken in-page slug for Decision 8 — `optimizer-refetch` where "optimizer re-fetch" slugs to `optimizer-re-fetch` — with **16 uses at `HEAD`, all resolving to nothing**. Repaired (12 in the spec, 4 in moved text). Plus 5 uses across 4 anchors naming spec sections the companion lacks, re-pointed at the spec through reference-style links.
 - **Held back under the implementation-relevant carve-out:** Decision 6's rejection of a blanket "every editable field required" rule and its M2M-always-optional derivation; Decision 8's relation-decode-after-authorize paragraph; Decision 9's whole re-fetch-visibility paragraph. Each is a "why that changes how it is built" or a guarantee the contract makes.
-- **Open maintainer call recorded, not acted on:** 184 review-finding tags across 34 grammars (`AR-H#` / `Major-#` / `Medium-#` / `CR-#` / `DRY-#` / `Low-1` / `P1`-`P2`) survive in the spec. A tag is a lookup key into the companion rather than a chronology, and both precedents left the shape standing (`spec-035` still carries a `Major-2`); stripping 184 parentheticals in 34 grammars is a rewrite, not a cut-and-paste.
 - Gates: `check_spec_glossary` `OK: 38 terms` exit 0; `check_citations` `OK: 929 citations resolve` exit 0 (unchanged); scaffold check exit 0 on both files with all 10 group headers in `START.md` order; 0 unresolved in-page anchors and full ref/def parity on both files; every def path disk-checked; all 30 cross-file `#anchor` defs resolved against the target's real headings.
 - Artifact: `docs/builder/bld-036-slice-0-rationale_extraction.md` — `Status: final-accepted`.
 
@@ -202,14 +201,6 @@ Per `docs/builder/BUILD.md` `### Worker 0 verifies every finding against source 
 3. **Decision 8 step 5 contradicts the spec's own no-visibility-leak guarantee (R1c H3).** The spec says M2M related objects "resolve through the target model's **default manager**" at four sites; `HEAD`'s `utils/write_values.py::decode_visible_relation_ids` type-checks every id and then confirms the whole set in one **visibility** query through the related primary's `get_queryset`. The spec asserts both contracts and they are incompatible; `HEAD` implements the safe one.
 4. **`FieldError`'s freeze claim is false and was pinned by zero test rows (R1a, R1d).** Decision 2 / Decision 7 promise `038` / `039` "reuse the byte-identical type". `spec-039` (commit `951945b7`) added `codes` and `path`, so the type has **four** fields at `HEAD`, not two — and its shipped docstring still says "Defined and frozen here (spec-036 Decision 7)" immediately above the two additive fields it documents. Nothing failed when the shape changed because exactly one site tree-wide inspects the type and it builds a name→field dict then asserts two entries, with no `len` and no set equality anywhere. **The spec's strongest promise had no gate.**
 
-### Contract-level findings escalated to the maintainer, not dispatched
-
-Per `docs/builder/BUILD.md` `### Contract-level findings are escalated as maintainer decisions before dispatch`:
-
-- **The `0.0.14` write hardening has no owning spec (R1c, structural).** Nine specs carry the `0_0_14` version segment and none of them scopes it; Worker 0 confirmed by grepping the whole `docs/SPECS/` corpus for `select_for_update` / `write_transaction` / `DjangoMutationExecutionContext` — the top hit is `spec-039` (10), the serializer card at `0.0.13`. So `spec-036` is the corpus's only spec-level description of a pipeline it did not scope, and 13 of R1c's rows have nowhere to be homed. The board already knows the surface is undocumented (`KANBAN.md` records the shipped always-on `atomic()` baseline as "given, commit `1b06c39e`", and a separate card item notes the atomicity guarantee "is stated nowhere") but no spec owns it. **This is the recurrence of a known class** — a surface with no owning spec silently inverts the specs describing it, previously homed on cards `051` / `052` / `064` by the `033` cycle.
-- **Two DRY ownership findings, both cross-flavor and both refactors of concurrent-dirty files.** R1a N6: the neutral `utils/` layer three write flavors share depends **upward** on `mutations/inputs.py` for `FieldError`, paid for with two function-local imports whose stated purpose is dodging an import cycle. R1b DRY-1: `mutations/sets.py` (1,606 lines) has become the cross-flavor write substrate — 25 distinct symbols imported out by `forms/sets.py`, `rest_framework/sets.py`, and `auth/mutations.py`, **4 private-by-name** and **6 helpers with zero caller inside `mutations/`** — with `sets_mixins.py` the exact precedent and the home Decision 4 predicted. Each cohort recorded three resolution paths and neither held at `revision-needed`.
-- **184 review-finding tags across 34 grammars survive in the spec** (`AR-H#` / `Major-#` / `Medium-#` / `CR-#` / `DRY-#` / `Low-1` / `P1`-`P2`), recorded by Slice 0. A tag is a lookup key into the companion rather than a chronology, and both precedents left the shape standing.
-
 **Stated positively so a later pass does not undo it (R1c):** four write flavors ride one `run_write_pipeline_sync` skeleton and three share `make_resolver_entries`, with **zero** cross-flavor near-copies. The DRY risk here is un-sharing, not duplication.
 
 ### Process defect in Worker 0's own dispatch, recorded
@@ -265,8 +256,7 @@ residue: what this cycle fixed, where the rest went, and what nobody owns.
   defect Slice 0 repaired here where it had 16. **All 70 repaired**; all three mutation specs now resolve
   **0** dead in-file anchors.
 - **`mutations/inputs.py::FieldError`'s "frozen … byte-identical" docstring claim.** Corrected: the type
-  is ADDITIVE, not frozen — 2 members grew to 4 when `codes` and `path` landed at `0.0.13`. The last
-  surviving copy of the retired claim is `CHANGELOG.md [0.0.12]`, homed on `TODO-ALPHA-056-0.0.17`.
+  is ADDITIVE, not frozen — 2 members grew to 4 when `codes` and `path` landed at `0.0.13`.
 - **`mutations/resolvers.py::_full_clean_or_field_errors`' `exclude=None`-for-create claim.** Corrected:
   its single caller passes the computed unprovided-field list for BOTH operations, so the model path
   never passes `None`.
@@ -281,33 +271,6 @@ residue: what this cycle fixed, where the rest went, and what nobody owns.
   "fix" would open the hole the guard exists to close: a consumer-authored `field_2` beside a generated
   `field2` reports two distinct names under the package caser and collapses to a single `field2` in real
   SDL. Proven by emitting the SDL. The invariant now sits in that function's own docstring.
-
-### Homed on cards
-
-- **`TODO-ALPHA-056-0.0.17`** takes six: the missing owner for the `0.0.14` write hardening; the absent
-  staged-anchor gate; the 184-review-tag ruling; `CHANGELOG.md [0.0.12]`'s "byte-identical"; the
-  `docs/GLOSSARY.md` gap on `FieldError.codes` / `.path`; and the two glossary headings missing from
-  `spec-036-mutations-0_0_11-terms.csv`.
-- **`TODO-ALPHA-053-0.0.15`** takes four: `mutations/sets.py`'s flavor-label and operation-map literal
-  duplication; `types/finalizer.py::finalize_django_types`' decomposition; and the two contract-level
-  module-home questions — whether `FieldError` / `NON_FIELD_ERROR_KEY` belong in `mutations/inputs.py`
-  (WP-A `import-linter`), and whether `mutations/sets.py` should own the cross-flavor write substrate
-  (WP-B).
-- **`TODO-BETA-067-0.1.5`** takes the four-part `test_products_api.py` DRY bundle: the `_assert_denied`
-  helper and where its three site-specific comments live, the `_grant_perms` split, the unnamed GlobalID
-  literals, and the one inline document duplicating a module-level wire constant.
-
-**The load-bearing item, unchanged:** the `0.0.14` write hardening has no owning spec and `spec-036` is
-not it. Nine specs carry the `0_0_14` segment and none scopes the completion-spanning transaction, the
-`DjangoSchema` requirement, `Meta.select_for_update`'s lock semantics, single-write-alias pinning, the
-retryable `conflict` envelope, the immutable authorized-pk snapshot, the phased alias guard, the
-strict-`bool` authorization contract, or the point-in-time authorization rule; the corpus-wide grep's top
-hit is `spec-039` (10 occurrences), the serializer card at `0.0.13`, and `require_managed_write` greps to
-**0** across the whole board. Maintainer Decision A deferred **10 of R1c's rows** on these grounds
-(`X3`-`X12`; `X13` partially discharged). Treat `spec-036`'s corrected Decisions 8, 10 and 15 as the
-**boundary of what `036` claims**, not as an outline for the missing spec. A recurrence of a known class —
-a surface with no owning spec silently inverts the specs describing it — previously homed on cards
-`051` / `052` / `064`.
 
 ### Owned by nobody — needs the maintainer's clean-`HEAD` tree
 

@@ -3,11 +3,10 @@
 Maps Django models to their generated ``DjangoType`` and ``(model,
 field_name)`` to generated ``Enum`` classes. Used by:
 
-- ``types.converters.resolved_relation_annotation`` for relation
-  resolution once target types are registered (called from the
-  per-entry finalize loop via ``iter_pending_relations`` /
-  ``discard_pending``).
-- ``types.converters.convert_choices_to_enum`` for enum reuse across
+- ``types/converters.py::resolved_relation_annotation`` for relation
+  resolution once target types are registered (called from the per-entry
+  finalize loop via ``iter_pending_relations`` / ``discard_pending``).
+- ``types/converters.py::convert_choices_to_enum`` for enum reuse across
   multiple ``DjangoType`` subclasses reading the same choice column.
 
 The registry is a process-global singleton (``registry``). Test isolation

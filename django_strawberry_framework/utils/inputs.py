@@ -1283,7 +1283,8 @@ def materialize_generated_input_class(
 
     Strawberry's ``LazyType.resolve_type`` reads
     ``sys.modules[<module>].__dict__[name]`` to materialize an
-    ``Annotated[<name>, strawberry.lazy(<module>)]`` reference; this is the
+    ``Annotated[<name>, strawberry.lazy(<module>)]`` reference or a consumer
+    helper's ``LazyType(<name>, <module>)``; this is the
     single entry point that pins ``cls`` at the matching ``__dict__`` slot
     (spec-027 / spec-028 Decision 9).
 
@@ -1429,7 +1430,7 @@ def build_lazy_input_annotation(
     input_type_name_for: Callable[[type[_FactorySetT]], str],
     module_path: str,
 ) -> object:
-    """Return the ``Annotated[..., strawberry.lazy(...)]`` forward-ref for a set's input class.
+    """Return the ``strawberry.LazyType`` naming a set's generated input class.
 
     The spec-027 / spec-028 Decision 11 consumer-helper body shared by
     ``filters/__init__.py::filter_input_type`` / ``filters/__init__.py::FilterInput``
@@ -1440,14 +1441,20 @@ def build_lazy_input_annotation(
     ..."``) so consumers catch misuse at the resolver-declaration site rather than
     schema-build time --
     records it in the family ``ledger`` (the finalizer's orphan check reads this),
-    and builds the canonical Strawberry forward-reference.
+    and returns ``strawberry.LazyType(<input name>, module_path)``.
 
-    The ForwardRef-wrapped ``Annotated[<runtime str>, strawberry.lazy(<module>)]``
-    form is load-bearing: ``LazyType.resolve_type`` resolves it via
-    ``module.__dict__`` at schema build, by which point ``finalize_django_types()``
-    has materialized the input class as a module global. The type name is passed
-    as a runtime-computed string into ``Annotated[...]`` (NOT interpolated into a
-    literal outside the call) so the ForwardRef wrapping holds.
+    The ``LazyType`` is the form Strawberry itself turns an
+    ``Annotated["<name>", strawberry.lazy(<module>)]`` reference into, and the form
+    is load-bearing: it carries no ``ForwardRef``, so nothing evaluates the input name in
+    the consumer's globals. Under ``from __future__ import annotations`` Strawberry
+    evaluates the whole annotation string (the helper call included) in the resolver
+    module's globals, and Python's evaluator then recurses into a returned
+    ``Annotated[ForwardRef("<name>"), ...]`` and resolves that ``ForwardRef`` in the same
+    globals, where the generated name is never defined. A ``LazyType`` instance passes
+    through untouched, eagerly or deferred, bare, under ``| None`` (its ``__or__``) or
+    inside ``list[...]``; ``LazyType.resolve_type`` reads ``module_path``'s
+    ``module.__dict__`` at schema build, by which point ``finalize_django_types()`` has
+    materialized the input class as a module global.
 
     ``TypeError`` for ANY other argument, including one whose ``__class__`` raises or
     claims a class it is not (the test reads the real class, ``truth.is_subclass``); a
@@ -1460,7 +1467,11 @@ def build_lazy_input_annotation(
             f"{helper_spelling} requires {expected_label} subclass; got {truth.render(set_class)}",
         )
     ledger.add(set_class)
-    return Annotated[input_type_name_for(set_class), strawberry.lazy(module_path)]
+    lazy_input: strawberry.LazyType[str, str] = strawberry.LazyType(
+        input_type_name_for(set_class),
+        module_path,
+    )
+    return lazy_input
 
 
 def iter_set_subclasses(root: type[_SetT]) -> list[type[_SetT]]:

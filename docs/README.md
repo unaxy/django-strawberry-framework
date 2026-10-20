@@ -626,7 +626,7 @@ MIDDLEWARE = [
 
 It runs the body boundary from that position, then your CSRF class runs in full. Listing it after a CSRF entry is refused at startup with `ConfigurationError` rather than allowed to fail open; a project that never edits `MIDDLEWARE` keeps the view-local arrangement.
 
-**The request-body cap is two layers, and you need both.** For a JSON body the application cap guarantees nothing is parsed, allocated, or executed past the limit, but not that the bytes were never *received*: Django's ASGI handler has already drained the request into a spooled temporary file before any application cap can run, and Uvicorn, Hypercorn, and Daphne ship no total-body limit of their own. An edge cap is therefore a co-requirement, never an alternative:
+**The request-body cap is two layers, and you need both.** For a JSON body the application cap guarantees nothing is parsed, allocated, or executed past the limit, but not that the bytes were never *received*: Django's ASGI handler has already drained the request into a spooled temporary file before any application cap can run, and the package relies on no ASGI server to cap the total body (Daphne ships no such limit). An edge cap is therefore a co-requirement, never an alternative:
 
 ```nginx
 location /graphql/ {

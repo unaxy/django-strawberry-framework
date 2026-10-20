@@ -193,10 +193,6 @@ Spec: [Decision 12 — Version bumps are owned by the joint `0.0.9` cut][spec-03
 
 - **Bumping in this card's last slice.** Rejected: the cut is a release act with its own checklist (version, lock, CHANGELOG heading, tag); folding it into a slice would couple the release to a PR merge.
 
-## Risks and open questions
-
-- **The strictness probe answers "the `to_attr` is present", not "the window was consumed".** [Decision 8](#decision-8--strictness-mode-wiring-for-connection-paths)'s third condition is implemented by `types/resolvers.py::_check_n1` as `getattr(root, to_attr, None) is None`. The resolver reaches that call only after deciding not to consume what sits under the `to_attr`, which happens when the value is not a list, when its rows carry no `_dst_row_number`, or when the resolver's own sidecar kwargs are present. In those three cases the per-parent pipeline queries while the probe reads "present" as "served", so `"raise"` stays silent. Reaching it needs a consumer write into the package-reserved `_dst_` namespace (declared unsupported) or a planner/resolver sidecar desync, and no data is wrong; only the diagnostic is silent. Closing it means passing the resolver's own consume decision into `_check_n1` instead of re-probing the attribute.
-
 <!-- LINK DEFINITIONS -->
 
 <!-- Root -->

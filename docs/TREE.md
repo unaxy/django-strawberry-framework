@@ -302,7 +302,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── context.py                # Shape-agnostic read / write / delete helpers for Strawberry's ``info.context``.
     ├── converters.py             # Fail-loud converter-dispatch skeleton shared by write-field and filter-input converters.
     ├── directives.py             # Construction-time validation for the consumer-supplied ``directives=`` forward.
-    ├── errors.py                 # Neutral ``FieldError`` / write-error constructors shared by every write flavor.
+    ├── errors.py                 # The ``FieldError`` envelope type and the write-error constructors shared by every write flavor.
     ├── execution_mode.py         # Which GraphQL executor is driving this resolver, as a fact rather than a guess.
     ├── imports.py                # Import helpers for best-effort, loaded-only, strict, and guarded optional-dependency lookups.
     ├── input_values.py           # Set-input traversal substrate shared by the FilterSet and OrderSet families.
@@ -443,7 +443,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── context.py                # Shape-agnostic read / write / delete helpers for Strawberry's ``info.context``.
     ├── converters.py             # Fail-loud converter-dispatch skeleton shared by write-field and filter-input converters.
     ├── directives.py             # Construction-time validation for the consumer-supplied ``directives=`` forward.
-    ├── errors.py                 # Neutral ``FieldError`` / write-error constructors shared by every write flavor.
+    ├── errors.py                 # The ``FieldError`` envelope type and the write-error constructors shared by every write flavor.
     ├── execution_mode.py         # Which GraphQL executor is driving this resolver, as a fact rather than a guess.
     ├── imports.py                # Import helpers for best-effort, loaded-only, strict, and guarded optional-dependency lookups.
     ├── input_values.py           # Set-input traversal substrate shared by the FilterSet and OrderSet families.
@@ -485,6 +485,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── _info.py                      # Real Strawberry ``Info`` objects for tests that call a resolver-side entry point directly.
 ├── _relation_fixtures.py         # Shared TEST-ONLY composite-primary-key relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
+├── _subprocess.py                # Shared fresh-interpreter isolation for tests whose claim is about a clean process.
 ├── conftest.py                   # Shared pytest fixtures and test-suite instrumentation.
 ├── test_app_registry_restore.py  # The suite-wide app-registry restore keeps a module-scope model registered.
 ├── test_apps.py                  # AppConfig tests for package registration and upstream patch dispatch.
@@ -500,7 +501,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_trailing_commas.py # Script tests for the ``source-layout`` gate in ``scripts/check_trailing_commas.py``.
 ├── test_check_truthful_reads.py  # Script tests for the ``truthful-reads`` gate in ``scripts/check_truthful_reads.py``.
 ├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
-├── test_ci_governance.py         # Governance tests for the CI workflow definitions.
+├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
@@ -774,6 +775,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── _info.py                      # Real Strawberry ``Info`` objects for tests that call a resolver-side entry point directly.
 ├── _relation_fixtures.py         # Shared TEST-ONLY composite-primary-key relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
+├── _subprocess.py                # Shared fresh-interpreter isolation for tests whose claim is about a clean process.
 ├── conftest.py                   # Shared pytest fixtures and test-suite instrumentation.
 ├── test_app_registry_restore.py  # The suite-wide app-registry restore keeps a module-scope model registered.
 ├── test_apps.py                  # AppConfig tests for package registration and upstream patch dispatch.
@@ -789,7 +791,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_trailing_commas.py # Script tests for the ``source-layout`` gate in ``scripts/check_trailing_commas.py``.
 ├── test_check_truthful_reads.py  # Script tests for the ``truthful-reads`` gate in ``scripts/check_truthful_reads.py``.
 ├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
-├── test_ci_governance.py         # Governance tests for the CI workflow definitions.
+├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.

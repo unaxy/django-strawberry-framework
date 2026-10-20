@@ -61,8 +61,8 @@ if TYPE_CHECKING:
     from django.db import models
     from strawberry import Info
 
-    from django_strawberry_framework.mutations.inputs import FieldError
     from django_strawberry_framework.types.relay import _RelayDjangoType
+    from django_strawberry_framework.utils.errors import FieldError
 
     from .inputs import InputFieldSpec
     from .typing import ModelField

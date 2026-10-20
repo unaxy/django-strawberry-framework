@@ -408,7 +408,7 @@ class Command(BaseCommand):
         if output_type is not None:
             return graphql_type, nullable, f"convert_field_output -> {truth.name(output_type)}"
         # ``choice enum`` for a choice field; otherwise name the SCALAR_MAP row
-        # that fired - the matched MRO ancestor (Decision 4) - so a consumer
+        # that fired - the matched MRO ancestor (spec-029 Decision 4) - so a consumer
         # subclass of a supported field reports the ancestor row (e.g.
         # ``TextField``) rather than its own concrete class name.
         converter = "choice enum" if field.choices else f"SCALAR_MAP[{_matched_scalar_key(field)}]"

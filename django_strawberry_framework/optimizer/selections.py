@@ -522,13 +522,20 @@ def named_children(selection: ConvertedSelection, name: str) -> list[FieldSelect
     return children
 
 
+#: Attribute naming the runtime-path prefixes a walker clone carries:
+#: ``with_runtime_prefix`` and the walker's merge write it, and the walker's
+#: ``_selection_runtime_prefixes`` reads it with a ``None`` default, so a
+#: misspelled site would read "no prefixes" silently.
+RUNTIME_PREFIXES_ATTR = "_optimizer_runtime_prefixes"
+
+
 def with_runtime_prefix(
     selection: ConvertedSelection,
     runtime_prefixes: tuple[tuple[str, ...], ...],
 ) -> SimpleNamespace:
     """Clone a node-level selection carrying runtime prefixes for the walker.
 
-    Fragments are descended, never marked; the ``_optimizer_runtime_prefixes``
+    Fragments are descended, never marked; the ``RUNTIME_PREFIXES_ATTR``
     marker lands on field leaves only. A fragment shell carrying the prefix
     would be meaningless - prefixes belong on the field selections the walker
     eventually plans.
@@ -549,7 +556,7 @@ def with_runtime_prefix(
         directives=getattr(selection, "directives", None) or {},
         arguments=getattr(selection, "arguments", None) or {},
         selections=list(getattr(selection, "selections", None) or []),
-        _optimizer_runtime_prefixes=list(runtime_prefixes),
+        **{RUNTIME_PREFIXES_ATTR: list(runtime_prefixes)},
     )
 
 

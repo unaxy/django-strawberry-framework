@@ -161,10 +161,8 @@ Scope `none`, confirmed against the landed diff rather than accepted from the pl
 The gate's `### Deferred work catalog` listed three items, every locator re-derived unscoped. All three were **homed onto `TODO-ALPHA-052-0.1.0` on 2026-08-19** and committed at `7722c4b3`, so the catalog itself is discharged rather than inherited:
 
 - The `DONE-026-0.0.7` card body's two false census clauses (`CardItem` 762 and 763) -> card 052 `CardItem` 1380, clauses (i) and (ii).
-- `CHANGELOG.md`'s repetition of the retired exclusivity shape -> card 052 `CardItem` 1381, clause (iii).
-- `CHANGELOG.md`'s two undercounts (three retired tests where six, eight live tests where nine) -> card 052 `CardItem` 1381, clauses (i) and (ii).
 
-The board half was homed rather than repaired in place, matching how card 052 already carries the `DONE-017-0.0.6` and `DONE-018-0.0.6` stale-card-body findings. `KANBAN.md` and `KANBAN.html` are rendered from `examples/fakeshop/db.sqlite3`, so whoever closes them edits the DB and regenerates; `CHANGELOG.md` is closed to a build cycle by `AGENTS.md` rule 21 and card 052 owns the promotion.
+The board half was homed rather than repaired in place, matching how card 052 already carries the `DONE-017-0.0.6` and `DONE-018-0.0.6` stale-card-body findings. `KANBAN.md` and `KANBAN.html` are rendered from `examples/fakeshop/db.sqlite3`, so whoever closes them edits the DB and regenerates.
 
 Homing also falsified card 052's own stub-preamble bullet (`CardItem` 1347), which was corrected in the same edit: the population it stated as three, and instructed later sweeps to measure as three, was already **one** before this cycle and is now **zero**.
 

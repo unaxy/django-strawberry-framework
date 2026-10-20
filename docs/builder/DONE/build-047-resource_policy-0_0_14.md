@@ -189,8 +189,7 @@ and are re-stated here only after Worker 0 confirmed them against `HEAD`.
   `TODO-BETA-047-0.1.2` in `examples/fakeshop/apps/products/schema.py` and in
   `docs/SPECS/spec-060-search_fields-0_1_2.md`. That is the **old numbering of a different,
   unshipped search card**; `docs/SPECS/appx/spec-033-connection_optimizer-0_0_9-rationale.md`
-  already records that it is `TODO-BETA-056-0.1.2` today, and `spec-060`'s own slice table
-  owns the comment-id fix. **Out of scope for this round — do not touch it.**
+  already records that it is `TODO-BETA-056-0.1.2` today.
 - **N. Both published test-row counts are large undercounts.** The Test plan says the live
   tier has "35 rows" and the package tier "79 rows". **Worker 0 re-derived both at `HEAD`
   with two independent instruments** rather than accepting either sweep's figure — one sweep

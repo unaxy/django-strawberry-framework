@@ -280,11 +280,10 @@ viewer cannot see.
   slot yet.
 - `examples/fakeshop/apps/products/schema.py` carries four commented-out
   `search_fields` declarations (Category, Item, Property, Entry) gated on
-  this card (their comments cite a stale pre-renumber card ID,
-  `TODO-BETA-047-0.1.2`). **All four are local or forward-FK paths — none
-  crosses a to-many relation**, so they cannot by themselves earn live
-  coverage of the card's defining row-preserving behavior; Slice 4 adds
-  the library to-many surface for that.
+  this card. **All four are local or forward-FK paths — none crosses a
+  to-many relation**, so they cannot by themselves earn live coverage of
+  the card's defining row-preserving behavior; Slice 4 adds the library
+  to-many surface for that.
 - `examples/fakeshop/apps/products/filters.py::CategoryFilter.check_name_permission`
   restricts filtering by `Category.name` to staff. Search over a declared
   `name` path must honor that gate, or an anonymous caller could probe
@@ -1320,7 +1319,7 @@ implement the original per-action policy.
 | 1 | `django_strawberry_framework/filters/search.py` (new), `django_strawberry_framework/filters/inputs.py`, `django_strawberry_framework/filters/sets.py`, `django_strawberry_framework/utils/permissions.py`, `tests/filters/test_search_fields.py` (new) | `apply_search_sync` / `apply_search_async` / `build_direct_search_q` / `build_search_path_plan(definition, paths)` / `SEARCH_MAX_LENGTH`; `active_search` re-export (canonical definition lands in `utils/connections.py`, Decision 3); the named path-driven permission-plan helper + runner (Decision 13); the lift of the request-scoped hop visible-row derivation off the filter-set instance (`FilterSet._hop_visible_rows` / `FilterSet._scoped_rows` and their async pre-pass), still called by the filter side (Decision 12); retarget the superseded `get_filters` TODO and `construct_search` reservation to card 061; unit tests for plan shape (declared-prefix, undeclared-remainder and re-entry hop resolution), prefix/duplicate/padding rejection, inactive-input identity, cap error, path-validation raises, permission-plan matrix |
 | 2 | `django_strawberry_framework/types/base.py`, `django_strawberry_framework/types/definition.py`, `django_strawberry_framework/types/finalizer.py`, `tests/types/` | shape validation + `DEFERRED_META_KEYS` → `ALLOWED_META_KEYS` promotion; `search_fields` + frozen search-path-plan definition slots; phase-2.5 `build_search_path_plan` call with the exact owning definition, permission-dispatch plan and declared-prefix hop resolution (Decision 12) built after `_bind_filtersets` (assign only after all succeed, retry-safe) |
 | 3 | `django_strawberry_framework/utils/connections.py`, `django_strawberry_framework/connection.py`, `tests/filters/test_search_fields.py`, `tests/test_connection.py` | `CONNECTION_SEARCH_KWARG` + sidecar-guard extension with the `active_search` presence predicate (canonical definition lands here — Decision 3); synthesized `search:` param; sync/async pipeline steps (visibility-aware, permission-gated) running every relational arm through `related_rows_exist` over each hop's visible rows; guard coverage |
-| 4 | `examples/fakeshop/apps/products/schema.py`, the library schema module declaring `GenreType`, `examples/fakeshop/test_query/` | uncomment all four products `search_fields` tuples (fix stale `TODO-BETA-047` comment IDs → this card); add `GenreType.Meta.search_fields = ("name", "books__title")` and the acceptance-only `LoanType` reverse-FK search surface (Decision 7); live HTTP tests per the required-live-case list (products cases in `test_products_api.py` seeded via `seed_data(N)` / `create_users(N)`, library cases in `test_library_api.py` with inline creates); the non-gating PostgreSQL plan-evidence artifact |
+| 4 | `examples/fakeshop/apps/products/schema.py`, the library schema module declaring `GenreType`, `examples/fakeshop/test_query/` | uncomment all four products `search_fields` tuples; add `GenreType.Meta.search_fields = ("name", "books__title")` and the acceptance-only `LoanType` reverse-FK search surface (Decision 7); live HTTP tests per the required-live-case list (products cases in `test_products_api.py` seeded via `seed_data(N)` / `create_users(N)`, library cases in `test_library_api.py` with inline creates); the non-gating PostgreSQL plan-evidence artifact |
 | 5 | `docs/TREE.md`, `docs/GLOSSARY.md` (DB + regen), `KANBAN.md`/`KANBAN.html` (DB + regen) | card-local tree regeneration; glossary intermediate status ("implemented on `main`; release pending the joint `0.1.2` cut"); card wrap; version triplet / README marketing / CHANGELOG defer to card 061 (Decision 10) |
 
 ## Helper-reuse obligations (DRY)
@@ -1831,11 +1830,6 @@ compiler shape.
   should grow the same argument is left open; nothing in this design
   precludes it (the step is field-agnostic), but it is not
   `0.1.2` work and no card currently owns it.
-- **Stale card IDs in fakeshop comments.** The commented-out declarations
-  in `examples/fakeshop/apps/products/schema.py` cite `TODO-BETA-047-0.1.2`,
-  an ID that does not denote this card (047 is the shipped
-  `DONE-047-0.0.14` resource-policy card). Slice 4 corrects the comments
-  as part of activation.
 
 ## Out of scope (explicitly tracked elsewhere)
 

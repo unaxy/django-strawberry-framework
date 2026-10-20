@@ -59,11 +59,9 @@ register_subsystem_clear(_helper_referenced_filtersets.clear, owner="filters.hel
 def _filter_input_annotation(filterset_class: object, *, helper_spelling: str) -> object:
     """Validate, ledger-record and annotate ``filterset_class`` for either helper spelling."""
     # spec-027 Decision 11 consumer-helper body shared with ``orders/__init__.py::
-    # _order_input_annotation`` via ``utils/inputs.py::build_lazy_input_annotation``
-    # The ForwardRef-wrapped ``Annotated[<runtime str>,
-    # strawberry.lazy(...)]`` form is pinned by
-    # ``test_filter_input_type_returns_forwardref_in_annotation_args`` -- the
-    # shared helper preserves it.
+    # _order_input_annotation`` via ``utils/inputs.py::build_lazy_input_annotation``,
+    # which returns the ``strawberry.LazyType`` that resolves under deferred
+    # annotations too.
     return build_lazy_input_annotation(
         filterset_class,
         expected_base=FilterSet,
@@ -76,17 +74,17 @@ def _filter_input_annotation(filterset_class: object, *, helper_spelling: str) -
 
 
 def filter_input_type(filterset_class: type[FilterSet]) -> object:
-    """Return the `Annotated[...]` forward-reference for a filterset's input class.
+    """Return the `strawberry.LazyType` naming a filterset's generated input class.
 
-    The returned annotation is the canonical Strawberry forward-reference
-    idiom:
-    ``Annotated["<Name>FilterInputType", strawberry.lazy("django_strawberry_framework.filters.inputs")]``.
-    Consumer resolvers use it as the type annotation for a ``filter:``
-    argument; Strawberry collects the annotation at ``@strawberry.type``
-    decoration time, defers resolution, and resolves it via
-    ``LazyType.resolve_type`` at schema-build time -- by which point
-    ``finalize_django_types()`` has materialized the input class as a
-    module global of ``django_strawberry_framework.filters.inputs``.
+    The returned annotation is
+    ``strawberry.LazyType("<Name>FilterInputType", "django_strawberry_framework.filters.inputs")``,
+    the lazy reference Strawberry itself resolves a ``strawberry.lazy(...)``
+    annotation into. Consumer resolvers use it as the type annotation for a
+    ``filter:`` argument, eagerly or under ``from __future__ import
+    annotations``; Strawberry resolves it via ``LazyType.resolve_type`` at
+    schema-build time -- by which point ``finalize_django_types()`` has
+    materialized the input class as a module global of
+    ``django_strawberry_framework.filters.inputs``.
 
     Args:
         filterset_class: A ``FilterSet`` subclass. Validated eagerly --
