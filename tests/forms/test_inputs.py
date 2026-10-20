@@ -55,7 +55,7 @@ from strawberry import relay
 from strawberry.types.base import StrawberryList, StrawberryOptional, get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 from strawberry.types.field import StrawberryField
-from typing_extensions import Never, override
+from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -90,6 +90,7 @@ from django_strawberry_framework.utils._narrowing import enum_value
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import InputFieldSpec
 from tests._idioms import ClassReadRaises, module_binding
+from tests._postgres_fields import FakeArrayField
 
 if TYPE_CHECKING:
     from django.db.models import Model
@@ -950,33 +951,10 @@ def test_choice_field_whose_valid_value_raises_propagates_its_exception() -> Non
         build_form_input_class(form_class, operation_kind=CREATE)
 
 
-class _FakeArrayField(models.Field[object, object]):
-    """An ``ArrayField`` stand-in: ``django.contrib.postgres`` needs a Postgres driver.
-
-    Mirrors the real field's metadata propagation, so ``base_field`` carries the model and the
-    name the element enum and the narrowing read.
-    """
-
-    def __init__(self, base_field: models.Field[Never, object]) -> None:
-        super().__init__()
-        self.base_field = base_field
-
-    @override
-    def contribute_to_class(
-        self,
-        cls: type[models.Model],
-        name: str,
-        private_only: bool = False,
-    ) -> None:
-        super().contribute_to_class(cls, name, private_only=private_only)
-        self.base_field.set_attributes_from_name(name)
-        self.base_field.model = cls
-
-
 class _TaggedBook(models.Model):
     """An unmanaged owner of a ``tags`` array column whose ``base_field`` lists ``a`` / ``b``."""
 
-    tags = _FakeArrayField(models.CharField(max_length=5, choices=[("a", "A"), ("b", "B")]))
+    tags = FakeArrayField(models.CharField(max_length=5, choices=[("a", "A"), ("b", "B")]))
 
     class Meta:
         managed = False
@@ -1092,9 +1070,9 @@ def test_array_choice_column_narrows_its_elements(
     ``list[<Input><Field>Enum]`` of the admitted values; a superset, and a single-value
     ``ChoiceField`` over the array, keep the column's ``list`` of the element's read enum.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
     column = _TaggedBook._meta.get_field("tags")
-    assert isinstance(column, _FakeArrayField)
+    assert isinstance(column, FakeArrayField)
     meta = type("Meta", (), {"model": _TaggedBook, "fields": ("tags",)})
     form_class = type("TagsForm", (forms.ModelForm,), {"tags": tags_field(), "Meta": meta})
     cre, _ = build_form_input_class(form_class, operation_kind=CREATE)

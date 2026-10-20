@@ -76,11 +76,11 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
   - [ ] Module-level sentinel `_ARRAY_FIELD_CLS`, soft-imported through the package's shared optional-import owner per [Decision 4](#decision-4--soft-import-via-module-level-sentinels)
   - [ ] `convert_scalar` branch guarded by `_ARRAY_FIELD_CLS is not None and isinstance(field, _ARRAY_FIELD_CLS)` per [Decision 2](#decision-2--arrayfield-dimensionality-cap-and-outer-choices-rejection)
   - [ ] Outer `choices` and nested `ArrayField` rejected with `ConfigurationError` per [Decision 2](#decision-2--arrayfield-dimensionality-cap-and-outer-choices-rejection)
-  - [ ] Fake-field test double `_FakeArrayField(models.Field)` in `tests/types/test_converters.py` per [Decision 7](#decision-7--test-strategy); test models hosting it declare `class Meta: managed = False; app_label = "test_arrayfield"`.
-  - [ ] Each `_FakeArrayField`-based test calls `monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)` *before* declaring the `DjangoType`. (See the [Schema test fixture pattern](#decision-7--test-strategy).)
+  - [ ] Fake-field test double `FakeArrayField(models.Field)` in the shared `tests/_postgres_fields.py` per [Decision 7](#decision-7--test-strategy); test models hosting it declare `class Meta: managed = False; app_label = "test_arrayfield"`.
+  - [ ] Each `FakeArrayField`-based test calls `monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)` *before* declaring the `DjangoType`. (See the [Schema test fixture pattern](#decision-7--test-strategy).)
   - [ ] Tests in `tests/types/test_converters.py`:
     - Soft-import branch coverage: owned by the shared helper's own tests (`tests/utils/test_imports.py`), not duplicated here — see [Decision 4](#decision-4--soft-import-via-module-level-sentinels).
-    - Sentinel-branch coverage (via `_FakeArrayField`):
+    - Sentinel-branch coverage (via `FakeArrayField`):
       - [ ] `test_array_field_of_int_maps_to_list_int_via_fake_sentinel`
       - [ ] `test_array_field_of_char_maps_to_list_str_via_fake_sentinel`
       - [ ] `test_array_field_nullable_inner_via_fake_sentinel`
@@ -96,16 +96,16 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
   - [ ] `convert_scalar` branch guarded by `_HSTORE_FIELD_CLS is not None and isinstance(field, _HSTORE_FIELD_CLS)` returning `strawberry.scalars.JSON` per [Decision 5](#decision-5--hstorefield-wire-shape)
   - [ ] Outer `choices` on `HStoreField` rejected with `ConfigurationError` per [Decision 5](#decision-5--hstorefield-wire-shape), consistent with the `ArrayField` outer-`choices` rejection in Decision 2
   - [ ] `HStoreField` is **not** in `SCALAR_MAP`
-  - [ ] Fake-field test double `_FakeHStoreField(models.Field)` in `tests/types/test_converters.py`; test models hosting it declare `class Meta: managed = False; app_label = "test_hstorefield"`
-  - [ ] Each `_FakeHStoreField`-based test calls `monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)` *before* declaring the `DjangoType`.
+  - [ ] Fake-field test double `FakeHStoreField(models.Field)` in the shared `tests/_postgres_fields.py`; test models hosting it declare `class Meta: managed = False; app_label = "test_hstorefield"`
+  - [ ] Each `FakeHStoreField`-based test calls `monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)` *before* declaring the `DjangoType`.
   - [ ] Tests in `tests/types/test_converters.py`:
     - Soft-import branch coverage: owned by the shared helper's own tests (`tests/utils/test_imports.py`), not duplicated here — see [Decision 4](#decision-4--soft-import-via-module-level-sentinels).
-    - Sentinel-branch coverage (via `_FakeHStoreField`):
+    - Sentinel-branch coverage (via `FakeHStoreField`):
       - [ ] `test_hstore_field_maps_to_json_scalar_via_fake_sentinel`
       - [ ] `test_hstore_field_nullable_via_fake_sentinel`
       - [ ] `test_hstore_field_resolver_dict_serializes_via_schema_execution` — resolver returns a hand-built `dict` (no DB persistence; SQLite cannot store HStore values); test name clarifies this is a serializer-level test
       - [ ] `test_hstore_field_resolver_dict_with_none_value_via_schema_execution` — resolver returns `{"k1": "v", "k2": None}`; pins that `JSON` accepts `None` values inside the dict (mirrors `HStoreField`'s native `dict[str, str | None]` shape)
-      - [ ] `test_hstore_field_outer_choices_rejected_via_fake_sentinel` — declares `_FakeHStoreField(choices=[("a", "A")])`; asserts `ConfigurationError` is raised at type creation
+      - [ ] `test_hstore_field_outer_choices_rejected_via_fake_sentinel` — declares `FakeHStoreField(choices=[("a", "A")])`; asserts `ConfigurationError` is raised at type creation
       - [ ] `test_hstore_field_sentinel_none_path` — monkey-patch sentinel to `None`
   - [ ] Optional gated test: `test_real_hstore_field_compatible_with_strawberry` — `pytest.importorskip("django.contrib.postgres.fields")`; declares a `DjangoType` with `HStoreField()` on a `managed = False` model, calls `finalize_django_types()`, introspects the schema, asserts the field type is `JSON!` (introspection chain: `NON_NULL → SCALAR { name: "JSON" }`; walk the `kind / ofType` structure explicitly), **and** exercises a resolver returning `{"k1": "v", "k2": None}` via `schema.execute_sync`, asserting the dict shape including the `None` value is preserved in the response.
 - [ ] Slice 5: Version bump to `0.0.6`
@@ -236,12 +236,11 @@ Target Django fields:
 Reject nested arrays and outer `choices` at type creation with `ConfigurationError`. `ArrayField(IntegerField())` works; `ArrayField(ArrayField(IntegerField()))` and `ArrayField(IntegerField(), choices=[...])` both raise.
 
 ```python
-# in convert_scalar, before the scalar_for_field SCALAR_MAP walk.
+# in convert_scalar, the array arm of ``route = scalar_route(field)``.
 # ``effective_null`` is the tri-state ``force_nullable`` override collapsed to
 # one boolean; see the nullability-override note below.
-element = array_element_field(field)
-if element is not None:
-    if array_element_field(element) is not None:
+if isinstance(route, ArrayRoute):
+    if array_element_field(route.element) is not None:
         raise ConfigurationError(
             f"Nested ArrayField on {_field_label(field)} is not supported.",
         )
@@ -251,12 +250,12 @@ if element is not None:
             f"field; outer-array choices are ambiguous at the GraphQL boundary. Declare choices "
             f"on base_field for element-level enum, or use FilterSet.",
         )
-    inner = convert_scalar(element, type_name)
+    inner = convert_scalar(route.element, type_name)
     result = GenericAlias(list, (inner,))
     return result | None if effective_null else result
 ```
 
-`array_element_field(field)` is the module's one `ArrayField` test: it returns the `base_field` of an `ArrayField` (matched through `utils/truth.py::is_instance`, so a field class cannot claim to be one) and `None` for any other column or when `django.contrib.postgres` is unavailable. `_field_label(field)` renders `Model.field` for diagnostics from truthful reads of the bound model class and the field name; an unbound field reads `<unbound>`.
+`django_strawberry_framework/types/converters.py::scalar_route` classifies the column before any `SCALAR_MAP` lookup: an `ArrayField` takes the `ArrayRoute` arm (carrying its `base_field` as `element`), an `HStoreField` the `HStoreRoute` arm, every other column the `MapRoute` arm. The arm's rejections stay in `convert_scalar`, in the order above. `array_element_field(field)` is the module's one `ArrayField` test: it returns the `base_field` of an `ArrayField` (matched through `utils/truth.py::is_instance`, so a field class cannot claim to be one) and `None` for any other column or when `django.contrib.postgres` is unavailable. `_field_label(field)` renders `Model.field` for diagnostics from truthful reads of the bound model class and the field name; an unbound field reads `<unbound>`.
 
 **Choice handling on `base_field` is inherited automatically:** the recursive `convert_scalar(element, type_name)` call on the `base_field` re-enters and hits the existing choices branch, producing `list[<TypeName><FieldName>Enum]`. The outer-`choices` rejection only fires for the outer `ArrayField` itself.
 
@@ -289,11 +288,11 @@ Module-load assignment only exercises one branch per environment, so the importa
 
 ### Decision 5 — `HStoreField` wire shape
 
-Map `HStoreField` → `strawberry.scalars.JSON`. Strawberry rejects `dict[str, str | None]` as an annotation. `HStoreField` is **not** added to `SCALAR_MAP`; instead it gets a sentinel-guarded branch in `convert_scalar`, mirroring Decision 2's shape:
+Map `HStoreField` → `strawberry.scalars.JSON`. Strawberry rejects `dict[str, str | None]` as an annotation. `HStoreField` is **not** added to `SCALAR_MAP`; instead `scalar_route` matches it through the `_HSTORE_FIELD_CLS` sentinel (after the `ArrayField` test, before the `SCALAR_MAP` lookup) and `convert_scalar` branches on that arm, mirroring Decision 2's shape:
 
 ```python
-# in convert_scalar, after the ArrayField branch, before the scalar_for_field walk:
-if _HSTORE_FIELD_CLS is not None and truth.is_instance(field, _HSTORE_FIELD_CLS):
+# in convert_scalar, after the array arm:
+if isinstance(route, HStoreRoute):
     if field.choices:
         raise ConfigurationError(
             f"HStoreField on {_field_label(field)} declares choices; "
@@ -334,10 +333,10 @@ The [`strawberry_config`][glossary-strawberry-config] factory's own surface - th
 - `tests/types/test_converters.py` — the sentinel-swap field-mapping tests and the package-internal schema-execution tests. Mirrors `django_strawberry_framework/types/converters.py`.
 - `examples/fakeshop/test_query/test_scalars_api.py` — the live `/graphql/` tier. Any mapping reachable from a real query against fakeshop is pinned HERE (per [`AGENTS.md`][agents]); the `apps.scalars` app carries the `ScalarSpecimen` / `NullableScalarSpecimen` pair whose `payload` (`JSONField`), `signed_big` (`BigIntegerField`), and `unsigned_big` (`PositiveBigIntegerField`) columns exercise every mapping this spec owns that a SQLite-backed example can reach, including every string-form parse and reject case. `ArrayField` / `HStoreField` are postgres-only and stay at the package tier behind fake sentinels.
 
-**Fake field doubles** (in `tests/types/test_converters.py`):
+**Fake field doubles** (in `tests/_postgres_fields.py`, shared by every test module that reaches a container arm):
 
 ```python
-class _FakeArrayField(models.Field):
+class FakeArrayField(models.Field):
     """Test double for ArrayField that does not require django.contrib.postgres.
 
     Mirrors Django's real ArrayField metadata propagation so base_field has
@@ -355,29 +354,29 @@ class _FakeArrayField(models.Field):
         self.base_field.model = cls
 
 
-class _FakeHStoreField(models.Field):
+class FakeHStoreField(models.Field):
     """Test double for HStoreField that does not require django.contrib.postgres.
 
     Tests must call
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
     before declaring a DjangoType using this field; otherwise convert_scalar's
     HStore branch never dispatches.
     """
     pass
 ```
 
-**Test-model `Meta` requirement**: every test model hosting `_FakeArrayField` or `_FakeHStoreField` declares `class Meta: managed = False` with its section's `app_label` (`"test_arrayfield"`, `"test_hstorefield"`). The `managed = False` flag tells Django the model has no migrated table: no migration is implied, and `MyModel.objects.create(...)` would fail at the database boundary, so test rows are instantiated directly (`MyModel(field=value)`).
+**Test-model `Meta` requirement**: every test model hosting `FakeArrayField` or `FakeHStoreField` declares `class Meta: managed = False` with its section's `app_label` (`"test_arrayfield"`, `"test_hstorefield"`). The `managed = False` flag tells Django the model has no migrated table: no migration is implied, and `MyModel.objects.create(...)` would fail at the database boundary, so test rows are instantiated directly (`MyModel(field=value)`).
 
-**Sentinel-swap requirement**: every `_FakeArrayField` / `_FakeHStoreField`-based test must call `monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)` (or `_HSTORE_FIELD_CLS`) *before* declaring the `DjangoType`. Without the swap, `convert_scalar` falls through to the unsupported-field `ConfigurationError`.
+**Sentinel-swap requirement**: every `FakeArrayField` / `FakeHStoreField`-based test must call `monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)` (or `_HSTORE_FIELD_CLS`) *before* declaring the `DjangoType`. Without the swap, `convert_scalar` falls through to the unsupported-field `ConfigurationError`.
 
 **Schema test fixture pattern** (the recipe every schema-execution test here follows):
 
 `tests/types/test_converters.py` applies the shared `tests/conftest.py::isolate_global_registry` to every test through a module-level `pytestmark = pytest.mark.usefixtures("isolate_global_registry")`; the fixture clears the registry and the connection-type cache on entry and exit. The suite-wide autouse `tests/conftest.py::_restore_app_registry` retires every model a test declares, so an in-function model can be re-declared under the same `app_label` without Django's "Model already registered" warning.
 
-The models are declared inside the test function, so each `monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)` sits beside the `DjangoType` declaration it governs. Every schema-execution test follows this sequence:
+The models are declared inside the test function, so each `monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)` sits beside the `DjangoType` declaration it governs. Every schema-execution test follows this sequence:
 
 1. **Define the synthetic test model** inside the test, with `class Meta: managed = False` and the section's `app_label`.
-2. **Apply sentinel monkey-patches** (where relevant) BEFORE declaring the `DjangoType` — `monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)` etc. The converter's sentinel-guard branch checks the patched value at type-creation time.
+2. **Apply sentinel monkey-patches** (where relevant) BEFORE declaring the `DjangoType` — `monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)` etc. The converter's sentinel-guard branch checks the patched value at type-creation time.
 3. **Define the `DjangoType` subclass** referencing the synthetic model. This registers it in the pending-types collection.
 4. **Call `finalize_django_types()`** to resolve pending relations and apply the `strawberry.type` decoration. This is **mandatory** — without it, the `DjangoType` is not a usable Strawberry type, and `strawberry.Schema(...)` raises.
 5. **Build the schema** with a `Query` root that exposes the type (a `@strawberry.field` returning a hand-built instance), passing `config=strawberry_config()` whenever a `BigInt` annotation is involved.
@@ -455,11 +454,11 @@ Files: `django_strawberry_framework/types/converters.py`, `examples/fakeshop/tes
 
 ### Slice 3 — `ArrayField` recursion (sentinel-based)
 
-Files: `django_strawberry_framework/types/converters.py` (sentinel + branch + outer-`choices` rejection), `tests/types/test_converters.py` (`_FakeArrayField` double + tests).
+Files: `django_strawberry_framework/types/converters.py` (sentinel + branch + outer-`choices` rejection), `tests/_postgres_fields.py` (`FakeArrayField` double), `tests/types/test_converters.py` (tests).
 
 ### Slice 4 — `HStoreField` conditional registration via sentinel
 
-Files: `django_strawberry_framework/types/converters.py` (sentinel + branch returning `JSON`), `tests/types/test_converters.py` (`_FakeHStoreField` double + tests).
+Files: `django_strawberry_framework/types/converters.py` (sentinel + branch returning `JSON`), `tests/_postgres_fields.py` (`FakeHStoreField` double), `tests/types/test_converters.py` (tests).
 
 ### Slice 5 — Version bump
 
@@ -507,8 +506,8 @@ Test categories:
 7. `null` in a nullable `BigInt` input position reaches the resolver as `None`.
 8. Sentinel branch coverage via fake field classes + monkey-patched sentinels.
 9. Soft-import branch coverage — owned by `tests/utils/test_imports.py`, not repeated here ([Decision 4](#decision-4--soft-import-via-module-level-sentinels)).
-10. Choice composition on `base_field` of `_FakeArrayField`.
-11. Outer-`choices` rejection on `_FakeArrayField` and `_FakeHStoreField`.
+10. Choice composition on `base_field` of `FakeArrayField`.
+11. Outer-`choices` rejection on `FakeArrayField` and `FakeHStoreField`.
 12. `base_field`-unsupported-type propagation through the recursive call.
 13. Dimensionality rejection.
 14. **Warning-free-import regression** — subprocess invocation `python -W error::DeprecationWarning -c "import django_strawberry_framework"` returns exit code 0 (no Strawberry class-direct-to-`scalar()` warning escapes the package import). Subprocess isolation avoids the `importlib.reload`-doesn't-reload-submodules trap; see [Decision 7](#decision-7--test-strategy).

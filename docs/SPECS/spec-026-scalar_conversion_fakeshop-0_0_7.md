@@ -37,7 +37,7 @@ A package-internal test standing up a synthetic `managed = False` model can read
 
 ## Non-goals
 
-1. **`ArrayField` and `HStoreField`.** Both are PostgreSQL-only and the fakeshop runs on SQLite, so neither can be exercised from a live fakeshop request at all. Neither has a `SCALAR_MAP` row of its own — they are sentinel-guarded branches in [`converters.py`][converters] `::convert_scalar` — and their coverage stays in `tests/` against package-internal fixtures. The exclusion is recorded in [`apps/scalars/models.py`][scalars-models]'s module docstring so the next reader of the app does not add them.
+1. **`ArrayField` and `HStoreField`.** Both are PostgreSQL-only and the fakeshop runs on SQLite, so neither can be exercised from a live fakeshop request at all. Neither has a `SCALAR_MAP` row of its own — they are sentinel-guarded arms of [`converters.py`][converters] `::scalar_route`, which `convert_scalar` branches on — and their coverage stays in `tests/` against package-internal fixtures. The exclusion is recorded in [`apps/scalars/models.py`][scalars-models]'s module docstring so the next reader of the app does not add them.
 2. **The sixteen trivial-collapse rows.** A column mapped to plain `int` or plain `str` is already read over HTTP wherever the other example apps select one; adding a column per row here would buy nothing.
 3. **A write, filter or order surface.** This card ships two read-only root query fields and no mutation, `FilterSet`, or `OrderSet`; the app's `Mutation`, `filters.py`, and `orders.py` belong to other cards ([Card snapshot](#card-snapshot)).
 4. **Package source changes.** No file under `django_strawberry_framework/` is touched, `__all__` is unchanged, and no new public export lands.

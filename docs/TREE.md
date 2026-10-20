@@ -483,6 +483,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── _generated_inputs.py          # Shared keyword-constructor view of run-time-generated GraphQL input classes.
 ├── _idioms.py                    # Shared test idioms written so the type checker can follow them.
 ├── _info.py                      # Real Strawberry ``Info`` objects for tests that call a resolver-side entry point directly.
+├── _postgres_fields.py           # Shared PostgreSQL container-field doubles that run without ``django.contrib.postgres``.
 ├── _relation_fixtures.py         # Shared TEST-ONLY composite-primary-key relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
 ├── conftest.py                   # Shared pytest fixtures and test-suite instrumentation.
@@ -772,6 +773,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── _generated_inputs.py          # Shared keyword-constructor view of run-time-generated GraphQL input classes.
 ├── _idioms.py                    # Shared test idioms written so the type checker can follow them.
 ├── _info.py                      # Real Strawberry ``Info`` objects for tests that call a resolver-side entry point directly.
+├── _postgres_fields.py           # Shared PostgreSQL container-field doubles that run without ``django.contrib.postgres``.
 ├── _relation_fixtures.py         # Shared TEST-ONLY composite-primary-key relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
 ├── conftest.py                   # Shared pytest fixtures and test-suite instrumentation.

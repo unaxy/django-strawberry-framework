@@ -96,6 +96,7 @@ from django_strawberry_framework.types.converters import convert_choices_to_enum
 from django_strawberry_framework.utils._narrowing import dict_of, enum_value, read_attr
 from django_strawberry_framework.utils.typing import call_forwarded
 from tests._idioms import ModelSerializerBase, bind_unparented
+from tests._postgres_fields import FakeArrayField
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -2090,23 +2091,15 @@ def test_multiple_choice_over_column_without_choices_accepted(
     assert set(_enum_members(inner).values()) == {"a", "b"}
 
 
-class _FakeArrayField(models.Field[object, object]):
-    """An ``ArrayField`` stand-in: ``django.contrib.postgres`` needs a Postgres driver."""
-
-    def __init__(self, base_field: ConcreteField) -> None:
-        super().__init__()
-        self.base_field = base_field
-
-
 def _array_choice_column(
     monkeypatch: pytest.MonkeyPatch,
     *,
     blank: bool = False,
-) -> _FakeArrayField:
+) -> FakeArrayField:
     """A ``tags`` array column whose ``base_field`` declares ``a`` / ``b``."""
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
     element: _Char = models.CharField(max_length=5, choices=[("a", "A"), ("b", "B")], blank=blank)
-    column = _FakeArrayField(element)
+    column = FakeArrayField(element)
     for field in (column, element):
         field.set_attributes_from_name("tags")
         field.model = product_models.Category
@@ -2213,9 +2206,9 @@ def test_multiple_choice_over_empty_label_array_base_accepted(
     The field's choices carry ``None`` from ``Choices.__empty__``; the element check leaves it to
     ``allow_null``, and the element enum has no ``_None`` member.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
     element: _Char = models.CharField(max_length=5, choices=_Condition.choices)
-    column = _FakeArrayField(element)
+    column = FakeArrayField(element)
     for model_field in (column, element):
         model_field.set_attributes_from_name("tags")
         model_field.model = product_models.Category
@@ -2381,11 +2374,11 @@ def test_field_taking_the_read_enum_of_a_grouped_column_refused(
     )
 
 
-def _grouped_array_choice_column(monkeypatch: pytest.MonkeyPatch) -> _FakeArrayField:
+def _grouped_array_choice_column(monkeypatch: pytest.MonkeyPatch) -> FakeArrayField:
     """A ``tags`` array column whose ``base_field`` declares the grouped choices."""
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
     element: _Char = models.CharField(max_length=8, choices=_GROUPED_CHOICES)
-    column = _FakeArrayField(element)
+    column = FakeArrayField(element)
     for model_field in (column, element):
         model_field.set_attributes_from_name("tags")
         model_field.model = product_models.Category

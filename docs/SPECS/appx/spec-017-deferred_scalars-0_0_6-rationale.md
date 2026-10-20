@@ -44,7 +44,7 @@ Companion to [`spec-017-deferred_scalars-0_0_6.md`][spec-017]. The spec states t
 ## Decision 7 — test strategy
 
 - **Subprocess, not `importlib.reload`, for the warning-free import.** `importlib.reload(django_strawberry_framework)` does not reload submodules, so `scalars.py`'s definition line never re-executes and a reload-based test observes zero warnings whether or not the definition is on the deprecated path: it cannot fail.
-- **Fake field doubles over a postgres driver.** `_FakeArrayField` / `_FakeHStoreField` plus a monkey-patched sentinel reach the branches on SQLite; the real-class tests run only where `django.contrib.postgres.fields` imports.
+- **Fake field doubles over a postgres driver.** `FakeArrayField` / `FakeHStoreField` plus a monkey-patched sentinel reach the branches on SQLite; the real-class tests run only where `django.contrib.postgres.fields` imports.
 - **`managed = False`.** The synthetic models have no migrated table; the flag records that and forces direct instantiation instead of `objects.create()`.
 - **No `isinstance` assertion on Strawberry's scalar wrapper in the import smoke test.** The wrapper type is an undocumented Strawberry internal, and `BigInt` is a bare `NewType` anyway; schema-execution tests give the stronger signal.
 - **Live tier first.** Every parse / serialize case a request can express is pinned over `/graphql/` against the `apps.scalars` specimens; the package tier keeps only Python-object inputs no request can carry.

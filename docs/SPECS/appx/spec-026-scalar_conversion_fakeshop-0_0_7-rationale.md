@@ -30,7 +30,7 @@ Decision 3 states what the `partner` edge itself does — `SET_NULL` clears `par
 
 `ArrayField` and `HStoreField` are absent from the coverage models on purpose. Both are PostgreSQL-only, the fakeshop's default database is SQLite, and a column the example database cannot create is a column no live `/graphql/` request can reach. Their coverage stays in `tests/` against package-internal fixtures. The spec states the exclusion as a non-goal, beside the module docstring of [`apps/scalars/models.py`][scalars-models], so it does not read as an oversight to fix.
 
-Neither field has a `SCALAR_MAP` row. Both are dispatched by sentinel-guarded branches in [`converters.py`][converters] `::convert_scalar` that run **before** the table's MRO walk, because neither type can be imported unconditionally; "their converter rows" would send a reader looking for two table entries that do not exist.
+Neither field has a `SCALAR_MAP` row. Both are dispatched by sentinel-guarded arms of [`converters.py`][converters] `::scalar_route` (the routing `convert_scalar` branches on), matched **before** the table's MRO walk, because neither type can be imported unconditionally; "their converter rows" would send a reader looking for two table entries that do not exist.
 
 ### Alternatives rejected
 

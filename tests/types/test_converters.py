@@ -16,7 +16,7 @@ declare, because *exposing* each column on a ``DjangoType`` is what cannot be
 built. The unsupported-field, ``DurationField`` and ``BinaryField`` owners pin
 the ``Unsupported Django field type`` raise in
 ``django_strawberry_framework/types/converters.py::scalar_for_field``; the
-``_FakeArrayField`` / ``_FakeHStoreField`` owners pin, on SQLite, the
+``FakeArrayField`` / ``FakeHStoreField`` owners pin, on SQLite, the
 PostgreSQL container branches of
 ``django_strawberry_framework/types/converters.py::convert_scalar``; and
 ``ChoiceFixture``'s hyphenated, digit-led and keyword choice values pin
@@ -68,10 +68,13 @@ from django_strawberry_framework.types.converters import (
     FIELD_OUTPUT_TYPE_MAP,
     FILESYSTEM_PATH_OUTPUT_TYPE_MAP,
     SCALAR_MAP,
+    ArrayRoute,
     DjangoFilePathType,
     DjangoFileType,
     DjangoImagePathType,
     DjangoImageType,
+    HStoreRoute,
+    MapRoute,
     _column_admits_empty_string,
     _field_label,
     _field_output_type_for,
@@ -83,10 +86,12 @@ from django_strawberry_framework.types.converters import (
     convert_field_output,
     convert_scalar,
     scalar_for_field,
+    scalar_route,
 )
 from django_strawberry_framework.utils._narrowing import enum_value, require
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import definition_raises, is_object_dict, is_object_list, resolver_function
+from tests._postgres_fields import FakeArrayField, FakeHStoreField
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -341,6 +346,46 @@ def test_build_enum_collision_message_runs_a_hostile_choice_repr() -> None:
             "FixtureTypeEnum",
             source_label="probe",
         )
+
+
+def test_scalar_route_names_each_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``scalar_route`` names the ``convert_scalar`` arm a column takes, with that arm's data.
+
+    The containers win over ``SCALAR_MAP`` (each double subclasses ``models.Field``, which
+    keys no map row); a map column carries the matched MRO ancestor, its scalar, and whether
+    the choice enum replaces it.
+    """
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
+
+    class CustomTextField(models.TextField[str, str]):
+        pass
+
+    element: models.CharField[str, str] = models.CharField(max_length=5)
+    assert scalar_route(FakeArrayField(element)) == ArrayRoute(element)
+    assert scalar_route(FakeHStoreField()) == HStoreRoute()
+    assert scalar_route(models.CharField()) == MapRoute(models.CharField, str, choices=False)
+    assert scalar_route(models.CharField(choices=[("a", "A")])) == MapRoute(
+        models.CharField,
+        str,
+        choices=True,
+    )
+    assert scalar_route(CustomTextField()) == MapRoute(models.TextField, str, choices=False)
+    assert scalar_route(models.BigIntegerField()) == MapRoute(
+        models.BigIntegerField,
+        BigInt,
+        choices=False,
+    )
+
+
+def test_scalar_route_rejects_an_unsupported_field() -> None:
+    """An unsupported column raises the same ``ConfigurationError`` ``scalar_for_field`` raises."""
+    field: models.DurationField[object, datetime.timedelta] = models.DurationField()
+    with pytest.raises(ConfigurationError, match="Unsupported Django field type") as route_error:
+        scalar_route(field)
+    with pytest.raises(ConfigurationError) as lookup_error:
+        scalar_for_field(field)
+    assert str(route_error.value) == str(lookup_error.value)
 
 
 def test_scalar_for_field_label_runs_a_hostile_field_name_str() -> None:
@@ -1441,7 +1486,7 @@ def test_convert_scalar_binary_field_raises_unsupported() -> None:
 # Synthetic models live under ``app_label = "test_bigint"`` so they do not
 # collide with the choice-enum fixture's ``app_label = "test_choice_enums"``.
 # ``managed = False`` per spec-017 Decision 7
-# #"every test model hosting `_FakeArrayField` or `_FakeHStoreField` declares `class Meta: managed = False`":
+# #"every test model hosting `FakeArrayField` or `FakeHStoreField` declares `class Meta: managed = False`":
 # no migration implication; test rows are instantiated directly when needed.
 # ---------------------------------------------------------------------------
 
@@ -1493,47 +1538,6 @@ def _introspect_field_type(
     raise AssertionError(f"field {field_name!r} not found on type {type_name!r}; got {fields!r}")
 
 
-class _FakeArrayField(models.Field[object, object]):
-    """Test double for ArrayField that does not require django.contrib.postgres.
-
-    Mirrors Django's real ArrayField metadata propagation so base_field has
-    model and name attributes when convert_scalar recurses into it. Required
-    because convert_choices_to_enum reads field.model.__name__ and field.name
-    to build enum_name = f"{type_name}{pascal_case(field.name)}Enum".
-    """
-
-    def __init__(
-        self,
-        base_field: models.Field[Never, object],
-        *,
-        null: bool = False,
-        choices: list[tuple[int, str]] | None = None,
-    ) -> None:
-        super().__init__(null=null, choices=choices)
-        self.base_field = base_field
-
-    @override
-    def contribute_to_class(
-        self,
-        cls: type[models.Model],
-        name: str,
-        private_only: bool = False,
-    ) -> None:
-        super().contribute_to_class(cls, name, private_only=private_only)
-        self.base_field.set_attributes_from_name(name)
-        self.base_field.model = cls
-
-
-class _FakeHStoreField(models.Field[object, object]):
-    """Test double for HStoreField that does not require django.contrib.postgres.
-
-    Tests must call
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)
-    before declaring a DjangoType using this field; otherwise convert_scalar's
-    HStore branch never dispatches.
-    """
-
-
 def test_bigint_in_input_position_with_null_via_schema_execution() -> None:
     """A nullable ``BigInt`` argument accepts ``null``.
 
@@ -1582,7 +1586,7 @@ def test_bigint_resolver_returning_bool_raises_via_schema_execution() -> None:
 # Synthetic models live under ``app_label = "test_arrayfield"`` so they do
 # not collide with the prior synthetic apps (``test_bigint``,
 # ``test_choice_enums``). Sentinel-branch tests monkey-patch
-# ``converters._ARRAY_FIELD_CLS = _FakeArrayField`` BEFORE declaring the
+# ``converters._ARRAY_FIELD_CLS = FakeArrayField`` BEFORE declaring the
 # ``DjangoType`` (spec-017 Decision 7 #"*before* declaring the `DjangoType`").
 # The introspection helpers (``_introspect_field_type`` /
 # ``_walk_introspected_type``) defined in the BigInt section above are
@@ -1602,13 +1606,13 @@ def test_array_field_of_int_maps_to_list_int_via_fake_sentinel(
     """``ArrayField(IntegerField())`` maps to ``list[int]`` (non-null outer + inner).
 
     ``ArrayField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this unmanaged
-    ``_FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
+    ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class ArrayIntOwner(models.Model):
-        arr = _FakeArrayField(models.IntegerField())
+        arr = FakeArrayField(models.IntegerField())
 
         class Meta:
             managed = False
@@ -1649,13 +1653,13 @@ def test_array_field_of_char_maps_to_list_str_via_fake_sentinel(
     """``ArrayField(CharField())`` maps to ``list[str]`` (terminal SCALAR name "String").
 
     ``ArrayField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this unmanaged
-    ``_FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
+    ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class ArrayCharOwner(models.Model):
-        arr = _FakeArrayField(models.CharField(max_length=20))
+        arr = FakeArrayField(models.CharField(max_length=20))
 
         class Meta:
             managed = False
@@ -1694,13 +1698,13 @@ def test_array_field_nullable_inner_via_fake_sentinel(monkeypatch: pytest.Monkey
     non-null. Introspection chain: ``NON_NULL -> LIST -> SCALAR``.
 
     ``ArrayField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this unmanaged
-    ``_FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
+    ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class ArrayNullableInnerOwner(models.Model):
-        arr = _FakeArrayField(models.IntegerField(null=True))
+        arr = FakeArrayField(models.IntegerField(null=True))
 
         class Meta:
             managed = False
@@ -1743,13 +1747,13 @@ def test_array_field_outer_nullable_via_fake_sentinel(monkeypatch: pytest.Monkey
     non-null. Introspection chain: ``LIST -> NON_NULL -> SCALAR``.
 
     ``ArrayField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this unmanaged
-    ``_FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
+    ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class ArrayOuterNullableOwner(models.Model):
-        arr = _FakeArrayField(models.IntegerField(), null=True)
+        arr = FakeArrayField(models.IntegerField(), null=True)
 
         class Meta:
             managed = False
@@ -1791,10 +1795,10 @@ def test_array_field_multidim_rejected_via_fake_sentinel(monkeypatch: pytest.Mon
     owner alone reaches the ``Nested ArrayField`` raise in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class ArrayMultidimOwner(models.Model):
-        arr = _FakeArrayField(_FakeArrayField(models.IntegerField()))
+        arr = FakeArrayField(FakeArrayField(models.IntegerField()))
 
         class Meta:
             managed = False
@@ -1815,13 +1819,13 @@ def test_annotation_override_of_arrayfield_with_nested_array_is_allowed(
     """Consumer ``arr: list[list[int]]`` annotation bypasses nested-ArrayField rejection.
 
     ``ArrayField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this unmanaged
-    ``_FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
+    ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class NestedArrayOverrideOwner(models.Model):
-        arr = _FakeArrayField(_FakeArrayField(models.IntegerField()))
+        arr = FakeArrayField(FakeArrayField(models.IntegerField()))
 
         class Meta:
             managed = False
@@ -1846,13 +1850,13 @@ def test_array_field_choices_inner_via_fake_sentinel(monkeypatch: pytest.MonkeyP
     an enum scalar.
 
     ``ArrayField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this unmanaged
-    ``_FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
+    ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class ArrayChoicesInnerOwner(models.Model):
-        arr = _FakeArrayField(
+        arr = FakeArrayField(
             models.CharField(max_length=5, choices=[("A", "A"), ("B", "B")]),
         )
 
@@ -1894,10 +1898,10 @@ def test_array_field_element_empty_label_gets_no_member_via_fake_sentinel(
     The element enum is built by the same ``_normalize_choice_pairs`` the column enum reads, so the
     ``(None, "Unassessed")`` pair labels the empty option there too.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class ArrayEmptyLabelOwner(models.Model):
-        arr = _FakeArrayField(models.CharField(max_length=5, choices=_Condition.choices))
+        arr = FakeArrayField(models.CharField(max_length=5, choices=_Condition.choices))
 
         class Meta:
             managed = False
@@ -1928,10 +1932,10 @@ def test_array_field_outer_choices_rejected_via_fake_sentinel(
     owner alone reaches the outer-``choices`` raise in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class ArrayOuterChoicesOwner(models.Model):
-        arr = _FakeArrayField(
+        arr = FakeArrayField(
             models.IntegerField(),
             choices=[(1, "one"), (2, "two")],
         )
@@ -1959,13 +1963,13 @@ def test_array_field_base_field_unsupported_type_raises(monkeypatch: pytest.Monk
     owner alone reaches the recursive ``Unsupported Django field type`` raise in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class _Weird(models.Field[object, object]):
         pass
 
     class ArrayUnsupportedBaseOwner(models.Model):
-        arr = _FakeArrayField(_Weird())
+        arr = FakeArrayField(_Weird())
 
         class Meta:
             managed = False
@@ -1988,7 +1992,7 @@ def test_array_field_sentinel_none_path(monkeypatch: pytest.MonkeyPatch) -> None
     Pins the short-circuit guard: without ``_ARRAY_FIELD_CLS is not None``,
     the ``isinstance(field, _ARRAY_FIELD_CLS)`` call would ``TypeError``.
 
-    A ``_FakeArrayField`` column exposed with ``_ARRAY_FIELD_CLS`` unset is unbuildable
+    A ``FakeArrayField`` column exposed with ``_ARRAY_FIELD_CLS`` unset is unbuildable
     by design (the package raises), so this unmanaged owner alone reaches the
     ``_ARRAY_FIELD_CLS is not None`` guard in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
@@ -1996,7 +2000,7 @@ def test_array_field_sentinel_none_path(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", None)
 
     class ArraySentinelNoneOwner(models.Model):
-        arr = _FakeArrayField(models.IntegerField())
+        arr = FakeArrayField(models.IntegerField())
 
         class Meta:
             managed = False
@@ -2071,7 +2075,7 @@ def test_real_array_field_compatible_with_strawberry() -> None:
 # Synthetic models live under ``app_label = "test_hstorefield"`` so they do
 # not collide with the prior synthetic apps (``test_bigint``,
 # ``test_arrayfield``, ``test_choice_enums``). Sentinel-branch tests
-# monkey-patch ``converters._HSTORE_FIELD_CLS = _FakeHStoreField`` BEFORE
+# monkey-patch ``converters._HSTORE_FIELD_CLS = FakeHStoreField`` BEFORE
 # declaring the ``DjangoType`` (spec-017 Decision 7 #"*before* declaring the `DjangoType`").
 # The sentinel's soft-import resolution is covered once in ``tests/utils/test_imports.py``,
 # not here (spec-017 #"**Soft-import branch coverage** is NOT written here.").
@@ -2089,13 +2093,13 @@ def test_hstore_field_maps_to_json_scalar_via_fake_sentinel(
     """``HStoreField`` (non-null) appears as ``JSON!`` in the schema.
 
     ``HStoreField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this
-    unmanaged ``_FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
+    unmanaged ``FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
     branch of ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
 
     class HStoreOwner(models.Model):
-        data = _FakeHStoreField()
+        data = FakeHStoreField()
 
         class Meta:
             managed = False
@@ -2128,13 +2132,13 @@ def test_hstore_field_nullable_via_fake_sentinel(monkeypatch: pytest.MonkeyPatch
     """``HStoreField(null=True)`` appears as ``JSON`` (nullable).
 
     ``HStoreField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this
-    unmanaged ``_FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
+    unmanaged ``FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
     branch of ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
 
     class HStoreNullableOwner(models.Model):
-        data = _FakeHStoreField(null=True)
+        data = FakeHStoreField(null=True)
 
         class Meta:
             managed = False
@@ -2174,13 +2178,13 @@ def test_hstore_field_resolver_dict_serializes_via_schema_execution(
     only the scalar's wire-level serialization through Strawberry.
 
     ``HStoreField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this
-    unmanaged ``_FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
+    unmanaged ``FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
     branch of ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
 
     class HStoreSerializeOwner(models.Model):
-        data = _FakeHStoreField()
+        data = FakeHStoreField()
 
         class Meta:
             managed = False
@@ -2220,13 +2224,13 @@ def test_hstore_field_resolver_dict_with_none_value_via_schema_execution(
     ``dict[str, str | None]`` shape.
 
     ``HStoreField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this
-    unmanaged ``_FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
+    unmanaged ``FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
     branch of ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
 
     class HStoreNoneValueOwner(models.Model):
-        data = _FakeHStoreField()
+        data = FakeHStoreField()
 
         class Meta:
             managed = False
@@ -2270,10 +2274,10 @@ def test_hstore_field_outer_choices_rejected_via_fake_sentinel(
     owner alone reaches the ``HStoreField ... declares choices`` raise in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
 
     class HStoreOuterChoicesOwner(models.Model):
-        data = _FakeHStoreField(choices=[("a", "A")])
+        data = FakeHStoreField(choices=[("a", "A")])
 
         class Meta:
             managed = False
@@ -2296,7 +2300,7 @@ def test_hstore_field_sentinel_none_path(monkeypatch: pytest.MonkeyPatch) -> Non
     Pins the short-circuit guard: without ``_HSTORE_FIELD_CLS is not None``,
     the ``isinstance(field, _HSTORE_FIELD_CLS)`` call would ``TypeError``.
 
-    A ``_FakeHStoreField`` column exposed with ``_HSTORE_FIELD_CLS`` unset is
+    A ``FakeHStoreField`` column exposed with ``_HSTORE_FIELD_CLS`` unset is
     unbuildable by design (the package raises), so this unmanaged owner alone reaches
     the ``_HSTORE_FIELD_CLS is not None`` guard in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
@@ -2304,7 +2308,7 @@ def test_hstore_field_sentinel_none_path(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", None)
 
     class HStoreSentinelNoneOwner(models.Model):
-        data = _FakeHStoreField()
+        data = FakeHStoreField()
 
         class Meta:
             managed = False
@@ -2575,7 +2579,7 @@ def test_relation_target_with_multiple_no_primary_surfaces_audit_error_at_finali
 # narrows. The choice / Array / HStore branches each read the same single
 # ``effective_null`` value, so the override applies uniformly. Synthetic
 # models reuse the existing ``_unique_app_label`` namespacing + the
-# ``_FakeArrayField`` / ``_FakeHStoreField`` doubles and their monkeypatch
+# ``FakeArrayField`` / ``FakeHStoreField`` doubles and their monkeypatch
 # pattern.
 # ---------------------------------------------------------------------------
 
@@ -2655,14 +2659,14 @@ def test_convert_scalar_force_nullable_on_array_field(monkeypatch: pytest.Monkey
     narrows back to bare ``list[int]``.
 
     ``ArrayField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this unmanaged
-    ``_FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
+    ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", _FakeArrayField)
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class _ArrOwner(models.Model):
-        arr = _FakeArrayField(models.IntegerField())
-        nullable_arr = _FakeArrayField(models.IntegerField(), null=True)
+        arr = FakeArrayField(models.IntegerField())
+        nullable_arr = FakeArrayField(models.IntegerField(), null=True)
 
         class Meta:
             managed = False
@@ -2684,14 +2688,14 @@ def test_convert_scalar_force_nullable_on_hstore_field(monkeypatch: pytest.Monke
     """The override flips ``HStoreField`` between ``JSON | None`` and ``JSON``.
 
     ``HStoreField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this
-    unmanaged ``_FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
+    unmanaged ``FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
     branch of ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", _FakeHStoreField)
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
 
     class _HStoreOwner(models.Model):
-        data = _FakeHStoreField()
-        nullable_data = _FakeHStoreField(null=True)
+        data = FakeHStoreField()
+        nullable_data = FakeHStoreField(null=True)
 
         class Meta:
             managed = False
