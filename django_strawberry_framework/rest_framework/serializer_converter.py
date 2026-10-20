@@ -86,6 +86,7 @@ from django_strawberry_framework.types.converters import (
     build_enum_from_choices,
     choice_column_is_grouped,
     choice_column_values,
+    choice_enum_name,
     convert_scalar,
     scalar_for_field,
 )
@@ -113,7 +114,7 @@ from django_strawberry_framework.utils.inputs import RELATION_SINGLE as RELATION
 from django_strawberry_framework.utils.inputs import SCALAR as SCALAR  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import FieldConversionBase, InputFieldSpec
 from django_strawberry_framework.utils.querysets import to_python_value
-from django_strawberry_framework.utils.strings import graphql_camel_name, pascal_case
+from django_strawberry_framework.utils.strings import graphql_camel_name
 
 from .accessors import (
     child_relation_of,
@@ -1289,7 +1290,7 @@ def _serializer_choice_enum(field: DRFField, type_name: str) -> type[Enum]:
     set fails loud rather than silently reusing the first.
     """
     field_name = _bound_field_name(field)
-    enum_name = f"{type_name}{pascal_case(field_name)}Enum"
+    enum_name = choice_enum_name(type_name, field_name)
     # Callers reach this only through ``_is_enumerable_serializer_choice``.
     choice = cast("serializers.ChoiceField", serializer_choice_source(field))
     choices = choices_of(choice)

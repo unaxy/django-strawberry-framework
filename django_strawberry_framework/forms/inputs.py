@@ -66,6 +66,7 @@ from django_strawberry_framework.types.converters import (
     array_element_field,
     build_enum_from_choices,
     choice_column_pairs,
+    choice_enum_name,
 )
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import dict_of
@@ -83,7 +84,7 @@ from django_strawberry_framework.utils.relations import (
     is_forward_concrete_relation,
     is_forward_many_to_many,
 )
-from django_strawberry_framework.utils.strings import graphql_camel_name, pascal_case
+from django_strawberry_framework.utils.strings import graphql_camel_name
 
 from .converter import (
     FILE,
@@ -701,15 +702,16 @@ def _form_choice_annotation(
 ) -> object:
     """Return the generated enum annotation for a form choice field's narrowed column choices.
 
-    The enum is ``<InputTypeName><FieldName>Enum`` (the serializer flavor's naming for a declared
-    choice field's generated enum), built by the shared ``build_enum_from_choices`` core from the
-    ``_form_choice_narrowing`` pairs, so member sanitization and ``BLANK`` follow the read enum's
-    rules; a list-writing field publishes ``list[<enum>]`` with a non-null element. One input
-    class references it, and the per-shape build cache builds each input once.
+    The enum is ``<InputTypeName><FieldName>Enum`` (``types/converters.py::choice_enum_name``, the
+    naming every flavor's generated choice enum shares), built by the shared
+    ``build_enum_from_choices`` core from the ``_form_choice_narrowing`` pairs, so member
+    sanitization and ``BLANK`` follow the read enum's rules; a list-writing field publishes
+    ``list[<enum>]`` with a non-null element. One input class references it, and the per-shape
+    build cache builds each input once.
     """
     enum_cls = build_enum_from_choices(
         pairs,
-        f"{type_name}{pascal_case(name)}Enum",
+        choice_enum_name(type_name, name),
         source_label=f"Form {truth.name(form_class)} field {truth.render(name)}",
     )
     return GenericAlias(list, (enum_cls,)) if writes_list else enum_cls

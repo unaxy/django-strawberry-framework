@@ -82,6 +82,7 @@ from django_strawberry_framework.types.converters import (
     build_enum_from_choices,
     choice_column_is_grouped,
     choice_column_values,
+    choice_enum_name,
     convert_choices_to_enum,
     convert_field_output,
     convert_scalar,
@@ -518,6 +519,11 @@ def test_choice_enum_name_derivation_propagates_a_hostile_type_name_format(
         # basedpyright: the unformattable type name is the hostile input under test;
         # convert_choices_to_enum types the parameter as str
         convert_choices_to_enum(field, _HostileTypeName())  # pyright: ignore[reportArgumentType]
+
+
+def test_choice_enum_name_composes_type_and_pascal_cased_field_name() -> None:
+    """The generated choice-enum name every flavor publishes is ``<TypeName><FieldName>Enum``."""
+    assert choice_enum_name("ItemType", "status_code") == "ItemTypeStatusCodeEnum"
 
 
 def _blank_choice_model(

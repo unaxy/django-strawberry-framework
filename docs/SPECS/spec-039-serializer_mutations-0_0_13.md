@@ -2569,8 +2569,8 @@ held by the identity ratchet where a symbol is shared:
 ### Small reuses to pin; deliberately not applicable
 
 Pin as named import obligations (Slice DoD lines): `utils/strings.py::graphql_camel_name`
-(the `categoryId` alias naming — do not hand-roll camel-casing) and its sibling
-`utils/strings.py::pascal_case`; `utils/inputs.py::normalize_field_name_sequence(flavor="SerializerMutation")`;
+(the `categoryId` alias naming — do not hand-roll camel-casing);
+`utils/inputs.py::normalize_field_name_sequence(flavor="SerializerMutation")`;
 `utils/permissions.py::request_from_info(family_label="SerializerMutation")`;
 `mutations/inputs.py::{annotate_queryset_relation, model_column_write_annotation,
 model_column_write_kind}` (the **backing** model-relation read the converter does via
@@ -2582,8 +2582,9 @@ apply_type_visibility_async, visibility_scoped_related_queryset, reject_async_in
 locate + relation-visibility + async-guard substrate (a re-spell here is a data-leak risk,
 not just a DRY nit); and the read-side
 [`types/converters.py`][types-converters]`::{convert_scalar, scalar_for_field,
-build_enum_from_choices}` keyed on the backing `models.Field` via `source` — the enum core
-the read side and the serializer converter share (Decision 7).
+build_enum_from_choices, choice_enum_name}` keyed on the backing `models.Field` via `source` —
+the enum core and the generated-enum name the read side and the serializer converter share
+(Decision 7).
 
 **Deliberately NOT applicable** — stated so a future reader does not hunt for a phantom
 reuse:
@@ -2606,8 +2607,7 @@ reuse:
   ([Decision 6](#decision-6--base-class-strategy-serializermutation-rides-the-djangomutation-base-modelserializer-driven)).
 - **`utils/strings.py::snake_case`** — an optimizer-walk helper, not a serializer-input
   reuse; do not conflate it with `graphql_camel_name`, which lives in the same module and
-  **is** the GraphQL↔Django input-name boundary the serializer flavor imports (as does
-  `pascal_case`, above).
+  **is** the GraphQL↔Django input-name boundary the serializer flavor imports.
 
 ### Import manifest — the DRY contract per `rest_framework/` module
 
@@ -2622,7 +2622,7 @@ the Slice-1 DRY bullet enumerates, and that one is executable
 
 | `rest_framework/` module | May import from | The substrate it must not re-implement |
 | --- | --- | --- |
-| [`serializer_converter.py`][rf-converter] | `exceptions`, `registry`, `scalars`, `mutations/inputs.py`, `types/converters.py`, `utils/converters.py`, `utils/inputs.py`, `utils/strings.py` | the shared fail-loud dispatch skeleton, the shared conversion base + field spec, the four input-kind constants, the read-side scalar / enum core (`convert_scalar`, `scalar_for_field`, `build_enum_from_choices`), the model-column relation classifiers (`model_column_write_kind`, `model_column_write_annotation`, `annotate_queryset_relation`), the [`Upload`][glossary-upload-scalar] scalar, `graphql_camel_name` / `pascal_case`, the `register_subsystem_clear` seam |
+| [`serializer_converter.py`][rf-converter] | `exceptions`, `registry`, `scalars`, `mutations/inputs.py`, `types/converters.py`, `utils/converters.py`, `utils/inputs.py`, `utils/strings.py` | the shared fail-loud dispatch skeleton, the shared conversion base + field spec, the four input-kind constants, the read-side scalar / enum core (`convert_scalar`, `scalar_for_field`, `build_enum_from_choices`, `choice_enum_name`), the model-column relation classifiers (`model_column_write_kind`, `model_column_write_annotation`, `annotate_queryset_relation`), the [`Upload`][glossary-upload-scalar] scalar, `graphql_camel_name`, the `register_subsystem_clear` seam |
 | [`inputs.py`][rf-inputs] | `exceptions`, `registry`, `mutations/inputs.py`, `utils/inputs.py`, `utils/strings.py`, `.serializer_converter` | the input-namespace one-ledger trio, the shape-build cache pair, `build_strawberry_input_class`, `generated_input_type_name`, `guard_dropped_required`, `iter_input_field_collisions`, `optional_input_field`, `resolve_effective_fields`, `normalize_field_name_sequence`, `pascalize_token`, `InputFieldSpec`, `graphql_camel_name`, the `CREATE` / `PARTIAL` kinds, the `register_subsystem_clear` seam |
 | [`sets.py`][rf-sets] | `exceptions`, `mutations/inputs.py`, `mutations/sets.py`, `utils/inputs.py`, `.inputs`, `.serializer_converter` | `DjangoMutation`, `_ValidatedMutationMeta`, `_validate_permission_classes`, `reject_unknown_meta_keys`, `MODEL_BACKED_WRITE_META_KEYS`, `NON_DELETE_OPERATION_INPUT_KIND` + `require_non_delete_operation`, `build_and_stash_input`, `construction_kwargs`, `normalize_meta_field_selection`, `require_backing_class` / `require_model_class` / `require_subclass`, `resolve_backed_model_or_raise` / `resolve_meta_model`, `resolver_seams`, `validate_select_for_update`, `normalize_field_name_sequence` |
 | [`resolvers.py`][rf-resolvers] | `exceptions`, `mutations/inputs.py`, `mutations/resolvers.py`, `utils/errors.py`, `utils/inputs.py`, `utils/permissions.py`, `utils/querysets.py`, `utils/relations.py`, `utils/write_transaction.py`, `utils/write_values.py`, `.hook_context`, `.inputs`, `.serializer_converter` | the shared sync-pipeline skeleton `run_write_pipeline_sync` + `make_resolver_entries`, the shared decode primitives in `utils/write_values.py` — `decode_visible_relation`, `decode_visible_relation_ids`, `decode_provided_fields`, `decode_field_handlers`, `decoded_into` — the shared leaf-error constructors in `utils/errors.py`, the `NON_FIELD_ERROR_KEY` sentinel and `FieldError`, the write-transaction substrate (`require_write_pipeline`, `pipeline_write_phase`, `pin_write_queryset`, `base_locked_queryset`, `assert_no_target_drift`, `pks_match`, `column_values_match`, `make_cross_alias_save_guard`), `related_visibility_queryset`, `request_from_info` |
