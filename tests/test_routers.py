@@ -3938,13 +3938,15 @@ async def test_a_revoked_session_closes_the_socket_on_the_next_operation_without
     refuses it from the connection-local flag with no further session read and
     nothing emitted. That operation is a controlled subscription precisely so the
     refusal is observable: its resolver never runs, so upstream's
-    ``handle_subscribe`` was never reached.
+    ``handle_subscribe`` was never reached. Throughout, ``scope["user"]`` keeps the
+    stale actor (spec-046 Decision 11): the revocation closes, it never downgrades.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
     """
     user, cookie, session_key = await _make_user_and_session("revalidation_probe")
     probe = _instrument_revalidation(monkeypatch)
+    gate = _record_outbound_gate(monkeypatch)
     router = _router()
 
     async with _open_ws(router, cookie=cookie) as communicator:
@@ -3952,6 +3954,10 @@ async def test_a_revoked_session_closes_the_socket_on_the_next_operation_without
         assert first["type"] == "next", first
         assert json_at(first, "payload", "data") == {"username": "revalidation_probe"}
         assert probe.reads == 2
+        assert gate.consumers, "operation 1's frame never reached the outbound gate"
+        consumer = gate.consumers[0]
+        stale = _connection_actor(consumer)
+        assert stale.is_authenticated
 
         await revoke(user, session_key)
 
@@ -3970,6 +3976,7 @@ async def test_a_revoked_session_closes_the_socket_on_the_next_operation_without
         assert await communicator.receive_nothing(timeout=0.2)
         assert not refused.started.is_set(), "a revoked connection admitted another operation"
         assert probe.reads == 3
+        assert _connection_actor(consumer) is stale
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4103,7 +4110,8 @@ async def test_a_revalidation_store_failure_denies_the_operation_and_is_logged(
     (no information disclosure about which happened), and the failure is reported
     through the package logger at ``ERROR`` with its traceback rather than
     swallowed. There is no fall back to the connection's cached actor, which is the
-    property Edge cases requires.
+    property Edge cases requires - nor a downgrade of it: ``scope["user"]`` keeps
+    the stale actor (spec-046 Decision 11).
 
     Operation 3 is what pins that the degrade does not *retry* into a read storm:
     once the connection is revoked, a pipelined frame is refused from the
@@ -4114,11 +4122,16 @@ async def test_a_revalidation_store_failure_denies_the_operation_and_is_logged(
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
     """
     _user, cookie, _session_key = await _make_user_and_session("failclosed_probe")
+    gate = _record_outbound_gate(monkeypatch)
     router = _router()
 
     async with _open_ws(router, cookie=cookie) as communicator:
         first = await _ws_operation(communicator, "{ username }", op_id="1")
         assert first["type"] == "next", first
+        assert gate.consumers, "operation 1's frame never reached the outbound gate"
+        consumer = gate.consumers[0]
+        stale = _connection_actor(consumer)
+        assert stale.is_authenticated
 
         _poison_the_session_store(monkeypatch)
         with caplog.at_level(logging.ERROR, logger="django_strawberry_framework"):
@@ -4133,6 +4146,7 @@ async def test_a_revalidation_store_failure_denies_the_operation_and_is_logged(
             )
             assert await communicator.receive_nothing(timeout=0.2)
             assert not refused.started.is_set()
+        assert _connection_actor(consumer) is stale
 
     assert frames == [], frames
     _assert_revoked_close(closed)
@@ -4167,6 +4181,7 @@ async def test_a_failing_auth_backend_load_also_fails_closed(
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
     """
     _user, cookie, _session_key = await _make_user_and_session("backend_failure_probe")
+    gate = _record_outbound_gate(monkeypatch)
     router = _router()
 
     async def exploding_get_user(_scope: object) -> NoReturn:
@@ -4175,11 +4190,16 @@ async def test_a_failing_auth_backend_load_also_fails_closed(
     async with _open_ws(router, cookie=cookie) as communicator:
         first = await _ws_operation(communicator, "{ username }", op_id="1")
         assert first["type"] == "next", first
+        assert gate.consumers, "operation 1's frame never reached the outbound gate"
+        consumer = gate.consumers[0]
+        stale = _connection_actor(consumer)
+        assert stale.is_authenticated
 
         monkeypatch.setattr(channels.auth, "get_user", exploding_get_user)
         with caplog.at_level(logging.ERROR, logger="django_strawberry_framework"):
             await _send_operation(communicator, "{ username }", op_id="2")
             closed, frames = await _drain_until_close(communicator)
+        assert _connection_actor(consumer) is stale
 
     assert frames == [], frames
     _assert_revoked_close(closed)
@@ -4619,6 +4639,7 @@ async def test_a_delayed_query_revoked_after_admission_never_sends_its_response(
     user, cookie, session_key = await _make_user_and_session("delayed_query_probe")
     controller = _controller("delayed")
     probe = _instrument_revalidation(monkeypatch)
+    gate = _record_outbound_gate(monkeypatch)
     router = _router()
 
     async with _open_ws(router, cookie=cookie) as communicator:
@@ -4628,8 +4649,16 @@ async def test_a_delayed_query_revoked_after_admission_never_sends_its_response(
 
         await _flush_the_session(user, session_key)
 
+        # Park the gate's read so the pre-denial actor can be taken off the live scope.
+        probe.hold = asyncio.Event()
         controller.release(0)
+        await _wait_until(lambda: probe.reads == 2, lambda: "the gate never revalidated")
+        consumer = gate.consumers[0]
+        stale = _connection_actor(consumer)
+        assert stale.is_authenticated
+        probe.hold.set()
         closed, frames = await _drain_until_close(communicator)
+        assert _connection_actor(consumer) is stale
 
     assert frames == [], frames
     _assert_revoked_close(closed)
