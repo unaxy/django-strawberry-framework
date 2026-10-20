@@ -33,7 +33,7 @@ planted non-``str`` key whose hash collides, which runs that key's ``__eq__``
 a namespace: ``module`` / ``label`` of a class, ``static_attr``, ``own_attr``,
 ``instance_dict``, the name of a callable instance, and the class and scalar
 spellings of ``render`` / ``text`` / ``describe``. The reads that consult no
-namespace (``class_of``, ``is_type``, ``is_instance``, ``is_mapping_dict``,
+namespace (``class_of``, ``is_type``, ``is_instance``, ``is_one_of``, ``is_mapping_dict``,
 ``is_subclass``, ``is_exact``, ``mro``, ``bases``, ``class_dict``, ``kind``,
 ``stored_function``, and ``name`` / ``qualname`` of a class, function, builtin
 or C descriptor) never raise and run no consumer code for any object. ``render`` /
@@ -68,6 +68,7 @@ __all__ = (
     "is_exact",
     "is_instance",
     "is_mapping_dict",
+    "is_one_of",
     "is_subclass",
     "is_type",
     "kind",
@@ -264,6 +265,12 @@ def is_instance(obj: object, cls: type[_T]) -> TypeIs[_T]: ...
 def is_instance(obj: object, cls: type[object]) -> bool:
     """``isinstance`` by the real class; no ``__class__`` or ``__instancecheck__`` runs."""
     return _is_in(cls, _get_mro(type(obj)))
+
+
+def is_one_of(obj: object, classes: tuple[type[object], ...]) -> bool:
+    """``isinstance(obj, classes)`` by the real class; no ``__class__`` or ``__instancecheck__`` runs."""
+    found = _get_mro(type(obj))
+    return any(_is_in(cls, found) for cls in classes)
 
 
 def is_mapping_dict(obj: Mapping[_K, _V] | None) -> TypeIs[dict[_K, _V]]:

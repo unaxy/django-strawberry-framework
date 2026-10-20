@@ -865,11 +865,6 @@ _FINGERPRINT_CONTAINER_TYPES = (
 )
 
 
-def _is_one_of(value: object, classes: tuple[type[object], ...]) -> bool:
-    """Whether ``value``'s real class subclasses one of ``classes`` (no ``__class__`` read)."""
-    return any(truth.is_instance(value, cls) for cls in classes)
-
-
 class _ValueSnapshot:
     """Base for a by-VALUE field snapshot that knows how to re-compare itself.
 
@@ -1043,7 +1038,7 @@ def _field_fingerprint(value: object) -> str:
                 "drift detection (exceeded the node budget). Reject rather than risk an "
                 "unbounded walk of consumer-controlled data.",
             )
-        if not _is_one_of(item, _FINGERPRINT_CONTAINER_TYPES):
+        if not truth.is_one_of(item, _FINGERPRINT_CONTAINER_TYPES):
             # Bytes / bytearray land here too (they are not containers): the
             # leaf renderer reads their base buffer, never ``bytes(item)``.
             parts.append(_leaf_token(item))
@@ -1097,7 +1092,7 @@ def _snapshot_field_value(value: object) -> object:
     """Snapshot a field value by value: fingerprint containers, name-capture files, alias scalars."""
     if truth.is_instance(value, FieldFile):
         return _FileNameSnapshot(value.name)
-    if _is_one_of(value, _MUTABLE_SNAPSHOT_TYPES):
+    if truth.is_one_of(value, _MUTABLE_SNAPSHOT_TYPES):
         return _FieldFingerprint(_field_fingerprint(value))
     return value
 

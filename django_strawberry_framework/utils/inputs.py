@@ -538,11 +538,6 @@ def _sorted_meta_values(value: object) -> list[object]:
 _UNORDERED_TYPES = (set, frozenset)
 
 
-def _is_one_of(value: object, classes: tuple[type[object], ...]) -> bool:
-    """Whether ``value``'s real class subclasses one of ``classes`` (no ``__class__`` read)."""
-    return any(truth.is_instance(value, cls) for cls in classes)
-
-
 FILTERSET_FIELDS_ALIAS = "filter_fields"
 
 _META_ABSENT = object()
@@ -592,11 +587,13 @@ def canonicalize_set_meta_fields(fields: object) -> object:
     shape is decided by the value's real class; any other value passes through
     to the family's typed declaration gate.
     """
-    if _is_one_of(fields, _UNORDERED_TYPES):
+    if truth.is_one_of(fields, _UNORDERED_TYPES):
         return _sorted_meta_values(fields)
     if truth.is_instance(fields, dict):
         return {
-            key: (_sorted_meta_values(value) if _is_one_of(value, _UNORDERED_TYPES) else value)
+            key: (
+                _sorted_meta_values(value) if truth.is_one_of(value, _UNORDERED_TYPES) else value
+            )
             for key, value in base_container_values(fields)
         }
     return fields
@@ -692,7 +689,7 @@ def plain_set_meta_fields(fields: object) -> object:
         ):
             return fields
         return dict(plain_pairs)
-    if _is_one_of(fields, _MEMBER_CONTAINER_TYPES):
+    if truth.is_one_of(fields, _MEMBER_CONTAINER_TYPES):
         members = base_container_values(fields)
         plain = tuple(_plain_name(member) for member in members)
         if _unchanged(members, plain):
@@ -957,7 +954,7 @@ def normalize_field_name_sequence(
             f"{flavor} Meta.fields / Meta.exclude must be a sequence of field "
             f"names, not a bare string: {truth.render(value)}.",
         )
-    if _is_one_of(value, _UNORDERED_TYPES):
+    if truth.is_one_of(value, _UNORDERED_TYPES):
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be an ordered sequence of field name "
             f"strings (a list or tuple), not an unordered {truth.kind(value)}: "
