@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 164 done, 127 to do.
+Progress: 164 done, 129 to do.
 
 ## Done
 
@@ -709,38 +709,77 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
-- [ ] 269. A flat copy whose instance `filter` is a bound method reading `self.field_name` breaks even when the request
-  names it: `_bound_terminal` copies the filter and rebinds `field_name`, but the bound method still points at the
-  pre-copy object (`books__title`), so the query raises `FieldError: Cannot resolve keyword 'books'`; `_owner_bound_child`
-  should treat any filter holding its own `filter` as owner-bound, as it does a `method=` filter
+- [ ] 269. A filter holding a `filter` of its own (a `Filter` subclass whose `__init__` stores `self.filter =
+  self._apply`, README's "a `filter` you set on the filter instance yourself") breaks on every walked path:
+  `filters/sets.py::FilterSet._bound_terminal` shallow-copies it and rebinds `field_name`, but the bound method still
+  reads the pre-copy object, so a child-expanded leaf (`patron__email`, to-many `loans__note`) and a parent-declared leaf
+  beside a `RelatedFilter` raise `FieldError: Cannot resolve keyword 'patron'`; and `FilterSet._apply_active_leaf`
+  negates an own-`filter` terminal with `exclude=True` twice (a projected child returns the excluded row, no error).
+  Root: `_owner_bound_child`, `FilterSet._flat_leaf_walk` and `_apply_active_leaf` test `method is not None` where the
+  condition is "the instance holds its own `filter`"; treat it as owner-bound and never negated, as `method=` is
+  (class-level `filter` and `null_extends` unchanged; `tests/filters/test_sets.py::test_a_filter_returning_no_queryset_fails_the_filter_queryset_assertion`
+  moves)
 - [ ] 271. A `get_queryset` hook returning `qs.extra(where=[...])` written without `params=` (Django's documented
   spelling) is refused by the visibility seal: `Query.add_extra` stores `ExtraWhere(where, None)` and
-  `utils/querysets.py::_raw_sql_params_defect` admits only an exact list or tuple, so every query over the type raises a
-  `ConfigurationError` ("where clause params is a NoneType") Django itself would serve
-- [ ] 272. A `get_queryset` hook returning `qs.extra(order_by=[<TextChoices or StrEnum member>])` is refused by the
-  visibility seal (`utils/querysets.py::_raw_sql_sequence_defect` admits only exact `str` terms) with a
-  `ConfigurationError`, while Django compiles the member as the field name it equals
-- [ ] 276. A `PrimaryKeyRelatedField` sourced on a non-relation column (`cat = PrimaryKeyRelatedField(queryset=Category.objects.all(),
-  source="id")` on `Item`, or `source="name"`) builds as that column's scalar (`cat: Int` / `String`) with no related
-  model, and DRF then writes the related instance into the scalar column (read, not run: a `TypeError` for `id`; for a
-  text column the instance's `str()` or a validation error); the model-backed scalar branch of
-  `serializer_converter.py::resolve_serializer_field` never checks that the serializer field is a relation
+  `utils/querysets.py::_raw_sql_node_defect` passes `None` to `_raw_sql_params_defect`, which admits only an exact list or
+  tuple, so every connection over the type raises a `ConfigurationError` ("where clause params is a NoneType") Django
+  itself would serve; admit `None` in the `ExtraWhere` arm only (`RawSQL(sql, None)` stays refused: Django raises
+  `TypeError` compiling it). Lands with 272
+- [ ] 272. A `get_queryset` hook naming a `TextChoices` / `StrEnum` member where Django takes any `str` is refused by the
+  visibility seal with a `ConfigurationError` Django itself would serve: `extra(order_by=[member])` and
+  `extra(tables=[member])` (`utils/querysets.py::_raw_sql_sequence_defect`), `order_by(member)` / `distinct(member)`
+  (`_expr_sequence_defect`), a member as an `extra(where=[...])` fragment (`_raw_sql_node_defect`), and a member in raw
+  params (`extra(where, params=[member])`, `extra(select_params=...)`, `RawSQL(sql, [member])`: `_raw_sql_params_defect`'s
+  exact-type leaves, while spec-045 Decision 8 admits the same member as a lookup value). Canonical reconstruction already
+  rebinds each member as an exact `str` / `int` with SQL and rows equal to Django's, so the exact-type tests are the only
+  blocker; one text-term predicate (`is_str` and no `resolve_expression`) and the admitted-bound-value rule for raw params
+- [ ] 276. A model-backed `SerializerMutation` field whose serializer kind disagrees with its column builds as the
+  column's kind and then fails every write: `rest_framework/serializer_converter.py::resolve_serializer_field` types by
+  `model_column_write_kind` alone (the SCALAR arm's `kind != SCALAR` line defers to the model converter, the FILE arm
+  never checks), while `rest_framework/resolvers.py::_assert_field_agreement` refuses the same field per request. Shapes:
+  `PrimaryKeyRelatedField(source="id" | "description" | "is_private")` builds `Int!` / `String!` / `Boolean!` (`many=True`
+  too, not even a list), over `attachment` builds `Upload!`, `source="pk"` over a scalar pk builds `refId: ID!`
+  (`_reject_relation_column_source` returns: an `AutoField`'s attname equals its name), `FileField(source="description")`
+  builds `String!`, `CharField(source="attachment")` builds `Upload!`; every create / update answers the masked "An
+  unexpected error occurred" (no data is written through the package; plain DRF writes the related row's `str()`).
+  Refuse the kind mismatch at build (spec-039 "type-override conflict policy"), one predicate shared with
+  `_assert_field_agreement`
 - [ ] 284. `workspace.py run` / `prove` (`::stream`) start the command in the wrapper's process group and forward no
-  signal: a SIGTERM / SIGHUP to `workspace.py` alone (`TaskStop`, `timeout`) ends the wrapper and its lease while the
-  prover or pytest keeps running in the copy, so `gc` / `release` can reclaim it underneath (the catchable sibling of 142)
-- [ ] 290. `filters/base.py::_decode_and_validate_global_id` coerces a relation filter's GlobalID against the target
-  model's `_meta.pk`, not the target type's id slot (`types/relay.py::_node_id_slot`): for a Relay target declaring
-  `id: relay.NodeID[str]` on a non-pk column, the GlobalID the server emits for that row is refused `GLOBALID_INVALID`,
-  and a GlobalID whose node id happens to be a valid pk filters by that pk (wrong rows)
-- [ ] 291. A ModelForm that sets a relation field's `to_field_name` in `__init__` is decoded by the class-level field
-  (pk-keyed): the decode binds the visible row's pk and the bound field resolves `<to_field_name>=<pk text>`, so a hidden
-  row whose key equals that text is linked with no error (visible A pk 121, hidden H `code="121"`: `targetId: 121`
-  stores H); without a collision the answer is `invalid_choice`; refuse a bound field whose `to_field_name` differs from
-  the class-level one, as the serializer's agreement guard does
+  signal: a SIGTERM / SIGHUP / SIGQUIT to the wrapper's pid alone (`kill <pid>`, a parent terminating the outer `uv run`,
+  `timeout --foreground`), or SIGINT to it alone, ends the wrapper and drops its lease while the prover or pytest keeps
+  running in the copy, so a second `run`, `run --fresh`, `release` and `gc` proceed underneath (a `gc` under a live
+  mutation left a `RESTORE-FAILED.json` that refuses later proves). A terminal Ctrl-C, group-mode `timeout` and
+  `TaskStop` reach the whole group and leave no survivor. Folds in 142 (the lease fds passed to the command)
+- [ ] 290. `filters/base.py::_decode_and_validate_global_id` coerces a GlobalID filter value against the target model's
+  `_meta.pk`, never the target type's id slot (`django_strawberry_framework/relay.py::_node_id_slot`), and
+  `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` compile on the pk path: for fakeshop `PublisherType.house_code:
+  relay.NodeID[str]` the GlobalID the server emits is refused `GLOBALID_INVALID` and `library.publisher:2` filters `pk=2`
+  (wrong row), on the own-pk key (`id.exact` / `id.in`), an own-pk leaf through a hop (flat `editionsPublisherId`, nested
+  `editions.publisher.id`), a forward relation key and a to-many relation key alike; the write side
+  (`relay.py::decode_model_global_id`) and the node field already use the slot
+- [ ] 291. A ModelForm whose bound relation field disagrees with the class-level field the decode reads is bound unchecked:
+  `forms/resolvers.py::_bound_form_or_field_errors` calls `get_form()` then `is_valid()` without comparing the bound
+  model-choice fields to the `get_form_fields()` basis. An `__init__` or `get_form` override setting (or clearing)
+  `to_field_name` links a hidden row with `errors: []` (visible pk 1, hidden `name="1"`), on single and many-to-many
+  fields and on an update omitting the relation (reconstruction binds the stored pk under the class key); an `__init__`
+  swapping the queryset to another model hands `perform_mutate` that model's row. Refuse at bind (`ConfigurationError`,
+  as `rest_framework/resolvers.py::_assert_relation_agreement` does) when the bound queryset's model or key column
+  differs; a same-column reassignment stays admitted
 - [ ] 292. A ModelForm relation field whose `to_field_name` names a concrete non-unique column passes the item 137 build
-  guard; when two rows (visible, or one visible and one hidden) share the decoded row's key, the form's
-  `queryset.get(<to_field_name>=key)` raises `MultipleObjectsReturned`, a top-level GraphQL error with no payload (plain
-  Django fails the same way); require `pk` or a unique field at build
+  guard (`forms/inputs.py::require_readable_choice_keys` checks `.concrete` only): two rows sharing the key make the
+  single field's `queryset.get(...)` raise `MultipleObjectsReturned` (a top-level error, no payload), and a
+  `ModelMultipleChoiceField` links every row with the key, a hidden one included. Require `pk` or a single-field unique
+  column at build, as Django's `ForeignObject._check_unique_target` (fields.E311) does. Lands with 291
+- [ ] 294. A `get_queryset` hook or raw-list resolver naming a `TextChoices` / `StrEnum` member as an alias or lookup is
+  refused by the visibility seal while Django serves it: `qs.annotate(**{member: F(...)})` ("query annotations has a
+  non-string key", `utils/querysets.py::_query_container_defect`), `qs.extra(select={member: sql})`,
+  `qs.prefetch_related(member)` (`_sealed_prefetch_related_lookups`; spec-045 Decision 4 pins the refusal), and
+  `qs.values(member)` under the raw-list and cascade policies (`_queryset_state_defect`)
+- [ ] 295. A `ModelForm` declaring a `ModelChoiceField` under a non-relation column's name (`description =
+  ModelChoiceField(queryset=Category.objects.all())`) builds as the column's scalar (`description: String!`), and
+  `DjangoModelFormMutation` create and update write the chosen row's `str()` into the column:
+  `forms/inputs.py::_field_triple_and_spec` types by the column alone and the form flavor has no runtime kind check
+  (census the file / scalar siblings too; the serializer twin is 276)
 ## To do: holes found re-checking the fixes
 
 
