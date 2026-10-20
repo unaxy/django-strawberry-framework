@@ -138,7 +138,7 @@ if TYPE_CHECKING:
     from django_filters.filterset import BaseFilterSet
     from strawberry.schema import Schema
 
-    from django_strawberry_framework.utils.typing import ConcreteField
+    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
     from .sets import FilterSet
 
@@ -404,6 +404,39 @@ def _bound_field_name(filter_instance: Filter) -> str:
             "FilterSet must name the model field path it filters.",
         )
     return field_name
+
+
+def _bound_model_field(filter_instance: Filter) -> ModelField | None:
+    """Return the model field a per-request filter's ORM path names on its FilterSet's model.
+
+    Reads the LIVE ``field_name`` against the filterset django-filter's
+    ``BaseFilterSet.__init__`` stamps as ``filter_.parent``, so an expanded leaf whose
+    ``field_name`` was rebased under a ``RelatedFilter`` prefix resolves the terminal
+    field (``_filterset_model_field``).
+    """
+    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
+    return _filterset_model_field(parent, filter_instance)
+
+
+def _filterset_model_field(
+    filterset: type[BaseFilterSet] | BaseFilterSet | None,
+    filter_instance: Filter,
+) -> ModelField | None:
+    """Return the model field ``filter_instance``'s ORM path names on ``filterset``'s model.
+
+    django-filter needs no model: no filterset, or one without a model, has nothing to
+    walk and returns ``None``. A bound filter must name its path
+    (``_bound_field_name``); a path naming no field (a typo, a missing hop) is ``None``
+    through ``django_filters.utils.get_model_field``, which raises ``RuntimeError`` on a
+    relation hop that is still an unresolved lazy string: a FilterSet used before
+    Django's app registry is populated, surfaced rather than read as an unknown field.
+    """
+    # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
+    meta = optional_instance(truth.static_attr(filterset, "_meta", None), FilterSetOptions)
+    model: type[models.Model] | None = getattr(meta, "model", None)
+    if model is None:
+        return None
+    return get_model_field(model, _bound_field_name(filter_instance))
 
 
 class ArrayFilterMethod(_EmptyListAwareFilterMethod):
@@ -769,10 +802,7 @@ def membership_in_filter_class(in_filter_class: type[BaseInFilter]) -> type[Memb
     return ConcreteInFilter
 
 
-def _coerce_int_in_members(
-    model_field: ConcreteField | None,
-    values: list[object],
-) -> list[object]:
+def _coerce_int_in_members(model_field: ModelField | None, values: list[object]) -> list[object]:
     """Drop ``__in`` members an integer column cannot store (range coercion).
 
     A scalar ``__in`` lookup (`BaseInFilter`) binds each member directly as a query
@@ -835,14 +865,7 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
             message="Invalid filter value: expected a list of integers.",
             code=FILTER_INVALID_ERROR_CODE,
         )
-        # django-filter's ``BaseFilterSet.__init__`` stamps ``filter_.parent = self`` and its
-        # metaclass stores ``_meta = FilterSetOptions(...)``.
-        parent: BaseFilterSet | None = getattr(self, "parent", None)
-        meta = optional_instance(truth.static_attr(parent, "_meta", None), FilterSetOptions)
-        model: type[models.Model] | None = getattr(meta, "model", None)
-        model_field = (
-            get_model_field(model, _bound_field_name(self)) if model is not None else None
-        )
+        model_field = _bound_model_field(self)
         if model_field is not None:
             kept = _coerce_int_in_members(model_field, value)
             if not kept:
@@ -1504,33 +1527,15 @@ def model_choice_identity_column(
     return _model_identity_column(model, filter_instance.extra.get("to_field_name"))
 
 
-def _relation_identity_column_for(filter_instance: Filter) -> ConcreteField | None:
-    """Resolve the bound filter's relation through its FilterSet model, then its identity column.
-
-    Reads the LIVE ``field_name`` against the owning filterset's model, the same walk
-    ``IntegerInFilter.filter`` uses, so an expanded leaf whose ``field_name`` was rebased
-    under a ``RelatedFilter`` prefix resolves the terminal relation. An unbound filter
-    (no parent filterset) has no model to walk and returns ``None``.
-    """
-    # django-filter's ``BaseFilterSet.__init__`` stamps ``filter_.parent = self`` and its
-    # metaclass stores ``_meta = FilterSetOptions(...)``.
-    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
-    meta: FilterSetOptions | None = getattr(parent, "_meta", None)
-    model: type[models.Model] | None = getattr(meta, "model", None)
-    field_name: str | None = getattr(filter_instance, "field_name", None)
-    if model is None or not field_name:
-        return None
-    return relation_identity_column(get_model_field(model, field_name))
-
-
 def _coerce_relation_identity(filter_instance: Filter, value: object) -> object:
     """Coerce one raw identity value through the target key column; ``None`` if it names no row.
 
     A value the column cannot hold (out of range, wrong shape) identifies no row, the
-    same verdict ``_coerce_int_in_members`` gives an integer ``in`` member. An unbound
-    filter has no column and passes the value through unchanged.
+    same verdict ``_coerce_int_in_members`` gives an integer ``in`` member. A filter
+    with no model to walk (``_bound_model_field``) has no column and passes the value
+    through unchanged.
     """
-    column = _relation_identity_column_for(filter_instance)
+    column = relation_identity_column(_bound_model_field(filter_instance))
     if column is None:
         return value
     return coerce_field_value_or_none(column, value)

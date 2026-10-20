@@ -38,8 +38,6 @@ from django_filters import (
 )
 from django_filters import RangeFilter as _DjangoRangeFilter
 from django_filters.filters import BaseCSVFilter
-from django_filters.filterset import FilterSetOptions
-from django_filters.utils import get_model_field
 from strawberry import relay
 
 from django_strawberry_framework.conf import hide_flat_filters_setting
@@ -51,7 +49,6 @@ from django_strawberry_framework.utils._narrowing import (
     dict_of,
     enum_value,
     is_list_or_tuple,
-    optional_instance,
     read_attr,
 )
 from django_strawberry_framework.utils.converters import MRO_CONTINUE, convert_with_mro
@@ -88,6 +85,7 @@ from .base import (
     TypedFilter,
     _bound_field_name,
     _EnumMemberFilterMixin,
+    _filterset_model_field,
     model_choice_identity_column,
     relation_identity_column,
 )
@@ -1045,7 +1043,7 @@ def _is_expanded_declared_filter(filter_instance: Filter) -> bool:
 def _group_filters_by_head(
     filterset_cls: type[FilterSet],
     all_filters: Mapping[str, Filter],
-) -> OrderedDict[str, OrderedDict[str, FormKeyedFilter]]:
+) -> tuple[OrderedDict[str, OrderedDict[str, FormKeyedFilter]], set[str]]:
     """Group ``get_filters()`` by input head, keeping each lookup's own form key.
 
     A declared filter, and a ``RelatedFilter`` expansion of a child's declared
@@ -1053,7 +1051,7 @@ def _group_filters_by_head(
     own lookup token (``name__exact``). A generated ``<path>__<lookup>`` entry
     joins the ``<path>`` head under ``<lookup>``. Two filters claiming one
     ``(head, lookup)`` slot would leave one unreachable from the generated
-    input, so that raises.
+    input, so that raises. Returns the grouping and the set of declared heads.
     """
     # django-filter's metaclass stores ``declared_filters`` as the name-keyed declared map.
     declared_filters = cast(
@@ -1061,6 +1059,7 @@ def _group_filters_by_head(
         truth.static_attr(filterset_cls, "declared_filters", {}),
     )
     grouped: OrderedDict[str, OrderedDict[str, FormKeyedFilter]] = OrderedDict()
+    declared_heads: set[str] = set()
     for filter_name, filter_instance in all_filters.items():
         # Skip expanded RelatedFilter entries (e.g., `self_link__self_link`
         # under a self-referential filterset). The top-level
@@ -1072,6 +1071,7 @@ def _group_filters_by_head(
         lookup_expr = filter_instance.lookup_expr
         if filter_name in declared_filters or _is_expanded_declared_filter(filter_instance):
             head, lookup_token = filter_name, lookup_expr
+            declared_heads.add(head)
         else:
             # django-filter names a generated filter ``<path>__<lookup>``, or the
             # bare ``<path>`` for ``exact``; a trailing token that is not the
@@ -1089,7 +1089,7 @@ def _group_filters_by_head(
                 "drop one via Meta.fields / Meta.exclude.",
             )
         bag[lookup_token] = (filter_name, filter_instance)
-    return grouped
+    return grouped, declared_heads
 
 
 def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
@@ -1103,12 +1103,7 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
     cached = filterset_cls._lookup_table
     if cached is not None and cached.source is all_filters:
         return cached
-    heads = _group_filters_by_head(filterset_cls, all_filters)
-    # django-filter's metaclass stores ``declared_filters`` as the name-keyed declared map.
-    declared_filters = cast(
-        "Mapping[str, Filter]",
-        truth.static_attr(filterset_cls, "declared_filters", {}),
-    )
+    heads, declared_heads = _group_filters_by_head(filterset_cls, all_filters)
     by_input_attr: dict[str, Mapping[str, FormKeyedFilter]] = {}
     gate_paths: dict[str, str] = {}
     for head, bag in heads.items():
@@ -1120,11 +1115,7 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
         # declared filter, whose flat spelling must fire the gates its nested twin
         # fires (``utils/permissions.py::_fire_flat_relation_path_gates`` walks the
         # relation hops and fires the child's ``check_<name>_permission``).
-        gate_paths[head] = (
-            head
-            if head in declared_filters or _is_expanded_declared_filter(sample_filter)
-            else _bound_field_name(sample_filter)
-        )
+        gate_paths[head] = head if head in declared_heads else _bound_field_name(sample_filter)
     alias_heads: dict[str, str] = {}
     for head in heads:
         input_attr = flatten_lookup_path(head)
@@ -1232,7 +1223,7 @@ def _build_input_fields(
         bag_specs: list[tuple[str, object, dict[str, object]]] = []
         for lookup, (_form_key, leaf_filter) in lookup_bag.items():
             lookup_python_attr, lookup_graphql_name = LOOKUP_NAME_MAP.get(lookup, (lookup, lookup))
-            model_field = _model_field_for_filter(filterset_cls, leaf_filter)
+            model_field = _filterset_model_field(filterset_cls, leaf_filter)
             annotation = convert_filter_to_input_annotation(
                 leaf_filter,
                 model_field,
@@ -1265,42 +1256,6 @@ def _build_input_fields(
         module_path=INPUTS_MODULE_PATH,
         field_specs=_field_specs,
     )
-
-
-def _model_field_for_filter(
-    filterset_cls: type[FilterSet],
-    filter_instance: Filter,
-) -> ModelField | None:
-    """Resolve the Django model field a filter targets (or ``None``).
-
-    Folder-owned path walk: delegates to ``django_filters.utils.get_model_field``
-    -- the same ``__``-separated relation traversal ``filters/base.py``
-    (``IntegerInFilter``) and ``filters/sets.py`` (``get_fields`` ``"__all__"``
-    expansion) already use -- so a typo / missing hop returns ``None`` and a
-    nested path (e.g. ``galaxy__name``) yields the terminal field under one
-    rule. The filterset / ``field_name`` guards stay here because the converter
-    receives a filter instance, not a bare ``(model, path)`` pair.
-
-    Contract note: ``get_model_field`` raises ``RuntimeError`` when a relation
-    hop is still an *unresolved* lazy string (``field.remote_field.model`` has
-    no ``_meta``) -- i.e. Django's app registry is not populated. That state is
-    unreachable here: this helper runs only under ``_build_input_fields`` during
-    ``finalize_django_types()``, which Django guarantees runs after
-    ``apps.populate()`` has resolved every FK. A raise therefore signals a
-    genuine "``FilterSet`` loaded before Django setup" misconfiguration and MUST
-    surface loudly rather than degrade to ``None`` (which would silently treat a
-    real relation as an unknown field). The reachable ``None`` path -- typo /
-    missing hop -- is preserved unchanged.
-    """
-    # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
-    meta = optional_instance(truth.static_attr(filterset_cls, "_meta", None), FilterSetOptions)
-    model: type[models.Model] | None = getattr(meta, "model", None)
-    if model is None:
-        return None
-    field_name: str | None = getattr(filter_instance, "field_name", None)
-    if not field_name:
-        return None
-    return get_model_field(model, field_name)
 
 
 def construct_search(all_filters: Mapping[str, object]) -> dict[str, str]:

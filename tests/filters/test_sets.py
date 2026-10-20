@@ -15941,6 +15941,60 @@ def test_declared_filter_walking_a_branch_fires_the_branch_gate_its_nested_twin_
     assert _gate_outcome(parent, filter_input, denied=True) == ("denied" if gated else "allowed")
 
 
+def _returns_a_list(_qs: object, _value: object) -> list[object]:
+    """A consumer ``Filter.filter`` replacement that breaks the ``QuerySet`` return contract."""
+    return []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("field_name", "named"),
+    [
+        ("title", "'BookParent.probe'"),
+        ("shelf", "'BookParent' filter 'shelf'"),
+        ("shelf__code", "'BookParent' filter 'code'"),
+    ],
+    ids=["own-column", "relation-key", "through-branch"],
+)
+def test_a_filter_returning_no_queryset_fails_the_filter_queryset_assertion(
+    field_name: str,
+    named: str,
+) -> None:
+    """Every leaf path asserts its filter returned a ``QuerySet``, as django-filter asserts.
+
+    A same-model leaf runs in ``_apply_flat_leaves``; a forward relation-key leaf
+    walking a declared branch runs over the parent rows, and a leaf through the
+    branch runs over the branch target's rows (``_apply_relation_leaf``).
+    """
+    _register_plain_types(library_models.Shelf)
+
+    class ShelfChild(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    probe = CharFilter(field_name=field_name)
+    setattr(probe, "filter", _returns_a_list)  # noqa: B010
+    parent = type(
+        "BookParent",
+        (FilterSet,),
+        {
+            "shelf": RelatedFilter(ShelfChild, field_name="shelf"),
+            "probe": probe,
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Book, "fields": {"title": ["exact"]}},
+            ),
+        },
+    )
+    with pytest.raises(
+        AssertionError,
+        match=f"^Expected {named} to return a QuerySet, but got a list",
+    ):
+        parent.apply_sync({"probe": "x"}, library_models.Book.objects.all(), _make_info())
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("spelling", ["projected", "nested"])
 def test_projected_leaf_fires_the_child_set_branch_gate_its_chain_walks(spelling: str) -> None:
