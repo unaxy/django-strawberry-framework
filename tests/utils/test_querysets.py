@@ -32,6 +32,9 @@ from apps.library.models import (
     Branch,
     LendingDesk,
     OpenVenue,
+    Patron,
+    PatronProfile,
+    SelfServeDesk,
     Shelf,
     TaggedItem,
     Venue,
@@ -46,6 +49,7 @@ from django.apps.registry import Apps
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import AnonymousUser, Group, Permission, User
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.db import connection, models, router
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import (
@@ -340,6 +344,44 @@ def test_coerce_field_value_or_none_drops_out_of_range_literal() -> None:
     ``OverflowError`` at ``pk__in``).
     """
     assert coerce_field_value_or_none(Category._meta.pk, 2**63) is None
+
+
+@pytest.mark.parametrize("model", [PatronProfile, LendingDesk, SelfServeDesk])
+def test_coerce_field_value_or_none_range_checks_a_relation_valued_pk(
+    model: type[models.Model],
+) -> None:
+    """A one-to-one pk or parent-link chain is held to the range of the column storing it.
+
+    The key's own ``to_python`` delegates down the chain, but the range validators live
+    only on the column the chain ends at: an out-of-range literal identifies no row
+    instead of reaching ``pk__in`` as a backend ``OverflowError``.
+    """
+    assert coerce_field_value_or_none(model._meta.pk, "7") == 7
+    assert coerce_field_value_or_none(model._meta.pk, 2**63) is None
+    assert coerce_field_value_or_none(model._meta.pk, str(2**70)) is None
+
+
+def _reject_thirteen(value: object) -> None:
+    """A consumer validator declared on a key: refuse the id ``13``."""
+    if value == 13:
+        raise ValidationError("13 is reserved.")
+
+
+def test_coerce_field_value_or_none_runs_key_and_stored_column_validators() -> None:
+    """A key's declared validators reject, and the column it stores still range-checks.
+
+    The key's own ``validators=`` refuse ``13``; ``Patron.id``'s range validators, which
+    the key does not carry, reject ``2**63``.
+    """
+    key: models.OneToOneField[Patron | Combinable, Patron] = models.OneToOneField(
+        Patron,
+        on_delete=models.CASCADE,
+        primary_key=True,
+        validators=[_reject_thirteen],
+    )
+    assert coerce_field_value_or_none(key, "7") == 7
+    assert coerce_field_value_or_none(key, "13") is None
+    assert coerce_field_value_or_none(key, 2**63) is None
 
 
 def test_coerce_field_value_or_none_drops_overflowing_duration() -> None:

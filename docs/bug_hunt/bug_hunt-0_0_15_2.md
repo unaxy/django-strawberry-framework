@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 162 done, 124 to do.
+Progress: 163 done, 125 to do.
 
 ## Done
 
@@ -559,6 +559,17 @@ Progress: 162 done, 124 to do.
   `conflict` at HEAD, 102 of 102 are now; a success runs no extra query, a failure one); a model or serializer update
   writing back a stale omitted key after a concurrent `SET_NULL` under the opt-out is Django's whole-row-save lost
   update, refused by the database, and stays out of scope
+- [x] 133. A `PrimaryKeyRelatedField` to a model whose pk is a `OneToOneField` (`PatronProfile`) was refused at schema
+  build, and the defect was wider: a relation id into any non-Relay or unregistered target whose primary key is itself a
+  key (a one-to-one pk, a multi-table-inheritance parent link or grandchild chain, `ForeignKey(primary_key=True)`, a
+  `to_field` naming a key) was refused in every write flavor (280 of 768 grid cells, 54 of 132 column-less), and an id
+  past the range of the column such a key stores was a masked `OverflowError` on `node`, relation GlobalID decode,
+  update `id` (both arms, live on `updatePatronProfile` / `updateLendingDesk`), filter identity and raw write ids:
+  fixed, `utils/relations.py::stored_value_column` follows a key to the column storing its value (the walk the filters
+  already made, now shared), `mutations/inputs.py::relation_id_scalar` types from it and
+  `utils/querysets.py::coerce_field_value_or_none` runs the key's own validators then that column's; all 280 refused
+  cells build and store the right row, the 280 that built keep identical SDL; fakeshop gains `KioskFault` with
+  `createKioskFault` / `ViaForm` / `ViaSerializer`
 
 ## Outside review of the fixes
 
@@ -599,9 +610,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 133. A `PrimaryKeyRelatedField` to a model whose pk is a `OneToOneField` (`PatronProfile`) is refused at schema build
-  ("Unsupported Django field type 'OneToOneField' on PatronProfile.patron"); a FK to such a model cannot be written by a
-  serializer mutation (fails loud)
 - [ ] 137. ModelForm and serializer flavors: a relation id naming a visible row whose `to_field` key is `NULL` clears an
   optional relation silently (the form binds `None`; the serializer's descriptor assignment stores `NULL`), where the model
   flavor refuses it as the relation error since item 130; `forms/resolvers.py::_to_form_key_value` also falls back to
@@ -713,11 +721,19 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 284. `workspace.py run` / `prove` (`::stream`) start the command in the wrapper's process group and forward no
   signal: a SIGTERM / SIGHUP to `workspace.py` alone (`TaskStop`, `timeout`) ends the wrapper and its lease while the
   prover or pytest keeps running in the copy, so `gc` / `release` can reclaim it underneath (the catchable sibling of 142)
+- [ ] 290. `filters/base.py::_decode_and_validate_global_id` coerces a relation filter's GlobalID against the target
+  model's `_meta.pk`, not the target type's id slot (`types/relay.py::_node_id_slot`): for a Relay target declaring
+  `id: relay.NodeID[str]` on a non-pk column, the GlobalID the server emits for that row is refused `GLOBALID_INVALID`,
+  and a GlobalID whose node id happens to be a valid pk filters by that pk (wrong rows)
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 289. CHANGELOG entry for item 133: write inputs (model, ModelForm, serializer) into a non-Relay or unregistered
+  target whose primary key is a one-to-one key or a multi-table-inheritance parent link now build, typed from the column
+  that key stores (0.0.14 refused the schema build); an id past that column's range on `node`, an update `id`, a relation
+  id or a filter is not-found / invalid instead of an unexpected error; GraphQL type names are unchanged
 - [ ] 288. CHANGELOG entry for item 285: an update or delete whose row a concurrent transaction deleted before its
   validation finished (`Meta.select_for_update = False` or no `FOR UPDATE`) is the `conflict` error instead of a field
   error about the vanished data or a masked `DoesNotExist` (serializer); a failed update / delete runs one more query

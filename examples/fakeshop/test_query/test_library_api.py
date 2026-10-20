@@ -8358,6 +8358,22 @@ def test_node_uncoercible_pk_live() -> None:
 
 
 @pytest.mark.django_db
+def test_node_out_of_range_relation_valued_pk_live() -> None:
+    """A ``PatronProfileType`` id past ``Patron.id``'s range resolves to ``null`` and reads no row.
+
+    The profile's primary key is the ``patron`` one-to-one, which carries no range
+    validator of its own: the id is held to the column the key stores (``Patron.id``),
+    so ``2**70`` identifies no row, never a backend ``OverflowError``.
+    """
+    gid = global_id_for(library_schema.PatronProfileType, 2**70)
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post_node(gid)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "node") is None
+    assert _sql_from_table(captured, "library_patronprofile") == []
+
+
+@pytest.mark.django_db
 def test_node_missing_row_null_live() -> None:
     """A well-formed id for a nonexistent row resolves to null with NO error over HTTP."""
     shelf = _seed_shelf()
@@ -14964,6 +14980,41 @@ _FORM_PROFILE_UPDATE = (
     "mutation($id: ID!, $d: PatronProfileGenreFormPartialInput!) { "
     f"updatePatronProfileViaForm(id: $id, data: $d) {{ {_PROFILE_SELECTION} }} }}"
 )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("operation", "field"),
+    [
+        (_MODEL_PROFILE_UPDATE, "updatePatronProfile"),
+        (_FORM_PROFILE_UPDATE, "updatePatronProfileViaForm"),
+    ],
+    ids=["model", "form"],
+)
+def test_profile_update_out_of_range_id_is_not_found_over_http(operation: str, field: str) -> None:
+    """An update ``id`` past ``Patron.id``'s range is the not-found error, never a backend crash.
+
+    ``PatronProfile``'s key is its ``patron`` one-to-one, so the decoded id is held to the
+    range of the column that key stores before the locate query runs.
+    """
+    patron = models.Patron.objects.create(name="OutOfRangeProfilePatron")
+    models.PatronProfile.objects.create(patron=patron, address_2="kept")
+    response = _post_graphql(
+        operation,
+        variables={
+            "id": global_id_for(library_schema.PatronProfileType, 2**70),
+            "d": {"address_2": "changed"},
+        },
+    )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    result = json_object(payload, "data", field)
+    assert result["node"] is None
+    assert result["errors"] == [
+        {"field": "id", "messages": ["No matching row found."]},
+    ]
+    assert list(models.PatronProfile.objects.values_list("address_2", flat=True)) == ["kept"]
 
 
 @pytest.mark.django_db

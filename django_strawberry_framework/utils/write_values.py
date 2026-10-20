@@ -191,7 +191,8 @@ def coerce_relation_pk_or_none(related_model: type[models.Model], pk: object) ->
     raw-pk relation has no Relay-Node type and so no ``resolve_id_attr`` seam: the
     existence query filters on ``pk__in`` directly, so coercion is against
     ``related_model._meta.pk`` via the shared
-    ``querysets.py::coerce_field_value_or_none`` primitive - the same
+    ``querysets.py::coerce_field_value_or_none`` primitive (which also range-checks a
+    key-valued pk against the column storing it) - the same
     ``to_python``-then-``run_validators`` mechanics the GlobalID path uses, so an
     out-of-range pk (beyond the backend's signed-64-bit column range) is rejected
     as a ``ValidationError`` here rather than reaching ``pk__in`` and raising a raw

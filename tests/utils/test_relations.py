@@ -13,7 +13,19 @@ from typing import TYPE_CHECKING
 
 import pytest
 from apps.kanban.models import Decision
-from apps.library.models import Book, Branch, Genre, Loan, MembershipCard, Patron, TaggedItem
+from apps.library.models import (
+    Book,
+    Branch,
+    Genre,
+    LendingDesk,
+    Loan,
+    MembershipCard,
+    Patron,
+    PatronProfile,
+    SelfServeDesk,
+    TaggedItem,
+    Venue,
+)
 from apps.library.models import Branch as _Branch
 from apps.library.models import Shelf as _Shelf
 from apps.scalars.models import ScalarSpecimen
@@ -62,6 +74,7 @@ from django_strawberry_framework.utils.relations import (
     relation_bool,
     relation_kind,
     relation_link,
+    stored_value_column,
     validate_lookup_expr,
 )
 from tests._relation_fixtures import RpCompositeParent
@@ -76,6 +89,8 @@ from tests.optimizer._link_models import (
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
+
+    from django_strawberry_framework.utils.typing import ModelField
 
 
 def _serving_field(
@@ -1694,3 +1709,35 @@ def test_validate_lookup_expr_forward_fk_column_answers_related_lookups(
     """
     terminal = Book._meta.get_field("shelf")
     assert validate_lookup_expr(terminal, lookup_expr) is lookup_class
+
+
+@pytest.mark.parametrize(
+    ("field", "column"),
+    [
+        (lambda: Book._meta.pk, lambda: Book._meta.pk),
+        (lambda: PatronProfile._meta.pk, lambda: Patron._meta.pk),
+        (lambda: LendingDesk._meta.pk, lambda: Venue._meta.pk),
+        (lambda: SelfServeDesk._meta.pk, lambda: Venue._meta.pk),
+        (
+            lambda: PatronProfile._meta.get_field("favorite_genre"),
+            lambda: Genre._meta.get_field("name"),
+        ),
+        (lambda: Patron._meta.get_field("profile"), lambda: Patron._meta.get_field("profile")),
+        (lambda: RpCompositeParent._meta.pk, lambda: RpCompositeParent._meta.pk),
+    ],
+    ids=[
+        "plain_pk",
+        "one_to_one_pk",
+        "parent_link",
+        "grandchild_parent_link_chain",
+        "to_field_column",
+        "reverse_relation",
+        "composite_pk",
+    ],
+)
+def test_stored_value_column_follows_each_key_to_the_column_storing_its_value(
+    field: "Callable[[], ModelField]",
+    column: Callable[[], object],
+) -> None:
+    """A key resolves to the first non-key column down its chain; anything else is itself."""
+    assert stored_value_column(field()) is column()

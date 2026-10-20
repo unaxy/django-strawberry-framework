@@ -506,6 +506,17 @@ def test_relation_id_scalar_without_a_primary_is_the_raw_pk_scalar() -> None:
     assert relation_id_scalar(library_models.Branch, None) is int
 
 
+@pytest.mark.parametrize(
+    "model",
+    [library_models.PatronProfile, library_models.LendingDesk, library_models.SelfServeDesk],
+)
+def test_relation_id_scalar_types_a_relation_valued_pk_from_the_column_storing_it(
+    model: type[models.Model],
+) -> None:
+    """A one-to-one pk or a parent-link chain types the id from ``Patron.id`` / ``Venue.id``."""
+    assert relation_id_scalar(model, None) is int
+
+
 def test_relation_id_annotation_wraps_multi_as_list_of_the_same_scalar() -> None:
     """Cardinality wrap is the only extra axis on top of ``relation_id_scalar``."""
     relay_model, relay_type = _make_relay_target()

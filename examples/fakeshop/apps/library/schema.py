@@ -772,6 +772,18 @@ class SelfServeDeskType(DjangoType):
         orderset_class = orders.SelfServeDeskOrder
 
 
+class KioskFaultType(DjangoType):
+    """A fault on a self-serve desk; non-Relay, so a write names its kiosk by raw id.
+
+    ``kiosk`` targets ``SelfServeDeskType``, also non-Relay, whose primary key is a parent
+    link two links above ``Venue.id``: the write inputs type ``kioskId`` from that column.
+    """
+
+    class Meta:
+        model = models.KioskFault
+        fields = ("id", "kiosk", "note")
+
+
 class OpenVenueType(DjangoType):
     """The ``OpenVenue`` proxy, whose rows come from its filtering default manager."""
 
@@ -2674,6 +2686,38 @@ class UpdateLendingDeskViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class CreateKioskFault(DjangoMutation):
+    """Create a ``KioskFault`` via the model pipeline, naming its kiosk by raw id.
+
+    ``SelfServeDeskType`` is non-Relay and its primary key is the ``lendingdesk_ptr``
+    parent link, so ``kioskId`` is typed from ``Venue.id``, the column that link chain
+    stores, and visibility-checked through ``SelfServeDeskType.get_queryset``.
+    """
+
+    class Meta:
+        model = models.KioskFault
+        operation = "create"
+        permission_classes = []
+
+
+class CreateKioskFaultViaForm(DjangoModelFormMutation):
+    """Create a ``KioskFault`` via ``KioskFaultForm``, naming its kiosk by raw id."""
+
+    class Meta:
+        form_class = forms.KioskFaultForm
+        operation = "create"
+        permission_classes = []
+
+
+class CreateKioskFaultViaSerializer(SerializerMutation):
+    """Create a ``KioskFault`` via ``KioskFaultSerializer``, naming its kiosk by raw id."""
+
+    class Meta:
+        serializer_class = serializers.KioskFaultSerializer
+        operation = "create"
+        permission_classes = []
+
+
 @strawberry.type
 class Mutation:
     """Library write surface (live raw-pk relation visibility + ``to_field_name``).
@@ -2729,6 +2773,9 @@ class Mutation:
     ``updateLendingDesk`` and its ``ViaForm`` / ``ViaSerializer`` siblings update a
     multi-table ``LendingDesk`` (``name`` on the ``Venue`` parent table, ``windowCount`` on
     the desk's own) located by its raw pk ``id``.
+    ``createKioskFault`` and its ``ViaForm`` / ``ViaSerializer`` siblings write a key into the
+    non-Relay ``SelfServeDesk``, whose primary key is a parent-link chain: ``kioskId`` is the
+    ``Int`` of ``Venue.id``, the column that chain stores.
     """
 
     create_shelf_via_form = DjangoMutationField(CreateShelfViaForm)
@@ -2845,6 +2892,9 @@ class Mutation:
     update_lending_desk = DjangoMutationField(UpdateLendingDesk)
     update_lending_desk_via_form = DjangoMutationField(UpdateLendingDeskViaForm)
     update_lending_desk_via_serializer = DjangoMutationField(UpdateLendingDeskViaSerializer)
+    create_kiosk_fault = DjangoMutationField(CreateKioskFault)
+    create_kiosk_fault_via_form = DjangoMutationField(CreateKioskFaultViaForm)
+    create_kiosk_fault_via_serializer = DjangoMutationField(CreateKioskFaultViaSerializer)
 
 
 __all__ = ("Mutation", "Query")

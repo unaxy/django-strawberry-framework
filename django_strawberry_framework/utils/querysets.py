@@ -135,7 +135,7 @@ from ._queryset_private import (
     set_queryset_prefetch_lookups,
     set_queryset_sticky_filter,
 )
-from .relations import leading_relation_hops, order_column_paths
+from .relations import leading_relation_hops, order_column_paths, stored_value_column
 from .typing import MISSING_ATTRIBUTE
 from .write_transaction import (
     current_write_pipeline,
@@ -754,13 +754,21 @@ def coerce_field_value_or_none(field: ModelField | None, value: object) -> objec
     Relay type's resolved id field, a related model's pk, an arbitrary filtered
     column) and stays at each call site; only the coercion mechanics are
     single-sourced here. A ``ForeignObjectRel`` or ``None`` field has no column
-    to coerce against, so it identifies no row either.
+    to coerce against, so it identifies no row either. A key (a one-to-one primary
+    key, a multi-table-inheritance parent link, any ``ForeignKey``) carries only
+    the validators declared on it, while its ``to_python`` delegates down the chain
+    to the column storing its value (``relations.py::stored_value_column``): the
+    value runs the key's own validators and then that column's, whose range
+    validators reject an out-of-range id.
     """
     if not isinstance(field, models.Field):
         return None
+    column = stored_value_column(field)
     try:
         coerced = to_python_value(field, value)
         field.run_validators(coerced)
+        if column is not field:
+            column.run_validators(coerced)
     except (
         ValidationError,
         TypeError,
