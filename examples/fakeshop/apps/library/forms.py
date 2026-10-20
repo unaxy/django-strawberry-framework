@@ -21,6 +21,8 @@ carries and the update input leaves out. ``PatronProfileGenreNameForm`` keeps th
 name-keyed field over the same key, so the stored name is the form key.
 ``PrintingForm`` relates to the text-keyed ``Edition`` (FK + M2M), so its raw-pk
 inputs carry ISBN text; ``EditionImprintForm`` updates an ``Edition`` located by that text.
+``LendingDeskForm`` updates a multi-table ``LendingDesk`` through a column of its ``Venue``
+parent table and one of its own, so the update writes both tables.
 ``BranchWithShelfForm`` and ``BranchPairForm`` add model-less plain-form
 ``perform_mutate`` write-hook and transaction-rollback cases.
 """
@@ -181,6 +183,20 @@ class EditionImprintForm(forms.ModelForm[models.Edition]):
     class Meta:
         model = models.Edition
         fields = ("imprint",)
+
+
+class LendingDeskForm(forms.ModelForm[models.LendingDesk]):
+    """A ``LendingDesk`` ``ModelForm`` over a parent column and a local one.
+
+    ``name`` lives on the ``Venue`` parent table and ``window_count`` on the desk's own, so
+    an update writes both tables of the multi-table row, each as an UPDATE that a deleted
+    row fails instead of re-inserting. ``LendingDeskType`` is non-Relay, so the update
+    ``id`` is the raw pk.
+    """
+
+    class Meta:
+        model = models.LendingDesk
+        fields = ("name", "window_count")
 
 
 class BranchWithShelfForm(forms.Form):

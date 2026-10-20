@@ -1186,10 +1186,11 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         post-validation ``IntegrityError``, or a Django ``ValidationError`` the
         override raises (keyed by form field name), returns the ``{ ok: false }``
         envelope with every write rolled back, never a top-level error. Any other
-        exception propagates. The ``ModelForm`` flavor writes via ``form.save()``
-        directly (it has a real model save; a create over a client-assigned key
-        splits it into ``form.save(commit=False)``, an INSERT and
-        ``form.save_m2m()``), so this hook is plain-flavor only.
+        exception propagates. The ``ModelForm`` flavor writes through the form's own
+        save (it has a real model save; an update, and a create over a
+        client-assigned key, split it into ``form.save(commit=False)``, the
+        package's UPDATE or INSERT and ``form.save_m2m()``), so this hook is
+        plain-flavor only.
         """
         del info
         save = getattr(form, "save", None)

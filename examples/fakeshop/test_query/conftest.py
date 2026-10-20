@@ -15,6 +15,11 @@ receiving tests from a module. A function-scoped guard then rebuilds only the ch
 aggregate schema/URL shell for every test and fingerprints the complete registration
 state. If a test changes any app registration or contributing module, teardown runs
 the full rebuild under ambient settings, including after an assertion failure.
+
+``delete_after_authorization`` stands in for a concurrent transaction that deletes an
+update's located row between the locate and the write: it wraps the fakeshop mutation's
+``check_permission`` so the row is deleted once authorization has run, outside any
+savepoint the write opens.
 """
 
 from __future__ import annotations
@@ -23,13 +28,17 @@ import sys
 from collections.abc import Callable, Iterator
 
 import pytest
+from graphql_client import DeleteAfterAuthorization
 from schema_reload import (
     _PROJECT_APP_SCHEMA_MODULES,
     reload_all_project_schemas,
     reload_project_schema_shell,
 )
+from strawberry.types import Info
 
+from django_strawberry_framework import DjangoMutation
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils.write_transaction import pipeline_write_phase
 
 
 def _registry_registration_identity() -> tuple[object, ...]:
@@ -101,3 +110,36 @@ def project_schema_override(
 ) -> Callable[[], None]:
     """Rebuild under temporary settings; the autouse state guard restores afterward."""
     return reload_all_project_app_schemas
+
+
+@pytest.fixture
+def delete_after_authorization(monkeypatch: pytest.MonkeyPatch) -> DeleteAfterAuthorization:
+    """Return an arming callable; each armed ``check_permission`` deletes after authorizing.
+
+    The concurrent delete is SIMULATED on the request's own connection: the wrapped
+    ``check_permission`` runs the mutation's real authorization, then ``delete()`` inside
+    ``pipeline_write_phase`` (the pipeline is database-read-only before its write, and the
+    stand-in writer borrows the write seam), so it lands after the locate and before the
+    write, outside any savepoint the write opens, and rolls back with the transaction.
+    ``mutation_cls`` is read off its schema module at test time, the class the rebuilt
+    schema serves. The armed classes are restored at teardown.
+    """
+
+    def arm(mutation_cls: type[DjangoMutation], delete: Callable[[], object], /) -> None:
+        original = mutation_cls.check_permission
+
+        def deleting(
+            mutation: DjangoMutation,
+            info: Info,
+            operation: str,
+            data: object,
+            instance: object = None,
+        ) -> bool:
+            allowed = original(mutation, info, operation, data, instance)
+            with pipeline_write_phase():
+                _ = delete()
+            return allowed
+
+        monkeypatch.setattr(mutation_cls, "check_permission", deleting)
+
+    return arm

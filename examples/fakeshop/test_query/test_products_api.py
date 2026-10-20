@@ -22,7 +22,10 @@ wired in ``apps.products.schema`` end to end:
   sees, a hidden related row answering like an absent one;
 * a save-time Django ``ValidationError`` from ``Item.save()`` / ``delete()``
   answered by every ``Item`` write mutation (model, form, serializer) with the
-  ``name``-keyed ``FieldError`` envelope and nothing written.
+  ``name``-keyed ``FieldError`` envelope and nothing written;
+* an ``Item`` update whose located row is deleted after authorization answered
+  by every flavor with the in-band ``conflict`` envelope and rolled back, and a
+  single-table update saving with ``update_fields=None``.
 
 Form-mutation async colour uses a module-local ``/graphql-async/`` mount
 (``graphql_client.py`` is sync-only).
@@ -44,6 +47,7 @@ from typing import NamedTuple
 
 import pytest
 from apps.products import models
+from apps.products import schema as products_schema
 from apps.products.forms import REJECTED_ITEM_NAME
 from apps.products.serializers import (
     REJECTED_RENAMED_DISPLAY_NAME,
@@ -59,12 +63,14 @@ from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.signals import connection_created
 from django.db.models import QuerySet
 from django.db.models.fields.files import FieldFile
+from django.db.models.signals import pre_save
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from graphql_client import (
+    DeleteAfterAuthorization,
     JSONObject,
     json_at,
     json_list,
@@ -72,6 +78,8 @@ from graphql_client import (
     json_str,
     middleware_without_debug_toolbar,
     response_json,
+    statement_shapes,
+    statement_shapes_after_last_delete,
 )
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _graphql_data
@@ -79,6 +87,7 @@ from graphql_client import post_graphql as _post_graphql
 from graphql_client import post_graphql_raw as _post_graphql_raw
 from strawberry import relay
 
+from django_strawberry_framework import DjangoMutation
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
@@ -5259,7 +5268,7 @@ _SAVE_REJECTED_ROWS: dict[str, _SaveRejectedRow] = {
         ),
         "change_item",
         "update",
-        13,
+        16,
     ),
     "createItemViaSerializer": _SaveRejectedRow(
         _save_rejected_query(
@@ -5339,7 +5348,8 @@ def test_item_save_time_validation_error_returns_the_name_keyed_envelope(mutatio
 
     The rule fires inside the write window of every ``Item`` write flavor: the model
     flavor's ``save()`` / forced update ``save()`` / ``delete()``, the ``ModelForm``'s
-    ``form.save()``, and the serializer's ``serializer.save()``. Each answers with
+    save (an update's a forced update too, in its own savepoint), and the serializer's
+    ``serializer.save()``. Each answers with
     ``node: null`` and one ``FieldError`` on ``name`` carrying the rule's message and
     code (no top-level error, no masked policy message), the write rolled back, and
     the exact query count of a request that never reached the ``INSERT`` / ``UPDATE``
@@ -6259,3 +6269,192 @@ def test_category_properties_list_is_not_selectable_over_http() -> None:
         "Cannot query field 'properties'" in json_str(error, "message")
         for error in json_list(payload, "errors")
     ), payload
+
+
+# ===========================================================================
+# An update's located row deleted after authorization -> ``conflict``
+# ===========================================================================
+# ``delete_after_authorization`` (``conftest.py``) deletes the located ``Item`` once the
+# mutation's own authorization ran, the stand-in for a concurrent transaction committing a
+# delete between the locate and the write under ``Meta.select_for_update = False`` (or a
+# backend without ``FOR UPDATE``). Every flavor answers with the in-band ``conflict``
+# envelope on ``id`` and rolls the transaction back, the stand-in delete with it.
+
+_UPDATE_ITEM_INPUTS = {
+    "updateItem": "ItemPartialInput",
+    "updateItemViaForm": "ItemModelFormPartialInput",
+    "updateItemViaSerializer": "ItemSerializerPartialInput",
+}
+
+#: The envelope a located row deleted after authorization answers with.
+_CONFLICT_ERRORS = [
+    {
+        "field": "id",
+        "messages": ["The row was changed or removed by a concurrent operation; retry."],
+        "codes": ["conflict"],
+    },
+]
+
+
+#: The write a forced update of a deleted ``Item`` runs: the zero-row ``UPDATE`` inside its
+#: own savepoint, rolled back; the absence probe; the pipeline's rollback and releases.
+_FORCED_UPDATE_CONFLICT = [
+    "SAVEPOINT",
+    'UPDATE "products_item"',
+    "ROLLBACK",
+    "RELEASE",
+    "SELECT",
+    "ROLLBACK",
+    "RELEASE",
+    "RELEASE",
+]
+
+
+def _item_update_mutation(mutation: str) -> type[DjangoMutation]:
+    """The mutation class the rebuilt schema serves, read off its module at test time."""
+    return {
+        "updateItem": products_schema.UpdateItem,
+        "updateItemViaForm": products_schema.UpdateItemViaForm,
+        "updateItemViaSerializer": products_schema.UpdateItemViaSerializer,
+    }[mutation]
+
+
+def _update_item_query(mutation: str) -> str:
+    return (
+        f"mutation($id: ID!, $d: {_UPDATE_ITEM_INPUTS[mutation]}!) {{ "
+        f"{mutation}(id: $id, data: $d) {{ node {{ name }} errors {{ field messages codes }} }} }}"
+    )
+
+
+def _stored_item(item_pk: int | None) -> tuple[list[tuple[str, str, int]], int]:
+    """The item's stored columns and the count of its cascaded ``Entry`` rows."""
+    return (
+        list(
+            models.Item._base_manager.filter(pk=item_pk).values_list(
+                "name",
+                "description",
+                "category_id",
+            ),
+        ),
+        models.Entry._base_manager.filter(item_id=item_pk).count(),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mutation", "writes"),
+    [
+        pytest.param(
+            "updateItem",
+            ["SELECT", "SELECT", *_FORCED_UPDATE_CONFLICT],
+            id="updateItem",
+        ),
+        pytest.param(
+            "updateItemViaForm",
+            [
+                "SELECT",
+                "SELECT",
+                "SELECT",
+                *_FORCED_UPDATE_CONFLICT,
+            ],
+            id="updateItemViaForm",
+        ),
+        pytest.param(
+            "updateItemViaSerializer",
+            [
+                "SELECT",
+                "SELECT",
+                "SAVEPOINT",
+                'UPDATE "products_item"',
+                'INSERT "products_item"',
+                "RELEASE",
+                "ROLLBACK",
+                "RELEASE",
+                "RELEASE",
+            ],
+            id="updateItemViaSerializer",
+        ),
+    ],
+)
+def test_update_of_an_item_deleted_after_authorization_is_conflict_over_http(
+    mutation: str,
+    writes: list[str],
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """An ``Item`` update whose located row is deleted after authorization is ``conflict``.
+
+    The model and ``ModelForm`` flavors UPDATE inside their own savepoint and never INSERT:
+    the zero-row UPDATE rolls the savepoint back and the absence probe reads the row gone.
+    The serializer flavor's DRF save keeps Django's update-else-insert, so the row is
+    re-INSERTed and the write witness's ``created=True`` under the authorized pk answers
+    ``conflict``. Every flavor rolls the transaction back: the row and its cascaded entries
+    are stored as before the request.
+    """
+    seed_data(1)
+    create_users(1)
+    item = models.Item.objects.earliest("pk")
+    before = _stored_item(item.pk)
+    assert before[1] > 0
+    client = _login_with_perm("staff_1", "change_item")
+    delete_after_authorization(
+        _item_update_mutation(mutation),
+        lambda: models.Item._base_manager.filter(pk=item.pk).delete(),
+    )
+
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_graphql(
+            _update_item_query(mutation),
+            client=client,
+            variables={"id": _global_id("products.item", item.pk), "d": {"name": "Renamed"}},
+        )
+
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", mutation) == {"node": None, "errors": _CONFLICT_ERRORS}
+    assert (
+        statement_shapes_after_last_delete(
+            [query["sql"] for query in captured.captured_queries],
+        )
+        == writes
+    )
+    assert _stored_item(item.pk) == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mutation", sorted(_UPDATE_ITEM_INPUTS))
+def test_item_update_saves_without_update_fields_over_http(mutation: str) -> None:
+    """A single-table ``Item`` update saves with ``update_fields=None`` in every flavor.
+
+    Only a multi-table row names its columns in ``update_fields``; an ``Item``'s
+    ``pre_save`` receiver sees exactly a plain save of an existing row, and the request
+    runs one ``UPDATE`` of the item's table and no ``INSERT``.
+    """
+    seed_data(1)
+    create_users(1)
+    item = models.Item.objects.earliest("pk")
+    client = _login_with_perm("staff_1", "change_item")
+    seen: list[object] = []
+
+    def _record(sender: object, **kwargs: object) -> None:
+        del sender
+        seen.append(kwargs["update_fields"])
+
+    pre_save.connect(_record, sender=models.Item, weak=False)
+    try:
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql(
+                _update_item_query(mutation),
+                client=client,
+                variables={"id": _global_id("products.item", item.pk), "d": {"name": "Renamed"}},
+            )
+    finally:
+        _ = pre_save.disconnect(_record, sender=models.Item)
+
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", mutation) == {"node": {"name": "Renamed"}, "errors": []}
+    assert seen == [None]
+    shapes = statement_shapes([query["sql"] for query in captured.captured_queries])
+    assert [shape for shape in shapes if shape.startswith(("UPDATE", "INSERT"))] == [
+        'UPDATE "products_item"',
+    ]

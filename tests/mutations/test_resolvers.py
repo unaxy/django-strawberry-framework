@@ -4,7 +4,9 @@ Internals a live fakeshop request cannot express: custom ``relay.NodeID`` write
 locate (shipped ``CategoryType`` uses pk; changing it would retarget every
 Category GlobalID), ``_unprovided_exclude`` / ``coerce_lookup_id`` helpers, a
 create over a multi-table child of a client-keyed parent and through a ``save()``
-override that saves twice, ``async def get_queryset`` ``SyncMisuseError``,
+override that saves twice, the ``update_fields`` an update names for a proxy, a three-table
+row, a non-key parent link, a generated column and a deferred row,
+``async def get_queryset`` ``SyncMisuseError``,
 async-row leak isolation, Relay M2M hide on a second ``Genre`` primary
 (shipped ``GenreType`` has no hide hook; a second primary cannot coexist in the
 live process), raw-pk M2M *update* (no shipped ``updateShelf``), unregistered
@@ -49,12 +51,13 @@ from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.scalars import models as scalars_models
 from asgiref.sync import sync_to_async
+from django import forms
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, connection, models, transaction
 from django.db.models import Model, QuerySet
-from django.db.models.signals import m2m_changed, pre_save
+from django.db.models.signals import m2m_changed, post_save, pre_save
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from strawberry import relay
@@ -63,6 +66,7 @@ from strawberry.types.base import has_object_definition
 from typing_extensions import Self, override
 
 from django_strawberry_framework import (
+    DjangoModelFormMutation,
     DjangoMutation,
     DjangoMutationField,
     DjangoOptimizerExtension,
@@ -91,6 +95,7 @@ from django_strawberry_framework.utils.typing import call_forwarded, object_resu
 from django_strawberry_framework.utils.write_transaction import (
     managed_write_transaction,
     open_write_pipeline,
+    pipeline_write_phase,
     require_write_pipeline,
 )
 from tests._idioms import is_object_dict, is_object_list, saved_pk
@@ -558,6 +563,89 @@ class TwiceSavedKeyedRow(models.Model):
         call_forwarded(super().save, args, kwargs)
 
 
+class _UnmanagedProductsModel(models.Model):
+    """Abstract base whose ``Meta`` the two models below inherit instead of declaring one."""
+
+    class Meta:
+        abstract = True
+        app_label = "products"
+        managed = False
+
+
+class LinkedVenue(_UnmanagedProductsModel):
+    """The multi-table parent of ``LinkedDesk``."""
+
+    name: _Text = models.TextField(blank=True, default="")
+
+
+class LinkedDesk(LinkedVenue):
+    """A multi-table child keyed by its own column, joined through an ordinary parent link.
+
+    ``venue`` is a ``parent_link`` one-to-one that is not the child's primary key, and
+    ``double_seats`` a generated column. No fakeshop model has either shape.
+    """
+
+    desk_id: models.AutoField[int | str | Combinable, int] = models.AutoField(primary_key=True)
+    venue: models.OneToOneField[LinkedVenue | Combinable, LinkedVenue] = models.OneToOneField(
+        LinkedVenue,
+        on_delete=models.CASCADE,
+        parent_link=True,
+    )
+    seats: _Int = models.IntegerField(default=0)
+    double_seats: models.GeneratedField = models.GeneratedField(
+        expression=models.F("seats") * 2,
+        output_field=models.IntegerField(),
+        db_persist=True,
+    )
+
+
+class BareVenue(_UnmanagedProductsModel):
+    """The multi-table parent of ``BareDesk``."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
+    name: _Text = models.TextField(blank=True, default="")
+
+
+class BareDesk(BareVenue):
+    """A multi-table child declaring no field of its own: its table holds only its key.
+
+    An ``update_fields`` save names no column of its table, so Django counts the table
+    as updated without a statement. No fakeshop model has this shape.
+    """
+
+
+class BareDeskForm(forms.ModelForm[BareDesk]):
+    """A ``ModelForm`` over ``BareDesk``'s inherited ``name``."""
+
+    class Meta:
+        model = BareDesk
+        fields = ("name",)
+
+
+class _DeleteDeskTableAfterLocate:
+    """Authorize, then delete the located desk's own table row, keeping its venue row.
+
+    The stand-in for a concurrent ``delete(keep_parents=True)`` committed between the
+    locate and the write, on the pipeline's connection.
+    """
+
+    def has_permission(
+        self,
+        _info: object,
+        _mutation: type[object],
+        _operation: str,
+        _data: object,
+        instance: object = None,
+    ) -> bool:
+        if instance is not None:
+            with pipeline_write_phase():
+                desk = BareDesk._base_manager.get(pk=read_attr(instance, "pk"))
+                _ = desk.delete(keep_parents=True)
+        return True
+
+
 @contextlib.contextmanager
 def _tables(*model_classes: type[Model]) -> Generator[None, None, None]:
     """Give ``managed = False`` synthetic models real tables for the test, then drop them."""
@@ -719,6 +807,156 @@ def test_create_through_a_save_override_that_saves_twice(
 
     assert answered == errors
     assert stored == rows
+
+
+@pytest.mark.parametrize(
+    ("row", "update_fields"),
+    [
+        pytest.param(product_models.Item, (), id="single-table"),
+        pytest.param(library_models.OpenVenue, (), id="proxy"),
+        pytest.param(
+            library_models.SelfServeDesk,
+            (
+                "name",
+                "opened_on",
+                "lead_ticket",
+                "window_count",
+                "kiosk_code",
+            ),
+            id="two-parent-links",
+        ),
+        pytest.param(LinkedDesk, ("name", "venue", "seats"), id="non-key-parent-link"),
+    ],
+)
+def test_located_row_update_fields_names_a_multi_table_rows_loaded_non_key_columns(
+    row: type[Model],
+    update_fields: tuple[str, ...],
+) -> None:
+    """Only a row a parent link joins to a second table names columns, minus its keys.
+
+    A single-table row and a proxy of one name nothing (``force_update`` alone covers their
+    one table, and their save keeps ``update_fields=None``). A multi-table row names every
+    concrete column of every table it spans except each table's primary key (both
+    ``<parent>_ptr`` links of the kiosk chain) and a generated column; a parent link that is
+    not the child's primary key is an ordinary column and is named, as a plain save writes
+    it. Fakeshop updates no proxy, no three-table row and no row of the last shape.
+    """
+    assert resolvers.located_row_update_fields(row()) == update_fields
+
+
+@pytest.mark.django_db
+def test_located_row_update_fields_leaves_out_deferred_columns() -> None:
+    """A deferred multi-table row names only its loaded columns, as Django's own save does.
+
+    The pipeline locates a whole row, so no live update reaches a deferred one.
+    """
+    desk = library_models.LendingDesk.objects.create(name="Deferred", window_count=2)
+
+    deferred = library_models.LendingDesk.objects.only("name").get(pk=desk.pk)
+
+    assert resolvers.located_row_update_fields(deferred) == ("name",)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_save_located_row_updates_both_tables_through_a_non_key_parent_link() -> None:
+    """A multi-table row joined by an ordinary parent link saves as two ``UPDATE`` s.
+
+    Django accepts the named parent link and leaves the generated column to the database:
+    the parent table and the child's own each take one ``UPDATE``, no ``INSERT``.
+    """
+    with _tables(LinkedVenue, LinkedDesk):
+        desk = LinkedDesk.objects.create(name="Linked", seats=2)
+        desk.name = "Renamed"
+        desk.seats = 5
+
+        with CaptureQueriesContext(connection) as queries:
+            resolvers.save_located_row(desk)
+
+        stored = list(LinkedDesk._base_manager.values_list("name", "seats", "double_seats"))
+    writes = [
+        query["sql"].split()[:2]
+        for query in queries.captured_queries
+        if query["sql"].startswith(("UPDATE", "INSERT"))
+    ]
+
+    assert writes == [["UPDATE", '"products_linkedvenue"'], ["UPDATE", '"products_linkeddesk"']]
+    assert stored == [("Renamed", 5, 10)]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("flavor", ["model", "form"])
+def test_update_of_a_columnless_child_table_deleted_after_the_locate_is_conflict(
+    flavor: str,
+) -> None:
+    """A child table naming no ``update_fields`` column is checked before the save.
+
+    Django counts a table that contributes no column to ``update_fields`` as updated
+    without a statement, so a ``BareDesk`` whose own table row was deleted after the
+    locate would save its venue and fire ``post_save`` on a desk that no longer exists.
+    The pre-save existence check answers ``conflict`` instead: no ``UPDATE`` runs, no
+    ``post_save`` fires, and the rollback restores the desk row. The model and
+    ``ModelForm`` flavors alike.
+    """
+    saved: list[object] = []
+
+    def _record(sender: object, **_kwargs: object) -> None:
+        saved.append(sender)
+
+    type(
+        "BareDeskT",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": BareDesk, "fields": ("id", "name"), "primary": True})},
+    )
+    meta: dict[str, object] = {
+        "operation": "update",
+        "permission_classes": [_DeleteDeskTableAfterLocate],
+        "select_for_update": False,
+    }
+    if flavor == "form":
+        update = type(
+            "UpdateDesk",
+            (DjangoModelFormMutation,),
+            {"Meta": type("Meta", (), {**meta, "form_class": BareDeskForm})},
+        )
+    else:
+        update = type(
+            "UpdateDesk",
+            (DjangoMutation,),
+            {"Meta": type("Meta", (), {**meta, "model": BareDesk, "fields": ("name",)})},
+        )
+
+    @strawberry.type
+    class Mutation:
+        update_desk = DjangoMutationField(update)
+
+    finalize_django_types()
+    with _tables(BareVenue, BareDesk):
+        desk = BareDesk.objects.create(name="Bare")
+        input_type = "BareDeskFormPartialInput" if flavor == "form" else "BareDeskPartialInput"
+        post_save.connect(_record, sender=BareDesk, weak=False)
+        try:
+            with CaptureQueriesContext(connection) as queries:
+                res = _schema(Mutation).execute_sync(
+                    f"mutation($id: ID!, $d: {input_type}!){{ updateDesk(id: $id, data: $d){{ "
+                    "result { id } errors { field codes } } }",
+                    variable_values={"id": str(desk.pk), "d": {"name": "Renamed"}},
+                )
+        finally:
+            _ = post_save.disconnect(_record, sender=BareDesk)
+        stored = list(BareDesk._base_manager.values_list("pk", "name"))
+
+    assert res.errors is None, res.errors
+    assert _json_at(res.data, "updateDesk") == {
+        "result": None,
+        "errors": [{"field": "id", "codes": ["conflict"]}],
+    }
+    assert saved == []
+    assert not [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].startswith(("UPDATE", "INSERT"))
+    ]
+    assert stored == [(desk.pk, "Bare")]
 
 
 @pytest.mark.django_db

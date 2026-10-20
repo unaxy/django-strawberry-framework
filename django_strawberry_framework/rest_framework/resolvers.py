@@ -92,7 +92,12 @@ The serializer-specific invariants this module owns:
   names through ``save_time_error_key_map``, one level, since a Django error names
   no nested item; the integrity mapper), never a top-level ``GraphQLError``. A
   nested item fails at save time through a DRF ``ValidationError`` in the nested
-  shape, which the flattener keys to the item's path.
+  shape, which the flattener keys to the item's path. DRF's ``update()`` saves
+  through Django's update-else-insert, so on an update a ``created=True`` write the
+  witness (``_write_witness``) records under the authorized pk on the pinned alias
+  is the re-INSERT of a located row a concurrent transaction deleted after the
+  locate: the step returns the in-band ``conflict`` envelope on ``id``, rolled back
+  with the re-inserted row, before the saved result is validated.
 
 - **The re-fetch rides the ``036`` ``refetch_optimized`` G2 path** (spec-039 Decision 9 /
   G2): the shared skeleton re-fetches the saved object by pk WITHOUT the visibility
@@ -186,6 +191,7 @@ from django_strawberry_framework.utils.write_transaction import (
     assert_no_target_drift,
     base_locked_queryset,
     column_values_match,
+    conflict_error,
     make_cross_alias_save_guard,
     pin_write_queryset,
     pipeline_write_phase,
@@ -2365,7 +2371,10 @@ def _write_witness(
       the snapshot. ``serializer.instance`` identity alone is likewise forgeable through
       normal DRF bookkeeping (a custom ``create()`` returning an EXISTING row still gets
       assigned to ``self.instance``); only the observed INSERT + pk snapshot proves the
-      returned row is new.
+      returned row is new. On UPDATE, a ``created=True`` record under the authorized
+      pk is the update-else-insert re-INSERT of a row that vanished after the
+      locate, which ``_guarded_serializer_write`` returns as the ``conflict``
+      envelope.
 
     Signal-less SAME-alias bulk writes are invisible to the recorder; for the create
     witness that fails CLOSED (an unwitnessed create result is rejected - persist the
@@ -2419,6 +2428,24 @@ def _saved(serializer: _Saving, save_kwargs: Mapping[str, object]) -> object:
     return serializer.save(**save_kwargs)
 
 
+def _inserted_authorized_row(
+    model: type[models.Model],
+    authorized_pk: object,
+    alias: str,
+    written: list[_WrittenRow],
+) -> bool:
+    """Return whether the write witness saw an INSERT under the update's authorized pk.
+
+    ``written`` is the ``_write_witness`` ``post_save`` record of the backing model; a
+    ``created=True`` row whose pk snapshot is ``authorized_pk`` on the pinned alias was
+    INSERTed under the located row's key, which a present row would have refused.
+    """
+    return any(
+        created and using == alias and pks_match(model, row_pk, authorized_pk)
+        for _row, row_pk, created, using in written
+    )
+
+
 def _checked_saved_result(
     mutation_cls: type[SerializerMutation],
     serializer: _SaveBookkeeping,
@@ -2459,7 +2486,11 @@ def _checked_saved_result(
       re-point the same object's pk at a hidden row). Only the observed INSERT whose
       snapshotted pk still equals ``saved.pk`` proves the returned row is the new one.
       A custom ``create()`` that persists via signal-less bulk paths fails closed here;
-      persist the returned row via ``instance.save()``.
+      persist the returned row via ``instance.save()``;
+    - on UPDATE it must match a witnessed ``created=False`` write the same way. An
+      update whose save was witnessed INSERTing under the authorized pk never
+      reaches this check: the located row vanished after the locate, which
+      ``_guarded_serializer_write`` returns as the ``conflict`` envelope first.
     """
     model = backing_model_of(mutation_cls._mutation_meta)
     name = truth.name(type(serializer))
@@ -2760,6 +2791,18 @@ def _guarded_serializer_write(
         )
     if write_error is not None:
         return StepFailure(write_error)
+    # An INSERT under the authorized pk during an UPDATE proves the located row was gone
+    # when the save ran (an INSERT over a present row is an ``IntegrityError``): DRF's
+    # ``ModelSerializer.update()`` saves through ``save()``'s update-else-insert fallback,
+    # so a row a concurrent transaction deleted after the locate was re-inserted. That is
+    # the in-band ``conflict`` envelope, rolled back with the re-inserted row.
+    if authorized_pk is not None and _inserted_authorized_row(
+        backing_model_of(mutation_cls._mutation_meta),
+        authorized_pk,
+        alias,
+        written,
+    ):
+        return StepFailure([conflict_error()])
     # The saved result is validated BEFORE the pipeline re-fetches / trusts it: correct model,
     # DRF save-bookkeeping identity, non-null pk, pinned alias, witnessed pk-snapshotted
     # INSERT on create, and - on update - the pre-hook authorized-pk snapshot.

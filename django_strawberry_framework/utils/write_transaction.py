@@ -31,7 +31,13 @@ discipline instead of three drifting copies:
   when the transaction is still usable and the row is demonstrably absent;
   any other database error propagates and rolls back. Django 6.0 raises the
   typed ``Model.NotUpdated``; Django 5.2 raises a bare ``DatabaseError``, so
-  the compat catch is version-sensitive (``not_updated_exceptions``).
+  the compat catch is version-sensitive (``not_updated_exceptions``). The model
+  and ``ModelForm`` flavors update through
+  ``mutations/resolvers.py::save_located_row`` (``force_update``, plus
+  ``update_fields`` on a multi-table row so no parent table is re-INSERTed); the
+  serializer flavor, whose DRF save keeps Django's update-else-insert, maps a
+  witnessed INSERT under the authorized pk to the same envelope
+  (``rest_framework/resolvers.py::_guarded_serializer_write``).
 - **One nested write boundary.** ``open_write_pipeline`` is the substrate every
   write flavor (model create/update, delete, ModelForm, serializer, plain form)
   enters: ``require_managed_write`` then ``transaction.atomic`` nested with
@@ -306,7 +312,7 @@ def pipeline_write_phase() -> Generator[None, None, None]:
     """Mark the pinned-alias WRITE phase open for the duration of one save / delete call.
 
     Entered by the flavor write steps around exactly the statement-issuing write
-    (``Model.save()`` + the M2M assignment, ``form.save()``, ``serializer.save()``,
+    (``Model.save()`` + the M2M assignment, the form's save, ``serializer.save()``,
     ``instance.delete()``) and consulted by ``pipeline_alias_guard``'s pinned-alias
     wrapper: outside this block the whole pipeline is database-READ-ONLY, so a
     permission method, a hook, or a validator that issues write SQL - even on the
