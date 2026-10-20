@@ -34,11 +34,11 @@ a namespace: ``module`` / ``label`` of a class, ``static_attr``, ``own_attr``,
 ``instance_dict``, the name of a callable instance, and the class and scalar
 spellings of ``render`` / ``text`` / ``describe``. The reads that consult no
 namespace (``class_of``, ``is_type``, ``is_instance``, ``is_mapping_dict``,
-``is_subclass``, ``is_exact``, ``mro``, ``bases``, ``class_dict``, ``kind``, and
-``name`` / ``qualname`` of a class, function, builtin or C descriptor) never
-raise and run no consumer code for any object. ``render`` / ``text`` / ``describe`` spell a
-builtin scalar through the builtin's own slot only while its class still
-resolves that slot; any other object renders through its own ``__repr__`` /
+``is_subclass``, ``is_exact``, ``mro``, ``bases``, ``class_dict``, ``kind``,
+``stored_function``, and ``name`` / ``qualname`` of a class, function, builtin
+or C descriptor) never raise and run no consumer code for any object. ``render`` /
+``text`` / ``describe`` spell a builtin scalar through the builtin's own slot only
+while its class still resolves that slot; any other object renders through its own ``__repr__`` /
 ``__str__``, which is consumer behaviour, and its exceptions propagate to the
 schema's error policy like any other consumer hook's.
 
@@ -79,15 +79,16 @@ __all__ = (
     "qualname",
     "render",
     "static_attr",
+    "stored_function",
     "text",
 )
 
 # The interpreter's own slot getters, each declared under the checker over what it reads:
 # ``type``'s getset descriptors (``type.__dict__["__name__"].__get__`` and the slots
-# beside it), the function, builtin and bound-method slots, ``dict.get`` through the base
-# slot (so a ``dict`` subclass namespace's own ``get`` never runs), the ``__name__`` /
-# ``__objclass__`` / ``__get__`` slots of the C descriptor types, and a builtin scalar's
-# own ``__repr__`` slot wrapper.
+# beside it), the function, builtin, bound-method, ``classmethod`` and ``staticmethod``
+# slots, ``dict.get`` through the base slot (so a ``dict`` subclass namespace's own
+# ``get`` never runs), the ``__name__`` / ``__objclass__`` / ``__get__`` slots of the C
+# descriptor types, and a builtin scalar's own ``__repr__`` slot wrapper.
 if TYPE_CHECKING:
 
     def _get_name(_cls: type[object], /) -> str: ...
@@ -104,6 +105,8 @@ if TYPE_CHECKING:
     def _get_builtin_self(_builtin: object, /) -> object: ...
     def _get_builtin_module(_builtin: object, /) -> object: ...
     def _get_method_func(_method: object, /) -> object: ...
+    def _get_classmethod_func(_wrapper: object, /) -> object: ...
+    def _get_staticmethod_func(_wrapper: object, /) -> object: ...
     def _dict_get(_namespace: dict[str, object], _key: str, _default: object, /) -> object: ...
     def _name_reader(_descriptor_type: type[object], /) -> Callable[[object], str]: ...
     def _objclass_reader(_descriptor_type: type[object], /) -> Callable[[object], type]: ...
@@ -134,6 +137,8 @@ else:
     _get_builtin_module = _BUILTIN_SLOTS["__module__"].__get__
 
     _get_method_func = types.MethodType.__dict__["__func__"].__get__
+    _get_classmethod_func = classmethod.__dict__["__func__"].__get__
+    _get_staticmethod_func = staticmethod.__dict__["__func__"].__get__
     _dict_get = dict.get
 
     def _name_reader(descriptor_type: type[object]) -> Callable[[object], str]:
@@ -275,13 +280,6 @@ def is_subclass(sub: object, cls: type[_T]) -> TypeIs[type[_T]]:
 # ``object`` forms for the same reason ``is_instance`` does.
 @overload
 def is_exact(obj: object, cls: type[list[object]]) -> TypeGuard[list[object]]: ...
-
-
-@overload
-def is_exact(
-    obj: object,
-    cls: type[classmethod[object, ..., object]],
-) -> TypeGuard[classmethod[object, ..., object]]: ...
 
 
 @overload
@@ -594,6 +592,27 @@ def own_attr(cls: object, attr: str, default: object = None) -> object:
         return default
     found = _mro_lookup(cls, attr)
     return default if found is _ABSENT else found
+
+
+def stored_function(value: object) -> object:
+    """Return the function a stored builtin method wrapper holds; any other value unchanged.
+
+    ``value`` is a namespace entry as ``static_attr`` returns it. An exact
+    ``classmethod``, ``staticmethod`` or bound method (``MethodType``) answers
+    its ``__func__`` slot, read through the wrapper type's own getter; a
+    subclass of one of them, a plain function and every other value come back
+    as given. Two reads naming the same function therefore compare by identity
+    whatever wrapper each one sits in. Unlike ``inspect.unwrap`` it never
+    follows ``__wrapped__``, and unlike ``getattr`` it binds no descriptor.
+    """
+    value_type = type(value)
+    if value_type is classmethod:
+        return _get_classmethod_func(value)
+    if value_type is staticmethod:
+        return _get_staticmethod_func(value)
+    if value_type is types.MethodType:
+        return _get_method_func(value)
+    return value
 
 
 def _class_repr(cls: type) -> str:
