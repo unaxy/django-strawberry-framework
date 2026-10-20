@@ -580,7 +580,7 @@ def test_resolve_id_attr_falls_back_to_pk() -> None:
     finalize_django_types()
     assert implements_relay_node(CategoryNode)
     assert CategoryNode.resolve_id_attr() == "pk"
-    # Direct helper exercise: the fallback fires when ``NodeIDAnnotationError`` raises.
+    # Direct helper exercise reads the finalize-time stamp.
     assert _resolve_id_attr_default(CategoryNode) == "pk"
 
 
@@ -1354,11 +1354,11 @@ def test_resolve_id_attr_reads_stamp_without_rescanning(monkeypatch: pytest.Monk
 
 
 def test_resolve_id_attr_live_scan_fallback_for_post_finalize_subclasses() -> None:
-    """An UNSTAMPED class (defined after finalize) still resolves via live scan.
+    """An UNSTAMPED class (defined after finalize) resolves via a live scan.
 
     A subclass created post-finalization inherits the installed default but
-    was never stamped; the default falls back to Strawberry's scan - a
-    declared ``NodeID`` wins, no annotation maps to ``"pk"``.
+    was never stamped; the default stamps it from Strawberry's scan on its
+    first read - a declared ``NodeID`` wins, no annotation maps to ``"pk"``.
     """
 
     class CategoryNode(DjangoType):
@@ -1380,6 +1380,40 @@ def test_resolve_id_attr_live_scan_fallback_for_post_finalize_subclasses() -> No
     assert "_dsf_relay_id_attr" not in LatePlain.__dict__
     assert _resolve_id_attr_default(LatePlain) == "pk"
     assert _resolve_id_attr_default(LateWithNodeID) == "name"
+
+
+def test_late_subclass_with_a_different_node_id_than_a_stamped_parent_resolves_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subclass defined after finalize resolves its OWN ``NodeID``, scanned once.
+
+    Finalize leaves the parent's declared column in Strawberry's ``_id_attr``
+    cache, which subclasses inherit, so a bare scan of the late subclass
+    answers with the parent's column. Its first read stamps it from its own
+    annotations instead, and later reads never rescan.
+    """
+
+    class ParentNode(DjangoType):
+        name: relay.NodeID[str]
+
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+
+    class LateChild(ParentNode):
+        created_date: relay.NodeID[str]
+
+    assert implements_relay_node(LateChild)
+    assert LateChild.resolve_id_attr() == "created_date"
+
+    def _boom(_cls: type[relay.Node]) -> NoReturn:
+        raise AssertionError("upstream scan must not run for a stamped type")
+
+    monkeypatch.setattr(relay.Node, "resolve_id_attr", classmethod(_boom))
+    assert LateChild.resolve_id_attr() == "created_date"
 
 
 def test_relay_chain_composite_pk_child_still_gated(monkeypatch: pytest.MonkeyPatch) -> None:

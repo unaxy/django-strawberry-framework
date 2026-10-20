@@ -262,8 +262,8 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
 _RELAY_ID_ATTR_SLOT = "_dsf_relay_id_attr"
 
 
-def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> None:
-    """Resolve the Relay id attribute ONCE and pin it on the class (Phase 2.5).
+def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
+    """Resolve the Relay id attribute ONCE, pin it on the class and return it (Phase 2.5).
 
     Two defects in the per-call path this replaces:
 
@@ -281,10 +281,12 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> None:
       result set. The stamp turns that into one ``__dict__`` read.
 
     The seed-then-scan keeps upstream as the single scan implementation (no
-    ported annotation walk to drift). Stamped unconditionally for every
-    Relay-Node-shaped type: when the consumer overrode ``resolve_id_attr``
-    the stamp is simply never read (the framework default is not installed).
-    Idempotent across partial-finalize reruns.
+    ported annotation walk to drift); the ``"pk"`` fallback ports
+    ``strawberry_django/relay/utils.py::resolve_model_id_attr``. Stamped
+    unconditionally for every Relay-Node-shaped type at finalize (when the
+    consumer overrode ``resolve_id_attr`` the stamp is simply never read) and
+    by ``_resolve_id_attr_default`` on its first read of a class finalize
+    never saw. Idempotent across partial-finalize reruns.
     """
     type_cls._id_attr = None
     try:
@@ -292,6 +294,7 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> None:
     except NodeIDAnnotationError:
         id_attr = "pk"
     setattr(type_cls, _RELAY_ID_ATTR_SLOT, id_attr)
+    return id_attr
 
 
 def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
@@ -303,18 +306,17 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
     deterministic at any inheritance depth (each chain class carries its
     own stamp; nothing is inherited).
 
-    The live-scan fallback serves unstamped callers only (a subclass
-    defined AFTER finalization, or direct unit calls): it asks
-    ``relay.Node.resolve_id_attr`` directly (via ``__func__`` so it binds
-    the runtime ``cls``) and maps ``NodeIDAnnotationError`` to ``"pk"`` -
-    the ported ``strawberry_django/relay/utils.py::resolve_model_id_attr``
-    semantics.
+    An unstamped class (a subclass defined AFTER finalization, or a direct
+    unit call) is stamped on its first read by the same
+    ``_stamp_relay_id_attr`` call finalize makes, never answered by a bare
+    scan: Strawberry's inherited ``_id_attr`` cache would give a late
+    subclass its parent's ``relay.NodeID[...]`` column.
 
     Deliberately NOT ``super(cls, cls).resolve_id_attr()``: with ``cls``
     bound at runtime, a relay-shaped DjangoType subclassing another
     relay-shaped DjangoType inherits the parent's installed copy of this
     default, and the MRO walk from the child lands back on that copy
-    re-bound to the child - infinite recursion. The
+    re-bound to the child - infinite recursion. The stamp's
     direct call asks Strawberry's annotation scan the same question
     without traversing the MRO's method chain, so the default behaves
     identically at every inheritance depth. (Skipping installation on
@@ -325,12 +327,7 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
     stamped = optional_instance(truth.class_dict(cls).get(_RELAY_ID_ATTR_SLOT), str)
     if stamped is not None:
         return stamped
-    try:
-        # basedpyright: the bound classmethod's ``__func__`` call returns ``Any``; the scanned id
-        # attr is a ``str``
-        return cast("str", relay.Node.resolve_id_attr.__func__(cls))
-    except NodeIDAnnotationError:
-        return "pk"
+    return _stamp_relay_id_attr(cls)
 
 
 # Marks a column absent from a row's instance namespace (``None`` is a value a
@@ -1365,7 +1362,7 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
     tuple-membership discriminator (``relay.Node in interfaces``) - the
     three answer different questions at three lifecycle phases.
     """
-    _stamp_relay_id_attr(type_cls)
+    _ = _stamp_relay_id_attr(type_cls)
     for attr, default_impl in _RELAY_RESOLVER_DEFAULTS:
         existing = truth.static_attr(type_cls, attr)
         node_func = truth.stored_function(truth.class_dict(relay.Node).get(attr))
