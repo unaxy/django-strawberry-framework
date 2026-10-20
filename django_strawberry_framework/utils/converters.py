@@ -110,9 +110,10 @@ def convert_with_mro(
        bare-``forms.Field`` exact-type pattern, and filter normalize skipping
        convert-only kinds). ``None`` is a real result, not a continue signal.
 
-    2. **Scalar registry MRO walk.** Walks the field class's real ``__mro__``
-       (read from the interpreter by ``truth.mro``, so a consumer metaclass
-       cannot intercept the read) against ``scalar_registry`` so the
+    2. **Scalar registry MRO walk.** ``utils/truth.py::mro_entry`` walks the
+       field class's real ``__mro__`` (read from the interpreter, so a consumer
+       metaclass cannot intercept the read) against one snapshot of
+       ``scalar_registry``, matching keys by identity, so the
        MOST-specific registered class wins regardless of dict insertion order
        (``FloatField`` / ``DecimalField`` resolve to their own entry, NOT the
        ``IntegerField`` they subclass; a supported field's UNregistered
@@ -134,20 +135,9 @@ def convert_with_mro(
             result = handler(field)
             if result is not MRO_CONTINUE:
                 return result
-    # The field class's real MRO, read from the interpreter (``truth.mro``),
-    # never through attribute lookup a consumer metaclass could intercept.
-    # Snapshot the registry once with the C-level dict copy: an exact-dict copy
-    # runs no key/user protocol (no ``items`` / ``keys`` / ``__iter__`` / key
-    # ``__hash__`` / ``__eq__`` dispatch) and is atomic under the GIL, so a
-    # consumer registration on another thread cannot surface as "dictionary
-    # changed size during iteration" mid-walk. The scan itself stays identity
-    # based: ordinary dict membership would run a consumer metaclass's own
-    # ``__hash__`` / ``__eq__`` on the field class.
-    registry_entries = dict(scalar_registry)
-    for klass in truth.mro(type(field)):
-        for registered, converter in registry_entries.items():
-            if registered is klass:
-                return converter
+    entry = truth.mro_entry(scalar_registry, truth.class_of(field))
+    if entry is not None:
+        return entry[1]
     raise fallthrough_error_factory(field)
 
 

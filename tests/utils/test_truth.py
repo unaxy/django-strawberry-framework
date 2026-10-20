@@ -676,6 +676,72 @@ def test_is_one_of_ignores_a_virtual_abc_registration() -> None:
     assert truth.is_one_of(_Unrelated(), (str, _Virtual)) is False
 
 
+class _EqualsEverythingTwin(_Base, metaclass=_EqualsEverythingMeta):
+    """A second class under ``_EqualsEverythingMeta``: same hash, claims equality with the first."""
+
+
+class _RaisingHashEqMeta(type):
+    """A metaclass whose ``__hash__`` and ``__eq__`` raise."""
+
+    @override
+    def __eq__(cls, other: object) -> NoReturn:
+        DISPATCHED.append("eq")
+        raise RuntimeError("__eq__")
+
+    @override
+    def __hash__(cls) -> NoReturn:
+        DISPATCHED.append("hash")
+        raise RuntimeError("__hash__")
+
+
+class _RaisingHashEq(_Base, metaclass=_RaisingHashEqMeta):
+    """A class every hash or equality test of which raises."""
+
+
+def test_mro_entry_most_specific_class_wins_over_insertion_order() -> None:
+    class _Child(_Base):
+        """A subclass whose entry is inserted after its parent's."""
+
+    class _Grandchild(_Child):
+        """An unregistered subclass that answers through its nearest ancestor."""
+
+    mapping: dict[type, str] = {object: "object", _Base: "base", _Child: "child"}
+    assert truth.mro_entry(mapping, _Child) == (_Child, "child")
+    assert truth.mro_entry(mapping, _Grandchild) == (_Child, "child")
+    assert truth.mro_entry(mapping, _Unrelated) == (object, "object")
+
+
+def test_mro_entry_ignores_an_aliasing_metaclass_key() -> None:
+    mapping: dict[type, str] = {_EqualsEverything: "aliased"}
+    assert mapping[_EqualsEverythingTwin] == "aliased"
+    assert "eq" in DISPATCHED
+    DISPATCHED.clear()
+    assert truth.mro_entry(mapping, _EqualsEverythingTwin) is None
+    assert truth.mro_entry(mapping, _EqualsEverything) == (_EqualsEverything, "aliased")
+    assert DISPATCHED == []
+
+
+def test_mro_entry_never_hashes_or_compares_a_raising_class() -> None:
+    mapping: dict[type, str] = {_Base: "base"}
+    with pytest.raises(RuntimeError, match="__hash__"):
+        _ = _RaisingHashEq in mapping
+    DISPATCHED.clear()
+    assert truth.mro_entry(mapping, _RaisingHashEq) == (_Base, "base")
+    assert DISPATCHED == []
+
+
+def test_mro_entry_returns_a_none_value_and_misses_as_none() -> None:
+    mapping: dict[type, None] = {_Base: None}
+    assert truth.mro_entry(mapping, _RaisingGetattribute) == (_Base, None)
+    assert truth.mro_entry(mapping, _Unrelated) is None
+    empty: dict[type, str] = {}
+    assert truth.mro_entry(empty, _Base) is None
+
+
+def test_mro_entry_of_a_non_class_is_none() -> None:
+    assert truth.mro_entry({int: "int", object: "object"}, 3) is None
+
+
 def test_is_type_and_is_exact() -> None:
     assert truth.is_type(_RaisingGetattribute) is True
     assert truth.is_type(int) is True

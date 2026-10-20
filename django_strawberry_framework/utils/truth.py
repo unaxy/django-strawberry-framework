@@ -40,7 +40,11 @@ or C descriptor) never raise and run no consumer code for any object. ``render``
 ``text`` / ``describe`` spell a builtin scalar through the builtin's own slot only
 while its class still resolves that slot; any other object renders through its own ``__repr__`` /
 ``__str__``, which is consumer behaviour, and its exceptions propagate to the
-schema's error policy like any other consumer hook's.
+schema's error policy like any other consumer hook's. ``mro_entry`` reads no
+namespace and scans its key map by identity; its one copy of that map inserts
+each key under its stored hash, so it shares the namespace reads' exception for
+two keys whose hashes collide, and any map but an exact ``dict`` may be read
+through its own ``keys`` / ``__getitem__``.
 
 This module is the only place in the package allowed to touch identity
 dunders directly; ``scripts/check_truthful_reads.py`` enforces that.
@@ -76,6 +80,7 @@ __all__ = (
     "module",
     "mro",
     "mro_attr",
+    "mro_entry",
     "name",
     "overrides",
     "qualname",
@@ -282,6 +287,32 @@ def is_mapping_dict(obj: Mapping[_K, _V] | None) -> TypeIs[dict[_K, _V]]:
 def is_subclass(sub: object, cls: type[_T]) -> TypeIs[type[_T]]:
     """``issubclass`` by the real MRO; ``False`` for a non-class, never a ``TypeError``."""
     return is_type(sub) and _is_in(cls, _get_mro(sub))
+
+
+def mro_entry(mapping: Mapping[_K, _V], cls: object) -> tuple[_K, _V] | None:
+    """Return the ``(key, value)`` entry of ``mapping`` keyed by the first class in ``cls``'s real MRO.
+
+    The most specific class wins regardless of the mapping's insertion order, so a
+    subclass's own entry beats its parent's and an unregistered subclass answers
+    through its nearest registered ancestor. ``None`` when no class in the MRO keys
+    ``mapping``, and for a non-class ``cls``; a key mapped to ``None`` answers
+    ``(key, None)``.
+
+    ``mapping`` is copied once with the C-level ``dict`` copy, which is atomic under
+    the GIL, so a registration on another thread cannot surface as "dictionary
+    changed size during iteration" mid-scan; copying an exact ``dict`` reuses each
+    key's stored hash, so no key ``__hash__`` runs. Keys are then matched by identity:
+    builtin membership would run a consumer metaclass's ``__hash__`` / ``__eq__``
+    on ``cls``, and one that aliases them could claim another class's entry.
+    """
+    if not is_type(cls):
+        return None
+    entries = dict(mapping)
+    for klass in _get_mro(cls):
+        for key, value in entries.items():
+            if key is klass:
+                return key, value
+    return None
 
 
 # ``is_exact`` narrows the builtin wrappers and containers it is asked about to their
