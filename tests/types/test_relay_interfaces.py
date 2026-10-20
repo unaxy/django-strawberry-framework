@@ -283,7 +283,7 @@ def test_relay_node_with_composite_pk_raises(monkeypatch: pytest.MonkeyPatch) ->
     The fakeshop apps do not ship a composite-pk model, so the test
     monkey-patches ``Category._meta.pk`` to a ``CompositePrimaryKey``
     instance for the duration of the test. Detection in Phase 2.5 is via
-    ``isinstance(model._meta.pk, CompositePrimaryKey)`` per
+    ``django_strawberry_framework/utils/relations.py::has_composite_pk`` per
     spec-015 #"Composite primary keys (Django 5.2+) are explicitly out of scope".
     The error message names the model and proposes the two remediation
     paths (declare ``id: relay.NodeID[...]`` or remove ``relay.Node``).
@@ -1765,7 +1765,7 @@ def test_direct_relay_node_inheritance_composite_pk_raises(
     The composite-pk gate must fire for every Relay-shaped type, including
     consumers who inherit ``relay.Node`` directly without declaring
     ``Meta.interfaces``. Detection uses Phase 2.5's
-    ``isinstance(model._meta.pk, CompositePrimaryKey)``.
+    ``django_strawberry_framework/utils/relations.py::has_composite_pk``.
     """
 
     class CategoryNode(DjangoType, relay.Node):
