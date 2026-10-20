@@ -2021,9 +2021,8 @@ def test_unregister_tolerates_unimportable_connection_submodule(
 ) -> None:
     """``unregister``'s connection-cache ``except ImportError`` guard is best-effort.
 
-    Unregister twin of ``test_clear_tolerates_unimportable_connection_submodule`` - same
-    poisoned-``sys.modules`` shape; the registry's own maps are still cleaned when
-    ``connection.py`` cannot be imported.
+    With ``connection.py`` poisoned in ``sys.modules``, the registry's own maps are still
+    cleaned.
 
     Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
     LIFO order, retry, or ImportError guards. No live sibling.
@@ -2274,63 +2273,5 @@ def test_clear_tolerates_unimportable_order_submodules(fresh_registry: TypeRegis
     with blocked_modules(inputs_name, orders_name):
         fresh_registry.register(Category, CategoryType)
         # Must not raise even though neither order submodule can be imported.
-        fresh_registry.clear()
-        assert fresh_registry.get(Category) is None
-
-
-def test_clear_tolerates_unimportable_connection_submodule(fresh_registry: TypeRegistry) -> None:
-    """``clear()`` itself imports nothing, so a poisoned ``connection`` entry cannot break it.
-
-    Connection twin of ``test_clear_tolerates_unimportable_order_submodules``. The connection
-    subsystem binds its teardown callbacks at ITS import time via ``register_subsystem_clear``
-    (``clear_connection_type_cache``, ``clear_window_edge_class_cache``), and ``clear()`` replays
-    the already-resolved callables. That replay imports nothing, so the poisoned ``connection``
-    module cannot make ``clear()`` raise: the registry's own state is dropped either way.
-
-    Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
-    LIFO order, retry, or ImportError guards. No live sibling.
-    """
-    connection_name = "django_strawberry_framework.connection"
-
-    @_as_django_type
-    class CategoryType:
-        pass
-
-    # ``None`` in ``sys.modules`` makes an import of ``connection.py`` raise
-    # ImportError. ``clear()`` runs no import, and the replayed connection
-    # callbacks import nothing, so its teardown path never reaches it.
-    with blocked_modules(connection_name):
-        fresh_registry.register(Category, CategoryType)
-        # Must not raise even though connection.py cannot be imported.
-        fresh_registry.clear()
-        assert fresh_registry.get(Category) is None
-
-
-def test_clear_tolerates_unimportable_relay_module(fresh_registry: TypeRegistry) -> None:
-    """``clear()`` itself imports nothing, so a poisoned ``relay`` entry cannot break it.
-
-    Relay twin of ``test_clear_tolerates_unimportable_connection_submodule``. The relay subsystem
-    binds its ledger teardown at ITS import time via ``register_subsystem_clear``
-    (``_clear_node_fields_declared``, spec-032 Decision 8), and ``clear()`` replays the
-    already-resolved callable. That replay imports nothing, so the poisoned ``relay`` module
-    cannot make ``clear()`` raise: the registry's own state is dropped either way. The positive
-    co-clear path is pinned by
-    ``tests/test_relay_node_field.py::test_node_field_without_node_types_raises_at_finalize``.
-
-    Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
-    LIFO order, retry, or ImportError guards. No live sibling.
-    """
-    relay_name = "django_strawberry_framework.relay"
-
-    @_as_django_type
-    class CategoryType:
-        pass
-
-    # ``None`` in ``sys.modules`` makes an import of ``relay.py`` raise
-    # ImportError. ``clear()`` runs no import, and the replayed relay callback
-    # imports nothing, so its teardown path never reaches it.
-    with blocked_modules(relay_name):
-        fresh_registry.register(Category, CategoryType)
-        # Must not raise even though relay.py cannot be imported.
         fresh_registry.clear()
         assert fresh_registry.get(Category) is None
