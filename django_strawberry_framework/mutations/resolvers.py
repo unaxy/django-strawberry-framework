@@ -346,7 +346,6 @@ def run_write_pipeline_sync(
             node_id, id_error = coerce_lookup_id(
                 id_,
                 cast("type[DjangoType]", primary_type),
-                using=using,
                 schema=strawberry_schema_from_info(info),
             )
             if id_error is not None:
@@ -1595,7 +1594,6 @@ def coerce_lookup_id(
     id_: object,
     target_type: type[DjangoType],
     *,
-    using: str | None = None,
     schema: Schema | None = None,
 ) -> tuple[object, FieldError | None]:
     """Coerce the update/delete ``id:`` to a pk: GlobalID for a Relay primary, raw pk otherwise.
@@ -1625,12 +1623,9 @@ def coerce_lookup_id(
       on ``id`` - identifies no row, exactly like the node field returns ``null``,
       never the raw Django ``ValueError`` that would leak the pk column type.
 
-    ``using`` pins the decode's NodeID-to-real-pk lookup to the mutation's write
-    alias. The caller runs inside ``open_write_pipeline`` and already holds that
-    alias, so it is threaded explicitly rather than recovered from pipeline state
-    here: ``relay.py::_resolve_real_pk`` performs that recovery for the relation
-    riders that cannot thread one, and a second read of the same context variable
-    at this seam could only ever return the same answer. ``schema`` is the
+    The decode's NodeID-to-real-pk lookup reads through the mutation's write alias
+    because the caller runs inside ``open_write_pipeline``, which pins it
+    (``relay.py::_real_pk_source``). ``schema`` is the
     executing Strawberry schema (``strawberry_schema_from_info(info)``): a
     ``type``-strategy id carries the name that schema published for its type,
     so the decode resolves it through that schema's own type map.
@@ -1660,7 +1655,7 @@ def coerce_lookup_id(
         if text_error is not None:
             return None, text_error
         return pk, None
-    result = decode_model_global_id(id_, target_model, using=using, schema=schema)
+    result = decode_model_global_id(id_, target_model, schema=schema)
     if result.status in (GlobalIDDecode.DECODE_FAILED, GlobalIDDecode.WRONG_MODEL):
         return None, _invalid_lookup_id_error()
     if result.status is GlobalIDDecode.UNCOERCIBLE_PK:

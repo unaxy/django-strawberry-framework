@@ -97,6 +97,7 @@ from django_strawberry_framework.utils.write_transaction import (
     open_write_pipeline,
     pipeline_write_phase,
     require_write_pipeline,
+    write_pipeline,
 )
 from tests._idioms import is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
@@ -402,7 +403,7 @@ def test_update_custom_node_id_resolves_payload_to_real_pk_not_wrong_row() -> No
 
 @pytest.mark.django_db
 def test_custom_node_id_real_pk_lookup_uses_pinned_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A custom NodeID lookup forwards the mutation's pinned database alias.
+    """A custom NodeID lookup reads through the ambient write pipeline's alias.
 
     The NodeID payload identifies a non-pk column, so
     ``decode_model_global_id`` must resolve that value to a real pk before the
@@ -410,8 +411,9 @@ def test_custom_node_id_real_pk_lookup_uses_pinned_alias(monkeypatch: pytest.Mon
     alias contract: a router may send reads to one alias and writes to another,
     and resolving the NodeID through the default manager would miss a row that
     exists only on the write alias. This package-level seam test pins the
-    forwarding without requiring a second test database; the live sharded
-    fakeshop suite exercises the same contract end to end.
+    ambient pipeline recovery on the single-id path (``relay.py::_real_pk_source``)
+    without requiring a second test database; the live sharded fakeshop suite
+    exercises the same contract end to end.
     """
     _schema, CategoryNode = _build_category_node_schema()
     target = product_models.Category.objects.create(name="alias-node-id", description="before")
@@ -420,7 +422,8 @@ def test_custom_node_id_real_pk_lookup_uses_pinned_alias(monkeypatch: pytest.Mon
     using = mock.Mock(wraps=manager.using)
     monkeypatch.setattr(manager, "using", using)
 
-    node_id, error = resolvers.coerce_lookup_id(gid, CategoryNode, using="default")
+    with write_pipeline("default", lock=False):
+        node_id, error = resolvers.coerce_lookup_id(gid, CategoryNode)
 
     assert error is None
     assert node_id == saved_pk(target)

@@ -291,11 +291,23 @@ class DecodeResult(NamedTuple):
     resolved_type: type[_RelayDjangoType] | None
 
 
+def _real_pk_source(resolved_type: type[_RelayDjangoType]) -> models.QuerySet[models.Model]:
+    """Return the default-manager queryset the NodeID -> real-pk lookups read.
+
+    Every write decode runs inside ``open_write_pipeline``, which pins the
+    transaction alias, so the lookup reads through that alias instead of the
+    router's default read database. Standalone decode callers have no pipeline
+    and keep the default-manager read.
+    """
+    pipeline = current_write_pipeline()
+    using = None if pipeline is None else pipeline.alias
+    return base_queryset(model_for(resolved_type), using=using)
+
+
 def _resolve_real_pk(
     resolved_type: type[_RelayDjangoType],
     coerced_id: object,
     *,
-    using: str | None = None,
     slot: tuple[str, ModelField | None] | None = None,
 ) -> object:
     """Map a coerced NodeID-attr value to the model's real primary key.
@@ -313,16 +325,13 @@ def _resolve_real_pk(
     representation coincides with the NodeID value.
 
     So for a non-pk ``id_attr`` this resolves the value to the row's real ``pk``
-    through the model's **default manager**: a value matching no row returns
-    ``None``, which the caller maps to the SAME ``UNCOERCIBLE_PK`` not-found surface
+    through ``_real_pk_source`` (the model's default manager): a value matching
+    no row returns ``None``, which the caller maps to the SAME ``UNCOERCIBLE_PK`` not-found surface
     an uncoercible literal yields. Visibility is intentionally NOT applied here - it
     is enforced downstream by every consumer (the locate / relation / form
     visibility ``get_queryset`` query), so a value matching a *hidden* row resolves
     to its pk and is then rejected by that downstream hook, indistinguishable from
-    missing (no existence leak). ``using`` pins this lookup to a caller-owned
-    transaction alias; when omitted, an active mutation write pipeline supplies its
-    pinned alias, while standalone decode callers retain the default-manager behavior.
-    The default (``id_attr == "pk"``: the coerced value
+    missing (no existence leak). The default (``id_attr == "pk"``: the coerced value
     already IS the pk) and a NodeID naming no model field at all (no column to
     filter - the ``_node_id_slot`` fall-through ``_coerce_pk_or_none`` shares)
     both return the value unchanged with no query. ``slot`` threads the
@@ -333,17 +342,8 @@ def _resolve_real_pk(
     id_attr, field = slot if slot is not None else _node_id_slot(resolved_type)
     if id_attr == "pk" or field is None:
         return coerced_id
-    if using is None:
-        # Relation and serializer decoders call ``decode_model_global_id`` through
-        # the shared write pipeline without threading an alias through every
-        # flavor-specific handler. Recover the active pinned alias here so the
-        # NodeID -> real-pk lookup cannot fall back to the router's default read
-        # database. Standalone callers have no pipeline and keep the historical
-        # default-manager behavior.
-        pipeline = current_write_pipeline()
-        using = None if pipeline is None else pipeline.alias
     return (
-        base_queryset(model_for(resolved_type), using=using)
+        _real_pk_source(resolved_type)
         .filter(**{id_attr: coerced_id})
         .values_list("pk", flat=True)
         .first()
@@ -396,8 +396,6 @@ def _decode_and_coerce(
 def _resolve_real_pks_batched(
     pending: list[tuple[type[_RelayDjangoType], object]],
     slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]],
-    *,
-    using: str | None = None,
 ) -> list[object]:
     """Map coerced NodeID-attr values to real pks with one query per ``(type, id_attr)``.
 
@@ -411,9 +409,8 @@ def _resolve_real_pks_batched(
     primitive's ``.first()`` semantics). A value matching no row maps to
     ``None``, which the caller reports as the SAME ``UNCOERCIBLE_PK``
     not-found surface the single primitive yields; visibility is enforced
-    downstream as there (no existence leak). ``using`` pins the mapping queries
-    to a caller-owned transaction alias, recovered from the active mutation
-    write pipeline when omitted, exactly like the single primitive.
+    downstream as there (no existence leak). Every group reads through the
+    same ``_real_pk_source`` as the single primitive.
     """
     results: list[object] = [None] * len(pending)
     groups: dict[tuple[type[_RelayDjangoType], str], list[int]] = {}
@@ -425,21 +422,10 @@ def _resolve_real_pks_batched(
         groups.setdefault((resolved_type, id_attr), []).append(index)
     if not groups:
         return results
-    if using is None:
-        pipeline = current_write_pipeline()
-        using = None if pipeline is None else pipeline.alias
     for (resolved_type, id_attr), indices in groups.items():
-        # The default manager itself, or the queryset its ``using()`` pins to ``using``.
-        manager: models.Manager[models.Model] | models.QuerySet[models.Model]
-        manager = model_for(resolved_type)._default_manager
-        if using is not None:
-            manager = manager.using(using)
-        pairs: list[tuple[object, object]] = list(
-            manager.filter(**{f"{id_attr}__in": [pending[i][1] for i in indices]}).values_list(
-                id_attr,
-                "pk",
-            ),
-        )
+        wanted_values = [pending[i][1] for i in indices]
+        source = _real_pk_source(resolved_type).filter(**{f"{id_attr}__in": wanted_values})
+        pairs: list[tuple[object, object]] = list(source.values_list(id_attr, "pk"))
         for i in indices:
             wanted = pending[i][1]
             results[i] = next((pk for attr, pk in pairs if attr == wanted), None)
@@ -450,7 +436,6 @@ def decode_model_global_id(
     value: object,
     expected_model: type[models.Model],
     *,
-    using: str | None = None,
     schema: Schema | None = None,
 ) -> DecodeResult:
     """Decode a typed ``GlobalID`` against ``expected_model``, non-raising.
@@ -469,7 +454,7 @@ def decode_model_global_id(
     field via ``_coerce_pk_or_none`` (the SAME coercer the node field uses, so
     an uncoercible literal never reaches the ORM as a raw ``ValueError``). The
     coerced value is then mapped to the model's real primary key via
-    ``_resolve_real_pk`` (pinned to ``using`` when supplied): unlike the READ
+    ``_resolve_real_pk`` (through the active write pipeline's alias): unlike the READ
     node field - which filters
     ``{id_attr: value}`` and never needs the pk - every WRITE consumer here uses the
     result as an actual pk (``get(pk=...)`` / ``pk__in`` / FK-M2M assignment), so a
@@ -491,7 +476,7 @@ def decode_model_global_id(
     # An ``OK`` result always carries the decoded type (``_decode_and_coerce``).
     resolved_type = cast("type[_RelayDjangoType]", intermediate.resolved_type)
     slot = slots[resolved_type]
-    real_pk = _resolve_real_pk(resolved_type, intermediate.pk, using=using, slot=slot)
+    real_pk = _resolve_real_pk(resolved_type, intermediate.pk, slot=slot)
     if real_pk is None:
         return DecodeResult(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
     return DecodeResult(GlobalIDDecode.OK, real_pk, resolved_type)
