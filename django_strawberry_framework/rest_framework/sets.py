@@ -73,6 +73,7 @@ from django_strawberry_framework.mutations.sets import (
     build_and_stash_input,
     construction_kwargs,
     normalize_meta_field_selection,
+    own_backing_class,
     reject_unknown_meta_keys,
     require_backing_class,
     require_model_class,
@@ -87,7 +88,7 @@ from django_strawberry_framework.mutations.sets import (
     _validate_permission_classes as _validate_mutation_permission_classes,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_mapping, optional_instance, tuple_iter
+from django_strawberry_framework.utils._narrowing import is_mapping, tuple_iter
 from django_strawberry_framework.utils.inputs import normalize_field_name_sequence
 
 from .inputs import (
@@ -612,8 +613,6 @@ class SerializerMutation(DjangoMutation):
         # ``get_serializer_for_schema()`` classmethod hook (spec-039
         # Decision 7), so a serializer whose ``.fields`` cannot be materialized no-arg
         # is validated through the consumer's override - not the default discovery.
-        # ``cls._mutation_meta`` is not yet assigned at class creation, so the default
-        # hook reads ``cls.Meta.serializer_class`` (the same serializer just validated).
         field_map = _validate_schema_field_map(name, cls.get_serializer_for_schema())
         # Validate the narrowing fail-loud via the shared machinery (mutual
         # exclusion, bare-string incl. ``"__all__"`` / duplicate / unknown-name /
@@ -761,32 +760,9 @@ class SerializerMutation(DjangoMutation):
 
         Consulted at class-creation validation AND at the phase-2.5 ``build_input`` bind;
         never on the query path (the decode reads the bind-stashed reverse map).
-        The default reads the serializer from the mutation's OWN validated snapshot when
-        present (the bind window) else from ``cls.Meta.serializer_class`` (class creation,
-        before the snapshot is assigned), resolving the SAME serializer in both windows.
-
-        The snapshot is read from the class's own namespace (``truth.class_dict``) - the
-        OWN snapshot only, NOT an
-        inherited one (spec-039): the metaclass assigns ``_mutation_meta`` AFTER
-        ``_validate_meta`` runs, so during a SUBCLASS's validation ``cls._mutation_meta``
-        would resolve up the MRO to the PARENT's snapshot (the parent's serializer),
-        making the default hook discover the wrong serializer's fields. The own-namespace
-        read returns ``None`` until the class's own
-        snapshot is assigned, so a subclass redefining ``Meta.serializer_class`` validates
-        against ``cls.Meta.serializer_class`` (its OWN ``Meta``), not the parent's.
         """
-        # The metaclass writes this own-namespace slot with the validated snapshot.
-        meta = optional_instance(
-            truth.class_dict(cls).get("_mutation_meta"),
-            _ValidatedMutationMeta,
-        )
         # Both windows read the serializer class ``_validate_meta`` gated before this hook runs.
-        serializer_class = cast(
-            "type[DRFSerializer]",
-            meta.serializer_class
-            if meta is not None
-            else truth.static_attr(truth.static_attr(cls, "Meta"), "serializer_class"),
-        )
+        serializer_class = cast("type[DRFSerializer]", own_backing_class(cls, "serializer_class"))
         return _default_serializer_schema_fields(serializer_class)
 
     @classmethod

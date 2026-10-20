@@ -2221,6 +2221,23 @@ def test_subclass_redefining_serializer_validates_against_child_serializer() -> 
     assert "category_id" in field_names  # the child serializer's FK, the 036 <name>_id scheme
 
 
+def test_default_schema_hook_uses_frozen_serializer_snapshot() -> None:
+    """Changing ``Meta.serializer_class`` after declaration cannot drift the schema field set."""
+
+    class NameOnlySer(ModelSerializerBase[product_models.Item]):
+        class Meta:
+            model = product_models.Item
+            fields = ("name",)
+
+    class CreateItem(SerializerMutation):
+        class Meta:
+            serializer_class: type[ModelSerializerBase[product_models.Item]] = NameOnlySer
+            operation = "create"
+
+    CreateItem.Meta.serializer_class = _item_serializer()
+    assert set(CreateItem.get_serializer_for_schema()) == {"name"}
+
+
 # ---------------------------------------------------------------------------
 # Base unregressed (the model flavor seam defaults unchanged)
 # ---------------------------------------------------------------------------
