@@ -4,6 +4,17 @@ These cases cross a real ``AsyncClient`` -> ``AsyncDjangoGraphQLView`` ->
 graphql-core async-completion boundary, posting through the package's own
 ``AsyncTestClient`` (``examples/fakeshop/graphql_client.py`` is sync-only).
 
+The sync-shaped field rows sit beside the list rows they mirror: under the
+async view a field with no ``resolver=`` or a plain ``def`` one still runs the
+asynchronous pipeline, the list field through
+``list_field.py::_execute_queryset_pipeline_async`` and a ``DjangoConnectionField``
+through ``connection.py::_pipeline_for_executor``, whose coroutine
+``DjangoConnection.resolve_connection`` awaits. So a default connection awaits
+an ``async def get_queryset``, and a ``check_<field>_permission`` gate that
+reads the permission tables (``user.has_perm`` for a logged-in non-staff user)
+answers its own denial on every shape instead of ``SynchronousOnlyOperation``
+masked as an unexpected error, then the page once the permission is granted.
+
 No case sets ``DJANGO_ALLOW_ASYNC_UNSAFE``. All tests carry
 ``@pytest.mark.django_db(transaction=True)``.
 """
@@ -24,7 +35,9 @@ import strawberry
 from apps.library import models as library_models
 from apps.library import schema as library_schema
 from apps.library.orders import BranchOrder
+from apps.products import services
 from asgiref.sync import sync_to_async
+from django.contrib.auth.models import AbstractUser, Permission, User
 from django.core.exceptions import EmptyResultSet
 from django.db import models
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -37,6 +50,7 @@ from django.test import AsyncClient, override_settings
 from django.test.utils import register_lookup
 from django.urls import clear_url_caches, path
 from django.utils.functional import cached_property
+from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
     json_at,
@@ -46,6 +60,7 @@ from graphql_client import (
     middleware_without_debug_toolbar,
     response_json,
 )
+from strategy_schemas import make_django_type
 from strawberry.django.context import StrawberryDjangoContext
 from strawberry.schema.name_converter import NameConverter
 from strawberry.types.arguments import StrawberryArgument
@@ -55,11 +70,15 @@ from django_strawberry_framework import (
     DjangoConnection,
     DjangoConnectionField,
     DjangoListField,
+    DjangoType,
     ErrorPolicy,
+    finalize_django_types,
     strawberry_config,
 )
+from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
-from django_strawberry_framework.orders import Ordering
+from django_strawberry_framework.orders import Ordering, OrderSet
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.resource_policy import (
     DST_RESOURCE_DEADLINE,
     DST_RESOURCE_POLICY,
@@ -363,6 +382,47 @@ async def test_async_get_queryset_is_awaited(monkeypatch: pytest.MonkeyPatch) ->
     assert "errors" not in payload, payload
     names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha"]
+
+
+async def _hide_hidden_genres(
+    _cls: type[DjangoType],
+    queryset: models.QuerySet[library_models.Genre],
+    _info: strawberry.Info[object, object],
+) -> models.QuerySet[library_models.Genre]:
+    """An ``async def get_queryset`` body: hide every genre named ``hidden*``."""
+    return queryset.exclude(name__startswith="hidden")
+
+
+def _async_hook_genre_schema() -> DjangoSchema:
+    """A default connection over a Relay ``Genre`` type whose ``get_queryset`` is ``async def``."""
+    registry.clear()
+    node = make_django_type(
+        "AsyncHookGenreNode",
+        library_models.Genre,
+        ("id", "name"),
+        namespace_extra={"get_queryset": classmethod(_hide_hidden_genres)},
+    )
+
+    finalize_django_types()
+    query_type = strawberry.type(type("HookQuery", (), {"genres": DjangoConnectionField(node)}))
+    return DjangoSchema(query=query_type, config=strawberry_config())
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_default_connection_awaits_an_async_get_queryset() -> None:
+    """A connection with no ``resolver=`` awaits an ``async def get_queryset`` too.
+
+    The field's resolver is a plain ``def``; under the async view its pipeline is
+    the asynchronous one, so the hook is awaited and its narrowing served.
+    """
+    await sync_to_async(library_models.Genre.objects.create)(name="Fiction")
+    await sync_to_async(library_models.Genre.objects.create)(name="hidden-a")
+    schema = await sync_to_async(_async_hook_genre_schema)()
+
+    payload = await _post_async(schema, "{ genres { edges { node { name } } } }")
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "genres", "edges") == [{"node": {"name": "Fiction"}}]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2544,6 +2604,134 @@ async def test_async_a_frozen_context_still_returns_the_windowed_rows() -> None:
     )
 
     assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
+
+
+# ---------------------------------------------------------------------------
+# Database-reading sidecar gates on every sync-shaped field
+# ---------------------------------------------------------------------------
+
+_VIEW_GENRE = "library.view_genre"
+
+
+def _require_view_genre(request: object, code: str) -> None:
+    """Deny unless the request's user holds ``library.view_genre`` (a permission-table read)."""
+    user = getattr(request, "user", None)
+    if not (isinstance(user, AbstractUser) and user.has_perm(_VIEW_GENRE)):
+        raise GraphQLError(f"needs {_VIEW_GENRE}", extensions={"code": code})
+
+
+class _GatedGenreFilter(FilterSet):
+    class Meta:
+        model = library_models.Genre
+        fields = {"name": ["exact"]}
+
+    def check_name_permission(self, request: object) -> None:
+        _require_view_genre(request, "FILTER_PERMISSION_DENIED")
+
+
+class _GatedGenreOrder(OrderSet):
+    class Meta:
+        model = library_models.Genre
+        fields = ["id", "name"]
+
+    @classmethod
+    def check_name_permission(cls, request: object) -> None:
+        _require_view_genre(request, "ORDER_PERMISSION_DENIED")
+
+
+def _plain_genres(
+    _root: object,
+    _info: strawberry.Info[object, object],
+) -> models.QuerySet[library_models.Genre]:
+    return library_models.Genre.objects.all()
+
+
+def _gated_genre_schema() -> DjangoSchema:
+    """A Relay ``Genre`` type whose filter and order gates read the permission tables."""
+    registry.clear()
+    node = make_django_type(
+        "GatedGenreNode",
+        library_models.Genre,
+        ("id", "name"),
+        meta_extra={"filterset_class": _GatedGenreFilter, "orderset_class": _GatedGenreOrder},
+    )
+
+    finalize_django_types()
+    query_type = strawberry.type(
+        type(
+            "GatedQuery",
+            (),
+            {
+                "__annotations__": {"plain_def_genre_list": list[node]},
+                "default_genres": DjangoConnectionField(node),
+                "plain_def_genres": DjangoConnectionField(node, resolver=_plain_genres),
+                "plain_def_genre_list": DjangoListField(node, resolver=_plain_genres),
+            },
+        ),
+    )
+    return DjangoSchema(query=query_type, config=strawberry_config())
+
+
+_FICTION_EDGES: JSONObject = {"edges": [{"node": {"name": "Fiction"}}]}
+
+#: ``id -> (query, the gate's denial code, the granted page)``: one row per
+#: sync-shaped field and sidecar.
+_GATED_QUERIES: dict[str, tuple[str, str, JSONObject]] = {
+    "default-connection-filter": (
+        '{ defaultGenres(filter: { name: { exact: "Fiction" } }) { edges { node { name } } } }',
+        "FILTER_PERMISSION_DENIED",
+        {"defaultGenres": _FICTION_EDGES},
+    ),
+    "default-connection-order": (
+        "{ defaultGenres(orderBy: [{ name: ASC }]) { edges { node { name } } } }",
+        "ORDER_PERMISSION_DENIED",
+        {"defaultGenres": _FICTION_EDGES},
+    ),
+    "plain-def-connection-filter": (
+        '{ plainDefGenres(filter: { name: { exact: "Fiction" } }) { edges { node { name } } } }',
+        "FILTER_PERMISSION_DENIED",
+        {"plainDefGenres": _FICTION_EDGES},
+    ),
+    "plain-def-connection-order": (
+        "{ plainDefGenres(orderBy: [{ name: ASC }]) { edges { node { name } } } }",
+        "ORDER_PERMISSION_DENIED",
+        {"plainDefGenres": _FICTION_EDGES},
+    ),
+    "plain-def-list-order": (
+        "{ plainDefGenreList(orderBy: [{ name: ASC }]) { name } }",
+        "ORDER_PERMISSION_DENIED",
+        {"plainDefGenreList": [{"name": "Fiction"}]},
+    ),
+}
+
+
+def _grant_view_genre(username: str) -> None:
+    user = User.objects.get(username=username)
+    user.user_permissions.add(Permission.objects.get(codename="view_genre"))
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("shape", list(_GATED_QUERIES))
+async def test_async_a_database_reading_sidecar_gate_answers_its_own_verdict(shape: str) -> None:
+    """Each sync-shaped field answers a ``has_perm`` gate's denial, then serves once granted."""
+    await sync_to_async(services.create_users)(1)
+    await sync_to_async(library_models.Genre.objects.create)(name="Fiction")
+    schema = await sync_to_async(_gated_genre_schema)()
+    query, code, page = _GATED_QUERIES[shape]
+    user = await sync_to_async(User.objects.get)(username="regular_1")
+
+    denied_client = AsyncClient()
+    await sync_to_async(denied_client.force_login)(user)
+    denied = await _post_async(schema, query, client=denied_client)
+    assert [json_at(error, "extensions", "code") for error in json_list(denied, "errors")] == [
+        code,
+    ], denied
+
+    await sync_to_async(_grant_view_genre)("regular_1")
+    granted_client = AsyncClient()
+    await sync_to_async(granted_client.force_login)(user)
+    granted = await _post_async(schema, query, client=granted_client)
+    assert granted == {"data": page}
 
 
 # ---------------------------------------------------------------------------

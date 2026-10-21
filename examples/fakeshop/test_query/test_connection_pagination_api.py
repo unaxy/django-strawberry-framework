@@ -32,14 +32,14 @@ asserts both the exact rejection and that no ``library_genre`` read happened
 that the defect should have prevented; a ``super()`` pass-through override is
 the positive control that the seal accepts a healthy ``OrderSet``.
 
-Both pipelines run that seal, so the matrix is mirrored over the async one, on
-the field shape each pipeline belongs to. The sync matrix runs on the shipped
-``allLibraryGenresConnection`` through ``/graphql/``: that field declares no
-``resolver=``, so its public resolver is a sync one and the field runs
+Both pipelines run that seal, so the matrix is mirrored over the async one. The
+sync matrix runs on the shipped ``allLibraryGenresConnection`` through
+``/graphql/``, where the synchronous executor runs
 ``connection.py::_pipeline_sync``. The async matrix runs on a test-local
 connection field this module builds over the same shipped ``GenreType`` with an
-``async def`` consumer resolver, which is the only field shape that selects
-``connection.py::_pipeline_async``; it is served over a ``/graphql-async/``
+``async def`` consumer resolver, the field shape that runs
+``connection.py::_pipeline_async`` on every execution (a sync-shaped field takes
+it only under the asynchronous executor); it is served over a ``/graphql-async/``
 mount this module owns (``graphql_client.py`` is sync-only, so those rows drive
 ``AsyncTestClient`` with ``django_db(transaction=True)``). The async rows mirror
 the sync matrix shape for shape - evaluated, materialized-list, none,
@@ -860,19 +860,18 @@ async def _async_genres_resolver(
     _root: object,
     _info: strawberry.Info[object, object],
 ) -> models.QuerySet[library_models.Genre]:
-    """An ``async def`` consumer resolver - the shape that selects ``_pipeline_async``."""
+    """An ``async def`` consumer resolver - the shape that always runs ``_pipeline_async``."""
     return library_models.Genre.objects.all()
 
 
 def _async_genre_connection_schema() -> DjangoSchema:
     """Build a schema whose genre connection runs the ASYNC pipeline.
 
-    ``connection.py::_build_connection_resolver`` commits sync-vs-async dispatch
-    per construction: the async branch is selected only when the field is given
-    an ``is_async_callable`` ``resolver=``. The shipped
-    ``allLibraryGenresConnection`` declares none, so its wrapped resolver is the
-    sync one; this field supplies an ``async def`` resolver over the same
-    ``GenreType`` and therefore carries the async half of the seal.
+    ``connection.py::_build_connection_resolver`` builds an ``async def`` resolver
+    for a field given an ``is_async_callable`` ``resolver=``, and that resolver
+    runs ``connection.py::_pipeline_async`` on every execution; this field
+    supplies one over the same ``GenreType`` and therefore carries the async half
+    of the seal.
 
     Built per request rather than cached, so the field is composed from the
     types the current reload registered.
@@ -948,7 +947,7 @@ def _assert_residual_awaitable_disposed(holder: _ResidualHolder, body_ran: list[
 
 #: Names of the overrides ``apply_async`` actually entered during one request.
 #: An override that is never called cannot append to it, so an empty list after
-#: a request means the field never took the async pipeline.
+#: a request means the request never reached the sidecar's ``apply_async``.
 _ASYNC_APPLY_CALLS: list[str] = []
 
 
@@ -1098,10 +1097,10 @@ async def _override_async_passthrough(
 #: Defect rows the post-``OrderSet`` seal names on the ASYNC connection
 #: pipeline: ``(id, override, expected message start, required substrings)``.
 #: The sync matrix above drives ``apply_sync`` through
-#: ``connection.py::_pipeline_sync`` on the shipped connection, whose public
-#: resolver is sync; these drive ``apply_async`` through
+#: ``connection.py::_pipeline_sync`` on the shipped connection under the
+#: synchronous executor; these drive ``apply_async`` through
 #: ``connection.py::_pipeline_async`` on the test-local connection field whose
-#: ``async def`` consumer resolver is what selects that branch. Every override
+#: ``async def`` consumer resolver runs that pipeline. Every override
 #: records itself in ``_ASYNC_APPLY_CALLS`` so each row can prove the seal it
 #: names was entered rather than bypassed. The fifth member is the residual
 #: holder pair a row that returns a SECOND awaitable owns, and ``None`` for

@@ -113,7 +113,7 @@ from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
 from .types.resolvers import _check_n1
 from .utils import truth
-from .utils._narrowing import is_list, read_attr, require, require_instance
+from .utils._narrowing import is_awaitable, is_list, read_attr, require, require_instance
 from .utils.connections import (
     CONNECTION_FILTER_KWARG,
     CONNECTION_ORDER_KWARG,
@@ -137,6 +137,7 @@ from .utils.connections import (
 from .utils.directives import validated_field_directives
 from .utils.execution_mode import async_execution, operation_is_async
 from .utils.querysets import (
+    _disposed_awaitable,
     applied_order,
     apply_filterset_async,
     apply_filterset_sync,
@@ -341,9 +342,10 @@ def _build_windowed_fallback(
     path consumes; it runs only when the fallback runs, so a served window
     constructs no queryset. No sidecar input reaches the fast path (the
     resolver refuses the window when ``filter`` / ``order_by`` kwargs are
-    present), so the fallback runs the pipeline with empty sidecars.
+    present), so the fallback runs the pipeline with empty sidecars, colored per
+    call like the resolver it stands in for (``_pipeline_for_executor``).
     """
-    return lambda: _pipeline_sync(
+    return lambda: _pipeline_for_executor(
         target_type,
         source_factory(),
         info,
@@ -749,6 +751,37 @@ def _resolve_from_window(
     return _set_total_count(conn, want_count=want_count, value=total)
 
 
+async def _resolve_awaited_source(
+    source: Awaitable[object],
+    resolve: Callable[[object], AwaitableOrValue[_ConnectionT]],
+) -> _ConnectionT:
+    """Await a connection source once, then hand the value to ``resolve`` and complete it.
+
+    The one completion step both awaitable sources share: the pipeline coroutine a
+    sync-shaped resolver returns under the asynchronous executor
+    (``DjangoConnection.resolve_connection``) and the one the windowed fallback
+    recovers (``_consume_window``). ``resolve`` answers an awaitable for an
+    async-iterable source (Strawberry's own ``ListConnection`` and the count step
+    do), so its result is awaited when it is one.
+
+    Exactly one await is spent on the source. A value that is still awaitable after
+    it is neither a queryset nor an iterable, and an unbounded awaitable chain is
+    never consumed, so it is disposed and refused, as every other async runner in
+    the package refuses a nested awaitable.
+    """
+    value = await source
+    if _disposed_awaitable(value):
+        raise ConfigurationError(
+            "A connection source resolved to another awaitable after being awaited; "
+            "a nested awaitable is neither a QuerySet nor an iterable. Return the "
+            "queryset (or iterable) directly.",
+        )
+    resolved = resolve(value)
+    if is_awaitable(resolved):
+        return await resolved
+    return resolved
+
+
 def _consume_window(
     cls: type[_ConnectionT],
     nodes: object,
@@ -848,8 +881,25 @@ def _consume_window(
         # Unservable window (the conditional-count drift guard, or a keyset
         # window with no published vocabulary): recover the per-parent
         # queryset and run the shipped pipeline so the results stay
-        # byte-identical.
+        # byte-identical. The pipeline picks its coloring per call, so under
+        # the asynchronous executor the recovery is its coroutine.
         nodes = nodes.fallback()
+        if is_awaitable(nodes):
+            return _resolve_awaited_source(
+                nodes,
+                functools.partial(
+                    _consume_fallback,
+                    cls,
+                    info=info,
+                    before=before,
+                    after=after,
+                    first=first,
+                    last=last,
+                    max_results=max_results,
+                    want_count=want_count,
+                    **kwargs,
+                ),
+            )
     return _consume_fallback(
         cls,
         nodes,
@@ -1332,7 +1382,32 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
         ``test_fast_path_total_count_marker_bypasses_non_queryset_guard`` /
         ``test_fast_path_ambiguous_empty_served_from_marker_row`` /
         ``test_fast_path_last_zero_serves_the_first_zero_page``.
+
+        An awaitable ``nodes`` is completed first, exactly as
+        ``ConnectionExtension.resolve_async`` completes an ``async def``
+        resolver's return before calling this method: Strawberry's sync
+        ``ConnectionExtension.resolve`` hands a sync resolver's return over
+        unawaited and returns whatever this method returns, and the asynchronous
+        executor completes that coroutine. That is how the synthesized
+        sync-shaped resolvers dispatch per call (``_pipeline_for_executor``):
+        under the asynchronous executor they return ``_pipeline_async``'s
+        coroutine, and every check below then runs on the pipeline's result in
+        the same order an ``async def`` resolver's result meets them.
         """
+        if is_awaitable(nodes):
+            return _resolve_awaited_source(
+                nodes,
+                functools.partial(
+                    cls.resolve_connection,
+                    info=info,
+                    before=before,
+                    after=after,
+                    first=first,
+                    last=last,
+                    max_results=max_results,
+                    **kwargs,
+                ),
+            )
         # The request's ``ResourcePolicy.max_page_size`` is a CEILING over the
         # field's / schema's own ``relay_max_results`` (spec-047 Decision 7). Resolving it
         # once here, before any window or slicing path reads it, is what stops a
@@ -1880,6 +1955,16 @@ def _sidecar_steps(
     return tuple(steps)
 
 
+#: The ``SyncMisuseError`` recourse ``_pipeline_sync`` appends when the target's
+#: ``get_queryset`` is ``async def``: the field is driven by the synchronous
+#: executor, and the asynchronous one awaits the same hook on every field shape.
+_CONNECTION_ASYNC_RECOURSE = (
+    "A connection field runs its synchronous pipeline under schema.execute_sync(), "
+    "which cannot await an async get_queryset hook; run the operation with await "
+    "schema.execute() (or the async view), or redefine get_queryset as a sync method."
+)
+
+
 def _pipeline_sync(
     target_type: type[DjangoType],
     source: object,
@@ -1898,9 +1983,10 @@ def _pipeline_sync(
     unchanged after the sidecar-input guard rejects ``filter:`` / ``orderBy:``.
 
     Awaitable sources are rejected before normalization. They can only come
-    from a plain ``def`` consumer resolver that returns an awaitable, a shape
-    committed to this sync path at field construction. The list field enforces
-    the same boundary through the same ``reject_awaitable_sync_source`` guard.
+    from a plain ``def`` consumer resolver that returns an awaitable, which
+    ``_pipeline_for_executor`` never sends to the async pipeline (an awaitable
+    is not a queryset). The list field enforces the same boundary through the
+    same ``reject_awaitable_sync_source`` guard.
 
     ``definition`` is the target's ONE construction-time definition read, handed
     down from the factory: the sidecar arguments this pipeline applies and the
@@ -1935,6 +2021,7 @@ def _pipeline_sync(
         target_type,
         prepared[0],
         info,
+        async_recourse=_CONNECTION_ASYNC_RECOURSE,
         model=definition.model,
     )
     for step in steps:
@@ -1970,12 +2057,14 @@ async def _pipeline_async(
 ) -> object:
     """Async sibling of ``_pipeline_sync`` - awaits the colored visibility / filter / order steps.
 
-    The consumer ``resolver=`` return was already awaited once by
-    ``_build_connection_resolver``'s async branch, so a value that is STILL
-    awaitable here is a nested async resolver whose inner awaitable would
-    otherwise pass the non-queryset sidecar guard and skip visibility entirely.
-    The shared ``reject_residual_async_source`` guard (the same one the list
-    field's ``list_field.py::DjangoListField._async_wrap`` applies) fails it closed
+    Two entries reach it: the ``async def`` consumer-resolver branch, with the
+    resolver's return already awaited once, and ``_pipeline_for_executor``, with
+    a sync-shaped resolver's ``QuerySet`` / ``Manager`` under the asynchronous
+    executor. A value that is STILL awaitable here can only be a nested async
+    resolver's inner awaitable, which would otherwise pass the non-queryset
+    sidecar guard and skip visibility entirely. The shared
+    ``reject_residual_async_source`` guard (the same one the list field's
+    ``list_field.py::DjangoListField._async_wrap`` applies) fails it closed
     before ``_prepare_pipeline_source`` can treat it as a plain iterable.
 
     ``definition`` is the factory's one construction-time read, exactly as the
@@ -2020,6 +2109,55 @@ async def _pipeline_async(
                 model=definition.model,
             )
     return _finalize_queryset(target_type, qs, info, definition=definition)
+
+
+def _pipeline_for_executor(
+    target_type: type[DjangoType],
+    source: object,
+    info: Info[object, object],
+    *,
+    definition: DjangoTypeDefinition,
+    filter_input: object,
+    order_by_input: object,
+) -> AwaitableOrValue[object]:
+    """Run the pipeline for a sync-shaped resolver, colored by the executor driving this call.
+
+    Every connection resolver that is not ``async def`` enters here: the default
+    field, a plain ``def`` ``resolver=``, a declared async-generator resolver, the
+    synthesized ``<field>Connection`` sibling and its windowed fallback. A
+    ``QuerySet`` or ``Manager`` source under the asynchronous executor
+    (``utils/execution_mode.py::async_execution``) is handed back as
+    ``_pipeline_async``'s coroutine, which ``DjangoConnection.resolve_connection``
+    awaits before slicing, so the sidecar sets run ``apply_async`` (their
+    permission checks, form validation and lazy ``.qs`` read in one sync boundary
+    off the event loop) and an async ``get_queryset`` is awaited. Under the
+    synchronous executor the same source runs ``_pipeline_sync``.
+
+    Any other source takes ``_pipeline_sync`` under either executor, and the
+    executor is not asked: a plain iterable or an async iterable is only guarded
+    and passed through, which touches no database, and an awaitable is refused
+    there by ``reject_awaitable_sync_source`` because a plain ``def`` that returns
+    one is a resolver the field cannot await. Asking only for a queryset source
+    keeps the synchronous executor under a running loop refusing exactly the
+    sources it cannot complete, as the list field's sync wrapper does.
+    """
+    if isinstance(source, (models.QuerySet, models.Manager)) and async_execution():
+        return _pipeline_async(
+            target_type,
+            source,
+            info,
+            definition=definition,
+            filter_input=filter_input,
+            order_by_input=order_by_input,
+        )
+    return _pipeline_sync(
+        target_type,
+        source,
+        info,
+        definition=definition,
+        filter_input=filter_input,
+        order_by_input=order_by_input,
+    )
 
 
 def _synthesized_signature(
@@ -2125,9 +2263,13 @@ def _sync_connection_resolver(
     ONE sync body serves the remaining three shapes - the default field (no
     resolver: the type's initial queryset), a plain ``def`` resolver, and a
     declared async-generator resolver (``is_async_callable`` is deliberately False
-    for async-generator functions). Strawberry's async ConnectionExtension accepts
-    the generator's AsyncIterable directly; the sync-shaped wrapper is intentional,
-    letting the native async executor consume it while the shared
+    for async-generator functions). The pipeline is colored per call
+    (``_pipeline_for_executor``): under the asynchronous executor a queryset
+    source comes back as the async pipeline's coroutine, which
+    ``DjangoConnection.resolve_connection`` awaits. Strawberry's
+    ConnectionExtension accepts the generator's AsyncIterable directly; the
+    sync-shaped wrapper is intentional, letting the native async executor consume
+    it while the shared
     ``utils/querysets.py::reject_async_iterable_in_sync_context`` guard turns
     execute_sync misuse into a typed package error. The guard is a no-op for the
     default branch (a QuerySet is synchronously iterable).
@@ -2145,7 +2287,7 @@ def _sync_connection_resolver(
                 async_executor=operation_is_async(),
             )
         filter_input, order_by_input = connection_sidecar_inputs_from_kwargs(kwargs)
-        return _pipeline_sync(
+        return _pipeline_for_executor(
             target_type,
             source,
             info,
@@ -2165,32 +2307,28 @@ def _build_connection_resolver(
     """Build the field resolver: the pipeline body plus the synthesized signature.
 
     The body pops ``filter`` / ``order_by`` (forwarded by ``ConnectionExtension``
-    as ``**kwargs``) and runs the composition pipeline. Sync-vs-async dispatch is
-    committed per-construction (spec-030 Decision 10), because Strawberry freezes a
-    field's resolver sync/async handling at schema-build time AND, unlike a plain
-    field, ``ConnectionExtension`` only awaits an awaitable inner-resolver return
-    when the field is async (``ConnectionExtension.resolve`` - the sync path -
-    passes the resolver return straight to ``resolve_connection`` without
-    awaiting; only ``resolve_async`` awaits). So a per-call coroutine return from
-    a sync resolver (the ``DjangoListField`` shape) would NOT be awaited here:
+    as ``**kwargs``) and runs the composition pipeline (spec-030 Decision 10).
+    Strawberry fixes a field's sync/async resolver chain at schema-build time from
+    whether the resolver is ``async def``, so the resolver's SHAPE is chosen here
+    once, while the pipeline's COLORING is chosen per call:
 
-    - **Sync branch** (everything ``is_async_callable`` rejects): the default
-      field (``resolver is None`` - the type's initial queryset), a plain
+    - **Sync-shaped branch** (everything ``is_async_callable`` rejects): the
+      default field (``resolver is None`` - the type's initial queryset), a plain
       ``def`` consumer resolver, and a declared async-generator resolver
       (``iscoroutinefunction`` is deliberately False for async-generator
-      functions) all share ONE sync resolver running ``_pipeline_sync``, which
-      returns a LAZY queryset. A lazy queryset works under BOTH
-      ``execute_sync`` and ``await execute`` - ``resolve_connection`` /
-      ``ListConnection`` materialize it with ``.count()`` (sync) or
-      ``.acount()`` (async) per the runtime context, so async counting still
-      happens for the default field. A sync pipeline meeting an async
-      ``get_queryset`` raises ``SyncMisuseError`` (the Relay-foundation
-      contract); to drive an async ``get_queryset`` hook through a connection,
-      supply an ``async def`` ``resolver=`` (below). An async generator's
-      return is an ``AsyncIterable`` rather than a coroutine: Strawberry
-      already consumes that shape on its async execution path, while the
-      wrapper's runtime guard rejects it explicitly when a caller incorrectly
-      uses ``execute_sync``.
+      functions) all share ONE sync resolver running
+      ``_pipeline_for_executor``. Under ``execute_sync`` that is
+      ``_pipeline_sync``, returning a lazy queryset. Under ``await execute`` a
+      queryset source is handed back as ``_pipeline_async``'s coroutine:
+      ``ConnectionExtension.resolve`` (the sync chain) passes it to
+      ``resolve_connection`` unawaited, ``DjangoConnection.resolve_connection``
+      awaits it first, and the executor completes the coroutine that method
+      returns. So the sidecar sets run their ``apply_async`` off the event loop
+      and an async ``get_queryset`` is awaited, exactly as for an ``async def``
+      resolver. An async generator's return is an ``AsyncIterable`` rather than
+      a coroutine: Strawberry already consumes that shape on its async
+      execution path, while the wrapper's runtime guard rejects it explicitly
+      when a caller incorrectly uses ``execute_sync``.
     - **Async consumer-resolver** branch (``is_async_callable(resolver)``) is an
       ``async def`` resolver running ``_pipeline_async`` - being ``async def``
       makes the field async, so ``ConnectionExtension.resolve_async`` awaits
@@ -2276,10 +2414,11 @@ def _build_relation_connection_resolver(
     and overshot ``after:`` marker pages are served directly. The resolver never
     sees the pagination arguments - ``ConnectionExtension`` consumes them.
 
-    Sync resolver returning a LAZY queryset by design (the
-    committed-at-construction contract on ``_build_connection_resolver`` holds
-    verbatim: a lazy queryset works under both ``execute_sync`` and
-    ``await execute``). Strictness (spec-033 Decision 8): before running the
+    A sync resolver whose pipeline is colored per call, as on
+    ``_build_connection_resolver``'s sync-shaped branch
+    (``_pipeline_for_executor``): under ``await execute`` the per-parent
+    pipeline comes back as a coroutine ``DjangoConnection.resolve_connection``
+    awaits. Strictness (spec-033 Decision 8): before running the
     per-parent fallback pipeline, the resolver consults the union-published
     optimizer sentinels via the parameterized
     ``types/resolvers.py::_check_n1`` (``kind="connection_to_attr"``) - an
@@ -2300,13 +2439,12 @@ def _build_relation_connection_resolver(
     all come from that one object; the resolver never reads
     ``__django_strawberry_definition__`` off the target class at all.
 
-    Async-``get_queryset`` posture: this is sync-pipeline-only and has
-    no ``resolver=`` seam (the documented escape a *root* connection uses for
-    an async hook), so a Relay target whose ``get_queryset`` is ``async def``
-    raises ``SyncMisuseError`` on every query of its synthesized
-    ``<field>Connection``; ``relation_shapes = {"<field>": "list"}`` is the
-    recourse. The
-    fail-loud ``SyncMisuseError`` is inherited from the pipeline, not new here.
+    Async-``get_queryset`` posture: the per-parent pipeline is colored per call,
+    so under ``await execute`` a Relay target whose ``get_queryset`` is
+    ``async def`` is awaited here and under ``execute_sync`` it raises
+    ``SyncMisuseError`` (inherited from the sync pipeline, not new here). A
+    relation the optimizer walker plans meets that hook at plan time instead,
+    where the walker refuses it on both executors (it plans synchronously).
     """
     to_attr = relation_connection_to_attr(relation_field_name)
 
@@ -2380,7 +2518,7 @@ def _build_relation_connection_resolver(
             kind="connection_to_attr",
             reason=reason,
         )
-        return _pipeline_sync(
+        return _pipeline_for_executor(
             target_type,
             source,
             info,

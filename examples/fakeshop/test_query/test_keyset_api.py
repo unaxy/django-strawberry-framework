@@ -1238,6 +1238,32 @@ async def test_async_keyset_total_count_only() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_async_keyset_sync_resolver_selecting_no_page_builds_its_connection_in_place() -> (
+    None
+):
+    """A plain ``def`` keyset field selecting no edges, ``pageInfo`` or count serves its shell.
+
+    Under the async view the sync-shaped resolver's pipeline is the asynchronous one,
+    and ``DjangoConnection.resolve_connection`` awaits it; a selection with nothing to
+    slice or count is answered by a finished connection rather than a coroutine, so
+    the awaited result is served as is.
+    """
+
+    def _sync_resolver(
+        _root: object,
+        _info: strawberry.Info[object, object],
+    ) -> QuerySet[models.Issue]:
+        return models.Issue.objects.all()
+
+    await sync_to_async(_seed_three_issues)()
+    payload = await _post_async_holder(
+        _issue_holder_schema(_sync_resolver),
+        "{ issues { __typename } }",
+    )
+    assert payload == {"data": {"issues": {"__typename": "IssueTypeConnection"}}}
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_async_keyset_deferred_cursor_column_is_loaded() -> None:
     """Cursor minting on an async keyset field must not lazy-load a deferred order column."""
 

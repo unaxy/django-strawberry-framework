@@ -1662,7 +1662,6 @@ def test_list_field_deadline_check_position(
         trusted_max_rows=False,
         model=Item,
         orderset_class=None,
-        is_async_context=False,
     )
     assert res is not None
     assert check_calls == 1

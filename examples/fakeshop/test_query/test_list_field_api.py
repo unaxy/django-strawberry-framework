@@ -4386,11 +4386,11 @@ def test_shipped_branches_sync_http_rejects_an_async_get_queryset(
         payload = graphql_payload("{ allLibraryBranchesViaListField { name } }")
 
     assert payload["data"] is None
-    assert "returned a coroutine in a sync resolver context" in json_str(
-        payload,
-        "errors",
-        0,
-        "message",
+    assert json_str(payload, "errors", 0, "message") == (
+        "BranchType.get_queryset returned a coroutine in a sync resolver context. "
+        "A DjangoListField runs its synchronous pipeline under schema.execute_sync(), "
+        "which cannot await an async get_queryset hook; run the operation with await "
+        "schema.execute() (or the async view), or redefine get_queryset as a sync method."
     )
 
 

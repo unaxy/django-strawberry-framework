@@ -1395,6 +1395,17 @@ def _order_normalization_scope(
     return contextlib.nullcontext()
 
 
+#: The ``SyncMisuseError`` recourse ``_execute_queryset_pipeline_sync`` appends when
+#: the target's ``get_queryset`` is ``async def``: the field is driven by the
+#: synchronous executor, and the asynchronous one awaits the same hook on every
+#: resolver shape.
+_LIST_FIELD_ASYNC_RECOURSE = (
+    "A DjangoListField runs its synchronous pipeline under schema.execute_sync(), "
+    "which cannot await an async get_queryset hook; run the operation with await "
+    "schema.execute() (or the async view), or redefine get_queryset as a sync method."
+)
+
+
 def _execute_queryset_pipeline_sync(
     target_type: type[DjangoType],
     source: models.QuerySet[models.Model, object],
@@ -1405,12 +1416,16 @@ def _execute_queryset_pipeline_sync(
     trusted_max_rows: bool,
     model: type[models.Model],
     orderset_class: type[OrderSet] | None,
-    is_async_context: bool,
 ) -> object:
-    post_vis_qs = apply_type_visibility_sync(target_type, source, info, model=model)
+    post_vis_qs = apply_type_visibility_sync(
+        target_type,
+        source,
+        info,
+        async_recourse=_LIST_FIELD_ASYNC_RECOURSE,
+        model=model,
+    )
     if not args_record.any_argument_supplied:
-        bounded = _windowed_rows(post_vis_qs, info, max_rows, trusted=trusted_max_rows)
-        return wrap_async_queryset_adapter(bounded) if is_async_context else bounded
+        return _windowed_rows(post_vis_qs, info, max_rows, trusted=trusted_max_rows)
 
     # One task-local capture scope spans public ordering and the offset guard,
     # so the base ``OrderSet`` can hand its normalized terms to the guard without
@@ -1431,7 +1446,7 @@ def _execute_queryset_pipeline_sync(
 
         _check_nonzero_offset_guard(post_order_qs, args_record, orderset_class, info)
 
-    bounded = _windowed_rows(
+    return _windowed_rows(
         post_order_qs,
         info,
         max_rows,
@@ -1439,7 +1454,6 @@ def _execute_queryset_pipeline_sync(
         offset=args_record.offset,
         requested_limit=args_record.limit,
     )
-    return wrap_async_queryset_adapter(bounded) if is_async_context else bounded
 
 
 async def _execute_queryset_pipeline_async(
@@ -1585,14 +1599,15 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
     # sync-vs-async handling.
     #
     # That commitment is per-RESOLVER, not per-request, so the sync wrapper is
-    # the one that runs when a sync consumer resolver is executed inside an
-    # event loop - and on that path it returns a value graphql-core completes
-    # asynchronously rather than a finished list: the queryset branch returns
-    # ``wrap_async_queryset_adapter``'s async-only rows object, and the
-    # async-only-iterable branch returns ``_resolve_async_iterable``'s
-    # coroutine, which the field executor awaits. Neither is a slip. The
-    # alternative is driving ORM iteration or an async generator from a sync
-    # frame on the event-loop thread, which is what the async pipeline exists to
+    # the one that runs when a sync consumer resolver is executed under the
+    # asynchronous executor - and on that path it returns a value graphql-core
+    # completes asynchronously rather than a finished list: the queryset branch
+    # returns ``_execute_queryset_pipeline_async``'s coroutine, exactly as
+    # ``_default`` does, and the async-only-iterable branch returns
+    # ``_resolve_async_iterable``'s coroutine, which the field executor awaits.
+    # Neither is a slip. The alternative is running the ordering sidecar's
+    # permission checks, ORM iteration or an async generator from a sync frame
+    # on the event-loop thread, which is what the async pipeline exists to
     # avoid. Code reaching past the executor to ``field.base_resolver`` under a
     # running loop owes the return value the same completion the executor gives
     # it.
@@ -1635,7 +1650,6 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
                 trusted_max_rows=trusted_max_rows,
                 model=target_model,
                 orderset_class=orderset_class,
-                is_async_context=False,
             )
 
         wrapped = _default
@@ -1748,6 +1762,17 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
                 )
                 source = prepared[0]
                 if prepared[1] is True:
+                    if async_execution():
+                        return _execute_queryset_pipeline_async(
+                            node_type,
+                            prepared[0],
+                            info,
+                            args_record,
+                            max_rows,
+                            trusted_max_rows=trusted_max_rows,
+                            model=target_model,
+                            orderset_class=orderset_class,
+                        )
                     return _execute_queryset_pipeline_sync(
                         node_type,
                         prepared[0],
@@ -1757,7 +1782,6 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
                         trusted_max_rows=trusted_max_rows,
                         model=target_model,
                         orderset_class=orderset_class,
-                        is_async_context=async_execution(),
                     )
                 rejection = _build_non_queryset_rejection_error(
                     args_record,
