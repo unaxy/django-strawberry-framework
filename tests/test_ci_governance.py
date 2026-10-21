@@ -1187,8 +1187,8 @@ def test_the_anchor_sweep_accepts_an_anchor_naming_an_open_spec(tmp_path: Path) 
 def test_channels_floor_constant_matches_the_pyproject_dependency_row() -> None:
     """The one Channels floor the install hints name is the one the project pins.
 
-    ``CHANNELS_FLOOR`` is interpolated into all four ``pip install
-    'channels>=...'`` hints, so the hints cannot drift from each other. What no
+    ``CHANNELS_FLOOR`` is interpolated into every ``pip install
+    'channels>=...'`` hint, so the hints cannot drift from each other. What no
     other test can see is the second place the floor is written: the
     ``channels[daphne]`` dev-group row in ``pyproject.toml``. Nothing imports a
     TOML dependency row, so a bump on either side is otherwise silent.

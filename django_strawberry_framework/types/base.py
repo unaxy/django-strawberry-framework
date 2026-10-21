@@ -127,10 +127,8 @@ ALLOWED_META_KEYS: frozenset[str] = frozenset(
 # never reserved-but-nonfunctional. DEFERRED_META_KEYS stays unchanged.
 
 # The valid relation-shape vocabulary and the package default: the single
-# source for ``_validate_relation_shapes``' typo-guard text, the finalizer's
-# Phase-2.5 synthesis default, and the consumer-visible error text
-# (spec-032 Decision 7). Mirrors the ``STRING_GLOBALID_STRATEGIES`` /
-# ``DEFAULT_GLOBALID_STRATEGY`` precedent below.
+# source of both (spec-032 Decision 7). Mirrors the
+# ``STRING_GLOBALID_STRATEGIES`` / ``DEFAULT_GLOBALID_STRATEGY`` precedent below.
 RELATION_SHAPE_VALUES: frozenset[str] = frozenset({"list", "connection", "both"})
 # ``"connection"`` is the secure default (spec-047 Decision 5): a raw many-side
 # list has no cursor and therefore no page of its own, so emitting one BESIDE the
@@ -154,15 +152,11 @@ _RELAY_NODE_GATE_LEAD = "requires a Relay-Node-shaped type; add `relay.Node` to 
 _RELAY_NODE_GATE_INHERIT_TAIL = "or inherit `relay.Node` directly."
 
 # The valid string-strategy set and the package default are the single source
-# of truth for the CONFIGURABLE GlobalID-encoding strategy vocabulary: the
-# ``Meta`` / setting validators here, the precedence resolver, and the testing
-# mint gate read these names rather than re-typing the literals (spec-031
-# Decisions 4/5/6). The encoder, the decode-shape enforcement, and the
-# strategy-aware filter read the payload-shape memberships in ``types/relay.py``
-# instead - vocabulary (what may be declared) vs shapes (what each strategy
-# emits / accepts) are separate contracts sharing an extension today. ``callable``
-# strategies are validated separately (arity + sync-ness), so they are not part
-# of the string set.
+# of truth for the CONFIGURABLE GlobalID-encoding strategy vocabulary, what a
+# consumer may declare (spec-031 Decisions 4/5/6). What each strategy emits or
+# accepts is a separate contract, the payload-shape memberships in
+# ``types/relay.py``, sharing an extension today. ``callable`` strategies are
+# validated separately (arity + sync-ness), so they are not part of the string set.
 STRING_GLOBALID_STRATEGIES: frozenset[str] = frozenset({"model", "type", "type+model"})
 DEFAULT_GLOBALID_STRATEGY = "model"
 
@@ -591,13 +585,9 @@ def _id_annotation_is_relay_node_id(cls: "type[DjangoType]") -> bool:
 def _is_relay_shaped(cls: "type[DjangoType]", interfaces: tuple[type[object], ...]) -> bool:
     """Return True when ``cls`` or any entry in ``interfaces`` is a Relay-Node-shaped type.
 
-    Single source of truth for the predicate that drives both the
-    Relay ``id`` collision guard at ``DjangoType.__init_subclass__`` and
-    the synthesized-``id``-annotation suppression branch in
-    ``_build_annotations``. Both call sites compute the same boolean
-    from the same inputs at different timings (class-creation-time vs.
-    annotation-synthesis-time); centralizing the predicate keeps the
-    Relay-shape contract single-sited.
+    Single source of truth for the Relay-shape predicate: every reader computes
+    the same boolean from the same inputs at its own timing, so the contract
+    stays single-sited.
     """
     return any(truth.is_subclass(i, relay.Node) for i in interfaces) or truth.is_subclass(
         cls,

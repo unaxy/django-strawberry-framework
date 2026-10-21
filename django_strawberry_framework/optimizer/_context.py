@@ -5,8 +5,8 @@ The shape-agnostic read / write / delete dispatch lives in
 (``resource_policy.py``); this module owns the optimizer's key vocabulary, its
 start-of-execution reset, and the per-execution frame every other module in the
 subpackage reads its own scratch out of. ``get_context_value`` and
-``stash_on_context`` are re-exported here because the optimizer subpackage and
-its tests reach for them at this path.
+``stash_on_context`` are re-exported so the whole hand-off is addressable from
+this module.
 
 The frame is here rather than in ``extension.py`` because its readers cannot
 import that module: the walker, the selection adapter and the nested-fetch

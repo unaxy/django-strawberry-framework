@@ -826,10 +826,8 @@ def pascalize_token(name: str) -> str:
     ``Is_uprivate``, ``field_2`` -> ``Field_u2``, and ``fooBar`` ->
     ``Foo_cbar``. Retained underscores are valid GraphQL name characters, and
     ``build_strawberry_input_class`` pins the finished name explicitly.
-
-    Promoted here from ``mutations/inputs.py`` (spec-039 kept it sited there at
-    two consumers; at three - model + form + serializer - it graduates to the shared
-    input-name machinery, kept visibly distinct from ``pascal_case``).
+    Deliberately not ``utils/strings.py::pascal_case``: this is an injective
+    token encoder, not a display-case helper.
     """
     if not name:
         return ""
