@@ -14,9 +14,11 @@ metaclass ``__eq__`` / ``__hash__`` could intercept:
 - ``type.__dict__["__name__"].__get__(cls)`` (and the ``__qualname__`` /
   ``__mro__`` / ``__bases__`` / ``__dict__`` slots beside it) is the base
   ``type`` getset descriptor, which reads the C slot and never consults the
-  metaclass. ``type`` itself enforces that ``__name__`` and ``__qualname__``
-  are exact ``str``. Functions, builtins and C descriptors are named the same
-  way, through their own types' slots.
+  metaclass. ``type`` keeps a ``str`` subclass assigned to ``__name__`` or
+  ``__qualname__`` as given, so every name read is copied through the base
+  ``str`` slot: it comes back an exact ``str`` and the subclass's own methods
+  never run. Functions, builtins and C descriptors are named the same way,
+  through their own types' slots.
 - Membership in a read MRO is tested by identity (``is``), never ``in`` or
   ``==``, so a metaclass ``__eq__`` cannot claim to be a framework base.
 - Declared attributes (``static_attr`` / ``mro_attr`` / ``overrides`` / ``instance_dict``) are
@@ -356,7 +358,8 @@ def class_dict(cls: object) -> types.MappingProxyType[str, object]:
 
 
 def _nonempty(value: str, fallback: str) -> str:
-    return value or fallback
+    """``value`` as an exact ``str``, copied through the base slot; ``fallback`` when empty."""
+    return str.__str__(value) or fallback
 
 
 def _mro_lookup(cls: type, attr: str) -> object:
@@ -691,8 +694,8 @@ def _class_repr(cls: type) -> str:
         return f"{prefix} {str.__repr__(_get_name(cls))}>"
     owner = _class_module(cls)
     if is_instance(owner, str) and str.__str__(owner) != "builtins":
-        return f"<class '{str.__str__(owner)}.{_get_qualname(cls)}'>"
-    return f"<class '{_get_name(cls)}'>"
+        return f"<class '{str.__str__(owner)}.{text(_get_qualname(cls))}'>"
+    return f"<class '{text(_get_name(cls))}'>"
 
 
 def _oversized_int(value: int) -> bool:
@@ -789,7 +792,7 @@ def text(value: object, fallback: str = "") -> str:
     propagate.
     """
     if is_instance(value, str):
-        rendered = str.__str__(value)
+        rendered = value
     elif is_type(value):
         rendered = _class_repr(value)
     else:
@@ -799,8 +802,8 @@ def text(value: object, fallback: str = "") -> str:
         elif scalar is not _Unrendered.NOT_SCALAR:
             rendered = scalar
         else:
-            rendered = str.__str__(str(value))
-    return rendered or fallback
+            rendered = str(value)
+    return _nonempty(rendered, fallback)
 
 
 def describe(value: object) -> str:

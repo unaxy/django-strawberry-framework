@@ -1105,6 +1105,85 @@ def test_results_are_exact_str() -> None:
         assert type(value) is str
 
 
+def _str_subclass_named_class(module: str = "consumer") -> type[object]:
+    named = type("Plain", (), {"__module__": module})
+    named.__name__ = _HostileStr("Named")
+    named.__qualname__ = _HostileStr("Outer.Named")
+    return named
+
+
+def _nameless_class_of_a_str_subclass_named_metaclass() -> type:
+    meta = type("PlainMeta", (type,), {})
+    meta.__name__ = _HostileStr("NamedMeta")
+    return meta("", (), {})
+
+
+def _str_subclass_named_function() -> Callable[[], None]:
+    def plain() -> None: ...
+
+    plain.__name__ = _HostileStr("named")
+    plain.__qualname__ = _HostileStr("Outer.named")
+    return plain
+
+
+@pytest.mark.parametrize(
+    ("read", "expected"),
+    [
+        pytest.param(lambda: truth.name(_str_subclass_named_class()), "Named", id="name-class"),
+        pytest.param(
+            lambda: truth.name(_nameless_class_of_a_str_subclass_named_metaclass()),
+            "NamedMeta",
+            id="name-metaclass-fallback",
+        ),
+        pytest.param(
+            lambda: truth.name(_str_subclass_named_class()()),
+            "Named",
+            id="name-instance",
+        ),
+        pytest.param(
+            lambda: truth.name(_str_subclass_named_function()),
+            "named",
+            id="name-function",
+        ),
+        pytest.param(
+            lambda: truth.qualname(_str_subclass_named_class()),
+            "Outer.Named",
+            id="qualname-class",
+        ),
+        pytest.param(
+            lambda: truth.qualname(_str_subclass_named_class()()),
+            "Outer.Named",
+            id="qualname-instance",
+        ),
+        pytest.param(
+            lambda: truth.qualname(_str_subclass_named_function()),
+            "Outer.named",
+            id="qualname-function",
+        ),
+        pytest.param(
+            lambda: truth.kind(_str_subclass_named_class()()),
+            "Named",
+            id="kind-instance",
+        ),
+        pytest.param(
+            lambda: truth.render(_str_subclass_named_class()),
+            "<class 'consumer.Outer.Named'>",
+            id="render-class",
+        ),
+        pytest.param(
+            lambda: truth.render(_str_subclass_named_class("builtins")),
+            "<class 'Named'>",
+            id="render-builtins-class",
+        ),
+    ],
+)
+def test_a_str_subclass_name_reads_as_an_exact_str(read: Callable[[], str], expected: str) -> None:
+    """A ``str`` subclass name comes back from every name read as an exact ``str``."""
+    value = read()
+    assert type(value) is str
+    assert value == expected
+
+
 # --- rendering matches repr / str for honest values ---
 
 
