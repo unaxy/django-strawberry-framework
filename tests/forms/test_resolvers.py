@@ -2929,6 +2929,328 @@ def test_modelform_update_null_on_not_null_foreign_key_is_field_keyed_null_error
     assert list(product_models.ItemHold.objects.values_list("item", flat=True)) == [item.pk]
 
 
+# ---------------------------------------------------------------------------
+# Explicit ``null`` the form coerces to a storable value (``_coerced_null_fields``)
+# ---------------------------------------------------------------------------
+
+_NULL_IS_PRIVATE_ERROR = {
+    "field": "isPrivate",
+    "messages": ["This field cannot be null."],
+    "codes": ["null"],
+}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_create_null_boolean_is_field_keyed_null_error() -> None:
+    """``isPrivate: null`` on create is the ``isPrivate`` ``null`` error, not a stored ``False``.
+
+    ``CheckboxInput`` reads the bound ``None`` as ``False``, a value the ``null=False``
+    column stores, so the save would succeed with a value the client never sent. The
+    valid form's instance is checked before the write; no row is written.
+    """
+    (
+        schema,
+        (
+            CategoryT,
+            _ItemT,
+            _C,
+            _U,
+        ),
+    ) = _build_item_form_schema()
+    cat = product_models.Category.objects.create(name=_uniq("Cat"))
+    res = schema.execute_sync(
+        "mutation($d: ItemModelFormInput!){ createItem(data:$d){ "
+        "node{ id } errors{ field messages codes } } }",
+        variable_values={
+            "d": {
+                "name": "NullPrivate",
+                "categoryId": global_id_for(CategoryT, saved_pk(cat)),
+                "isPrivate": None,
+            },
+        },
+    )
+    assert res.errors is None, res.errors
+    assert res.data == {"createItem": {"node": None, "errors": [_NULL_IS_PRIVATE_ERROR]}}
+    assert not product_models.Item.objects.filter(name="NullPrivate").exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_update_null_boolean_leaves_the_stored_value() -> None:
+    """``isPrivate: null`` on update over a ``True`` row is the ``null`` error; the row stays ``True``."""
+    (
+        schema,
+        (
+            _CategoryT,
+            ItemT,
+            _C,
+            UpdateItem,
+        ),
+    ) = _build_item_form_schema()
+    cat = product_models.Category.objects.create(name=_uniq("Cat"))
+    item = product_models.Item.objects.create(name="Private", category=cat, is_private=True)
+    assert UpdateItem._input_class is not None
+    res = schema.execute_sync(
+        f"mutation($id: ID!, $d: {UpdateItem._input_class.__name__}!){{ "
+        "updateItem(id:$id, data:$d){ node{ id } errors{ field messages codes } } }",
+        variable_values={"id": global_id_for(ItemT, saved_pk(item)), "d": {"isPrivate": None}},
+    )
+    assert res.errors is None, res.errors
+    assert res.data == {"updateItem": {"node": None, "errors": [_NULL_IS_PRIVATE_ERROR]}}
+    item.refresh_from_db()
+    assert item.is_private is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_update_null_on_form_required_field_keeps_the_required_error() -> None:
+    """``name: null`` on a form-required field fails ``is_valid()`` with ``required`` first.
+
+    The coerced-``null`` check runs only on a valid form, so the form's own error keeps
+    its message and code and the stored name is unchanged.
+    """
+    (
+        schema,
+        (
+            _CategoryT,
+            ItemT,
+            _C,
+            UpdateItem,
+        ),
+    ) = _build_item_form_schema()
+    cat = product_models.Category.objects.create(name=_uniq("Cat"))
+    item = product_models.Item.objects.create(name="Named", category=cat)
+    assert UpdateItem._input_class is not None
+    res = schema.execute_sync(
+        f"mutation($id: ID!, $d: {UpdateItem._input_class.__name__}!){{ "
+        "updateItem(id:$id, data:$d){ node{ id } errors{ field messages codes } } }",
+        variable_values={"id": global_id_for(ItemT, saved_pk(item)), "d": {"name": None}},
+    )
+    assert res.errors is None, res.errors
+    assert res.data == {
+        "updateItem": {
+            "node": None,
+            "errors": [
+                {"field": "name", "messages": ["This field is required."], "codes": ["required"]},
+            ],
+        },
+    }
+    item.refresh_from_db()
+    assert item.name == "Named"
+
+
+# One unattached column per case below: ``_blank_choice_model`` binds each to its own model class.
+_TEXT_PICK_ON_CREATE: models.Field[object, object] = models.TextField(
+    choices=[("a", "A"), ("b", "B")],
+    blank=True,
+)
+_TEXT_PICK_ON_UPDATE: models.Field[object, object] = models.TextField(
+    choices=[("a", "A"), ("b", "B")],
+    blank=True,
+)
+
+
+@pytest.mark.parametrize(
+    ("column", "operation", "stored"),
+    [
+        pytest.param(_TEXT_PICK_ON_CREATE, "create", None, id="create"),
+        pytest.param(_TEXT_PICK_ON_UPDATE, "update", "a", id="update"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_modelform_null_on_blank_text_choice_is_field_keyed_null_error(
+    column: models.Field[object, object],
+    operation: str,
+    stored: object,
+) -> None:
+    """``pick: null`` on a ``blank=True, null=False`` text choice column is the ``null`` error.
+
+    The column's ``TypedChoiceField`` cleans the ``null`` to its ``empty_value`` ``""``,
+    which a text column stores, so the save would clear the column the client sent
+    ``null`` for. The error is keyed by the column with Django's ``null`` message and
+    code and nothing is written. The omitted (create) or reconstructed (update) ``note``
+    is not an explicit ``null``, so it is never named.
+    """
+    model_class = _blank_choice_model("TextPickRow", column)
+    with _blank_choice_table(model_class):
+        schema, create_input, update_input = _blank_choice_schema(model_class, ("pick", "note"))
+        if operation == "create":
+            res = schema.execute_sync(
+                f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+                "result{ id } errors{ field messages codes } } }",
+                variable_values={"d": {"pick": None}},
+            )
+            payload = res.data and res.data["createRow"]
+        else:
+            row = model_class.objects.create(pick=stored)
+            res = schema.execute_sync(
+                f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+                "result{ id } errors{ field messages codes } } }",
+                variable_values={"id": str(saved_pk(row)), "d": {"pick": None}},
+            )
+            payload = res.data and res.data["updateRow"]
+        assert res.errors is None, res.errors
+        assert payload == {"result": None, "errors": [_NULL_PICK_ERROR]}
+        assert list(model_class.objects.values_list("pick", flat=True)) == (
+            [] if stored is None else [stored]
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_update_null_on_nullable_column_clears_it() -> None:
+    """``pick: null`` on a ``null=True`` integer column stores ``NULL`` with no error.
+
+    The column stores the clear the client sent, so the coerced-``null`` check never
+    names it.
+    """
+    model_class = _blank_choice_model(
+        "NullablePickRow",
+        models.IntegerField(blank=True, null=True),
+    )
+    with _blank_choice_table(model_class):
+        schema, _, update_input = _blank_choice_schema(model_class, ("pick",))
+        row = model_class.objects.create(pick=3)
+        res = schema.execute_sync(
+            f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"id": str(saved_pk(row)), "d": {"pick": None}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data is not None
+        assert res.data["updateRow"]["errors"] == []
+        assert list(model_class.objects.values_list("pick", flat=True)) == [None]
+
+
+class _CleanedPrivateForm(forms.ModelForm[product_models.Item]):
+    """``clean_is_private`` supplies ``True`` whatever the client sent."""
+
+    class Meta:
+        model = product_models.Item
+        fields = ("name", "category", "is_private")
+
+    def clean_is_private(self) -> bool:
+        return True
+
+
+class _DisabledPrivateForm(forms.ModelForm[product_models.Item]):
+    """A ``disabled`` ``is_private``: the bound value is ignored for the field's initial."""
+
+    is_private = forms.BooleanField(required=False, disabled=True)
+
+    class Meta:
+        model = product_models.Item
+        fields = ("name", "category", "is_private")
+
+
+class _UnwrittenPrivateForm(forms.ModelForm[product_models.Item]):
+    """A declared ``is_private`` that ``Meta.fields`` leaves out of ``construct_instance``."""
+
+    is_private = forms.BooleanField(required=False)
+
+    class Meta:
+        model = product_models.Item
+        fields = ("name", "category")
+
+
+class _ExcludedPrivateForm(forms.ModelForm[product_models.Item]):
+    """A declared ``is_private`` that ``Meta.exclude`` leaves out of ``construct_instance``."""
+
+    is_private = forms.BooleanField(required=False)
+
+    class Meta:
+        model = product_models.Item
+        # ``Meta.exclude`` is the shape under test.
+        exclude = ("is_private", "attachment")  # noqa: DJ006
+
+
+@pytest.mark.parametrize(
+    ("shape", "stored", "written"),
+    [
+        pytest.param("clean_field", False, True, id="clean-field"),
+        pytest.param("get_form_kwargs", False, True, id="get-form-kwargs"),
+        pytest.param("disabled", False, False, id="disabled"),
+        pytest.param("unwritten", True, True, id="unwritten"),
+        pytest.param("excluded", True, True, id="excluded"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_modelform_null_the_consumer_form_resolves_is_written(
+    shape: str,
+    stored: object,
+    written: object,
+) -> None:
+    """An explicit ``isPrivate: null`` the consumer's form resolves is no ``null`` error.
+
+    Only the form field's own cleaning of the bound ``None`` is refused. A ``clean_is_private``
+    supplying ``True``, a ``get_form_kwargs`` override binding ``True`` in place of the
+    ``null``, a ``disabled`` field (the bound value ignored for the stored ``False``, the
+    value its own cleaning of the ``null`` would give) and a declared field ``Meta.fields``
+    or ``Meta.exclude`` leaves out of ``construct_instance`` each succeed, the row holding
+    the value the form resolved.
+    """
+    chosen_form = {
+        "clean_field": _CleanedPrivateForm,
+        "get_form_kwargs": _item_model_form(),
+        "disabled": _DisabledPrivateForm,
+        "unwritten": _UnwrittenPrivateForm,
+        "excluded": _ExcludedPrivateForm,
+    }[shape]
+
+    # The ``category`` relation input needs the target's registered primary type.
+    type(
+        "CategoryT",
+        (DjangoType, relay.Node),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": product_models.Category, "fields": ("id", "name"), "primary": True},
+            ),
+        },
+    )
+
+    class ItemT(DjangoType, relay.Node):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name")
+            primary = True
+
+    class UpdateItem(DjangoModelFormMutation):
+        class Meta:
+            form_class = chosen_form
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+        @override
+        def get_form_kwargs(
+            self,
+            info: strawberry.Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: models.Model | None = None,
+        ) -> dict[str, object]:
+            bound = {**data, "is_private": True} if shape == "get_form_kwargs" else data
+            return super().get_form_kwargs(info, data=bound, files=files, instance=instance)
+
+    @strawberry.type
+    class Mutation:
+        update_item = DjangoMutationField(UpdateItem)
+
+    finalize_django_types()
+    assert UpdateItem._input_class is not None
+    cat = product_models.Category.objects.create(name=_uniq("Cat"))
+    item = product_models.Item.objects.create(name="Private", category=cat, is_private=stored)
+    res = _schema(Mutation).execute_sync(
+        f"mutation($id: ID!, $d: {UpdateItem._input_class.__name__}!){{ "
+        "updateItem(id:$id, data:$d){ node{ id } errors{ field codes } } }",
+        variable_values={"id": global_id_for(ItemT, saved_pk(item)), "d": {"isPrivate": None}},
+    )
+    assert res.errors is None, res.errors
+    assert res.data is not None
+    assert res.data["updateItem"]["errors"] == []
+    item.refresh_from_db()
+    assert item.is_private is written
+
+
 class CommitNoteRow(models.Model):
     """A row Django keys, written through ``CommitOnlyNoteForm``."""
 

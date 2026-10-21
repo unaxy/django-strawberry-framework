@@ -335,7 +335,10 @@ package-internal; Slice 4 is the live consumer surface.
     `validation_error_to_field_errors(ValidationError(form.errors.as_data()), key_map)`)
     and returns a null-object payload (on an update whose located row a concurrent
     transaction removed meanwhile, the skeleton's probe answers the `conflict` envelope
-    on `id` instead); **write** via the form's save (`ModelForm`; an
+    on `id` instead); an explicit `null` a `null=False` column's own form field cleaned
+    to a storable value (a `BooleanField`'s `False`, a `blank=True` text or
+    text-choice column's `""`) → that column's field-keyed `null` error, nothing
+    written; **write** via the form's save (`ModelForm`; an
     update and a client-assigned-key create split around `commit=False`) /
     `perform_mutate` (plain form), **wrapped by the `036` save-time mappers**
     (`save_or_field_errors`; a `ModelForm` update `forced_save_or_field_errors`: an
@@ -1524,7 +1527,25 @@ write flavor rides.
    (`build_error_key_map`), by every name Django keys the backing model field by on the
    `ModelForm` (`django_strawberry_framework/utils/errors.py::save_time_error_key_map`,
    shared with the serializer flavor). The envelope rolls back whatever the save wrote
-   before it raised; any other exception (a `ValueError` included) propagates. **The
+   before it raised; any other exception (a `ValueError` included) propagates. **Before
+   the save, the `ModelForm` refuses an explicit `null` its form field coerced to a
+   storable value** ([`forms/resolvers.py`][forms-resolvers]`::_coerced_null_fields`):
+   for a form-declared, non-`disabled`, editable non-pk `null=False` column that
+   `construct_instance` writes (its `Meta.fields` / `Meta.exclude` keep it) and whose
+   bound `form.data` (what `get_form` bound, after any override) holds `None` (an explicit
+   `null`: an update reconstructs an omitted field from a row that stores no `NULL` in
+   it), a cleaned value equal to the form field's own cleaning of that `None`, on the
+   instance as neither `None` nor a `""` the column cannot store, means the save would
+   succeed with a value the client never sent: `CheckboxInput` reads `None` as `False` on
+   a `BooleanField`, and the `CharField` / `TypedChoiceField` of a `blank=True` text or
+   text-choice column cleans it to `""`. That column is the field-keyed error with the
+   field, code `null` and path the model flavor answers the same input with, and the
+   column's Django `error_messages["null"]` as the message, and nothing is written. A
+   cleaned value the consumer form supplies instead (a `clean_<field>` / `clean()`
+   default) is written, as is a `disabled` field's initial. A `null=True` column stores
+   the clear, an M2M empty value clears the relation, a file is bound through `files=`
+   (an explicit `null` upload changes nothing), and a form-required field fails
+   `is_valid()` with its own `required` error first, so none of them is checked. **The
    `ModelForm` save also maps the one other failure a valid `ModelForm` reaches on its own**
    ([`forms/resolvers.py`][forms-resolvers]`::_modelform_save_or_field_errors`): over
    a `blank=True, null=False` column the form field is optional, so an explicit `null`
@@ -1965,6 +1986,20 @@ Rationale companion: [Decision 14][rationale-d14].
   `"__all__"` envelope
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
+- **Explicit `null` coerced to a storable value on a `null=False` column.** A
+  `BooleanField`'s `CheckboxInput` reads an explicit `null` as `False`, and a
+  `blank=True` text or text-choice column's form field cleans it to `""`; both are
+  values the column stores, so the save would succeed. The valid form's instance is
+  checked before the save, and such a column returns the null-object envelope keyed by
+  it with code `null` and the column's `error_messages["null"]`, nothing written, on
+  create and update alike, as the model and serializer flavors answer the same input.
+  Only the form field's own cleaning of the `null` is refused: a value a `clean_<field>`
+  / `clean()` supplies, a `get_form` / `get_form_kwargs` override binding a value in
+  place of the `null`, a `disabled` field, and a declared field `Meta.fields` /
+  `Meta.exclude` keeps out of `construct_instance` all write as the form resolves them. A
+  `null=True` column, an M2M, a file and a form-required field are never checked
+  ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
+  step 5).
 - **Write-time consumer `ValidationError`.** A `ValidationError` raised by consumer
   save-time code (a `ModelForm.save()` / `Model.save()` override, a model signal
   receiver, a plain-form `perform_mutate`) after `is_valid()` passed returns the
@@ -2090,6 +2125,10 @@ behavior reachable through `/graphql/`, package tests own internals.
   a member writes and an omission keeps the default; an explicit `itemId: null` on
   `createItemHoldViaForm` (`ItemHold.item` is a `blank=True, null=False` foreign key)
   returns the `itemId` / `null` envelope `createItemHold` returns, with no row written.
+  **Explicit `null` coerced to a storable value** — `description: null` on
+  `createItemViaForm` / `updateItemViaForm` (`Item.description` is a `blank=True,
+  null=False` text column) returns the `description` / `null` envelope `createItem` /
+  `updateItem` return, with no row written and the stored description unchanged.
 - **Package-internal** ([`tests/forms/`][test-forms]):
   - `test_converter.py` — each supported form-field class → annotation +
     required-ness; `ModelChoiceField` / `ModelMultipleChoiceField` id mapping
@@ -2163,6 +2202,14 @@ behavior reachable through `/graphql/`, package tests own internals.
     `ItemHold` update sending `itemId: null` each return the column-keyed `null` envelope
     with nothing written; a model `save()` filling the value in (`""` or `None`) writes; a
     consumer `save()` `ValueError` with no such column propagates;
+    **explicit `null` coerced to a storable value** — `isPrivate: null` on create and on
+    update over a `True` row, and a `blank=True` text choice column sent `null` on create
+    and update, each return the column-keyed `null` envelope with nothing written; a
+    form-required `name: null` keeps the form's `required` error, and a `null=True`
+    column sent `null` stores `NULL`; an `isPrivate: null` the consumer form resolves (a
+    `clean_is_private`, a `get_form_kwargs` override, a `disabled` field, a declared field
+    `Meta.fields` / `Meta.exclude` leaves out) writes with empty `errors`
+    (`::test_modelform_null_the_consumer_form_resolves_is_written`);
     **the `get_form_kwargs` / `get_form` hook** — an override injecting `user` and one
     scoping a `ModelChoiceField.queryset` (input shape unchanged); **partial-update
     reconstruction at the unit tier** — omitted scalar / FK / M2M preserved from the
@@ -2352,7 +2399,8 @@ The completion contract.
    `ValidationError`), and
    a `ModelForm` save refused over a `blank=True, null=False` column cleaned to a value
    it cannot store (`None`, or `""` on a non-text choice column) returns that column's
-   field-keyed `null` error;
+   field-keyed `null` error, as does, before the save, an explicit `null` its own form
+   field cleaned to a value such a `null=False` column stores (`False`, `""`);
    the `ModelForm` payload object is re-fetched through the
    `036` optimizer path (G2: `select_related` / `prefetch_related` kept, no
    [`.only(...)`][glossary-only-projection]); the **plain `DjangoFormMutation`

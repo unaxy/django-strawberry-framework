@@ -525,6 +525,102 @@ def test_create_item_hold_explicit_null_item_is_a_field_error(document: str, roo
     assert not models.ItemHold.objects.exists()
 
 
+_CREATE_ITEM_WITH_CODES = (
+    "mutation($d: ItemInput!) { createItem(data: $d) { "
+    "node { name } errors { field messages codes } } }"
+)
+_CREATE_ITEM_VIA_FORM_WITH_CODES = (
+    "mutation($d: ItemModelFormInput!) { createItemViaForm(data: $d) { "
+    "node { name } errors { field messages codes } } }"
+)
+_UPDATE_ITEM_VIA_FORM_WITH_CODES = (
+    "mutation($id: ID!, $d: ItemModelFormPartialInput!) { updateItemViaForm(id: $id, "
+    "data: $d) { node { name } errors { field messages codes } } }"
+)
+_NULL_DESCRIPTION_ERROR = {
+    "field": "description",
+    "messages": ["This field cannot be null."],
+    "codes": ["null"],
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("document", "root"),
+    [
+        (_CREATE_ITEM_WITH_CODES, "createItem"),
+        (_CREATE_ITEM_VIA_FORM_WITH_CODES, "createItemViaForm"),
+    ],
+    ids=["model", "modelform"],
+)
+def test_create_item_explicit_null_description_is_a_field_error(document: str, root: str) -> None:
+    """An explicit ``description: null`` on the ``blank=True, null=False`` text column is refused.
+
+    The model flavor refuses the ``null`` at decode
+    (``django_strawberry_framework/mutations/resolvers.py::_explicit_null_error``). The
+    ``ModelForm``'s optional ``CharField`` cleans it to ``""``, a value the column stores, so
+    the save would succeed with a description the client never sent;
+    ``django_strawberry_framework/forms/resolvers.py::_coerced_null_fields`` refuses it
+    before the write with the same field, message and code. No row is written.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    client = _login_with_perm("staff_1", "add_item")
+
+    data = _graphql_data(
+        document,
+        client=client,
+        variables={
+            "d": {
+                "name": "NullDescription",
+                "categoryId": _global_id("products.category", category.pk),
+                "description": None,
+            },
+        },
+    )
+    result = json_at(data, root)
+    assert json_at(result, "node") is None, result
+    assert json_at(result, "errors") == [_NULL_DESCRIPTION_ERROR]
+    assert not models.Item.objects.filter(name="NullDescription").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("document", "root"),
+    [(_UPDATE_ITEM, "updateItem"), (_UPDATE_ITEM_VIA_FORM_WITH_CODES, "updateItemViaForm")],
+    ids=["model", "modelform"],
+)
+def test_update_item_explicit_null_description_is_a_field_error(document: str, root: str) -> None:
+    """An explicit ``description: null`` update leaves the stored description unchanged.
+
+    The update twin of ``test_create_item_explicit_null_description_is_a_field_error``:
+    the ``ModelForm`` binds the client's ``null`` over the reconstructed row, its
+    ``CharField`` cleans it to ``""``, and the pre-write check answers the model flavor's
+    ``description`` / ``null`` error instead of clearing the column.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    item = models.Item.objects.create(
+        name="KeepsItsDescription",
+        description="stored",
+        category=category,
+    )
+    client = _login_with_perm("staff_1", "change_item")
+
+    data = _graphql_data(
+        document,
+        client=client,
+        variables={"id": _global_id("products.item", item.pk), "d": {"description": None}},
+    )
+    result = json_at(data, root)
+    assert json_at(result, "node") is None, result
+    assert json_at(result, "errors") == [_NULL_DESCRIPTION_ERROR]
+    item.refresh_from_db()
+    assert item.description == "stored"
+
+
 _DELETE_ITEM_WITH_CONNECTION = (
     "mutation($id: ID!) { deleteItem(id: $id) { "
     "node { id name entriesConnection { edges { node { value } } } } "
