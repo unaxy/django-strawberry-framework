@@ -31,7 +31,7 @@ from django_strawberry_framework.keyset import (
     decode_keyset_cursor,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_str, list_of
+from django_strawberry_framework.utils._narrowing import is_str, list_of, require
 from django_strawberry_framework.utils.connections import (
     ConnectionWindowBounds,
     FetchMode,
@@ -53,7 +53,7 @@ from django_strawberry_framework.utils.connections import (
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.querysets import expand_relation_order
-from django_strawberry_framework.utils.relations import instance_accessor
+from django_strawberry_framework.utils.relations import instance_accessor, is_model_class
 
 from . import logger
 from .hints import hint_is_skip
@@ -480,11 +480,16 @@ def _plain_field_terms(
 
 
 def _model_index_shapes(meta: Options[models.Model]) -> tuple[list[list[tuple[str, bool]]], bool]:
-    """Return ``(inspectable leading-term shapes, saw_uninspectable)`` for a model.
+    """Return ``(inspectable leading-term shapes, saw_uninspectable)`` for a table-owning model.
 
     The coverage inventory built from every PHYSICAL index shape model metadata
     represents inspectably, so the advisory reasons about the indexes PostgreSQL
-    can actually use for a nested window - not only ``Meta.indexes``:
+    can actually use for a nested window - not only ``Meta.indexes``. ``meta`` is
+    the options of the model that owns the table (``_meta.concrete_model``): a
+    proxy's own ``Meta.indexes`` / ``constraints`` / ``unique_together`` are
+    always empty (Django keeps them on the declaring class, and ``models.E016``
+    refuses a proxy declaring any), so read through a proxy they would hide every
+    index its table holds:
 
     - unconditional field-based ``Meta.indexes`` entries (direction-carrying);
     - unconditional field-based ``UniqueConstraint`` entries and legacy
@@ -555,15 +560,17 @@ def _model_index_shapes(meta: Options[models.Model]) -> tuple[list[list[tuple[st
 
 
 def _index_coverage(
-    related_model: type[models.Model],
+    table_model: type[models.Model],
     equality: Sequence[str],
     order_terms: Sequence[tuple[str, bool]],
 ) -> str:
     """Tri-state classify whether a represented index covers the window's leading shape.
 
-    Returns ``_INDEX_COVERED`` when some inspectable physical index shape
-    (``_model_index_shapes``: an unconditional field-based ``Index`` /
-    ``UniqueConstraint`` / ``unique_together``, or a single equality column's
+    ``table_model`` is the model that owns the window's table, never a proxy of
+    it (``_model_index_shapes``). Returns ``_INDEX_COVERED`` when some
+    inspectable physical index shape (``_model_index_shapes``: an
+    unconditional field-based ``Index`` / ``UniqueConstraint`` /
+    ``unique_together``, or a single equality column's
     field-level ``db_index`` / ``unique`` / FK auto-index) serves the
     ``(equality prefix, order terms)`` shape; ``_INDEX_UNKNOWN`` when a covering
     index is not represented but at least one index could not be classified
@@ -573,7 +580,7 @@ def _index_coverage(
     represented in model metadata" is never conflated with "proved absent" (a
     DBA-created index outside model metadata stays invisible here).
     """
-    shapes, saw_uninspectable = _model_index_shapes(related_model._meta)
+    shapes, saw_uninspectable = _model_index_shapes(table_model._meta)
     for index_terms in shapes:
         if _index_serves_window(index_terms, equality, order_terms):
             return _INDEX_COVERED
@@ -603,10 +610,11 @@ def _describe_index_columns(
 # this advisory per request; without the guard the same DEBUG warning repeats
 # every request and buries genuinely new plan shapes in the noise, breaking the
 # README / module "one advisory per plan shape" promise. The key is strategy-
-# AND request-INDEPENDENT: ``(model label, equality-prefix columns, order
-# terms)`` is the entire input that determines the recommended index, so two
-# rebuilds of one shape collapse while genuinely different shapes (a different
-# model, partition column, morph prefix, or order) each still warn once - the
+# AND request-INDEPENDENT: ``(table-owning model label, equality-prefix columns,
+# order terms)`` is the entire input that determines the recommended index, so two
+# rebuilds of one shape collapse (a proxy and its concrete model are one table, one
+# shape) while genuinely different shapes (a different table, partition column,
+# morph prefix, or order) each still warn once - the
 # strategy is deliberately excluded so switching strategies never re-emits.
 # Bounded LRU (cap ``_MAX_INDEX_ADVISORY_KEYS``) so a pathological variety of
 # plan shapes cannot grow the process's memory without limit; eviction only
@@ -681,7 +689,10 @@ def _advise_composite_index(
     ``Meta.indexes``, ``Meta.constraints`` unique constraints, legacy
     ``unique_together``, and field-level primary-key / unique / ``db_index``
     columns (``_model_index_shapes``). A covering ``UniqueConstraint`` therefore
-    correctly silences the advisory.
+    correctly silences the advisory. That metadata is the table-owning model's
+    (``_meta.concrete_model``): a proxy target (or a proxy of a proxy) declares
+    none of its own, so its window is inspected, recommended and deduplicated as
+    its concrete model's.
 
     This is advisory ONLY: it never raises, and logs at ``WARNING`` only under
     ``settings.DEBUG`` (``DEBUG`` off -> ``debug``). It stays SILENT unless
@@ -708,17 +719,22 @@ def _advise_composite_index(
     """
     if join.partition_expr is None:
         return
-    partition_field = _window_column(related_model, join.partition_expr)
+    # A proxy shares its concrete model's table, but Django keeps ``Meta.indexes``,
+    # ``Meta.constraints`` and ``unique_together`` only on the declaring class, and
+    # ``models.E016`` refuses a proxy declaring any: the table's indexes, the model the
+    # recommendation names and the dedup identity are all the concrete model's.
+    table_model = require(related_model._meta.concrete_model, is_model_class)
+    partition_field = _window_column(table_model, join.partition_expr)
     if partition_field is None:
         return
     equality: list[str] = []
     if join.content_type_column is not None:
-        content_type_field = _window_column(related_model, join.content_type_column)
+        content_type_field = _window_column(table_model, join.content_type_column)
         if content_type_field is None:
             return
         append_unique(equality, content_type_field.attname)
     append_unique(equality, partition_field.attname)
-    order_terms = _concrete_order_terms(order_by, related_model)
+    order_terms = _concrete_order_terms(order_by, table_model)
     if order_terms is None:
         # Order-parsing UNKNOWN dominates: some effective ordering term is not a
         # child-table ``(attname, direction)`` (or carries explicit NULLS
@@ -736,10 +752,10 @@ def _advise_composite_index(
     # and naming a duplicated column.
     equality_columns = set(equality)
     effective_order = [term for term in order_terms if term[0] not in equality_columns]
-    if _index_coverage(related_model, equality, effective_order) != _INDEX_ABSENT:
+    if _index_coverage(table_model, equality, effective_order) != _INDEX_ABSENT:
         return
     if _index_advisory_already_emitted(
-        (related_model._meta.label, tuple(equality), tuple(effective_order)),
+        (table_model._meta.label, tuple(equality), tuple(effective_order)),
     ):
         return
     columns = _describe_index_columns(equality, effective_order)
@@ -749,8 +765,8 @@ def _advise_composite_index(
         "window's leading columns %s; a composite index on (%s) would let the database "
         "serve each page from the index instead of sorting per partition. Advisory only "
         "(an index absent from Django model metadata is not visible here).",
-        related_model._meta.app_label,
-        related_model._meta.object_name,
+        table_model._meta.app_label,
+        table_model._meta.object_name,
         columns,
         ", ".join(columns),
     )

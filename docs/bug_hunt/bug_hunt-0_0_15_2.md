@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 170 done, 133 to do.
+Progress: 171 done, 132 to do.
 
 ## Done
 
@@ -621,6 +621,12 @@ Progress: 170 done, 133 to do.
 - [x] 296. `tests/test_workspace.py::test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order` failed on main:
   `9a97127c` made CI's lint job run `scripts/check_citations.py --check --substrings` while the `gate` lint suite still
   ran `--check`: fixed in `8e191ea3`, `scripts/workspace.py #"LINT_COMMANDS"` runs `--check --substrings` as CI does
+- [x] 234. The index advisory on a proxy target (or a proxy of a proxy) read the proxy's own empty `Meta.indexes` /
+  `Meta.constraints` / `unique_together`, recommended an index the concrete model already declares, named the proxy
+  (where `models.E016` forbids declaring it) and deduplicated under the proxy's label: fixed,
+  `optimizer/nested_planner.py::_advise_composite_index` reads the table-owning `_meta.concrete_model` once and feeds it
+  to the window columns, the order terms, the coverage check, the dedup key and the message, so a covered proxy is
+  silent and an uncovered one warns once naming the concrete model; a non-proxy model is unchanged
 
 ## Outside review of the fixes
 
@@ -748,9 +754,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 231. KANBAN.md's "`FieldError` keying" card (rendered from the kanban DB) still says
   `validation_error_to_field_errors` is an identity pass-through and that no test covers a multi-word snake_case
   field; both are stale (the key maps and `tests/utils/test_error_keys.py` landed before)
-- [ ] 234. Index advisory on a proxy target reads the proxy's empty `Meta.indexes` / `Meta.constraints`
-  (`optimizer/nested_planner.py::_model_index_shapes` reads the proxy's `Options`) and recommends an index the concrete
-  model already declares (a `GenericRelation` to a proxy)
 - [ ] 235. Two comments in `optimizer/nested_planner.py` label a guard "the P2-3 defect" / "the P2-3 false-coverage defect",
   a review label START "No process provenance" bans; restate each as the invariant it guards
 - [ ] 241. Duplicate input-object field names escape the value budget:
