@@ -71,6 +71,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.sets_mixins import ActiveInputPermissionMixin
     from django_strawberry_framework.types.base import DjangoType
+    from django_strawberry_framework.types.definition import DjangoTypeDefinition
 
     from .input_values import FieldSpecMap, RelatedBranch
 
@@ -678,11 +679,26 @@ def _set_model(set_cls: type[object]) -> type[models.Model] | None:
     return model if isinstance(model, type) else None
 
 
-def set_bound_type(set_cls: type[object]) -> type[DjangoType] | None:
-    """Return the ``DjangoType`` a set class is bound to (``_owner_definition.origin``), if any."""
-    definition: object = getattr(set_cls, "_owner_definition", None)
-    origin: object = getattr(definition, "origin", None)
-    return cast("type[DjangoType]", origin) if isinstance(origin, type) else None
+def set_bound_definition(set_cls: object) -> DjangoTypeDefinition | None:
+    """Return the definition of the ``DjangoType`` a set class is bound to, ``None`` when unbound.
+
+    The one read of the owner slot ``types/finalizer.py::_bind_set_owner_common``
+    writes and ``registry.clear()`` drops: the class's OWN ``_owner_definition``,
+    never one inherited from a base set. A subclass of a bound set is a separate
+    set (the multi-owner refusal's remedy), so until a ``DjangoType`` wires it, it
+    is unbound like any other unwired set and answers for no owner of its base.
+    ``None`` too for anything that is not a class (a ``RelatedFilter(None)``
+    placeholder's target).
+    """
+    # The binder is the one writer of a class's own slot and stores a ``DjangoTypeDefinition``;
+    # the set bases' own ``None`` is the unbound default.
+    return cast("DjangoTypeDefinition | None", truth.class_dict(set_cls).get("_owner_definition"))
+
+
+def set_bound_type(set_cls: object) -> type[DjangoType] | None:
+    """Return the ``DjangoType`` a set class is bound to (``set_bound_definition``'s ``origin``), if any."""
+    definition = set_bound_definition(set_cls)
+    return None if definition is None else definition.origin
 
 
 def _walk_undeclared_hops(

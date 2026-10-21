@@ -79,7 +79,6 @@ from django_strawberry_framework.sets_mixins import (
     require_re_readable_field_declaration,
     should_cache_expansion,
 )
-from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
@@ -115,6 +114,8 @@ from django_strawberry_framework.utils.inputs import (
 from django_strawberry_framework.utils.permissions import (
     RelationHop,
     relation_path_gates,
+    set_bound_definition,
+    set_bound_type,
     walk_declared_relation_path,
 )
 from django_strawberry_framework.utils.querysets import (
@@ -194,6 +195,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self, TypeIs
 
     from django_strawberry_framework.types.base import DjangoType
+    from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.typing import ForeignKeyField, ModelField
 
     # ``(field_name, target_type, child_filterset, child_input, child_base)`` per active
@@ -2360,11 +2362,13 @@ class FilterSet(
     `RuntimeError` consumers can match on.
 
     `_owner_definition` is the binding seam populated by
-    `finalize_django_types` phase 2.5; the slot declared
-    `None` and the fallback branch in `filter_for_field` /
-    `filter_for_lookup` that consults `registry.primary_for(...)` keeps
-    package-internal tests able to exercise the Relay-vs-scalar
-    conditional before owner binding lands.
+    `finalize_django_types` phase 2.5 and read only as the class's own slot
+    (`utils/permissions.py::set_bound_definition`), so a subclass is unbound
+    until a `DjangoType` wires it. The slot declared `None` and the fallback
+    branch in `filter_for_field` / `filter_for_lookup` that consults
+    `registry.get(...)` while the class is unbound keep package-internal
+    tests able to exercise the Relay-vs-scalar conditional before owner
+    binding lands.
     """
 
     # The package-AUTHORED public generation-policy table. Installed in place of django-filter's
@@ -3083,10 +3087,10 @@ class FilterSet(
     ) -> Filter | None:
         """Pick the Relay-aware filter for Relay-Node-shaped relation targets.
 
-        Decision-4 conditional. Resolves the relation target via
-        `_owner_definition.related_target_for(field_name)` (the owner
-        binding) and falls back to `registry.get(target_model)`
-        when the owner has not been bound yet. A target type implementing
+        Decision-4 conditional. Resolves the relation target via the
+        bound owner's `related_target_for(field_name)`
+        (`_resolve_relation_target_type`) and falls back to
+        `registry.get(target_model)` while this class is unbound. A target type implementing
         `relay.Node` produces `GlobalIDMultipleChoiceFilter` for
         multi-valued relations (M2M / reverse FK / reverse M2M) and
         `GlobalIDFilter` for single-valued relations (forward FK /
@@ -3639,7 +3643,7 @@ class FilterSet(
             # GlobalID cannot represent ``true``). Any other lookup has no
             # GlobalID ordering / pattern semantics. This guard is
             # authoritative once the owner is bound (finalizer phase 2.5):
-            # ``_is_own_pk_under_relay_owner`` keys off ``cls._owner_definition``,
+            # ``_is_own_pk_under_relay_owner`` keys off the class's own binding,
             # which is ``None`` during class creation, so the check is inert
             # then and becomes authoritative at finalize (not only the
             # ``get_fields`` ``"__all__"`` narrowing). An explicit
@@ -3779,12 +3783,13 @@ class FilterSet(
         whose owning ``DjangoType`` implements ``relay.Node`` filters on
         its own primary key, the wire shape is a Relay GlobalID - so the
         filter for that PK is ``GlobalIDFilter`` rather than the scalar
-        upstream default. Resolves only when ``_owner_definition`` is
-        bound (finalizer phase-2.5 binding) so package-internal tests
-        that run pre-binding keep the upstream shape.
+        upstream default. Resolves only when this class is bound
+        (finalizer phase-2.5 binding, ``set_bound_type``): a set no
+        ``DjangoType`` wires, a subclass of a bound set included, keeps the
+        upstream shape.
         """
-        owner = cls._owner_definition
-        if owner is None:
+        owner_type = set_bound_type(cls)
+        if owner_type is None:
             return False
         if getattr(field, "is_relation", False):
             return False
@@ -3796,9 +3801,7 @@ class FilterSet(
         pk = getattr(model._meta, "pk", None)
         if pk is None or field is not pk:
             return False
-        # ``DjangoTypeDefinition.origin`` is the registered ``DjangoType`` class.
-        owner_type: type[DjangoType] | None = getattr(owner, "origin", None)
-        return owner_type is not None and implements_relay_node(owner_type)
+        return implements_relay_node(owner_type)
 
     @staticmethod
     def _relay_filter_class_for_field(
@@ -3834,30 +3837,19 @@ class FilterSet(
     ) -> type[DjangoType] | None:
         """Look up the registered target `DjangoType` for a relation field.
 
-        Consults `_owner_definition.related_target_for(...)` when the
-        finalizer phase-2.5 binding has landed; otherwise falls back to
-        `registry.get(field.related_model)`. The caller
+        Consults the bound owner's `related_target_for(...)` when this class
+        is bound (finalizer phase-2.5 binding, `set_bound_definition`);
+        otherwise falls back to `registry.get(field.related_model)`. The caller
         (`filter_for_lookup`) passes relation fields only; a field with no
         `related_model` resolves to `None`.
         """
-        owner = cls._owner_definition
+        owner = set_bound_definition(cls)
         if owner is not None and field_name is not None:
-            # Owner-aware path (finalizer phase-2.5 binding has landed): resolve
-            # the target `DjangoType` through `owner.related_target_for(...)`.
-            # The pair's first member is a `DjangoTypeDefinition`, whose
-            # registered `DjangoType` class is its `.origin` attribute --
-            # NOT `.type` / `.type_cls`, which the definition never
-            # exposes (a stale read there silently returned `None` and
-            # dropped every owner-aware resolution to the registry
-            # fallback). Mirrors `_is_own_pk_under_relay_owner` /
-            # `_target_type_for_related_filter`, which both read `.origin`.
-            resolved: Callable[[object], tuple[DjangoTypeDefinition, ModelField] | None] | None
-            resolved = getattr(owner, "related_target_for", None)
-            if callable(resolved):
-                pair = resolved(field_name)
-                if pair is not None:
-                    target_definition, _ = pair
-                    return getattr(target_definition, "origin", None)
+            # The pair's first member is the target's `DjangoTypeDefinition`, whose
+            # registered `DjangoType` class is its `origin`.
+            pair = owner.related_target_for(field_name)
+            if pair is not None:
+                return pair[0].origin
         related_model = read_attr(field, "related_model", None)
         if not is_model_class(related_model):
             return None
@@ -4020,8 +4012,8 @@ class FilterSet(
         GlobalID type-name validation happens at queryset-evaluation
         time inside ``GlobalIDFilter.filter`` /
         ``GlobalIDMultipleChoiceFilter.filter``, which read the owner
-        via ``filter_instance.parent._owner_definition``. The owner is
-        therefore not threaded as a parameter here.
+        through ``filter_instance.parent`` (``filters/base.py::_target_definition_for``).
+        The owner is therefore not threaded as a parameter here.
 
         Leaf form keys come from ``inputs.py::filter_lookup_table``, the one
         place each operator-bag lookup's form key is decided
@@ -4598,8 +4590,9 @@ class FilterSet(
         """Resolve the `DjangoType` whose ``get_queryset()`` scopes the branch.
 
         Prefer the child filterset's *bound owner* - the type the consumer
-        explicitly wired via ``Meta.filterset_class`` (``_owner_definition``,
-        bound at finalizer phase 2.5) - over a model-only registry lookup. When a
+        explicitly wired via ``Meta.filterset_class`` to that class itself
+        (``set_bound_type``, bound at finalizer phase 2.5; a subclass of a bound
+        filterset is unbound until wired) - over a model-only registry lookup. When a
         child model has more than one registered ``DjangoType`` and the child
         filterset is bound to a non-primary one, a model-only lookup resolves the
         *primary* type and runs ITS ``get_queryset()`` against the non-primary's
@@ -4614,15 +4607,7 @@ class FilterSet(
         case.
         """
         child_filterset = related_filter.filterset
-        # ``FilterSet._owner_definition`` is the finalizer-bound ``DjangoTypeDefinition`` slot,
-        # whose ``origin`` is the ``DjangoType``.
-        child_owner = optional_instance(
-            truth.static_attr(child_filterset, "_owner_definition", None),
-            DjangoTypeDefinition,
-        )
-        owner_type: type[DjangoType] | None = (
-            getattr(child_owner, "origin", None) if child_owner is not None else None
-        )
+        owner_type = set_bound_type(child_filterset)
         if owner_type is not None:
             return owner_type
         # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
@@ -4998,13 +4983,12 @@ class FilterSet(
         relation = _bound_field_name(related_filter)
         if LOOKUP_SEP not in relation:
             return ()
-        owner = cls._owner_definition
         return relation_path_visibility_types(
             # A branch's declaring set is model-backed (``related_filters`` is collected
             # for model-backed sets only).
             cast("type[models.Model]", cls._meta.model),
             relation.rpartition(LOOKUP_SEP)[0],
-            root=owner.origin if owner is not None else None,
+            root=set_bound_type(cls),
         )
 
     @classmethod

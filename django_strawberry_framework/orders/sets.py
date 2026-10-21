@@ -448,10 +448,11 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
     operator bag.
     """
 
-    # Binding seam - populated by ``finalize_django_types`` phase 2.5 in
-    # per spec-028 Decision 6. The slot's existence is the contract here;
-    # the binding write lands with the field factory. Same shape as the
-    # filter side's ``FilterSet._owner_definition``.
+    # Binding seam - populated by ``finalize_django_types`` phase 2.5 per
+    # spec-028 Decision 6 and read only as the class's own slot
+    # (``utils/permissions.py::set_bound_definition``), so a subclass is
+    # unbound until a ``DjangoType`` wires it. Same shape as the filter side's
+    # ``FilterSet._owner_definition``.
     _owner_definition: DjangoTypeDefinition | None = None
 
     # The name-keyed ``RelatedOrder`` declarations ``OrderSetMetaclass`` stores on every
