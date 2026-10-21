@@ -614,10 +614,10 @@ reportUnusedCallResult = "error"
 # diagnostic instead); one below it fails until the budget is lowered to match, and a rule at
 # zero leaves `ignores` (marked `# Locked` above once it is on in every environment).
 [tool.type-suppressions]
-cast = 404
+cast = 403
 
 [tool.type-suppressions.ignores]
-reportArgumentType = 274
+reportArgumentType = 273
 reportAssignmentType = 28
 reportAttributeAccessIssue = 113
 reportCallIssue = 11

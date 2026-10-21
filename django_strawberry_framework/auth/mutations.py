@@ -1529,17 +1529,13 @@ def bind_auth_mutations() -> None:
     login_holder = by_surface.get("login")
     if login_holder is not None:
         login_holder._primary_type = primary
-        payload_cls = build_payload_type(
-            "Login",
-            object_type=primary,
-            object_slot=payload_object_slot(cast("type[DjangoType]", primary)),
-        )
+        payload_cls = build_payload_type("Login", object_type=primary)
         materialize_mutation_input_class(truth.name(payload_cls), payload_cls)
         login_holder._payload_type_name = truth.name(payload_cls)
 
     logout_holder = by_surface.get("logout")
     if logout_holder is not None:
-        payload_cls = build_payload_type("Logout", object_type=None, object_slot=None)
+        payload_cls = build_payload_type("Logout", object_type=None)
         materialize_mutation_input_class(truth.name(payload_cls), payload_cls)
         logout_holder._payload_type_name = truth.name(payload_cls)
 
