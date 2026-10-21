@@ -664,7 +664,11 @@ input's own record of what each field IS, read through
 `extensions/resource_policy.py::_mutation_input_specs` for the top-level input and
 `::_nested_specs_map` for a nested serializer's own fields, and it is the same record the
 request-time relation decode walks — so the budget and the decode cannot disagree about what
-a list is. A field the package did not generate has no spec, which is exactly when rule 3
+a list is. Both maps are keyed by the input attr the decode walks by, and a wire field reaches
+its spec through the attr the executable schema back-referenced on it
+(`django_strawberry_framework/utils/typing.py::input_field_python_name`), never through a
+name: a consumer input field declared without `name=` is named by the schema's converter
+after the specs are recorded. A field the package did not generate has no spec, which is exactly when rule 3
 takes over.
 
 The single name-based rule — `ids` — exists because node refetch is a Relay convention with

@@ -1182,7 +1182,8 @@ to `Register`** with:
   [`save_or_field_errors`][mutations-resolvers]),
   so the duplicate-`USERNAME_FIELD` unique error and the concurrent-race `IntegrityError`
   come back through the standing envelope with no auth-specific error handling. The
-  write step passes the rider class to that tail, so every `full_clean()` error keys to
+  write step passes the rider class and its bind specs (every `RegisterInput` field pins its
+  wire name) to that tail, so every `full_clean()` error keys to
   the `RegisterInput` field the client sent, exactly as on the model flavor (a
   `REQUIRED_FIELDS` entry `first_name` reports as `firstName`). The
   plaintext exists only in memory and

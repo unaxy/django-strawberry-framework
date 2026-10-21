@@ -152,6 +152,7 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
     inline_fragment_type_condition,
+    input_field_python_name,
     is_graphql_list,
     unwrap_non_null,
 )
@@ -359,9 +360,13 @@ def _mutation_input_specs(field_def: object) -> Mapping[str, InputFieldSpec] | N
 
     ``None`` for any field that is not a package-generated mutation - a query,
     a consumer-written resolver, an unbound target - which leaves the list
-    classification to the id scalar name, the only signal left. There is no
-    shape under which a spec says one thing and the wire another: the specs are
-    recorded from the SAME merged input dataclass the schema materialized.
+    classification to the id scalar name, the only signal left. The map is keyed
+    by the input dataclass attr (``spec.input_attr``), the key the decode walks
+    by, and a wire field reaches its spec through the attr the executable schema
+    back-referenced on it (``utils/typing.py::input_field_python_name``), never
+    through a name: the specs are recorded at bind, before any schema exists, and
+    a consumer field declared without ``name=`` is named by the executing
+    schema's converter, so only the attr is the same on both sides.
     """
     extensions: object = getattr(field_def, "extensions", None)
     strawberry_field = (
@@ -374,7 +379,7 @@ def _mutation_input_specs(field_def: object) -> Mapping[str, InputFieldSpec] | N
     specs: Sequence[InputFieldSpec] | None = getattr(mutation_cls, "_input_field_specs", None)
     if not specs:
         return None
-    return {spec.graphql_name: spec for spec in specs}
+    return {spec.input_attr: spec for spec in specs}
 
 
 def _nested_specs_map(spec: InputFieldSpec | None) -> Mapping[str, InputFieldSpec] | None:
@@ -383,13 +388,14 @@ def _nested_specs_map(spec: InputFieldSpec | None) -> Mapping[str, InputFieldSpe
     A serializer nested-serializer field records its nested rows' own reverse
     map on the enclosing field's spec (``InputFieldSpec.nested_specs``), so a
     relation list one level down - a nested ``altBranches`` raw-pk list - is
-    classified by the same bind signal as a top-level one. ``None`` for every
-    non-nested field, which is every field of every non-serializer flavor.
+    classified by the same bind signal as a top-level one, keyed by attr as
+    ``_mutation_input_specs`` is. ``None`` for every non-nested field, which is
+    every field of every non-serializer flavor.
     """
     nested: tuple[InputFieldSpec, ...] | None = getattr(spec, "nested_specs", None)
     if not nested:
         return None
-    return {nested_spec.graphql_name: nested_spec for nested_spec in nested}
+    return {nested_spec.input_attr: nested_spec for nested_spec in nested}
 
 
 #: The sequence types whose ``__len__`` and iteration are the interpreter's own,
@@ -692,22 +698,20 @@ class _ValueBudget:
             child_path = (*path, mapping)
             for name, item in entries:
                 # A key is whatever the value carried, and a lookup by a key that is
-                # not a name just misses, so both name-keyed maps are read through
-                # object-keyed views.
+                # not a name just misses, so the name-keyed field map is read through
+                # an object-keyed view.
                 field_def = (
                     cast("Mapping[object, GraphQLInputField]", field_map).get(name)
                     if field_map is not None
                     else None
                 )
-                # Specs resolve only under a declared input object: a hostile
-                # mapping parked under a scalar argument is charged, never
-                # classified, and a child's own spec map comes from ITS field
-                # spec's nested records (``nested_specs``), never inherited.
-                field_spec = (
-                    cast("Mapping[object, InputFieldSpec]", spec_map).get(name)
-                    if field_map is not None and spec_map
-                    else None
-                )
+                # Specs resolve only through a declared input field: a hostile
+                # mapping parked under a scalar argument, or a key the input object
+                # does not publish, is charged, never classified, and a child's own
+                # spec map comes from ITS field spec's nested records
+                # (``nested_specs``), never inherited.
+                attr = None if field_def is None else input_field_python_name(field_def)
+                field_spec = spec_map.get(attr) if attr is not None and spec_map else None
                 field_type: GraphQLType | None = getattr(field_def, "type", None)
                 stack.append(
                     (

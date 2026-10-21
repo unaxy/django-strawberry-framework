@@ -71,12 +71,7 @@ from django.db.models.functions import Lower, Now, Random, RowNumber
 from django.db.models.sql.compiler import SQLCompiler
 from django.test import RequestFactory
 from graphql import (
-    GraphQLArgument,
     GraphQLError,
-    GraphQLField,
-    GraphQLInt,
-    GraphQLObjectType,
-    GraphQLScalarType,
 )
 from strawberry.schema_directive import Location as _DirectiveLocation
 from strawberry.schema_directive import schema_directive as _schema_directive
@@ -114,7 +109,6 @@ from django_strawberry_framework.list_field import (
     _normalize_list_arguments,
     _order_normalization_scope,
     _orderset_class_from_definition,
-    _published_wire_name,
     _resolve_argument_wire_name,
     _resolver_root_and_info,
     _synthesized_list_signature,
@@ -1396,42 +1390,6 @@ def test_list_field_direct_call_schema_name_fallback_and_definition_lookup(
         )
     assert exc_info.value.extensions is not None
     assert exc_info.value.extensions["argument"] == "offset"
-
-
-def test_published_wire_name_rejects_malformed_schema_metadata() -> None:
-    """Executable-schema metadata that cannot name the argument is a configuration error."""
-    # graphql-core's ``GraphQLNamedType.__new__`` widens every built-in scalar to its base.
-    assert isinstance(GraphQLInt, GraphQLScalarType)
-
-    arg_def = SimpleNamespace(python_name="offset")
-
-    # 1. No ``_raw_info`` at all: a direct-call stub, so no published name.
-    assert _published_wire_name(_as_strawberry_info(SimpleNamespace()), arg_def, "offset") is None
-
-    # 2. The field exists but no argument carries this definition back-reference.
-    other_def = SimpleNamespace(python_name="offset")
-    field = GraphQLField(
-        GraphQLInt,
-        args={
-            "offset": GraphQLArgument(GraphQLInt, extensions={"strawberry-definition": other_def}),
-        },
-    )
-    parent = GraphQLObjectType("Query", {"cats": field})
-    raw = SimpleNamespace(parent_type=parent, field_name="cats")
-    info = SimpleNamespace(_raw_info=raw, field_name="cats")
-    with pytest.raises(ConfigurationError, match="has a definition but no published wire name"):
-        _published_wire_name(_as_strawberry_info(info), arg_def, "offset")
-
-    # 3. The matching back-reference returns the published key, whatever its spelling.
-    field_ok = GraphQLField(
-        GraphQLInt,
-        args={
-            "OFFSET": GraphQLArgument(GraphQLInt, extensions={"strawberry-definition": arg_def}),
-        },
-    )
-    parent_ok = GraphQLObjectType("Query", {"cats": field_ok})
-    info_ok = SimpleNamespace(_raw_info=SimpleNamespace(parent_type=parent_ok, field_name="cats"))
-    assert _published_wire_name(_as_strawberry_info(info_ok), arg_def, "offset") == "OFFSET"
 
 
 def test_list_field_record_independence(

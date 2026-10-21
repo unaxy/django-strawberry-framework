@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from strawberry.types.base import WithStrawberryObjectDefinition
+    from strawberry.types.field import StrawberryField
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
@@ -166,24 +167,36 @@ _materialized_names, _materialize_input, _clear_input_namespace = make_input_nam
 )
 
 
+def _predicted_input_field_name(field: StrawberryField) -> str:
+    """Predict, at bind, the wire name a default-config schema publishes for an input field.
+
+    An explicit ``name=`` is final, and every generated field pins one. A
+    consumer-authored field without one is named by the executing schema's
+    ``NameConverter`` at schema build, and no schema exists at bind; under the
+    default ``auto_camel_case=True`` the converter's ``apply_naming_config`` is
+    Strawberry's ``to_camel_case``, so that is the prediction - NOT the
+    package's ``graphql_camel_name``, which disagrees with it (``field_2`` ->
+    ``field2`` vs ``field_2``). A request never trusts the prediction: it reads
+    the executing schema's own name
+    (``mutations/resolvers.py::_published_input_specs``).
+    """
+    return field.graphql_name or to_camel_case(field.python_name)
+
+
 def _audit_mutation_input_surface(
     name: str,
     input_cls: type[WithStrawberryObjectDefinition],
 ) -> None:
     """Reject a duplicate effective GraphQL name on generated or merged inputs.
 
-    The fallback is Strawberry's ``to_camel_case`` and NOT the package's
-    ``graphql_camel_name`` - deliberately, and the two disagree. This audit
-    predicts the name the SCHEMA will publish for a field carrying no explicit
-    ``name=``, which is whatever ``NameConverter.apply_naming_config`` emits;
-    substituting the package caser would let a consumer-authored ``field_2``
-    sit beside a generated ``field2``, report no collision, and collapse to a
-    single ``field2`` in the SDL. Generated fields pin their wire name
-    explicitly, so the fallback is reached only for consumer-authored ones.
+    Each field's name is ``_predicted_input_field_name``'s: substituting the
+    package caser would let a consumer-authored ``field_2`` sit beside a
+    generated ``field2``, report no collision, and collapse to a single
+    ``field2`` in the SDL.
     """
     seen: dict[str, str] = {}
     for field in input_cls.__strawberry_definition__.fields:
-        graphql_name = field.graphql_name or to_camel_case(field.python_name)
+        graphql_name = _predicted_input_field_name(field)
         if graphql_name in seen:
             raise ConfigurationError(
                 f"DjangoMutation input {name!r} maps input attributes "
@@ -679,7 +692,11 @@ def mutation_input_field_specs(
     either an indexed forward relation or a non-relation concrete column, so the
     classifier is total here (no per-index kind branches). ``target_name`` is
     the model attr the decode writes (``category_id`` for a forward FK /
-    OneToOne, the field name for a scalar / M2M).
+    OneToOne, the field name for a scalar / M2M). ``graphql_name`` is the
+    field's pinned wire name or, for a consumer-authored field without ``name=``,
+    ``_predicted_input_field_name``'s bind-time prediction, which a request
+    replaces with the executing schema's name
+    (``mutations/resolvers.py::_published_input_specs``).
     """
     excluded = _frozenset_of_attr_names(excluded_attrs, parameter="excluded_attrs")
     fk_by_attr, m2m_by_name = _relation_field_index(model)
@@ -687,7 +704,7 @@ def mutation_input_field_specs(
     model_fields: ModelFieldIndex = {}
     for field in input_cls.__strawberry_definition__.fields:
         python_name = field.python_name
-        graphql_name = field.graphql_name or graphql_camel_name(python_name)
+        graphql_name = _predicted_input_field_name(field)
         django_field = fk_by_attr.get(python_name) or m2m_by_name.get(python_name)
         if django_field is None:
             try:

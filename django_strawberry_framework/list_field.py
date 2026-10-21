@@ -68,7 +68,6 @@ from django.db.models.lookups import (
     Range,
 )
 from graphql import GraphQLError
-from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types import Info
 from typing_extensions import override
 
@@ -117,7 +116,7 @@ from .utils.querysets import (
     take_order_expansion_step,
     wrap_async_queryset_adapter,
 )
-from .utils.typing import graphql_fields, is_async_callable
+from .utils.typing import is_async_callable, published_argument
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -344,59 +343,19 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
 _DEFAULT_WIRE_NAMES: dict[str, str] = {"offset": "offset", "limit": "limit", "order_by": "orderBy"}
 
 
-def _published_wire_name(
-    info: Info[object, object],
-    arg_def: object,
-    parameter_name: str,
-) -> str | None:
-    """Read the wire name the executable schema PUBLISHED for ``arg_def``.
-
-    Strawberry fixes every argument's GraphQL name once, while it builds the
-    schema: ``GraphQLCoreConverter.from_field`` keys the ``GraphQLField.args``
-    map by the converter's answer and ``from_argument`` stores the
-    ``StrawberryArgument`` under ``DEFINITION_BACKREF`` in each entry's
-    ``extensions``. That map is the only name a client could have sent, so the
-    error path reads it back instead of running the schema's shared
-    ``NameConverter`` a second time at request time - a converter is consumer
-    code, may be stateful, and is not the framework's to invoke concurrently.
-    Returns ``None`` when ``info`` carries no executable-schema metadata (a
-    direct-call stub), so the caller can fall back to the default spelling.
-    """
-    try:
-        raw_info = info._raw_info
-    except AttributeError:
-        return None
-    published_args = graphql_fields(raw_info.parent_type)[raw_info.field_name].args
-    for wire_name, graphql_argument in published_args.items():
-        extensions: Mapping[str, object] = graphql_argument.extensions or {}
-        if extensions.get(GraphQLCoreConverter.DEFINITION_BACKREF) is arg_def:
-            return wire_name
-    raise ConfigurationError(
-        f"Argument {parameter_name!r} on {_field_label(info)} has a definition but no "
-        "published wire name in the executable schema.",
-    )
-
-
 def _resolve_argument_wire_name(info: Info[object, object], parameter_name: str) -> str:
     """Resolve the active GraphQL wire name for an internal parameter name.
 
     Only invoked on error paths (e.g. inside ``ListArgumentError`` instantiation or
     normalizer error branches) so successful requests perform zero name lookups.
     The name comes from the executable schema's published argument map
-    (:func:`_published_wire_name`); the schema's ``NameConverter`` is never
-    invoked at request time.
+    (``utils/typing.py::published_argument``); the schema's ``NameConverter`` is
+    never invoked at request time.
     """
-    fallback = _DEFAULT_WIRE_NAMES.get(parameter_name, parameter_name)
-    try:
-        # A direct-call stub carries no argument-definition resolver.
-        get_arg_def = info.get_argument_definition
-    except AttributeError:
-        return fallback
-    arg_def = get_arg_def(parameter_name)
-    if arg_def is None:
-        return fallback
-    published = _published_wire_name(info, arg_def, parameter_name)
-    return fallback if published is None else published
+    published = published_argument(info, parameter_name)
+    if published is None:
+        return _DEFAULT_WIRE_NAMES.get(parameter_name, parameter_name)
+    return published[0]
 
 
 # ``slots=True`` is deliberately absent: combined with ``frozen=True`` the
