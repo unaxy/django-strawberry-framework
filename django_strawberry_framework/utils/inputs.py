@@ -538,8 +538,7 @@ def _sorted_meta_values(value: object) -> list[object]:
     """Sort a metadata container without trusting iteration or representation hooks.
 
     The read and the ordering are ``utils/canonical.py``'s
-    (``base_container_values`` / ``canonical_sort_key``), shared with the write
-    pipeline's drift fingerprint.
+    (``base_container_values`` / ``canonical_sort_key``).
     """
     return sorted(base_container_values(value), key=canonical_sort_key)
 

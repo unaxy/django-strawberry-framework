@@ -1,13 +1,10 @@
 """Tests for the container read / ordering primitives (``utils/canonical.py``).
 
-The module has two consumers - the set families' ``Meta.fields`` ordering
-(``utils/inputs.py::_sorted_meta_values``) and the write pipeline's pre-save
-drift fingerprint (``utils/write_transaction.py::_field_fingerprint``) - and both
-reach it only through their own gates. These tests exercise the primitives
-DIRECTLY, because the properties that matter (a subclass's overridden iteration
-never runs; a lying ``__repr__`` never collapses an order)
-are properties of the primitive, not of either walk that consumes it. A test that
-could only reach them through a consumer would be testing the consumer's gate.
+Every caller reaches the module only through its own gate. These tests exercise
+the primitives DIRECTLY, because the properties that matter (a subclass's
+overridden iteration never runs; a lying ``__repr__`` never collapses an order)
+are properties of the primitive, not of any caller's walk. A test that could
+only reach them through a caller would be testing the caller's gate.
 No GraphQL document can observe those dunders; input SDL lives in
 ``examples/fakeshop/test_query/test_library_api.py``.
 """
@@ -176,7 +173,7 @@ def test_base_container_values_reads_subclasses_through_the_base_iterator(
 def test_base_container_values_refuses_a_non_base_iterable() -> None:
     """Outside the five built-ins there is no base slot to read, so the answer is typed.
 
-    The refusal is the contract both callers already assume: each gates on the
+    The refusal is the contract every caller already assumes: each gates on the
     five built-in container types before calling in, so no reachable path relies
     on an arbitrary ``__iter__`` being walked.
     """
