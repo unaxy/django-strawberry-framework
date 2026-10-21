@@ -334,10 +334,11 @@ class OptimizationPlan:
         so a resolver keying off ``is_empty`` for a "skip optimizer"
         early-out will not see the uncacheable-flag signal.  Trigger to
         revisit: a resolver-side call site reads ``is_empty`` and
-        ``cacheable`` together for a logic decision.  Today only
-        ``apply()`` is empty-tolerant and the extension's
-        ``plan_relation`` / ``_optimize`` paths do not branch on
-        ``is_empty``.
+        ``cacheable`` together for a logic decision.  Today ``apply()`` is
+        empty-tolerant and the one reader,
+        ``DjangoOptimizerExtension._optimize``, branches on ``is_empty``
+        alone (skip the consumer diff, return the queryset unapplied)
+        after the plan cache has already settled ``cacheable``.
         """
         return (
             not self.select_related
