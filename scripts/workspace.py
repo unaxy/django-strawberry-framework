@@ -200,7 +200,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, TypedDict, cast
+from typing import TYPE_CHECKING, BinaryIO, TypedDict, cast, overload
 
 import tomli
 from typing_extensions import NotRequired, override
@@ -652,11 +652,38 @@ def _array_field(document: Mapping[str, object], key: str) -> list[object]:
     return value if _is_json_array(value) else []
 
 
-def _read_json_object(path: Path, default: Mapping[str, object]) -> Mapping[str, object]:
-    """Return the JSON object this script wrote at ``path``, or ``default`` when it is absent."""
-    if not path.exists():
+def _read_text_if_present(path: Path) -> str | None:
+    """Return the text of ``path``, or ``None`` when no file is there as it is read.
+
+    The read is the existence check: a file a ``gc`` or the ``$TMPDIR`` purge
+    removes after a separate check would raise instead.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+@overload
+def _read_json_object(path: Path, default: Mapping[str, object]) -> Mapping[str, object]: ...
+
+
+@overload
+def _read_json_object(path: Path, default: None) -> Mapping[str, object] | None: ...
+
+
+def _read_json_object(
+    path: Path,
+    default: Mapping[str, object] | None,
+) -> Mapping[str, object] | None:
+    """Return the JSON object this script wrote at ``path``, or ``default`` when it is absent.
+
+    A file removed while this runs reads as absent.
+    """
+    text = _read_text_if_present(path)
+    if text is None:
         return default
-    document = _loads(path.read_text(encoding="utf-8"))
+    document = _loads(text)
     if not _is_json_object(document):
         msg = f"{path} holds a JSON {type(document).__name__}, not the object this script writes"
         raise WorkspaceError(msg)
@@ -1630,12 +1657,17 @@ def _admit(
     slot: str,
     *,
     fresh: bool,
-) -> bool:
+) -> _Manifest | None:
     """Decide, with ``slot``'s lock held, whether the copy needs a sync before this run uses it.
 
     ``state.json`` is read now, not when the address was bound. A sync is
     recorded ``syncing`` before it starts, so a sync that dies part way,
     ``fresh`` or not, resyncs on the address's next run.
+
+    Returns:
+        The manifest of a copy already synced for ``address``, read here, so a
+        manifest that is gone by then means a sync; ``None`` when the copy
+        needs one.
 
     Raises:
         WorkspaceError: ``slot`` no longer holds ``address``: a ``release``
@@ -1648,12 +1680,15 @@ def _admit(
         if not bound or bound["address"] != str(address):
             msg = f"{address}: {slot} was released while this command waited for it; run it again"
             raise WorkspaceError(msg)
-        if not fresh and bound["status"] == "ready" and layout.manifest_path(slot).exists():
-            return False
+        if not fresh and bound["status"] == "ready":
+            synced = _read_json_object(layout.manifest_path(slot), None)
+            if synced is not None:
+                # Only ``sync_slot`` writes a slot's manifest file, always from a ``_Manifest``.
+                return cast("_Manifest", synced)
         if bound["status"] != "syncing":
             bound["status"] = "syncing"
             _write_json(layout.state_path, state)
-        return True
+        return None
 
 
 @contextlib.contextmanager
@@ -1666,10 +1701,11 @@ def lease(
     """Hold ``address``'s copy, bound and synced for it, until the block ends.
 
     The caller holds the flow's lease. The run waits for the copy's lock and
-    decides only then, from ``state.json`` read under it, whether to sync: a
-    copy already synced for the address is used as it stands, edits included,
-    however long the run waited; a copy still ``syncing`` (a new binding, or
-    a sync that never finished) or one ``fresh`` asks for is resynced.
+    decides only then, from ``state.json`` and the copy's manifest read under
+    it, whether to sync: a copy already synced for the address is used as it
+    stands, edits included, however long the run waited; a copy still
+    ``syncing`` (a new binding, or a sync that never finished), one whose
+    manifest is gone, or one ``fresh`` asks for is resynced.
 
     Raises:
         WorkspaceError: the copy no longer holds ``address``: a release freed
@@ -1679,12 +1715,8 @@ def lease(
     """
     slot = bind(layout, address).slot
     with file_lock(layout.slot_lock(slot)):
-        manifest = (
-            sync_slot(layout, slot, address)
-            if _admit(layout, address, slot, fresh=fresh)
-            # Only ``sync_slot`` writes a slot's manifest file, always from a ``_Manifest``.
-            else cast("_Manifest", _read_json_object(layout.manifest_path(slot), {}))
-        )
+        synced = _admit(layout, address, slot, fresh=fresh)
+        manifest = sync_slot(layout, slot, address) if synced is None else synced
         yield Lease(slot, layout.slot_dir(slot), manifest)
 
 
@@ -2264,11 +2296,15 @@ class _LoggedRun(TypedDict):
 
 
 def load_runs(layout: Layout) -> dict[str, _LoggedRun]:
-    """Return every logged run of the flow by id."""
-    if not layout.run_log.exists():
+    """Return every logged run of the flow by id.
+
+    A run log removed while this runs (a ``gc`` of the flow) holds no runs.
+    """
+    text = _read_text_if_present(layout.run_log)
+    if text is None:
         return {}
     runs: dict[str, _LoggedRun] = {}
-    for line in layout.run_log.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if line.strip():
             record = _logged_run(_loads(line), layout.run_log)
             runs[record["run_id"]] = record
