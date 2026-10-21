@@ -7,7 +7,8 @@ throwaway-schema branches a shipped mutation cannot express, and fail-closed
 Live HTTP owns the consumer-visible form writes in
 ``examples/fakeshop/test_query/test_products_api.py`` (``createItemViaForm`` /
 ``updateItemViaForm`` / file create+omit / ``get_form_kwargs`` inject /
-write-time IntegrityError / ``submitContact`` / ``submitPing`` /
+write-time IntegrityError / ``createItemHoldViaForm`` explicit-null FK /
+``submitContact`` / ``submitPing`` /
 ``/graphql-async/``), ``test_library_api.py`` (raw-pk hidden FK+M2M,
 ``to_field_name`` write, omitted M2M preserve, explicit-null required M2M,
 ``perform_mutate`` write + IntegrityError rollback, explicit-null blank integer
@@ -27,7 +28,11 @@ hiding text-keyed type (no fakeshop text-keyed type hides a row), ImageField
 reconstruction key absence, decode-helper envelopes, optimizer
 ``dst_optimizer_plan`` G2, and the save-time blank non-text choice column shapes
 fakeshop has no column for (omitted with no default, decimal / date, update
-``null``, a filling-in model ``save()``, an unrelated consumer ``ValueError``), and
+``null``, a filling-in model ``save()``, an unrelated consumer ``ValueError``), the
+save-time ``None`` on a ``blank=True, null=False`` column fakeshop's live
+``createItemHoldViaForm`` does not reach (a plain integer column sent ``null``, omitted
+or updated to ``null``, a filling-in model ``save()``, and an ``ItemHold`` update
+sending ``itemId: null``, which no fakeshop form offers), and
 the keying of a save-time Django ``ValidationError`` by a name fakeshop's own
 ``Item.save()`` rule never raises (a relation ``attname``, a name only the form
 declares, a dotted name): the ``ModelForm`` reads it against the backing model, the
@@ -51,6 +56,7 @@ import pytest
 import strawberry
 from apps.library import models as library_models
 from apps.products import models as product_models
+from apps.products.services import seed_data
 from apps.scalars import models as scalars_models
 from django import forms
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
@@ -2519,10 +2525,14 @@ def _blank_choice_table(model_class: type[models.Model]) -> Generator[None, None
 def _blank_choice_schema(
     model_class: type[models.Model],
     fields: tuple[str, ...],
+    *,
+    type_fields: tuple[str, ...] | None = None,
 ) -> tuple[strawberry.Schema, str, str]:
     """A non-Relay primary + create / update ModelForm mutations over ``model_class``.
 
-    Returns the schema and the create / update input type names.
+    The primary type selects ``type_fields`` (default ``fields``) beside ``id``, so a form
+    may carry a relation whose target has no registered type. Returns the schema and the
+    create / update input type names.
     """
     form_class = type(
         f"{model_class.__name__}Form",
@@ -2532,7 +2542,13 @@ def _blank_choice_schema(
     type(
         f"{model_class.__name__}T",
         (DjangoType,),
-        {"Meta": type("Meta", (), {"model": model_class, "fields": ("id", *fields)})},
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": model_class, "fields": ("id", *(type_fields or fields))},
+            ),
+        },
     )
     create = type(
         "CreateRow",
@@ -2765,6 +2781,152 @@ def test_modelform_unrelated_save_value_error_propagates() -> None:
         assert [error.message for error in res.errors] == ["consumer save refused the row"]
         assert res.errors[0].original_error is _CONSUMER_SAVE_ERROR
         assert not FailingPickRow.objects.exists()
+
+
+# ---------------------------------------------------------------------------
+# Save-time ``None`` on a ``null=False`` column (``_unstorable_cleaned_fields``)
+# ---------------------------------------------------------------------------
+
+
+def _blank_amount_model(name: str) -> type[models.Model]:
+    """A synthetic model: a ``blank=True, null=False`` plain integer column ``amount``.
+
+    The optional ``forms.IntegerField`` Django builds for it cleans an omitted or
+    explicit ``null`` to ``None``, which ``Model.clean_fields`` skips.
+    """
+    return type(
+        name,
+        (models.Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(blank=True),
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+        },
+    )
+
+
+_NULL_AMOUNT_ERROR = {
+    "field": "amount",
+    "messages": ["This field cannot be null."],
+    "codes": ["null"],
+}
+
+
+@pytest.mark.parametrize(
+    ("operation", "amount_input", "stored"),
+    [
+        pytest.param("create", {"amount": None}, None, id="create-null"),
+        pytest.param("create", {}, None, id="create-omitted"),
+        pytest.param("update", {"amount": None}, 7, id="update-null"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_modelform_none_on_not_null_scalar_is_field_keyed_null_error(
+    operation: str,
+    amount_input: dict[str, object],
+    stored: object,
+) -> None:
+    """``None`` on a ``blank=True, null=False`` scalar is the column's ``null`` error.
+
+    The save reaches the database's ``NOT NULL`` ``IntegrityError``, which the
+    ``ModelForm`` save diagnoses from the instance it attempted: the envelope is keyed
+    by the column with Django's ``null`` message and code, never the ``"__all__"``
+    ``constraint`` error, and the write does not happen (no row on create, the stored
+    value unchanged on update).
+    """
+    model_class = _blank_amount_model("BlankAmountRow")
+    with _blank_choice_table(model_class):
+        schema, create_input, update_input = _blank_choice_schema(model_class, ("amount",))
+        if operation == "create":
+            res = schema.execute_sync(
+                f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+                "result{ id } errors{ field messages codes } } }",
+                variable_values={"d": amount_input},
+            )
+            payload = res.data and res.data["createRow"]
+        else:
+            row = model_class.objects.create(amount=stored)
+            res = schema.execute_sync(
+                f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+                "result{ id } errors{ field messages codes } } }",
+                variable_values={"id": str(saved_pk(row)), "d": amount_input},
+            )
+            payload = res.data and res.data["updateRow"]
+        assert res.errors is None, res.errors
+        assert payload == {"result": None, "errors": [_NULL_AMOUNT_ERROR]}
+        assert list(model_class.objects.values_list("amount", flat=True)) == (
+            [] if stored is None else [stored]
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_none_filled_in_by_model_save_writes() -> None:
+    """A model ``save()`` that fills a ``None`` ``null=False`` column in writes.
+
+    The diagnosis runs only after a failed save (django-trac 13776): an explicit
+    ``null`` reaches ``save()`` as ``None``, the override stores ``5`` and the row is
+    written with no error.
+    """
+
+    class FilledAmountRow(models.Model):
+        amount: _Int = models.IntegerField(blank=True)
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            if vars(self)["amount"] is None:
+                self.amount = 5
+            call_forwarded(super().save, args, kwargs)
+
+    with _blank_choice_table(FilledAmountRow):
+        schema, create_input, _ = _blank_choice_schema(FilledAmountRow, ("amount",))
+        res = schema.execute_sync(
+            f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"d": {"amount": None}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data is not None
+        assert res.data["createRow"]["errors"] == []
+        assert list(FilledAmountRow.objects.values_list("amount", flat=True)) == [5]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_update_null_on_not_null_foreign_key_is_field_keyed_null_error() -> None:
+    """An update sending ``itemId: null`` on ``ItemHold.item`` is the ``itemId`` ``null`` error.
+
+    ``item`` is ``blank=True, null=False``: the form's optional ``ModelChoiceField``
+    cleans the ``null`` to ``None`` and the forced UPDATE hits ``NOT NULL`` inside
+    ``forced_save_or_field_errors``'s savepoint. The error is keyed through the
+    backing model's ``item`` to the input's ``itemId``, as the model flavor keys the
+    same input, and the stored reference is unchanged. (Fakeshop's live
+    ``createItemHoldViaForm`` pins the create; it has no ``ItemHold`` update form.)
+    """
+    seed_data(1)
+    item = product_models.Item.objects.earliest("pk")
+    hold = product_models.ItemHold.objects.create(reason="reserved", item=item)
+    schema, _, update_input = _blank_choice_schema(
+        product_models.ItemHold,
+        ("reason", "item"),
+        type_fields=("reason",),
+    )
+    res = schema.execute_sync(
+        f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+        "result{ id } errors{ field messages codes } } }",
+        variable_values={"id": str(saved_pk(hold)), "d": {"itemId": None}},
+    )
+    assert res.errors is None, res.errors
+    assert res.data is not None
+    assert res.data["updateRow"] == {
+        "result": None,
+        "errors": [
+            {"field": "itemId", "messages": ["This field cannot be null."], "codes": ["null"]},
+        ],
+    }
+    assert list(product_models.ItemHold.objects.values_list("item", flat=True)) == [item.pk]
 
 
 class CommitNoteRow(models.Model):

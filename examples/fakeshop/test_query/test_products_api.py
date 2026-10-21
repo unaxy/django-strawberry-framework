@@ -484,30 +484,43 @@ def test_delete_item_refused_by_a_hold_returns_the_protected_envelope(reference:
     assert models.Item.objects.filter(pk=held.pk).exists()
 
 
+_CREATE_ITEM_HOLD_VIA_FORM = (
+    "mutation($d: ItemHoldModelFormInput!) { createItemHoldViaForm(data: $d) { "
+    "node { reason } errors { field messages codes } } }"
+)
+
+
 @pytest.mark.django_db
-def test_create_item_hold_explicit_null_item_is_a_field_error() -> None:
+@pytest.mark.parametrize(
+    ("document", "root"),
+    [(_CREATE_ITEM_HOLD, "createItemHold"), (_CREATE_ITEM_HOLD_VIA_FORM, "createItemHoldViaForm")],
+    ids=["model", "modelform"],
+)
+def test_create_item_hold_explicit_null_item_is_a_field_error(document: str, root: str) -> None:
     """An explicit ``itemId: null`` on the ``blank=True, null=False`` FK is keyed to ``itemId``.
 
-    ``full_clean`` skips a ``blank=True`` empty value, so without the decode-time
-    FK null guard in ``django_strawberry_framework/mutations/resolvers.py`` the
-    write reaches a NOT NULL ``IntegrityError`` and the generic ``__all__``
-    constraint envelope; the client must learn which field failed. No row is
-    written.
+    ``full_clean`` skips a ``blank=True`` empty value, so the write would reach a
+    NOT NULL ``IntegrityError`` and the generic ``__all__`` constraint envelope; the
+    client must learn which field failed, with the same field, message and code on
+    both flavors. The model flavor refuses the ``null`` at decode
+    (``django_strawberry_framework/mutations/resolvers.py::_decode_single_relation_id``);
+    the ``ModelForm``'s optional ``ModelChoiceField`` cleans it to ``None``, and the
+    refused save is diagnosed by
+    ``django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields``.
+    No row is written.
     """
     create_users(1)
     client = _login_with_perm("staff_1", "add_itemhold")
 
     data = _graphql_data(
-        _CREATE_ITEM_HOLD,
+        document,
         client=client,
         variables={"d": {"reason": "reserved", "itemId": None}},
     )
-    result = json_at(data, "createItemHold")
+    result = json_at(data, root)
     assert json_at(result, "node") is None, result
-    assert [
-        (json_at(error, "field"), json_at(error, "codes")) for error in json_list(result, "errors")
-    ] == [
-        ("itemId", ["null"]),
+    assert json_at(result, "errors") == [
+        {"field": "itemId", "messages": ["This field cannot be null."], "codes": ["null"]},
     ]
     assert not models.ItemHold.objects.exists()
 

@@ -341,8 +341,9 @@ package-internal; Slice 4 is the live consumer surface.
     (`save_or_field_errors`; a `ModelForm` update `forced_save_or_field_errors`: an
     `IntegrityError` or a consumer save-time Django `ValidationError` → envelope, a
     located row deleted before the update → `conflict`, no top-level error at write), the
-    `ModelForm` save also mapping a `blank=True, null=False` non-text choice column
-    the form cleaned to `""` onto that column's field-keyed `null` error; **re-fetch**
+    `ModelForm` save also mapping a `blank=True, null=False` column the form cleaned
+    to a value it cannot store (`None`, or `""` on a non-text choice column) onto that
+    column's field-keyed `null` error; **re-fetch**
     the saved object by pk + optimizer-plan (the `ModelForm` flavor); **return** the
     `<Name>Payload` (`node` / `result` for the `ModelForm`, the pinned `ok` + `errors`
     for the plain form). The whole pipeline runs inside one `transaction.atomic()`
@@ -374,10 +375,12 @@ package-internal; Slice 4 is the live consumer surface.
     `ItemFileModelForm` (adds `Item.attachment`, the nullable `FileField`),
     `StampedItemModelForm` (requires a `user` constructor kwarg),
     `DefaultCategoryItemModelForm` (narrows `category` away and takes it as a kwarg),
+    `ItemHoldModelForm` (over `ItemHold`, whose `item` is `blank=True, null=False`),
     and the plain `ContactForm` / `PingForm`; `products/schema.py` wraps them in
     `CreateItemViaForm` / `UpdateItemViaForm`, `CreateItemWithFileViaForm` /
     `UpdateItemWithFileViaForm`, `CreateStampedItemViaForm`,
-    `CreateDefaultCategoryItemViaForm` (each a `DjangoModelFormMutation`) and
+    `CreateDefaultCategoryItemViaForm`, `CreateItemHoldViaForm` (each a
+    `DjangoModelFormMutation`) and
     `SubmitContact` / `SubmitPing` (each a `DjangoFormMutation`).
   - [ ] [`test_products_api.py`][test-products-api] (seeded via `seed_data` /
     `create_users`): live `/graphql/` create / update through the `ModelForm`
@@ -1524,18 +1527,25 @@ write flavor rides.
    before it raised; any other exception (a `ValueError` included) propagates. **The
    `ModelForm` save also maps the one other failure a valid `ModelForm` reaches on its own**
    ([`forms/resolvers.py`][forms-resolvers]`::_modelform_save_or_field_errors`): over
-   a `blank=True, null=False` non-text choice column, Django's form field keeps
-   `TypedChoiceField(empty_value="")`, so an explicit `null` (or an omission with no
-   column default) cleans to `""`, `Model.clean_fields` skips it, and `save()` refuses
-   it with a `ValueError` (e.g. an integer / float `get_prep_value`) or
-   `ValidationError` (e.g. a decimal / date / UUID / boolean `to_python`). After that failed save, a form-declared editable
-   column holding `""` that stores no empty string is reported as the field-keyed
-   error with the same field, code `null` and path the model flavor answers an explicit
-   `null` on a non-nullable column with, and the column's Django `error_messages["null"]`
-   as the message (the form is the message source of truth, so a custom or translated
-   message is sent as is, where the model flavor's message is fixed); when no column explains
-   the exception, a `ValueError` propagates unchanged and a `ValidationError` is the
-   consumer's own, mapped as above. The check runs on the instance after the
+   a `blank=True, null=False` column the form field is optional, so an explicit `null`
+   (or an omission with no column default) cleans to an empty value and
+   `Model.clean_fields` skips it. Most form fields (`ModelChoiceField`, `IntegerField`,
+   `DateField`, ...) clean it to `None`, which the database refuses with a `NOT NULL`
+   `IntegrityError`; on a non-text choice column Django's form field keeps
+   `TypedChoiceField(empty_value="")`, and `save()` refuses that `""` with a
+   `ValueError` (e.g. an integer / float `get_prep_value`) or `ValidationError` (e.g. a
+   decimal / date / UUID / boolean `to_python`). After that failed save, a form-declared
+   editable non-pk column holding `None` on a `null=False` column, or `""` on a column
+   that stores no empty string, is reported
+   (`django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields`) as the
+   field-keyed error with the same field, code `null` and path the model flavor answers
+   an explicit `null` on a non-nullable column or foreign key with, and the column's
+   Django `error_messages["null"]` as the message (the form is the message source of
+   truth, so a custom or translated message is sent as is, where the model flavor's
+   message is fixed). The check reads only the in-memory instance, so no query runs on a
+   connection the `IntegrityError` left unusable. When no column explains the exception,
+   an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` propagates
+   unchanged and a `ValidationError` is the consumer's own, mapped as above. The check runs on the instance after the
    save attempt, never before it, so a model `save()` that fills the blank value in
    (the reason Django keeps the shape) still writes. The returned envelope rolls the
    atomic block back exactly as the `IntegrityError` envelope does.
@@ -1565,8 +1575,8 @@ helpers the runner composes are public, and live in three modules:
   save-time `IntegrityError` / Django `ValidationError` → `FieldError` mapper reused
   per step 5, wrapping a zero-arg save callable and a lazily built error key map; the
   `ModelForm` flavor calls it through
-  `_modelform_save_or_field_errors`, which adds step 5's blank non-text choice column
-  mapping), and `forced_save_or_field_errors` (its update-side counterpart, adding the
+  `_modelform_save_or_field_errors`, which adds step 5's unstorable `blank=True,
+  null=False` column mapping), and `forced_save_or_field_errors` (its update-side counterpart, adding the
   disappearing-row `conflict` envelope, which the `ModelForm` update hands its
   `commit=False` split).
 - [`utils/errors.py`][utils-errors] — `validation_error_to_field_errors` and
@@ -1703,13 +1713,14 @@ plain `ContactForm`, and `products/schema.py` exposes them via
 
 **The live form surface spans several example apps**, and each earns its place:
 
-- **`products`** — eight form mutations: `createItemViaForm`, `updateItemViaForm`,
+- **`products`** — nine form mutations: `createItemViaForm`, `updateItemViaForm`,
   `createItemWithFileViaForm`, `updateItemWithFileViaForm`,
-  `createDefaultCategoryItemViaForm`, `createStampedItemViaForm`, `submitContact`,
-  `submitPing`, over `ItemModelForm` (with a `clean_<field>`), `ItemFileModelForm`,
-  `DefaultCategoryItemModelForm` (the write-time `IntegrityError` case),
-  `StampedItemModelForm` (kwarg-requiring, the `get_form_kwargs` case), `ContactForm`
-  and `PingForm` (the `DenyAll` default).
+  `createDefaultCategoryItemViaForm`, `createStampedItemViaForm`,
+  `createItemHoldViaForm`, `submitContact`, `submitPing`, over `ItemModelForm` (with a
+  `clean_<field>`), `ItemFileModelForm`, `DefaultCategoryItemModelForm` (the write-time
+  `IntegrityError` case), `StampedItemModelForm` (kwarg-requiring, the
+  `get_form_kwargs` case), `ItemHoldModelForm` (the explicit-`null` `blank=True,
+  null=False` foreign key), `ContactForm` and `PingForm` (the `DenyAll` default).
 - **`library`** — `CreateShelfViaForm`, `UpdateShelfViaForm`, `UpdateBookViaForm`,
   `UpdateBookAtRepairDeskViaForm`, `UpdatePatronProfileViaForm`,
   `UpdatePatronProfileByGenreNameViaForm`, `CreateBranchWithShelf` and `CreateBranchPair` over
@@ -1943,13 +1954,15 @@ Rationale companion: [Decision 14][rationale-d14].
   and answers `conflict` when it is gone. A row still present keeps `form.errors`: a
   partial update after the only kept genre was deleted is `genres` `required`, true about
   the row.
-- **Write-time blank non-text choice column.** A `ModelForm` over a `blank=True,
-  null=False` choice column of any non-text type (e.g. integer, decimal, date) cleans
-  an explicit `null` (or an omission with no column default) to `""`, which only
-  `save()` refuses; the
+- **Write-time unstorable `blank=True, null=False` column.** A `ModelForm` over a
+  `blank=True, null=False` column cleans an explicit `null` (or an omission with no
+  column default) to `None` (a foreign key, a plain integer, ...) or, on a choice column
+  of any non-text type (e.g. integer, decimal, date), to `""`, which only `save()` or
+  the database's `NOT NULL` refuses; the
   failure returns the null-object envelope keyed by that column with code `null`,
   nothing written. A consumer `save()` that fills the value in writes; any other
-  `ValueError` out of `save()` propagates
+  `ValueError` out of `save()` propagates and any other `IntegrityError` is the
+  `"__all__"` envelope
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
 - **Write-time consumer `ValidationError`.** A `ValidationError` raised by consumer
@@ -2071,10 +2084,12 @@ behavior reachable through `/graphql/`, package tests own internals.
   returns the `name`-keyed envelope with nothing written (the create also over the
   async view), and the kanban `setCardStatus` illegal transition (a `pre_save`
   receiver under `perform_mutate`) returns `{ ok: false }` with one `"__all__"`
-  error. **Write-time blank non-text choice column** — an explicit
+  error. **Write-time unstorable `blank=True, null=False` column** — an explicit
   `tier: null` on `createShelfViaForm` (`Shelf.tier` is a `blank=True` integer choice
   column with a default) returns the `tier` / `null` envelope with no row written, while
-  a member writes and an omission keeps the default.
+  a member writes and an omission keeps the default; an explicit `itemId: null` on
+  `createItemHoldViaForm` (`ItemHold.item` is a `blank=True, null=False` foreign key)
+  returns the `itemId` / `null` envelope `createItemHold` returns, with no row written.
 - **Package-internal** ([`tests/forms/`][test-forms]):
   - `test_converter.py` — each supported form-field class → annotation +
     required-ness; `ModelChoiceField` / `ModelMultipleChoiceField` id mapping
@@ -2142,10 +2157,12 @@ behavior reachable through `/graphql/`, package tests own internals.
     `ModelForm` and plain-form paths keys through each flavor's key map (form field
     name, model field name, forward-relation `attname`, `NON_FIELD_ERRORS`, an
     unexposed key kept as raised);
-    **write-time blank non-text choice column** — an integer column omitted with no
-    default, decimal and date columns sent `null`, and an update sent `null` each return
-    the column-keyed `null` envelope with nothing written; a model `save()` filling the
-    value in writes; a consumer `save()` `ValueError` with no such column propagates;
+    **write-time unstorable `blank=True, null=False` column** — an integer choice column
+    omitted with no default, decimal and date choice columns sent `null`, an update sent
+    `null`, a plain integer column sent `null`, omitted or updated to `null`, and an
+    `ItemHold` update sending `itemId: null` each return the column-keyed `null` envelope
+    with nothing written; a model `save()` filling the value in (`""` or `None`) writes; a
+    consumer `save()` `ValueError` with no such column propagates;
     **the `get_form_kwargs` / `get_form` hook** — an override injecting `user` and one
     scoping a `ModelChoiceField.queryset` (input shape unchanged); **partial-update
     reconstruction at the unit tier** — omitted scalar / FK / M2M preserved from the
@@ -2333,8 +2350,9 @@ The completion contract.
    `validation_error_to_field_errors(ValidationError(form.errors.as_data()), key_map)`); **the write is wrapped by the `036` `save_or_field_errors`
    save-time mapper** (`forced_save_or_field_errors` on a `ModelForm` update) (no top-level error on a save-time race or a consumer save-time
    `ValidationError`), and
-   a `ModelForm` save refused over a `blank=True, null=False` non-text choice column
-   cleaned to `""` returns that column's field-keyed `null` error;
+   a `ModelForm` save refused over a `blank=True, null=False` column cleaned to a value
+   it cannot store (`None`, or `""` on a non-text choice column) returns that column's
+   field-keyed `null` error;
    the `ModelForm` payload object is re-fetched through the
    `036` optimizer path (G2: `select_related` / `prefetch_related` kept, no
    [`.only(...)`][glossary-only-projection]); the **plain `DjangoFormMutation`
