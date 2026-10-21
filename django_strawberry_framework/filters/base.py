@@ -290,30 +290,10 @@ def _materialize_list_shaped_values(value: object, *, message: str, code: str) -
 
     Iterating an accepted ``list`` / ``tuple`` (subclass included) is the
     value's own behaviour, so whatever its ``__iter__`` raises propagates.
-    Shared by ``_globalid_multiple_choice_values`` (the GlobalID multi-value
-    gate), ``ListFilter.filter``, and ``IntegerInFilter.filter`` so the
-    fail-closed contract cannot drift between the three list-shaped consumers.
     """
     if not is_list_or_tuple(value):
         raise GraphQLError(message, extensions=coded_error_extensions(code))
     return list(value)
-
-
-def _globalid_multiple_choice_values(value: object) -> list[object]:
-    """Validate and normalize a multi-value GlobalID input container.
-
-    Django's ``MultipleChoiceField`` normally supplies a list, but callers can
-    invoke a filter directly (and a malformed raw filter mapping can bypass
-    form coercion) with an arbitrary object; an iterator or scalar never
-    reaches a ``len()`` it cannot satisfy.  Only the list/tuple shapes accepted
-    by the form contract are meaningful here; all other shapes fail closed with
-    the same invalid-ID code used for malformed members.
-    """
-    return _materialize_list_shaped_values(
-        value,
-        message="Invalid GlobalID list: expected a list of GlobalIDs.",
-        code=GLOBALID_INVALID_ERROR_CODE,
-    )
 
 
 # Private instance-attribute slot a generated GlobalID RELATION filter carries a
@@ -1433,11 +1413,14 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         queryset; an explicit ``[]`` is the match-none membership predicate
         (``ListFilter`` empty-set semantics for every list-shaped lookup, not
         upstream ``MultipleChoiceFilter``'s ``if not value: return qs`` skip).
-        Both run BEFORE decode. Every remaining element is decoded and validated
-        by ``_decode_and_validate_global_id``, which rejects a malformed payload,
-        a wrong ``type_name``, AND a well-typed empty-id GlobalID (an empty
-        decoded id is ``GLOBALID_INVALID`` with its list index named), so no
-        vacuous element can silently reduce the membership list.
+        A container that is not a ``list`` / ``tuple`` is refused before the
+        emptiness probe, under the ``GLOBALID_INVALID`` code a malformed member
+        gets. All three run BEFORE decode. Every remaining element is decoded
+        and validated by ``_decode_and_validate_global_id``, which rejects a
+        malformed payload, a wrong ``type_name``, AND a well-typed empty-id
+        GlobalID (an empty decoded id is ``GLOBALID_INVALID`` with its list
+        index named), so no vacuous element can silently reduce the membership
+        list.
 
         The ``in`` lookup consumes the WHOLE decoded list in one predicate.
         Upstream ``MultipleChoiceFilter.filter`` instead ORs one predicate
@@ -1453,7 +1436,11 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         """
         if value is None:
             return super().filter(qs, None)
-        value = _globalid_multiple_choice_values(value)
+        value = _materialize_list_shaped_values(
+            value,
+            message="Invalid GlobalID list: expected a list of GlobalIDs.",
+            code=GLOBALID_INVALID_ERROR_CODE,
+        )
         if len(value) == 0:
             return _match_none_queryset(self, qs)
         node_ids = [
