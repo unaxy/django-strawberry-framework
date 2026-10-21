@@ -30,7 +30,6 @@ from django_strawberry_framework.utils.input_values import (
     iter_active_fields,
     iter_input_items,
     related_declaration_mapping,
-    set_traversal_depth_cap,
 )
 from django_strawberry_framework.utils.inputs import GeneratedInputFieldSpec
 from django_strawberry_framework.utils.typing import object_result
@@ -531,29 +530,8 @@ def test_iter_active_fields_propagates_a_hostile_config_related_attr_read() -> N
 
 
 # ---------------------------------------------------------------------------
-# Depth-cap helpers -- one budget, shared sentence, defensive label read
+# assert_set_traversal_depth -- one budget, shared sentence, defensive label read
 # ---------------------------------------------------------------------------
-
-
-def test_set_traversal_depth_cap_resolves_the_family_budget() -> None:
-    """A declared int knob is honored; absent/None/non-int knobs take the neutral default."""
-
-    class _OrderLike:
-        pass
-
-    class _NoneKnob:
-        _MAX_LOGIC_DEPTH = None
-
-    class _Raised:
-        _MAX_LOGIC_DEPTH = 12
-
-    class _Garbage:
-        _MAX_LOGIC_DEPTH = "10"
-
-    assert set_traversal_depth_cap(_OrderLike) == DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
-    assert set_traversal_depth_cap(_NoneKnob) == DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
-    assert set_traversal_depth_cap(_Raised) == 12
-    assert set_traversal_depth_cap(_Garbage) == DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
 
 
 def test_assert_set_traversal_depth_enforces_the_declared_budget() -> None:
@@ -572,22 +550,37 @@ def test_assert_set_traversal_depth_enforces_the_declared_budget() -> None:
     )
 
 
-def test_assert_set_traversal_depth_words_knobless_sets_with_the_default_sentence() -> None:
-    """A set with no ``_MAX_LOGIC_DEPTH`` knob is capped at the neutral default."""
+@pytest.mark.parametrize(
+    "namespace",
+    [
+        pytest.param({}, id="absent"),
+        pytest.param({"_MAX_LOGIC_DEPTH": None}, id="none"),
+        pytest.param({"_MAX_LOGIC_DEPTH": "10"}, id="non-int"),
+    ],
+)
+def test_assert_set_traversal_depth_words_a_non_int_knob_with_the_default_sentence(
+    namespace: dict[str, object],
+) -> None:
+    """A set without an int ``_MAX_LOGIC_DEPTH`` is capped at the neutral default, unnamed."""
+    set_cls = type("_Set", (), namespace)
 
-    class _OrderLike:
-        pass
-
-    with pytest.raises(
-        ConfigurationError,
-        match="nesting exceeded the maximum traversal depth \\(8\\)",
-    ):
+    assert_set_traversal_depth(
+        set_cls,
+        DEFAULT_SET_INPUT_TRAVERSAL_DEPTH,
+        branch="related-branch",
+        input_noun="related",
+    )
+    with pytest.raises(ConfigurationError) as excinfo:
         assert_set_traversal_depth(
-            _OrderLike,
+            set_cls,
             DEFAULT_SET_INPUT_TRAVERSAL_DEPTH + 1,
             branch="related-branch",
             input_noun="related",
         )
+    assert str(excinfo.value) == (
+        "_Set: related-branch nesting exceeded the maximum traversal depth (8). Flatten the "
+        "related input or split into multiple queries."
+    )
 
 
 @pytest.mark.parametrize("raised", [RuntimeError, KeyboardInterrupt])
