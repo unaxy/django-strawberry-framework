@@ -7657,7 +7657,8 @@ def test_evaluate_logic_tree_caps_a_non_int_knob_at_the_neutral_default() -> Non
     The filter enforcement sites resolve their budget through the shared
     check, which honors a declared int and takes the neutral default for
     anything else: depth past the default raises the shared typed
-    sentence instead of failing on the comparison.
+    sentence instead of failing on the comparison, and the sentence names
+    the default, not the knob that did not set it.
     """
 
     class CategoryFilter(FilterSet):
@@ -7668,7 +7669,10 @@ def test_evaluate_logic_tree_caps_a_non_int_knob_at_the_neutral_default() -> Non
             model = Category
             fields = {"name": ["exact"]}
 
-    with pytest.raises(ConfigurationError, match="nesting exceeded"):
+    with pytest.raises(
+        ConfigurationError,
+        match=r"nesting exceeded the maximum traversal depth \(8\)\. ",
+    ):
         CategoryFilter._evaluate_logic_tree(
             Category.objects.all(),
             {"and": [{"name": "x"}]},

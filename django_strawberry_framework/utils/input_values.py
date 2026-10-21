@@ -34,7 +34,7 @@ families import it without a cycle -- same contract as ``utils/permissions.py``
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, NoReturn, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from strawberry.types.unset import UnsetType
 
@@ -215,50 +215,6 @@ class ActiveField:
     related_obj: object = None
 
 
-def set_traversal_depth_cap(set_cls: object) -> int:
-    """Return the traversal-depth budget that governs ``set_cls``.
-
-    ONE budget for both traversals over the same input tree: a ``FilterSet``
-    declares ``_MAX_LOGIC_DEPTH`` (and consumers may raise it on a subclass),
-    while an ``OrderSet`` has no such knob and takes
-    ``DEFAULT_SET_INPUT_TRAVERSAL_DEPTH``. The resolution was written out at both
-    the logical-branch walk and the permission walk, which is how one budget came
-    to be enforced with two vocabularies.
-    """
-    declared = truth.static_attr(set_cls, "_MAX_LOGIC_DEPTH")
-    return declared if truth.is_instance(declared, int) else DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
-
-
-def raise_set_traversal_depth_exceeded(
-    set_cls: object,
-    *,
-    branch: str,
-    input_noun: str,
-    subject: str = "",
-) -> NoReturn:
-    """Raise the shared depth-cap ``ConfigurationError`` for ``set_cls``.
-
-    The reason both walks cap at all is the same - a self-referential set
-    (``CardFilter.dependencies`` -> ``CardFilter``) would otherwise recurse
-    input-deep into a ``RecursionError`` instead of a typed error at the source -
-    so the sentence is shared and only the three words that name WHICH walk hit
-    the cap are per-caller.
-    """
-    cap = set_traversal_depth_cap(set_cls)
-    label = truth.qualname(set_cls)
-    if subject:
-        label = f"{subject} {label}"
-    cap_detail = (
-        f"_MAX_LOGIC_DEPTH={cap}"
-        if truth.static_attr(set_cls, "_MAX_LOGIC_DEPTH") is not None
-        else f"the maximum traversal depth ({cap})"
-    )
-    raise ConfigurationError(
-        f"{label}: {branch} nesting exceeded {cap_detail}. Flatten the "
-        f"{input_noun} input or split into multiple queries.",
-    )
-
-
 def assert_set_traversal_depth(
     set_cls: object,
     depth: int,
@@ -267,14 +223,35 @@ def assert_set_traversal_depth(
     input_noun: str,
     subject: str = "",
 ) -> None:
-    """Fail closed when ``depth`` passes ``set_cls``'s traversal budget."""
-    if depth > set_traversal_depth_cap(set_cls):
-        raise_set_traversal_depth_exceeded(
-            set_cls,
-            branch=branch,
-            input_noun=input_noun,
-            subject=subject,
-        )
+    """Fail closed when ``depth`` passes ``set_cls``'s traversal budget.
+
+    ONE budget for both traversals over the same input tree: a ``FilterSet``
+    declares an int ``_MAX_LOGIC_DEPTH`` (and consumers may raise it on a
+    subclass), while an ``OrderSet`` has no such knob and takes
+    ``DEFAULT_SET_INPUT_TRAVERSAL_DEPTH``, as does a knob that is not an int.
+    The sentence names the knob only when the knob set the cap.
+
+    The reason both walks cap at all is the same - a self-referential set
+    (``CardFilter.dependencies`` -> ``CardFilter``) would otherwise recurse
+    input-deep into a ``RecursionError`` instead of a typed error at the source -
+    so the sentence is shared and only the three words that name WHICH walk hit
+    the cap are per-caller.
+    """
+    declared = truth.static_attr(set_cls, "_MAX_LOGIC_DEPTH")
+    knob_governs = truth.is_instance(declared, int)
+    cap = declared if knob_governs else DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
+    if depth <= cap:
+        return
+    label = truth.qualname(set_cls)
+    if subject:
+        label = f"{subject} {label}"
+    cap_detail = (
+        f"_MAX_LOGIC_DEPTH={cap}" if knob_governs else f"the maximum traversal depth ({cap})"
+    )
+    raise ConfigurationError(
+        f"{label}: {branch} nesting exceeded {cap_detail}. Flatten the "
+        f"{input_noun} input or split into multiple queries.",
+    )
 
 
 class RelatedDeclarationError(Exception):
