@@ -1345,7 +1345,7 @@ def test_field_error_wire_name_set_on_a_generated_payload_is_frozen() -> None:
     fail independently.
     """
     _, relay_type = _make_relay_target()
-    payload = build_payload_type("CreateThing", object_type=relay_type, object_slot="node")
+    payload = build_payload_type("CreateThing", object_type=relay_type)
     errors_field = {f.python_name: f for f in payload.__strawberry_definition__.fields}["errors"]
     assert isinstance(errors_field.type, StrawberryList)
     error_type = errors_field.type.of_type
@@ -1365,18 +1365,6 @@ def test_field_error_wire_name_set_on_a_generated_payload_is_frozen() -> None:
     }
 
 
-def test_payload_slot_never_model_derived_for_property_like_model() -> None:
-    """A model whose name would collide with a builtin uses the uniform slot, not its name.
-
-    The payload slot is uniform: a ``Property``-shaped payload exposes ``node``
-    (Relay) / ``result`` (non-Relay), NEVER a ``property``-named field.
-    """
-    payload = build_payload_type("CreateProperty", object_type=ItemType, object_slot="node")
-    fields = {f.python_name for f in payload.__strawberry_definition__.fields}
-    assert "property" not in fields
-    assert "node" in fields
-
-
 def test_payload_model_less_shape() -> None:
     """A model-less payload (object_type=None) yields ``ok: bool`` + ``errors`` with no object slot."""
     payload = build_payload_type("DoAction", object_type=None)
@@ -1391,19 +1379,22 @@ def test_payload_model_less_shape() -> None:
     assert "result" not in fields
 
 
-def test_payload_slot_defaults_from_object_type() -> None:
-    """When object_slot is omitted, it defaults to the uniform slot via payload_object_slot."""
+def test_payload_slot_is_the_uniform_one_for_the_object_type() -> None:
+    """The object slot is the one ``payload_object_slot`` names, never model-derived.
+
+    A Relay-Node target exposes ``node``, any other ``result``; the field set is
+    exactly the slot plus ``errors``, so no model-named field (``genre``, ``branch``)
+    rides beside it.
+    """
     _, relay_type = _make_relay_target()
     payload_relay = build_payload_type("CreateRelayAuto", object_type=relay_type)
     fields_relay = {f.python_name for f in payload_relay.__strawberry_definition__.fields}
-    assert "node" in fields_relay
-    assert "errors" in fields_relay
+    assert fields_relay == {"node", "errors"}
 
     _, plain_type = _make_non_relay_target()
     payload_plain = build_payload_type("CreatePlainAuto", object_type=plain_type)
     fields_plain = {f.python_name for f in payload_plain.__strawberry_definition__.fields}
-    assert "result" in fields_plain
-    assert "errors" in fields_plain
+    assert fields_plain == {"result", "errors"}
 
 
 # ---------------------------------------------------------------------------
@@ -1781,7 +1772,7 @@ def test_field_error_is_public_export() -> None:
 def test_field_error_payload_uses_a_strawberry_type() -> None:
     """Sanity: the payload + FieldError are real ``@strawberry.type`` classes."""
     assert hasattr(FieldError, "__strawberry_definition__")
-    payload = build_payload_type("X", object_type=ItemType, object_slot="node")
+    payload = build_payload_type("X", object_type=ItemType)
     # ``strawberry.type`` decoration is detectable via the definition marker.
     assert hasattr(payload, "__strawberry_definition__")
     # Guard against accidental input-vs-type confusion: payloads are output types.
@@ -1867,36 +1858,6 @@ def test_mutation_input_field_specs_rejects_bare_string_excluded_attrs() -> None
             # mutation_input_field_specs types the parameter as Collection[str]
             excluded_attrs=b"name",  # pyright: ignore[reportArgumentType]
         )
-
-
-def test_build_payload_type_rejects_reserved_or_invalid_object_slot() -> None:
-    """A payload ``object_slot`` colliding with ``ok`` / ``errors`` fails loud.
-
-    A slot that is not an identifier fails loud as well.
-
-    The payload namespace dict keys the object slot beside ``errors`` (and the
-    model-less ``ok``), so a slot named ``errors`` used to collapse onto the
-    duplicate dict key and silently build a payload with NO object field, and a
-    non-identifier slot exploded later inside dataclass codegen with a cryptic
-    ``SyntaxError`` (``__dataclass_dflt_node-x__``). The builder rejects both at
-    the framework boundary; the uniform slots (``node`` / ``result``) and the
-    auto-derivation keep building (pinned by the payload rows above).
-    """
-    _, relay_type = _make_relay_target()
-    for bad_slot in (
-        "errors",
-        "ok",
-        "node-x",
-        5,
-    ):
-        with pytest.raises(ConfigurationError, match="object_slot"):
-            build_payload_type(
-                "CreateThing",
-                object_type=relay_type,
-                # basedpyright: each invalid slot is the hostile input under test;
-                # build_payload_type types the parameter as str | None
-                object_slot=bad_slot,  # pyright: ignore[reportArgumentType]
-            )
 
 
 # ---------------------------------------------------------------------------

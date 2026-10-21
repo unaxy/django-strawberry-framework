@@ -1051,13 +1051,6 @@ def build_mutation_input(
     return build_strawberry_input_class(type_name, triples)
 
 
-# The attr names a generated payload namespace already claims; an
-# ``object_slot`` equal to one of these would collapse onto the same dict key
-# when the namespace is assembled, silently dropping the object field (or
-# being overwritten by the ``errors`` list default).
-_RESERVED_PAYLOAD_ATTRS: frozenset[str] = frozenset({"ok", "errors"})
-
-
 def payload_object_slot(primary_type: type[DjangoType]) -> str:
     """Return the uniform payload object-slot name for a primary type.
 
@@ -1077,26 +1070,20 @@ def build_payload_type(
     mutation_name: str,
     *,
     object_type: type[DjangoType] | None,
-    object_slot: str | None = None,
 ) -> type[WithStrawberryObjectDefinition]:
     """Build the ``<Name>Payload`` ``@strawberry.type`` wrapper (spec-036 Decision 7 / spec-038 Decision 6).
 
     Two payload shapes from ONE builder + ONE materialize ledger (the
     single-source choice, spec-038 Decision 6):
 
-    - **model-backed** (``object_type`` is non-``None``): ``object_slot`` is the
-      UNIFORM object-field name from ``payload_object_slot(primary_type)`` -
-      ``"node"`` for a Relay-Node target, ``"result"`` otherwise (derived
-      automatically if ``object_slot`` is omitted). It is
+    - **model-backed** (``object_type`` is non-``None``): the object field is
+      the UNIFORM slot ``payload_object_slot(object_type)`` names - ``"node"``
+      for a Relay-Node target, ``"result"`` otherwise. It is
       NEVER model-derived, so a ``Property`` payload exposes ``node`` / ``result``,
-      never a ``property``-named field. Fields: ``<object_slot>: object_type | None``
+      never a ``property``-named field. Fields: ``<slot>: object_type | None``
       (nullable - ``null`` on a validation failure) and ``errors:
       list[FieldError]`` (the non-null list of non-null ``FieldError`` the spec
-      writes ``[FieldError!]!``). A supplied ``object_slot`` must be a valid
-      Python identifier outside the reserved ``ok`` / ``errors`` attrs - a
-      colliding slot would silently lose the object field to the duplicate
-      namespace key - so a bad value fails loud as a ``ConfigurationError``.
-      ``object_type`` is referenced directly: by the
+      writes ``[FieldError!]!``). ``object_type`` is referenced directly: by the
       time the phase-2.5 bind calls this, the read ``DjangoType`` is a real
       class, so a direct ``object_type | None`` annotation resolves at schema build
       (the genuine import-time forward-ref hazard is the ``DjangoMutationField``
@@ -1115,20 +1102,7 @@ def build_payload_type(
             "errors": strawberry.field(default_factory=list),
         }
     else:
-        slot = object_slot if object_slot is not None else payload_object_slot(object_type)
-        # ``object_slot`` is a public parameter typed ``str | None``; the str check rejects a
-        # caller that breaks that contract before ``isidentifier`` runs
-        if (
-            not truth.is_instance(slot, str)
-            or not truth.text(slot).isidentifier()
-            or truth.text(slot) in _RESERVED_PAYLOAD_ATTRS
-        ):
-            raise ConfigurationError(
-                f"object_slot {truth.render(slot)} is not a usable payload object-field "
-                "name: it must be a valid Python identifier outside the reserved payload "
-                f"attributes {sorted(_RESERVED_PAYLOAD_ATTRS)!r}. Omit object_slot, or "
-                "pass payload_object_slot(object_type).",
-            )
+        slot = payload_object_slot(object_type)
         namespace = {
             "__annotations__": {slot: object_type | None, "errors": list[FieldError]},
             slot: None,
