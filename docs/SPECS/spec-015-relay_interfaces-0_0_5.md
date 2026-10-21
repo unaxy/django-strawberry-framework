@@ -236,9 +236,9 @@ Suppression is keyed to a single predicate, `django_strawberry_framework/types/b
 
 This mirrors strawberry-django's `MAP_AUTO_ID_AS_GLOBAL_ID` behavior but is opt-in per type rather than a global setting.
 
-Composite primary keys (Django 5.2+) are explicitly out of scope for Relay node mapping. When a Relay-shaped type's model has a composite primary key, finalization raises `ConfigurationError` naming the model and recommending either an explicit `id: relay.NodeID[...]` annotation or removing `relay.Node` from `Meta.interfaces` — and it **honors the first of those remediations**: a type declaring an explicit `relay.NodeID[...]` attribute passes the gate, since it has named a single-column node id. Only the no-annotation case raises. Detection is `django_strawberry_framework/utils/relations.py::has_composite_pk` (Django's `Options.is_composite_pk`), the same read the FK-id-elision eligibility test uses.
+Composite primary keys (Django 5.2+) are explicitly out of scope for Relay node mapping. When a Relay-shaped type's model has a composite primary key, finalization raises `ConfigurationError` naming the model and recommending either an explicit `id: relay.NodeID[...]` annotation or removing `relay.Node` from `Meta.interfaces` — and it **honors the first of those remediations**: a type declaring an explicit `relay.NodeID[...]` attribute other than `pk` passes the gate, since it has named a single-column node id. The no-annotation case raises, and so does a `pk` annotation: on a composite-pk model the pk names no single column. Detection is `django_strawberry_framework/utils/relations.py::has_composite_pk` (Django's `Options.is_composite_pk`), the same read the FK-id-elision eligibility test uses.
 
-The gate asks Strawberry's annotation scan directly (`relay.Node.resolve_id_attr.__func__(type_cls)`) rather than calling `type_cls.resolve_id_attr()`. That is load-bearing: a Relay-shaped child of a Relay-shaped parent inherits the parent's installed framework default, which swallows `NodeIDAnnotationError` into the `"pk"` fallback and would let a composite-pk child slip the gate.
+The gate's verdict is the type's own `_stamp_relay_id_attr` scan (Decision 3), never `type_cls.resolve_id_attr()`. That is load-bearing: a consumer `resolve_id_attr` override, on the type or a Relay-shaped parent, answers without reading annotations, and a `"pk"` stamp is exactly the case the gate rejects.
 
 Rejected alternatives — the global-setting form, and an unconditional composite-pk rejection — are in the [rationale companion][spec-015-rationale].
 ### Decision 3: Relay resolver injection
@@ -355,7 +355,7 @@ def install_is_type_of(type_cls: type) -> None:
 
 
 def _check_composite_pk_for_relay_node(type_cls: type) -> None:
-    """Raise ``ConfigurationError`` for a composite pk with no ``NodeID`` escape."""
+    """Raise ``ConfigurationError`` for a composite pk with no non-``pk`` ``NodeID`` escape."""
 
 
 def _stamp_relay_id_attr(type_cls: type) -> str:
@@ -414,7 +414,7 @@ The slice is five steps, each naming the symbols it owns.
    - `"interfaces"` sits in `django_strawberry_framework/types/base.py #"ALLOWED_META_KEYS: frozenset[str]"`, not `django_strawberry_framework/types/base.py #"DEFERRED_META_KEYS: frozenset[str]"`. Promotion is the last step because a deferred key is promoted only once every behavior it enables is applied end to end (Goal 5).
    - The doc homes listed in "Doc updates".
 ## Edge cases and constraints
-- **Composite primary keys (Django 5.2+).** A Relay-shaped type over a composite-pk model raises `ConfigurationError` at finalization unless it declares an explicit `id: relay.NodeID[...]` annotation, which the gate accepts (Decision 2). The error names the model and points to that annotation or to removing `relay.Node` from `Meta.interfaces`. Deterministic composite-key encoding is parked as `BACKLOG.md` `composite_pk_globalid`.
+- **Composite primary keys (Django 5.2+).** A Relay-shaped type over a composite-pk model raises `ConfigurationError` at finalization unless it declares an explicit `id: relay.NodeID[...]` annotation on a column other than `pk`, which the gate accepts (Decision 2). The error names the model and points to that annotation or to removing `relay.Node` from `Meta.interfaces`. Deterministic composite-key encoding is parked as `BACKLOG.md` `composite_pk_globalid`.
 - **Models without an `AutoField`/`BigAutoField`/`SmallAutoField` primary key.** The default `_resolve_id_attr_default` returns `"pk"`; Django resolves that to the actual primary-key attname (`UUIDField`, custom-typed pk, etc.). No special-casing is required as long as the column has a single-column pk.
 - **Nullable primary keys.** Not supported by Django for normal models; out of scope.
 - **Inherited interfaces via parent `DjangoType`.** A subclass of a Relay-declared `DjangoType` inherits `relay.Node` through `__bases__`. The validation rule in Decision 4 accepts this case as a no-op when the subclass also declares `Meta.interfaces = (relay.Node,)`.
@@ -501,7 +501,7 @@ The slice is complete when all of the following are true:
 1. `"interfaces"` is in `ALLOWED_META_KEYS` (`django_strawberry_framework/types/base.py #"ALLOWED_META_KEYS: frozenset[str]"`), validated by `_validate_meta` per Decision 4, and stored on the `DjangoTypeDefinition.interfaces` slot at `django_strawberry_framework/types/definition.py::DjangoTypeDefinition #"interfaces: tuple[type[object], ...] = ()"`. The slice adds no other field to `DjangoTypeDefinition`.
 2. `finalize_django_types()` (`django_strawberry_framework/types/finalizer.py::finalize_django_types`) injects declared interfaces into `cls.__bases__` and runs the `relay.Node` resolver injection (Decision 3) before the `strawberry.type(cls, ...)` Phase 3 loop. Types that omit `Meta.interfaces` take no Relay or interface step.
 3. Declaring `interfaces = (relay.Node,)` produces a working Relay-Node GraphQL type with `id: GlobalID!`, the four injected `resolve_*` methods, the `is_type_of` virtual subclass behavior, and consumer override support per Decision 6. The single-interface forms `interfaces = relay.Node` and `interfaces = (relay.Node)` normalize to the same stored tuple.
-4. A Relay-shaped type over a composite-pk model raises `ConfigurationError` at finalization with a message that names the model and proposes a remediation path, unless the type declares an explicit `id: relay.NodeID[...]` annotation — the first remediation the message proposes, which the gate honors (Decision 2).
+4. A Relay-shaped type over a composite-pk model raises `ConfigurationError` at finalization with a message that names the model and proposes a remediation path, unless the type declares an explicit `id: relay.NodeID[...]` annotation on a column other than `pk` — the first remediation the message proposes, which the gate honors (Decision 2).
 5. Optimizer invariants in Decision 7 hold: `only()` includes the pk attname when Relay `id` is selected, `resolve_id` does not trigger an avoidable lazy load, and a target type's Relay declaration does not change how relations to it are planned.
 6. Tests in `tests/types/test_relay_interfaces.py`, plus the rows in `tests/optimizer/test_relay_id_projection.py`, `tests/test_registry.py`, `examples/fakeshop/test_query/test_library_api.py`, and `examples/fakeshop/test_query/test_products_api.py` listed in the Test plan all pass.
 7. Package coverage stays at 100% (`pyproject.toml [tool.coverage.report] fail_under = 100`).

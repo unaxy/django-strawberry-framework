@@ -92,9 +92,9 @@ Spec: [Decision 2][spec-015-decision-2].
 - **Rejected: rejecting composite primary keys unconditionally.** The error proposes an explicit
   `id: relay.NodeID[...]` annotation, so the gate honors it
   ([`types/relay.py::_check_composite_pk_for_relay_node`][types-relay]); a deterministic composite-key
-  encoding is parked in `BACKLOG.md` as `composite_pk_globalid`. The gate asks Strawberry's scan
-  directly because a Relay child of a Relay parent inherits the installed default, which swallows
-  `NodeIDAnnotationError` into `"pk"`.
+  encoding is parked in `BACKLOG.md` as `composite_pk_globalid`. The gate reads the type's own
+  `_stamp_relay_id_attr` scan, not `resolve_id_attr()`, which a consumer override answers without
+  reading annotations; a `"pk"` stamp (no `NodeID`, or a `pk` one) is rejected.
 
 ## Decision 3: Relay resolver injection
 
