@@ -604,8 +604,7 @@ def test_renamed_relation_resolves_backing_column_and_id_like_name() -> None:
     assert spec.target_name == "category_pk"
     assert spec.source == "category"
     assert spec.kind == RELATION_SINGLE
-    # The relation's target model is recorded on the spec at build time so the
-    # The decode step never re-discovers the serializer field set per request.
+    # The relation's target model is recorded on the spec at build time.
     assert spec.related_model is product_models.Category
 
 

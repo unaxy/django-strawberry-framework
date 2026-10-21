@@ -1367,22 +1367,20 @@ def resolve_serializer_field(
     from the field's ``queryset.model`` (``serializer_only_relation_annotation``);
     a scalar via ``_model_backed_scalar_annotation`` (type-override conflict
     policy: a CONSUMER-DECLARED model-backed scalar whose declared type disagrees
-    with the column's fails loud rather than silently picking the column). The
-    GraphQL name is ALWAYS derived from the DECLARED serializer field name via
-    the id-like-suffix rule (never ``source``). A column-less field uses
+    with the column's fails loud rather than silently picking the column). Every
+    branch names the field through ``serializer_field_graphql_name`` over the DECLARED
+    name, never ``source``. A column-less field uses
     ``convert_serializer_field`` (the model-less table) for the kind, and the
     relation / file annotations are finalized here (where ``Upload`` and the
     serializer-only relation id-type are known); a column-less ``ChoiceField`` /
     ``MultipleChoiceField`` / ``ListField(child=ChoiceField)`` is upgraded to a generated
     GraphQL enum.
 
-    The GraphQL name is ALWAYS derived from the DECLARED serializer field name via
-    the id-like-suffix rule (never ``source``). Returns the BASE (non-nullable)
-    annotation; the create/partial requiredness + ``allow_null`` widening is
-    applied by the caller. The returned ``InputFieldSpec`` records the reverse map
-    the resolver consults - ``target_name`` is the DECLARED serializer
-    field name (the ``validated_data`` key), ``source`` the resolved one-segment
-    source.
+    Returns the BASE (non-nullable) annotation; the create/partial requiredness +
+    ``allow_null`` widening is applied by the caller. The returned ``InputFieldSpec``
+    records the reverse map the resolver consults - ``target_name`` is the DECLARED
+    serializer field name (the ``validated_data`` key), ``source`` the resolved
+    one-segment source.
     """
     # reject a nested serializer field FIRST, before the backing-column lookup - a
     # nested serializer over a reverse-relation column (``BranchSerializer.shelves``) would
@@ -1405,10 +1403,7 @@ def resolve_serializer_field(
         # Model-backed field: ``model_column_write_kind`` is the one column
         # classifier (shared with ``model_column_input_annotation`` / form).
         # Relation / file annotations ride ``model_column_write_annotation``;
-        # SCALAR keeps the type-override conflict policy. The GraphQL name
-        # follows the DECLARED serializer name (id-like-suffix rule), so a
-        # renamed ``category_pk = PrimaryKeyRelatedField(source="category")``
-        # exposes ``categoryPk`` while the column is resolved via ``source``.
+        # SCALAR keeps the type-override conflict policy.
         kind = model_column_write_kind(column)
         if kind in (RELATION_SINGLE, RELATION_MULTI):
             # Only a PK relation (``PrimaryKeyRelatedField`` / ``ManyRelatedField``

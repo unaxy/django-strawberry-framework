@@ -405,7 +405,7 @@ class InputFieldSpec:
     - ``nested_specs`` - the serializer-only nested-serializer axis: the
       ordered reverse-map ``InputFieldSpec`` tuple of the NESTED input's
       OWN fields, recorded for a ``nested_single`` / ``nested_multi`` field so the
-      the decode recurses into the nested input dataclass with the SAME
+      decode recurses into the nested input dataclass with the SAME
       per-field machinery (scalar / relation / file / deeper-nested) the top level
       uses. ``None`` for every non-nested field (including every form field). A
       tuple of frozen ``InputFieldSpec`` is hashable, so it participates in the
