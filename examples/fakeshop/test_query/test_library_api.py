@@ -5297,6 +5297,55 @@ def test_order_check_permission_quiet_for_inactive_field() -> None:
     assert cities == ["Boston", "Cambridge"]
 
 
+_PUBLISHERS_BY_HOUSE_CODE = """
+query {
+  allLibraryPublishersConnection(filter: { houseCode: { exact: "GATED" } }) {
+    edges { node { name } }
+  }
+}
+"""
+
+
+@pytest.mark.django_db
+def test_filter_return_form_gate_denies_on_false() -> None:
+    """A gate that RETURNS ``False`` denies over ``/graphql/``; it is never read as an allow.
+
+    ``PublisherFilter.check_house_code_permission`` returns
+    ``user.is_staff``-style booleans instead of raising. For an anonymous
+    request it returns ``False``, which denies with the same top-level
+    ``GraphQLError`` a raising gate produces: ``data`` is ``null`` and no
+    publisher row leaks.
+    """
+    models.Publisher.objects.create(name="Gated House", house_code="GATED")
+
+    response = _post_graphql(_PUBLISHERS_BY_HOUSE_CODE)
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    assert (
+        json_str(payload, "errors", 0, "message")
+        == "Not authorized to use house_code on PublisherFilter."
+    )
+    assert json_at(payload, "errors", 0, "path") == ["allLibraryPublishersConnection"]
+
+
+@pytest.mark.django_db
+def test_filter_return_form_gate_allows_on_true() -> None:
+    """The same return-form gate returns ``True`` for a staff user and the filter applies."""
+    models.Publisher.objects.create(name="Gated House", house_code="GATED")
+    models.Publisher.objects.create(name="Open House", house_code="OPEN")
+
+    response = _post_graphql_as_staff(_PUBLISHERS_BY_HOUSE_CODE)
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    names = [
+        json_at(edge, "node", "name")
+        for edge in json_list(payload, "data", "allLibraryPublishersConnection", "edges")
+    ]
+    assert names == ["Gated House"]
+
+
 @pytest.mark.django_db
 def test_order_check_permission_denies_active_related_branch() -> None:
     """Spec-028 test plan - active-branch relation-level gate.

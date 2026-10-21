@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 30 to do.
+Progress: 29 to do.
 
 ## To do: fix before beta
 
@@ -25,11 +25,6 @@ Progress: 30 to do.
   no recourse except `relation_shapes = {"x": "list"}`. `DjangoListField` already picks
   `_execute_queryset_pipeline_async` per call, so lists work where connections fail. Confirmed live over
   `AsyncDjangoGraphQLView` (`allCategories`, `allItems`)
-- [ ] 3. A type-side permission gate that returns `False` or `0` allows the request: the return value is discarded and
-  only a raise denies (`django_strawberry_framework/utils/permissions.py::invoke_permission_method`). A DRF-style
-  `return user.is_staff` silently admits everyone, while mutation `has_permission` is bool-returning, so the two
-  families disagree. `docs/README.md` shows only the `raise GraphQLError` form. Fix: deny on a falsy return, or refuse a
-  non-`None` return loudly
 - [ ] 4. A model whose `delete()` returns `None` (soft-delete mixins such as model_utils' `SoftDeletableModel`) can
   never be deleted through `DjangoMutation`: `django_strawberry_framework/mutations/resolvers.py::_delete_or_field_errors`
   unpacks `_total, per_model = instance.delete()` and raises `TypeError` as a top-level error (the write rolls back).
