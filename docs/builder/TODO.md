@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 27 to do.
+Progress: 26 to do.
 
 ## To do: fix before beta
 
@@ -17,10 +17,6 @@ Progress: 27 to do.
   no recourse except `relation_shapes = {"x": "list"}`. `DjangoListField` already picks
   `_execute_queryset_pipeline_async` per call, so lists work where connections fail. Confirmed live over
   `AsyncDjangoGraphQLView` (`allCategories`, `allItems`)
-- [ ] 5. The ModelForm flavor stores an explicit `null` on a non-null `BooleanField` as `false` and reports success
-  (`isPrivate: null` on a `True` row stored `False`, `errors: []`), where the model flavor returns a field-keyed error:
-  `django_strawberry_framework/utils/write_values.py::decode_provided_fields` hands `None` to the bound form, which
-  cleans it to the empty value. Fix, or decide that form-flavor `null` keeps form semantics and document it
 - [ ] 6. On Postgres an embedded NUL (`\u0000`) in a text value escapes as a top-level error with `data: null`:
   `django_strawberry_framework/utils/write_values.py::unencodable_text_error` states that NUL passes, a model
   `TextField` has no validator, and nothing in the package maps psycopg's `DataError` ("PostgreSQL text fields cannot
