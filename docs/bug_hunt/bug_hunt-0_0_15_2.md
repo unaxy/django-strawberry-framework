@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 169 done, 131 to do.
+Progress: 170 done, 133 to do.
 
 ## Done
 
@@ -618,6 +618,9 @@ Progress: 169 done, 131 to do.
   Ctrl-Z stops the group with the run and `fg` continues both; the record keeps the command's exit and adds
   `stopped_by`, the wrapper ends by the signal (`128 + N`); a closed output sink no longer hangs the run (36-cell
   matrix: 0 survivors after, the defect on every relay cell before)
+- [x] 296. `tests/test_workspace.py::test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order` failed on main:
+  `9a97127c` made CI's lint job run `scripts/check_citations.py --check --substrings` while the `gate` lint suite still
+  ran `--check`: fixed in `8e191ea3`, `scripts/workspace.py #"LINT_COMMANDS"` runs `--check --substrings` as CI does
 
 ## Outside review of the fixes
 
@@ -664,13 +667,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the untracked files and `.python-version` that `stash create` never records (12 of 12 probed shapes differ). `run`,
   `audit` and `diff <sha>` never notice, and `diff` reports a pre-existing untracked file as the item's own addition.
   Fix: snapshot the mirrored copy as a commit under the copy's lock (parent `HEAD`; for `gate`, its `head`) through one
-  helper for both; land after 146 or with it
+  helper for both; land after 146 or with it. Against 146: drop any rewrite of `item_diff` (146 owns it; a tree-vs-tree
+  diff over the real index's `ls-files -co` keeps the index dependence), reuse `_git` with the keyword `env` / `stdin` 146
+  adds instead of a second git runner, and run the snapshot under 146's `REPOSITORY_CONFIG_ONLY` (a global
+  `core.autocrlf` otherwise moves the snapshot's blobs)
 - [ ] 146. `workspace.py::item_diff` stitches `git diff <baseline>` over the paths the real index tracks with per-file
   `--no-index` renders of the untracked files, so its bytes depend on the index: staging an unchanged added file reorders
   the diff and changes its seal (`diff --check` fails after staging alone), `rm --cached` of an unchanged file emits it
   twice, and the `git diff` stat refresh rewrites the shared `.git/index`. The diff should be one baseline-versus-content
   diff through a private index, with global and system git config ignored; land before 141 or with it, and re-record any
-  `pass-<n>.diff` holding an untracked file, an unstaged move or an `rm --cached`
+  `pass-<n>.diff` holding an untracked file, an unstaged move or an `rm --cached`. Its landing rewords the module
+  docstring sentence item 298 quotes ("the caller's global git config is ignored" becomes "global and system"); update
+  298's quote in the same commit
 - [ ] 149. `scripts/count_queries.py` checks only `result.errors`, while Strawberry's `execute_sync` raises
   `MissingQueryError`, `CannotGetOperationTypeError` and `InvalidOperationTypeError`: an anonymous document with
   `--operation-name`, a name the document lacks, a fragment-only document and an empty file exit 1 ("scales with
@@ -678,7 +686,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `select_operation` (Strawberry's rule: a given name must match, none means the first operation; not graphql-core's
   `get_operation_ast`, which refuses a shape C53 pinned) replacing `effective_operation_name`, refusing through
   `parser.error` (exit 2) before bootstrap; parse errors move up front too (no failure JSON for a syntax error);
-  validation errors stay per-cell rows
+  validation errors stay per-cell rows. Open for you: whether a syntax error may stop writing the per-cell ERROR rows
+  and the failure JSON (it still exits 2), and whether the unreadable `--query` / `--compare` refusals (exit 2 through
+  `parser.error`) land in the same change
 - [ ] 150. `docs/bug_hunt/pbugs.md` item 20 has `DESC` `NULL` placement backwards for both backends: SQLite sorts `NULL`s
   last on `DESC` (executed) and Postgres first (its docs; Django's `nulls_order_largest`). The only false sentence of six
   that state a per-backend direction; no package code relies on it. Fix: reword it like `orders/inputs.py::Ordering`'s
@@ -826,9 +836,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `DjangoModelFormMutation` create and update write the chosen row's `str()` into the column:
   `forms/inputs.py::_field_triple_and_spec` types by the column alone and the form flavor has no runtime kind check
   (census the file / scalar siblings too; the serializer twin is 276)
-- [ ] 296. `tests/test_workspace.py::test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order` fails on main:
-  `9a97127c` made CI's lint job run `scripts/check_citations.py --check --substrings` (`.github/workflows/django.yml:94`),
-  but the `gate` lint suite still runs `--check` (`scripts/workspace.py:299`)
 - [ ] 297. `scripts/review_changed_python_diffs_against_head.py --against worktree` has 146's stitched, index-dependent new
   side: a package `.py` that was untracked at the baseline is listed as `A`, as if the item added it (`D` then `A` under
   141's snapshot baseline)
@@ -837,8 +844,7 @@ tracker number are recorded there; open remainders and new defects are filed as 
   depend on the caller, against `item_diff`'s "the caller's global git config is ignored" (`scripts/workspace.py:37`);
   here it hides `.claude/settings.local.json`
 - [ ] 299. The `scripts/workspace.py` module docstring says `status` prints disk use (line 81); it never has (since
-  `cd6a74aa`). Item 143's research also found that a fully idle pool loses `state.json`, against the docstring's "keeps
-  `state.json`"
+  `cd6a74aa`). (Its other false claim, that an idle pool keeps `state.json`, went with item 143's rewrite of that sentence.)
 - [ ] 300. `workspace.py::stream` never closes its pipe file objects: harmless in a CLI run, but an in-process `stream` call
   leaves them to the garbage collector, so under `filterwarnings = error` no test can call it in-process
 - [ ] 301. `workspace.py`'s lock files (`pool.lock`, `slots/slot-N.lock`, `gate.lock`) are regular files that are only
@@ -846,13 +852,30 @@ tracker number are recorded there; open remainders and new defects are filed as 
   command holds across 03:35 on a pool older than 3 days; a later command then creates and locks a new inode while the
   first still holds the old one (`_flock`'s `_still_names` check covers only callers already waiting), so two commands
   hold the same copy or `state.json` lock (item 143's mechanism; the flow lease is a directory and unaffected)
-- [ ] 301. `scripts/check_spec_glossary.py::auto_link_terms` (the NEXT.md Step 7 `--auto-link` run) protects only
+- [ ] 302. `scripts/check_spec_glossary.py::auto_link_terms` (the NEXT.md Step 7 `--auto-link` run) protects only
   fenced code and `[label](target)` links and matches a term with no boundary: a spec's first unlinked mention inside a
   code span, a double-backtick span, reference-link text, an autolink, a raw HTML attribute, a bare URL, a heading, or as
   the prefix of a longer identifier (`DjangoListFieldExtra`) gets `[term][glossary-x]` written into it (8 of 8 probed
   shapes). Fix: reuse the KANBAN inliner's CommonMark lexer (`build_kanban_md.py::_protected_regions`, extracted to a
   shared script module then), add block exclusions (headings, link-definition block, fenced and indented code) and the
   term boundary
+- [ ] 303. A partial update over a `DjangoMutation` whose `Meta.model` is a proxy of a model declaring a
+  `UniqueConstraint` (or `unique_together`) skips the uniqueness check: `mutations/resolvers.py::_unique_constraint_groups`
+  reads the proxy's own `Meta.constraints` / `unique_together`, which Django keeps only on the declaring class, so
+  `_unprovided_exclude` excludes the co-constrained unprovided field, `full_clean` passes and the duplicate reaches the
+  database as `IntegrityError` ("UNIQUE constraint failed: products_item.category_id, products_item.name") instead of the
+  `FieldError` envelope the concrete model gets (spec-036 partial-update carve-out). Fix: walk `_meta.all_parents` as
+  Django's `Model._get_unique_checks` does; check a multi-table-inheritance child whose parent declares the constraint
+- [ ] 304. An evaluated project `QuerySet` subclass carrying an aggregate annotation is refused by the visibility seal on
+  every policy, raw-list included (whose `carry_result_cache` exists to carry evaluated sources): a manager or hook
+  returning `LoanQuerySet.annotate(n=Count("pk"))` after iterating it raises "binds a function bound value", because
+  Django's `BaseExpression.convert_value` is a `cached_property` that stores a function in the node's `__dict__` on first
+  compile and `utils/querysets.py::_normalized_bound_value` refuses it
+- [ ] 305. A ModelForm `MultipleChoiceField` declared over a single-value column that lists no choices (`description =
+  MultipleChoiceField(...)` over a `TextField`) builds as `description: String!` and every create and update fails with
+  "Enter a list of values.": `forms/inputs.py::_form_choice_narrowing` returns before its list-over-single-value refusal
+  when the column lists no choices; the serializer twin is unchecked on purpose (spec-039), so say whether the form
+  flavor refuses at build or types the field as a list
 
 ## To do: holes found re-checking the fixes
 
