@@ -104,10 +104,11 @@ its own), and is harness-agnostic. ``DSF_WS_ROOT`` replaces
 ``$TMPDIR/dsf-ws``; a root inside the repository is refused, since copies of
 a tree holding its own copies recurse. ``DSF_WS_SLOTS`` caps each flow's pool
 (default 4: three parallel roles and the pinned ``before``). New copies are
-refused below 6 GB free. macOS deletes files under ``$TMPDIR`` idle for about
-three days but keeps the directories, so an idle pool keeps ``state.json``
-listing slots ``ready`` while the copies and their evidence are gone; ``gc``
-the flow before reusing it after an idle stretch.
+refused below 6 GB free. macOS deletes, daily, files under ``$TMPDIR`` not
+read for three days and keeps every directory, so a copy left idle loses its
+files and evidence while ``state.json`` may still list it ``ready``. The
+flow's marker is a directory, so ``gc`` still owns the folder; ``gc`` the flow
+before reusing it after an idle stretch.
 
 Guarantees, each one a hand-run failure this encodes away:
 
@@ -735,7 +736,7 @@ class Layout:
 
     @property
     def pool_lock(self) -> Path:
-        """Guards ``state.json``."""
+        """Guards ``state.json`` and the upgrade of a marker file to the marker directory."""
         return self.flow_dir / "pool.lock"
 
     @property
@@ -780,11 +781,21 @@ class Layout:
         return f"ws_{repo_key(self.repo_root)[:12]}_{self.flow}_"
 
     def ensure_marked(self) -> None:
-        """Create the flow folder with the marker that lets ``gc`` prove it owns it."""
+        """Create the flow folder with the marker that lets ``gc`` prove it owns it.
+
+        The marker is an empty directory, since the macOS ``$TMPDIR`` purge
+        deletes files and keeps every directory, so the proof outlives an idle
+        stretch. A marker file is replaced by the directory under
+        ``pool.lock``, so two commands upgrading it at once never collide.
+        """
         self.flow_dir.mkdir(parents=True, exist_ok=True)
         marker = self.flow_dir / MARKER_NAME
-        if not marker.exists():
-            _write_json(marker, {"repo_root": str(self.repo_root), "flow": self.flow})
+        if marker.is_dir():
+            return
+        with file_lock(self.pool_lock):
+            if not marker.is_dir():
+                marker.unlink(missing_ok=True)
+                marker.mkdir()
 
 
 def _make_flow_dir(flow_dir: Path) -> None:
@@ -2138,7 +2149,10 @@ def running_slots(layout: Layout, slots: Iterable[str]) -> list[str]:
 
 
 def _remove_flow_dir(flow_dir: Path) -> None:
-    """Remove the flow folder, its marker last, so a removal that fails can be run again."""
+    """Remove the flow folder, its marker last, so a removal that fails can be run again.
+
+    The marker is a directory, or a file nothing has upgraded yet.
+    """
     for entry in flow_dir.iterdir():
         if entry.name == MARKER_NAME:
             continue
@@ -2146,7 +2160,11 @@ def _remove_flow_dir(flow_dir: Path) -> None:
             shutil.rmtree(entry)
         else:
             entry.unlink()
-    (flow_dir / MARKER_NAME).unlink()
+    marker = flow_dir / MARKER_NAME
+    if marker.is_dir():
+        marker.rmdir()
+    else:
+        marker.unlink()
     flow_dir.rmdir()
 
 

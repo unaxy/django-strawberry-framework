@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -190,7 +191,7 @@ def test_check_shared_checkout_refuses_a_copy(repo: Path, tmp_path: Path) -> Non
     workspace.check_shared_checkout(repo)
     copy = tmp_path / "flow" / "slots" / "slot-1"
     copy.mkdir(parents=True)
-    _write(tmp_path / "flow" / workspace.MARKER_NAME, "{}")
+    (tmp_path / "flow" / workspace.MARKER_NAME).mkdir()
 
     with pytest.raises(workspace.WorkspaceError, match="shared checkout"):
         workspace.check_shared_checkout(copy)
@@ -444,7 +445,7 @@ def test_bind_reuses_an_address_and_gives_each_new_address_its_own_copy(
 
     assert (first.slot, again.slot, second.slot) == ("slot-1", "slot-1", "slot-2")
     assert _statuses(layout) == {"slot-1": "syncing", "slot-2": "syncing"}
-    assert (layout.flow_dir / workspace.MARKER_NAME).exists()
+    assert (layout.flow_dir / workspace.MARKER_NAME).is_dir()
 
 
 @pytest.fixture
@@ -1102,6 +1103,116 @@ def test_gc_cut_short_keeps_the_marker_so_the_next_gc_finishes(
     assert (layout.flow_dir / workspace.MARKER_NAME).exists()
     workspace.gc(layout)
     assert not layout.flow_dir.exists()
+
+
+def _purge(root: Path, keep: tuple[str, ...] = ()) -> None:
+    """Unlink every regular file under ``root`` but ``keep``, as the macOS ``$TMPDIR`` purge does.
+
+    Directories and symlinks stay; ``keep`` names paths relative to ``root``.
+    """
+    for folder, _dirs, files in os.walk(root):
+        for name in files:
+            path = Path(folder) / name
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and str(path.relative_to(root)) not in keep
+            ):
+                path.unlink()
+
+
+def test_gc_removes_a_flow_the_tmpdir_purge_emptied(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
+    binding = workspace.bind(layout, _address("perf-1"))
+    _write(binding.directory / "file.txt", "x\n")
+    _write(layout.run_log, "{}\n")
+    assert (layout.flow_dir / workspace.MARKER_NAME).is_dir()
+
+    _purge(layout.flow_dir)
+    workspace.gc(layout)
+
+    assert not layout.flow_dir.exists()
+    assert not layout.base.exists()
+    assert not layout.base.parent.exists()
+
+
+def test_a_purge_that_spares_state_json_keeps_the_flow_releasable_and_listed(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(workspace.ROOT_ENV, str(layout.base.parent))
+    binding = workspace.bind(layout, _address("perf-1"))
+    _write(binding.directory / "file.txt", "x\n")
+
+    _purge(layout.flow_dir, keep=("state.json",))
+
+    assert "review: 1 of 4 copies" in workspace.status(layout.repo_root, None)
+    assert workspace.release(layout, "pkg/a.py") == ["slot-1 review/pkg/a.py/perf-1"]
+
+
+@pytest.mark.parametrize("run_first", [True, False])
+def test_a_marker_file_becomes_the_directory_and_gc_removes_either(
+    layout: workspace.Layout,
+    *,
+    run_first: bool,
+) -> None:
+    marker = _write(layout.flow_dir / workspace.MARKER_NAME, "{}")
+    if run_first:
+        with workspace.flow_lease(layout) as marked:
+            assert marked
+        assert marker.is_dir()
+
+    workspace.gc(layout)
+
+    assert not layout.flow_dir.exists()
+
+
+def test_a_marker_file_is_upgraded_under_the_pool_lock(layout: workspace.Layout) -> None:
+    marker = _write(layout.flow_dir / workspace.MARKER_NAME, "{}")
+    upgrade = threading.Thread(target=layout.ensure_marked)
+    try:
+        with workspace.file_lock(layout.pool_lock):
+            upgrade.start()
+            upgrade.join(timeout=0.5)
+            waited = upgrade.is_alive()
+            still_a_file = marker.is_file()
+    finally:
+        if upgrade.ident is not None:
+            upgrade.join()
+
+    assert waited
+    assert still_a_file
+    assert marker.is_dir()
+
+
+def test_a_marker_another_command_upgraded_first_is_left_as_the_directory(
+    layout: workspace.Layout,
+) -> None:
+    marker = _write(layout.flow_dir / workspace.MARKER_NAME, "{}")
+    errors: list[OSError] = []
+
+    def _upgrade() -> None:
+        try:
+            layout.ensure_marked()
+        except OSError as error:
+            errors.append(error)
+
+    upgrade = threading.Thread(target=_upgrade)
+    try:
+        with workspace.file_lock(layout.pool_lock):
+            upgrade.start()
+            upgrade.join(timeout=0.5)
+            marker.unlink()
+            marker.mkdir()
+    finally:
+        if upgrade.ident is not None:
+            upgrade.join()
+
+    assert errors == []
+    assert marker.is_dir()
 
 
 def test_a_lock_taken_after_gc_never_brings_the_flow_back(

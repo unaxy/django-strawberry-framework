@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 164 done, 129 to do.
+Progress: 165 done, 134 to do.
 
 ## Done
 
@@ -581,6 +581,12 @@ Progress: 164 done, 129 to do.
   a schema-build `ConfigurationError` on any field the operation binds (every declared field for an update) and the
   fallback is gone (the item's `to_field_name`-keyed half was already fixed by item 266); fakeshop gains `Branch.isil` and
   `InterlibraryLoan` with create / update in all three flavors
+- [x] 143. The `.dsf-ws` marker was a regular file written once and only `.exists()`-checked, so its atime never moved
+  and the macOS daily `$TMPDIR` purge (regular files whose atime is over 3 days old; directories never removed) deleted
+  it 3 days after the flow's first command: `gc` then refused the flow, `release` freed nothing while `state.json` kept
+  the bindings, and `status` dropped the flow: fixed, the marker is an empty directory, `Layout.ensure_marked` turns a
+  marker file into it under `pool.lock` (re-checking inside the lock), and `_remove_flow_dir` removes it last with
+  `rmdir` or `unlink`; `gc` still refuses an unmarked folder (13-row grid: 7/13 at the parent, 13/13 after)
 
 ## Outside review of the fixes
 
@@ -621,31 +627,66 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 141. `workspace.py baseline` records the ITEM_BASELINE sha before it waits for the copy's lock and syncs, so the
-  `before` copy can come from a later tree than the recorded sha
-- [ ] 142. A SIGKILLed `workspace.py` leaves its command running without any lease (its fds are not inherited), so `gc`
-  or `release` can remove or unbind the copy under a still-running pytest
-- [ ] 143. The macOS `$TMPDIR` purge deletes a flow's `.dsf-ws` marker after about 3 idle days, so START.md's "gc the flow
-  before reuse" refuses ("carries no marker") until a run writes it again
-- [ ] 145. `workspace.py status` can raise `FileNotFoundError` reading `state.json` while a `gc` removes the flow
-- [ ] 146. `workspace.py::item_diff` emits the tracked and staged diff first, then the untracked files: staging an unchanged
-  added file moves it into the first group, so the diff order and its seal change and `diff --check` fails after staging
-  alone; the diff should be one baseline-versus-content diff independent of the index
-- [ ] 147. `scripts/build_kanban_md.py::GlossaryInliner._protected` does not protect URI or email autolinks:
-  `Read <https://example.com/?q=DjangoListField>.` gets a glossary link inside the URI autolink, changing its destination
-  (`<DjangoListField@example.com>` likewise); a later plain mention must still link (the test's mention must not be
-  followed by `.`, which `TERM_BOUNDARY_AFTER` reads as a path character). `09d0caa0` already protects `[...]` groups with
-  quoted titles, nested-parenthesis destinations, shortcut references and double-backtick code spans
-- [ ] 149. `scripts/count_queries.py` with a `--query` document that lacks the `--operation-name` (an anonymous `query { ... }`,
-  or a named document without that name) raises an uncaught `CannotGetOperationTypeError` from `execute_sync` and exits 1,
-  the "scales with cardinality" code, instead of printing NOT MEASURED and exiting 2
-- [ ] 150. `docs/bug_hunt/pbugs.md`'s Postgres scrutiny line has `DESC` `NULL` placement backwards: SQLite sorts `NULL`s
-  last on `DESC` and Postgres first
-- [ ] 155. Specs 030, 031 and 032 (lines naming the "uv.lock-resolved" Strawberry) and the spec-030 / spec-032 rationale
-  companions name strawberry-graphql 0.324.0; `uv.lock` resolves 0.327.7. Re-check each claim against the locked release
-- [ ] 158. Outside QUERY operations (operation gate closed: mutation, subscription, a mutation's post-write re-fetch) a planned
-  child keeps the hook's consumer `.only()` and gains no link columns, so selected columns lazy-load row by row (fails on
-  async); read from code, not reproduced, unreachable from fakeshop
+- [ ] 141. `workspace.py baseline` and `gate` take their sha (`baseline_sha`: `git stash create` or `HEAD`) from the
+  shared tree before the copy is mirrored, so the sha never names the copy. A commit, tracked edit, untracked add or
+  `add -f` landing while `baseline` waits on the copy's lock is in the copy only; with no concurrency the copy still holds
+  the untracked files and `.python-version` that `stash create` never records (12 of 12 probed shapes differ). `run`,
+  `audit` and `diff <sha>` never notice, and `diff` reports a pre-existing untracked file as the item's own addition.
+  Fix: snapshot the mirrored copy as a commit under the copy's lock (parent `HEAD`; for `gate`, its `head`) through one
+  helper for both; land after 146 or with it
+- [ ] 142. Every `workspace.py` lock is an `flock` held only by the wrapper's own descriptors, and `::stream`,
+  `::_run_checked` (`uv sync`) and `::probe` start their children without them: after a SIGKILL of the wrapper the child
+  keeps working in the copy with no lease, and `gc` removes the flow or `release` unbinds the slot under it (`run`,
+  `gate` and a kill during `uv sync` alike; a real `uv sync` wrote about 25,000 `.venv` entries after its wrapper died).
+  Fix: the children inherit the held flow lease, copy lock and `gate.lock` (`pass_fds`), never `git` or docker; land after
+  145 and 284 (same `lease` and `Popen` lines)
+- [ ] 145. `workspace.py::_read_json_object` and `::load_runs` test `exists()` and then read, and `status`, `audit` and
+  `gc`'s busy branch read with no lease by design, so a concurrent `gc` raises an uncaught `FileNotFoundError` (2 in about
+  38,000 `status` calls racing `gc`). A file gone at read time must read as absent, except `lease`'s manifest read, where
+  absent would yield `{}` and a run record with false provenance: `_admit` must read the manifest under `pool.lock` and
+  resync when it is gone; land before 142
+- [ ] 146. `workspace.py::item_diff` stitches `git diff <baseline>` over the paths the real index tracks with per-file
+  `--no-index` renders of the untracked files, so its bytes depend on the index: staging an unchanged added file reorders
+  the diff and changes its seal (`diff --check` fails after staging alone), `rm --cached` of an unchanged file emits it
+  twice, and the `git diff` stat refresh rewrites the shared `.git/index`. The diff should be one baseline-versus-content
+  diff through a private index, with global and system git config ignored; land before 141 or with it, and re-record any
+  `pass-<n>.diff` holding an untracked file, an unstaged move or an `rm --cached`
+- [ ] 147. `scripts/build_kanban_md.py::GlossaryInliner._protected` copies CommonMark precedence only for single-backtick
+  code spans, so a glossary term inside a URI or email autolink (`<https://example.com/?q=DjangoListField>`,
+  `<DjangoListField@example.com>`), a raw HTML tag (`<span title="...">`), a double-backtick span (contrary to what was
+  claimed for `09d0caa0`) or a GitHub bare URL / `www.` / bare email gets a link written into it, and a `]` inside an
+  autolink or attribute pairs with a `[` so a term inside real link text links too (19 of 33 probed rows; GitHub renders
+  the broken destinations). Latent: the committed KANBAN.md holds no autolink or bare URL. Fix: one left-to-right
+  tokenizer (escape | code span with CommonMark backtick-run matching | autolink | raw HTML) masked before bracket
+  pairing, autolinks and HTML as atomic links, plus an over-matching GitHub extended-autolink guard; tests as rows of
+  `test_inliner_leaves_existing_links_intact`; closes C24's remainder
+- [ ] 149. `scripts/count_queries.py` checks only `result.errors`, while Strawberry's `execute_sync` raises
+  `MissingQueryError`, `CannotGetOperationTypeError` and `InvalidOperationTypeError`: an anonymous document with
+  `--operation-name`, a name the document lacks, a fragment-only document and an empty file exit 1 ("scales with
+  cardinality") by traceback, as do an unreadable `--query` and a missing or non-JSON `--compare`. Fix: one up-front
+  `select_operation` (Strawberry's rule: a given name must match, none means the first operation; not graphql-core's
+  `get_operation_ast`, which refuses a shape C53 pinned) replacing `effective_operation_name`, refusing through
+  `parser.error` (exit 2) before bootstrap; parse errors move up front too (no failure JSON for a syntax error);
+  validation errors stay per-cell rows
+- [ ] 150. `docs/bug_hunt/pbugs.md` item 20 has `DESC` `NULL` placement backwards for both backends: SQLite sorts `NULL`s
+  last on `DESC` (executed) and Postgres first (its docs; Django's `nulls_order_largest`). The only false sentence of six
+  that state a per-backend direction; no package code relies on it. Fix: reword it like `orders/inputs.py::Ordering`'s
+  docstring; no test (already pinned on both vendors by `_ordered_with_missing`)
+- [ ] 155. Nine sentences in specs 030, 031, 032 and the spec-030 / spec-032 rationale companions name 0.324.0 as the
+  `uv.lock`-resolved Strawberry; the lock resolves 0.327.7. Every technical claim still holds on the locked release (26
+  executed checks; `strawberry/relay/` byte-identical), so only the number is false. Fix: drop the number, spelling it
+  "the `uv.lock`-resolved release" as spec-029 does, so a lock-only bump cannot falsify it again; floor pins and audited
+  ranges stay. Open for you: a citation-gate rule refusing a version literal beside "locked" / "`uv.lock`-resolved"
+- [ ] 158. The optimizer's operation gate (`walker.py::_enable_only_for_operation`) is decided per plan-cache key, so under
+  a mutation no writer records columns and a consumer `.only()` / `.defer()` (hook, manager, resolver) is never widened:
+  a hook `.only("name")` under a mutation runs 77 statements where the QUERY runs 2 (152 with one more column; a nested
+  connection 102), `strictness="raise"` stays silent, and a `DjangoMutation` re-fetch selecting a deferred column fails
+  on async with `SynchronousOnlyOperation`. Breaks spec-004's hook-union row and spec-035 Decision 5. Subscriptions are
+  not reachable (fail without a hook). Fix: writers record columns unconditionally; the plan carries a cached
+  `introduce_projection` and applies a projection only when it is set or the queryset already carries a consumer one
+  (non-QUERY never introduces, always widens); `plans.py::prune_unsupportable_select_related` then has no live caller and
+  goes; live rows beside `test_query/test_library_api.py::_hooked_holder_schema`. Open for you: retracting the prune
+  design in specs 004 and 035, and whether `types/resolvers.py::_FK_ELISION_UNSAFE` stays as a defensive check
 - [ ] 160. A one-sided declared range (`range: {start: ...}` or only `end`) compiles to `BETWEEN x AND NULL` and returns no rows
   (`filters/base.py::RangeFilter`); seen early in the fixes, re-check on HEAD
 - [ ] 161. A declared `django_filters.RangeFilter` writes `_0` / `_1` keys while the installed django-filter widget may read
@@ -780,6 +821,27 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `DjangoModelFormMutation` create and update write the chosen row's `str()` into the column:
   `forms/inputs.py::_field_triple_and_spec` types by the column alone and the form flavor has no runtime kind check
   (census the file / scalar siblings too; the serializer twin is 276)
+- [ ] 296. `tests/test_workspace.py::test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order` fails on main:
+  `9a97127c` made CI's lint job run `scripts/check_citations.py --check --substrings` (`.github/workflows/django.yml:94`),
+  but the `gate` lint suite still runs `--check` (`scripts/workspace.py:299`)
+- [ ] 297. `scripts/review_changed_python_diffs_against_head.py --against worktree` has 146's stitched, index-dependent new
+  side: a package `.py` that was untracked at the baseline is listed as `A`, as if the item added it (`D` then `A` under
+  141's snapshot baseline)
+- [ ] 298. Git's default global ignore file (`~/.config/git/ignore`) still applies under `GIT_CONFIG_GLOBAL=/dev/null`; only
+  `-c core.excludesFile=/dev/null` turns it off. So `workspace.py`'s untracked listings (`wanted_files`, `item_diff`)
+  depend on the caller, against `item_diff`'s "the caller's global git config is ignored" (`scripts/workspace.py:37`);
+  here it hides `.claude/settings.local.json`
+- [ ] 299. The `scripts/workspace.py` module docstring says `status` prints disk use (line 81); it never has (since
+  `cd6a74aa`). Item 143's research also found that a fully idle pool loses `state.json`, against the docstring's "keeps
+  `state.json`"
+- [ ] 300. `workspace.py::stream` never closes its pipe file objects: harmless in a CLI run, but an in-process `stream` call
+  leaves them to the garbage collector, so under `filterwarnings = error` no test can call it in-process
+- [ ] 301. `workspace.py`'s lock files (`pool.lock`, `slots/slot-N.lock`, `gate.lock`) are regular files that are only
+  opened and `flock`ed, never read, so their atime stays at creation and the macOS `$TMPDIR` purge can unlink one a
+  command holds across 03:35 on a pool older than 3 days; a later command then creates and locks a new inode while the
+  first still holds the old one (`_flock`'s `_still_names` check covers only callers already waiting), so two commands
+  hold the same copy or `state.json` lock (item 143's mechanism; the flow lease is a directory and unaffected)
+
 ## To do: holes found re-checking the fixes
 
 
