@@ -1079,17 +1079,19 @@ def test_a_shared_directory_that_is_not_this_users_own_is_refused_before_anythin
         directory.symlink_to(elsewhere, target_is_directory=True)
     else:
         directory.mkdir()
-        real_lstat = os.lstat
+        real_lstat = Path.lstat
 
-        def foreign_lstat(path: "str | os.PathLike[str]") -> os.stat_result:
+        # The ownership check reads ``Path.lstat``; Python 3.10's pathlib binds ``os.lstat``
+        # at import, so a stub on ``os.lstat`` would never reach it there.
+        def foreign_lstat(path: Path) -> os.stat_result:
             status = real_lstat(path)
-            if Path(path) != directory:
+            if path != directory:
                 return status
             fields = list(status)
             fields[4] = os.getuid() + 1
             return os.stat_result(fields)
 
-        monkeypatch.setattr(os, "lstat", foreign_lstat)
+        monkeypatch.setattr(Path, "lstat", foreign_lstat)
 
     code = prove_failability.main([str(_manifest(tmp_path))])
 

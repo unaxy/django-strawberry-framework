@@ -806,7 +806,12 @@ def _wrapped(_owner: type[object]) -> None:
     """The function each builtin wrapper below holds in its ``__func__`` slot."""
 
 
-class _LyingClassmethod(classmethod[object, ..., object]):
+# ``classmethod`` is not subscriptable at runtime before Python 3.11 and a class base is
+# evaluated there, so the parametrized type is carried by an annotated alias.
+_ClassmethodBase: type[classmethod[object, ..., object]] = classmethod
+
+
+class _LyingClassmethod(_ClassmethodBase):
     """A ``classmethod`` subclass whose ``__func__`` lies; never an exact builtin wrapper."""
 
     @property
