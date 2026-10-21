@@ -23,10 +23,11 @@ import dataclasses
 import datetime
 import enum
 import inspect
+import itertools
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NamedTuple, NoReturn, TypeAlias, TypeVar, cast
 from unittest import mock
@@ -82,7 +83,7 @@ from django_filters.filterset import FILTER_FOR_DBFIELD_DEFAULTS as UPSTREAM
 from django_filters.filterset import BaseFilterSet, UnknownFieldBehavior
 from django_filters.filterset import FilterSetMetaclass as DjangoFilterMetaclass
 from graphql import GraphQLError
-from strawberry.types.base import get_object_definition
+from strawberry.types.base import StrawberryOptional, get_object_definition
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -159,6 +160,7 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
     require,
 )
+from django_strawberry_framework.utils.canonical import canonical_sort_key
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
 from django_strawberry_framework.utils.typing import object_result
@@ -3127,6 +3129,187 @@ def test_a_str_enum_class_meta_fields_is_refused_a_declared_filter_like_a_collec
 
     assert _declared_filter_probe_error(names) == _declared_filter_probe_error(
         _FieldNames("name", "custom"),
+    )
+
+
+_CATEGORY_COLUMNS = (
+    "name",
+    "description",
+    "is_private",
+    "created_date",
+    "updated_date",
+)
+_NAME_LOOKUPS = (
+    "exact",
+    "icontains",
+    "istartswith",
+    "iendswith",
+)
+# Each lookup's field on the generated per-field lookup input.
+_LOOKUP_INPUT_FIELDS = {
+    "exact": "exact",
+    "icontains": "i_contains",
+    "istartswith": "i_starts_with",
+    "iendswith": "i_ends_with",
+}
+_LOGIC_INPUT_FIELDS = frozenset({"and_", "or_", "not_"})
+
+
+def _canonical(names: Iterable[str]) -> list[str]:
+    return sorted(names, key=canonical_sort_key)
+
+
+def _scrambled(
+    kind: Callable[[Iterable[str]], Collection[str]],
+    members: Sequence[str],
+    *,
+    drop: tuple[str, ...] = (),
+) -> Collection[str]:
+    """A ``kind`` over ``members`` (plus every ``drop`` name) iterating out of canonical order.
+
+    The order is read in this process, so the row exercises the reorder under
+    whatever ``PYTHONHASHSEED`` the run has; the ``drop`` names are ignored when
+    judging the order, since ``Meta.exclude`` removes them before it matters.
+    """
+    for size in range(len(members), 1, -1):
+        for combo in itertools.combinations(members, size):
+            declared = kind(combo + drop)
+            kept = [name for name in declared if name not in drop]
+            if kept != _canonical(kept):
+                return declared
+    pytest.fail(f"no {kind.__name__} over {members!r} iterates out of canonical order")
+
+
+def _filter_input_order(filterset: type[FilterSet]) -> list[tuple[str, list[str]]]:
+    """Each generated filter input field, in order, with its lookup sub-input's fields in order."""
+    root = get_object_definition(FilterArgumentsFactory(filterset).arguments, strict=True)
+    order: list[tuple[str, list[str]]] = []
+    for field in root.fields:
+        if field.python_name in _LOGIC_INPUT_FIELDS:
+            continue
+        optional = field.type
+        assert isinstance(optional, StrawberryOptional)
+        lookup_input = get_object_definition(optional.of_type, strict=True)
+        order.append((field.python_name, [sub.python_name for sub in lookup_input.fields]))
+    return order
+
+
+class _CanonicalOrderRow(NamedTuple):
+    """One unordered ``Meta`` declaration and the order it must expand in."""
+
+    meta: dict[str, object]
+    # ``(field name, lookups)`` in the expected order: each lookup a ``base_filters`` entry.
+    expected: list[tuple[str, list[str]]]
+
+
+_RowBuilder: TypeAlias = Callable[[], _CanonicalOrderRow]
+
+
+def _names_meta(key: str, kind: Callable[[Iterable[str]], Collection[str]]) -> _RowBuilder:
+    def build() -> _CanonicalOrderRow:
+        names = _scrambled(kind, _CATEGORY_COLUMNS)
+        return _CanonicalOrderRow(
+            {key: names},
+            [(name, ["exact"]) for name in _canonical(names)],
+        )
+
+    return build
+
+
+def _excluded_meta() -> _CanonicalOrderRow:
+    names = _scrambled(set, _CATEGORY_COLUMNS[:-1], drop=("updated_date",))
+    return _CanonicalOrderRow(
+        {"fields": names, "exclude": {"updated_date"}},
+        [(name, ["exact"]) for name in _canonical(names) if name != "updated_date"],
+    )
+
+
+def _lookup_set_meta() -> _CanonicalOrderRow:
+    lookups = _scrambled(set, _NAME_LOOKUPS)
+    return _CanonicalOrderRow(
+        {"fields": {"name": lookups, "description": ["exact"]}},
+        [("name", _canonical(lookups)), ("description", ["exact"])],
+    )
+
+
+_CANONICAL_ORDER_ROWS: dict[str, _RowBuilder] = {
+    "fields set": _names_meta("fields", set),
+    "fields frozenset": _names_meta("fields", frozenset),
+    "filter_fields set": _names_meta("filter_fields", set),
+    "filter_fields frozenset": _names_meta("filter_fields", frozenset),
+    "set beside a set exclude": _excluded_meta,
+    "set of lookups in a dict": _lookup_set_meta,
+}
+
+
+@pytest.mark.parametrize("row", list(_CANONICAL_ORDER_ROWS))
+def test_an_unordered_meta_fields_expands_in_canonical_order(row: str) -> None:
+    """A ``set`` / ``frozenset`` declaration expands in ``canonical_sort_key`` order.
+
+    django-filter iterates the declaration as given, so without the reorder its
+    hash order (which moves with ``PYTHONHASHSEED``) would order ``base_filters``,
+    the generated filter input's fields and each field's lookup sub-input. Each
+    row declares a set this process iterates out of canonical order. The
+    declaration itself is kept as declared.
+    """
+    declared, expected = _CANONICAL_ORDER_ROWS[row]()
+    name = "CanonicalOrder" + "".join(word.title() for word in row.replace("_", " ").split())
+    meta = type("Meta", (), {"model": Category, **declared})
+    probe = type(name, (FilterSet,), {"Meta": meta, "__module__": __name__})
+    assert issubclass(probe, FilterSet)
+
+    assert list(probe.base_filters) == [
+        field if lookup == "exact" else f"{field}__{lookup}"
+        for field, lookups in expected
+        for lookup in lookups
+    ]
+    assert _filter_input_order(probe) == [
+        (field, [_LOOKUP_INPUT_FIELDS[lookup] for lookup in lookups])
+        for field, lookups in expected
+    ]
+    assert read_attr(read_attr(probe, "_meta"), "fields") is next(iter(declared.values()))
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        pytest.param(
+            ["updated_date", "name", "is_private"],
+            ["updated_date", "name", "is_private"],
+            id="list",
+        ),
+        pytest.param(
+            ("updated_date", "name", "is_private"),
+            ["updated_date", "name", "is_private"],
+            id="tuple",
+        ),
+        pytest.param(
+            {"name": ["istartswith", "exact", "icontains"]},
+            ["name__istartswith", "name", "name__icontains"],
+            id="dict of lists",
+        ),
+    ],
+)
+def test_an_ordered_meta_fields_keeps_its_declared_order(
+    fields: object,
+    expected: list[str],
+) -> None:
+    """Positive control: a declaration out of canonical order but ordered is expanded as declared."""
+    meta = type("Meta", (), {"model": Category, "fields": fields})
+    probe = type("DeclaredOrderProbe", (FilterSet,), {"Meta": meta, "__module__": __name__})
+    assert issubclass(probe, FilterSet)
+
+    assert list(probe.base_filters) == expected
+    assert read_attr(read_attr(probe, "_meta"), "fields") is fields
+
+
+@pytest.mark.parametrize("kind", [set, frozenset])
+def test_an_unordered_meta_fields_stays_out_of_the_declared_filter_allowance(
+    kind: Callable[[Iterable[str]], Collection[str]],
+) -> None:
+    """The canonical reorder never turns a set into the ``list`` django-filter lets name a declared filter."""
+    assert "'Meta.fields' must not contain non-model field names: custom" in (
+        _declared_filter_probe_error(kind(["name", "custom"]))
     )
 
 

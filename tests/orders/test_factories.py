@@ -13,6 +13,7 @@ Factory construction and collision guards have no wire shape. Published
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Iterator
 from typing import get_args
 
@@ -33,6 +34,7 @@ from django_strawberry_framework.orders.inputs import (
     _materialized_names,
 )
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr
+from django_strawberry_framework.utils.canonical import canonical_sort_key
 from tests._idioms import definition_raises, type_args
 
 
@@ -418,17 +420,41 @@ def test_factory_dedupes_double_enqueued_target_via_seen_check() -> None:
 # ---------------------------------------------------------------------------
 
 
+_BOOK_COLUMNS = (
+    "title",
+    "subtitle",
+    "circulation_status",
+    "shelf",
+    "id",
+)
+
+
+def _out_of_canonical_order_set() -> set[str]:
+    """A set of ``Book`` columns this process iterates out of canonical order."""
+    for size in range(len(_BOOK_COLUMNS), 1, -1):
+        for combo in itertools.combinations(_BOOK_COLUMNS, size):
+            declared: set[str] = set(combo)
+            if list(declared) != sorted(declared, key=canonical_sort_key):
+                return declared
+    pytest.fail(f"no set over {_BOOK_COLUMNS!r} iterates out of canonical order")
+
+
 def test_orderset_set_shaped_meta_fields_expand_in_canonical_order() -> None:
-    """Class-declared set-shaped ``Meta.fields`` expand in ``repr``-sorted order."""
+    """Class-declared set-shaped ``Meta.fields`` expand in ``canonical_sort_key`` order.
+
+    The set iterates out of canonical order in this process, so the row fails
+    under every ``PYTHONHASHSEED`` when the expansion follows the hash order.
+    """
+    declared = _out_of_canonical_order_set()
+    snapshot = set(declared)
 
     class BookOrderSetFields(OrderSet):
         class Meta:
             model = library_models.Book
-            fields = {"title", "subtitle"}
+            fields = declared
 
-    expected = sorted(["title", "subtitle"], key=repr)
-    assert list(BookOrderSetFields.get_fields()) == expected
-    assert BookOrderSetFields.Meta.fields == {"title", "subtitle"}
+    assert list(BookOrderSetFields.get_fields()) == sorted(declared, key=canonical_sort_key)
+    assert BookOrderSetFields.Meta.fields == snapshot
 
 
 def test_factory_handles_diamond_dependency_graph() -> None:
