@@ -4,7 +4,7 @@ The package's opt-in session-auth surface: ``login_mutation()`` /
 ``logout_mutation()`` (this module), ``register_mutation()`` (this module - a
 narrow ``DjangoMutation`` rider, spec-040 Decision 6), and ``current_user()``
 (``auth/queries.py``). Everything here is a thin layer over the frozen write
-foundation - the declaration-ledger mechanics come from ``mutations.sets``,
+foundation - the declaration-ledger mechanics come from ``write_mixins``,
 payload construction from ``mutations.inputs``, authorization + the envelope
 leaf ctors from ``mutations.resolvers``, and request resolution from
 ``utils.permissions`` (the spec-040 Helper-reuse obligations). The genuinely new
@@ -61,13 +61,7 @@ from django_strawberry_framework.mutations.inputs import (
     payload_type_name,
 )
 from django_strawberry_framework.mutations.resolvers import run_write_pipeline_sync
-from django_strawberry_framework.mutations.sets import (
-    DjangoMutation,
-    DjangoMutationMetaclass,
-    _validate_permission_classes,
-    backing_model_of,
-    make_declaration_registry,
-)
+from django_strawberry_framework.mutations.sets import DjangoMutation, DjangoMutationMetaclass
 from django_strawberry_framework.mutations.sets import (
     register_mutation as record_mutation_declaration,
 )
@@ -97,6 +91,11 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.sessions import actor_transition
 from django_strawberry_framework.utils.write_values import unencodable_text_error
+from django_strawberry_framework.write_mixins import (
+    _validate_permission_classes,
+    backing_model_of,
+    make_declaration_registry,
+)
 
 from . import sessions
 
@@ -118,12 +117,12 @@ if TYPE_CHECKING:
         _GeneratedPayload,
         _M2MAssignments,
     )
-    from django_strawberry_framework.mutations.sets import (
+    from django_strawberry_framework.types.base import DjangoType
+    from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
+    from django_strawberry_framework.write_mixins import (
         DeclarationRegistry,
         _ValidatedMutationMeta,
     )
-    from django_strawberry_framework.types.base import DjangoType
-    from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 
     # The register decode product: the constructed (unsaved) user, the M2M
     # replace-sets, the ``full_clean`` exclude list, and the captured raw password.
@@ -247,7 +246,7 @@ class _AuthMutationMetaSnapshot:
     session field does not have).
 
     Sealed once ``__init__`` finishes, mirroring
-    ``mutations/sets.py::_ValidatedMutationMeta``: the holder's snapshot is the
+    ``write_mixins.py::_ValidatedMutationMeta``: the holder's snapshot is the
     per-request authorization source for the fixed auth surfaces
     (``login`` / ``logout`` / ``current_user`` ride ``DjangoMutation.check_permission``
     by call), and a ``has_permission`` hook runs inside the walk with the holder

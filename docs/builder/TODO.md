@@ -368,7 +368,7 @@ Entry format:
 - Original text: "`mutations/sets.py` (1,606 lines) has become the cross-flavor write substrate -- 25 distinct symbols imported out by `forms/sets.py`, `rest_framework/sets.py`, and `auth/mutations.py`, 4 private-by-name and 6 helpers with zero caller inside `mutations/` -- with `sets_mixins.py` the exact precedent and the home Decision 4 predicted."
 - Current state: Open (contract-level, maintainer call). `django_strawberry_framework/mutations/sets.py` is now about 2,000 lines and is still imported by `forms/sets.py`, `forms/resolvers.py`, `rest_framework/sets.py`, `rest_framework/resolvers.py`, `auth/mutations.py`, `types/finalizer.py` and `utils/write_transaction.py`; the 25 / 6 figures were not re-derived.
 - Also tracked: Card `TODO-ALPHA-053-0.0.15` (WP-B), `KANBAN.md` line 316.
-- Verdict: **IMPLEMENT**: under card 053 WP-B: extract the cross-flavor substrate out of `mutations/sets.py`. Large; the file is dirty from another session now.
+- Verdict: **IMPLEMENT** (done): under card 053 WP-B: the cross-flavor substrate moved out of `mutations/sets.py` into `django_strawberry_framework/write_mixins.py`, the write-side twin of `sets_mixins.py`; `mutations/sets.py` keeps only `DjangoMutation`'s own class, metaclass, ledger and bind.
 
 ### T-083: No gate greps for a staged `TODO(spec-NNN ...)` anchor
 - Source: `docs/builder/DONE/build-036-mutations-0_0_11.md` (`## R1 outcome`, "The two SKIPPED contracts", item 1; `## Deferred-work disposition`, "Homed on cards", the `TODO-ALPHA-056-0.0.17` bullet "the absent staged-anchor gate")

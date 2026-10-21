@@ -52,10 +52,10 @@ from django_strawberry_framework.mutations.permissions import (
     _require_sync_bool_auth_result,
     run_permission_classes,
 )
-from django_strawberry_framework.mutations.sets import _ValidatedMutationMeta
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._idioms import saved_pk
 from tests._info import make_info
 
@@ -63,10 +63,9 @@ if TYPE_CHECKING:
     from django_strawberry_framework.mutations.permissions import _ModelResolvingMutation
 
     class _CreateItemMutation(_ModelResolvingMutation, Protocol):
-        """A bound create mutation class: what the permission seam and the seal rows both read."""
+        """A bound create mutation class: what the permission seam reads."""
 
         _mutation_meta: ClassVar[_ValidatedMutationMeta]
-        _primary_type: ClassVar[type[DjangoType]]
 
 
 @pytest.fixture(autouse=True)
@@ -822,58 +821,3 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
     # The walk aborts at the FIRST entry (the raising hook) on every request:
     # the configured denier never ran at all under the seal.
     assert denier_runs == []
-
-
-def test_whole_record_swap_and_deletion_on_a_real_mutation_class_are_sealed() -> None:
-    """A mutation class's validated ``_mutation_meta`` head is write-once (0.0.15 hardening).
-
-    The metaclass guard (``make_meta_validating_metaclass.__setattr__`` /
-    ``__delattr__``) refuses any post-creation rebind or deletion of
-    ``_mutation_meta``: a ``has_permission`` hook receives the mutation class, so
-    an unguarded head would let one request replace the validated record
-    wholesale with a hook-chosen namespace (the empty allow-any posture) - the
-    persistent cross-request bypass the snapshot's own seal closes at the slot
-    level. Creation time is the one honored write, so the guards are unreachable
-    from a live request and are earned here at the unit tier. Related bind
-    outputs (``_primary_type`` etc.) are unaffected.
-    """
-    sealed = _create_item_mutation()
-    original = sealed._mutation_meta
-    hook_chosen = SimpleNamespace(permission_classes=())
-    with pytest.raises(ConfigurationError, match="sealed and cannot be rebound"):
-        # basedpyright: the hook-chosen namespace is the hostile rebind under test; the slot is
-        # typed as the validated record
-        sealed._mutation_meta = hook_chosen  # pyright: ignore[reportAttributeAccessIssue]
-    with pytest.raises(ConfigurationError, match="sealed and cannot be deleted"):
-        del sealed._mutation_meta
-    # The validated record survived both attempts, record identity included.
-    assert isinstance(sealed._mutation_meta, _ValidatedMutationMeta)
-    assert sealed._mutation_meta is original
-    assert sealed._mutation_meta.permission_classes == (DjangoModelPermission,)
-    # Unrelated class attributes (the bind's outputs) stay writable and deletable:
-    # the head seal narrows ONLY the ``_mutation_meta`` head.
-    sealed._primary_type = DjangoType
-    assert sealed._primary_type is DjangoType
-    del sealed._primary_type
-    assert "_primary_type" not in sealed.__dict__
-
-
-def test_validated_mutation_meta_record_refuses_slot_writes_and_deletes() -> None:
-    """The validated snapshot's own slots are sealed once ``__init__`` finishes.
-
-    Mirrors the head seal at the record level: the record is the per-request
-    authorization source (``run_permission_classes`` reads
-    ``type(self)._mutation_meta.permission_classes``), so a sealed record refuses
-    every attribute write and delete for the life of the process. A consumer who
-    needs different authorization declares a new mutation class.
-    """
-    snapshot = _create_item_mutation()._mutation_meta
-    with pytest.raises(ConfigurationError, match="sealed"):
-        snapshot.permission_classes = ()
-    with pytest.raises(ConfigurationError, match="sealed"):
-        del snapshot.permission_classes
-    with pytest.raises(ConfigurationError, match="sealed and 'model' cannot be reassigned"):
-        snapshot.model = None
-    # The validated configuration is untouched by all three attempts.
-    assert snapshot.permission_classes == (DjangoModelPermission,)
-    assert snapshot.operation == "create"

@@ -474,7 +474,7 @@ def test_auth_permission_holder_snapshot_is_sealed() -> None:
     authorization source (``login`` / ``logout`` / ``current_user`` ride
     ``DjangoMutation.check_permission`` by call, which reads
     ``type(self)._mutation_meta.permission_classes``), so it is SEALED once
-    ``__init__`` finishes - mirroring ``mutations/sets.py::_ValidatedMutationMeta``.
+    ``__init__`` finishes - mirroring ``write_mixins.py::_ValidatedMutationMeta``.
     A mutable slot would let one request's ``has_permission`` hook (which receives
     the holder) rebind the validated set - e.g. to the empty allow-any posture -
     for every later login/logout/me request.

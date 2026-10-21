@@ -154,7 +154,6 @@ from django_strawberry_framework.mutations.resolvers import (
     run_write_pipeline_sync,
     save_or_field_errors,
 )
-from django_strawberry_framework.mutations.sets import backing_model_of
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
@@ -211,6 +210,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_visible_relation_ids,
     decoded_into,
 )
+from django_strawberry_framework.write_mixins import backing_model_of
 
 from .accessors import (
     bound_fields,

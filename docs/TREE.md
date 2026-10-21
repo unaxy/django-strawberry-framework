@@ -219,6 +219,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── schema.py                     # ``DjangoSchema`` - the schema whose mutation transactions span response completion.
 ├── sets_mixins.py                # Mixins and lifecycle machinery shared by the ``FilterSet`` and ``OrderSet`` families.
 ├── views.py                      # The package's Django GraphQL HTTP endpoint, declared in the consumer's URLconf.
+├── write_mixins.py               # Lifecycle machinery shared by the write-flavor ``Mutation`` families.
 ├── auth/    # Opt-in session-auth field factories.
 │   ├── mutations.py              # Session-auth mutation factories + the phase-2.5 auth bind.
 │   ├── queries.py                # The ``current_user()`` query-field factory + its return-alias namespace.
@@ -252,7 +253,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   ├── operations.py             # Canonical mutation operation descriptors: ``create``, ``update``, ``delete``, and ``form``.
 │   ├── permissions.py            # Shared mutation authorization: permission execution, model permissions, and model-less deny-by-default.
 │   ├── resolvers.py              # The sync + async create / update / delete write pipeline + the skeleton every flavor rides.
-│   └── sets.py                   # ``DjangoMutation`` base + metaclass + ``Meta`` validation + phase-2.5 bind + shared seams.
+│   └── sets.py                   # ``DjangoMutation`` base + metaclass + ``Meta`` validation + phase-2.5 bind.
 ├── optimizer/    # Optimizer subsystem - selection-driven queryset planning via ``DjangoOptimizerExtension`` (N+1 prevention).
 │   ├── _context.py               # Optimizer <-> resolver context hand-off: the optimizer's stash keys and its per-execution frame.
 │   ├── extension.py              # ``DjangoOptimizerExtension`` - Strawberry schema extension solving N+1 via queryset plans.
@@ -355,6 +356,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── schema.py                     # ``DjangoSchema`` - the schema whose mutation transactions span response completion.
 ├── sets_mixins.py                # Mixins and lifecycle machinery shared by the ``FilterSet`` and ``OrderSet`` families.
 ├── views.py                      # The package's Django GraphQL HTTP endpoint, declared in the consumer's URLconf.
+├── write_mixins.py               # Lifecycle machinery shared by the write-flavor ``Mutation`` families.
 ├── aggregates/    # planned by TODO-BETA-062-0.1.3 - Declarative AggregateSet output types with related, permissioned, selection-aware sync/async statistics.
 ├── auth/    # Opt-in session-auth field factories.
 │   ├── mutations.py              # Session-auth mutation factories + the phase-2.5 auth bind.
@@ -392,7 +394,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   ├── operations.py             # Canonical mutation operation descriptors: ``create``, ``update``, ``delete``, and ``form``.
 │   ├── permissions.py            # Shared mutation authorization: permission execution, model permissions, and model-less deny-by-default.
 │   ├── resolvers.py              # The sync + async create / update / delete write pipeline + the skeleton every flavor rides.
-│   └── sets.py                   # ``DjangoMutation`` base + metaclass + ``Meta`` validation + phase-2.5 bind + shared seams.
+│   └── sets.py                   # ``DjangoMutation`` base + metaclass + ``Meta`` validation + phase-2.5 bind.
 ├── optimizer/    # Optimizer subsystem - selection-driven queryset planning via ``DjangoOptimizerExtension`` (N+1 prevention).
 │   ├── _context.py               # Optimizer <-> resolver context hand-off: the optimizer's stash keys and its per-execution frame.
 │   ├── extension.py              # ``DjangoOptimizerExtension`` - Strawberry schema extension solving N+1 via queryset plans.
@@ -545,6 +547,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.
+├── test_write_mixins.py          # Pins for the write-flavor substrate shared by every ``Mutation`` family.
 ├── auth/    # Package-internal tests for the opt-in auth subsystem.
 │   ├── _helpers.py               # Shared auth-test helpers hoisted out of the individual test modules.
 │   ├── conftest.py               # Shared fixtures for the auth test modules.
@@ -836,6 +839,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.
+├── test_write_mixins.py          # Pins for the write-flavor substrate shared by every ``Mutation`` family.
 ├── aggregates/    # planned by TODO-BETA-062-0.1.3 - Mirrored package tests for the aggregates subsystem.
 ├── auth/    # Package-internal tests for the opt-in auth subsystem.
 │   ├── _helpers.py               # Shared auth-test helpers hoisted out of the individual test modules.

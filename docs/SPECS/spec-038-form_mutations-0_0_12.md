@@ -905,7 +905,7 @@ no model, so it cannot resolve a primary [`DjangoType`][glossary-djangotype] pay
 or inherit [`DjangoMutation`][glossary-djangomutation]'s resolvable-model contract.
 It is a lighter base with its **own** metaclass —
 `DjangoFormMutationMetaclass = make_meta_validating_metaclass(register_form_mutation, …)`,
-the shared metaclass factory [`mutations/sets.py`][mutations-sets] exposes, bound over
+the shared metaclass factory [`write_mixins.py`][write-mixins] exposes, bound over
 the plain form's own disjoint declaration ledger — that shares the form pipeline
 (`is_valid()` → `form.errors` → `FieldError` → `perform_mutate`) and the converter,
 but its payload carries **no DjangoType object slot**. Because it is **not** a
@@ -1594,7 +1594,7 @@ re-implementation and none of it through another module's privates.
 mutation class ([Decision 5](#decision-5--public-surface-djangoformmutation--djangomodelformmutation-exported-from-the-root)), and the model
 base is what delegates to [`mutations/resolvers.py`][mutations-resolvers]. Both form
 flavors' pair comes from one shared factory,
-[`mutations/sets.py`][mutations-sets]`::resolver_seams`, invoked with `with_id=False`
+[`write_mixins.py`][write-mixins]`::resolver_seams`, invoked with `with_id=False`
 for the plain flavor — matching the `id`-gate
 [`mutations/fields.py`][mutations-fields] applies on its #"operation != \"form\"" test,
 so a model-less mutation is never given an `id:`
@@ -1786,7 +1786,7 @@ different declaration namespaces with different `bind_*` bodies and different
 `registry.clear()` rows, so merging the *storage* would be over-DRY. The mechanics
 (identity-dedup append, post-`mark_finalized()` reject, `.clear()`, ordered `tuple(...)`
 snapshot) are single-sourced in
-[`mutations/sets.py`][mutations-sets]`::make_declaration_registry`, which both
+[`write_mixins.py`][write-mixins]`::make_declaration_registry`, which both
 `mutations/sets.py` and `forms/sets.py` instantiate over a fresh private store.
 
 **No change to [`DEFERRED_META_KEYS`][types-base] / `ALLOWED_META_KEYS`**: a
@@ -2500,6 +2500,7 @@ The completion contract.
 [utils-inputs]: ../../django_strawberry_framework/utils/inputs.py
 [utils-write-transaction]: ../../django_strawberry_framework/utils/write_transaction.py
 [utils-write-values]: ../../django_strawberry_framework/utils/write_values.py
+[write-mixins]: ../../django_strawberry_framework/write_mixins.py
 
 <!-- tests/ -->
 [test-forms]: ../../tests/forms/
