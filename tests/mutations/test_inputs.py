@@ -1303,6 +1303,41 @@ def test_materializer_rejects_consumer_alias_colliding_with_generated_remainder(
         materialize_mutation_input_class("MergedItemInput", merged)
 
 
+def test_materializer_audits_an_unnamed_consumer_field_under_its_schema_name() -> None:
+    """An unnamed consumer field is audited under the name a default-config schema publishes.
+
+    ``field_2`` declares no ``name=``, so the schema's converter names it ``field2``
+    (Strawberry's ``to_camel_case``; the package caser would keep ``field_2``), the
+    name the generated ``field2`` already pins: the two would collapse onto one SDL
+    field, so the merged input is refused.
+    """
+
+    class DigitCollide(models.Model):
+        field2: _Int = models.IntegerField()
+
+        class Meta:
+            app_label = _unique_app_label()
+
+    class DigitCollideType(DjangoType, relay.Node):
+        class Meta:
+            model = DigitCollide
+            fields = ("id",)
+
+    @strawberry.input
+    class ConsumerInput:
+        field_2: int
+
+    remainder = build_mutation_input(
+        DigitCollide,
+        operation_kind=CREATE,
+        primary_type=DigitCollideType,
+    )
+    merged = strawberry.input(type("DigitCollideInput", (ConsumerInput, remainder), {}))
+
+    with pytest.raises(ConfigurationError, match="same GraphQL field name 'field2'"):
+        materialize_mutation_input_class("DigitCollideInput", merged)
+
+
 # ---------------------------------------------------------------------------
 # Upload mapping (spec-037) - FileField/ImageField become Upload
 # ---------------------------------------------------------------------------

@@ -691,7 +691,7 @@ def _published_node_name_table(schema: Schema) -> dict[type, str]:
     as ``__typename``, and the one Strawberry's ``Node.resolve_typename`` puts in
     a ``type``-strategy GlobalID. The converter itself is never invoked: it is
     consumer code that already ran at schema build, so the published map is
-    read back the way ``list_field.py::_published_wire_name`` reads an
+    read back the way ``utils/typing.py::published_argument`` reads an
     argument's wire name. Built on first use and memoized for the schema's
     lifetime; every entry that is not a Relay-Node ``DjangoType`` object type is
     skipped.

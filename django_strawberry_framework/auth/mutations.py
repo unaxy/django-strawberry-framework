@@ -1251,7 +1251,7 @@ def _register_write_step(
     ``IntegrityError`` or a save-time ``ValidationError`` -> envelope) -> M2M to
     the shared model write tail, which
     keys every ``full_clean`` error to the GraphQL input field the client sent
-    through ``mutation_cls``'s specs (``first_name`` -> ``firstName``) -
+    through ``mutation_cls``'s bind specs (``first_name`` -> ``firstName``) -
     ``validate_password`` + ``set_password`` are the ONLY auth-specific steps.
     """
     user, m2m_assignments, exclude, raw_password = decoded
@@ -1279,7 +1279,14 @@ def _register_write_step(
         codes = [leaf.code for leaf in exc.error_list if leaf.code]
         return resolvers.StepFailure([field_error("password", exc.messages, codes=codes)])
     user.set_password(raw_password)
-    return resolvers._model_write_step(mutation_cls, instance, (user, m2m_assignments, exclude))
+    # ``RegisterInput`` takes no ``input_class``, so every field pins its wire name
+    # and the bind specs are already the published ones.
+    return resolvers._model_write_step(
+        mutation_cls,
+        instance,
+        (user, m2m_assignments, exclude),
+        specs=mutation_cls._input_field_specs,
+    )
 
 
 def _run_register_pipeline_sync(

@@ -20,7 +20,11 @@ multi-word validated model column, ``Book.circulation_status``, rides an
 enum-guarded input, so no live request can fail its ``full_clean``), the keying
 of a save-time Django ``ValidationError`` against the backing model through a
 renamed ``Meta.input_class`` input, a relation ``attname`` and a dotted name
-(fakeshop's ``Item.save()`` rule raises only ``name``), and
+(fakeshop's ``Item.save()`` rule raises only ``name``), the error keys and the
+relation bound of a ``Meta.input_class`` field declared without ``name=`` under the
+default config, ``auto_camel_case=False`` and a custom ``NameConverter`` (the live
+schema is one config, and no shipped override leaves such a field unnamed over a
+column the casers disagree on, which adding one would change the published SDL), and
 ``ScalarSpecimen`` writes (no shipped mutation; rung 1
 would add ``CreateScalarSpecimen`` to the scalars schema, rung 3 is the same
 late-declaration reject). Consumer-visible create/update/delete, empty-name
@@ -60,7 +64,10 @@ from django.db.models import Model, QuerySet
 from django.db.models.signals import m2m_changed, post_save, pre_save
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
+from graphql import GraphQLInputObjectType
 from strawberry import relay
+from strawberry.schema.config import StrawberryConfig
+from strawberry.schema.name_converter import NameConverter
 from strawberry.types import ExecutionResult
 from strawberry.types.base import has_object_definition
 from typing_extensions import Self, override
@@ -72,6 +79,7 @@ from django_strawberry_framework import (
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
+    ResourcePolicy,
     finalize_django_types,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -91,7 +99,11 @@ from django_strawberry_framework.utils._narrowing import pk_of, read_attr, requi
 from django_strawberry_framework.utils.errors import validation_error_to_field_errors
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import SyncMisuseError
-from django_strawberry_framework.utils.typing import call_forwarded, object_result
+from django_strawberry_framework.utils.typing import (
+    call_forwarded,
+    graphql_input_fields,
+    object_result,
+)
 from django_strawberry_framework.utils.write_transaction import (
     managed_write_transaction,
     open_write_pipeline,
@@ -1576,6 +1588,243 @@ def test_save_time_django_validation_error_reads_its_names_as_model_fields(
     assert not product_models.Item.objects.filter(name="Refused").exists()
 
 
+class _UnderscorePrefixConverter(NameConverter):
+    """Prefix ``n_`` onto every converter-named field whose Python name carries an underscore."""
+
+    @override
+    def apply_naming_config(self, name: str) -> str:
+        base = super().apply_naming_config(name)
+        return f"n_{base}" if "_" in name else base
+
+
+#: ``(isbn_13, isbn_10, publisher_2_id)`` as each schema config publishes them.
+_NAMING_CONFIGS = [
+    pytest.param(StrawberryConfig(), ("isbn13", "isbn10", "publisher2Id"), id="default"),
+    pytest.param(
+        StrawberryConfig(auto_camel_case=False),
+        ("isbn_13", "isbn_10", "publisher_2_id"),
+        id="auto-camel-case-off",
+    ),
+    pytest.param(
+        StrawberryConfig(name_converter=_UnderscorePrefixConverter()),
+        ("n_isbn13", "n_isbn10", "n_publisher2Id"),
+        id="custom-converter",
+    ),
+]
+
+
+@strawberry.input
+class _EditionUnnamedFields:
+    """A ``Meta.input_class`` whose fields carry no ``name=``: the schema's converter names them."""
+
+    isbn_13: str
+    isbn_10: str | None = strawberry.field(default=UNSET)
+    publisher_2_id: int | None = strawberry.field(default=UNSET)
+
+
+_EDITION_SAVE_REFUSAL_DISPATCH_UID = "tests.mutations.edition_save_time_refusal"
+
+
+@contextlib.contextmanager
+def _edition_save_refused() -> Generator[None, None, None]:
+    """Refuse every ``Edition`` save inside the block with a Django error keyed ``isbn_10``."""
+
+    def _refuse(**_kwargs: object) -> None:
+        raise DjangoValidationError(
+            {"isbn_10": DjangoValidationError("Refused at save.", code="refused")},
+        )
+
+    pre_save.connect(
+        _refuse,
+        sender=library_models.Edition,
+        weak=False,
+        dispatch_uid=_EDITION_SAVE_REFUSAL_DISPATCH_UID,
+    )
+    try:
+        yield
+    finally:
+        _ = pre_save.disconnect(
+            sender=library_models.Edition,
+            dispatch_uid=_EDITION_SAVE_REFUSAL_DISPATCH_UID,
+        )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("config", "published"), _NAMING_CONFIGS)
+def test_unnamed_consumer_input_fields_key_errors_to_the_names_the_schema_published(
+    config: StrawberryConfig,
+    published: tuple[str, str, str],
+) -> None:
+    """Every error on an unnamed consumer field keys to the name the executing schema published.
+
+    ``_EditionUnnamedFields`` declares ``isbn_13``, ``isbn_10`` and ``publisher_2_id``
+    without ``name=``, so the schema's own converter names them at schema build and
+    the bind can only predict the spelling. A duplicate key (``full_clean``), an
+    explicit ``null`` and an unresolvable relation id (the decode) and a save-time
+    Django ``ValidationError`` each key to the published name under the default
+    config, under ``auto_camel_case=False`` and under a custom ``NameConverter``,
+    and the SDL publishes exactly those names.
+    """
+    isbn_13, isbn_10, publisher_2_id = published
+
+    class PublisherT(DjangoType):
+        class Meta:
+            model = library_models.Publisher
+            fields = ("id", "name")
+            primary = True
+
+    class EditionT(DjangoType):
+        class Meta:
+            model = library_models.Edition
+            fields = ("isbn_13",)
+            primary = True
+
+    # The primaries only have to exist: the bind reads them from the registry.
+    del PublisherT, EditionT
+
+    class CreateEdition(DjangoMutation):
+        class Meta:
+            model = library_models.Edition
+            operation = "create"
+            input_class = _EditionUnnamedFields
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        # One word, so every config publishes the field under the same name.
+        write = DjangoMutationField(CreateEdition)
+
+    finalize_django_types()
+    schema = DjangoSchema(query=_Query, mutation=Mutation, config=config)
+    input_type = require_instance(schema._schema.type_map["EditionInput"], GraphQLInputObjectType)
+    assert set(graphql_input_fields(input_type)) == {
+        isbn_13,
+        isbn_10,
+        publisher_2_id,
+        "imprint",
+        "publisherId",
+    }
+
+    publisher = library_models.Publisher.objects.create(name="P-Unnamed", house_code="PU")
+    _ = library_models.Edition.objects.create(isbn_13="978-dup", publisher=publisher)
+    mutation = "mutation($d: EditionInput!){ write(data: $d){ errors{ field path codes } } }"
+
+    def errors_for(**data: object) -> object:
+        result = schema.execute_sync(
+            mutation,
+            variable_values={"d": {"publisherId": saved_pk(publisher), **data}},
+        )
+        assert result.errors is None, result.errors
+        return _json_at(result.data, "write", "errors")
+
+    assert errors_for(**{isbn_13: "978-dup"}) == [
+        {"field": isbn_13, "path": [isbn_13], "codes": ["unique"]},
+    ]
+    assert errors_for(**{isbn_13: "978-null", isbn_10: None}) == [
+        {"field": isbn_10, "path": [isbn_10], "codes": ["null"]},
+    ]
+    assert errors_for(**{isbn_13: "978-rel", publisher_2_id: 999_999}) == [
+        {"field": publisher_2_id, "path": [publisher_2_id], "codes": ["invalid"]},
+    ]
+    with _edition_save_refused():
+        assert errors_for(**{isbn_13: "978-save", isbn_10: "0-00"}) == [
+            {"field": isbn_10, "path": [isbn_10], "codes": ["refused"]},
+        ]
+    assert list(
+        library_models.Edition.objects.values_list("isbn_13", flat=True),
+    ) == ["978-dup"]
+
+
+@strawberry.input
+class _PrintingUnnamedBoundWith:
+    """A ``Meta.input_class`` exposing the raw-pk ``bound_with`` M2M without ``name=``."""
+
+    bound_with: list[str] | None = strawberry.field(default=UNSET)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("config", "bound_with"),
+    [
+        pytest.param(StrawberryConfig(), "boundWith", id="default"),
+        pytest.param(
+            StrawberryConfig(auto_camel_case=False),
+            "bound_with",
+            id="auto-camel-case-off",
+        ),
+        pytest.param(
+            StrawberryConfig(name_converter=_UnderscorePrefixConverter()),
+            "n_boundWith",
+            id="custom-converter",
+        ),
+    ],
+)
+def test_an_unnamed_consumer_relation_list_charges_the_relation_bound(
+    config: StrawberryConfig,
+    bound_with: str,
+) -> None:
+    """A raw-pk M2M a consumer field declares without ``name=`` is charged as relation ids.
+
+    ``Edition`` is non-Relay, so ``bound_with`` is a ``[String!]`` of raw ISBNs that
+    only the mutation's bind specs classify as a relation list. The resource policy
+    reaches the spec through the attr the schema back-referenced on the wire field,
+    so the list charges ``max_relation_ids_per_mutation`` under whatever name the
+    schema's converter published, and nothing is written.
+    """
+
+    class EditionT(DjangoType):
+        class Meta:
+            model = library_models.Edition
+            fields = ("isbn_13",)
+            primary = True
+
+    class PrintingT(DjangoType):
+        class Meta:
+            model = library_models.Printing
+            fields = ("id",)
+            primary = True
+
+    # The primaries only have to exist: the bind reads them from the registry.
+    del EditionT, PrintingT
+
+    class CreatePrinting(DjangoMutation):
+        class Meta:
+            model = library_models.Printing
+            operation = "create"
+            input_class = _PrintingUnnamedBoundWith
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        # One word, so every config publishes the field under the same name.
+        write = DjangoMutationField(CreatePrinting)
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=_Query,
+        mutation=Mutation,
+        config=config,
+        resource_policy=ResourcePolicy(max_relation_ids_per_mutation=1),
+    )
+    publisher = library_models.Publisher.objects.create(name="P-Bound", house_code="PB")
+    for isbn in ("978-a", "978-b"):
+        _ = library_models.Edition.objects.create(isbn_13=isbn, publisher=publisher)
+    result = schema.execute_sync(
+        "mutation($d: PrintingInput!){ write(data: $d){ errors{ field } } }",
+        variable_values={"d": {"editionId": "978-a", bound_with: ["978-a", "978-b"]}},
+    )
+    assert result.errors is not None
+    assert [error.extensions for error in result.errors] == [
+        {
+            "code": "RESOURCE_LIMIT_EXCEEDED",
+            "bound": "max_relation_ids_per_mutation",
+            "limit": 1,
+            "charged": 2,
+        },
+    ]
+    assert not library_models.Printing.objects.exists()
+
+
 _ITEM_SAVE_LOOKUP_DISPATCH_UID = "tests.mutations.item_save_reads_a_missing_category"
 
 
@@ -2709,7 +2958,12 @@ def test_assign_m2m_integrity_error_contained_in_envelope() -> None:
     ):
         decoded: _ModelDecoded = (cat, [("fake_m2m", [1, 2])], [])
         with managed_write_transaction("default"), open_write_pipeline(CreateCategoryMutation):
-            failure = resolvers._model_write_step(CreateCategoryMutation, None, decoded)
+            failure = resolvers._model_write_step(
+                CreateCategoryMutation,
+                None,
+                decoded,
+                specs=CreateCategoryMutation._input_field_specs,
+            )
         assert isinstance(failure, resolvers.StepFailure)
         errors = failure.errors
         assert len(errors) == 1
@@ -2721,8 +2975,9 @@ def test_assign_m2m_integrity_error_contained_in_envelope() -> None:
 def test_model_write_step_full_clean_error_keys_to_wire_name() -> None:
     """A ``full_clean`` failure on a multi-word column reports the GraphQL wire name.
 
-    The write step re-keys the Django field buckets through the bind-stashed
-    specs: ``Book.circulation_status`` (whose input is the enum-guarded
+    The write step re-keys the Django field buckets through the specs it is
+    handed (a generated input's bind specs, every name pinned):
+    ``Book.circulation_status`` (whose input is the enum-guarded
     ``circulationStatus``, so no live request can fail its ``full_clean``) surfaces
     as ``circulationStatus`` - the wire-name contract the relation-decode errors,
     the serializer flattener, and the committed ``categoryId`` rows already keep.
@@ -2744,7 +2999,8 @@ def test_model_write_step_full_clean_error_keys_to_wire_name() -> None:
             permission_classes = [_AllowAll]
 
     finalize_django_types()
-    key_map = resolvers._model_error_key_map(CreateBookMutation)
+    specs = CreateBookMutation._input_field_specs
+    key_map = resolvers._model_error_key_map(CreateBookMutation, specs)
     assert key_map["shelf"][0] == "shelfId"
     assert key_map["shelf_id"][0] == "shelfId"
     assert key_map["circulation_status"][0] == "circulationStatus"
@@ -2758,7 +3014,7 @@ def test_model_write_step_full_clean_error_keys_to_wire_name() -> None:
     )
     decoded: _ModelDecoded = (book, [], [])
     with managed_write_transaction("default"), open_write_pipeline(CreateBookMutation):
-        failure = resolvers._model_write_step(CreateBookMutation, None, decoded)
+        failure = resolvers._model_write_step(CreateBookMutation, None, decoded, specs=specs)
     assert isinstance(failure, resolvers.StepFailure)
     assert [field_error.field for field_error in failure.errors] == ["circulationStatus"]
 

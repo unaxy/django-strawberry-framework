@@ -1957,7 +1957,7 @@ Under `StrawberryConfig(auto_camel_case=False)` or a custom `NameConverter`, out
 - Stop pinning `name=` on package-generated input fields except where a Python keyword forces it (`in_`, `and_`, `or_`, `not_`); mark them so the schema's converter can name them.
 - `django_strawberry_framework/scalars.py::strawberry_config` (and [`DjangoSchema`](docs/GLOSSARY.md#djangoschema)) install a converter wrapping the consumer's: for marked fields `django_strawberry_framework/utils/strings.py::graphql_camel_name` under the default config (keeps `field_2` and `field2` distinct), the consumer's `apply_naming_config` otherwise.
 - `django_strawberry_framework/filters/inputs.py::LOOKUP_NAME_MAP` entries follow the config (`i_contains`, `is_null` under snake case).
-- Runtime readers of the pinned name read the name the built schema published instead, the way `django_strawberry_framework/list_field.py::_published_wire_name` does: `django_strawberry_framework/extensions/resource_policy.py::_nested_specs_map` (the resource budget; a wrong name silently skips the limit), the mutation, form and serializer resolvers, and `utils/write_values.py`.
+- Runtime readers of the pinned name read the name the built schema published instead, the way `django_strawberry_framework/utils/typing.py::published_argument` does: `django_strawberry_framework/extensions/resource_policy.py::_nested_specs_map` (the resource budget; a wrong name silently skips the limit), the mutation, form and serializer resolvers, and `utils/write_values.py`.
 - Decide a plain `strawberry.Schema` built without `strawberry_config`: document it or refuse it.
 
 #### Definition of done

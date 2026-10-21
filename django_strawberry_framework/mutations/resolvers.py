@@ -91,14 +91,14 @@ products ``Mutation`` + ``config/schema.py`` wiring + the live
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Model, ProtectedError, RestrictedError
 from django.utils import timezone
-from graphql import GraphQLError
+from graphql import GraphQLError, GraphQLInputObjectType
 
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.optimizer.extension import (
@@ -109,7 +109,13 @@ from django_strawberry_framework.relay import GlobalIDDecode, decode_model_globa
 from django_strawberry_framework.resource_policy import check_deadline
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import call_method, list_of, pk_of, read_attr
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    list_of,
+    pk_of,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
     FIELD_ERROR_CODE_NOT_FOUND,
@@ -133,7 +139,14 @@ from django_strawberry_framework.utils.querysets import (
     run_in_one_sync_boundary,
     sync_pipeline_recourse,
 )
-from django_strawberry_framework.utils.typing import strawberry_schema_from_info
+from django_strawberry_framework.utils.typing import (
+    graphql_input_fields,
+    graphql_type_of,
+    input_field_python_name,
+    published_argument,
+    strawberry_schema_from_info,
+    unwrap_non_null,
+)
 from django_strawberry_framework.utils.write_transaction import (
     authorization_phase,
     base_locked_queryset,
@@ -1032,6 +1045,9 @@ def _run_pipeline_sync(
         return _run_delete(mutation_cls, info, id_)
 
     model = model_for(primary_type)
+    # A create / update has an input, so the bind stashed the decode's reverse maps;
+    # their wire names are read from the executing schema once per request.
+    specs = _published_input_specs(info, mutation_cls._input_field_specs)
     return run_write_pipeline_sync(
         mutation_cls,
         info,
@@ -1042,8 +1058,7 @@ def _run_pipeline_sync(
             data,
             info,
             instance=instance,
-            # A create / update has an input, so the bind stashed the decode's reverse maps.
-            specs=mutation_cls._input_field_specs,
+            specs=specs,
             model_fields=cast("ModelFieldIndex", mutation_cls._model_fields_by_attr),
         ),
         # The model flavor's bind stashes no ``EXCLUDED`` spec, so its decode
@@ -1052,7 +1067,57 @@ def _run_pipeline_sync(
             mutation_cls,
             instance,
             cast("_ModelDecoded", decoded),
+            specs=specs,
         ),
+    )
+
+
+def _published_input_specs(
+    info: Info[object, object],
+    specs: Sequence[InputFieldSpec],
+) -> Sequence[InputFieldSpec]:
+    """Return a model mutation's bind specs, each named as the executing schema published it.
+
+    A spec is recorded at bind (phase 2.5), before any schema exists. Every
+    generated input field pins its wire name, so its ``graphql_name`` is final
+    there; a consumer-authored ``Meta.input_class`` / ``partial_input_class``
+    field declared without ``name=`` is named by the schema's own
+    ``NameConverter`` at schema build, which the bind can only predict
+    (``mutations/inputs.py::_predicted_input_field_name``): ``isbn_10`` publishes
+    ``isbn10`` under the default config and ``isbn_10`` under
+    ``auto_camel_case=False``, and one merged input class can serve several
+    schemas. The executable schema keys the ``data:`` input object's fields by
+    the names it published and back-references each field's attr
+    (``utils/typing.py::published_argument`` /
+    ``utils/typing.py::input_field_python_name``), so every name an error is
+    keyed by - the decode's, ``full_clean()``'s and a save-time
+    ``ValidationError``'s - is one a client of THIS schema could have sent.
+
+    The bind tuple itself comes back when every name already agrees (an
+    all-generated input) and when ``info`` carries no executable schema (a
+    direct-call stub), which keeps the bind prediction. Never stored: the
+    answer belongs to the executing schema.
+    """
+    # ``mutations/fields.py::_synthesized_mutation_signature`` names the input parameter ``data``.
+    published = published_argument(info, "data")
+    if published is None:
+        return specs
+    input_type = require_instance(
+        unwrap_non_null(graphql_type_of(published[1])),
+        GraphQLInputObjectType,
+    )
+    wire_names: dict[str, str] = {}
+    for wire_name, input_field in graphql_input_fields(input_type).items():
+        python_name = input_field_python_name(input_field)
+        if python_name is not None:
+            wire_names[python_name] = wire_name
+    if all(
+        wire_names.get(spec.input_attr, spec.graphql_name) == spec.graphql_name for spec in specs
+    ):
+        return specs
+    return tuple(
+        replace(spec, graphql_name=wire_names.get(spec.input_attr, spec.graphql_name))
+        for spec in specs
     )
 
 
@@ -1124,6 +1189,8 @@ def _model_write_step(
     mutation_cls: type[DjangoMutation],
     instance: models.Model | None,
     decoded: _ModelDecoded,
+    *,
+    specs: Sequence[InputFieldSpec],
 ) -> models.Model | StepFailure:
     """Run the model ``write_step``: ``full_clean`` -> ``save`` -> M2M.
 
@@ -1131,8 +1198,9 @@ def _model_write_step(
     ``_validate_save_assign_refetch_payload``): ``full_clean(exclude=...)`` mapped to
     the envelope, ``save()`` (a race ``IntegrityError`` or a consumer save-time
     ``ValidationError`` into the envelope), then the M2M ``.set(...)`` assignment
-    (the same two mappings). ``mutation_cls`` supplies the bind-stashed specs the
-    ``full_clean`` errors are keyed through. Returns the saved instance (the skeleton's
+    (the same two mappings). ``specs`` are the request's published specs
+    (``_published_input_specs``) every error of the step is keyed through, beside
+    ``mutation_cls``'s bind-time Django-field index. Returns the saved instance (the skeleton's
     ``refetch_optimized`` re-fetches it by pk under the G2 plan) or a
     ``StepFailure`` on a validation / write failure. ``instance`` (the located
     update row, ``None`` for create) selects the save mode: a create INSERTs the
@@ -1154,13 +1222,18 @@ def _model_write_step(
     """
     target, m2m_assignments, exclude = decoded
 
-    clean_errors = _full_clean_or_field_errors(mutation_cls, target, exclude=exclude)
+    # ``full_clean`` and a save-time ``ValidationError`` key through one map, built
+    # only on a failure path.
+    def error_key_map() -> ErrorKeyMap:
+        return _model_error_key_map(mutation_cls, specs)
+
+    clean_errors = _full_clean_or_field_errors(
+        target,
+        exclude=exclude,
+        error_key_map=error_key_map,
+    )
     if clean_errors is not None:
         return StepFailure(clean_errors)
-
-    # A save-time ``ValidationError`` keys through the same map as ``full_clean``.
-    def error_key_map() -> ErrorKeyMap:
-        return _model_error_key_map(mutation_cls)
 
     # The pinned-alias WRITE phase opens for exactly the save + M2M assignment:
     # everything before this point (full_clean included) is database-read-only
@@ -1542,10 +1615,10 @@ def authorize_or_raise(
 
 
 def _full_clean_or_field_errors(
-    mutation_cls: type[DjangoMutation],
     instance: models.Model,
     *,
     exclude: list[str] | None,
+    error_key_map: Callable[[], ErrorKeyMap],
 ) -> list[FieldError] | None:
     """Run ``full_clean(exclude=...)``; return the mapped ``FieldError``s on failure else ``None``.
 
@@ -1553,9 +1626,9 @@ def _full_clean_or_field_errors(
     duplicate is caught here as a ``ValidationError`` BEFORE ``save()``;
     its field-keyed messages populate the envelope (multi-field constraint ->
     ``"__all__"`` sentinel), each model field name re-keyed to the GraphQL input
-    field the client sent through ``_model_error_key_map`` (``category`` or
-    ``category_id`` -> ``categoryId``; a field the input does not expose keeps its model field
-    name). The key map is built only on this failure path. ``exclude`` is the
+    field the client sent through ``error_key_map()`` (``_model_error_key_map``:
+    ``category`` or ``category_id`` -> ``categoryId``; a field the input does not expose
+    keeps its model field name). The key map is built only on this failure path. ``exclude`` is the
     exclude-aware unprovided-field list for BOTH create and update -
     ``_model_decode_step`` computes it either way, so the model path never passes
     ``None``; the parameter stays optional for a caller that validates every
@@ -1567,11 +1640,14 @@ def _full_clean_or_field_errors(
     try:
         instance.full_clean(exclude=exclude)
     except ValidationError as exc:
-        return validation_error_to_field_errors(exc, _model_error_key_map(mutation_cls))
+        return validation_error_to_field_errors(exc, error_key_map())
     return None
 
 
-def _model_error_key_map(mutation_cls: type[DjangoMutation]) -> ErrorKeyMap:
+def _model_error_key_map(
+    mutation_cls: type[DjangoMutation],
+    specs: Sequence[InputFieldSpec],
+) -> ErrorKeyMap:
     """Build the model flavor's error key map: model field names -> GraphQL input name.
 
     ``full_clean()`` keys its ``error_dict`` by model FIELD name (or, for a
@@ -1580,11 +1656,13 @@ def _model_error_key_map(mutation_cls: type[DjangoMutation]) -> ErrorKeyMap:
     ``model_field_error_names`` of the bind-time column of ``spec.input_attr``
     (``_model_fields_by_attr``) - the same index the decode and the exclude
     calculation read, never a live ``get_field``. Input ``categoryId`` is keyed
-    by both ``category`` and ``category_id``.
+    by both ``category`` and ``category_id``. ``specs`` are the request's
+    published specs (``_published_input_specs``), so each key is a name the
+    executing schema published.
     """
     model_fields = cast("ModelFieldIndex", mutation_cls._model_fields_by_attr)
     return build_error_key_map(
-        mutation_cls._input_field_specs,
+        specs,
         keys_of=lambda spec: model_field_error_names(model_fields[spec.input_attr]),
     )
 

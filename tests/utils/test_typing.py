@@ -14,9 +14,14 @@ import pytest
 import strawberry
 from asgiref.sync import markcoroutinefunction
 from graphql import (
+    GraphQLArgument,
+    GraphQLField,
+    GraphQLInputField,
+    GraphQLInt,
     GraphQLList,
     GraphQLNonNull,
     GraphQLNullableType,
+    GraphQLObjectType,
     GraphQLScalarType,
     GraphQLString,
     InlineFragmentNode,
@@ -27,13 +32,16 @@ from strawberry.types.base import StrawberryList
 from typing_extensions import Self, override
 
 import django_strawberry_framework.utils.typing as typing_module
-from django_strawberry_framework.utils._narrowing import class_dict, require
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.utils._narrowing import class_dict, require, require_instance
 from django_strawberry_framework.utils.typing import (
     MAX_TYPE_WRAPPER_DEPTH,
     _callable_inspection_target,
     inline_fragment_type_condition,
+    input_field_python_name,
     is_async_callable,
     is_marked_coroutine_function,
+    published_argument,
     schema_config_from_info,
     strawberry_schema_from_info,
     strawberry_schema_from_schema,
@@ -55,10 +63,12 @@ def test_typing_exports_all() -> None:
         "graphql_input_fields",
         "graphql_type_of",
         "inline_fragment_type_condition",
+        "input_field_python_name",
         "is_async_callable",
         "is_graphql_list",
         "is_marked_coroutine_function",
         "object_result",
+        "published_argument",
         "return_type_of",
         "schema_config_from_info",
         "strawberry_schema_from_info",
@@ -589,3 +599,60 @@ def test_unwrap_non_null_raises_on_a_cyclic_non_null_chain() -> None:
 
     with pytest.raises(RuntimeError, match="unwrap_non_null"):
         unwrap_non_null(chain)
+
+
+def _info_stand_in(stand_in: object) -> strawberry.Info[object, object]:
+    """Hand ``published_argument`` an info shape no execution builds: the shape is the input."""
+    return typing.cast("strawberry.Info[object, object]", stand_in)
+
+
+def test_published_argument_reads_the_executable_schemas_argument_map() -> None:
+    """A parameter's published argument is read back by its definition, never re-derived."""
+    # graphql-core's ``GraphQLNamedType.__new__`` widens every built-in scalar to its base.
+    int_scalar = require_instance(GraphQLInt, GraphQLScalarType)
+    arg_def = SimpleNamespace(python_name="offset")
+
+    def defines_offset(name: str) -> object:
+        return arg_def if name == "offset" else None
+
+    # 1. A direct-call stub: no definition reader, or a definition but no ``_raw_info``.
+    assert published_argument(_info_stand_in(SimpleNamespace()), "offset") is None
+    no_raw = SimpleNamespace(get_argument_definition=defines_offset)
+    assert published_argument(_info_stand_in(no_raw), "offset") is None
+    # 2. The field declares no such parameter.
+    assert published_argument(_info_stand_in(no_raw), "limit") is None
+
+    def info_over(args: dict[str, GraphQLArgument]) -> strawberry.Info[object, object]:
+        parent = GraphQLObjectType("Query", {"cats": GraphQLField(int_scalar, args=args)})
+        raw = SimpleNamespace(parent_type=parent, field_name="cats")
+        return _info_stand_in(
+            SimpleNamespace(get_argument_definition=defines_offset, _raw_info=raw),
+        )
+
+    # 3. A definition no published argument back-references is a configuration error.
+    other = GraphQLArgument(int_scalar, extensions={"strawberry-definition": object()})
+    with pytest.raises(ConfigurationError, match="has a definition but no published wire name"):
+        _ = published_argument(info_over({"offset": other}), "offset")
+
+    # 4. The back-referencing entry comes back with its key, whatever its spelling.
+    published = GraphQLArgument(int_scalar, extensions={"strawberry-definition": arg_def})
+    assert published_argument(info_over({"other": other, "OFFSET": published}), "offset") == (
+        "OFFSET",
+        published,
+    )
+
+
+def test_input_field_python_name_reads_the_definition_backref() -> None:
+    """An input field's attr comes from the ``StrawberryField`` filed on it, else ``None``."""
+    assert isinstance(GraphQLInt, GraphQLScalarType)
+    named = GraphQLInputField(
+        GraphQLInt,
+        extensions={"strawberry-definition": SimpleNamespace(python_name="isbn_10")},
+    )
+    assert input_field_python_name(named) == "isbn_10"
+    assert input_field_python_name(GraphQLInputField(GraphQLInt)) is None
+    not_text = GraphQLInputField(
+        GraphQLInt,
+        extensions={"strawberry-definition": SimpleNamespace(python_name=10)},
+    )
+    assert input_field_python_name(not_text) is None

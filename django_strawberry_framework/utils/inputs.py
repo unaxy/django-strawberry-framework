@@ -374,7 +374,11 @@ class InputFieldSpec:
 
     - ``input_attr`` - the generated Strawberry dataclass attr (``category_id``
       for an FK relation, ``name`` for a scalar).
-    - ``graphql_name`` - the camel-cased GraphQL wire name (``categoryId``).
+    - ``graphql_name`` - the GraphQL wire name (``categoryId``): the name a
+      generated field pins, or, for a model mutation's ``Meta.input_class``
+      field declared without ``name=``, the bind-time prediction that a request
+      replaces with the executing schema's name
+      (``mutations/resolvers.py::_published_input_specs``).
     - ``target_name`` - the per-flavor decode key. For the form flavor this is the
       form's declared field name (``category``); for the serializer flavor this is
       the DECLARED serializer field name (``category_pk``), which the framework
