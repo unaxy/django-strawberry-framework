@@ -330,17 +330,7 @@ def test_invoke_permission_method_fires_once_and_dedupes() -> None:
 
 
 def test_invoke_permission_method_rejects_an_async_gate_instead_of_silently_allowing() -> None:
-    """An ``async def check_<field>_permission`` is a loud ``SyncMisuseError``, not a silent allow.
-
-    A filter / order permission gate is fired synchronously (on the async surface it
-    runs on the single ``sync_to_async`` worker ``_apply_common_finalize`` wraps), so
-    it can never be awaited. An ``async def`` gate returns a truthy, un-awaited
-    coroutine whose ``raise`` never executes -- so an intended DENIAL would silently
-    become a no-op, an authorization BYPASS. This gate is now guarded the same way
-    every sibling authorization seam already is (mutation ``has_permission`` /
-    ``check_permission``, the ``get_queryset`` visibility hook), so the async gate is
-    rejected loudly rather than passed through as an allow.
-    """
+    """An ``async def`` permission gate raises ``SyncMisuseError``, never a silent allow."""
     denied: list[str] = []
 
     class _Bare:
