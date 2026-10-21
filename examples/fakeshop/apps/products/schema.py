@@ -460,6 +460,14 @@ class CreateStampedItemViaForm(DjangoModelFormMutation):
         return kwargs
 
 
+class CreateItemHoldViaForm(DjangoModelFormMutation):
+    """Create an ``ItemHold`` through ``ItemHoldModelForm``, whose FK may clean to ``None``."""
+
+    class Meta:
+        form_class = forms.ItemHoldModelForm
+        operation = "create"
+
+
 class SubmitContact(DjangoFormMutation):
     """Submit a model-less ``ContactForm`` (the plain-form ``{ ok, errors }`` flavor).
 
@@ -560,12 +568,14 @@ class Mutation:
     for the upload and `updateItemWithFileViaForm` for the omit-the-file preserve),
     the `get_form_kwargs`-injects-`user` form (`createStampedItemViaForm`), the
     narrowed-constraint form whose duplicate reaches a write-time `IntegrityError`
-    (`createDefaultCategoryItemViaForm`), and the two model-less plain
+    (`createDefaultCategoryItemViaForm`), the `ItemHold` form whose explicit `null` on
+    the `blank=True, null=False` `item` reaches the database's `NOT NULL` refusal
+    (`createItemHoldViaForm`), and the two model-less plain
     `DjangoFormMutation` flavors - `submitContact`, which opts into anonymous access
     with an explicit empty `permission_classes = []`, and `submitPing`, which leaves
     the key unset and so falls to the `DenyAll` deny-by-default (spec-038 Decision 11).
     The `ModelForm` flavors inherit the same `DjangoModelPermission` default (codenames
-    `add_item` / `change_item`).
+    `add_item` / `change_item`, `add_itemhold` for the `ItemHold` form).
 
     The serializer-mutation surface (spec-039) adds the `SerializerMutation`
     create / update over `Item` via `ItemSerializer` (`createItemViaSerializer` /
@@ -590,6 +600,7 @@ class Mutation:
     update_item_with_file_via_form = DjangoMutationField(UpdateItemWithFileViaForm)
     create_default_category_item_via_form = DjangoMutationField(CreateDefaultCategoryItemViaForm)
     create_stamped_item_via_form = DjangoMutationField(CreateStampedItemViaForm)
+    create_item_hold_via_form = DjangoMutationField(CreateItemHoldViaForm)
     submit_contact = DjangoMutationField(SubmitContact)
     submit_ping = DjangoMutationField(SubmitPing)
     create_item_via_serializer = DjangoMutationField(CreateItemViaSerializer)

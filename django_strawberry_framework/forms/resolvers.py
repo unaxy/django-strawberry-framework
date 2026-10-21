@@ -93,10 +93,12 @@ and the form-specific invariants this module owns:
   form field name for the plain form, every name Django keys the backing model
   field by for the ``ModelForm`` (``save_time_error_key_map``). The ``ModelForm``
   save adds the one failure a valid ``ModelForm`` reaches on its own: a
-  ``blank=True, null=False`` non-text choice column cleaned to ``""``, which
-  ``save()`` refuses with a ``ValueError`` / ``ValidationError``, maps to that
-  column's field-keyed ``null`` error (``_modelform_save_or_field_errors``); any
-  other ``ValueError`` propagates. On a ``ModelForm`` update, and a create over a
+  ``blank=True, null=False`` column cleaned to an empty value it cannot store
+  (``None``, refused by the database's ``NOT NULL`` ``IntegrityError``, or ``""`` on
+  a non-text choice column, refused by ``save()`` with a ``ValueError`` /
+  ``ValidationError``) maps to that column's field-keyed ``null`` error
+  (``_modelform_save_or_field_errors``); any other ``ValueError`` propagates. On a
+  ``ModelForm`` update, and a create over a
   client-assigned key, the form's ``save()`` is called with ``commit=False``, the
   package saves the row it returned and calls ``form.save_m2m()``, as Django's
   admin does, so work a ``ModelForm.save()`` override does only when committing
@@ -143,6 +145,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from django import forms
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.db import IntegrityError
 from django.forms.models import model_to_dict
 
 from django_strawberry_framework.mutations.resolvers import (
@@ -751,25 +754,31 @@ def _bound_form_or_field_errors(
     return form, None
 
 
-def _unstorable_blank_fields(
+def _unstorable_cleaned_fields(
     form: _ModelFormAny,
 ) -> list[models.Field[object, object]]:
-    """Return the form's columns holding a cleaned empty value the column cannot store.
+    """Return the form's columns holding a value the column cannot store.
 
-    Django's ``Field.formfield`` keeps ``TypedChoiceField(empty_value="")`` on a
-    ``null=False`` choice column whatever the column type, and ``ModelForm._post_clean``
-    writes that ``""`` onto ``form.instance`` while ``Model.clean_fields`` skips every
-    ``blank=True`` column whose value is an empty value ("the developer is responsible
-    for making sure they have a valid value"). A non-text column therefore carries a
-    value only ``save()`` refuses, for example the ``ValueError`` of an integer / float
-    column's ``get_prep_value`` ("expected a number but got ''") or the
-    ``ValidationError`` of a decimal / date / UUID / boolean column's ``to_python``.
-    Reads the model's concrete columns the form declares and ``_post_clean``
-    constructed, with Django's own skip predicate (``blank`` and an empty value)
-    narrowed to ``""`` on a column that stores no empty string. A text column storing
-    ``""`` is a legitimate clear and is never named; ``None`` on a ``null=False``
-    column is the database's ``NOT NULL`` ``IntegrityError``, which
-    ``save_or_field_errors`` already maps, so it is not this diagnosis.
+    Reads the instance the save was attempted on, never the database, so it is safe
+    after a failed write left the transaction unusable. Two values qualify, both on a
+    concrete, editable, non-primary-key column the form declares:
+
+    - ``None`` on a ``null=False`` column. A ``blank=True`` column's optional form field
+      cleans an omitted or explicit ``null`` to ``None`` (``ModelChoiceField``,
+      ``IntegerField``, ``DateField``, ...), ``ModelForm._post_clean`` writes it onto
+      ``form.instance``, and ``Model.clean_fields`` skips every ``blank=True`` column
+      whose value is an empty value ("the developer is responsible for making sure they
+      have a valid value"), so the database refuses it with a ``NOT NULL``
+      ``IntegrityError``. The column's ``attname`` is read, so a foreign key with no
+      related row reads ``None`` instead of raising.
+    - ``""`` on a ``blank=True`` column that stores no empty string. Django's
+      ``Field.formfield`` keeps ``TypedChoiceField(empty_value="")`` on a ``null=False``
+      choice column whatever the column type, so a non-text choice column carries a
+      value only ``save()`` refuses, for example the ``ValueError`` of an integer /
+      float column's ``get_prep_value`` ("expected a number but got ''") or the
+      ``ValidationError`` of a decimal / date / UUID / boolean column's ``to_python``.
+
+    A text column storing ``""`` is a legitimate clear and is never named.
     """
     instance = form.instance
     unstorable_fields: list[models.Field[object, object]] = []
@@ -777,7 +786,9 @@ def _unstorable_blank_fields(
         if field.name not in form.fields or not field.editable or field.primary_key:
             continue
         value = read_attr(instance, field.attname)
-        if field.blank and value == "" and not field.empty_strings_allowed:
+        if (value is None and not field.null) or (
+            field.blank and value == "" and not field.empty_strings_allowed
+        ):
             unstorable_fields.append(field)
     return unstorable_fields
 
@@ -815,22 +826,28 @@ def _modelform_save_or_field_errors(
     signal receiver keys its error by the model field name or a forward relation's
     ``attname``, so both reach the GraphQL input name. On top, the one failure a
     VALID ``ModelForm`` can reach at ``save()`` on its own: a ``blank=True,
-    null=False`` non-text column the form cleaned to ``""`` (an omitted or
-    explicitly ``null`` optional choice column with no default to fall back on),
-    which Django's ``clean_fields`` skipped and the column's ``get_prep_value`` /
-    ``to_python`` then refuses with a ``ValueError`` or ``ValidationError``. The
-    exception is the trigger, never the diagnosis: the failure is re-raised as that
-    column's field-keyed ``ValidationError`` only when ``_unstorable_blank_fields``
-    finds such a column on the instance the save was attempted on, so the error
-    carries the field, code ``null`` and path the model flavor's
-    ``mutations/resolvers.py::_explicit_null_error`` gives the same column, with the
-    column's Django ``error_messages["null"]`` as the message (the form is the
-    message source of truth, so a custom or translated message is sent as is). Any
-    other ``ValueError`` out of a consumer ``save()`` propagates unchanged; any other
-    ``ValidationError`` is the consumer's own and maps as raised. Checking the
-    instance AFTER the save attempt, not before, keeps Django's own ``blank=True,
-    null=False`` contract (django-trac 13776 / 20205): a consumer ``save()`` that
-    fills the value in never sees the guard.
+    null=False`` column the form cleaned to an empty value the column cannot store
+    (an omitted or explicitly ``null`` optional field with no default to fall back
+    on), which Django's ``clean_fields`` skipped. ``None`` reaches the database's
+    ``NOT NULL`` ``IntegrityError``; ``""`` on a non-text choice column is refused by
+    the column's ``get_prep_value`` / ``to_python`` with a ``ValueError`` or
+    ``ValidationError``. The exception is the trigger, never the diagnosis: the
+    failure is re-raised as that column's field-keyed ``ValidationError`` only when
+    ``_unstorable_cleaned_fields`` finds such a column on the instance the save was
+    attempted on, so the error carries the field, code ``null`` and path the model
+    flavor gives the same input (``mutations/resolvers.py::_explicit_null_error`` for
+    a scalar, ``mutations/resolvers.py::_decode_single_relation_id`` for a foreign
+    key), with the column's Django ``error_messages["null"]`` as the message (the form
+    is the message source of truth, so a custom or translated message is sent as is).
+    The diagnosis reads only the in-memory instance, so no query runs on a connection
+    the ``IntegrityError`` left unusable; the shared mapper's envelope then rolls the
+    pipeline transaction back (an update's failed save is already contained in
+    ``forced_save_or_field_errors``'s savepoint). An ``IntegrityError`` no such column
+    explains reaches the shared mapper unchanged (the ``"__all__"`` envelope), such a
+    ``ValueError`` propagates unchanged, and any other ``ValidationError`` is the
+    consumer's own and maps as raised. Checking the instance AFTER the save attempt,
+    not before, keeps Django's own ``blank=True, null=False`` contract (django-trac
+    13776 / 20205): a consumer ``save()`` that fills the value in never sees the guard.
     """
 
     def save() -> None:
@@ -843,8 +860,8 @@ def _modelform_save_or_field_errors(
                 form.save_m2m()
             else:
                 _ = form.save()
-        except (ValueError, ValidationError):
-            unstorable_fields = _unstorable_blank_fields(form)
+        except (IntegrityError, ValueError, ValidationError):
+            unstorable_fields = _unstorable_cleaned_fields(form)
             if not unstorable_fields:
                 raise
             raise ValidationError(
@@ -885,7 +902,7 @@ def _modelform_write_step(
     ``_modelform_save_or_field_errors`` (the form's save, split around
     ``commit=False`` on an update and a client-assigned-key create; the reused
     ``IntegrityError`` / ``ValidationError`` mappers, the update's ``conflict``, plus
-    the blank non-text choice column ``null`` mapping). Returns the saved instance
+    the unstorable ``blank=True, null=False`` column ``null`` mapping). Returns the saved instance
     (the skeleton's ``refetch_optimized`` re-fetches it by pk under the G2 plan) or a
     ``StepFailure`` on a validation / write failure.
     """

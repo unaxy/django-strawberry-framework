@@ -31,13 +31,18 @@ end. These forms cover the spec's Decision-12 live matrix:
   out of its ``Meta.fields`` and receiving it as a constructor kwarg, so a duplicate
   ``name`` reaches a real write-time ``IntegrityError`` (the post-validation constraint
   case Django's own validation cannot see).
+* ``ItemHoldModelForm`` - a standard ``ModelForm`` over ``ItemHold`` carrying ``reason`` /
+  ``item``. ``item`` is ``blank=True, null=False``, so its ``ModelChoiceField`` is
+  optional and an explicit ``null`` cleans to ``None`` past ``full_clean`` to the
+  database's ``NOT NULL`` refusal, which the save must report as the ``itemId`` ``null``
+  error the model flavor gives the same input.
 """
 
 from django import forms
 from django.contrib.auth.models import AbstractUser, AnonymousUser
 from typing_extensions import override
 
-from .models import Category, Item
+from .models import Category, Item, ItemHold
 
 # The sentinel value ``ItemModelForm.clean_name`` rejects - drives the field-level
 # ``form.errors`` keyed-to-the-form-field live case (a ``clean_<field>`` error).
@@ -195,3 +200,16 @@ class DefaultCategoryItemModelForm(forms.ModelForm[Item]):
         super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         if category is not None:
             self.instance.category = category
+
+
+class ItemHoldModelForm(forms.ModelForm[ItemHold]):
+    """``ModelForm`` over ``ItemHold``: an optional form field over a ``null=False`` column.
+
+    Declared the standard Django way: ``item``'s ``ModelChoiceField`` is
+    ``required=False`` because the column is ``blank=True``, so an explicit ``null``
+    is a valid form whose save the database refuses.
+    """
+
+    class Meta:
+        model = ItemHold
+        fields = ("reason", "item")
