@@ -111,6 +111,8 @@ from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    is_exact_dict,
+    is_exact_pair,
     list_of,
     pk_of,
     read_attr,
@@ -1551,10 +1553,15 @@ def _delete_or_field_errors(instance: models.Model) -> list[FieldError] | None:
     under ``Meta.select_for_update = False`` or a lockless backend). A success
     payload would claim a deletion that did not happen, so it is the in-band
     ``conflict`` envelope instead - which the caller's centralized envelope
-    also rolls back.
+    also rolls back. The count is read only from Django's own return, an
+    exact ``(total, per_model)`` pair whose second member is a ``dict``: a
+    consumer ``delete()`` override returning anything else (a soft-delete
+    mixin's ``None``) reports no count, so a return without raising is
+    success. A row-existence probe is no substitute: a hard-deleting override
+    returning ``None`` would read as a false conflict.
     """
     try:
-        _total, per_model = instance.delete()
+        result: object = instance.delete()
     except (ProtectedError, RestrictedError):
         return [
             field_error(
@@ -1567,7 +1574,10 @@ def _delete_or_field_errors(instance: models.Model) -> list[FieldError] | None:
         return integrity_error_field_errors()
     except ValidationError as exc:
         return validation_error_to_field_errors(exc)
-    if per_model.get(instance._meta.label, 0) == 0:
+    if not is_exact_pair(result):
+        return None
+    _total, per_model = result
+    if is_exact_dict(per_model) and per_model.get(instance._meta.label, 0) == 0:
         return [conflict_error()]
     return None
 

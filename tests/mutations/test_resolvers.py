@@ -122,6 +122,7 @@ if TYPE_CHECKING:
 
     # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
     # out because the checker runs without the django-stubs mypy plugin that would infer them.
+    _Bool: TypeAlias = models.BooleanField[bool | Combinable, bool]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
     _Text: TypeAlias = models.TextField[str | Combinable, str]
 
@@ -570,6 +571,29 @@ class TwiceSavedRow(models.Model):
         call_forwarded(super().save, args, kwargs)
         self.slug = f"saved-{pk_of(self)}"
         call_forwarded(super().save, args, kwargs)
+
+
+class SoftDeletedRow(models.Model):
+    """A row whose ``delete()`` override flags and saves it, returning ``None`` (soft delete)."""
+
+    name: _Text = models.TextField(blank=True, default="")
+    deleted: _Bool = models.BooleanField(default=False)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "tests_mutations_soft_deleted_row"
+
+    @override
+    # basedpyright: deliberately returns None, the soft-delete mixin shape Django's count is absent from
+    def delete(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        using: str | None = None,
+        keep_parents: bool = False,
+    ) -> None:
+        del keep_parents
+        self.deleted = True
+        self.save(using=using)
 
 
 class TwiceSavedKeyedRow(models.Model):
@@ -3034,6 +3058,99 @@ def test_delete_integrity_error_contained_in_envelope() -> None:
         assert len(errors) == 1
         assert errors[0].field == NON_FIELD_ERROR_KEY
         assert errors[0].codes == ["constraint"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "returned",
+    [
+        None,
+        1,
+        (1,),
+        (1, None),
+    ],
+    ids=[
+        "none",
+        "int",
+        "one-tuple",
+        "pair-without-dict",
+    ],
+)
+def test_delete_without_a_count_is_success(returned: object) -> None:
+    """A ``delete()`` returning anything but Django's ``(total, per_model)`` pair succeeds.
+
+    Only Django's own pair reports the target model's count, so another return (a
+    soft-delete override's ``None``) reports no count and answers no envelope, never a
+    top-level ``TypeError`` / ``ValueError`` from unpacking it.
+    """
+    cat = product_models.Category.objects.create(name=_category_name())
+
+    with patch.object(product_models.Category, "delete", return_value=returned):
+        assert resolvers._delete_or_field_errors(cat) is None
+
+
+@pytest.mark.django_db
+def test_delete_of_zero_target_rows_is_conflict() -> None:
+    """Django's pair with the target model's count zero is the ``conflict`` envelope on ``id``."""
+    cat = product_models.Category.objects.create(name=_category_name())
+
+    with patch.object(product_models.Category, "delete", return_value=(0, {})):
+        errors = resolvers._delete_or_field_errors(cat)
+    assert isinstance(errors, list)
+    assert [(error.field, error.codes) for error in errors] == [("id", ["conflict"])]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_soft_delete_override_returning_none_deletes_through_the_mutation() -> None:
+    """A delete mutation over a soft-delete ``delete()`` returning ``None`` succeeds.
+
+    The payload carries the pre-delete snapshot with empty ``errors`` and no top-level
+    error; the override's flag is committed and the row stays. No fakeshop model
+    soft-deletes.
+    """
+    type(
+        "SoftDeletedRowT",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": SoftDeletedRow, "fields": ("id", "name"), "primary": True},
+            ),
+        },
+    )
+    delete = type(
+        "DeleteRow",
+        (DjangoMutation,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": SoftDeletedRow,
+                    "operation": "delete",
+                    "permission_classes": [_AllowAll],
+                },
+            ),
+        },
+    )
+
+    @strawberry.type
+    class Mutation:
+        delete_row = DjangoMutationField(delete)
+
+    finalize_django_types()
+    with _tables(SoftDeletedRow):
+        pk = saved_pk(SoftDeletedRow.objects.create(name="Kept"))
+        res = _schema(Mutation).execute_sync(
+            "mutation($id: ID!){ deleteRow(id: $id){ result { id name } errors { field codes } } }",
+            variable_values={"id": str(pk)},
+        )
+        stored = list(SoftDeletedRow._base_manager.values_list("pk", "name", "deleted"))
+
+    assert res.errors is None, res.errors
+    assert _json_at(res.data, "deleteRow") == {"result": {"id": pk, "name": "Kept"}, "errors": []}
+    assert stored == [(pk, "Kept", True)]
 
 
 # ---------------------------------------------------------------------------
