@@ -796,10 +796,11 @@ def _related_declarations(cls: type[object], related_attr: str) -> tuple[tuple[s
 
     The read + ``None`` normalization + mapping proof are the shared front half
     (``utils/input_values.py::related_declaration_mapping``); what stays here is
-    the authorization-specific tail: the mapping is materialized through the
-    UNBOUND ``dict.items`` so an ``items`` override cannot run inside a
-    permission walk, and every rejection is worded against the declaring class
-    and attribute the consumer actually wrote.
+    the authorization-specific tail: a real ``dict`` is materialized through the
+    UNBOUND ``dict.items`` so an ``items`` override on a ``dict`` subclass cannot
+    run inside a permission walk (any other ``Mapping`` answers through its own
+    ``items()``), and every rejection is worded against the declaring class and
+    attribute the consumer actually wrote.
     """
     try:
         related = related_declaration_mapping(cls, related_attr)
@@ -810,7 +811,7 @@ def _related_declarations(cls: type[object], related_attr: str) -> tuple[tuple[s
             f"{related_attr!r} must be a mapping; got {truth.kind(exc.value)}.",
         ) from None
     # No emptiness short-circuit: an empty mapping already materializes to
-    # ``()`` through the unbound read below.
+    # ``()`` through the read below.
     # ``sets_mixins.py::collect_related_declarations`` keys the collection by each
     # declaration's class-attribute name; a hand-assigned collection is held to the same
     # shape here, since the key becomes the hop's declared attribute name.

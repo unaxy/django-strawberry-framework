@@ -306,9 +306,9 @@ def related_declaration_mapping(owner: object, related_attr: str) -> Mapping[obj
     to be added in both places.
 
     What stays per-caller is what each does with the mapping - the permission
-    walker materializes it through the UNBOUND ``dict.items`` (an ``items``
-    override must not run inside an authorization walk), while the traversal
-    reads membership lazily. Those are different contracts, not a missed merge.
+    walker materializes it (``utils/permissions.py::_related_declarations``),
+    while the traversal reads membership lazily. Those are different contracts,
+    not a missed merge.
 
     Raises :class:`RelatedDeclarationError` for the caller to translate.
     """
