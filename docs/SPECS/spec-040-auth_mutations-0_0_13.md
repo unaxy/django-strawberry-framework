@@ -846,11 +846,9 @@ credential or session work — is
 5. `logout`: `ok` is whether an **authenticated actor existed before teardown**,
    answered by the ONE shared anonymity definition
    ([`auth/mutations.py::_authenticated_actor_or_none`][auth-mutations]) `current_user`'s
-   nullable return also derives from — so a request with no actor the middleware could
-   load (`SessionMiddleware` without `AuthenticationMiddleware`, or a transport adapter
-   whose scope carries no middleware-loaded user) and a request whose `user` is
-   unauthenticated both read `ok: false`, and the classification cannot drift between
-   the two fields or between transports. The payload is constructed **before** any session
+   nullable return also derives from — so every shape it reads as anonymous reads
+   `ok: false`, and the classification cannot drift between the two fields or between
+   transports. The payload is constructed **before** any session
    mutation (so `ok` describes the state being transitioned and a
    payload-construction failure cannot follow a completed teardown), then the
    session teardown runs unconditionally (flushing the session whether or not
@@ -1272,18 +1270,11 @@ so the two fields cannot drift. It returns:
 - the user object, typed as the user model's primary
   [`DjangoType`][glossary-djangotype], when the request carries an authenticated
   actor;
-- `null` otherwise. "Otherwise" is every non-authenticated shape, not just the
-  anonymous session: a request with **no `user` attribute at all** (a session
-  without `AuthenticationMiddleware`, or a transport adapter whose scope carries no
-  middleware-loaded user) reads `null` rather than raising, and a **hostile** actor —
-  a `user` descriptor, an `is_authenticated` read, a legacy `is_authenticated()`
-  callable, or an `is_authenticated` value whose truthiness raises `TypeError` /
-  `ValueError` / `AttributeError` / `KeyError` / `IndexError` — collapses to `null`
-  as well, and so does an awaitable `is_authenticated` value (closed, never awaited).
-  The classification is **fail-closed in one direction only**: a hostile
-  state is anonymous, never authenticated. Any other exception (a `DatabaseError`
-  from forcing the lazy user) still propagates, so a real store outage is never
-  disguised as an anonymous read.
+- `null` otherwise, never an error: every shape that definition reads as anonymous
+  ([`auth/mutations.py::_authenticated_actor_or_none`][auth-mutations], whose docstring
+  is the classification table), a request with **no `user` attribute at all**
+  included. It is a classification, not a guard: a `DatabaseError` from forcing the
+  lazy user propagates, so a real store outage is never disguised as an anonymous read.
 
 **`current_user` is permission-gated like the other three, but its enforcement site
 is the query resolver, not `run_write_pipeline_sync`**. It accepts
@@ -1764,7 +1755,7 @@ Rationale companion: [Decision 12][rationale-d12].
 | Slice | Files | Tests |
 | --- | --- | --- |
 | 1 — auth substrate + `login` / `logout`, earned live | `auth/__init__.py` (the four re-exports), [`auth/mutations.py`][auth-mutations] (`login_mutation` / `logout_mutation`, the `_make_permission_holder` holders reusing `check_permission` / `authorize_or_raise` by call, the declaration ledger and its full-clear-only [`register_subsystem_clear`][registry] row, `bind_auth_mutations()`, the `_make_auth_field` dispatcher, the split sync / async session bodies and their Channels twins), [`auth/sessions.py`][auth-sessions] (`classify_transport`, `require_session`, `scope_session_lock`, the capability predicates), [`types/finalizer.py`][types-finalizer] (the `loaded_attr` reach to `bind_auth_mutations()` after the pre-bind reset loop, before `bind_mutations()`), `examples/fakeshop/apps/accounts/` (the schema-only app: `UserType` over `auth.User`, the auth `Query` / `Mutation`), [`config/schema.py`][config-schema] + [`config/settings.py`][config-settings] (compose + install the app), [`schema_reload.py`][schema-reload] (the `"apps.accounts.schema"` `_PROJECT_APP_SCHEMA_MODULES` row) | **Primary: `test_query/test_auth_api.py`** (login happy path + session cookie, the session-key branches, the failed-login envelope classes, logout round trip + anonymous logout, the sessionless refusals, CSRF, the complete-reload fixture). **Internals: `tests/auth/test_mutations.py`** (ledger lifecycle, bind arms, post-finalize raise, dispatch spies, async-permission `SyncMisuseError`, gate variants on throwaway schemas, session-store failure injection, the Channels / WebSocket transport) + **`tests/auth/test_sessions.py`** (classification, capability, the per-scope lock) |
-| 2 — `register` + `current_user`, earned live | [`auth/mutations.py`][auth-mutations] (`register_mutation`, `derive_register_fields`, the cached `Register` rider with its `RegisterInput` name seam and `resolve_sync` / `resolve_async` overrides, the password-aware `_register_decode_step` / `_register_write_step` pair over `run_write_pipeline_sync`), `auth/queries.py` (`current_user`, its holder, the `CurrentUserAlias` namespace trio and its pre-bind `register_subsystem_clear` row), the shared seams it rides in [`mutations/inputs.py`][mutations-inputs] (the `EXCLUDED` kind via `mutation_input_field_specs(…, excluded_attrs=…)`) and [`mutations/resolvers.py`][mutations-resolvers] (the four-tuple `_model_decode_step`), `examples/fakeshop/apps/accounts/schema.py` (`register` + `me`) | **Primary: `test_query/test_auth_api.py`** (register → login → `me` → logout round trip with hashed storage, duplicate-username / weak-password / surrogate / decode-failure envelopes, anonymous `me: null`, the SDL shapes, the async mount, the strictness holder). **Internals: `tests/auth/test_mutations.py` + `tests/auth/test_queries.py`** (factory cache identity, reload-idempotence, the register / current-user arms, `derive_register_fields`, the exclusion seam, decode / write defense-in-depth, a register over a username-keyed user model raced by a competing account, alias lifecycle, hostile `is_authenticated` containment, gated `me`) |
+| 2 — `register` + `current_user`, earned live | [`auth/mutations.py`][auth-mutations] (`register_mutation`, `derive_register_fields`, the cached `Register` rider with its `RegisterInput` name seam and `resolve_sync` / `resolve_async` overrides, the password-aware `_register_decode_step` / `_register_write_step` pair over `run_write_pipeline_sync`), `auth/queries.py` (`current_user`, its holder, the `CurrentUserAlias` namespace trio and its pre-bind `register_subsystem_clear` row), the shared seams it rides in [`mutations/inputs.py`][mutations-inputs] (the `EXCLUDED` kind via `mutation_input_field_specs(…, excluded_attrs=…)`) and [`mutations/resolvers.py`][mutations-resolvers] (the four-tuple `_model_decode_step`), `examples/fakeshop/apps/accounts/schema.py` (`register` + `me`) | **Primary: `test_query/test_auth_api.py`** (register → login → `me` → logout round trip with hashed storage, duplicate-username / weak-password / surrogate / decode-failure envelopes, anonymous `me: null`, the SDL shapes, the async mount, the strictness holder). **Internals: `tests/auth/test_mutations.py` + `tests/auth/test_queries.py`** (factory cache identity, reload-idempotence, the register / current-user arms, `derive_register_fields`, the exclusion seam, decode / write defense-in-depth, a register over a username-keyed user model raced by a competing account, alias lifecycle, the anonymity classification, gated `me`) |
 | 3 — docs | [`docs/GLOSSARY.md`][glossary], [`docs/README.md`][docs-readme], [`README.md`][readme], [`TODAY.md`][today], [`docs/TREE.md`][tree] | — |
 
 The small footprint is the dividend of riding the foundation: no new
@@ -2222,10 +2213,11 @@ schemas (below).
   **including an async `me` under a permission gate whose `instance=request.user`
   argument forces the lazy object inside the boundary, asserting no
   `SynchronousOnlyOperation` leaks**;
-- the shared anonymity definition's containment: a hostile `user` descriptor, a
-  hostile or legacy-callable or awaitable `is_authenticated`, and a hostile
-  `is_authenticated` truthiness each read as anonymous (`me: null`, `logout`
-  `ok: false`), never as authenticated;
+- the shared anonymity definition's classification table
+  ([`auth/mutations.py::_authenticated_actor_or_none`][auth-mutations]), pinned for `me`
+  in `tests/auth/test_queries.py` and for `logout`'s `ok` in
+  `tests/auth/test_mutations.py`, where a raising `is_authenticated` propagates before
+  any session teardown;
 - **the transport contract**
   ([Decision 11](#decision-11--transport-contract-classify-first-refuse-a-transport-that-cannot-honour-the-surface-truthfully)),
   in `tests/auth/test_sessions.py` for the classification / capability layer and in
