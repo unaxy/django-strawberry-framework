@@ -41,6 +41,7 @@ from django.apps import apps
 from django.db import router
 from django.db.models.constants import LOOKUP_SEP
 from django.http import HttpRequest
+from graphql import GraphQLError
 
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -387,10 +388,17 @@ def invoke_permission_method(
 ) -> None:
     """Call ``check_<field_path>_permission(request)`` if defined on ``bare_instance``.
 
-    When ``fired`` is supplied, the method name is recorded after a successful
+    A gate allows by returning ``None`` or ``True`` and denies by raising or by
+    returning anything else. A returned denial raises the same plain
+    ``GraphQLError`` a gate raises itself, so a DRF-style ``return
+    user.is_staff`` (or ``0``, ``""``, ``1``) can never read as an allow:
+    only the two explicit allow values pass, and the read fails closed.
+
+    When ``fired`` is supplied, the method name is recorded after an allowing
     fire and subsequent calls with the same name skip the attribute lookup
-    entirely. The dedup is scoped to the supplied set -- the caller passes the
-    per-class set keyed out of its shared ``_fired`` map.
+    entirely; a denial is never recorded. The dedup is scoped to the supplied
+    set -- the caller passes the per-class set keyed out of its shared
+    ``_fired`` map.
 
     The gate result runs through ``reject_async_in_sync_context``: an
     ``async def check_<field>_permission`` returns a truthy, un-awaited coroutine
@@ -419,13 +427,16 @@ def invoke_permission_method(
             "or remove the attribute.",
         )
     if method is not None:
-        _ = reject_async_in_sync_context(
+        owner = truth.name(type(bare_instance))
+        result = reject_async_in_sync_context(
             method(request),
-            owner=truth.name(type(bare_instance)),
+            owner=owner,
             method=method_name,
             context="permission-check",
             recourse=_GATE_ASYNC_RECOURSE,
         )
+        if result is not None and result is not True:
+            raise GraphQLError(f"Not authorized to use {field_path} on {owner}.")
         if fired is not None:
             fired.add(method_name)
 

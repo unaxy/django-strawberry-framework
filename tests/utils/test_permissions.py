@@ -15,6 +15,7 @@ import strawberry
 from django.contrib.auth import get_user_model
 from django.db.models import Model
 from django.http import HttpRequest
+from graphql import GraphQLError
 from typing_extensions import override
 
 import django_strawberry_framework.utils.permissions as perm
@@ -451,6 +452,197 @@ def test_invoke_permission_method_treats_a_none_slot_as_absent() -> None:
     fired: set[str] = set()
     invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
     assert fired == set()
+
+
+def _returning_gate(result: object, calls: list[object]) -> Callable[[object, object], object]:
+    def _check(_self: object, _request: object) -> object:
+        calls.append(result)
+        return result
+
+    return _check
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        False,
+        0,
+        0.0,
+        "",
+        [],
+        "yes",
+        1,
+        object(),
+    ],
+    ids=[
+        "false",
+        "zero",
+        "zero-float",
+        "empty-str",
+        "empty-list",
+        "truthy-str",
+        "one",
+        "object",
+    ],
+)
+def test_invoke_permission_method_denies_on_any_return_but_none_or_true(result: object) -> None:
+    """A gate allows only by returning ``None`` or ``True``; every other return denies.
+
+    A DRF-style ``return user.is_staff`` must never read as an allow, and a
+    truthy non-bool is not an explicit allow either: the read fails closed with
+    the plain ``GraphQLError`` a raising gate produces. The denied gate is not
+    recorded in the dedup set, so a later fire in the same request runs it again.
+    """
+    calls: list[object] = []
+
+    class _Bare:
+        check_name_permission = _returning_gate(result, calls)
+
+    fired: set[str] = set()
+    for _ in range(2):
+        with pytest.raises(GraphQLError, match=r"^Not authorized to use name on _Bare\.$") as exc:
+            invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
+        assert exc.value.extensions == {}
+    assert fired == set()
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("result", [None, True], ids=["none", "true"])
+def test_invoke_permission_method_allows_on_none_or_true(result: object) -> None:
+    """``None`` (the raise-to-deny form's fall-through) and ``True`` both allow and are recorded."""
+    calls: list[object] = []
+
+    class _Bare:
+        check_name_permission = _returning_gate(result, calls)
+
+    fired: set[str] = set()
+    invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
+    invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
+    assert fired == {"check_name_permission"}
+    assert calls == [result]
+
+
+@pytest.mark.parametrize("result", [None, True, False], ids=["none", "true", "false"])
+def test_invoke_permission_method_rejects_an_async_gate_whatever_it_would_return(
+    result: object,
+) -> None:
+    """An ``async def`` gate is refused before its result is read, allow or deny alike.
+
+    The pass is synchronous, so the coroutine is never awaited: no awaited value
+    can allow, and the gate is not recorded as fired.
+    """
+    ran: list[object] = []
+
+    class _Bare:
+        async def check_name_permission(self, _request: object) -> object:
+            ran.append(result)
+            return result
+
+    fired: set[str] = set()
+    with pytest.raises(SyncMisuseError, match="check_name_permission returned a coroutine"):
+        invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
+    assert ran == []
+    assert fired == set()
+
+
+def test_flat_relation_path_gate_denies_on_a_false_return() -> None:
+    """A flat path stops at the first returned denial; the denied gate is not recorded.
+
+    ``category__name`` fires ``Item.check_category_permission`` (allows with
+    ``True``) and then ``Category.check_name_permission``, which returns
+    ``False`` and denies.
+    """
+    calls: list[object] = []
+
+    class Category:
+        check_name_permission = _returning_gate(result=False, calls=calls)
+
+    class Item(ActiveInputPermissionMixin):
+        related_filters = {"category": _Rel("category", Category, target_attr="filterset")}
+        check_category_permission = _returning_gate(result=True, calls=calls)
+
+    fired: dict[type[object], set[str]] = {}
+    with pytest.raises(GraphQLError, match="Not authorized to use name on Category"):
+        _fire_flat_relation_path_gates(
+            Item,
+            "category__name",
+            HttpRequest(),
+            fired=fired,
+            related_attr="related_filters",
+            target_attr="filterset",
+        )
+    assert calls == [True, False]
+    assert fired[Item] == {"check_category_permission"}
+    assert fired[Category] == set()
+
+
+def test_nested_branch_gate_denies_on_a_false_return() -> None:
+    """A parent per-branch gate returning ``False`` denies the nested branch and is not recorded."""
+    calls: list[str] = []
+
+    class _Child:
+        @classmethod
+        def _run_permission_checks(
+            cls,
+            _input_value: object,
+            _request: object,
+            *,
+            _fired: dict[type[object], set[str]] | None = None,
+            _depth: int = 0,
+        ) -> None:
+            calls.append("child._run")
+
+    related_obj = type("Rel", (), {"orderset": _Child})()
+
+    class _Parent(ActiveInputPermissionMixin):
+        @override
+        @classmethod
+        def _permission_walk_gates(
+            cls,
+            input_value: object,
+        ) -> tuple[tuple[type[object], str], ...]:
+            return ()
+
+        @override
+        @classmethod
+        def _active_permission_targets(
+            cls,
+            input_value: object,
+        ) -> tuple[list[str], list[tuple[str, object, object]]]:
+            return ["name"], [("child", related_obj, {"x": 1})]
+
+        @override
+        @staticmethod
+        def _invoke_permission_method(
+            bare_instance: ActiveInputPermissionMixin,
+            field_path: str,
+            request: object,
+            *,
+            fired: set[str] | None = None,
+        ) -> None:
+            invoke_permission_method(bare_instance, field_path, request, fired=fired)
+
+        def check_name_permission(self, _request: object) -> bool:
+            calls.append("parent.name")
+            return True
+
+        def check_child_permission(self, _request: object) -> bool:
+            calls.append("parent.child")
+            return False
+
+    fired: dict[type[object], set[str]] = {}
+    with pytest.raises(GraphQLError, match="Not authorized to use child on _Parent"):
+        run_active_input_permission_checks(
+            _Parent,
+            {"name": "v", "child": {"x": 1}},
+            HttpRequest(),
+            fired=fired,
+            bare=object.__new__(_Parent),
+            target_attr="orderset",
+            related_attr="related_orders",
+        )
+    assert calls == ["parent.name", "child._run", "parent.child"]
+    assert fired[_Parent] == {"check_name_permission"}
 
 
 # ---------------------------------------------------------------------------

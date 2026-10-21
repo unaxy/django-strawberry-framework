@@ -18,6 +18,7 @@ filter graph.
 from __future__ import annotations
 
 from django import forms
+from django.contrib.auth.models import AbstractUser
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, QueryDict
 from django_filters import CharFilter, ModelChoiceFilter, ModelMultipleChoiceFilter
@@ -242,6 +243,17 @@ class PublisherFilter(FilterSet):
     class Meta:
         model = models.Publisher
         fields = {"id": ["exact", "in"], "name": ["exact", "icontains"], "house_code": ["exact"]}
+
+    def check_house_code_permission(self, request: object) -> bool:
+        """Return-form gate: only staff users may filter by ``house_code``.
+
+        The DRF-style spelling: the gate returns the decision instead of
+        raising. ``True`` (or ``None``) allows; ``False`` denies with the same
+        ``GraphQLError`` a raising gate produces, so an anonymous request never
+        reads the boolean as an allow.
+        """
+        user = getattr(request, "user", None)
+        return isinstance(user, AbstractUser) and user.is_staff
 
 
 class EditionFilter(FilterSet):
