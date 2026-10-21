@@ -278,6 +278,11 @@ from itertools import takewhile
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, cast
 
+try:
+    import _stop_signals
+except ModuleNotFoundError:  # imported as ``scripts.prove_failability`` (repo root on path)
+    from scripts import _stop_signals
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
     from types import FrameType
@@ -300,18 +305,13 @@ TREE_NAMESPACE_DIGEST_LENGTH = 16
 PRISTINE_DIRECTORY_NAME = "pristine"
 ACTIVE_MARKER_NAME = "ACTIVE-MUTATION.json"
 RESTORE_FAILED_MARKER_NAME = "RESTORE-FAILED.json"
-# The signals that ask a run to stop: Ctrl-C, ``kill``/``timeout``/a CI cancel, a closed
-# terminal, Ctrl-backslash. Each ends the run where a scope run returns, never mid-restore.
-STOP_SIGNALS = (
-    signal.SIGINT,
-    signal.SIGTERM,
-    signal.SIGHUP,
-    signal.SIGQUIT,
-)
+# The signals that ask a run to stop (``scripts/_stop_signals.py``). Each ends the run where a
+# scope run returns, never mid-restore.
+STOP_SIGNALS = _stop_signals.STOP_SIGNALS
 # A repeat stop signal inside this many seconds of the first is the same stop delivered
-# twice (``uv run`` forwards a Ctrl-C the terminal already sent the whole group), so only a
-# later one escalates to ``SIGKILL``; inside the window pytest's teardown is left to finish.
-STOP_REPEAT_GRACE = 1.0
+# twice, so only a later one escalates to ``SIGKILL``; inside the window pytest's teardown is
+# left to finish.
+STOP_REPEAT_GRACE = _stop_signals.STOP_REPEAT_GRACE
 # ``--no-cov`` is mandatory: pytest.ini's addopts turn coverage on, and coverage
 # gating belongs to the full-suite run, not to this tool. ``--color=no`` and
 # ``-p no:cacheprovider`` keep the captured output parseable and keep the run
@@ -2016,16 +2016,8 @@ def _request_stop(signum: int, _frame: FrameType | None) -> None:
 
 
 def _signal_scope(signum: int) -> None:
-    """Send ``signum`` to the running scope's whole process group, if a scope is running.
-
-    A group already gone raises ``ProcessLookupError``; one whose members have
-    all exited but whose leader is not yet reaped raises ``PermissionError`` on
-    macOS. Either way nothing is left to signal.
-    """
-    scope = _STOP.scope
-    if scope is not None and scope.returncode is None:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(scope.pid, signum)
+    """Send ``signum`` to the running scope's process group, if one is running; never raise."""
+    _stop_signals.signal_group(_STOP.scope, signum)
 
 
 def _raise_if_stopped() -> None:
@@ -2045,16 +2037,10 @@ def _stop_on_signals() -> Generator[None, None, None]:
     out and the stop request ends with the run, so a later run in the same
     process starts unstopped.
     """
-    previous = {
-        signum: signal.signal(signum, _request_stop)
-        for signum in STOP_SIGNALS
-        if signal.getsignal(signum) is not signal.SIG_IGN
-    }
     try:
-        yield
+        with _stop_signals.routed_to(_request_stop):
+            yield
     finally:
-        for signum, handler in previous.items():
-            _ = signal.signal(signum, signal.SIG_DFL if handler is None else handler)
         _STOP.signum = None
 
 
@@ -3258,16 +3244,10 @@ def _write_report(report: str, output: Path | None, *, label: str) -> None:
 def _cli() -> NoReturn:
     """Run :func:`main` as the script does, ending by the stop signal that stopped the run.
 
-    :func:`main` returns ``128 + N`` for in-process callers. A process that
-    exits with that status still reads as a normal exit to its parent, so a
-    calling shell loop would carry on; dying by ``N`` with its default action
-    is what an unhandled stop signal does, and what the parent expects.
+    :func:`main` returns ``128 + N`` for in-process callers; the process
+    then dies by ``N`` (``scripts/_stop_signals.py::exit_with``).
     """
-    code = main()
-    if code - 128 in STOP_SIGNALS:
-        _ = signal.signal(code - 128, signal.SIG_DFL)
-        os.kill(os.getpid(), code - 128)
-    raise SystemExit(code)
+    _stop_signals.exit_with(main())
 
 
 if __name__ == "__main__":

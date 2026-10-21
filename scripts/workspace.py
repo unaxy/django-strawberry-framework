@@ -149,8 +149,9 @@ Guarantees, each one a hand-run failure this encodes away:
 * **Cleanup leaves nothing.** ``release`` unbinds copies and drops their
   databases. ``gc`` removes the flow folder, its databases, and the empty
   parent folders; a removal cut short keeps the folder's marker, so ``gc``
-  finishes it on the next run. A crashed run's lock dies with its process; a
-  crashed sync, ``--fresh`` included, resyncs on the address's next run.
+  finishes it on the next run. A crashed run's locks last while its command
+  runs and die with it; a crashed sync, ``--fresh`` included, resyncs on the
+  address's next run.
 * **A copy is settled under its own lock.** A run holds its copy's lock
   from before it decides whether to sync until its command ends, and reads
   its binding and the copy's sync status from ``state.json`` only once it
@@ -166,9 +167,36 @@ Guarantees, each one a hand-run failure this encodes away:
   lock while holding ``pool.lock``. ``release``, and the check that names a
   copy ``RUNNING``, try a copy's lock under ``pool.lock`` without waiting, so
   no two commands wait on each other and that check never makes a
-  ``release`` refuse.
+  ``release`` refuse. The command holds its run's locks too, on the same
+  open descriptions, so they last until the command and everything it
+  started with them has ended, even when this script was killed first
+  (``SIGKILL``); so do a copy's ``uv sync`` and the gate's floor installs. A
+  process the command leaves running behind it (``sleep 60 &``) holds them
+  as well: the copy reads ``RUNNING`` and ``gc`` and ``release`` refuse
+  until it ends. pytest's xdist workers and the prover's scopes are
+  started with ``close_fds``, so they never hold them.
+* **A stop signal stops the command, then the run.** ``SIGINT``, ``SIGTERM``,
+  ``SIGHUP`` and ``SIGQUIT`` to this script (Ctrl-C, ``kill`` or a parent's
+  ``terminate()``, a closed terminal, Ctrl-backslash) are relayed to the
+  command, which runs in a session of its own, by signalling its whole process
+  group: ``uv``, pytest and every xdist worker get it as a terminal's
+  foreground group would. The run keeps its locks, its log and its output
+  until the command and what it left holding its output have ended, then
+  records the run with ``stopped_by`` and ends by that signal. A repeat
+  within ``STOP_REPEAT_GRACE`` (one second) of the last relayed stop is the
+  same stop delivered twice (``uv run`` forwards a signal its group already
+  got) and is dropped; a later one is relayed as received, so a second
+  Ctrl-C means what the command makes of it. A signal the run inherited as
+  ignored (``nohup``, a background job) stays ignored, for the command too.
+* **Ctrl-Z suspends the command with the run.** ``SIGTSTP`` (and ``SIGTTIN``
+  / ``SIGTTOU``) to this script stops the command's whole group with
+  ``SIGSTOP``, since the kernel never stops a group in a session of its own
+  on those, then stops this script; ``fg`` (``SIGCONT``) continues both.
 
-Exit codes: ``run`` and ``prove`` return the command's own exit code. ``125``
+Exit codes: ``run`` and ``prove`` return the command's own exit code, ``128 + N``
+for a command that died by signal ``N``. A run stopped by signal ``N``, and a
+``gate`` so stopped, makes :func:`main` return ``128 + N``, and a ``128 + N``
+for a stop signal ends the process by ``N``. ``125``
 means this script refused before the command ran (bad address, full pool,
 its copy was released while it waited, wrong provenance, Postgres
 unavailable), with the reason on stderr. The other
@@ -194,25 +222,28 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, TypedDict, cast, overload
+from typing import TYPE_CHECKING, BinaryIO, NoReturn, TypedDict, cast, overload
 
 import tomli
 from typing_extensions import NotRequired, override
 
 try:
     import _bench_common
+    import _stop_signals
 except ModuleNotFoundError:  # imported as ``scripts.workspace`` (repo root on path)
-    from scripts import _bench_common
+    from scripts import _bench_common, _stop_signals
 
 if TYPE_CHECKING:
     import io
     from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+    from types import FrameType
 
     from typing_extensions import TypeIs
 
@@ -229,6 +260,12 @@ DEFAULT_SLOTS = 4
 MIN_FREE_BYTES = 6 * 1024**3
 REFUSED = 125
 MARKER_NAME = ".dsf-ws"
+# The signals that ask a run to stop (``scripts/_stop_signals.py``). A run relays each to its
+# command and ends only once that has ended.
+STOP_SIGNALS = _stop_signals.STOP_SIGNALS
+# A repeat inside this many seconds of the last relayed stop is that stop delivered twice, so it
+# is not relayed.
+STOP_REPEAT_GRACE = _stop_signals.STOP_REPEAT_GRACE
 
 #: Listing entries under these prefixes are cycle output, never tree content.
 EXCLUDED_PREFIXES = ("output/", "docs/shadow/")
@@ -581,8 +618,11 @@ def file_lock(
     *,
     blocking: bool = True,
     create: bool = True,
-) -> Generator[None, None, None]:
-    """Hold an exclusive ``flock`` on ``path``; the kernel drops it if the process dies.
+) -> Generator[int, None, None]:
+    """Hold an exclusive ``flock`` on ``path``; yield the descriptor holding it.
+
+    The kernel drops the lock once every descriptor sharing it is closed: when
+    this block ends and no command it was handed to (:func:`stream`) runs.
 
     ``create`` makes the file, and its folder, but never the folder above:
     only :func:`flow_lease` creates a flow folder, so a lock taken after
@@ -601,7 +641,7 @@ def file_lock(
         msg = f"{path} is held: a command is still running there"
         raise LockBusyError(msg) from None
     try:
-        yield
+        yield descriptor
     finally:
         os.close(descriptor)
 
@@ -865,9 +905,22 @@ def _lock_flow_dir(layout: Layout, operation: int, *, create: bool) -> int | Non
                 return None
 
 
+@dataclasses.dataclass(frozen=True)
+class FlowLease:
+    """A held flow lease: whether the flow is marked, and the descriptor holding the lease.
+
+    ``holding`` is that descriptor for a command that must hold the lease too
+    (:func:`stream`); empty when the flow folder does not exist, so no lease
+    is held.
+    """
+
+    marked: bool
+    holding: tuple[int, ...]
+
+
 @contextlib.contextmanager
-def flow_lease(layout: Layout, *, create: bool = True) -> Generator[bool, None, None]:
-    """Hold a shared lease on the flow for a whole command; yield whether the flow is marked.
+def flow_lease(layout: Layout, *, create: bool = True) -> Generator[FlowLease, None, None]:
+    """Hold a shared lease on the flow for a whole command; yield it and whether the flow is marked.
 
     The lease is an ``flock`` on the flow folder itself, so no lock file sits
     in what ``gc`` removes. ``gc`` takes it exclusively and keeps it until the
@@ -878,12 +931,12 @@ def flow_lease(layout: Layout, *, create: bool = True) -> Generator[bool, None, 
     """
     descriptor = _lock_flow_dir(layout, fcntl.LOCK_SH, create=create)
     if descriptor is None:
-        yield False
+        yield FlowLease(marked=False, holding=())
         return
     try:
         if create:
             layout.ensure_marked()
-        yield (layout.flow_dir / MARKER_NAME).exists()
+        yield FlowLease(marked=(layout.flow_dir / MARKER_NAME).exists(), holding=(descriptor,))
     finally:
         os.close(descriptor)
 
@@ -1077,16 +1130,26 @@ def mirror_tree(
     raise WorkspaceError(msg)
 
 
-def _run_checked(command: Sequence[str], env: dict[str, str]) -> None:
-    """Run one environment-building command; a non-zero exit is a refusal with its stderr."""
-    completed = subprocess.run(list(command), capture_output=True, env=env, check=False)
+def _run_checked(command: Sequence[str], env: dict[str, str], holding: Sequence[int] = ()) -> None:
+    """Run one environment-building command; a non-zero exit is a refusal with its stderr.
+
+    The command holds the ``holding`` descriptors (the locks it builds
+    under), so a lock lasts while the command runs, even past this process.
+    """
+    completed = subprocess.run(
+        list(command),
+        capture_output=True,
+        env=env,
+        check=False,
+        pass_fds=tuple(holding),
+    )
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", "replace").strip()
         msg = f"{shlex.join(command)} failed ({completed.returncode}): {detail}"
         raise WorkspaceError(msg)
 
 
-def _uv_sync(destination: Path) -> None:
+def _uv_sync(destination: Path, holding: Sequence[int] = ()) -> None:
     command = [
         "uv",
         "sync",
@@ -1097,7 +1160,7 @@ def _uv_sync(destination: Path) -> None:
         "pg",
         "-q",
     ]
-    _run_checked(command, clean_env())
+    _run_checked(command, clean_env(), holding)
 
 
 def _lower_bound(specifier: str, what: str) -> str:
@@ -1219,13 +1282,14 @@ class _FloorVenv(TypedDict):
     reused: bool
 
 
-def ensure_floor_venv(layout: Layout) -> _FloorVenv:
+def ensure_floor_venv(layout: Layout, holding: Sequence[int] = ()) -> _FloorVenv:
     """Reuse the gate copy's floor virtualenv while its key matches; else rebuild it whole.
 
     The key covers the install commands (so the pins and the interpreter) and
     the copy's ``pyproject.toml`` and ``uv.lock``. Package edits need no
     rebuild: the copy is installed editable. The key is written only after
     every command succeeded, so a failed build is rebuilt on the next gate.
+    Each install holds ``holding``, the gate's locks (:func:`_run_checked`).
     """
     copy = layout.gate_dir
     venv = layout.floor_venv
@@ -1251,7 +1315,7 @@ def ensure_floor_venv(layout: Layout) -> _FloorVenv:
             shutil.rmtree(venv)
         env = clean_env(UV_PROJECT_ENVIRONMENT=str(venv))
         for command in commands:
-            _run_checked(command, env)
+            _run_checked(command, env, holding)
         _ = key_path.write_text(key, encoding="utf-8")
     return {
         "python": str(python),
@@ -1275,10 +1339,15 @@ def sync_copy(
     destination: Path,
     *,
     preserved: frozenset[str] = PRESERVED,
+    holding: Sequence[int] = (),
 ) -> _Manifest:
-    """Mirror, ``uv sync`` and digest-check one copy; return its manifest."""
+    """Mirror, ``uv sync`` and digest-check one copy; return its manifest.
+
+    ``uv sync`` holds ``holding``, the locks the copy is synced under
+    (:func:`_run_checked`).
+    """
     entries = mirror_tree(repo_root, destination, preserved=preserved)
-    _uv_sync(destination)
+    _uv_sync(destination, holding)
     copy_digest = _bench_common.package_digest(destination / PACKAGE_DIR)
     shared_digest = _bench_common.package_digest(repo_root / PACKAGE_DIR)
     if copy_digest != shared_digest:
@@ -1587,11 +1656,16 @@ class Binding:
 
 @dataclasses.dataclass(frozen=True)
 class Lease:
-    """An address's copy while this process holds its lock, synced for that address."""
+    """An address's copy while this process holds its lock, synced for that address.
+
+    ``holding`` is every descriptor holding the run's locks, the copy's last,
+    for a command that must hold them too (:func:`stream`).
+    """
 
     slot: str
     directory: Path
     manifest: _Manifest
+    holding: tuple[int, ...]
 
 
 def _free_bytes(path: Path) -> int:
@@ -1697,15 +1771,18 @@ def lease(
     address: Address,
     *,
     fresh: bool = False,
+    holding: tuple[int, ...] = (),
 ) -> Generator[Lease, None, None]:
     """Hold ``address``'s copy, bound and synced for it, until the block ends.
 
-    The caller holds the flow's lease. The run waits for the copy's lock and
-    decides only then, from ``state.json`` and the copy's manifest read under
-    it, whether to sync: a copy already synced for the address is used as it
-    stands, edits included, however long the run waited; a copy still
-    ``syncing`` (a new binding, or a sync that never finished), one whose
-    manifest is gone, or one ``fresh`` asks for is resynced.
+    The caller holds the flow's lease, on the ``holding`` descriptors. The
+    copy's sync holds that lease and the copy's lock too. The run waits for
+    the copy's lock and decides only then, from ``state.json`` and the copy's
+    manifest read under it, whether to sync: a copy already synced for the
+    address is used as it stands, edits included, however long the run
+    waited; a copy still ``syncing`` (a new binding, or a sync that never
+    finished), one whose manifest is gone, or one ``fresh`` asks for is
+    resynced.
 
     Raises:
         WorkspaceError: the copy no longer holds ``address``: a release freed
@@ -1714,10 +1791,11 @@ def lease(
 
     """
     slot = bind(layout, address).slot
-    with file_lock(layout.slot_lock(slot)):
+    with file_lock(layout.slot_lock(slot)) as descriptor:
+        held = (*holding, descriptor)
         synced = _admit(layout, address, slot, fresh=fresh)
-        manifest = sync_slot(layout, slot, address) if synced is None else synced
-        yield Lease(slot, layout.slot_dir(slot), manifest)
+        manifest = sync_slot(layout, slot, address, held) if synced is None else synced
+        yield Lease(slot, layout.slot_dir(slot), manifest, held)
 
 
 def copy_path(layout: Layout, address: Address) -> Path:
@@ -1769,12 +1847,20 @@ def _mark_synced(
         _write_json(layout.state_path, state)
 
 
-def sync_slot(layout: Layout, slot: str, address: Address) -> _Manifest:
-    """Resync one copy from the shared tree for ``address`` and drop its Postgres databases."""
+def sync_slot(
+    layout: Layout,
+    slot: str,
+    address: Address,
+    holding: Sequence[int] = (),
+) -> _Manifest:
+    """Resync one copy from the shared tree for ``address`` and drop its Postgres databases.
+
+    ``uv sync`` holds ``holding``, the run's locks (:func:`sync_copy`).
+    """
     postgres = _running_postgres(layout.repo_root)
     if postgres is not None:
         _ = postgres.drop_matching(layout.db_name(slot), exact=True)
-    manifest = sync_copy(layout.repo_root, layout.slot_dir(slot))
+    manifest = sync_copy(layout.repo_root, layout.slot_dir(slot), holding=holding)
     _write_json(layout.manifest_path(slot), manifest)
     _mark_synced(layout, slot, address, manifest)
     return manifest
@@ -1902,11 +1988,76 @@ def _pump(
     log: BinaryIO,
     lock: threading.Lock,
 ) -> None:
+    """Copy ``source`` to ``sink`` and the log until the command closes it.
+
+    A sink that fails (a closed terminal, a reader gone from a pipe) is
+    dropped and the log keeps every byte, so the command never blocks on a
+    pipe nobody drains.
+    """
+    echo: BinaryIO | None = sink
     for chunk in iter(lambda: source.read1(1 << 16), b""):
-        _ = sink.write(chunk)
-        sink.flush()
+        if echo is not None:
+            try:
+                _ = echo.write(chunk)
+                echo.flush()
+            except OSError:
+                echo = None
         with lock:
             _ = log.write(chunk)
+
+
+@dataclasses.dataclass(frozen=True)
+class Finished:
+    """How a streamed command ended: its exit code, and the stop signal its run relayed, if any."""
+
+    code: int
+    stopped_by: int | None = None
+
+
+class _StopRelay:
+    """Relay stop signals to one command's process group; record the first.
+
+    The handler never raises, so nothing unwinds: the locks, the log and the
+    pumps stay until the command has ended and its output is drained. The
+    first stop is sent to the command's whole group as received, as a
+    terminal sends Ctrl-C to its foreground group; a repeat inside
+    :data:`STOP_REPEAT_GRACE` of the last one relayed is that one delivered
+    twice and is dropped, and a later one is relayed as received, so a
+    command's own answer to a second Ctrl-C holds. The group is signalled
+    until the output is drained, after the command itself has exited too, so
+    a stop reaches what it left holding its output (``sleep 60 &``). A stop
+    that lands before the command is recorded waits in ``pending`` until it
+    is (:meth:`started`).
+    """
+
+    def __init__(self) -> None:
+        self.signum: int | None = None
+        self.relayed_at: float = 0.0
+        self.pending: int | None = None
+        self.group_id: int | None = None
+
+    def __call__(self, signum: int, _frame: FrameType | None) -> None:
+        now = time.monotonic()
+        if self.signum is not None and now - self.relayed_at < STOP_REPEAT_GRACE:
+            return
+        if self.signum is None:
+            self.signum = signum
+        self.relayed_at = now
+        if self.group_id is None:
+            self.pending = signum
+        else:
+            _stop_signals.signal_group_id(self.group_id, signum)
+
+    def group(self) -> int | None:
+        """Return the command's process group once it is recorded: its pid, as it leads a session."""
+        return self.group_id
+
+    def started(self, process: subprocess.Popen[bytes]) -> None:
+        """Record the command's group, then send it the stop that came before it, if any."""
+        self.group_id = process.pid
+        pending, self.pending = self.pending, None
+        if pending is not None:
+            _stop_signals.signal_group_id(self.group_id, pending)
 
 
 def stream(
@@ -1915,10 +2066,22 @@ def stream(
     log_path: Path,
     header: str,
     cwd: Path | None = None,
-) -> int:
-    """Run ``command`` in ``cwd``, copying its stdout and stderr through while logging both."""
+    *,
+    holding: Sequence[int] = (),
+) -> Finished:
+    """Run ``command`` in ``cwd``, copying its stdout and stderr through while logging both.
+
+    The command runs in a session of its own and holds the ``holding``
+    descriptors (the run's leases), so a lease lasts while anything the
+    command started with it runs, even past this process. A stop signal is
+    relayed to the command's whole process group (:class:`_StopRelay`), and
+    Ctrl-Z suspends that group with this process (``fg`` continues both);
+    this returns once the command has ended and its output is drained. A
+    command that died by signal ``N`` reads as exit ``128 + N``.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("wb") as log:
+    relay = _StopRelay()
+    with log_path.open("wb") as log, _stop_signals.routed_to(relay, group=relay.group):
         _ = log.write(header.encode("utf-8"))
         log.flush()
         process = subprocess.Popen(  # the worker's own command, in its copy
@@ -1927,7 +2090,10 @@ def stream(
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
+            pass_fds=tuple(holding),
         )
+        relay.started(process)
         lock = threading.Lock()
         pumps = [
             threading.Thread(
@@ -1954,7 +2120,7 @@ def stream(
         code = process.wait()
         for pump in pumps:
             pump.join()
-    return code
+    return Finished(128 - code if code < 0 else code, relay.signum)
 
 
 def _short(names: list[str], limit: int = 4) -> str:
@@ -1984,6 +2150,7 @@ class _RunRecord(TypedDict):
     started: str
     exit: NotRequired[int]
     seconds: NotRequired[float]
+    stopped_by: NotRequired[str]
 
 
 def render_header(record: _RunRecord) -> str:
@@ -2017,8 +2184,15 @@ def execute(
 ) -> int:
     """Lease the address's copy, probe, then run the command in it."""
     check_shared_checkout(layout.repo_root)
-    with flow_lease(layout):
-        return _execute_leased(layout, address, build_command, cell=cell, fresh=fresh)
+    with flow_lease(layout) as flow:
+        return _execute_leased(
+            layout,
+            address,
+            build_command,
+            cell=cell,
+            fresh=fresh,
+            holding=flow.holding,
+        )
 
 
 def _execute_leased(
@@ -2028,8 +2202,9 @@ def _execute_leased(
     *,
     cell: str,
     fresh: bool,
+    holding: tuple[int, ...],
 ) -> int:
-    with lease(layout, address, fresh=fresh) as held:
+    with lease(layout, address, fresh=fresh, holding=holding) as held:
         manifest = held.manifest
         env, database = cell_env(layout, held.slot, cell)
         found = probe(held.directory, env)
@@ -2071,14 +2246,26 @@ def _execute_leased(
             "--group",
             "pg",
         ]
-        code = stream([*uv_run, "--", *command], env, log_path, header)
+        finished = stream(
+            [*uv_run, "--", *command],
+            env,
+            log_path,
+            header,
+            holding=held.holding,
+        )
         seconds = round(time.monotonic() - started, 2)
-        record.update(exit=code, seconds=seconds)
+        record.update(exit=finished.code, seconds=seconds)
+        stopped = ""
+        if finished.stopped_by is not None:
+            record["stopped_by"] = signal.Signals(finished.stopped_by).name
+            stopped = f", stopped by {record['stopped_by']}"
     layout.evidence.mkdir(parents=True, exist_ok=True)
     with layout.run_log.open("a", encoding="utf-8") as handle:
         _ = handle.write(json.dumps(record, sort_keys=True) + "\n")
-    _ = sys.stderr.write(f"workspace run {record['run_id']} exit {code} in {seconds}s\n")
-    return code
+    _ = sys.stderr.write(
+        f"workspace run {record['run_id']} exit {finished.code} in {seconds}s{stopped}\n",
+    )
+    return finished.code if finished.stopped_by is None else 128 + finished.stopped_by
 
 
 def _worker_command(raw: Sequence[str]) -> list[str]:
@@ -2119,8 +2306,8 @@ def release(
         LockBusyError: a command still runs in one of them.
 
     """
-    with flow_lease(layout, create=False) as marked:
-        if not marked:
+    with flow_lease(layout, create=False) as flow:
+        if not flow.marked:
             return []
         with file_lock(layout.pool_lock), contextlib.ExitStack() as leases:
             state = _load_state(layout)
@@ -2135,7 +2322,7 @@ def release(
             busy: list[str] = []
             for slot in chosen:
                 try:
-                    leases.enter_context(file_lock(layout.slot_lock(slot), blocking=False))
+                    _ = leases.enter_context(file_lock(layout.slot_lock(slot), blocking=False))
                 except LockBusyError:
                     busy.append(slot)
             if busy:
@@ -2488,12 +2675,21 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
     """Run the gate suites in the gate copy; write and print the bound result."""
     check_shared_checkout(layout.repo_root)
     repo_root = layout.repo_root
-    with flow_lease(layout), file_lock(layout.flow_dir / "gate.lock", blocking=False):
+    with (
+        flow_lease(layout) as flow,
+        file_lock(layout.flow_dir / "gate.lock", blocking=False) as gate_lock,
+    ):
         if not layout.gate_dir.exists() and _free_bytes(layout.base) < MIN_FREE_BYTES:
             msg = f"under {MIN_FREE_BYTES // 1024**3} GB free at {layout.base}; no gate copy"
             raise WorkspaceError(msg)
         bound_to = baseline_sha(repo_root)
-        manifest = sync_copy(repo_root, layout.gate_dir, preserved=PRESERVED | {".git"})
+        holding = (*flow.holding, gate_lock)
+        manifest = sync_copy(
+            repo_root,
+            layout.gate_dir,
+            preserved=PRESERVED | {".git"},
+            holding=holding,
+        )
         head = build_gate_git(repo_root, layout.gate_dir)
         suite_results: dict[str, _GateRun | _GateUnverified] = {}
         result: dict[str, object] = {
@@ -2519,6 +2715,7 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
             "pg",
         ]
         all_passed = True
+        stopped_by: int | None = None
         for suite in suites:
             arguments, cell = GATE_SUITES[suite]
             run_id = new_run_id(layout.flow)
@@ -2528,7 +2725,7 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
             try:
                 env, database = gate_env(layout, cell)
                 if suite == FLOOR_SUITE:
-                    floor = ensure_floor_venv(layout)
+                    floor = ensure_floor_venv(layout, holding)
                     result["floor"] = floor
                     runner, cwd = [floor["python"], "-m"], layout.gate_dir
             except WorkspaceError as error:
@@ -2545,7 +2742,15 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
             header = f"workspace gate {run_id} suite={suite} cell={cell} copy={layout.gate_dir}\n"
             _ = sys.stderr.write(header)
             started = time.monotonic()
-            code = stream([*runner, *arguments], env, log_path, header, cwd=cwd)
+            finished = stream(
+                [*runner, *arguments],
+                env,
+                log_path,
+                header,
+                cwd=cwd,
+                holding=holding,
+            )
+            code = finished.code
             ran: _GateRun = {
                 "run_id": run_id,
                 "cell": cell,
@@ -2559,6 +2764,10 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
             suite_results[suite] = ran
             all_passed = all_passed and code == 0
             _append_gate_run(layout, ran, suite, manifest)
+            if finished.stopped_by is not None:
+                stopped_by = finished.stopped_by
+                result["stopped_by"] = signal.Signals(stopped_by).name
+                break
         if "pg" in suites:
             postgres = _running_postgres(repo_root)
             if postgres is not None:
@@ -2572,6 +2781,9 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
         print(f"  {suite:<8} {entry['run_id']}  {verdict}")
         for line in entry.get("coverage", []):
             print(f"           {line}")
+    if stopped_by is not None:
+        print(f"  stopped by {signal.Signals(stopped_by).name}; later suites did not run")
+        return 128 + stopped_by
     return 0 if all_passed else 1
 
 
@@ -2894,5 +3106,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return REFUSED if args.name in {"run", "prove"} else 1
 
 
+def _cli() -> NoReturn:
+    """Run :func:`main` as the script does, ending by the stop signal that stopped the run.
+
+    :func:`main` returns ``128 + N`` for in-process callers; the process then
+    dies by ``N`` (``scripts/_stop_signals.py::exit_with``).
+    """
+    _stop_signals.exit_with(main())
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _cli()
