@@ -4,23 +4,20 @@ The neutral query-source mechanics every resolver surface shares: coerce a
 ``Manager`` to a ``QuerySet`` exactly once, decide whether a value is a
 queryset, run the ``DjangoType.get_queryset`` visibility hook through the sync
 or async path, and combine those into the list-field consumer-resolver shape.
-Extracted here so list fields, connection fields, the
-optimizer middleware, the Relay node defaults, and the filter
-related-visibility derive all reach ONE implementation of the contract --
+Every surface reaches ONE implementation of the contract --
 ``get_queryset`` is the visibility hook, and a visibility-hook mistake is a
 data-leak bug, so the routing must not be re-decided per surface.
 
 ``coerce_field_value_or_none`` is the sibling neutral
 primitive for the "raw literal -> Django field value, or nothing" safety
-wrapper the Relay id decode, the raw relation-pk decode, and the ``__in``
-filter member decode each need against a DIFFERENT field - single-sourcing the
-coercion mechanics while leaving the field selection to each caller.
+wrapper every raw-identity decode needs against a DIFFERENT field -
+single-sourcing the coercion mechanics while leaving the field selection to
+each caller.
 
 ``run_in_one_sync_boundary`` is the sibling neutral
 primitive for "run a sync callable in exactly one
-``sync_to_async(thread_sensitive=True)`` worker" - shared by filters /
-orders / cascade permissions / mutation-form pipelines / session auth so
-the off-event-loop boundary cannot drift.
+``sync_to_async(thread_sensitive=True)`` worker", so the off-event-loop
+boundary cannot drift.
 
 The two colored visibility runners are the package's hardened ``get_queryset``
 security boundary (the get_queryset-visibility-boundary decision): every
@@ -299,8 +296,7 @@ def _disposed_awaitable(value: object) -> bool:
 
     The shared half of every awaitable refusal in the package: detect, then
     close the coroutine / cancel the future so no "coroutine was never awaited"
-    warning escapes. Four sites spelled this pair inline, each followed by its
-    own raise.
+    warning escapes.
 
     The raise deliberately stays at the caller. The ``SyncMisuseError`` versus
     ``ConfigurationError`` split is a documented contract (``SyncMisuseError``
@@ -725,11 +721,7 @@ def coerce_field_value_or_none(field: ModelField | None, value: object) -> objec
     """Coerce ``value`` through ``field``'s ``to_python`` + ``run_validators``; ``None`` if invalid.
 
     The single "raw literal -> Django field value, or nothing" safety wrapper
-    three independent call sites each grew their own copy of: the Relay
-    ``GlobalID`` id-attr coercion (``relay.py::_coerce_pk_or_none``), the raw
-    relation-pk coercion (``utils/write_values.py::coerce_relation_pk_or_none``),
-    and the ``__in`` filter member coercion
-    (``filters/base.py::_coerce_int_in_members``). ``to_python`` is a pure type
+    every raw-identity decode runs through. ``to_python`` is a pure type
     cast that does NOT range-check, so a syntactically-valid but out-of-range
     literal (e.g. a pk past a backend's signed-64-bit column range) would
     otherwise reach a ``pk__in`` / ``filter`` call and raise a raw backend
@@ -784,16 +776,13 @@ _RELAY_ASYNC_RECOURSE = (
 def sync_pipeline_recourse(flavor_noun: str) -> str:
     """Build the ``SyncMisuseError`` recourse a sync write pipeline appends (spec-039).
 
-    The three write flavors (model / form / serializer) each raise a
-    ``SyncMisuseError`` naming the SAME recourse when an ``async def get_queryset`` is
-    met inside their (synchronous) ORM pipeline - byte-identical except the flavor
-    subject. Single-sites that sentence so the three ``*_ASYNC_RECOURSE`` module
-    constants cannot drift; each flavor still keeps its own named constant
-    (``_MUTATION_ASYNC_RECOURSE`` / ``_FORM_ASYNC_RECOURSE`` /
-    ``_SERIALIZER_ASYNC_RECOURSE``), now computed from this template. NOT used for the
+    Every write flavor raises a ``SyncMisuseError`` naming the SAME recourse when an
+    ``async def get_queryset`` is met inside its (synchronous) ORM pipeline -
+    byte-identical except the flavor subject - so the sentence lives here and each
+    flavor's own ``*_ASYNC_RECOURSE`` constant is computed from it. NOT used for the
     Relay recourse (``_RELAY_ASYNC_RECOURSE`` - async IS possible there) or the
-    permission recourse (about ``has_permission`` / ``check_permission``, not
-    ``get_queryset``), which are genuinely different wordings.
+    permission recourses (about the permission hooks, not ``get_queryset``), which
+    are genuinely different wordings.
     """
     return (
         f"A {flavor_noun} runs its ORM pipeline synchronously (under one sync_to_async "
@@ -893,17 +882,15 @@ async def run_in_one_sync_boundary(
     """Run ``fn(*args, **kwargs)`` in ONE ``sync_to_async(thread_sensitive=True)`` worker.
 
     The generic one-boundary primitive (spec-040 D17): every async surface
-    that must keep a consumer-overridable sync hook (permission check, form
-    filter body, cascade walk, mutation/form write pipeline, session auth) off
-    the event loop shares this call, so the boundary discipline (one worker per
-    resolution, ``thread_sensitive=True``, never per-step hops) cannot drift.
+    that must keep a consumer-overridable sync hook off the event loop shares
+    this call, so the boundary discipline (one worker per resolution,
+    ``thread_sensitive=True``, never per-step hops) cannot drift.
     A ``sync_to_async`` worker is itself a sync context, so the standing
     ``SyncMisuseError`` guards still fire inside ``fn``.
 
     Neutral home: lives here with the sibling ``reject_async_in_sync_context``
     primitive (cycle-safe utils substrate) rather than under ``mutations/``, so
-    read-side modules (``filters/``, ``orders/``, root ``permissions.py``) can
-    reuse it without a root-into-subpackage import.
+    read-side modules reuse it without a root-into-subpackage import.
     """
     return await sync_to_async(fn, thread_sensitive=True)(*args, **kwargs)
 

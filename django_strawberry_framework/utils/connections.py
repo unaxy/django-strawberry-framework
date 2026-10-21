@@ -167,12 +167,12 @@ def connection_sidecar_inputs_from_kwargs(
 
     The single reader of the sidecar kwarg keys so no caller re-spells
     ``kwargs.get("filter")`` / ``kwargs.get("order_by")``. Reads BOTH order
-    spellings because its two callers speak different vocabularies: the
-    resolver passes Python ``**kwargs`` (``order_by``), the walker passes the
-    converted selection's RAW GraphQL argument names (``orderBy`` under the
-    default ``auto_camel_case``; ``order_by`` when camelization is disabled).
-    No collision is possible - the resolver's kwargs never carry the camel
-    key, and on the walker side either spelling IS the sidecar argument.
+    spellings because its callers speak two vocabularies: a resolver passes
+    Python ``**kwargs`` (``order_by``), the walker passes the converted
+    selection's RAW GraphQL argument names (``orderBy`` under the default
+    ``auto_camel_case``; ``order_by`` when camelization is disabled). No
+    collision is possible - a resolver's kwargs never carry the camel key, and
+    on the walker side either spelling IS the sidecar argument.
     """
     if not kwargs:
         return None, None
@@ -186,10 +186,8 @@ def is_supplied(value: object) -> bool:
     """Return whether a connection argument was actually supplied by the client.
 
     The connection surfaces' spelling of the package's ONE active-input rule,
-    ``utils/input_values.py::is_inactive_value``, whose docstring already
-    claims to be that single rule. It was being re-typed as
-    ``value is not None and value is not strawberry.UNSET`` at 15 sites across
-    the two connection modules - the exact inverse, hand-written each time.
+    ``utils/input_values.py::is_inactive_value`` (the exact inverse), so no
+    site re-types ``value is not None and value is not strawberry.UNSET``.
 
     The rule lives in ``input_values.py``, which takes the sentinel as an
     argument; this passes ``input_values.UNSET``, Strawberry's ``UNSET`` typed

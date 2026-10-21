@@ -323,12 +323,11 @@ _RELATION_IDENTITY_FILTER_CLASSES: tuple[type[Filter], ...] = (
 def _strip_model_choice_extras(extra: Mapping[str, object]) -> dict[str, object]:
     """Return ``extra`` without the model-choice-only constructor kwargs.
 
-    Used by both flat relation replacement sites (``FilterSet.filter_for_field``'s
-    relation branch and ``FilterSet.filter_for_lookup``'s relation return) when a
-    model-choice default is swapped for a GlobalID or raw-pk filter class whose form
-    field cannot accept model-choice kwargs. Dropping the model-choice ``queryset``
-    membership check is deliberate: it validated existence against the target's
-    default manager, which tells a missing row from one ``get_queryset`` hides.
+    Used wherever a model-choice default is swapped for a GlobalID or raw-pk filter
+    class whose form field cannot accept model-choice kwargs. Dropping the
+    model-choice ``queryset`` membership check is deliberate: it validated existence
+    against the target's default manager, which tells a missing row from one
+    ``get_queryset`` hides.
     """
     return {key: value for key, value in extra.items() if key not in _MODEL_CHOICE_ONLY_EXTRAS}
 

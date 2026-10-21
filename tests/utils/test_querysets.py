@@ -79,7 +79,6 @@ from typing_extensions import Self, override
 
 from django_strawberry_framework import DjangoType
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.mutations import resolvers as mutation_resolvers
 from django_strawberry_framework.orders import Ordering, OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import querysets as querysets_module
@@ -576,19 +575,6 @@ async def test_apply_type_visibility_async_passes_sync_hook_through() -> None:
 # ---------------------------------------------------------------------------
 # run_in_one_sync_boundary -- the shared off-event-loop worker primitive
 # ---------------------------------------------------------------------------
-
-
-def test_run_in_one_sync_boundary_is_single_sourced_from_utils() -> None:
-    """Mutations re-exports the utils owner; sites must not re-inline the wrapper.
-
-    The byte-identical ``sync_to_async(fn, thread_sensitive=True)(*args, **kwargs)``
-    shape was promoted out of ``mutations/resolvers.py`` into this module so filters / orders /
-    permissions / auth share one boundary. Pin the re-export identity so a
-    future split cannot silently fork a second definition.
-    """
-    assert (
-        module_binding(mutation_resolvers, "run_in_one_sync_boundary") is run_in_one_sync_boundary
-    )
 
 
 async def test_run_in_one_sync_boundary_runs_callable_off_event_loop() -> None:

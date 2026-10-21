@@ -571,13 +571,12 @@ def _resolve_globalid_strategy(
 
 
 # Single source of truth for the "strategy -> payload shape" mapping
-# (spec-031). The string constants ``STRING_GLOBALID_STRATEGIES``
-# / ``DEFAULT_GLOBALID_STRATEGY`` live in ``types/base.py``; these are the
-# payload-shape memberships the encoder, the model-label-routing audit, the
-# strategy-aware filter (``filters/base.py``), and the decoder all
-# reference rather than re-typing ``{"model", "type+model"}`` / ``{"type",
-# "type+model"}`` at each site. ``callable`` and ``custom`` are intentionally in
-# neither set: they are encode-only in 0.0.9 (no decode path), so the decoder's
+# (spec-031): the payload-shape memberships read wherever a strategy's emitted
+# or accepted shape is decided, rather than re-typing ``{"model", "type+model"}``
+# / ``{"type", "type+model"}``. The configurable string vocabulary
+# (``STRING_GLOBALID_STRATEGIES`` / ``DEFAULT_GLOBALID_STRATEGY`` in
+# ``types/base.py``) is a separate contract. ``callable`` and ``custom`` are
+# intentionally in neither set: they are encode-only (no decode path), so the decoder's
 # "no decode for these" contract IS their absence from both memberships - there
 # is deliberately no ``{"callable", "custom"}`` literal.
 #
@@ -585,16 +584,9 @@ def _resolve_globalid_strategy(
 # model label and which ACCEPT one on decode - because for the framework
 # strategies the two coincide. That is why ``_emits_model_label`` and
 # ``_accepts_model_label_decode`` have identical bodies and are still two names:
-# the routing audit reads the emit half and the accept half through them, and
-# the decode-Step-2 enforcement reads the accept half. The encoder closure reads
-# this set directly (it decides over the RAW resolved strategy - a live callable
-# or framework string - while the predicates answer over the RECORDED
-# classification; re-open if the closure ever captures the recorded value), and
-# the strategy-aware filter reads both sets directly (it derives an accepted
-# NAME SET for validation and its mismatch message, not a boolean verdict;
-# re-open if filter acceptance must diverge from decode acceptance, or a second
-# name-set deriver appears). Split the sets, not just the predicates, if encode
-# and decode acceptance ever diverge.
+# each names the direction its reader asks. Membership is the contract, so a
+# reader may test the sets directly. Split the sets, not just the predicates, if
+# encode and decode acceptance ever diverge.
 MODEL_LABEL_STRATEGIES = frozenset({"model", "type+model"})
 TYPE_NAME_STRATEGIES = frozenset({"type", "type+model"})
 
@@ -603,9 +595,7 @@ def _emits_model_label(effective_strategy: str | None) -> bool:
     """Return whether a recorded effective strategy emits the model-label slot.
 
     ``model`` and ``type+model`` both emit ``app_label.modelname`` in the
-    ``GlobalID`` type-name slot. Read by the model-label-routing audit (the
-    ``emits_model_label`` half); the encoder closure reads
-    ``MODEL_LABEL_STRATEGIES`` directly - see the membership comment.
+    ``GlobalID`` type-name slot.
     """
     return effective_strategy in MODEL_LABEL_STRATEGIES
 
@@ -614,10 +604,9 @@ def _accepts_model_label_decode(effective_strategy: str | None) -> bool:
     """Return whether a recorded effective strategy can decode a model-label slot.
 
     Identical membership to ``_emits_model_label`` - ``model`` and ``type+model``
-    both decode model labels - but named distinctly because the audit's
-    ``accepts_model_label(primary)`` predicate and the decode-Step-2 enforcement
-    read the *acceptance* side. Why one frozenset serves both directions is
-    stated on ``MODEL_LABEL_STRATEGIES`` itself.
+    both decode model labels - but named for the *acceptance* side. Why one
+    frozenset serves both directions is stated on ``MODEL_LABEL_STRATEGIES``
+    itself.
     """
     return effective_strategy in MODEL_LABEL_STRATEGIES
 
@@ -626,11 +615,7 @@ def _accepts_type_name_decode(effective_strategy: str | None) -> bool:
     """Return whether a recorded effective strategy can decode a GraphQL-type-name slot.
 
     ``type`` and ``type+model`` both accept a bare ``graphql_type_name`` payload.
-    Sibling of ``_accepts_model_label_decode`` for the type-name shape. Read by
-    the decode-Step-2 enforcement (the no-dot branch);
-    ``filters/base.py::_accepted_globalid_type_names`` (the strategy-aware filter)
-    reads ``TYPE_NAME_STRATEGIES`` directly to derive its accepted name set -
-    see the membership comment.
+    Sibling of ``_accepts_model_label_decode`` for the type-name shape.
     """
     return effective_strategy in TYPE_NAME_STRATEGIES
 

@@ -42,11 +42,9 @@ __all__ = [
 
 
 # The verified Channels floor, interpolated into every install hint that names
-# it. Channels is the one optional dependency whose hint text is written at more
-# than one site (the router's three, the auth session boundary's one), so the
-# version was being re-typed as a bare literal that nothing compared against the
-# ``channels[daphne]`` row in ``pyproject.toml``. That row is still the second
-# place and must be bumped with this one; there is no third.
+# it, so no hint carries a bare literal nothing compares against. The
+# ``channels[daphne]`` row in ``pyproject.toml`` is the second place the floor
+# is written and must be bumped with this one; there is no third.
 CHANNELS_FLOOR = "4.3.2"
 
 # The verified Strawberry floor, interpolated into the one install hint that

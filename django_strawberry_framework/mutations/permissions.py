@@ -80,15 +80,11 @@ if TYPE_CHECKING:
 # returns a coroutine. Write authorization runs synchronously in the same sync
 # pipeline (spec-036 Decision 15), so an async permission hook can never be
 # awaited - and silently treating its truthy coroutine as "allow" is an
-# authorization BYPASS. Shared by both
-# enforcement seams - the resolver's ``authorize_or_raise`` (``check_permission``)
-# and ``DjangoMutation.check_permission`` (each ``has_permission``) - so the
-# wording cannot drift between them. Mirrors
-# ``utils/permissions.py::_GATE_ASYNC_RECOURSE`` (the read-side gate's twin);
-# the two are deliberately NOT computed from a shared template the way the three
-# pipeline recourses are (``utils/querysets.py::sync_pipeline_recourse``, whose
-# docstring declines these two): four of their clauses differ, so a template
-# would take a parameter per clause and pin nothing.
+# authorization BYPASS. Mirrors ``utils/permissions.py::_GATE_ASYNC_RECOURSE``
+# (the read-side gate's twin); the two are deliberately NOT computed from a
+# shared template the way the write-pipeline recourses are
+# (``utils/querysets.py::sync_pipeline_recourse``): their clauses differ
+# throughout, so a template would take a parameter per clause and pin nothing.
 _PERMISSION_ASYNC_RECOURSE = (
     "A DjangoMutation runs its permission check synchronously, so it cannot await "
     "an async permission hook; redefine has_permission / check_permission as a sync "
@@ -97,12 +93,12 @@ _PERMISSION_ASYNC_RECOURSE = (
 
 
 def _require_sync_bool_auth_result(value: object, *, owner: str, method: str) -> bool:
-    """Return a sync authorization bool; reject invalid results (auth hardening, shipped 0.0.14).
+    """Return a sync authorization bool; reject invalid results.
 
-    The ONE write-authorization result contract the three sync seams share:
-    ``has_permission``, ``check_permission``, and ``user.has_perm``. Each must
-    return an actual ``bool``; a truthy coroutine or any other non-bool would
-    silently read as "allow" under a truthiness test - an authorization bypass.
+    The ONE write-authorization result contract every sync permission seam
+    shares: each must return an actual ``bool``; a truthy coroutine or any
+    other non-bool would silently read as "allow" under a truthiness test - an
+    authorization bypass.
     Async rejection reuses ``reject_async_in_sync_context`` with the shared
     ``_PERMISSION_ASYNC_RECOURSE`` so the wording cannot drift between seams.
     """
@@ -235,7 +231,7 @@ class DjangoModelPermission:
         codename = f"{model._meta.app_label}.{action}_{model._meta.model_name}"
         # ``user.has_perm`` is sync Django auth; an awaitable / non-bool return
         # is the same authorization-bypass class ``_require_sync_bool_auth_result``
-        # closes for ``has_permission`` / ``check_permission`` (0.0.14 auth hardening).
+        # closes for ``has_permission`` / ``check_permission``.
         return _require_sync_bool_auth_result(
             call_method(user, "has_perm", codename),
             owner=truth.name(truth.class_of(user)),

@@ -1261,7 +1261,7 @@ def effective_connection_order(
     (``utils/querysets.py::expand_relation_order``).
 
     Every read here ignores ``query.standard_ordering`` and
-    ``query.extra_order_by``: both callers run ``normalize_order_direction`` on
+    ``query.extra_order_by``: callers run ``normalize_order_direction`` on
     the queryset first, so a hook / manager ``extra(order_by=...)`` ordering
     reaches this read as the ``order_by`` terms it compiles as, and a
     ``.reverse()`` as explicit terms under the forward flag (already total,
@@ -1466,8 +1466,7 @@ def normalize_order_direction(
     back (``_finalize_queryset``'s pk tiebreaker, ``apply_window_pagination``'s
     ``order_by``, the ``last:`` ``.reverse()``), so a reversed queryset would
     compile one direction while its seek, its cursors and its row numbers ran
-    the other. Both entry points of that ladder (the two callers of
-    ``effective_connection_order``) run this first.
+    the other. Every entry point of that ladder runs this first.
 
     The materialized order is the reverse of the FORWARD total order: the order
     ``effective_connection_order`` selects for ``cursor_field`` reading the terms

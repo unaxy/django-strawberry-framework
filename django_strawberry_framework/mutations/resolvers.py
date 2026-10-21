@@ -1778,12 +1778,6 @@ async def run_pipeline_async(
     return await run_in_one_sync_boundary(sync_body, mutation_cls, info, data, id_)
 
 
-# ``run_in_one_sync_boundary`` is imported from ``utils/querysets`` above and
-# remains importable from this module for compatibility with historical
-# importers. Package-internal callers import the canonical utils owner directly,
-# avoiding a mutations-subpackage dependency.
-
-
 def make_resolver_entries(
     sync_body: Callable[
         [

@@ -113,10 +113,9 @@ __all__ = ("DjangoGraphQLProtocolRouter",)
 
 # This module's single channels-ABSENT install hint (spec-041 Decision 5). The
 # auth transport carries its own feature-keyed twin (``auth/sessions.py``). The
-# floor itself is ``utils/imports.py::CHANNELS_FLOOR`` - the only other place it
-# is written is the ``channels[daphne]`` dev-group row in ``pyproject.toml``,
-# which must be bumped with it. One floor covers the package's whole advertised
-# Django range through 6.1.
+# floor itself is ``utils/imports.py::CHANNELS_FLOOR``, which owns where else it
+# is written. One floor covers the package's whole advertised Django range
+# through 6.1.
 _CHANNELS_INSTALL_HINT = (
     "DjangoGraphQLProtocolRouter requires channels, which is not installed. Install it "
     f"with `pip install 'channels>={CHANNELS_FLOOR}'` (the package's verified Channels floor)."
@@ -130,10 +129,7 @@ _CHANNELS_BROKEN_HINT = (
     "though `channels` is installed - the install is likely broken or older than the "
     f"package's verified floor. Reinstall with `pip install 'channels>={CHANNELS_FLOOR}'`."
 )
-# Both floors are interpolated, never re-typed: this hint names two dependencies
-# and each one's version lives in ``utils/imports.py`` (``CHANNELS_FLOOR``,
-# ``STRAWBERRY_FLOOR``) with exactly one other written copy, its own
-# ``pyproject.toml`` dependency row.
+# Both floors are interpolated from ``utils/imports.py``, never re-typed.
 _STRAWBERRY_CHANNELS_BROKEN_HINT = (
     "DjangoGraphQLProtocolRouter could not import Strawberry's Channels consumers. It "
     f"requires both `channels>={CHANNELS_FLOOR}` and `strawberry-graphql>={STRAWBERRY_FLOOR}` "

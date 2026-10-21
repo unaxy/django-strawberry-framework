@@ -1138,9 +1138,8 @@ def _shape_token(
 ) -> str:
     """Encode one emitted field's descriptor state as a collision-resistant name token.
 
-    Reuses ``utils/inputs.py::pascalize_token`` (promoted from ``mutations/inputs.py``
-    - spec-039) for the field-name component so the bare concatenation of
-    per-field tokens stays uniquely decomposable (no third PascalCase encoder). The
+    Reuses ``utils/inputs.py::pascalize_token`` for the field-name component so the
+    bare concatenation of per-field tokens stays uniquely decomposable. The
     Full generated-field identity is folded into the token via a stable ``hash``-free
     digest - the EMITTED annotation (post-nullable-widening, so a ``T`` vs ``T | None``
     nullability difference diverges), requiredness, kind, ``input_attr``,

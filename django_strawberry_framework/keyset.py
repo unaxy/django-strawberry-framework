@@ -442,10 +442,9 @@ def keyset_contract_error(detail: str) -> GraphQLError:
 
     Every one of these errors says the same thing first - this connection is on
     keyset cursors because it declared ``Meta.cursor_field`` - and then names
-    the single requirement the request violated. Five sites across two
-    modules share this stem: without this helper a reword of the shared
-    half would be a five-site edit with nothing checking it; the per-site
-    half stays at its own site, because that half is the actual message.
+    the single requirement the request violated. The shared half lives here so
+    a reword of it is one edit; the per-site half stays at its own site,
+    because that half is the actual message.
     """
     return GraphQLError(
         f"This connection uses keyset cursors (Meta.cursor_field), which {detail}",
