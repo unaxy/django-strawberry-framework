@@ -3995,22 +3995,14 @@ class FilterSet(
     def _normalize_input(cls, input_value: object) -> dict[str, object]:
         """Translate a Strawberry input dataclass into `django-filter` form data.
 
-        Per-primitive value normalization: each scalar attr passes
-        through ``normalize_input_value`` so ``relay.GlobalID`` ->
-        ``node_id``, Strawberry enum -> ``.value``, and
-        ``filters/base.py::RangeFilter`` -> positional ``{name}_0`` /
-        ``{name}_1`` keys all land in ``data`` correctly (``RangeFilter``
-        is not imported here -- the symbol lives in ``filters.base`` and
-        is referenced for shape-documentation; the actual range patch
-        comes back from ``inputs.py::_normalize_range_value``). Related-
-        branch keys (the
-        ``shelves`` / ``books`` / etc. names declared via
-        ``RelatedFilter``) are STRIPPED from the form-data dict before
-        the parent's form sees it -- ``django-filter``'s form only owns
-        the leaf lookup keys for the parent filterset, and any nested
-        dict in those positions would fail validation. ``_apply_related_constraints``
-        handles those branches separately, restricting the parent through each
-        branch's correlated ``EXISTS`` earlier in the apply pipeline.
+        Related-branch keys (the ``shelves`` / ``books`` / etc. names
+        declared via ``RelatedFilter``) are STRIPPED from the form-data
+        dict before the parent's form sees it -- ``django-filter``'s form
+        only owns the leaf lookup keys for the parent filterset, and any
+        nested dict in those positions would fail validation.
+        ``_apply_related_constraints`` handles those branches separately,
+        restricting the parent through each branch's correlated ``EXISTS``
+        earlier in the apply pipeline.
 
         GlobalID type-name validation happens at queryset-evaluation
         time inside ``GlobalIDFilter.filter`` /
@@ -4020,8 +4012,8 @@ class FilterSet(
 
         Leaf form keys come from ``inputs.py::filter_lookup_table``, the one
         place each operator-bag lookup's form key is decided
-        (``_leaf_form_entries``); nothing here re-derives a key from
-        ``(field, lookup)``.
+        (``_leaf_form_entries``), and each leaf value's form-data shape from
+        ``inputs.py::normalize_input_value``; nothing here re-derives either.
 
         Fail-loud input contracts (each raises the typed
         ``ConfigurationError`` instead of silently dropping predicates
@@ -4033,16 +4025,11 @@ class FilterSet(
           object) raises instead of normalizing to ``{}``;
         * a field or lookup the lookup table does not hold raises instead
           of being written as a form key django-filter ignores;
-        * a range value ``_normalize_range_value`` cannot read (not a
-          mapping or input object, or a key other than ``start`` /
-          ``end``, which includes a misspelled lookup under a range head)
-          raises instead of normalizing to an unconstrained patch;
-        * a dict value that survives ``normalize_input_value`` on a
-          NON-range filter raises via ``_reject_dict_form_value`` --
-          only the positional range patch (its own ``_RangeFormPatch``
-          type) merges, and any other dict would be splatted into unknown
-          form-data keys the form silently ignores (the
-          explicit-filter-applies-nothing failure mode).
+        * a range value ``_normalize_range_value`` cannot read raises
+          instead of normalizing to an unconstrained patch;
+        * a dict value other than the range patch raises via
+          ``_reject_dict_form_value`` instead of being splatted into
+          form-data keys the form silently ignores.
         """
         if is_inactive_value(input_value, unset_sentinel=UNSET):
             return {}
