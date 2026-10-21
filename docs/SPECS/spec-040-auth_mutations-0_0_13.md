@@ -2223,8 +2223,7 @@ schemas (below).
   in `tests/auth/test_sessions.py` for the classification / capability layer and in
   `tests/auth/test_mutations.py` for the resolvers driving it: each of the three
   classified modes resolved from its own request shape and every unrecognized object /
-  scope type rejected (hostile scope / adapter / class shapes contained as
-  `ConfigurationError`); the `channels`-free import of the `auth` submodule, and the
+  scope type rejected as `ConfigurationError`; the `channels`-free import of the `auth` submodule, and the
   install-hint `ImportError` when a Channels scope arrives without the soft dependency;
   `require_session` naming the transport; the capability answers per engine,
   including that a **subclassed** signed-cookie engine is still recognized as

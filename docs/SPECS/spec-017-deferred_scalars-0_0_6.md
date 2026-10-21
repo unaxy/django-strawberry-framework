@@ -64,7 +64,6 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
     - [ ] `test_filter_specimens_by_bigint_exact_rejects_malformed_decimal_string` — empty, whitespace-padded, non-decimal (`"abc"`, `"1.9"`, `"1e3"`, `"0x10"`), underscore-separated, leading-plus, Unicode-digit, leading-zero, and `"-0"` strings are each refused
     - [ ] `test_scalar_specimen_id_maps_big_auto_pk_to_int` — the `BigAutoField` pk stays `Int`
   - [ ] Package-tier converter tests in `tests/types/test_converters.py` (no fakeshop field reaches them):
-    - [ ] `test_big_auto_field_still_maps_to_int`
     - [ ] `test_bigint_in_input_position_with_null_via_schema_execution`
     - [ ] `test_bigint_resolver_returning_bool_raises_via_schema_execution` — `_serialize_bigint` rejects a non-`int` resolver return value at the schema boundary
 - [ ] Slice 2: `JSONField` mapping
@@ -489,9 +488,9 @@ Files: `docs/GLOSSARY.md`, `docs/TREE.md`, `KANBAN.md` (each re-rendered from it
 
 Three test files, all run unconditionally:
 
-- **`tests/test_scalars.py`** — the `BigInt` cases no GraphQL request can express (Python `bool` / `float` / `None` into the parser, non-`int` objects and hostile subclasses into the serializer, unprintable values in error text), the top-level import smoke test, and the warning-free-import test (a subprocess).
-- **`tests/types/test_converters.py`** — the sentinel-guarded `ArrayField` / `HStoreField` mappings (postgres-only, unreachable from a real fakeshop query), the `BigAutoField` mapping, the `null` input position, and a resolver returning `bool`, via the [Schema test fixture pattern](#decision-7--test-strategy).
-- **`examples/fakeshop/test_query/test_scalars_api.py`** — the live `/graphql/` tier for every case a real fakeshop query reaches: `BigInt` and `JSON` annotation shape via introspection, nullable widening, wire round-trip (including zero, negative, int64-min and int64-max), string-form / int-form argument parsing, and every malformed-string and `bool` / `float` literal rejection.
+- **`tests/test_scalars.py`** — the `BigInt` cases no GraphQL request can express (Python `bool` / `float` / `None` into the parser, non-`int` objects and hostile subclasses into the serializer), the top-level import smoke test, and the warning-free-import test (a subprocess).
+- **`tests/types/test_converters.py`** — the sentinel-guarded `ArrayField` / `HStoreField` mappings (postgres-only, unreachable from a real fakeshop query), the `null` input position, and a resolver returning `bool`, via the [Schema test fixture pattern](#decision-7--test-strategy).
+- **`examples/fakeshop/test_query/test_scalars_api.py`** — the live `/graphql/` tier for every case a real fakeshop query reaches: `BigInt` and `JSON` annotation shape via introspection, the `BigAutoField` pk staying `Int`, nullable widening, wire round-trip (including zero, negative, int64-min and int64-max), string-form / int-form argument parsing, and every malformed-string and `bool` / `float` literal rejection.
 
 Per [`AGENTS.md`][agents], any mapping reachable from a real query against fakeshop is pinned at the live tier rather than by a synthetic package-tier substitute.
 
@@ -499,7 +498,7 @@ Test categories:
 
 1. Wire format: decimal-string serialization including `0`, negative values, int64-min, int64-max (live).
 2. Strict serializer negative cases: `bool`, `float`, `str`, `Decimal`, `None`, custom object (package); a resolver returning `bool` (package, schema execution).
-3. Hostile `int` / `str` subclasses normalized; unprintable values in error text (package).
+3. Hostile `int` / `str` subclasses normalized (package).
 4. Strict parser positive cases: int and string zero, negative decimal strings, int64-min/max strings, decimal strings past the JS safe integer (live).
 5. Strict parser negative cases: `bool` / `float` literals and empty / whitespace-padded / non-decimal / underscore / leading-plus / leading-zero / `-0` / Unicode-digit strings (live); Python `bool`, `float`, `None` (package).
 6. Annotation generation and `null=True` widening via schema introspection.

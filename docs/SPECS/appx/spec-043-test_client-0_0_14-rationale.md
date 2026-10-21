@@ -247,9 +247,7 @@ Spec: [Decision 9][d9].
   decimal strings do not share `int()`'s acceptance domain, so a non-canonical index could be
   accepted where the emitted `object-path` segment could not name it.
 - **`{x!r}` in guard diagnostics.** Every package error message names a value through
-  `utils/truth.py::render`, which spells a builtin scalar through its own type's slot (an
-  oversized `int` reads `<unprintable int>` instead of raising) and renders any other value
-  through its own `__repr__`; a second spelling here would drift from it.
+  `utils/truth.py::render`; a second spelling here would drift from it.
 
 ### Decision 10 — Mixin-first: `GraphQLTestMixin` composes over `TestClient`
 

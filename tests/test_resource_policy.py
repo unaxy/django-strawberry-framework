@@ -2728,10 +2728,9 @@ def test_a_non_string_query_is_declined_not_scanned(hostile: object) -> None:
     """A non-string query is declined, never handed to the lexer.
 
     Handing a truthy non-string to the lexer raised a raw ``TypeError`` /
-    ``AttributeError`` / ``KeyError`` from inside graphql-core at exactly the
-    input the exception-containment invariant says must never escape an input
-    decoder. The HTTP transports type-check the query before the extension runs,
-    but the WebSocket path does not, so the decline is the scanner's own
+    ``AttributeError`` / ``KeyError`` from inside graphql-core. The HTTP
+    transports type-check the query before the extension runs, but the
+    WebSocket path does not, so the decline is the scanner's own
     contract: a value that is not text carries no tokens to charge.
     """
     # basedpyright: each non-string query is the hostile input under test; scan_document_text
