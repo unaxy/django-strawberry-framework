@@ -509,13 +509,13 @@ is uncapped.
 ### Final gate and closeout
 
 Every item but the gate verified + inventory re-reconciled → Worker-0 dispatches the gate Worker-1
-(the entry command authorized `workspace.py gate dry --suites lint,default,floor`: CI's lint job,
-the suite and CI's floor cell in a gate copy carrying its own git index). Gate = lint + full suite +
-package coverage 100% + floor suite + every `## Pending execution` command from
-every artifact, run as listed (a green unmutated suite discharges no failability proof). Record
-failures, coverage, skips, xfails, collected/selected counts, `FAKESHOP_SHARDED` mode: sharded-only
-tests skip by default, so their behaviors stay unverified unless the maintainer also authorizes a
-`FAKESHOP_SHARDED=1` run (`--suites lint,default,floor,sharded`, `pg` likewise). The gate's result
+(the entry command authorized `workspace.py gate dry --suites lint`: CI's lint job in a gate copy
+carrying its own git index). The full suite, package coverage 100%, the floor cell and the
+`FAKESHOP_SHARDED=1` / `pg` tiers never run locally; they run in GitHub Actions (`django.yml` on
+push, `gh workflow run django.yml` for the full matrix, `postgres.yml`). Gate = lint + every
+`## Pending execution` command from every artifact, run as listed (a green unmutated suite
+discharges no failability proof). Record failures, skips, xfails, collected/selected counts and the
+Actions run that carried the full suite. The gate's result
 file binds it: `git stash create` at gate time + blob ids of `pyproject.toml` and `uv.lock` + each
 suite's cell + the floor pins. Change to package source, tests, fixtures, pytest/coverage config, dependencies or mode
 invalidates it; prose doesn't. Worker-2 completes the gate row by confirming the bound inputs still

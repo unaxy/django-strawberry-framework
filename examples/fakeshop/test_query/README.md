@@ -46,7 +46,7 @@ Coverage = package only, `fail_under = 100`; live tests here are how it gets the
 
 ## Where a test goes
 
-Four trees, one `pytest.ini`, one command `uv run pytest`.
+Four trees, one `pytest.ini`. Locally, run targeted selections only; the full suite runs in GitHub Actions.
 
 | Tree | SUT | Style | Package? |
 |---|---|---|---|
