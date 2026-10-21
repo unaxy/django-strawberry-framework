@@ -13,18 +13,21 @@ these rows can move there. There is no live sibling in
 ``examples/fakeshop/test_query/``.
 """
 
+import contextlib
 import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -448,13 +451,22 @@ def test_bind_reuses_an_address_and_gives_each_new_address_its_own_copy(
     assert (layout.flow_dir / workspace.MARKER_NAME).is_dir()
 
 
-@pytest.fixture
-def syncs(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """Every copy synced in this process, in order; ``uv sync`` itself never runs."""
-    synced: list[Path] = []
+class _Syncs(list[Path]):
+    """The copies synced, in order, and what each ``uv sync`` held: each descriptor's file."""
 
-    def _uv_sync(destination: Path) -> None:
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding: list[list[tuple[int, int]]] = []
+
+
+@pytest.fixture
+def syncs(monkeypatch: pytest.MonkeyPatch) -> _Syncs:
+    """Every copy synced in this process, in order; ``uv sync`` itself never runs."""
+    synced = _Syncs()
+
+    def _uv_sync(destination: Path, holding: Sequence[int] = ()) -> None:
         synced.append(destination)
+        synced.holding.append([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in holding])
 
     monkeypatch.setattr(workspace, "_uv_sync", _uv_sync)
     return synced
@@ -526,7 +538,7 @@ def test_a_sync_that_dies_part_way_resyncs_on_the_next_run(
             pass
     real_uv_sync = workspace._uv_sync
 
-    def _dying_uv_sync(_destination: Path) -> None:
+    def _dying_uv_sync(_destination: Path, _holding: object = ()) -> None:
         msg = "uv sync died"
         raise workspace.WorkspaceError(msg)
 
@@ -587,7 +599,8 @@ def test_copy_path_syncs_an_unsynced_copy_and_reuses_a_synced_one(
 #: creating, ``postgres`` and ``state`` at those reads. A step the test names as a pause then
 #: waits until ``<name>.go-<step>`` appears. ``die_in_sync`` kills the process in its sync;
 #: the ``hold`` command only holds the lock at ``path``, stepping ``opened`` each time it opens
-#: that file.
+#: that file. ``bin`` puts a folder ahead of ``PATH`` (a stand-in ``uv``); ``real_stream`` and
+#: ``real_sync`` keep the script's own ``stream`` and ``uv sync``, run through that ``uv``.
 _ACTOR = """
 import json, os, sys, time
 from pathlib import Path
@@ -596,6 +609,8 @@ config = json.loads(sys.argv[1])
 sys.path.insert(0, config["scripts"])
 import workspace
 
+if config.get("bin"):
+    os.environ["PATH"] = config["bin"] + os.pathsep + os.environ["PATH"]
 sync = Path(config["sync"])
 name = config["name"]
 pauses = set(config["pauses"])
@@ -626,7 +641,7 @@ def bind(*args, **kwargs):
     return binding
 
 
-def uv_sync(_destination):
+def uv_sync(_destination, _holding=()):
     step("sync")
     if config.get("die_in_sync"):
         os._exit(9)
@@ -640,13 +655,13 @@ def probe(directory, _env):
     }
 
 
-def stream(command, _env, _log_path, _header, cwd=None):
+def stream(command, _env, _log_path, _header, cwd=None, holding=()):
     copy = Path(command[command.index("--directory") + 1])
     seen = sorted(path.stem for path in copy.glob("*.edit"))
     (copy / f"{name}.edit").write_text(name)
     (sync / f"{name}.json").write_text(json.dumps({"slot": copy.name, "seen": seen}))
     step("in")
-    return 0
+    return workspace.Finished(0)
 
 
 real_file_lock = workspace.file_lock
@@ -667,8 +682,10 @@ workspace.Layout.for_flow = staticmethod(for_flow)
 workspace.bind = bind
 workspace.file_lock = file_lock
 workspace.probe = probe
-workspace.stream = stream
-workspace._uv_sync = uv_sync
+if not config.get("real_stream"):
+    workspace.stream = stream
+if not config.get("real_sync"):
+    workspace._uv_sync = uv_sync
 workspace._free_bytes = lambda _path: workspace.MIN_FREE_BYTES * 2
 workspace._running_postgres = stepped("postgres", lambda _root: None)
 workspace._load_state = stepped("state", workspace._load_state)
@@ -1317,8 +1334,8 @@ def test_a_flow_folder_is_made_while_another_gc_removes_the_empty_parents(
 
     monkeypatch.setattr(Path, "mkdir", _parent_removed_twice)
 
-    with workspace.flow_lease(layout) as marked:
-        assert marked
+    with workspace.flow_lease(layout) as flow:
+        assert flow.marked
     assert races == []
 
 
@@ -2044,7 +2061,7 @@ def _record_installs(
     """Replace the build commands' subprocess layer; ``uv sync`` lays down the interpreter."""
     calls: list[tuple[list[str], dict[str, str]]] = []
 
-    def _run_checked(command: list[str], env: dict[str, str]) -> None:
+    def _run_checked(command: list[str], env: dict[str, str], _holding: object = ()) -> None:
         calls.append((list(command), env))
         if fail_on is not None and fail_on in command:
             msg = f"{' '.join(command)} failed (1): no such release"
@@ -2364,3 +2381,891 @@ def test_only_run_and_prove_take_a_command_after_the_separator() -> None:
                 "x",
             ],
         )
+
+
+# --------------------------------------------------------------------------------------------
+# Stop signals
+# --------------------------------------------------------------------------------------------
+
+# Spelled out rather than read from the script, so a signal dropped there fails its rows.
+STOP_SIGNALS = (
+    signal.SIGINT,
+    signal.SIGTERM,
+    signal.SIGHUP,
+    signal.SIGQUIT,
+)
+
+# Stands in for ``uv run <command>``: it writes ``<pid> <pgid> <grandchild pid>`` to
+# ``S_READY`` once it has started a grandchild (uv -> pytest -> xdist worker), appends the
+# name of every stop signal it gets to ``<S_READY>.got`` and blocks until
+# ``<S_READY>.release`` exists, then prints ``released`` and exits 0. ``S_ON_STOP=teardown``
+# makes a stop take a second, print ``torn down`` and exit 3, as pytest's teardown does;
+# ``count`` only records it; ``hang`` records the first and exits 4 on the second, as pytest
+# does on a second Ctrl-C during a teardown that hangs; ``ignore`` leaves every stop signal as
+# the command inherited it.
+_COMMAND = """
+import os, signal, subprocess, sys, time
+from pathlib import Path
+
+ready = Path(os.environ["S_READY"])
+mode = os.environ["S_ON_STOP"]
+stops = []
+
+
+def stopped(signum, _frame):
+    stops.append(signum)
+    with open(str(ready) + ".got", "a", encoding="utf-8") as got:
+        got.write(signal.Signals(signum).name + "\\n")
+    if mode == "teardown":
+        time.sleep(1)
+        print("torn down", flush=True)
+        sys.exit(3)
+    if mode == "hang" and len(stops) == 2:
+        print("stopped twice", flush=True)
+        sys.exit(4)
+
+
+if mode != "ignore":
+    for stop_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(stop_signal, stopped)
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+ready.with_suffix(".tmp").write_text(f"{os.getpid()} {os.getpgid(0)} {child.pid}")
+os.replace(ready.with_suffix(".tmp"), ready)
+release = Path(str(ready) + ".release")
+deadline = time.monotonic() + 30
+while not release.exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+child.kill()
+print("released", flush=True)
+"""
+
+# Runs the real ``stream`` in a process of its own, as ``run`` does, holding an ``flock`` on
+# ``S_LOCK`` it hands the command, and writes what ``stream`` returned to ``S_RESULT``.
+# ``starting`` signals the process itself as the command is being started, before the fork;
+# ``started`` signals it once the command has started, before ``stream`` has recorded it;
+# ``sink-stdout`` and ``sink-stderr`` point that stream at a pipe whose reader has gone.
+_STREAM_RUN = """
+import json, os, signal, subprocess, sys
+from pathlib import Path
+
+from scripts import workspace
+
+mode = os.environ["S_MODE"]
+signum = int(os.environ["S_SIGNUM"])
+if mode in {"starting", "started"}:
+
+    class SignalledPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            if mode == "starting":
+                os.kill(os.getpid(), signum)
+            super().__init__(*args, **kwargs)
+            if mode == "started":
+                os.kill(os.getpid(), signum)
+
+    subprocess.Popen = SignalledPopen
+if mode.startswith("sink-"):
+    reader, writer = os.pipe()
+    os.close(reader)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    setattr(sys, mode[len("sink-") :], os.fdopen(writer, "w"))
+command = [sys.executable, "-c", os.environ["S_COMMAND"]]
+with workspace.file_lock(Path(os.environ["S_LOCK"])) as held:
+    finished = workspace.stream(
+        command,
+        dict(os.environ),
+        Path(os.environ["S_LOG"]),
+        "header\\n",
+        holding=(held,),
+    )
+Path(os.environ["S_RESULT"]).write_text(json.dumps([finished.code, finished.stopped_by]))
+"""
+
+# Sets ``S_SIGNUM`` to ``SIG_IGN`` and execs the rest of its argv under a fresh interpreter,
+# which inherits the ignored disposition as a process started under ``nohup`` does.
+_IGNORING_EXEC = """
+import os, signal, sys
+
+signal.signal(int(os.environ["S_SIGNUM"]), signal.SIG_IGN)
+os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+"""
+
+# Writes 2 MB to ``S_STREAM`` (``stdout`` or ``stderr``), far past what a pipe buffers.
+_FLOOD = """
+import os, sys
+
+out = getattr(sys, os.environ["S_STREAM"])
+for _ in range(20000):
+    out.write("x" * 99 + "\\n")
+"""
+
+# Stands in for ``uv`` on ``PATH``: ``uv run ... -- <command>`` becomes ``<command>``;
+# ``uv sync`` writes its pid to ``WSTEST_SYNC`` and blocks until ``<WSTEST_SYNC>.release``.
+_UV = """
+import os, sys, time
+from pathlib import Path
+
+arguments = sys.argv[1:]
+if arguments[0] == "sync":
+    ready = Path(os.environ["WSTEST_SYNC"])
+    ready.write_text(str(os.getpid()))
+    release = Path(str(ready) + ".release")
+    deadline = time.monotonic() + 30
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    sys.exit(0)
+command = arguments[arguments.index("--") + 1 :]
+os.execvp(command[0], command)
+"""
+
+
+# Stands in for a job-control shell on the terminal it was started on (stdin): it makes that
+# terminal its own, runs its argv as a job in a process group of its own in the foreground,
+# and appends ``job <pid>``, then ``stopped`` each time the job stops, and ``exited <code>`` to
+# ``argv[1]``. ``fg`` is the file ``<argv[1]>.fg``: the shell gives the job the terminal back
+# and continues it, as ``fg`` does.
+_JOB_SHELL = """
+import fcntl, os, signal, subprocess, sys, termios, time
+from pathlib import Path
+
+report = Path(sys.argv[1])
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+for job_signal in (signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU):
+    signal.signal(job_signal, signal.SIG_IGN)
+
+
+def as_job():
+    os.setpgid(0, 0)
+    for job_signal in (signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU):
+        signal.signal(job_signal, signal.SIG_DFL)
+
+
+job = subprocess.Popen(sys.argv[2:], preexec_fn=as_job)
+os.tcsetpgrp(0, job.pid)
+with report.open("a", encoding="utf-8") as out:
+    out.write(f"job {job.pid}\\n")
+fg = Path(str(report) + ".fg")
+while True:
+    _, status = os.waitpid(job.pid, os.WUNTRACED)
+    if os.WIFSTOPPED(status):
+        with report.open("a", encoding="utf-8") as out:
+            out.write("stopped\\n")
+        deadline = time.monotonic() + 30
+        while not fg.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        fg.unlink()
+        os.tcsetpgrp(0, job.pid)
+        os.killpg(job.pid, signal.SIGCONT)
+        continue
+    with report.open("a", encoding="utf-8") as out:
+        out.write(f"exited {os.waitstatus_to_exitcode(status)}\\n")
+    break
+"""
+
+# Stands in for a command that beats: as ``_COMMAND``, but it appends a line to
+# ``<S_READY>.beats`` every 20 ms until released.
+_BEATING = """
+import os, time
+from pathlib import Path
+
+ready = Path(os.environ["S_READY"])
+ready.with_suffix(".tmp").write_text(f"{os.getpid()} {os.getpgid(0)} {os.getpid()}")
+os.replace(ready.with_suffix(".tmp"), ready)
+release = Path(str(ready) + ".release")
+deadline = time.monotonic() + 30
+while not release.exists() and time.monotonic() < deadline:
+    with open(str(ready) + ".beats", "a", encoding="utf-8") as beats:
+        beats.write("beat\\n")
+    time.sleep(0.02)
+print("released", flush=True)
+"""
+
+# Stands in for a command that leaves a process holding its output and exits at once:
+# ``bash -c 'sleep 30 & echo started'``, writing ``<pid> <pgid> <sleep pid>`` to ``S_READY``.
+_LEAVING = """
+import os
+
+os.execvp(
+    "bash",
+    [
+        "bash",
+        "-c",
+        'sleep 30 & echo "$$ $$ $!" > "$S_READY.tmp"; mv "$S_READY.tmp" "$S_READY"; echo started',
+    ],
+)
+"""
+
+
+class _StreamRun:
+    """One real ``stream`` in its own process, its stand-in command, and what each left."""
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        mode: str = "external",
+        on_stop: str = "teardown",
+        signum: int = signal.SIGTERM,
+        ignored: bool = False,
+        command: str = _COMMAND,
+        stream: str = "stdout",
+        tty: int | None = None,
+    ) -> None:
+        self.tmp_path = tmp_path
+        self.shell = tmp_path / "shell"
+        self.ready = tmp_path / "ready"
+        self.lock = tmp_path / "copy.lock"
+        self.log = tmp_path / "run.log"
+        self.result = tmp_path / "result.json"
+        environment = {
+            **os.environ,
+            "PYTHONPATH": str(Path(workspace.__file__).resolve().parents[1]),
+            "S_MODE": mode,
+            "S_ON_STOP": on_stop,
+            # ``int`` first: on Python 3.10 ``str`` of a ``Signals`` member is ``Signals.SIGTERM``.
+            "S_SIGNUM": str(int(signum)),
+            "S_COMMAND": command,
+            "S_STREAM": stream,
+            "S_READY": str(self.ready),
+            "S_LOCK": str(self.lock),
+            "S_LOG": str(self.log),
+            "S_RESULT": str(self.result),
+        }
+        argv = [sys.executable, "-c", _STREAM_RUN]
+        if ignored:
+            argv = [
+                sys.executable,
+                "-c",
+                _IGNORING_EXEC,
+                *argv[1:],
+            ]
+        if tty is not None:
+            # A job of a shell on the terminal ``tty``, Ctrl-Z and ``fg`` included.
+            self.process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    _JOB_SHELL,
+                    str(self.shell),
+                    *argv,
+                ],
+                env=environment,
+                stdin=tty,
+                stdout=tty,
+                stderr=tty,
+                start_new_session=True,
+            )
+            return
+        self.process = subprocess.Popen(
+            argv,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def pids(self) -> list[int]:
+        """Return the command's pid, its process group and its grandchild's pid, once started."""
+        assert _poll(self.ready.exists), "the command never started"
+        return [int(pid) for pid in self.ready.read_text(encoding="utf-8").split()]
+
+    def got(self) -> list[str]:
+        return _stops_got(self.tmp_path)
+
+    def beats(self) -> int:
+        beats = self.tmp_path / "ready.beats"
+        return len(beats.read_text(encoding="utf-8").split()) if beats.exists() else 0
+
+    def shell_said(self) -> list[str]:
+        return self.shell.read_text(encoding="utf-8").splitlines() if self.shell.exists() else []
+
+    def release(self) -> None:
+        (self.tmp_path / "ready.release").touch()
+
+    def finish(self, timeout: float = 30) -> tuple[object, object]:
+        """Return the code and stop signal ``stream`` returned; fail on a run that never ends."""
+        try:
+            _ = self.process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            pytest.fail("the run never finished")
+        code, stopped_by = json_list(json_loads(self.result.read_text(encoding="utf-8")))
+        return code, stopped_by
+
+    def kill(self) -> None:
+        """Kill whatever a failed row left running, so it cannot outlive the row."""
+        self.release()
+        if self.process.poll() is None:
+            self.process.kill()
+        _ = self.process.communicate()
+        for line in self.shell_said():
+            if line.startswith("job ") and _is_running(int(line.split()[1])):
+                os.kill(int(line.split()[1]), signal.SIGKILL)
+        if self.ready.exists():
+            for pid in self.pids()[::2]:
+                if _is_running(pid):
+                    os.kill(pid, signal.SIGKILL)
+
+
+def _stops_got(tmp_path: Path) -> list[str]:
+    """Return the name of every stop signal the stand-in command got, in order."""
+    got = tmp_path / "ready.got"
+    return got.read_text(encoding="utf-8").split() if got.exists() else []
+
+
+def _poll(predicate: Callable[[], bool], seconds: float = 20) -> bool:
+    """Return whether ``predicate`` became true within ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def _is_running(pid: int) -> bool:
+    """Return whether ``pid`` is a process that has not exited (a zombie has exited)."""
+    state = subprocess.run(
+        [
+            "ps",
+            "-o",
+            "stat=",
+            "-p",
+            str(pid),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def _lock_is_held(path: Path) -> bool:
+    try:
+        with workspace.file_lock(path, blocking=False):
+            return False
+    except workspace.LockBusyError:
+        return True
+
+
+def _gc_refused(layout: workspace.Layout) -> bool:
+    try:
+        _ = workspace.gc(layout)
+    except workspace.LockBusyError:
+        return True
+    return False
+
+
+@pytest.fixture
+def stream_runs() -> Iterator[list[_StreamRun]]:
+    runs: list[_StreamRun] = []
+    yield runs
+    for run in runs:
+        run.kill()
+
+
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_a_stop_signal_to_the_run_alone_reaches_the_whole_command_and_the_run_outlives_it(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+    signum: signal.Signals,
+) -> None:
+    run = _StreamRun(tmp_path)
+    stream_runs.append(run)
+    command, group, grandchild = run.pids()
+
+    os.kill(run.process.pid, signum)
+
+    assert _poll(lambda: not _is_running(grandchild))
+    assert group == command != os.getpgid(run.process.pid)
+    assert run.got() == [signum.name]
+    # The command is tearing down: the run still holds its lease and waits for it.
+    assert _is_running(run.process.pid)
+    assert _lock_is_held(run.lock)
+    assert run.finish() == (3, signum)
+    assert not _is_running(command)
+    assert not _lock_is_held(run.lock)
+    assert run.log.read_text(encoding="utf-8").endswith("torn down\n")
+
+
+def test_a_repeat_stop_inside_the_grace_is_dropped_and_a_later_one_is_relayed(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+) -> None:
+    run = _StreamRun(tmp_path, on_stop="count")
+    stream_runs.append(run)
+    _ = run.pids()
+
+    os.kill(run.process.pid, signal.SIGTERM)
+    assert _poll(lambda: run.got() == ["SIGTERM"])
+    os.kill(run.process.pid, signal.SIGINT)
+    time.sleep(workspace.STOP_REPEAT_GRACE + 0.3)
+    os.kill(run.process.pid, signal.SIGINT)
+    assert _poll(lambda: len(run.got()) >= 2)
+    run.release()
+
+    assert run.finish() == (0, signal.SIGTERM)
+    # A relayed repeat would sit between the two: the command gets its signals in order.
+    assert run.got() == ["SIGTERM", "SIGINT"]
+
+
+def test_a_second_stop_after_the_grace_reaches_a_command_whose_teardown_hangs(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+) -> None:
+    # pytest ends on a second Ctrl-C during a teardown that hangs; the run passes it on.
+    run = _StreamRun(tmp_path, on_stop="hang")
+    stream_runs.append(run)
+    _ = run.pids()
+
+    os.kill(run.process.pid, signal.SIGTERM)
+    assert _poll(lambda: run.got() == ["SIGTERM"])
+    time.sleep(workspace.STOP_REPEAT_GRACE + 0.3)
+    os.kill(run.process.pid, signal.SIGTERM)
+
+    assert run.finish(timeout=10) == (4, signal.SIGTERM)
+    assert run.got() == ["SIGTERM", "SIGTERM"]
+
+
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_a_stop_signal_the_run_inherited_as_ignored_stays_ignored_and_stops_nothing(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+    signum: signal.Signals,
+) -> None:
+    run = _StreamRun(tmp_path, signum=signum, ignored=True)
+    stream_runs.append(run)
+    _ = run.pids()
+
+    os.kill(run.process.pid, signum)
+    # Then, past the grace, a stop the run does relay: a relayed ``signum`` would show before it.
+    time.sleep(workspace.STOP_REPEAT_GRACE + 0.3)
+    other = signal.SIGTERM if signum != signal.SIGTERM else signal.SIGHUP
+    os.kill(run.process.pid, other)
+
+    assert run.finish() == (3, other)
+    assert run.got() == [other.name]
+
+
+@pytest.mark.parametrize("mode", ["starting", "started"])
+def test_a_stop_before_the_command_is_recorded_reaches_it_once_it_is(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+    mode: str,
+) -> None:
+    run = _StreamRun(
+        tmp_path,
+        mode=mode,
+        signum=signal.SIGHUP,
+        command="import time; time.sleep(25)",
+    )
+    stream_runs.append(run)
+
+    # The command died by the relayed signal, read as ``128 + N``, long before its sleep ended.
+    assert run.finish(timeout=10) == (128 + signal.SIGHUP, signal.SIGHUP)
+
+
+def test_a_killed_stream_leaves_its_lock_held_while_its_command_runs(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+) -> None:
+    run = _StreamRun(tmp_path)
+    stream_runs.append(run)
+    command, _group, _grandchild = run.pids()
+
+    run.process.kill()
+    _ = run.process.wait()
+
+    assert _is_running(command)
+    assert _lock_is_held(run.lock)
+    run.release()
+    assert _poll(lambda: not _is_running(command))
+    assert _poll(lambda: not _lock_is_held(run.lock))
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_a_reader_gone_from_the_run_keeps_the_log_and_never_blocks_the_command(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+    stream: str,
+) -> None:
+    # ``workspace.py run ... | head``, or a closed terminal: the echo fails, the log does not.
+    run = _StreamRun(tmp_path, mode=f"sink-{stream}", command=_FLOOD, stream=stream)
+    stream_runs.append(run)
+
+    assert run.finish(timeout=15) == (0, None)
+    assert run.log.stat().st_size == len("header\n") + 20000 * 100
+
+
+def _is_stopped(pid: int) -> bool:
+    state = subprocess.run(
+        [
+            "ps",
+            "-o",
+            "stat=",
+            "-p",
+            str(pid),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return state.startswith("T")
+
+
+def _drain(master: int, done: threading.Event) -> None:
+    """Read the terminal's output until ``done``, so nothing writing to it ever blocks.
+
+    It never blocks in a read: closing a descriptor another thread is reading
+    can hang on macOS while a process still holds the terminal.
+    """
+    with contextlib.suppress(OSError):
+        while not done.is_set():
+            if select.select([master], [], [], 0.05)[0]:
+                _ = os.read(master, 1 << 16)
+
+
+@pytest.fixture
+def terminal() -> Iterator[tuple[int, int]]:
+    """A pseudo-terminal: its master side, read until the row ends, and its terminal side.
+
+    Rows take it before ``stream_runs``, so whatever a row left holding the
+    terminal is killed before the terminal closes.
+    """
+    master, tty = os.openpty()
+    done = threading.Event()
+    drain = threading.Thread(target=_drain, args=(master, done), daemon=True)
+    drain.start()
+    yield master, tty
+    done.set()
+    drain.join()
+    os.close(tty)
+    os.close(master)
+
+
+@pytest.mark.parametrize("ignored", [None, signal.SIGCONT], ids=["plain", "sigcont-ignored"])
+def test_ctrl_z_suspends_the_command_with_the_run_and_fg_continues_both(
+    tmp_path: Path,
+    terminal: tuple[int, int],
+    stream_runs: list[_StreamRun],
+    ignored: signal.Signals | None,
+) -> None:
+    # With ``SIGCONT`` inherited as ignored the run still continues, and must continue its group.
+    master, tty = terminal
+    run = _StreamRun(
+        tmp_path,
+        command=_BEATING,
+        tty=tty,
+        signum=ignored or signal.SIGTERM,
+        ignored=ignored is not None,
+    )
+    stream_runs.append(run)
+    command, _, _ = run.pids()
+    assert _poll(lambda: run.beats() > 3)
+
+    _ = os.write(master, b"\x1a")  # Ctrl-Z
+
+    assert _poll(lambda: "stopped" in run.shell_said())
+    assert _poll(lambda: _is_stopped(command))
+    stopped_at = run.beats()
+    time.sleep(0.5)
+    assert run.beats() == stopped_at
+    Path(f"{run.shell}.fg").touch()  # fg
+    assert _poll(lambda: run.beats() > stopped_at + 3)
+    assert not _is_stopped(command)
+    run.release()
+
+    assert _poll(lambda: "exited 0" in run.shell_said())
+    assert json_list(json_loads(run.result.read_text(encoding="utf-8"))) == [0, None]
+    assert run.log.read_text(encoding="utf-8").endswith("released\n")
+
+
+def test_ctrl_z_the_run_inherited_as_ignored_stays_ignored_and_stops_nothing(
+    tmp_path: Path,
+    terminal: tuple[int, int],
+    stream_runs: list[_StreamRun],
+) -> None:
+    master, tty = terminal
+    run = _StreamRun(tmp_path, command=_BEATING, tty=tty, signum=signal.SIGTSTP, ignored=True)
+    stream_runs.append(run)
+    command, _, _ = run.pids()
+    assert _poll(lambda: run.beats() > 3)
+
+    _ = os.write(master, b"\x1a")  # Ctrl-Z
+
+    beats = run.beats()
+    assert _poll(lambda: run.beats() > beats + 25)
+    assert not _is_stopped(command)
+    assert "stopped" not in run.shell_said()
+    run.release()
+    assert _poll(lambda: "exited 0" in run.shell_said())
+    assert json_list(json_loads(run.result.read_text(encoding="utf-8"))) == [0, None]
+
+
+def test_a_continue_to_the_run_alone_continues_its_stopped_command(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+) -> None:
+    run = _StreamRun(tmp_path, command=_BEATING)
+    stream_runs.append(run)
+    command, group, _ = run.pids()
+    assert _poll(lambda: run.beats() > 3)
+    # Only the command's own group: never this test's (a run that shared it would stop it too).
+    assert group == command != os.getpgrp()
+    os.killpg(group, signal.SIGSTOP)
+    assert _poll(lambda: _is_stopped(command))
+    stopped_at = run.beats()
+
+    os.kill(run.process.pid, signal.SIGCONT)
+
+    assert _poll(lambda: run.beats() > stopped_at + 3)
+    run.release()
+    assert run.finish() == (0, None)
+
+
+def test_a_stop_after_the_command_exits_reaches_what_it_left_holding_its_output(
+    tmp_path: Path,
+    stream_runs: list[_StreamRun],
+) -> None:
+    run = _StreamRun(tmp_path, command=_LEAVING)
+    stream_runs.append(run)
+    command, _, leftover = run.pids()
+    # The command has exited; its ``sleep`` holds the output, so the run waits on it.
+    assert _poll(lambda: not _is_running(command))
+    assert _is_running(leftover)
+    assert run.process.poll() is None
+
+    os.kill(run.process.pid, signal.SIGTERM)
+
+    assert _poll(lambda: not _is_running(leftover), 5)
+    assert run.finish(timeout=5) == (0, signal.SIGTERM)
+    assert run.log.read_text(encoding="utf-8").endswith("started\n")
+
+
+@pytest.fixture
+def stand_in_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Put ``_UV`` on the actors' ``PATH`` and point ``_COMMAND`` at ``tmp_path``.
+
+    Yields the folder it lives in; afterwards kills whatever the command or ``uv sync``
+    left running, so a failed row cannot outlive the row.
+    """
+    folder = tmp_path / "bin"
+    uv = _write(folder / "uv", f"#!{sys.executable}\n{_UV}")
+    uv.chmod(0o755)
+    monkeypatch.setenv("S_READY", str(tmp_path / "ready"))
+    monkeypatch.setenv("S_ON_STOP", "count")
+    monkeypatch.setenv("WSTEST_SYNC", str(tmp_path / "sync-ready"))
+    yield folder
+    (tmp_path / "ready.release").touch()
+    (tmp_path / "sync-ready.release").touch()
+    pids: list[int] = []
+    if (tmp_path / "ready").exists():
+        pids += [int(pid) for pid in (tmp_path / "ready").read_text(encoding="utf-8").split()][::2]
+    if (tmp_path / "sync-ready").exists():
+        pids.append(int((tmp_path / "sync-ready").read_text(encoding="utf-8")))
+    for pid in pids:
+        if _is_running(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _run_record(layout: workspace.Layout) -> dict[object, object]:
+    (record,) = [json_object(json_loads(line)) for line in layout.run_log.read_text().splitlines()]
+    return record
+
+
+def test_a_stopped_run_keeps_its_leases_until_its_command_ends_then_records_the_stop(
+    layout: workspace.Layout,
+    actors: _Actors,
+    stand_in_uv: Path,
+    tmp_path: Path,
+) -> None:
+    command = (
+        "--",
+        sys.executable,
+        "-c",
+        _COMMAND,
+    )
+    actors.start("A", "run", _ADDRESS, *command, bin=str(stand_in_uv), real_stream=True)
+    assert _poll((tmp_path / "ready").exists)
+    process = actors.processes["A"]
+
+    # A non-TTY Ctrl-C under ``uv run python scripts/workspace.py``: the group's SIGINT, then
+    # uv's forward of it 200 ms later. A stop after the grace is relayed.
+    os.kill(process.pid, signal.SIGINT)
+    assert _poll(lambda: _stops_got(tmp_path) == ["SIGINT"])
+    time.sleep(0.2)
+    os.kill(process.pid, signal.SIGINT)
+    time.sleep(workspace.STOP_REPEAT_GRACE + 0.3)
+    os.kill(process.pid, signal.SIGTERM)
+    assert _poll(lambda: len(_stops_got(tmp_path)) >= 2)
+    refused = _gc_refused(layout)
+    (tmp_path / "ready.release").touch()
+    code, _out, err = actors.finish("A")
+
+    assert _stops_got(tmp_path) == ["SIGINT", "SIGTERM"]
+    assert refused
+    assert code == 128 + signal.SIGINT
+    record = _run_record(layout)
+    assert (record["exit"], record["stopped_by"]) == (0, "SIGINT")
+    assert err.rstrip().endswith(f"exit 0 in {record['seconds']}s, stopped by SIGINT")
+
+
+def test_a_killed_run_keeps_its_flow_and_copy_leased_until_its_command_ends(
+    layout: workspace.Layout,
+    actors: _Actors,
+    stand_in_uv: Path,
+    tmp_path: Path,
+) -> None:
+    command = (
+        "--",
+        sys.executable,
+        "-c",
+        _COMMAND,
+    )
+    actors.start("A", "run", _ADDRESS, *command, bin=str(stand_in_uv), real_stream=True)
+    assert _poll((tmp_path / "ready").exists)
+    pid = int((tmp_path / "ready").read_text(encoding="utf-8").split()[0])
+
+    actors.processes["A"].kill()
+    assert actors.finish("A")[0] == -signal.SIGKILL
+    actors.run("B")
+
+    assert _is_running(pid)
+    assert _gc_refused(layout)
+    with pytest.raises(workspace.LockBusyError):
+        _ = workspace.release(layout, "pkg/a.py")
+    assert workspace.running_slots(layout, ["slot-1"]) == ["slot-1"]
+    assert actors.reached("B", "bound")
+    assert not actors.reached("B", "in", within=0.5)
+    (tmp_path / "ready.release").touch()
+    assert actors.finish("B")[0] == 0
+    assert _poll(lambda: not _gc_refused(layout))
+
+
+def test_a_killed_sync_keeps_its_flow_and_copy_leased_until_uv_sync_ends(
+    layout: workspace.Layout,
+    actors: _Actors,
+    stand_in_uv: Path,
+    tmp_path: Path,
+) -> None:
+    sync = tmp_path / "sync-ready"
+    actors.run("A", bin=str(stand_in_uv), real_sync=True)
+    assert _poll(sync.exists)
+    pid = int(sync.read_text(encoding="utf-8"))
+
+    actors.processes["A"].kill()
+    assert actors.finish("A")[0] == -signal.SIGKILL
+
+    assert _is_running(pid)
+    assert _gc_refused(layout)
+    with pytest.raises(workspace.LockBusyError):
+        _ = workspace.release(layout, "pkg/a.py")
+    (tmp_path / "sync-ready.release").touch()
+    assert _poll(lambda: not _gc_refused(layout))
+
+
+def test_each_floor_install_holds_the_locks_the_gate_holds(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _gate_copy_inputs(layout)
+    held: list[object] = []
+
+    def _run_checked(command: list[str], _env: dict[str, str], holding: object = ()) -> None:
+        held.append(holding)
+        if command[:2] == ["uv", "sync"]:
+            _write(layout.floor_venv / "bin" / "python", "interpreter\n")
+
+    monkeypatch.setattr(workspace, "_run_checked", _run_checked)
+
+    _ = workspace.ensure_floor_venv(layout, (7, 8))
+
+    assert held == [(7, 8)] * 3
+
+
+def test_a_stopped_gate_runs_no_later_suite_and_ends_by_the_signal(
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for name in ("pyproject.toml", "uv.lock"):
+        _ = _write(layout.repo_root / name, f"{name}\n")
+    streamed: list[tuple[list[str], list[tuple[int, int]]]] = []
+
+    def stopped_stream(
+        command: list[str],
+        _env: dict[str, str],
+        log_path: Path,
+        header: str,
+        cwd: Path | None = None,
+        *,
+        holding: tuple[int, ...] = (),
+    ) -> workspace.Finished:
+        del cwd
+        streamed.append((command, [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in holding]))
+        _ = _write(log_path, header)
+        return workspace.Finished(128 + signal.SIGINT, signal.SIGINT)
+
+    monkeypatch.setattr(workspace, "stream", stopped_stream)
+
+    code = workspace.gate(layout, ["lint", "default"])
+
+    out = capsys.readouterr().out
+    assert code == 128 + signal.SIGINT
+    assert syncs == [layout.gate_dir]
+    ((command, holding),) = streamed
+    assert command[-3:] == list(workspace.GATE_SUITES["lint"][0])
+    # The copy's sync and the suite hold the flow's lease and the gate's lock.
+    locks = [layout.flow_dir, layout.flow_dir / "gate.lock"]
+    files = [(path.stat().st_dev, path.stat().st_ino) for path in locks]
+    assert syncs.holding == [files]
+    assert holding == files
+    assert "  stopped by SIGINT; later suites did not run" in out
+    (result_path,) = layout.evidence.glob("gate-*.json")
+    result = json_object(json_loads(result_path.read_text(encoding="utf-8")))
+    assert result["stopped_by"] == "SIGINT"
+    assert list(json_object(result, "suites")) == ["lint"]
+
+
+# Runs ``_cli`` with ``main`` returning ``W_CODE``, as the script's entry point does.
+_CLI = """
+import os
+
+from scripts import workspace
+
+workspace.main = lambda argv=None: int(os.environ["W_CODE"])
+workspace._cli()
+"""
+
+
+@pytest.mark.parametrize(
+    ("code", "returncode"),
+    [
+        (128 + signal.SIGTERM, -signal.SIGTERM),
+        (128 + signal.SIGINT, -signal.SIGINT),
+        (3, 3),
+        (128 + signal.SIGKILL, 128 + signal.SIGKILL),
+    ],
+    ids=[
+        "stopped-by-sigterm",
+        "stopped-by-sigint",
+        "plain-exit",
+        "not-a-stop-signal",
+    ],
+)
+def test_the_script_ends_by_the_stop_signal_that_stopped_its_run(
+    code: int,
+    returncode: int,
+) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", _CLI],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(workspace.__file__).resolve().parents[1]),
+            "W_CODE": str(code),
+        },
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == returncode

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 167 done, 133 to do.
+Progress: 169 done, 131 to do.
 
 ## Done
 
@@ -602,6 +602,22 @@ Progress: 167 done, 133 to do.
   the read the existence check (only `FileNotFoundError` reads as absent; an unreadable file still raises), and
   `_admit` reads the slot manifest itself under `pool.lock`, so a manifest gone before the run uses the copy resyncs it
   instead of yielding `{}` and a run record with false provenance
+- [x] 142. Every `workspace.py` lock was an `flock` held only by the wrapper's own descriptors, and `::stream`,
+  `::_run_checked` (`uv sync`) and `::probe` started their children without them, so after a SIGKILL of the wrapper the
+  child kept working in the copy with no lease and `gc` / `release` proceeded under it: fixed with 284, the command and
+  every `uv sync` receive the held flow lease and copy lock (`pass_fds`; `gate`'s sync also `gate.lock`), so a lease lives
+  as long as anything holding it; a daemon the command leaves behind keeps the run RUNNING and `gc` / `release` refuse
+  until it ends (stated in the docstring)
+- [x] 284. `workspace.py run` / `prove` (`::stream`) started the command in the wrapper's process group and forwarded
+  no signal, so a SIGTERM / SIGHUP / SIGQUIT / SIGINT to the wrapper's pid alone ended the wrapper and dropped its lease
+  while pytest or the prover kept running in the copy (a `gc` under a live mutation left a `RESTORE-FAILED.json`), and
+  no run record was written; terminal Ctrl-C, group-mode `timeout` and `TaskStop` already reached the whole group:
+  fixed, the command runs in its own session and the wrapper relays each stop signal to its group
+  (`scripts/_stop_signals.py`, shared with `prove_failability.py`; an inherited SIG_IGN stays ignored, a repeat inside
+  1 s is uv's duplicate and dropped, no SIGKILL escalation) until the command and whatever holds its output have ended;
+  Ctrl-Z stops the group with the run and `fg` continues both; the record keeps the command's exit and adds
+  `stopped_by`, the wrapper ends by the signal (`128 + N`); a closed output sink no longer hangs the run (36-cell
+  matrix: 0 survivors after, the defect on every relay cell before)
 
 ## Outside review of the fixes
 
@@ -649,12 +665,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `audit` and `diff <sha>` never notice, and `diff` reports a pre-existing untracked file as the item's own addition.
   Fix: snapshot the mirrored copy as a commit under the copy's lock (parent `HEAD`; for `gate`, its `head`) through one
   helper for both; land after 146 or with it
-- [ ] 142. Every `workspace.py` lock is an `flock` held only by the wrapper's own descriptors, and `::stream`,
-  `::_run_checked` (`uv sync`) and `::probe` start their children without them: after a SIGKILL of the wrapper the child
-  keeps working in the copy with no lease, and `gc` removes the flow or `release` unbinds the slot under it (`run`,
-  `gate` and a kill during `uv sync` alike; a real `uv sync` wrote about 25,000 `.venv` entries after its wrapper died).
-  Fix: the children inherit the held flow lease, copy lock and `gate.lock` (`pass_fds`), never `git` or docker; land after
-  145 and 284 (same `lease` and `Popen` lines)
 - [ ] 146. `workspace.py::item_diff` stitches `git diff <baseline>` over the paths the real index tracks with per-file
   `--no-index` renders of the untracked files, so its bytes depend on the index: staging an unchanged added file reorders
   the diff and changes its seal (`diff --check` fails after staging alone), `rm --cached` of an unchanged file emits it
@@ -786,12 +796,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   unexpected error occurred" (no data is written through the package; plain DRF writes the related row's `str()`).
   Refuse the kind mismatch at build (spec-039 "type-override conflict policy"), one predicate shared with
   `_assert_field_agreement`
-- [ ] 284. `workspace.py run` / `prove` (`::stream`) start the command in the wrapper's process group and forward no
-  signal: a SIGTERM / SIGHUP / SIGQUIT to the wrapper's pid alone (`kill <pid>`, a parent terminating the outer `uv run`,
-  `timeout --foreground`), or SIGINT to it alone, ends the wrapper and drops its lease while the prover or pytest keeps
-  running in the copy, so a second `run`, `run --fresh`, `release` and `gc` proceed underneath (a `gc` under a live
-  mutation left a `RESTORE-FAILED.json` that refuses later proves). A terminal Ctrl-C, group-mode `timeout` and
-  `TaskStop` reach the whole group and leave no survivor. Folds in 142 (the lease fds passed to the command)
 - [ ] 290. `filters/base.py::_decode_and_validate_global_id` coerces a GlobalID filter value against the target model's
   `_meta.pk`, never the target type's id slot (`django_strawberry_framework/relay.py::_node_id_slot`), and
   `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` compile on the pk path: for fakeshop `PublisherType.house_code:
