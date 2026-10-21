@@ -1415,10 +1415,13 @@ relation field whose `many=` shape contradicts the column it is mapped over — 
 `PrimaryKeyRelatedField(many=True, ...)` across a forward FK or a reverse one-to-one, or a
 single `PrimaryKeyRelatedField` across a reverse FK or a many-to-many — is a
 [`ConfigurationError`][glossary-configurationerror]
-([`rest_framework/serializer_converter.py`][rf-converter]`::_reject_relation_cardinality_mismatch`). Where the two agree,
-the emitted `kind` is re-derived from the **serializer** field's cardinality rather than
-from the column classifier alone, so a `many=True` field over a reverse FK or a
-`GenericRelation` emits a list-of-ids input, which is what DRF will validate.
+([`rest_framework/serializer_converter.py`][rf-converter]`::_reject_relation_cardinality_mismatch`). The
+column side of that comparison is the shared column classifier
+`django_strawberry_framework/mutations/inputs.py::model_column_write_kind`, which answers
+`relation_multi` for every collection-valued relation (`many_to_many`, or `one_to_many`: a
+reverse FK, a `GenericRelation`); once the two agree the classifier's `kind` is the
+emitted one, so a `many=True` field over a reverse FK or a `GenericRelation` emits a
+list-of-ids input, which is what DRF will validate.
 
 **Renamed fields (`source`) — supported for the simple cases, fail-loud otherwise.** A
 DRF serializer field's GraphQL-facing identity is its **declared field name**, but the

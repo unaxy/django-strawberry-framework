@@ -549,15 +549,17 @@ def annotate_queryset_relation(
 def relation_input_python_attr(field: ModelField) -> str:
     """Return the generated input attr for a relation field (the 036 naming scheme).
 
-    Forward FK / OneToOne -> ``<field.name>_id``; M2M -> the plain field name.
-    Single-sourced so the generator (``relation_input_annotation``) and the
+    A single-valued relation (forward FK / OneToOne) -> ``<field.name>_id``; a
+    collection-valued one -> the plain field name. Which side is a collection
+    is ``model_column_write_kind``'s rule (``relation_multi``), read here rather than
+    restated. Single-sourced so the generator (``relation_input_annotation``) and the
     bind-time reverse index (``_relation_field_index``) spell the scheme once: the
     class-creation validator (``mutations/sets.py::_expected_input_attr_names``)
     and the relation-override lock already compose the generator by name, and the
     index is the reverse half of the same grammar. A scheme change moves this one
     body; both halves follow.
     """
-    if getattr(field, "many_to_many", False):
+    if model_column_write_kind(field) == RELATION_MULTI:
         return field.name
     return f"{field.name}_id"
 
@@ -570,7 +572,9 @@ def relation_input_annotation(
     """Map a relation field to its ``(python_attr, graphql_name, annotation)`` triple.
 
     Forward FK / OneToOne become a single ``<field>_id`` input; M2M becomes
-    ``list[<id>]`` (spec-036 Decision 6). The id type rides
+    ``list[<id>]`` (spec-036 Decision 6). List-vs-single is
+    ``model_column_write_kind``'s collection rule, the same answer the python attr
+    reads. The id type rides
     ``relation_id_annotation`` (Relay ``GlobalID`` vs raw pk scalar).
 
     The python attr is ``<field.name>_id`` for FK / OneToOne so the
@@ -584,7 +588,7 @@ def relation_input_annotation(
     registry is fully populated); ``None`` means no primary is registered, in
     which case the raw pk scalar is used.
     """
-    many = bool(getattr(field, "many_to_many", False))
+    many = model_column_write_kind(field) == RELATION_MULTI
     # A relation field's ``related_model`` is its resolved target model class.
     annotation = relation_id_annotation(
         cast("type[models.Model]", field.related_model),
@@ -604,9 +608,17 @@ def model_column_write_kind(field: ModelField) -> str:
     -> ``relation_single`` / ``relation_multi``, ``FileField`` / ``ImageField``
     -> ``file``, else ``scalar``. Naming, source, type-override, and the
     serializer's required-primary policy stay at each flavor.
+
+    A relation is ``relation_multi`` when its side is collection-valued: a
+    ``many_to_many`` relation, or a ``one_to_many`` one (a reverse FK
+    ``ManyToOneRel``, a ``GenericRelation``), whose writer assigns a list of
+    related rows. Every other relation (forward FK / OneToOne, a reverse
+    ``OneToOneRel``, a ``GenericForeignKey``) points at one row and is
+    ``relation_single``.
     """
     if getattr(field, "is_relation", False):
-        return RELATION_MULTI if getattr(field, "many_to_many", False) else RELATION_SINGLE
+        collection = getattr(field, "many_to_many", False) or getattr(field, "one_to_many", False)
+        return RELATION_MULTI if collection else RELATION_SINGLE
     if isinstance(field, (models.FileField, models.ImageField)):
         return FILE
     return SCALAR
@@ -714,7 +726,6 @@ def model_column_write_annotation(
     type_name: str,
     *,
     primary_of: Callable[[type[models.Model]], type[DjangoType] | None],
-    kind: str | None = None,
 ) -> object:
     """Return the GraphQL annotation for a backing column, without naming.
 
@@ -725,8 +736,7 @@ def model_column_write_annotation(
     ``serializer_field_graphql_name``. Serializer SCALAR type-override stays at
     ``_model_backed_scalar_annotation``.
     """
-    if kind is None:
-        kind = model_column_write_kind(field)
+    kind = model_column_write_kind(field)
     if kind in (RELATION_SINGLE, RELATION_MULTI):
         # A relation field's ``related_model`` is its resolved target model class.
         related_model = cast("type[models.Model]", field.related_model)
@@ -775,12 +785,7 @@ def model_column_input_annotation(
     return (
         python_attr,
         graphql_name,
-        model_column_write_annotation(
-            field,
-            type_name,
-            primary_of=primary_of,
-            kind=kind,
-        ),
+        model_column_write_annotation(field, type_name, primary_of=primary_of),
     )
 
 

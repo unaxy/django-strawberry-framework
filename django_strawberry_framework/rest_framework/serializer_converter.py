@@ -653,13 +653,6 @@ def _relation_cardinality(field: DRFField) -> bool:
     return isinstance(field, serializers.ManyRelatedField)
 
 
-def _model_relation_cardinality(field: ModelField) -> bool:
-    """Return whether a Django relation field exposes a collection-valued side."""
-    return bool(
-        getattr(field, "many_to_many", False) or getattr(field, "one_to_many", False),
-    )
-
-
 def _reject_relation_cardinality_mismatch(field: DRFField, column: ModelField) -> None:
     """Reject a serializer relation whose collection shape disagrees with its model relation.
 
@@ -671,7 +664,7 @@ def _reject_relation_cardinality_mismatch(field: DRFField, column: ModelField) -
     the runtime serializer validates.
     """
     serializer_many = _relation_cardinality(field)
-    model_many = _model_relation_cardinality(column)
+    model_many = model_column_write_kind(column) == RELATION_MULTI
     if serializer_many == model_many:
         return
     expected = "many=True" if model_many else "a single related object"
@@ -1417,15 +1410,6 @@ def resolve_serializer_field(
             # A PK relation bound to the relation's ``attname`` validates to an instance DRF
             # writes under the column: refused, the relation is bound by its name.
             _reject_relation_column_source(field, column)
-            # The cardinality guard has aligned the serializer field's cardinality with the
-            # model relation's collection shape, so the emitted kind follows the SERIALIZER
-            # field's cardinality: a many field over a one_to_many rel (a reverse FK /
-            # GenericRelation - collection-shaped but many_to_many=False) emits a list
-            # id input, never the single id the column classifier alone would produce.
-            # The runtime ``ManyRelatedField`` validates a list of pks, and the generated
-            # input must describe the same shape the runtime serializer validates.
-            if _relation_cardinality(field):
-                kind = RELATION_MULTI
             if related_model is None:
                 # A ``GenericForeignKey`` names no target model: the field's queryset pins
                 # the one model it writes, as for a serializer-only relation.
@@ -1443,14 +1427,12 @@ def resolve_serializer_field(
                     column,
                     type_name,
                     primary_of=lambda model: _require_relation_primary(field_name, model),
-                    kind=kind,
                 )
         elif kind == FILE:
             annotation = model_column_write_annotation(
                 column,
                 type_name,
                 primary_of=lambda _model: None,
-                kind=kind,
             )
         else:
             # ``model_column_write_kind`` classifies every reverse ``ForeignObjectRel``
