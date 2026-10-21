@@ -1372,7 +1372,7 @@ def _synthesize_register_rider(
             ``type_name`` re-pinned so the class and its SDL name read
             ``RegisterInput`` instead of the deterministic shape-derived name.
             Materialized onto the standard ``mutations.inputs`` emit ledger so the
-            the distinct-shape collision raise still guards a consumer's own
+            distinct-shape collision raise still guards a consumer's own
             ``RegisterInput``. Stashes specs with ``password`` as kind ``EXCLUDED``
             (spec-040 D6) so the shared model decode captures it out of construction.
             """
