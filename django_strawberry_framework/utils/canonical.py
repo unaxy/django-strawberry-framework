@@ -1,16 +1,8 @@
 """Primitives for canonically reading consumer-controlled containers.
 
-Two subsystems reduce arbitrary consumer data to a canonical form: the set
-families' unordered ``Meta.fields`` ordering
-(``utils/inputs.py::_sorted_meta_values``, whose output is a sorted list) and the
-write pipeline's pre-save drift fingerprint
-(``utils/write_transaction.py::_field_fingerprint``, which is request-scoped).
-Their OUTPUT encodings are deliberately different and stay with each owner - one
-produces an ordered list, the other a flat digest string.
-
-What must NOT differ is how either one READS the data on the way there, because
-both read values a consumer controls, and the two halves of that read are where
-a walk stops being trustworthy:
+A walk over a consumer-controlled container keeps its own OUTPUT encoding; what
+it must not spell for itself is how it READS the container, because the two
+halves of that read are where a walk stops being trustworthy:
 
 * **Iteration.** ``for x in value`` on a ``dict`` / ``list`` / ``set`` SUBCLASS
   dispatches the subclass's own ``__iter__`` / ``items`` / ``keys``. A value that
@@ -72,11 +64,8 @@ def base_container_values(value: object) -> tuple[object, ...]:
     is the silent one - an ``__iter__`` that returns DIFFERENT members per call
     fingerprints a lie without raising anything. There is no base slot to read
     for a type the interpreter does not define, so the honest answer is a typed
-    refusal. Every caller gates on the five built-in types before arriving here
-    (``utils/inputs.py::canonicalize_set_meta_fields``,
-    ``utils/inputs.py::plain_set_meta_fields``,
-    ``utils/write_transaction.py::_field_fingerprint``), so
-    the refusal fires only for a future caller that widened its gate without
+    refusal. Every caller gates on the five built-in types before arriving here,
+    so the refusal fires only for a future caller that widened its gate without
     deciding how an arbitrary iterable should be read.
     """
     if truth.is_instance(value, dict):
