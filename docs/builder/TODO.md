@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 28 to do.
+Progress: 27 to do.
 
 ## To do: fix before beta
 
@@ -17,10 +17,6 @@ Progress: 28 to do.
   no recourse except `relation_shapes = {"x": "list"}`. `DjangoListField` already picks
   `_execute_queryset_pipeline_async` per call, so lists work where connections fail. Confirmed live over
   `AsyncDjangoGraphQLView` (`allCategories`, `allItems`)
-- [ ] 4. A model whose `delete()` returns `None` (soft-delete mixins such as model_utils' `SoftDeletableModel`) can
-  never be deleted through `DjangoMutation`: `django_strawberry_framework/mutations/resolvers.py::_delete_or_field_errors`
-  unpacks `_total, per_model = instance.delete()` and raises `TypeError` as a top-level error (the write rolls back).
-  Fix: tolerate a non-tuple return
 - [ ] 5. The ModelForm flavor stores an explicit `null` on a non-null `BooleanField` as `false` and reports success
   (`isPrivate: null` on a `True` row stored `False`, `errors: []`), where the model flavor returns a field-keyed error:
   `django_strawberry_framework/utils/write_values.py::decode_provided_fields` hands `None` to the bound form, which
