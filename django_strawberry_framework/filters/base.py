@@ -97,6 +97,7 @@ from django_strawberry_framework.utils.errors import (
     GLOBALID_UNVALIDATABLE_ERROR_CODE,
     coded_error_extensions,
 )
+from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.querysets import base_queryset, coerce_field_value_or_none
 from django_strawberry_framework.utils.relations import (
     is_model_class,
@@ -907,9 +908,10 @@ class IntegerRangeFilter(BaseRangeFilter, NumberFilter):
 def _target_definition_for(filter_instance: Filter) -> DjangoTypeDefinition | None:
     """Resolve the owner/target ``DjangoTypeDefinition`` for a GlobalID-aware filter.
 
-    Walks the runtime ``parent.<filterset>._owner_definition`` binding that
-    the finalizer's phase 2.5 wires (spec-027 #"Bind the owner."). Two
-    routing branches:
+    Reads the owner of the filter's runtime ``parent``: a filter set instance's
+    class's own binding (``utils/permissions.py::set_bound_definition``, which
+    the finalizer's phase 2.5 wires, spec-027 #"Bind the owner."), or the
+    definition an undeclared hop's face carries. Two routing branches:
 
     1. **Own-PK branch.** When ``filter_instance.field_name`` matches the
        owning model's PK name (``_meta.pk.name`` or ``"pk"``) and that PK is
@@ -924,7 +926,7 @@ def _target_definition_for(filter_instance: Filter) -> DjangoTypeDefinition | No
        filter names like ``"genres__id"`` (Django ``__`` source paths per
        spec-027 #"rebuild ORM paths"); the relevant definition is the
        target ``DjangoType`` (spec-027
-       #"consult `cls._owner_definition.related_target_for(field_name)`").
+       #"consult the bound owner's `related_target_for(field_name)`").
 
     Returns ``None`` when no owner is bound (unit-test
     contexts) or when the lookup cannot resolve a target; the filter then
@@ -934,11 +936,15 @@ def _target_definition_for(filter_instance: Filter) -> DjangoTypeDefinition | No
     here so the strategy-aware acceptance check in ``_decode_and_validate_global_id``
     consumes a single definition (spec-031 Decision 13).
     """
-    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
-    # ``FilterSet._owner_definition`` is the finalizer-bound ``DjangoTypeDefinition`` slot.
-    owner = optional_instance(
-        truth.static_attr(parent, "_owner_definition", None) if parent is not None else None,
-        DjangoTypeDefinition,
+    parent: object = getattr(filter_instance, "parent", None)
+    # An undeclared hop's face (``filters/sets.py::_UndeclaredHopSet``) carries the
+    # definition its rows answer for on itself; a filter set instance answers for its
+    # class's own binding.
+    face = truth.instance_dict(parent) or {}
+    owner = (
+        optional_instance(face["_owner_definition"], DjangoTypeDefinition)
+        if "_owner_definition" in face
+        else set_bound_definition(truth.class_of(parent))
     )
     if owner is None:
         return None
@@ -955,9 +961,10 @@ def resolve_globalid_target_definition(
     The own-PK-vs-relation resolution of ``_target_definition_for`` factored out
     of the ``filter_instance.parent`` accessor so the finalizer's build-time
     audit (``finalizer._audit_globalid_filter_strategies``) resolves the SAME
-    target definition from a bound ``filterset_cls._owner_definition`` +
-    ``filter.field_name`` that the runtime path resolves from a live filter
-    instance - the own-PK-vs-relation decision stays single-sited here.
+    target definition from a bound filterset's own binding
+    (``utils/permissions.py::set_bound_definition``) + ``filter.field_name``
+    that the runtime path resolves from a live filter instance - the
+    own-PK-vs-relation decision stays single-sited here.
 
     A ``"pk"`` segment names the current model's primary key. A scalar primary
     key is the current definition's own Relay id, so it ends the path (owner
@@ -1276,7 +1283,7 @@ class GlobalIDFilter(Filter):
     Accepts both raw `str` and `strawberry.relay.GlobalID` objects per
     spec-027 #"Accepts both raw". Validates the decoded `type_name` against
     the strategy-aware accepted set (resolved through the parent filterset's
-    `_owner_definition.related_target_for(field_name)`, or the owner
+    bound owner's `related_target_for(field_name)`, or the owner
     itself when the filter targets the own PK) per spec-031 Decision 13; a
     mismatch raises `GraphQLError("GlobalID type mismatch...")` before
     any queryset clause runs.

@@ -49,6 +49,7 @@ from .canonical import base_container_values, canonical_sort_key
 from .imports import import_attr_if_importable
 from .input_values import UNSET
 from .lazy import unwrap_lazy_object
+from .permissions import set_bound_definition
 
 # ``utils/strings.py`` is the owner of ``graphql_camel_name``;
 # re-imported here (the ``as`` form marks the explicit re-export) so existing
@@ -1597,11 +1598,11 @@ def clear_generated_input_namespace(
         binding_attrs: tuple[str, ...] = getattr(lifecycle, "binding_attrs", ())
         # The family names its own set base class (``make_set_input_namespace``'s kwargs).
         for subclass in iter_set_subclasses(cast("type[object]", set_root)):
-            # ``delattr`` on the subclass so an inherited default (the set
-            # base's ``_owner_definition = None``) is restored rather than
-            # masked. Each attribute is removed only when set directly on the
-            # subclass (its own real namespace) so a subclass that never had
-            # a binding tolerates the clear.
+            # ``delattr`` on the subclass so it reads as unbound again: its own
+            # slot is gone (``utils/permissions.py::set_bound_definition`` reads
+            # only that one). Each attribute is removed only when set directly
+            # on the subclass (its own real namespace) so a subclass that never
+            # had a binding tolerates the clear.
             for attr in binding_attrs:
                 if attr in truth.class_dict(subclass):
                     delattr(subclass, attr)
@@ -1751,11 +1752,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
     def _build_class_type(self, set_cls: type[_FactorySetT]) -> None:
         """Build the root input class for ``set_cls`` and stash it in the cache."""
         type_name = set_input_type_name(set_cls)
-        # ``_owner_definition`` is the finalizer-bound ``DjangoTypeDefinition`` slot.
-        owner_definition = cast(
-            "DjangoTypeDefinition | None",
-            truth.static_attr(set_cls, "_owner_definition", None),
-        )
+        owner_definition = set_bound_definition(set_cls)
         triples = self._build_input_triples(set_cls, type_name, owner_definition)
         # A set whose Layer-4 expansion is empty -- an ``OrderSet`` with an empty /
         # omitted ``Meta.fields`` and no active ``RelatedOrder``, or a related

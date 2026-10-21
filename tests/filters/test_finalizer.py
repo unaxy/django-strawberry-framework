@@ -38,6 +38,7 @@ import strawberry
 from apps.library.models import Book, Branch, Genre, LendingDesk, ProxyBranch, Shelf, Venue
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest
+from django.test import override_settings
 from django_filters import Filter
 from strawberry import relay
 from typing_extensions import override
@@ -81,6 +82,7 @@ from django_strawberry_framework.utils._narrowing import (
     require,
 )
 from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import json_at
 from tests._subprocess import run_in_fresh_process
 
 
@@ -579,6 +581,238 @@ def test_a_filterset_subclass_binds_its_own_owner_apart_from_its_base(
     assert result.data is not None
     assert result.data["viaHiding"]["edges"] == []
     assert result.data["viaPlain"]["edges"] == [{"node": {"title": "on-hidden"}}]
+
+
+# Each row of ``test_an_unwired_filterset_subclass_answers_for_no_owner``: the
+# ``shelf`` branch input and the titles it returns, one row per owner-dependent
+# read the branch's target set answers with.
+_UNWIRED_TARGET_ROWS = [
+    pytest.param('{topic: {exact: "secret"}}', [], id="declared-branch-scope"),
+    pytest.param("{id: {exact: %(seen)d}}", ["on-seen"], id="own-pk-scalar"),
+    pytest.param('{back: {title: {exact: "on-hidden"}}}', [], id="via-type-re-entry"),
+    pytest.param('{branchShelvesTopic: {exact: "secret"}}', [], id="undeclared-hop-re-entry"),
+    pytest.param(
+        '{branch: {exact: "%(shelf_named_branch_id)s"}}',
+        ["on-seen"],
+        id="relation-globalid-node-id-only",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("shelf_input", "titles"), _UNWIRED_TARGET_ROWS)
+@pytest.mark.parametrize(
+    "subclass_target",
+    [
+        pytest.param(True, id="unwired-subclass-of-a-bound-filterset"),
+        pytest.param(False, id="unrelated-unwired-filterset"),
+    ],
+)
+def test_an_unwired_filterset_subclass_answers_for_no_owner(
+    *,
+    subclass_target: bool,
+    shelf_input: str,
+    titles: list[str],
+) -> None:
+    """A ``RelatedFilter`` to an unwired ``SubShelfFilter(ShelfFilter)`` answers as an unwired set does.
+
+    ``ShelfFilter`` is bound to the non-primary ``PlainShelfType``, which hides
+    nothing; the primary ``HidingShelfType`` hides secret shelves. Both are Relay
+    nodes. A subclass no type wires is a separate set bound to no owner, so it
+    answers every row exactly as an unrelated unwired filterset over ``Shelf``
+    declaring the same filters does: its branch rows, and a path re-entering
+    ``Shelf``'s table through a multi-relation ``RelatedFilter`` or a flat leaf,
+    are scoped by the primary type (a secret shelf is not seen); its own key is
+    the scalar column, not its base's owner's GlobalID; and a relation GlobalID
+    is read node-id-only, so its type name is not checked against an owner.
+    """
+
+    class BackBookFilter(FilterSet):
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+    target_fields = {
+        "topic": ["exact"],
+        "id": ["exact"],
+        "branch": ["exact"],
+        "branch__shelves__topic": ["exact"],
+    }
+
+    class ShelfFilter(FilterSet):
+        back = RelatedFilter(BackBookFilter, field_name="branch__shelves__books")
+
+        class Meta:
+            model = Shelf
+            fields = target_fields
+
+    class SubShelfFilter(ShelfFilter):
+        pass
+
+    class LoneShelfFilter(FilterSet):
+        back = RelatedFilter(BackBookFilter, field_name="branch__shelves__books")
+
+        class Meta:
+            model = Shelf
+            fields = target_fields
+
+    target = SubShelfFilter if subclass_target else LoneShelfFilter
+
+    class BranchType(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    class HidingShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "topic")
+            primary = True
+            interfaces = (relay.Node,)
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[Shelf],
+            info: object,
+            **kwargs: object,
+        ) -> QuerySet[Shelf]:
+            return queryset.exclude(topic="secret")
+
+    class PlainShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "topic")
+            interfaces = (relay.Node,)
+            filterset_class = ShelfFilter
+
+    class ViaTargetBookFilter(FilterSet):
+        shelf = RelatedFilter(target, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+    class ViaTargetBookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            filterset_class = ViaTargetBookFilter
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+    assert read_attr(class_dict(ShelfFilter)["_owner_definition"], "origin") is PlainShelfType
+    assert "_owner_definition" not in class_dict(target)
+    assert registry.get(Shelf) is HidingShelfType
+    assert registry.get(Branch) is BranchType
+
+    # ``from __future__ import annotations`` leaves a class-body annotation a string
+    # naming a function local, so the root type is built with resolved annotations.
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"via_target": DjangoConnection[ViaTargetBookType]},
+                "via_target": DjangoConnectionField(ViaTargetBookType),
+            },
+        ),
+    )
+    branch = Branch.objects.create(name="b")
+    hidden = Shelf.objects.create(branch=branch, code="h", topic="secret")
+    seen = Shelf.objects.create(branch=branch, code="s", topic="zzz")
+    Book.objects.create(title="on-hidden", shelf=hidden)
+    Book.objects.create(title="on-seen", shelf=seen)
+    shelf_filter = shelf_input % {
+        "seen": seen.pk,
+        "shelf_named_branch_id": relay.to_base64("PlainShelfType", branch.pk),
+    }
+    result = strawberry.Schema(query=query, config=strawberry_config()).execute_sync(
+        f"{{ viaTarget(filter: {{shelf: {shelf_filter}}}) {{ edges {{ node {{ title }} }} }} }}",
+        context_value=HttpRequest(),
+    )
+    assert result.errors is None, result.errors
+    assert json_at(result.data, "viaTarget", "edges") == [
+        {"node": {"title": title}} for title in titles
+    ]
+
+
+@pytest.mark.parametrize(
+    "subclass_target",
+    [
+        pytest.param(True, id="unwired-subclass-of-a-bound-filterset"),
+        pytest.param(False, id="unrelated-unwired-filterset"),
+    ],
+)
+def test_an_unwired_filterset_subclass_names_a_choice_enum_as_an_unbound_set(
+    *,
+    subclass_target: bool,
+) -> None:
+    """An unwired subclass names a choice enum it builds first as an unbound set does.
+
+    No ``DjangoType`` exposes ``Shelf.condition`` and ``HIDE_FLAT_FILTERS`` keeps
+    the root from building the column as a flat leaf, so the ``RelatedFilter``
+    target, built before ``PlainShelfType`` (declared last) builds its own
+    ``ShelfFilter``, is the first to read the column, and the first builder names
+    the enum after its owner. A subclass of ``ShelfFilter`` no type wires has no
+    owner, so it names the enum exactly as an unrelated unwired filterset does,
+    with the unbound ``Filter`` prefix rather than its base's owner's type name.
+    """
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
+
+        class ShelfFilter(FilterSet):
+            class Meta:
+                model = Shelf
+                fields = {"condition": ["exact"]}
+
+        class SubShelfFilter(ShelfFilter):
+            pass
+
+        class LoneShelfFilter(FilterSet):
+            class Meta:
+                model = Shelf
+                fields = {"condition": ["exact"]}
+
+        target = SubShelfFilter if subclass_target else LoneShelfFilter
+
+        class ViaTargetBookFilter(FilterSet):
+            shelf = RelatedFilter(target, field_name="shelf")
+
+            class Meta:
+                model = Book
+                fields = {"title": ["exact"]}
+
+        class ViaTargetBookType(DjangoType):
+            class Meta:
+                model = Book
+                fields = ("id", "title")
+                filterset_class = ViaTargetBookFilter
+                interfaces = (relay.Node,)
+
+        class PlainShelfType(DjangoType):
+            class Meta:
+                model = Shelf
+                fields = ("id", "topic")
+                filterset_class = ShelfFilter
+
+        finalize_django_types()
+        assert read_attr(class_dict(ShelfFilter)["_owner_definition"], "origin") is PlainShelfType
+        assert "_owner_definition" not in class_dict(target)
+        query = strawberry.type(
+            type(
+                "Query",
+                (),
+                {
+                    "__annotations__": {"via_target": DjangoConnection[ViaTargetBookType]},
+                    "via_target": DjangoConnectionField(ViaTargetBookType),
+                },
+            ),
+        )
+        schema = strawberry.Schema(query=query, config=strawberry_config())
+    assert schema.get_type_by_name("FilterConditionEnum") is not None
+    assert schema.get_type_by_name("PlainShelfTypeConditionEnum") is None
 
 
 def test_phase_2_5_accepts_multi_owner_with_identical_target() -> None:

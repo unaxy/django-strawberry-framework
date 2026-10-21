@@ -69,17 +69,16 @@ from django_strawberry_framework.registry import (
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     list_of,
-    optional_instance,
     read_attr,
     require_instance,
 )
 from django_strawberry_framework.utils.imports import loaded_attr
+from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.relations import instance_accessor
 from django_strawberry_framework.utils.typing import object_result
 
 from .base import DEFAULT_RELATION_SHAPE
 from .converters import resolved_relation_annotation
-from .definition import DjangoTypeDefinition
 from .relay import (
     _accepts_model_label_decode,
     _check_composite_pk_for_relay_node,
@@ -108,6 +107,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import ModelField
 
     from .base import DjangoType
+    from .definition import DjangoTypeDefinition
     from .relations import PendingRelation
 
 # The sidecar family one phase-2.5 binding pass runs over: every hook in one
@@ -1203,10 +1203,11 @@ def _bind_set_owner_common(
     Django lazy-ref string idiom reaches here) raises the same family
     mismatch error instead of leaking ``issubclass()``'s raw ``TypeError``.
     Re-binding the same ``(set_cls, definition)`` pair is a no-op. The binding
-    read is the class's own slot, never one inherited from a base set, so a
-    subclass binds its own owner independently of its base. A second,
-    distinct owner runs the family's
-    pre-check then the declared-relation-target agreement walk: every declared
+    read is the class's own slot (``utils/permissions.py::set_bound_definition``,
+    the read every owner-dependent axis composes), never one inherited from a
+    base set, so a subclass binds its own owner independently of its base and an
+    unwired subclass answers for no owner. A second, distinct owner runs the
+    family's pre-check then the declared-relation-target agreement walk: every declared
     related target must resolve to the EXACT same ``DjangoTypeDefinition``
     AND ``graphql_type_name`` across both owners.
 
@@ -1233,14 +1234,10 @@ def _bind_set_owner_common(
         # metaclass validation) must raise the family model-mismatch error
         # rather than leak ``issubclass()``'s raw ``TypeError``.
         raise ConfigurationError(format_model_mismatch(set_cls, definition))
-    # The class's OWN slot: a subclass inherits its base's binding through
-    # attribute lookup, but it is a separate set wired to its own owner (the
-    # multi-owner refusal's remedy), so a base's owner is never its previous one.
-    # ``_owner_definition`` is the finalizer-bound ``DjangoTypeDefinition`` slot.
-    previous = optional_instance(
-        truth.class_dict(set_cls).get("_owner_definition"),
-        DjangoTypeDefinition,
-    )
+    # The class's OWN binding: a subclass is a separate set wired to its own
+    # owner (the multi-owner refusal's remedy), so a base's owner is never its
+    # previous one.
+    previous = set_bound_definition(set_cls)
     if previous is None:
         set_cls._owner_definition = definition
         return
@@ -2081,7 +2078,7 @@ def _audit_globalid_filter_strategies(wired: list[type[FilterSet]]) -> None:
 
     for filterset_cls in wired:
         # Subpass 1 bound every wired filterset's owner before this audit runs.
-        owner = cast("DjangoTypeDefinition", filterset_cls._owner_definition)
+        owner = cast("DjangoTypeDefinition", set_bound_definition(filterset_cls))
         for field_name, filter_instance in (filterset_cls.get_filters() or {}).items():
             if not isinstance(filter_instance, GlobalIDFilter | GlobalIDMultipleChoiceFilter):
                 continue
