@@ -209,7 +209,7 @@ A slice that adds a new example-project app — or any new schema module — mus
 
 ### Test staleness a focused run cannot see
 
-Two further change shapes strand test files the slice never names, and both hide for one reason: the un-re-pinned file is not in the diff, so neither per-pass diff review nor any focused run executes it before the final gate's full sweep.
+Two further change shapes strand test files the slice never names, and both hide for one reason: the un-re-pinned file is not in the diff, so neither per-pass diff review nor any focused run executes it before the full sweep in GitHub Actions; run the stranded files as targeted tests.
 
 - **An example-model field/column added, removed, or renamed** breaks every test hard-coding that model's field set — package `tests/` may use real example models as fixtures — through *different* mechanisms: a stale `fields=` / `exclude=` list, an editable-column expectation, a `"__all__"` shorthand that now raises on an unfilterable column type, a dedup/identity assertion. The sweep is the full `uv run pytest tests/ --no-cov`, never a focused run, and every staleness it exposes is fixed in the same pass. The faithful fix restores the test's original intent against the model's **current** field set: never weaken an assertion to force a pass, never change production code to make a stale test green.
 - **A wire-shape conversion** — a root or relation field becoming a connection, or any change to the `edges` / `node` / argument envelope a consumer query must use — must be re-pinned in **every** test tree exercising that field, not only the tree the slice text names (`AGENTS.md` defines four: package `tests/`, per-app `examples/fakeshop/apps/<app>/tests/`, live `examples/fakeshop/test_query/`, project-level `examples/fakeshop/tests/`). The check is `grep -rn <converted field name>` across all four.
@@ -503,7 +503,7 @@ After the integration pass is clean, Worker-1 runs the final test-run gate and p
 
 The gate is intentionally narrow:
 
-- `uv run pytest --no-cov` — full sweep across all four test trees per `AGENTS.md`. Plain `uv run pytest` is a coverage run in this repo and is forbidden by `## Coverage is the maintainer's gate, not a worker's tool`. The only `pytest`-side requirement is that the suite passes; do NOT inspect or assert line coverage.
+- The full sweep across all four test trees never runs locally (`AGENTS.md`): it runs in GitHub Actions (`django.yml` on the landing push, or a `gh workflow run django.yml` dispatch), and `bld-<NNN>-final.md` records that run. The only `pytest`-side requirement is that the suite passes; do NOT inspect or assert line coverage (`## Coverage is the maintainer's gate, not a worker's tool`).
 - Django's own consistency checks against the example project — `uv run python examples/fakeshop/manage.py check` and `… makemigrations --check --dry-run` — which catch model/admin/url-config drift `pytest` does not.
 - The lint/format/diff gate, all read-only (never `--fix`): `uv run ruff format --check .`, `uv run ruff check .`, and `git diff --check` (whitespace errors and conflict markers anywhere in the tree). Failures block `final-accepted` unless a pre-flight baseline exception was recorded in the plan's preamble.
 - **Floor verification** for every slice in the plan's floor-verification scope: that slice's focused tests, re-run in an isolated floor venv. The shared `.venv` is NOT the floor. See `## Floor verification` for the procedure and what gets recorded — the gate is the backstop confirming it happened, not the owner.

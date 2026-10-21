@@ -75,19 +75,9 @@ Each phase finishes completely (every agent it dispatched has reported) before t
   `git clone -q --no-local <repo> S/<id>-<role>` then `uv sync -q`; assert `django_strawberry_framework.__file__`
   lies inside it). The shared checkout is read-only to every agent; only the coordinator writes it, at landing.
 - Never touch `~/.t3/` (read-only), any `hunt-ws/`, or `~/dst-handoff/`. Never mention feedback.md / feedback2.md.
-- Resource gate before every pytest run (35% free) and every basedpyright / `check_public_types` run (50% free); one
-  heavy run at a time machine-wide. Pytest only `uv run pytest -q -p no:randomly --no-cov -n 2 <one file or node
-  ids>`, never the full suite. Gate script (`S/gate.sh <percent>`):
-
-  ```bash
-  #!/bin/bash
-  while true; do
-    busy=$(ps -axo comm=,args= | awk '$1 !~ /(^|\/)(zsh|bash|sh|rg|grep|ugrep|awk|ps)$/ && /[p]ytest|[b]asedpyright/' | wc -l | tr -d ' ')
-    free=$(memory_pressure | tail -1 | tr -dc '0-9')
-    if [ "$busy" = "0" ] && [ "${free:-0}" -ge "$1" ]; then echo "gate open (free=${free}%)"; exit 0; fi
-    echo "gate wait busy=$busy free=${free}%"; sleep 60
-  done
-  ```
+- Pytest only `uv run pytest -q -p no:randomly --no-cov -n 2 <one file or node ids>`, never the full suite; the
+  full suite runs in GitHub Actions. Targeted runs and basedpyright / `check_public_types` start without waiting
+  for an idle machine.
 
 - Downloads only PyPI wheels into a fresh empty dir; read them, never run them; Python reading them runs with `-I`.
 - No commits, branches or stash in any clone. Delete only files you created.

@@ -78,7 +78,7 @@ When implementation reveals the plan's approach is not quite right (a planned he
 
 On a re-pass after `revision-needed`, run focused tests for both the file you fixed AND every test file that imports the changed surface — including sibling apps and the example projects. Module-local tests catch your targeted fix; sibling tests catch over-corrections that break unrelated callers.
 
-**Test staleness.** `docs/builder/BUILD.md` `### Test staleness a focused run cannot see` is canonical. Worker-2's deltas: run its full sweep — never only your focused tests — **before** setting `Status: built`, since the staleness is yours to fix in this pass and Worker-3 never sees it in the diff; and when a failure this build caused falls outside your slice's scope, record it in `### Notes for Worker-1 (spec reconciliation)` and as a focused-test failure in the build report so Worker-0 can route it through the owning slice loop or the integration pass.
+**Test staleness.** `docs/builder/BUILD.md` `### Test staleness a focused run cannot see` is canonical. Worker-2's deltas: run every test file the changed surface reaches as targeted tests — never only your focused tests — **before** setting `Status: built`, since the staleness is yours to fix in this pass and Worker-3 never sees it in the diff; and when a failure this build caused falls outside your slice's scope, record it in `### Notes for Worker-1 (spec reconciliation)` and as a focused-test failure in the build report so Worker-0 can route it through the owning slice loop or the integration pass.
 
 ## DRY implementation rules
 
