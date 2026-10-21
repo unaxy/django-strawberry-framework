@@ -189,20 +189,7 @@ independently verifiable; the weight is breadth, not depth.
         delegation, keyed `resolve_unvisited_fragment`,
         `_graphql_surface_names`, `_relay_node_gate`, `_validate_set_sidecar`,
         `_attach_generated_resolvers`, relay node-default routing,
-        `require_subclass`, one `scopes_rows(type, definition)` predicate).
-        The predicate is the single answer to "does this type filter its
-        rows under the executing schema" and replaces every direct
-        `has_custom_get_queryset` read outside the type-definition owner,
-        today spelled two ways: the `DjangoTypeDefinition` field
-        (`types/resolvers.py::_custom_visibility_type`), the
-        `DjangoType.has_custom_get_queryset` classmethod (`orders/sets.py`,
-        `utils/permissions.py`, `utils/querysets.py`), and both
-        (`optimizer/walker.py::_target_has_custom_get_queryset`, which
-        `optimizer/nested_planner.py` reaches through its injected
-        `target_has_custom_get_queryset` callable). Its contract is
-        defined by effect, not by whether a class body defines
-        `get_queryset`: it is true exactly when the type's visibility hook
-        is not the identity.
+        `require_subclass`).
 - [ ] **Slice 3 — Structural DRY batch (WP-C, ~500–600 lines)**
   - [ ] C1 `_run_delete` folded onto the write skeleton (`tail_step` seam).
   - [ ] C2 the plain-form pipeline folded onto the skeleton
@@ -656,7 +643,7 @@ minus helper lines added):
 | Slice | Work package | Candidates | Est. net lines removed | Risk profile |
 |---|---|---|---|---|
 | 1 | WP-A boundary | A2 → A1 → A3 | ~0 (adds config) | LOW — re-exports + metadata |
-| 2 | WP-B mechanical | B1–B5 (16 items) | ~450–550 | LOW — provably-coinciding behavior |
+| 2 | WP-B mechanical | B1–B5 | ~450–550 | LOW — provably-coinciding behavior |
 | 3 | WP-C structural | C1–C13 | ~500–600 | MEDIUM — pinned strings, ledger ordering, one behavior change (C2) |
 | 4 | WP-D contract | D1–D3 | ~150 + doc debt | MED-HIGH — strictness accounting, test-double pins |
 | 5 | Docs + cut | — | — | mechanical breadth |
