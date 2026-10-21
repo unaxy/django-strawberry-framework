@@ -24,7 +24,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import cast
 
@@ -476,6 +476,40 @@ def test_lease_syncs_a_new_copy_once_reuses_it_with_its_edits_and_fresh_resyncs_
     assert kept
     assert wiped
     assert again.manifest == first.manifest
+    assert _statuses(layout) == {"slot-1": "ready"}
+
+
+def _run_once_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    action: Callable[[], object],
+) -> None:
+    """Run ``action`` once, right before the first ``read_text`` of ``target`` reads it."""
+    real_read_text = Path.read_text
+    pending = [action]
+
+    def _read_text(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if path == target and pending:
+            pending.pop()()
+        return real_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+
+def test_a_manifest_gone_when_the_lease_reads_it_resyncs_the_copy(
+    layout: workspace.Layout,
+    syncs: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with workspace.lease(layout, _address("perf-1")) as first:
+        pass
+    manifest = layout.manifest_path(first.slot)
+    _run_once_before_reading(monkeypatch, manifest, manifest.unlink)
+    with workspace.lease(layout, _address("perf-1")) as again:
+        pass
+
+    assert syncs == [first.directory, again.directory]
+    assert manifest.is_file()
     assert _statuses(layout) == {"slot-1": "ready"}
 
 
@@ -1230,6 +1264,39 @@ def test_a_lock_taken_after_gc_never_brings_the_flow_back(
     assert not layout.flow_dir.exists()
 
 
+def test_status_reports_a_flow_gc_removes_mid_read_as_gone(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(workspace.ROOT_ENV, str(layout.base.parent))
+    workspace.bind(layout, _address("perf-1"))
+
+    def _gc() -> None:
+        workspace.gc(layout)
+
+    _run_once_before_reading(monkeypatch, layout.state_path, _gc)
+
+    assert workspace.status(layout.repo_root, None) == [
+        f"root {layout.base}",
+        "review: 0 of 4 copies",
+        "postgres: no fakeshop container runs",
+    ]
+    assert not layout.flow_dir.exists()
+
+
+def test_a_state_file_that_cannot_be_read_is_an_error_not_an_empty_pool(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(workspace.ROOT_ENV, str(layout.base.parent))
+    workspace.bind(layout, _address("perf-1"))
+    layout.state_path.unlink()
+    layout.state_path.mkdir()
+
+    with pytest.raises(IsADirectoryError):
+        workspace.status(layout.repo_root, None)
+
+
 def test_a_flow_folder_is_made_while_another_gc_removes_the_empty_parents(
     layout: workspace.Layout,
     monkeypatch: pytest.MonkeyPatch,
@@ -1585,6 +1652,45 @@ def test_audit_binds_cited_run_ids_and_fails_unknown_or_foreign_ones(
     assert "shared=moved 1" in lines[1]
     assert lines[2].startswith("  FAIL review-20260924T120001-bbbbbb")
     assert lines[3].startswith("  FAIL review-20260101T000000-cccccc: no run log entry")
+
+
+def test_audit_reports_a_run_log_gc_removes_mid_read_as_gone(
+    layout: workspace.Layout,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+
+    def _layout_base(_root: Path) -> Path:
+        return layout.base
+
+    monkeypatch.setattr(workspace, "workspace_base", _layout_base)
+    layout.ensure_marked()
+    copy = layout.slot_dir("slot-1")
+    run_id = "review-20260924T120000-aaaaaa"
+    run: dict[str, object] = {
+        "run_id": run_id,
+        "address": "review/pkg/a.py/perf-1",
+        "directory": str(copy),
+        "package_file": str(copy / PACKAGE / "__init__.py"),
+        "package_digest": "sha256:" + "0" * 64,
+        "databases": {"default": str(copy / "examples" / "fakeshop" / "db.sqlite3")},
+        "cell": "default",
+        "exit": 0,
+        "copy_edits": [],
+        "shared_moves": [],
+    }
+    _write(layout.run_log, json.dumps(run) + "\n")
+    record = _write(tmp_path / "rev.md", f"Proof: {run_id}.\n")
+
+    def _gc() -> None:
+        workspace.gc(layout)
+
+    _run_once_before_reading(monkeypatch, layout.run_log, _gc)
+    lines, ok = workspace.audit_record(layout.repo_root, record)
+
+    assert ok is False
+    assert lines[1:] == [f"  FAIL {run_id}: no run log entry (never ran here, or gc removed it)"]
+    assert not layout.flow_dir.exists()
 
 
 def test_audit_fails_a_run_that_recorded_no_package_file_and_no_exit(

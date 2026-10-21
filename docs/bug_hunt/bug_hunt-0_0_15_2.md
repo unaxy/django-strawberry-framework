@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 166 done, 134 to do.
+Progress: 167 done, 133 to do.
 
 ## Done
 
@@ -596,6 +596,12 @@ Progress: 166 done, 134 to do.
   over escapes, equal-width backtick runs, autolinks and CommonMark 6.6 raw HTML (unclosed openers linear), masks each
   atomically before bracket pairing, then an over-matching GitHub bare-URL guard; a held mention no longer spends the
   slot and `_find` retries so nothing linked at the parent stops linking; KANBAN.md renders byte-identical
+- [x] 145. `workspace.py::_read_json_object` and `::load_runs` tested `exists()` and then read, and `status`, `audit`
+  and `gc`'s busy branch read with no lease by design, so a concurrent `gc` raised an uncaught `FileNotFoundError` (16
+  in 43,919 `status` calls racing `gc` for 10 s at the parent; 0 in 57,913 after): fixed, `_read_text_if_present` makes
+  the read the existence check (only `FileNotFoundError` reads as absent; an unreadable file still raises), and
+  `_admit` reads the slot manifest itself under `pool.lock`, so a manifest gone before the run uses the copy resyncs it
+  instead of yielding `{}` and a run record with false provenance
 
 ## Outside review of the fixes
 
@@ -649,11 +655,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `gate` and a kill during `uv sync` alike; a real `uv sync` wrote about 25,000 `.venv` entries after its wrapper died).
   Fix: the children inherit the held flow lease, copy lock and `gate.lock` (`pass_fds`), never `git` or docker; land after
   145 and 284 (same `lease` and `Popen` lines)
-- [ ] 145. `workspace.py::_read_json_object` and `::load_runs` test `exists()` and then read, and `status`, `audit` and
-  `gc`'s busy branch read with no lease by design, so a concurrent `gc` raises an uncaught `FileNotFoundError` (2 in about
-  38,000 `status` calls racing `gc`). A file gone at read time must read as absent, except `lease`'s manifest read, where
-  absent would yield `{}` and a run record with false provenance: `_admit` must read the manifest under `pool.lock` and
-  resync when it is gone; land before 142
 - [ ] 146. `workspace.py::item_diff` stitches `git diff <baseline>` over the paths the real index tracks with per-file
   `--no-index` renders of the untracked files, so its bytes depend on the index: staging an unchanged added file reorders
   the diff and changes its seal (`diff --check` fails after staging alone), `rm --cached` of an unchanged file emits it
