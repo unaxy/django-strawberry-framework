@@ -2883,6 +2883,66 @@ def test_filterset_accepts_a_computed_re_readable_collection() -> None:
     assert set(CustomCollectionForm.get_fields()) == {"code"}
 
 
+def _category_filter_with_exclude(exclude: Callable[[], object]) -> type[FilterSet]:
+    """Build a ``Category`` FilterSet whose only declaration is ``Meta.exclude``."""
+    meta = type("Meta", (), {"model": Category, "exclude": exclude()})
+    return type("ExcludeProbeFilter", (FilterSet,), {"Meta": meta})
+
+
+@pytest.mark.parametrize(
+    ("exclude", "received"),
+    [
+        pytest.param(lambda: (n for n in ["is_private"]), "generator", id="generator"),
+        pytest.param(lambda: iter(["is_private"]), "list_iterator", id="iter"),
+        pytest.param(lambda: map(str, ["is_private"]), "map", id="map"),
+        pytest.param(lambda: "is_private", "str", id="bare-str"),
+    ],
+)
+def test_filterset_rejects_a_meta_exclude_that_cannot_be_re_read(
+    exclude: Callable[[], object],
+    received: str,
+) -> None:
+    """A one-shot or bare-string ``Meta.exclude`` fails closed at class creation.
+
+    Upstream ``get_fields`` keeps a field when ``f not in exclude``: a one-shot
+    exclude is exhausted by the first membership test, so every later field
+    (the excluded column included) would become a client-queryable filter, and
+    a bare string answers by substring. Both are refused before upstream reads
+    the declaration, naming ``Meta.exclude``.
+    """
+    with pytest.raises(ConfigurationError) as excinfo:
+        _category_filter_with_exclude(exclude)
+
+    message = str(excinfo.value)
+    assert message.startswith(
+        "FilterSet ExcludeProbeFilter.Meta.exclude must be a re-readable collection of "
+        f"field names; got {received} (",
+    )
+    assert message.endswith("not a one-shot iterator or generator, and not a bare string.")
+
+
+@pytest.mark.parametrize(
+    "exclude",
+    [
+        pytest.param(["is_private"], id="list"),
+        pytest.param(("is_private",), id="tuple"),
+        pytest.param({"is_private"}, id="set"),
+        pytest.param(frozenset({"is_private"}), id="frozenset"),
+        pytest.param({"is_private": None}.keys(), id="dict-keys"),
+        pytest.param({"field": "is_private"}.values(), id="dict-values"),
+        pytest.param(SimpleLazyObject(lambda: ["is_private"]), id="lazy-list"),
+    ],
+)
+def test_filterset_meta_exclude_re_readable_collection_drops_the_column(exclude: object) -> None:
+    """Every re-readable ``Meta.exclude`` keeps the excluded column out of ``base_filters``."""
+    probe = _category_filter_with_exclude(lambda: exclude)
+
+    assert "is_private" not in probe.base_filters
+    assert "name" in probe.base_filters
+    # A second expansion reads the same declaration to the same field map.
+    assert "is_private" not in probe.get_fields()
+
+
 _Namer: TypeAlias = Callable[[str], str]
 
 

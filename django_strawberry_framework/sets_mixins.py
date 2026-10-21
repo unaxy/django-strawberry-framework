@@ -30,8 +30,9 @@ metaclass + expansion lifecycle a third time:
 - ``expanded_once`` -- the class-level expansion cache + reentry-guard skeleton
   shared by ``FilterSet.get_filters`` / ``OrderSet.get_fields``.
 - ``require_re_readable_field_declaration`` -- the ``Meta.fields`` shape gate
-  both families run before their first consumption, since both expansions may
-  re-run and a one-shot declaration is exhausted by the first walk.
+  both families run before their first consumption (and the filter family's
+  ``Meta.exclude`` gate), since both expansions may re-run and a one-shot
+  declaration is exhausted by the first walk.
 - ``SetLifecycleAttrs`` -- the per-family binding-state descriptor naming the
   ``registry.clear()`` reset attrs (owner / expansion cache / reentry guard) in
   one place instead of re-spelled tuples.
@@ -636,8 +637,9 @@ def require_re_readable_field_declaration(
     *,
     subject: str,
     accepted: str,
+    meta_attr: str = "fields",
 ) -> None:
-    """Fail closed when a family's ``Meta.fields`` cannot be walked twice.
+    """Fail closed when a family's ``Meta.fields`` / ``Meta.exclude`` cannot be walked twice.
 
     Both set families re-run their expansion: ``FilterSetOptions`` stores
     ``Meta.fields`` verbatim and upstream ``get_fields`` consumes it into a
@@ -646,16 +648,22 @@ def require_re_readable_field_declaration(
     the cache. A one-shot declaration therefore expands correctly on the first
     walk and silently to an EMPTY or partial field set on every later one, which
     is why the shape is rejected before the first iteration rather than after
-    the divergence.
+    the divergence. The filter family's ``Meta.exclude`` is consumed the same
+    way: upstream ``get_fields`` answers ``f not in exclude`` once per field, so
+    a one-shot exclude is exhausted by the first membership test and every later
+    field passes (the excluded column becomes a filter), and a bare string
+    answers that test by substring. The same gate refuses both shapes there.
 
-    ``subject`` is the family label and ``accepted`` the family's own list of
-    legal ``Meta.fields`` spellings (the filter family also accepts a lookup-bag
-    dict and both accept ``'__all__'``); the contract sentence itself is shared.
+    ``subject`` is the family label, ``accepted`` the family's own list of
+    legal spellings for the declaration (the filter family's ``Meta.fields``
+    also accepts a lookup-bag dict and both families' ``Meta.fields`` accept
+    ``'__all__'``), and ``meta_attr`` the ``Meta`` attribute the message names;
+    the contract sentence itself is shared.
     """
     if is_re_readable_field_declaration(value):
         return
     raise ConfigurationError(
-        f"{subject} {truth.qualname(set_cls)}.Meta.fields must be {accepted}; got "
+        f"{subject} {truth.qualname(set_cls)}.Meta.{meta_attr} must be {accepted}; got "
         f"{truth.kind(value)} ({truth.render(value)}). {RE_READABLE_FIELDS_HELP}",
     )
 
