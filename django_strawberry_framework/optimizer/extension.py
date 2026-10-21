@@ -144,7 +144,7 @@ from .selections import (
     resolve_unvisited_fragment,
     response_key,
 )
-from .walker import plan_optimizations, plan_relation
+from .walker import plan_optimizations
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -160,7 +160,6 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import EitherInfo
 
     from ._context import FrozenVariableValue, PlanCacheKey
-    from .field_meta import FieldMeta
     from .plans import OptimizationPlan
     from .selections import ConvertedSelection, FragmentVisitKey
 
@@ -1642,25 +1641,6 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             runtime_path_from_info(info),
             origin,
         )
-
-    def plan_relation(
-        self,
-        field: "FieldMeta",
-        target_type: "type[DjangoType]",
-        info: object,
-    ) -> tuple[str, str]:
-        """Plan a single relation traversal (O6 entry point).
-
-        Thin instance-method delegate to the module-level ``plan_relation``
-        in ``walker.py``.  Kept on the class as a deliberate override seam:
-        subclasses can replace per-relation planning without monkey-patching
-        the walker module, and tests can swap an instance method for
-        custom strategies.
-
-        Returns ``("select", reason)`` or ``("prefetch", reason)`` describing how
-        the walker should materialize this relation on the parent queryset.
-        """
-        return plan_relation(field, target_type, info)
 
 
 def apply_connection_optimization(

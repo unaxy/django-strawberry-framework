@@ -116,7 +116,6 @@ from django_strawberry_framework.optimizer.extension import (
     apply_connection_optimization,
     clear_document_key_cache,
 )
-from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.hints import hint_is_skip
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.permissions import apply_cascade_permissions
@@ -4483,30 +4482,6 @@ def test_optimizer_does_not_cache_custom_get_queryset_prefetch_plans() -> None:
     assert ext.cache_info().hits == 0
     assert ext.cache_info().misses == 2
     assert ext.cache_info().size == 0
-
-
-def test_plan_relation_returns_prefetch_for_custom_get_queryset() -> None:
-    """O6: the extension exposes the relation planner entry point."""
-    field = FieldMeta.from_django_field(Item._meta.get_field("category"))
-    info = SimpleNamespace()
-
-    class FilteredCategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-        @override
-        @classmethod
-        def get_queryset(
-            cls,
-            queryset: QuerySet[Category],
-            info: strawberry.Info,
-        ) -> QuerySet[Category]:
-            return queryset
-
-    kind, reason = DjangoOptimizerExtension().plan_relation(field, FilteredCategoryType, info)
-    assert kind == "prefetch"
-    assert reason == "custom_get_queryset"
 
 
 # ---------------------------------------------------------------------------

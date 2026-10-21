@@ -499,7 +499,7 @@ Under `examples/fakeshop/test_query/test_library_api.py`:
 - Consumer-shaped queryset cooperation, [`OptimizerHint`][glossary-optimizerhint]`.prefetch_related()`, `OptimizerHint.SKIP`, and consumer-authored relation overrides are observable through the HTTP layer.
 ### Optimizer regression tests
 Under `tests/optimizer/test_definition_order.py`:
-- `walker.plan_relation(field, target_type, info)` returns the same `("select", "default")` / `("prefetch", "default")` / `("prefetch", "custom_get_queryset")` decisions for cyclic graphs after finalization.
+- `walker.plan_relation(field, target_type)` returns the same `("select", "default")` / `("prefetch", "default")` / `("prefetch", "custom_get_queryset")` decisions for cyclic graphs after finalization.
 - `DjangoOptimizerExtension.check_schema(schema)` returns no warnings for reachable types whose relation targets are registered.
 - The registered `DjangoTypeDefinition.field_map` carries an entry for every selected field, relation and scalar alike — the optimizer's canonical source, asserted directly rather than through any class-attribute proxy.
 ### Idempotency / isolation tests

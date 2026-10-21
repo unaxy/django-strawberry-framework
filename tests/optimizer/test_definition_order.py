@@ -15,7 +15,8 @@ import pytest
 import strawberry
 from apps.library.models import Book, Genre, MembershipCard, Patron
 from apps.products.models import Category, Item
-from django.db.models import Model
+from django.db.models import Model, QuerySet
+from typing_extensions import override
 
 from django_strawberry_framework import DjangoOptimizerExtension, DjangoType, finalize_django_types
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
@@ -88,29 +89,43 @@ def test_plan_relation_decisions_match_cardinality_after_finalization() -> None:
 
     finalize_django_types()
 
-    assert plan_relation(_model_field(Item, "category"), CategoryType, info=None) == (
+    assert plan_relation(_model_field(Item, "category"), CategoryType) == ("select", "default")
+    assert plan_relation(_model_field(Category, "items"), ItemType) == ("prefetch", "default")
+    assert plan_relation(_model_field(MembershipCard, "patron"), PatronType) == (
         "select",
         "default",
     )
-    assert plan_relation(_model_field(Category, "items"), ItemType, info=None) == (
+    assert plan_relation(_model_field(Patron, "card"), MembershipCardType) == ("select", "default")
+    assert plan_relation(_model_field(Book, "genres"), GenreType) == ("prefetch", "default")
+    assert plan_relation(_model_field(Genre, "books"), BookType) == ("prefetch", "default")
+
+
+def test_plan_relation_class_fallback_downgrades_custom_get_queryset_target() -> None:
+    """A direct call that omits ``target_definition`` reads the target class's own report.
+
+    A target that overrides ``get_queryset`` still turns a forward FK into a
+    ``Prefetch`` when no captured definition is passed. The walk always passes
+    one; that captured arm is executed by
+    ``examples/fakeshop/test_query/test_scalars_api.py::test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_http_query``.
+    """
+
+    class FilteredCategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+        @override
+        @classmethod
+        def get_queryset(
+            cls,
+            queryset: QuerySet[Category],
+            info: strawberry.Info,
+        ) -> QuerySet[Category]:
+            return queryset
+
+    assert plan_relation(_model_field(Item, "category"), FilteredCategoryType) == (
         "prefetch",
-        "default",
-    )
-    assert plan_relation(_model_field(MembershipCard, "patron"), PatronType, info=None) == (
-        "select",
-        "default",
-    )
-    assert plan_relation(_model_field(Patron, "card"), MembershipCardType, info=None) == (
-        "select",
-        "default",
-    )
-    assert plan_relation(_model_field(Book, "genres"), GenreType, info=None) == (
-        "prefetch",
-        "default",
-    )
-    assert plan_relation(_model_field(Genre, "books"), BookType, info=None) == (
-        "prefetch",
-        "default",
+        "custom_get_queryset",
     )
 
 
