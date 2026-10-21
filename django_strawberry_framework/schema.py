@@ -127,7 +127,7 @@ if TYPE_CHECKING:
         SchemaExtension | type[SchemaExtension] | Callable[[], SchemaExtension]
     )
 
-    from .mutations.sets import WriteMutationClass
+    from .write_mixins import WriteMutationClass
 
     class _DBAPIConnection(Protocol):
         """The raw handle a Django connection wraps, as far as closing it goes (PEP 249)."""

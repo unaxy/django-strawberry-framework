@@ -56,10 +56,14 @@ from django_strawberry_framework.mutations.permissions import (
     DjangoModelPermission,
     run_permission_classes,
 )
-from django_strawberry_framework.mutations.sets import (
+from django_strawberry_framework.mutations.sets import DjangoMutation
+from django_strawberry_framework.registry import register_subsystem_clear
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import require
+from django_strawberry_framework.utils.inputs import make_shape_build_cache
+from django_strawberry_framework.write_mixins import (
     COMMON_WRITE_META_KEYS,
     MODEL_BACKED_WRITE_META_KEYS,
-    DjangoMutation,
     _validate_permission_classes,
     _ValidatedMutationMeta,
     bind_write_declarations,
@@ -81,10 +85,6 @@ from django_strawberry_framework.mutations.sets import (
     resolve_meta_model,
     resolver_seams,
 )
-from django_strawberry_framework.registry import register_subsystem_clear
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import require
-from django_strawberry_framework.utils.inputs import make_shape_build_cache
 
 from .inputs import (
     FORM,
@@ -110,9 +110,9 @@ if TYPE_CHECKING:
     from strawberry.types import Info
     from typing_extensions import TypeIs
 
-    from django_strawberry_framework.mutations.sets import DeclarationRegistry
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.utils.inputs import InputFieldSpec
+    from django_strawberry_framework.write_mixins import DeclarationRegistry
 
     from .inputs import FormClass
 
@@ -470,7 +470,7 @@ def _default_get_form_kwargs(
     """
     del info  # the default ignores ``info``; an override may consult it.
     # The "add ``instance`` only on update" clause is single-sited in
-    # ``mutations/sets.py::construction_kwargs`` (spec-039), shared with the
+    # ``write_mixins.py::construction_kwargs`` (spec-039), shared with the
     # serializer ``get_serializer_kwargs`` default.
     return construction_kwargs(data=data, files=files, instance=instance)
 
@@ -512,7 +512,7 @@ def _build_and_stash_form_input(
     base whose default ``get_form_kwargs`` / ``get_form`` an override is detected
     against). Routes through ``_cached_build_form_input`` (per-shape dedupe +
     per-declaration create-required guard) and the promoted
-    ``mutations/sets.py::build_and_stash_input``, which materializes
+    ``write_mixins.py::build_and_stash_input``, which materializes
     the class into ``forms.inputs`` and stashes the reverse-map ``field_specs`` on
     the mutation (``cls._input_field_specs``) for the decode. The form's
     per-flavor stash value (``build_and_stash_input``'s ``payload``) IS the
@@ -1229,7 +1229,7 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
 def bind_form_mutations() -> None:
     """Bind every registered plain ``DjangoFormMutation`` (the finalizer phase-2.5 entry point).
 
-    The model-less rider of ``mutations/sets.py::bind_write_declarations``, and
+    The model-less rider of ``write_mixins.py::bind_write_declarations``, and
     the plain-form sibling of ``bind_mutations()``: ``types/finalizer.py`` calls
     it in the phase-2.5 window (alongside ``bind_mutations()``), after
     primary-type state is settled and before ``strawberry.type(...)`` freezes

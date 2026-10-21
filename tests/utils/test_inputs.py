@@ -17,7 +17,7 @@ import strawberry
 from django.utils.functional import LazyObject, SimpleLazyObject
 from typing_extensions import override
 
-from django_strawberry_framework import strawberry_config
+from django_strawberry_framework import strawberry_config, write_mixins
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import filter_input_type
 from django_strawberry_framework.filters import inputs as filter_inputs
@@ -994,6 +994,7 @@ def test_get_or_store_shape_build_stores_on_miss_and_reuses_on_hit() -> None:
 def test_write_flavor_shape_caches_share_get_or_store_owner() -> None:
     """Model bind, form cached_build_input, and serializer dedupe import one get-or-store."""
     assert module_binding(mutation_sets, "get_or_store_shape_build") is get_or_store_shape_build
+    assert module_binding(write_mixins, "get_or_store_shape_build") is get_or_store_shape_build
     assert module_binding(ser_inputs, "get_or_store_shape_build") is get_or_store_shape_build
 
 

@@ -702,7 +702,7 @@ symbol before closing each item): `ActiveInputPermissionMixin`
 `slot_child_selections` (`optimizer/selections.py`), `iter_relation_path`
 (`utils/relations.py`), the budgeted-walk primitive (`utils/`),
 `install_input_namespace` (`utils/inputs.py`), `bind_write_declarations`
-(`mutations/sets.py`), `require_subclass` (`mutations/sets.py`).
+(`write_mixins.py`), `require_subclass` (`write_mixins.py`).
 
 ## Edge cases and constraints
 

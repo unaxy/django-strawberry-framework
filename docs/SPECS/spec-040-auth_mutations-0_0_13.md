@@ -379,7 +379,7 @@ bind that materializes the auth payloads.
 - **It composes the write foundation through its seams.**
   [`mutations/sets.py`][mutations-sets] `DjangoMutation` (the `Register` rider's base,
   with its `input_type_name` / `build_input` / `resolve_sync` / `resolve_async`
-  overrides), `make_declaration_registry` (the auth ledger) and
+  overrides), [`write_mixins.py`][write-mixins] `make_declaration_registry` (the auth ledger) and
   `_validate_permission_classes` (the AllowAny default);
   [`mutations/inputs.py`][mutations-inputs] `build_payload_type` /
   `payload_object_slot` (both payload shapes), `payload_type_name` (the lazy payload
@@ -870,7 +870,7 @@ primitive, and every "AllowAny" in this document reads as "empty list /
 allow-all". This is not a weakening of
 the family rule but its documented, single-sited exception: the factories pass the
 explicit default into the same `_validate_permission_classes` normalization
-([`mutations/sets.py`][mutations-sets]) every flavor uses, so a consumer who
+([`write_mixins.py`][write-mixins]) every flavor uses, so a consumer who
 supplies `permission_classes=[...]` (rate-limit gate on `login`, invite gate on
 `register`, a locked-down `logout` if they insist) gets the standard
 `has_permission(info, mutation, operation, data, instance)` contract, including the
@@ -1059,7 +1059,7 @@ to `Register`** with:
   inversion), overridable through the factory's `permission_classes=` kwarg.
   **`permission_classes` is class-local, so `register` is one declaration per
   process**: the permission classes live on the
-  synthesized class's `Meta` snapshot ([`mutations/sets.py`][mutations-sets]
+  synthesized class's `Meta` snapshot ([`write_mixins.py`][write-mixins]
   `::_validate_permission_classes` /
   [`DjangoMutation`][glossary-djangomutation]`.check_permission`), and the class's
   fixed `RegisterInput` / `RegisterPayload` names cannot serve two distinct
@@ -1199,7 +1199,7 @@ to `Register`** with:
   because the input name otherwise derives from the *model* (`User`) plus the
   narrowed shape — the deterministic `UserEmailPasswordUsernameInput`. The
   **payload** name has **no seam**: the phase-2.5 bind's payload half
-  ([`mutations/sets.py`][mutations-sets] `::bind_mutation_outputs`, which both
+  ([`write_mixins.py`][write-mixins] `::bind_mutation_outputs`, which both
   write-declaration ledgers ride) calls
   `build_payload_type(mutation_cls.__name__, …)` and
   [`DjangoMutationField`][glossary-djangomutationfield]'s synthesized signature
@@ -1240,7 +1240,7 @@ declaration ledgers: the mutation ledger (so `bind_mutations()` re-binds the rid
 AND the auth ledger (so `bind_auth_mutations()`'s
 [Decision 8](#decision-8--the-user-models-primary-djangotype-is-required-validated-at-bind)
 validation still covers `register`)**. Both re-records are
-identity-deduped ([`mutations/sets.py`][mutations-sets] `::make_declaration_registry`
+identity-deduped ([`write_mixins.py`][write-mixins] `::make_declaration_registry`
 #"if not any(declaration_cls is stored for stored in store):"), so on a live ledger
 each is a no-op, and after a `registry.clear()` drains both, a consumer re-declaration
 **re-appends to both**. The auth-ledger record is re-written on every call, not once
@@ -1433,7 +1433,7 @@ factories cannot resolve types eagerly; they follow the exact
 [`DjangoMutationField`][glossary-djangomutationfield] discipline:
 
 - Each factory call records a declaration in a module-level auth ledger — **a
-  [`make_declaration_registry`][mutations-sets]`("AuthMutation")` instance, not a
+  [`make_declaration_registry`][write-mixins]`("AuthMutation")` instance, not a
   hand-rolled list** (Helper-reuse D14), so the
   every-call identity-deduped `.register` and the `TypeRegistry.clear()` drain are the
   same ones the model / form / serializer flavors use — (**surface-keyed**: which of
@@ -1827,7 +1827,7 @@ so each carries a source comment at its site.
   `clear_fn` is the `register_subsystem_clear` row); no hand-rolled `setattr` / `delattr`
   ([Decision 7](#decision-7--current_user-returns-the-session-actor-nullable-and-does-not-re-run-get_queryset) / [Decision 9](#decision-9--bind-lifecycle-a-declaration-ledger--bind_auth_mutations-at-phase-25--registered-clear-rows)).
 - [ ] **D14** — the auth declaration ledger is a
-  [`make_declaration_registry`][mutations-sets]`("AuthMutation")` instance; every-call
+  [`make_declaration_registry`][write-mixins]`("AuthMutation")` instance; every-call
   re-record on both ledgers via `.register`
   ([Decision 9](#decision-9--bind-lifecycle-a-declaration-ledger--bind_auth_mutations-at-phase-25--registered-clear-rows)).
 - [ ] **D15** — the current_user alias's `register_subsystem_clear` row carries
@@ -2527,6 +2527,7 @@ The completion contract.
 [utils-sessions]: ../../django_strawberry_framework/utils/sessions.py
 [utils-typing]: ../../django_strawberry_framework/utils/typing.py
 [utils-write-values]: ../../django_strawberry_framework/utils/write_values.py
+[write-mixins]: ../../django_strawberry_framework/write_mixins.py
 
 <!-- tests/ -->
 

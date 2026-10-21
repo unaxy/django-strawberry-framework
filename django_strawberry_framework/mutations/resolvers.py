@@ -178,9 +178,10 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.errors import ErrorKeyMap
     from django_strawberry_framework.utils.inputs import InputFieldSpec
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+    from django_strawberry_framework.write_mixins import WriteMutationClass
 
     from .inputs import ModelFieldIndex
-    from .sets import DjangoMutation, WriteMutationClass
+    from .sets import DjangoMutation
 
     # A class ``authorize_or_raise`` / ``payload_cls_for`` receives: every
     # write-mutation declaration, plus the auth surfaces' synthesized permission

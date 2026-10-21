@@ -66,9 +66,12 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import CREATE
 from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATION_INPUT_KIND
-from django_strawberry_framework.mutations.sets import (
+from django_strawberry_framework.mutations.sets import DjangoMutation
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_mapping, tuple_iter
+from django_strawberry_framework.utils.inputs import normalize_field_name_sequence
+from django_strawberry_framework.write_mixins import (
     MODEL_BACKED_WRITE_META_KEYS,
-    DjangoMutation,
     _ValidatedMutationMeta,
     build_and_stash_input,
     construction_kwargs,
@@ -84,12 +87,9 @@ from django_strawberry_framework.mutations.sets import (
     resolver_seams,
     validate_select_for_update,
 )
-from django_strawberry_framework.mutations.sets import (
+from django_strawberry_framework.write_mixins import (
     _validate_permission_classes as _validate_mutation_permission_classes,
 )
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_mapping, tuple_iter
-from django_strawberry_framework.utils.inputs import normalize_field_name_sequence
 
 from .inputs import (
     SERIALIZER_INPUTS_MODULE_PATH,
@@ -926,7 +926,7 @@ class SerializerMutation(DjangoMutation):
         longer possible.
         """
         del info, hook_context  # the default ignores them; an override may consult them.
-        # Shared with the form default via ``mutations/sets.py::construction_kwargs``
+        # Shared with the form default via ``write_mixins.py::construction_kwargs``
         # (spec-039): create has no ``instance`` key; update injects it from the
         # framework merge, never from this constructor-only hook.
         return construction_kwargs(data=data)

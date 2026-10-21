@@ -158,7 +158,6 @@ from django_strawberry_framework.mutations.resolvers import (
     save_new_row,
     save_or_field_errors,
 )
-from django_strawberry_framework.mutations.sets import backing_model_of
 from django_strawberry_framework.utils._narrowing import call_method, is_str, list_of, read_attr
 from django_strawberry_framework.utils.errors import (
     build_error_key_map,
@@ -174,6 +173,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_visible_relation,
     materialize_relation_id_container,
 )
+from django_strawberry_framework.write_mixins import backing_model_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container

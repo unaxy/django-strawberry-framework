@@ -926,7 +926,7 @@ def normalize_field_name_sequence(
     re-binding wrappers). Each site normalizes a declared field sequence the same
     way; they differ only in the human flavor label interpolated into the two
     ``ConfigurationError`` messages, so that single divergence is hoisted to the
-    ``flavor`` parameter -- mirroring how ``mutations/sets.py::make_declaration_registry``
+    ``flavor`` parameter -- mirroring how ``write_mixins.py::make_declaration_registry``
     already parameterizes its reject wording by a flavor label. The
     field-existence-basis check (a name not in the model's editable columns /
     the form's ``base_fields``) stays at each call site; this helper only validates

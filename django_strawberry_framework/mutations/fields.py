@@ -70,7 +70,7 @@ from .sets import iter_mutations
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from .sets import WriteMutationClass
+    from django_strawberry_framework.write_mixins import WriteMutationClass
 
 # The attribute name ``DjangoMutationField`` stamps its synthesized resolver with,
 # pointing at the bound mutation class. ``schema.py::DjangoMutationExecutionContext``
@@ -171,7 +171,7 @@ def _is_registered_mutation_target(mutation_cls: type[object]) -> bool:
     """Return whether either phase-2.5 declaration ledger will bind ``mutation_cls``.
 
     Membership is by identity, the contract both ledgers record under
-    (``django_strawberry_framework/mutations/sets.py::make_declaration_registry``);
+    (``django_strawberry_framework/write_mixins.py::make_declaration_registry``);
     an equality test would dispatch a consumer metaclass's ``__eq__``, so a class
     drained by ``registry.clear()`` that compares equal to its redeclaration would
     pass, and a raising ``__eq__`` would escape at the construction line.

@@ -485,7 +485,7 @@ contract alone:
 
 - **Row locking defaults on.** `Meta.select_for_update` defaults to `True` for every
   model-backed flavor through one shared validator
-  (`mutations/sets.py::validate_select_for_update`): locked writes are the safe posture,
+  (`write_mixins.py::validate_select_for_update`): locked writes are the safe posture,
   so an opt-*out* is the shape that fails safe when a consumer says nothing. A per-flavor
   default was rejected because it would make one `Meta` key mean different things on
   three bases.
