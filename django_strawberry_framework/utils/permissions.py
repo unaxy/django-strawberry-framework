@@ -394,13 +394,8 @@ def invoke_permission_method(
     The gate result runs through ``reject_async_in_sync_context``: an
     ``async def check_<field>_permission`` returns a truthy, un-awaited coroutine
     whose ``raise`` never executes, so an intended DENIAL would silently become a
-    no-op -- an authorization BYPASS. This is the same guard every sibling
-    authorization seam already applies (``mutations/permissions.py`` /
-    ``mutations/resolvers.py`` write hooks, ``utils/querysets.py`` ``get_queryset``
-    visibility); the filter / order gate is fired the same synchronous way (on the
-    async surface it runs on the ``sync_to_async`` worker ``_apply_common_finalize``
-    wraps), so an async gate is rejected loudly with ``SyncMisuseError`` on both
-    surfaces rather than passed through as a silent allow.
+    no-op -- an authorization BYPASS. It is rejected loudly with
+    ``SyncMisuseError`` instead.
 
     The gate SLOT itself is validated the same fail-loud way. A DECLARED gate
     that is not callable (``check_name_permission = 42``) is silently skipped

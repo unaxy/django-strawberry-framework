@@ -274,21 +274,16 @@ def reject_async_in_sync_context(
 ) -> _T:
     """Guard a synchronous hook result against any awaitable return.
 
-    Three sync pipeline seams invoke a consumer-overridable hook that
-    Decision 9 / Decision 15 allow to be sync OR async: the ``get_queryset``
-    visibility hook (``apply_type_visibility_sync``) and the two write
-    authorization hooks (``check_permission`` / a ``permission_classes``
-    entry's ``has_permission``). None can await - the whole ORM pipeline runs
-    synchronously (under one ``sync_to_async`` worker on the async surface),
-    so an ``async def`` override returns an orphaned coroutine. Treating that
-    truthy coroutine as success would be a silent bug - an authorization
-    BYPASS for the permission hooks - so it is rejected loudly.
+    The caller is a sync seam invoking a consumer-overridable hook. It cannot
+    await, so an ``async def`` override returns an orphaned coroutine; treating
+    that truthy coroutine as success would be a silent bug - an authorization
+    BYPASS for a permission hook - so it is rejected loudly.
 
-    Awaitables cannot be consumed by these sync pipelines. Native coroutines
-    are closed and futures are cancelled before ``SyncMisuseError`` is raised;
-    other awaitables have no standard cleanup protocol. Native-coroutine error
-    text is preserved for compatibility. Otherwise ``value`` is returned
-    unchanged, so callers read ``x = reject_async_in_sync_context(x, ...)``.
+    Native coroutines are closed and futures are cancelled before
+    ``SyncMisuseError`` is raised; other awaitables have no standard cleanup
+    protocol. Native-coroutine error text is preserved for compatibility.
+    Otherwise ``value`` is returned unchanged, so callers read
+    ``x = reject_async_in_sync_context(x, ...)``.
     """
     if inspect.isawaitable(value):
         kind = "a coroutine" if inspect.iscoroutine(value) else "an awaitable"
