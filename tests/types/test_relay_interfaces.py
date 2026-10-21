@@ -326,6 +326,31 @@ def test_composite_pk_with_explicit_node_id_annotation_is_accepted(
     assert CategoryNode.resolve_id_attr() == "name"
 
 
+def test_composite_pk_with_a_pk_node_id_annotation_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``pk: relay.NodeID[...]`` annotation is no escape from the composite-pk gate.
+
+    On a composite-pk model the pk names no single column, so finalization
+    rejects the type as if it declared no ``NodeID``; declaring the class
+    does not.
+    """
+    monkeypatch.setattr(Category._meta, "pk", CompositePrimaryKey("name", "is_private"))
+
+    class CategoryNode(DjangoType):
+        pk: relay.NodeID[str]
+
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    assert registry.get(Category) is CategoryNode
+    with pytest.raises(
+        ConfigurationError,
+        match=r"^Category: relay\.Node is not supported on models with a composite primary key\.",
+    ):
+        finalize_django_types()
+
+
 # ---------------------------------------------------------------------------
 # is_type_of injection
 # ---------------------------------------------------------------------------
@@ -1419,12 +1444,9 @@ def test_late_subclass_with_a_different_node_id_than_a_stamped_parent_resolves_i
 def test_relay_chain_composite_pk_child_still_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     """The composite-pk gate is not bypassed by an inherited framework default.
 
-    The gate used to call ``type_cls.resolve_id_attr()`` expecting
-    ``NodeIDAnnotationError`` from Strawberry's default when no explicit
-    ``NodeID`` exists - but a chain child inherits the parent's installed
-    framework default, which swallows that error into the ``"pk"``
-    fallback and would have let a composite-pk child slip through. The
-    gate now asks Strawberry's annotation scan directly.
+    A chain child inherits the parent's installed ``resolve_id_attr``
+    default, so the gate never asks the child's ``resolve_id_attr()``: it
+    reads the child's own stamp, scanned from its own annotations.
     """
 
     class ParentNode(DjangoType):

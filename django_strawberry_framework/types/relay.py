@@ -224,25 +224,14 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
     The error message proposes "declare an explicit ``id: relay.NodeID[...]``
     annotation" as a remediation; honor that here so a consumer who
     escapes the composite-pk surface with a single-column ``NodeID``
-    annotation is not unconditionally rejected. Strawberry's
-    ``Node.resolve_id_attr()`` returns the consumer's ``NodeID``
-    attribute name when present and raises ``NodeIDAnnotationError``
-    otherwise; only the latter case is the contract violation this
-    gate is meant to catch.
+    annotation is not unconditionally rejected. The verdict is the type's
+    own ``_stamp_relay_id_attr`` scan, never ``type_cls.resolve_id_attr()``
+    (a consumer override, on the type or a parent, answers without reading
+    annotations): a ``"pk"`` stamp means no ``NodeID`` names a column, and
+    on a composite-pk model the pk is no single column either.
     """
     model = model_for(type_cls)
-    if not has_composite_pk(model):
-        return
-    # Ask Strawberry's annotation scan directly rather than
-    # ``type_cls.resolve_id_attr()``: a relay-shaped child of a relay-shaped
-    # parent inherits the parent's installed framework default, which
-    # swallows ``NodeIDAnnotationError`` into the ``"pk"`` fallback and
-    # would let a composite-pk child slip past this gate.
-    try:
-        relay.Node.resolve_id_attr.__func__(type_cls)
-    except NodeIDAnnotationError:
-        pass
-    else:
+    if not has_composite_pk(model) or _stamp_relay_id_attr(type_cls) != "pk":
         return
     raise ConfigurationError(
         f"{truth.name(model)}: relay.Node is not supported on models with a "
@@ -255,10 +244,9 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
 # Framework slot ``_stamp_relay_id_attr`` pins each finalized Relay type's
 # resolved id attribute into (read via ``cls.__dict__`` so a subclass NEVER
 # inherits its parent's stamp). Deliberately NOT Strawberry's ``_id_attr``
-# slot: stamping ``"pk"`` there would satisfy upstream's inherited-cache
-# check on a chain child and silently bypass the composite-pk gate's
-# ``NodeIDAnnotationError`` detection - the exact bug class the composite-pk
-# gate hardening removed.
+# slot: Strawberry reads that cache through inheritance as a declared
+# ``NodeID``, so a ``"pk"`` written there would answer any unseeded upstream
+# scan of a subclass in place of its own annotations.
 _RELAY_ID_ATTR_SLOT = "_dsf_relay_id_attr"
 
 
