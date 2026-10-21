@@ -69,7 +69,6 @@ from django_strawberry_framework.types.converters import (
     _field_output_type_for,
     scalar_route,
 )
-from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_str, optional_instance, require
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
@@ -78,6 +77,7 @@ if typing.TYPE_CHECKING:
     from strawberry.types.base import WithStrawberryObjectDefinition
 
     from django_strawberry_framework.optimizer.field_meta import FieldMeta
+    from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
 _GLOBAL_ID_GRAPHQL_TYPE = "GlobalID!"
@@ -173,11 +173,7 @@ class Command(BaseCommand):
         if not truth.is_subclass(target, DjangoType):
             raise CommandError(f"{type_name} is not a DjangoType subclass")
 
-        # ``DjangoType`` declares the attribute; the package's registration writes it.
-        definition = optional_instance(
-            truth.static_attr(target, "__django_strawberry_definition__", None),
-            DjangoTypeDefinition,
-        )
+        definition = registry.registered_own_definition(target)
         if definition is None:
             raise CommandError(
                 f"{truth.name(target)} is not a registered DjangoType "

@@ -166,38 +166,15 @@ def _validate_djangotype_target(
     finalize-time.
 
     Order is load-bearing - each target-type check assumes the previous one
-    passed. The registration check is the strict invariant:
-    ``__django_strawberry_definition__`` is assigned by
-    ``DjangoType.__init_subclass__`` (``types/base.py::DjangoType.__init_subclass__``)
-    only for concrete subclasses carrying their own ``Meta`` with a ``model``.
-    The attribute is inherited via MRO, so ``hasattr`` would accept a subclass
-    that omits its own ``Meta`` - binding the field to a target whose
-    definition, ``Meta.primary`` state, and model belong to the parent.
-
-    The attribute answer is not trusted on its own word. ``origin is
-    target_type`` is only the own-class half; the accepted object must ALSO be
-    the exact ``DjangoTypeDefinition`` the registry holds for ``target_type``,
-    compared by IDENTITY. ``__init_subclass__`` registers the definition and
-    assigns the attribute from one value, so the canonical answer and the
-    attribute answer agree for every real target - while a fabricated
-    same-origin lookalike, a copy of a real definition, and a definition for a
-    type the registry has never seen are all rejected here, at the line that
-    constructed the field, instead of surfacing later as a Strawberry
-    runtime-type error over an unrelated model. The registry is the one
-    canonical metadata source every factory reads, so "registered target"
-    cannot mean different things to the list, connection and Relay node
-    entry points.
-
-    Every identity fact is read truthfully (``utils/truth.py``): the class and
-    subclass gates read the real metaclass chain and MRO, the definition
-    attribute is read from the real class namespaces without consulting the
-    metaclass, and the registry lookup is by identity. Rejection messages
-    render the target through ``truth.render`` / ``truth.name``.
-    A proxy of a class is not a target: the registry's definition names the
-    proxied class as its ``origin``, never the proxy. The attribute is compared
-    to the registry's object by identity before ``origin`` is read, so ``origin``
-    is only ever read off the registry's own definition, never off a replacement
-    object the attribute was reassigned to.
+    passed. The class and subclass gates read the real metaclass chain and MRO
+    (``utils/truth.py``); the registration check accepts only the target's own
+    registered definition (``registry.py::TypeRegistry.registered_own_definition``),
+    so a subclass that omits its own ``Meta`` is not bound to its parent's
+    definition, ``Meta.primary`` state and model, and a fabricated or copied
+    definition is rejected here, at the line that constructed the field, instead
+    of surfacing later as a Strawberry runtime-type error over an unrelated
+    model. Rejection messages render the target through ``truth.render`` /
+    ``truth.name``.
 
     Raises ``ConfigurationError`` on failure; returns the canonical
     ``DjangoTypeDefinition`` when every guard passes, so the Relay validator
@@ -213,9 +190,8 @@ def _validate_djangotype_target(
         raise ConfigurationError(
             f"{field} requires a DjangoType subclass; got {truth.name(target_type)}.",
         )
-    definition: object = truth.static_attr(target_type, "__django_strawberry_definition__", None)
-    canonical = registry.get_definition(target_type)
-    if canonical is None or definition is not canonical or canonical.origin is not target_type:
+    definition = registry.registered_own_definition(target_type)
+    if definition is None:
         raise ConfigurationError(
             f"{field} target {truth.name(target_type)} is not a registered DjangoType. "
             f"This usually means {truth.name(target_type)}'s `Meta` is missing a `model` "
@@ -223,7 +199,7 @@ def _validate_djangotype_target(
         )
     if resolver is not None and not callable(resolver):
         raise ConfigurationError(f"{field} resolver must be callable.")
-    return canonical
+    return definition
 
 
 def _validate_relay_djangotype_target(
@@ -250,8 +226,8 @@ def _validate_relay_djangotype_target(
 
     Reconsideration triggers (Family ``relay-node-target-guard``): a new
     Relay-shape arm (T-shape: ``types/base.py::_is_relay_shaped`` owns the
-    predicate), a registration-canonicality change (T-canonical: the base
-    ``_validate_djangotype_target`` owns the identity check), or a guard
+    predicate), a registration-canonicality change (T-canonical:
+    ``registry.py::TypeRegistry.registered_own_definition`` owns it), or a guard
     reading ``DecodeResult`` statuses (T-lifecycle: row existence lives in
     the ``types/relay.py`` resolve defaults, relation-target existence in
     the finalizer audit - construction answers registered + shaped only).

@@ -40,7 +40,7 @@ also keeps ``import django_strawberry_framework.testing`` light - the
 ``types``-package imports below are paid only by suites that use the helpers.
 """
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from strawberry import relay
 
@@ -50,16 +50,13 @@ from django_strawberry_framework.types.base import (
     _RELAY_NODE_GATE_INHERIT_TAIL,
     _RELAY_NODE_GATE_LEAD,
     STRING_GLOBALID_STRATEGIES,
-    DjangoType,
 )
-from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.relay import (
     decode_global_id,
     encode_typename,
     published_node_type_name,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import optional_instance
 
 if TYPE_CHECKING:
     from strawberry.schema import Schema
@@ -81,30 +78,18 @@ def global_id_for(
     under a ``type`` strategy the slot is the name ``schema`` published for the
     type when a schema is given (``ConfigurationError`` if that schema publishes
     no Relay-Node object type for it), else the ``graphql_type_name``. Raises
-    ``ConfigurationError`` for non-``DjangoType`` inputs, unfinalized types,
+    ``ConfigurationError`` for an input without its own registered definition
+    (``registry.py::TypeRegistry.registered_own_definition``), unfinalized types,
     finalized non-Relay-Node types, and ``callable`` / ``custom`` strategies
     (see the module docstring for the full contract).
     """
-    definition: DjangoTypeDefinition | None = None
-    is_registered_own_definition = False
-    if truth.is_subclass(type_cls, DjangoType):
-        # Registration writes this slot; the identity check below proves it is the canonical one.
-        definition = optional_instance(
-            truth.static_attr(type_cls, "__django_strawberry_definition__", None),
-            DjangoTypeDefinition,
-        )
-        canonical = registry.get_definition(type_cls)
-        is_registered_own_definition = (
-            canonical is not None and definition is canonical and canonical.origin is type_cls
-        )
-    if not is_registered_own_definition:
+    definition = registry.registered_own_definition(type_cls)
+    if definition is None:
         raise ConfigurationError(
             f"global_id_for: {truth.render(type_cls)} is not a registered "
             "DjangoType subclass; "
             "pass the DjangoType class whose emitted id you want to mint.",
         )
-    # The gate above proved ``definition`` is ``type_cls``'s own registered one.
-    definition = cast("DjangoTypeDefinition", definition)
     if not definition.finalized:
         # Gate on ``finalized`` FIRST. The strategy stamp is written in Phase
         # 2.5 - BEFORE Phase 3 flips ``finalized`` - so a partial-finalize
