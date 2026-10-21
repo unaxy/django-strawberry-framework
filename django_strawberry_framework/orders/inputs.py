@@ -54,10 +54,8 @@ if TYPE_CHECKING:
     from .sets import OrderSet
 
 # Domain-local aliases for the shared generated-input substrate (the mechanics
-# are single-sited in ``utils/inputs.py``). Tests import all five from this
-# module; ``orders/__init__.py`` takes ``_input_type_name_for``; ``FieldSpec``
-# and ``_input_type_name_for`` are also read intra-module -- so the names
-# stay addressable here.
+# are single-sited in ``utils/inputs.py``); the names stay addressable from this
+# module.
 FieldSpec = GeneratedInputFieldSpec
 build_input_class = build_strawberry_input_class
 _camel_case = graphql_camel_name

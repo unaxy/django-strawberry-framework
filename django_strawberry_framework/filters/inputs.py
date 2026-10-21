@@ -91,9 +91,8 @@ from .base import (
 )
 
 # Domain-local aliases for the shared generated-input substrate (the mechanics
-# are single-sited in ``utils/inputs.py``). Tests and
-# ``factories.py`` import these spec-027 Decision 9 names from this module, so
-# they stay addressable here.
+# are single-sited in ``utils/inputs.py``); the spec-027 Decision 9 names stay
+# addressable from this module.
 FieldSpec = GeneratedInputFieldSpec
 build_input_class = build_strawberry_input_class
 _camel_case = graphql_camel_name
@@ -665,7 +664,7 @@ def normalize_input_value(
 ) -> object:
     """Translate a Strawberry-shaped input value into ``django-filter`` form-data.
 
-    Returns one of three shapes:
+    Returns one of three shapes (spec-027 Decision 4):
 
     - a scalar value (``str`` / ``int`` / wire-form GlobalID string /
       enum ``.value``) when the filter consumes a single form-data key;
@@ -679,19 +678,14 @@ def normalize_input_value(
       wire form (not pre-decoded to a bare ``node_id``) so the bound filter
       can validate its ``type_name`` before decoding;
     - a ``list`` when ``django-filter`` consumes a list;
-    - a ``dict[str, Any]`` patch the caller merges into the form-data
-      dict when the filter consumes more than one positional form-data
-      key (``RangeFilter`` -> ``{<field>_0, <field>_1}``).
+    - a ``_RangeFormPatch`` when the filter consumes more than one
+      positional form-data key (``RangeFilter`` -> ``{<field>_0, <field>_1}``).
 
     Kind order is ``_FILTER_INPUT_KIND_TYPES``, the same table convert
     walks. ``TypedFilter`` is convert-only: normalize returns
     ``MRO_CONTINUE`` so ChoiceFilter / the unwrap catch-all can still
     fire. ``None`` from unwrap (an enum member whose ``.value`` is
     ``None``) is a successful result, not a continue signal.
-
-    Per spec-027 Decision 4's ``normalize_input_value`` contract, the
-    multi-key return shape lets the ``_normalize_input`` caller merge
-    the patch without inventing a sentinel-pair object.
     """
     # Defensive short-circuit against ``strawberry.UNSET`` reaching the
     # branches below: every branch indexes / iterates / coerces
@@ -948,9 +942,8 @@ def _normalize_range_value(
     # treats a missing key the same as a ``None``-valued one, but emitting
     # ``{<name>_0: None}`` or ``{<name>_0: UNSET}`` to the form-data dict surfaces
     # "axis supplied, value is inactive" to any caller walking ``data.keys()`` and
-    # leaks ``UNSET`` into form-field cleaning -- the explicit
-    # ``is_inactive_value`` rigor mirrors ``normalize_input_value``'s ``raw_value
-    # is None or raw_value is UNSET`` entry guard.
+    # leaks ``UNSET`` into form-field cleaning -- the same ``is_inactive_value``
+    # test as ``normalize_input_value``'s entry guard.
     patch = _RangeFormPatch()
     if not is_inactive_value(start, unset_sentinel=UNSET):
         patch[f"{base}_0"] = _unwrap_enum_member(start)
