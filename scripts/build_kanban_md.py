@@ -87,18 +87,47 @@ MD_OMITTED_DONE_SECTION_KEYS = frozenset({"verified_upstream"})
 # character, a dotted/``::``-qualified path, or a path separator on either side.
 TERM_BOUNDARY_BEFORE = r"(?<![A-Za-z0-9_.:/\-])"
 TERM_BOUNDARY_AFTER = r"(?![A-Za-z0-9_.:/\-])"
-# Regions a term match may not straddle: a ``#"substring"`` citation pinpoint or any
-# balanced ``[...]`` group with its trailing ``(destination "title")`` or ``[label]``
-# (any overlap rejects -- the pinpoint must stay byte-exact, and an existing link of any
-# shape keeps its text), and an inline code span (a match must contain the whole span
-# or none of it, so a term is linked when it IS the span, never when it sits inside a
-# longer literal). Brackets are paired after masking backslash escapes and code spans,
-# so an escaped or backticked bracket is literal text; a trailing destination and title
-# are scanned whole with only escapes masked, so a backtick in a title is literal too.
+# Regions a term match may not overlap at all: a ``#"substring"`` citation pinpoint (it
+# must stay byte-exact), any balanced ``[...]`` group with its trailing
+# ``(destination "title")`` or ``[label]`` (an existing link of any shape keeps its text),
+# a URI or email autolink and raw HTML (CommonMark 6.5, 6.6: a link written there lands in
+# an href, an attribute or hidden markup), and the URL, ``www.`` or email GitHub links
+# bare. Regions a match takes whole or not at all: a code span, an unmatched backtick
+# run and a backslash escape (a term is linked when it IS the span, never inside a longer
+# literal, and never so it splits a run or an escape). ``_protected_regions`` lexes them
+# left to right the way CommonMark does before it pairs link brackets.
 PINPOINT_RE = re.compile(r"#\"[^\"\n]*\"")
-CODE_SPAN_RE = re.compile(r"`[^`\n]+`")
 ESCAPE_RE = re.compile(r"\\[\s\S]")
-ESCAPE_OR_CODE_RE = re.compile(ESCAPE_RE.pattern + "|" + CODE_SPAN_RE.pattern)
+BACKTICK_RUN_RE = re.compile(r"`+")
+INLINE_TOKEN_RE = re.compile(r"\\[\s\S]?|`+|[<\[\]]")
+# A paragraph: inline constructs never cross a blank line (``\r\n`` endings included).
+PARAGRAPH_RE = re.compile(r"(?:[^\n]|\n(?![ \t\r]*(?:\n|$)))+")
+AUTOLINK_RE = re.compile(
+    r"<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^<>\x00-\x20]*>"
+    r"|<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~\-]+@[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*>",
+)
+HTML_ATTRIBUTE = (
+    r"\s+[A-Za-z_:][A-Za-z0-9_.:\-]*(?:\s*=\s*(?:[^\"'=<>`\x00-\x20]+|'[^']*'|\"[^\"]*\"))?"
+)
+# Raw HTML (CommonMark 6.6): an open or closing tag or an empty comment by regex; a
+# comment, processing instruction, CDATA section or declaration runs from its opener to
+# the first closer after it (``HTML_DELIMITED``), found by ``_raw_html_end``.
+HTML_TAG_RE = re.compile(
+    rf"<[A-Za-z][A-Za-z0-9\-]*(?:{HTML_ATTRIBUTE})*\s*/?>|</[A-Za-z][A-Za-z0-9\-]*\s*>|<!---?>",
+)
+HTML_DELIMITED = (
+    (re.compile(r"<!--"), "-->"),
+    (re.compile(r"<\?"), "?>"),
+    (re.compile(r"<!\[CDATA\["), "]]>"),
+    (re.compile(r"<![A-Za-z]"), ">"),
+)
+# GitHub's extended autolinks, over-matched so a link GitHub draws is always covered: any
+# start character (GitHub links ``<https://...`` with no closing ``>``), no trailing trim.
+GFM_AUTOLINK_RE = re.compile(
+    r"(?:(?:https?|ftp)://|www\.)[^\s<]*"
+    r"|(?<![\w.+\-])[\w.+\-]+@[\w.\-]+",
+)
 LINK_LABEL_RE = re.compile(r"\[[^\[\]]*\]")
 LINK_ANGLE_DESTINATION_RE = re.compile(r"<[^<>\n]*>")
 LINK_TITLE_RE = re.compile(r"\"[^\"]*\"|'[^']*'|\([^()]*\)")
@@ -386,6 +415,13 @@ def term_pattern(title: str) -> re.Pattern[str]:
 Spans = list[tuple[int, int]]
 
 
+class Regions(NamedTuple):
+    """Where a glossary term match may land in one text (the comment above ``PINPOINT_RE``)."""
+
+    opaque: Spans
+    atoms: Spans
+
+
 def _skip_space(raw: str, j: int) -> int:
     """Return the first index at or after ``j`` that is not whitespace."""
     while j < len(raw) and raw[j].isspace():
@@ -425,19 +461,110 @@ def _link_tail_end(raw: str, i: int) -> int | None:
     return k + 1 if raw.startswith(")", k) else None
 
 
+def _closing_run(
+    text: str,
+    start: int,
+    end: int,
+    width: int,
+) -> int | None:
+    """End of the first backtick run exactly ``width`` long in ``text[start:end]``, else None."""
+    for run in BACKTICK_RUN_RE.finditer(text, start, end):
+        if run.end() - run.start() == width:
+            return run.end()
+    return None
+
+
+def _raw_html_end(
+    text: str,
+    start: int,
+    end: int,
+    closers: dict[str, int],
+) -> int | None:
+    """End of the raw HTML at ``text[start]`` inside ``text[:end]``, else None.
+
+    ``closers`` maps each closer to its last found index in the paragraph (-1: none
+    left). The scan moves left to right, so a found closer past the opener is reused and
+    a missing one stays missing: an unclosed opener costs one search per paragraph, not
+    one per opener.
+    """
+    tag = HTML_TAG_RE.match(text, start, end)
+    if tag:
+        return tag.end()
+    for opener, closer in HTML_DELIMITED:
+        head = opener.match(text, start, end)
+        if head is None:
+            continue
+        hit = closers.get(closer)
+        if hit is None or 0 <= hit < head.end():
+            hit = text.find(closer, head.end(), end)
+            closers[closer] = hit
+        return hit + len(closer) if hit >= 0 else None
+    return None
+
+
+def _protected_regions(text: str) -> Regions:
+    """Lex ``text`` into the regions a term match must respect, CommonMark-first.
+
+    One left-to-right pass per paragraph, leftmost construct first (CommonMark 6.1-6.6):
+    a backslash escape, a backtick run (a code span through the next run of equal length,
+    else the run alone is literal), a URI or email autolink or raw HTML at ``<``, then
+    bracket pairing over what is left, each ``]`` taking its link tail scanned whole with
+    only escapes masked. GitHub's bare autolinks are found last, in text no earlier
+    region covers.
+    """
+    opaque = [m.span() for m in PINPOINT_RE.finditer(text)]
+    atoms: Spans = []
+    code: Spans = []
+    raw = ESCAPE_RE.sub(lambda m: "." * len(m.group()), text)
+    for paragraph in PARAGRAPH_RE.finditer(text):
+        end = paragraph.end()
+        openers: list[int] = []
+        closers: dict[str, int] = {}
+        token = INLINE_TOKEN_RE.search(text, paragraph.start(), end)
+        while token is not None:
+            start, nxt = token.span()
+            mark = token.group()
+            if mark[0] == "\\":
+                atoms.append((start, nxt))
+            elif mark[0] == "`":
+                close = _closing_run(text, nxt, end, len(mark))
+                if close is None:
+                    atoms.append((start, nxt))
+                else:
+                    code.append((start, close))
+                    nxt = close
+            elif mark == "<":
+                autolink = AUTOLINK_RE.match(text, start, end)
+                tag_end = autolink.end() if autolink else _raw_html_end(text, start, end, closers)
+                if tag_end is not None:
+                    nxt = tag_end
+                    opaque.append((start, nxt))
+            elif mark == "[":
+                openers.append(start)
+            elif openers:
+                nxt = _link_tail_end(raw, nxt) or nxt
+                opaque.append((openers.pop(), nxt))
+            token = INLINE_TOKEN_RE.search(text, nxt, end)
+    bare = list(text)
+    for lo, hi in opaque + code:
+        bare[lo:hi] = " " * (hi - lo)
+    opaque += [m.span() for m in GFM_AUTOLINK_RE.finditer("".join(bare))]
+    return Regions(opaque, atoms + code)
+
+
 class GlossaryInliner:
-    r"""Link the first in-text mention of every glossary term inside one card.
+    """Link the first in-text mention of every glossary term inside one card.
 
     Derived, not stored: the whole glossary is searched against the card's text, so a
     link lands exactly where the prose names the term and nowhere else. One link per
     term per card, longest title first so ``Meta.fields`` never fires inside
-    ``Meta.fields_class``. A match may not overlap a ``#"..."`` citation pinpoint or
-    any unescaped balanced ``[...]`` group (link text of every link shape, so a
-    literal bracket run stays unlinked too) with its trailing destination, title or
-    label at all (titles and destinations are scanned whole; escapes inert), and may
-    not cut a code span in half; it may swallow a whole span (a backticked ``Foo``
-    becomes a linked span) or several (a backticked ``BigInt`` followed by
-    ``scalar``).
+    ``Meta.fields_class``. A mention is prose ``_protected_regions`` leaves open: never
+    inside a ``#"..."`` citation pinpoint, a balanced ``[...]`` group with its link
+    tail (a literal bracket run stays unlinked too), an autolink, raw HTML or a bare
+    URL GitHub links, and never cutting a code span, a backtick run or an escape; it
+    may swallow a whole span (a backticked ``Foo`` becomes a linked span) or several
+    (a backticked ``BigInt`` followed by ``scalar``). A mention a region holds is
+    skipped, not spent: the term's one link goes to the next mention in prose.
     """
 
     def __init__(self, glossary_terms: list[GlossaryTermRef]) -> None:
@@ -449,51 +576,29 @@ class GlossaryInliner:
 
     def inline(self, text: str) -> str:
         """Return ``text`` with every still-unlinked term's first mention linked."""
-        protected = self._protected(text)
+        regions = _protected_regions(text)
         for anchor in list(self._pending):
             term, pattern = self._pending[anchor]
-            match = self._find(pattern, text, protected)
+            match = self._find(pattern, text, regions)
             if match is None:
                 continue
             del self._pending[anchor]
             link = f"[{match.group(0)}]({GLOSSARY_MD_PATH}#{term['anchor']})"
             text = text[: match.start()] + link + text[match.end() :]
-            protected = self._protected(text)
+            regions = _protected_regions(text)
         return text
 
     @staticmethod
-    def _protected(text: str) -> tuple[Spans, Spans]:
-        """Return the (link-or-pinpoint, code-span) regions of ``text``."""
-        links = [m.span() for m in PINPOINT_RE.finditer(text)]
-        masked = ESCAPE_OR_CODE_RE.sub(lambda m: "." * len(m.group()), text)
-        raw = ESCAPE_RE.sub(lambda m: "." * len(m.group()), text)
-        openers: list[int] = []
-        i = 0
-        while i < len(masked):
-            if masked[i] == "[":
-                openers.append(i)
-            elif masked[i] == "]" and openers:
-                end = _link_tail_end(raw, i + 1) or i + 1
-                links.append((openers.pop(), end))
-                i = end - 1
-            i += 1
-        spans = [m.span() for m in CODE_SPAN_RE.finditer(text)]
-        return links, spans
-
-    @staticmethod
-    def _find(
-        pattern: re.Pattern[str],
-        text: str,
-        protected: tuple[Spans, Spans],
-    ) -> re.Match[str] | None:
-        links, spans = protected
-        for match in pattern.finditer(text):
+    def _find(pattern: re.Pattern[str], text: str, regions: Regions) -> re.Match[str] | None:
+        """First match, at any start, that overlaps no opaque region and cuts no atom."""
+        match = pattern.search(text)
+        while match is not None:
             lo, hi = match.span()
-            if any(a < hi and lo < b for a, b in links):
-                continue
-            if any(a < hi and lo < b and not (lo <= a and b <= hi) for a, b in spans):
-                continue
-            return match
+            overlaps = any(a < hi and lo < b for a, b in regions.opaque)
+            cuts = any(a < hi and lo < b and not (lo <= a and b <= hi) for a, b in regions.atoms)
+            if not (overlaps or cuts):
+                return match
+            match = pattern.search(text, lo + 1)
         return None
 
 

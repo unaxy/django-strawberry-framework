@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 165 done, 134 to do.
+Progress: 166 done, 134 to do.
 
 ## Done
 
@@ -587,6 +587,15 @@ Progress: 165 done, 134 to do.
   the bindings, and `status` dropped the flow: fixed, the marker is an empty directory, `Layout.ensure_marked` turns a
   marker file into it under `pool.lock` (re-checking inside the lock), and `_remove_flow_dir` removes it last with
   `rmdir` or `unlink`; `gc` still refuses an unmarked folder (13-row grid: 7/13 at the parent, 13/13 after)
+- [x] 147. `scripts/build_kanban_md.py::GlossaryInliner._protected` lexed only single-backtick code spans, so a
+  glossary link was written inside a URI / email autolink, raw HTML (tag, attribute, comment, PI, declaration), a
+  multi-backtick or multi-line code span, or a GitHub bare URL / `www.` / bare email, a `]` inside an autolink or
+  attribute closed real link text early, and a construct holding a term spent its one link per card (40 of 84 grid
+  rows; latent, no card text held such a shape; `09d0caa0` never lexed double-backtick spans, contrary to the earlier
+  tracker claim): fixed, `_protected_regions` makes one leftmost-wins pass per paragraph (CRLF blank lines included)
+  over escapes, equal-width backtick runs, autolinks and CommonMark 6.6 raw HTML (unclosed openers linear), masks each
+  atomically before bracket pairing, then an over-matching GitHub bare-URL guard; a held mention no longer spends the
+  slot and `_find` retries so nothing linked at the parent stops linking; KANBAN.md renders byte-identical
 
 ## Outside review of the fixes
 
@@ -621,7 +630,7 @@ tracker number are recorded there; open remainders and new defects are filed as 
 | C25. Docs: the live-test README reversed the ruff fix / format order | Fixed | `56ecb877` |
 | C28. Docs: the serializer reverse one-to-one cardinality example was inverted | Fixed | `00bb2482` |
 | C42. The item-diff check omitted new untracked files (now included); staging alone still changes its seal | Partial; remainder item 146 | `acb6c25a` |
-| C24. The KANBAN glossary inliner linked terms inside existing links | Partial; remainder item 147 | `09d0caa0` |
+| C24. The KANBAN glossary inliner linked terms inside existing links | Fixed; remainder closed by item 147 | `09d0caa0` |
 | C44. The test-model census conflated same-named classes across scopes (fixed); imports still resolve through one flat map | Partial; remainder item 148 | `f7000986` |
 | C15. An in-place change to the settings `OrderedDict` stays stale | Not a defect: configuration is trusted after construction; only an exact `dict` source is held by reference (other mappings are copied by design, per `conf.py::_normalize_user_settings`), and replacing or overriding the setting reloads (`override_settings` fires `setting_changed`) | none |
 
@@ -651,15 +660,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   twice, and the `git diff` stat refresh rewrites the shared `.git/index`. The diff should be one baseline-versus-content
   diff through a private index, with global and system git config ignored; land before 141 or with it, and re-record any
   `pass-<n>.diff` holding an untracked file, an unstaged move or an `rm --cached`
-- [ ] 147. `scripts/build_kanban_md.py::GlossaryInliner._protected` copies CommonMark precedence only for single-backtick
-  code spans, so a glossary term inside a URI or email autolink (`<https://example.com/?q=DjangoListField>`,
-  `<DjangoListField@example.com>`), a raw HTML tag (`<span title="...">`), a double-backtick span (contrary to what was
-  claimed for `09d0caa0`) or a GitHub bare URL / `www.` / bare email gets a link written into it, and a `]` inside an
-  autolink or attribute pairs with a `[` so a term inside real link text links too (19 of 33 probed rows; GitHub renders
-  the broken destinations). Latent: the committed KANBAN.md holds no autolink or bare URL. Fix: one left-to-right
-  tokenizer (escape | code span with CommonMark backtick-run matching | autolink | raw HTML) masked before bracket
-  pairing, autolinks and HTML as atomic links, plus an over-matching GitHub extended-autolink guard; tests as rows of
-  `test_inliner_leaves_existing_links_intact`; closes C24's remainder
 - [ ] 149. `scripts/count_queries.py` checks only `result.errors`, while Strawberry's `execute_sync` raises
   `MissingQueryError`, `CannotGetOperationTypeError` and `InvalidOperationTypeError`: an anonymous document with
   `--operation-name`, a name the document lacks, a fragment-only document and an empty file exit 1 ("scales with
@@ -841,6 +841,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   command holds across 03:35 on a pool older than 3 days; a later command then creates and locks a new inode while the
   first still holds the old one (`_flock`'s `_still_names` check covers only callers already waiting), so two commands
   hold the same copy or `state.json` lock (item 143's mechanism; the flow lease is a directory and unaffected)
+- [ ] 301. `scripts/check_spec_glossary.py::auto_link_terms` (the NEXT.md Step 7 `--auto-link` run) protects only
+  fenced code and `[label](target)` links and matches a term with no boundary: a spec's first unlinked mention inside a
+  code span, a double-backtick span, reference-link text, an autolink, a raw HTML attribute, a bare URL, a heading, or as
+  the prefix of a longer identifier (`DjangoListFieldExtra`) gets `[term][glossary-x]` written into it (8 of 8 probed
+  shapes). Fix: reuse the KANBAN inliner's CommonMark lexer (`build_kanban_md.py::_protected_regions`, extracted to a
+  shared script module then), add block exclusions (headings, link-definition block, fenced and indented code) and the
+  term boundary
 
 ## To do: holes found re-checking the fixes
 
