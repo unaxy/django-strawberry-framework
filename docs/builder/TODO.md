@@ -5,18 +5,10 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 29 to do.
+Progress: 28 to do.
 
 ## To do: fix before beta
 
-- [ ] 1. With psycopg installed, every `"__all__"` int, decimal, date and datetime filter leaf publishes `containedBy`,
-  and it always errors: `django_strawberry_framework/types/converters.py` imports `django.contrib.postgres.fields` at
-  module import, which registers `RangeContainedBy` globally, and
-  `django_strawberry_framework/filters/sets.py::_lookups_for_field` emits every `get_lookups()` entry. On SQLite
-  `allScalarSpecimens(filter: {id: {containedBy: 5}})` returns "Subclasses must implement as_sql()"; on Postgres it
-  compiles to `"id" <@ %s::int4range` with an int param. 144 fakeshop input types differ between a psycopg venv and one
-  without it, so local and CI SDL differ too. `django.contrib.postgres` in `INSTALLED_APPS` exposes `search` /
-  `trigram_*` the same way. Fix: an allowlist or exclusion in `_lookups_for_field`
 - [ ] 2. Under ASGI, a default root `DjangoConnectionField` or a nested relation connection whose `get_queryset` hook
   touches the database (`user.has_perm(...)`, as fakeshop `CategoryType` does) fails with a masked "unexpected error":
   `django_strawberry_framework/connection.py::_pipeline_sync` always runs the sync pipeline on the loop, so

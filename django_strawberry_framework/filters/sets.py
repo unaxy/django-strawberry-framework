@@ -274,6 +274,18 @@ def _lookups_for_field(model_field: ModelField | None) -> list[str]:
     consumer who wants a transform (e.g. ``created__year``) declares it as an
     explicit lookup expression instead.
 
+    Lookups ``django.contrib.postgres`` registers onto a field that is not its
+    own are EXCLUDED too (``_without_foreign_postgres_lookups``): importing its
+    range module registers ``contained_by`` (a range-operand lookup) onto the
+    core integer, float, decimal, date and datetime fields, and installing the
+    app registers ``search`` / ``trigram_*`` onto the core text fields. None of
+    them runs off PostgreSQL, ``contained_by`` takes a range no scalar input can
+    carry, and publishing them would make the input schema depend on whether a
+    driver is installed. A ``django.contrib.postgres`` field (``ArrayField``,
+    ``HStoreField``, the range fields, or a subclass) keeps its full set, and a
+    lookup the consumer registers is published like a built-in one. A consumer
+    who wants ``search`` or a trigram lookup declares it explicitly.
+
     Memoized by ``type(model_field)`` (see ``_lookups_for_field_class_cache``):
     the lookup set is class-determined, so same-typed fields share one crawl.
     A COPY is returned so a caller mutating the list cannot corrupt the cache.
@@ -283,9 +295,34 @@ def _lookups_for_field(model_field: ModelField | None) -> list[str]:
     field_class = type(model_field)
     cached = _lookups_for_field_class_cache.get(field_class)
     if cached is None:
-        cached = _non_transform_lookups(model_field.get_lookups())
+        lookups = _without_foreign_postgres_lookups(field_class, model_field.get_lookups())
+        cached = _non_transform_lookups(lookups)
         _lookups_for_field_class_cache[field_class] = cached
     return list(cached)
+
+
+# Package prefix every ``django.contrib.postgres`` module name starts with.
+_CONTRIB_POSTGRES_PREFIX = "django.contrib.postgres."
+
+
+def _without_foreign_postgres_lookups(
+    field_class: type[ModelField],
+    lookups: Mapping[str, object],
+) -> dict[str, object]:
+    """Return ``lookups`` minus ``django.contrib.postgres`` lookups on a field not its own.
+
+    Every lookup is kept when ``field_class`` (or a class on its MRO) is defined
+    under ``django.contrib.postgres``; otherwise a lookup class defined there is
+    dropped. Module names are read through ``truth.module``.
+    """
+    own_field = any(
+        truth.module(cls).startswith(_CONTRIB_POSTGRES_PREFIX) for cls in truth.mro(field_class)
+    )
+    return {
+        lookup_expr: lookup
+        for lookup_expr, lookup in lookups.items()
+        if own_field or not truth.module(lookup).startswith(_CONTRIB_POSTGRES_PREFIX)
+    }
 
 
 # Constructor kwargs that only make sense on django-filter's model-choice

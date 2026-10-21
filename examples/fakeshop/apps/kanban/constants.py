@@ -220,6 +220,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/filters/__init__.py",
     "tests/filters/fixtures/__init__.py",
     "tests/filters/fixtures/filtersets.py",
+    "tests/filters/test_all_lookups.py",
     "tests/filters/test_base.py",
     "tests/filters/test_factories.py",
     "tests/filters/test_finalizer.py",

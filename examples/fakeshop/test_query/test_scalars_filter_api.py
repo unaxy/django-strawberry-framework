@@ -14,6 +14,9 @@ not a Relay node): one pk or a list for the forward key, a list for the reverse
 one, with the README membership rules on every list. ``price_span`` is a declared
 ``RangeFilter`` on both specimen filtersets: its nested input type is scoped
 per owning filterset and the ``range`` lookup applies over the wire.
+The per-field ``"__all__"`` leaves never publish a ``django.contrib.postgres``
+lookup Django registers onto a core field (``containedBy`` on the numeric and
+temporal leaves), whether or not a PostgreSQL driver is installed.
 """
 
 import datetime
@@ -24,7 +27,7 @@ import pytest
 from apps.scalars import models
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _assert_graphql_success
-from graphql_client import json_at, json_list, json_object
+from graphql_client import json_at, json_list, json_object, post_graphql, response_json
 
 _DATE = datetime.date(2021, 6, 15)
 _DATETIME = datetime.datetime(2021, 6, 15, 9, 30, tzinfo=datetime.timezone.utc)
@@ -201,6 +204,50 @@ def test_scalars_filter_by_price_span_range() -> None:
         """,
         {"allScalarSpecimens": [{"label": "mid"}]},
     )
+
+
+_ALL_INPUT_FIELDS_QUERY = """
+query {
+  __schema { types { name inputFields { name } } }
+  id: __type(name: "ScalarSpecimenFilterIdFilterInputType") { inputFields { name } }
+}
+"""
+
+
+@pytest.mark.django_db
+def test_all_lookup_leaves_publish_no_contrib_postgres_lookup() -> None:
+    """No input type publishes ``containedBy``, and sending it is a validation error.
+
+    ``django.contrib.postgres``'s range module (imported whenever a driver is
+    installed) registers ``contained_by`` onto the core integer, decimal, date
+    and datetime fields; fakeshop declares no PostgreSQL field, so no input type
+    may carry it. The ``id`` leaf keeps its ordinary ``"__all__"`` lookups.
+    """
+    data = _assert_graphql_success(_ALL_INPUT_FIELDS_QUERY)
+
+    carriers = [
+        json_at(type_, "name")
+        for type_ in json_list(data, "__schema", "types")
+        if json_at(type_, "inputFields") is not None
+        and any(
+            json_at(field, "name") == "containedBy" for field in json_list(type_, "inputFields")
+        )
+    ]
+    assert carriers == []
+    id_lookups = {json_at(field, "name") for field in json_list(data, "id", "inputFields")}
+    assert {
+        "exact",
+        "in",
+        "gt",
+        "range",
+        "isNull",
+    } <= id_lookups
+
+    payload = response_json(
+        post_graphql("query { allScalarSpecimens(filter: { id: { containedBy: 5 } }) { label } }"),
+    )
+    assert "data" not in payload or payload["data"] is None, payload
+    assert "containedBy" in str(payload["errors"]), payload
 
 
 _BY_PARENT = """
