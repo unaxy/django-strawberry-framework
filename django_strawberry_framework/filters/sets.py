@@ -3998,7 +3998,7 @@ class FilterSet(
         Per-primitive value normalization: each scalar attr passes
         through ``normalize_input_value`` so ``relay.GlobalID`` ->
         ``node_id``, Strawberry enum -> ``.value``, and
-        ``filters.base.RangeFilter`` -> positional ``{name}_0`` /
+        ``filters/base.py::RangeFilter`` -> positional ``{name}_0`` /
         ``{name}_1`` keys all land in ``data`` correctly (``RangeFilter``
         is not imported here -- the symbol lives in ``filters.base`` and
         is referenced for shape-documentation; the actual range patch

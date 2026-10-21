@@ -540,7 +540,7 @@ def _consumer_converter_label(definition: "DjangoTypeDefinition", name: str) -> 
     ``annotation`` vs ``strawberry.field`` distinguishes the two authoring styles
     and the ``(scalar)`` / ``(relation)`` suffix names the column kind - both
     facts come straight from the four-corner override sets recorded on the
-    definition (see ``types/base._consumer_assigned_fields``). This is the row
+    definition (see ``types/base.py::_consumer_assigned_fields``). This is the row
     that actually fired: NOT the relation auto-converter and NOT a ``SCALAR_MAP``
     entry, both of which ``_build_annotations`` skipped for this name.
 

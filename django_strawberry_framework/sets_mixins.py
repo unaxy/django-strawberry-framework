@@ -98,7 +98,7 @@ class ClassBasedTypeNameMixin:
     rule with their own suffixes instead of re-deriving the convention inline.
 
     Port of ``django_graphene_filters/mixins.py::ClassBasedTypeNameMixin``,
-    using this package's ``utils.strings.pascal_case_or_raise`` in place of
+    using this package's ``utils/strings.py::pascal_case_or_raise`` in place of
     the cookbook's ``stringcase.pascalcase``.
     """
 
@@ -115,7 +115,7 @@ class ClassBasedTypeNameMixin:
         string and the resulting type name would collide with the root
         ``f"{cls.__name__}{cls._root_type_suffix}"`` (or with a sibling
         field's bag class). The conversion + guard are the shared
-        ``utils.strings.pascal_case_or_raise`` (shared with
+        ``utils/strings.py::pascal_case_or_raise`` (shared with
         ``filters/inputs.py::_pascal_case``); ``pascal_case`` splits on
         ``"_"`` and drops empty tokens, so a ``LOOKUP_SEP`` (``"__"``)
         boundary PascalCases each path segment, matching the cookbook's
@@ -753,10 +753,10 @@ class ActiveInputPermissionMixin:
         """Derive the family's canonical active-input traversal config.
 
         The family's ``_permission`` CONTAINS the ``SetInputTraversal`` that
-        ``utils.input_values.iter_active_fields`` consumes, so this is a read
+        ``utils/input_values.py::iter_active_fields`` consumes, so this is a read
         rather than a field-for-field copy. Both family
         normalizers (``FilterSet._normalize_input`` /
-        ``orders.inputs.normalize_input_value``) and the permission walkers
+        ``orders/inputs.py::normalize_input_value``) and the permission walkers
         classify input through this one object, so apply-time and gate-time
         classification cannot drift apart -- a divergence would let a field be
         filtered without its permission gate (or gate a field never applied).

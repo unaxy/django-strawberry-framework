@@ -2482,7 +2482,10 @@ def test_override_unknown_field_raises() -> None:
 
 
 def test_override_excluded_field_raises() -> None:
-    """A name excluded from the selected set raises - distinct from unknown (Decision 8 rule 2)."""
+    """A name excluded from the selected set raises - distinct from unknown.
+
+    spec-029 Decision 8 rule 2.
+    """
     with pytest.raises(ConfigurationError, match="not in the selected set"):
         # ``note`` exists on the model but is excluded from the type.
         _make_override_type(
@@ -2504,7 +2507,7 @@ def test_override_consumer_authored_field_raises() -> None:
 
 
 def test_override_relation_field_raises() -> None:
-    """A relation field name raises - non-relation scope (Decision 10)."""
+    """A relation field name raises - non-relation scope (spec-029 Decision 10)."""
     with pytest.raises(ConfigurationError, match="relation field"):
         _make_override_type(
             _make_override_model(),
@@ -2514,7 +2517,10 @@ def test_override_relation_field_raises() -> None:
 
 
 def test_override_relay_suppressed_pk_raises() -> None:
-    """Naming the Relay-Node-suppressed pk in an override set raises (Decision 8 rule e)."""
+    """Naming the Relay-Node-suppressed pk in an override set raises.
+
+    spec-029 Decision 8 rule 4.
+    """
     with pytest.raises(ConfigurationError, match="Relay-Node-suppressed pk"):
 
         @definition_raises
@@ -2531,7 +2537,7 @@ def test_override_relay_relation_pk_reports_relay_reason() -> None:
 
     ``PatronProfile`` is keyed by its ``OneToOneField(primary_key=True)`` to ``Patron``, so
     ``patron`` is both the Relay-Node-suppressed pk and a relation field; the Relay-pk check
-    runs first (Decision 8 rule e).
+    runs first (spec-029 Decision 8 rule 4).
     """
     with pytest.raises(ConfigurationError, match="Relay-Node-suppressed pk") as excinfo:
 

@@ -122,10 +122,8 @@ declares its members ``Any``, so every annotation argument a test inspects would
 length of a ``with`` block and yields its namespace. Strawberry evaluates a deferred
 annotation in the globals of the module its class names, so a PEP 563 consumer needs a
 module that exists, not a bare ``exec`` namespace. The program compiles with
-``dont_inherit=True``: ``exec`` of source text otherwise inherits the calling test module's
-own ``from __future__ import annotations``, and a program that omits the import would defer
-its annotations anyway. ``consumer_query`` reads the program's ``Query`` class out of that
-namespace as a ``type``.
+``dont_inherit=True``, so its future features are exactly the ones its own source declares.
+``consumer_query`` reads the program's ``Query`` class out of that namespace as a ``type``.
 """
 
 import enum

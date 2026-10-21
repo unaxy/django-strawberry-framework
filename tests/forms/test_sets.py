@@ -329,7 +329,7 @@ def test_modelform_missing_operation_rejected() -> None:
     ],
 )
 def test_plain_base_rejects_any_operation(operation: str | None) -> None:
-    """The plain ``DjangoFormMutation`` base rejects ANY ``Meta.operation`` (Decision 10)."""
+    """The plain ``DjangoFormMutation`` base rejects ANY ``Meta.operation`` (spec-038 Decision 10)."""
     form_cls = _contact_form()
     declared_operation = operation  # bind to a local: a class body cannot read the param name.
     with pytest.raises(ConfigurationError, match="operation is not supported"):
@@ -351,7 +351,7 @@ def test_plain_base_rejects_any_operation(operation: str | None) -> None:
     ],
 )
 def test_plain_base_rejects_inherited_meta_operation(operation: str | None) -> None:
-    """Decision 10 rejects ``Meta.operation`` inherited via a shared Meta parent too.
+    """spec-038 Decision 10 rejects ``Meta.operation`` inherited via a shared Meta parent too.
 
     ``form_class`` / ``permission_classes`` resolve through ``getattr`` (MRO-visible),
     so a shared ``Meta`` parent is a real consumer pattern. Presence of ``operation``
@@ -1346,7 +1346,7 @@ def test_form_bind_is_retry_idempotent_after_fixable_later_phase_failure(
 def test_plain_form_input_dedupes_via_form_sentinel() -> None:
     """Two plain mutations over the SAME form + effective set dedupe to one input class.
 
-    The ``"form"`` sentinel shape identity (Decision 7): both build the same
+    The ``"form"`` sentinel shape identity (spec-038 Decision 7): both build the same
     ``<FormClass>Input`` shape, so the materialize ledger dedupes to one class
     object (idempotent re-materialize, no collision raise).
     """

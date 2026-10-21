@@ -138,7 +138,7 @@ def _format_unresolved_targets_error(unresolved: list[PendingRelation]) -> str:
     """Return the canonical unresolved relation target error message.
 
     Sibling convention: ``_format_ambiguity_error`` below owns the canonical
-    primary-ambiguity error string; ``types/base.py:_format_unknown_fields_error``
+    primary-ambiguity error string; ``types/base.py::_format_unknown_fields_error``
     owns the other consumer-surface ``Meta.fields`` / ``Meta.exclude`` /
     ``Meta.optimizer_hints`` error strings. If consumer-surface ``Meta.*`` keys
     are renamed or supplemented, update the formatters together.
@@ -1011,7 +1011,7 @@ def finalize_django_types() -> None:
                 registry._globalid_setting_snapshot,
             )
         if definition.cursor_field is not None:
-            # Keyset-cursor column contract (the ``stable_cursor_field``
+            # Keyset-cursor column contract (the spec-030 ``## Keyset cursors``
             # finalization half): every ``Meta.cursor_field`` entry must be a
             # local concrete non-nullable column and the terminal entry a
             # unique total-order anchor. Runs in this Phase-2.5 window so a

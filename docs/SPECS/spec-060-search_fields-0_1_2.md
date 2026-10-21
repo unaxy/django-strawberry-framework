@@ -145,8 +145,8 @@ is the audit ledger. Load-bearing entries:
   ([Decision 7](#decision-7--row-preserving-to-many-compilation-no-search-driven-distinct)),
   the active-search non-queryset guard extension.
 - [ ] **Slice 4 — live activation + composability.** Uncomment all four
-  `search_fields` declarations in `examples/fakeshop/apps/products/schema.py`
-  (fixing their stale card-number comments), add the library to-many
+  `search_fields` declarations in `examples/fakeshop/apps/products/schema.py`,
+  add the library to-many
   surface (`GenreType` `search_fields = ("name", "books__title")` over
   `allLibraryGenresConnection`) plus the reverse-FK acceptance surface
   (`LoanType.Meta.search_fields = ("note", "book__loans__patron__email")`

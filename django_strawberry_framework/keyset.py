@@ -1,6 +1,6 @@
 """Keyset (value-encoded) stable cursors - the ``Meta.cursor_field`` opt-in.
 
-The BACKLOG ``stable_cursor_field`` contract: a ``DjangoType`` may declare::
+The spec-030 ``## Keyset cursors`` contract: a ``DjangoType`` may declare::
 
     class ItemType(DjangoType):
         class Meta:
@@ -259,7 +259,7 @@ def _resolve_cursor_field_column(model: type[models.Model], name: str) -> ModelF
     """Resolve one cursor column name through the shared segment-field rule.
 
     The ``pk`` alias and the ``FieldDoesNotExist`` vocabulary are owned by
-    ``utils.relations._resolve_segment_field``; a reverse-relation name
+    ``utils/relations.py::_resolve_segment_field``; a reverse-relation name
     resolves to its ``ForeignObjectRel``, which ``validate_cursor_field_columns``
     rejects.
     """

@@ -129,8 +129,10 @@ Each top-level item maps to one commit / PR.
         explicit outcomes — measurable; safely unmeasurable with the original position
         intact so the bounded read may run; or position potentially corrupted, so fail
         closed with the package's own controlled rejection — with every capability call
-        (`seekable()`, both `seek()`s, and the subtraction) guarded rather than allowed to
-        escape as an unrelated `500`
+        (`seekable()`, the `tell()` that reads the starting position, the seek to the end,
+        the seek back, and the `tell()` that verifies it; an answer that is not a built-in
+        `int` is never used in arithmetic) guarded rather than allowed to escape as an
+        unrelated `500`
         ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
         #"An unmeasurable stream has three outcomes, not two").
   - [ ] `_request_body.py::_bounded_read_exceeds_limit` is total in the same way and for the
@@ -2774,13 +2776,17 @@ Maintainer-invoked gates only, per [`AGENTS.md`][agents].
     bounded read supplies the bound: `413` after one bounded read, with bytes demonstrably
     left unread. Its control is a **genuinely empty** body on an honest stream, allowed after
     one bounded read of that same `limit + 1` size, so the probe's zero is never taken on
-    trust in either direction. Each guarded capability call gets its own stand-in besides:
-    one whose `seekable()` raises, one whose seek-to-end raises, one whose
-    subtraction result cannot be produced, and one whose **restoring** seek raises — the
-    first three bounded by the read with the original position intact, the last refused with
-    the package's own controlled rejection and never a raw `500`, which is the same verdict
-    the over-reported position reaches by the other route, since a restore that raises and a
-    restore that cannot be verified are one outcome
+    trust in either direction. Each guarded capability call gets its own stand-in besides: one
+    whose `seekable()` raises, one whose starting `tell()` raises, one whose seek-to-end raises,
+    and one whose **restoring** seek raises. So does each position answer that is not a built-in
+    `int`: a seek-to-end that returns `None`, an end position whose subtraction raises, one
+    whose comparison raises, and a starting `tell()` answering an `int` subclass, refused before
+    any seek; and so do the two capability shapes decided without a call, a non-callable
+    `seekable` marker and a stream with no `seek` method. All but the restoring-seek stand-in
+    are bounded by the read with the original position intact; that one is refused with the
+    package's own controlled rejection and never a raw `500`, the verdict the over-reported
+    position and a verifying `tell()` whose `int`-subclass answer lies about equality also
+    reach, since a restore that raises and a restore that cannot be verified are one outcome
     ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
     #"An unmeasurable stream has three outcomes, not two"). The **bounded read's own** failure
     gets two rows on both views, backed by a non-seekable stream whose `read` raises after zero

@@ -9452,10 +9452,11 @@ def _strict_genre_books_connection(
             return book_hook(queryset, info).distinct()
 
         monkeypatch.setattr(library_schema.BookType, "get_queryset", classmethod(_distinct_books))
+    optimizer = DjangoOptimizerExtension(strictness="raise")
     schema = DjangoSchema(
         query=library_schema.Query,
         config=strawberry_config(),
-        extensions=[lambda: DjangoOptimizerExtension(strictness="raise")],
+        extensions=[lambda: optimizer],
         error_policy={"enabled": False},
     )
     response = _post_holder(

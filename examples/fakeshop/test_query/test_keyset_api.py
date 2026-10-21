@@ -1,6 +1,6 @@
 """Live GraphQL HTTP tests for keyset (``Meta.cursor_field``) cursor pagination.
 
-The acceptance surface for the ``stable_cursor_field`` contract over the
+The acceptance surface for the spec-030 ``## Keyset cursors`` contract over the
 library app's ``IssueType`` (``cursor_field = ("-number", "id")`` - the
 newest-first mixed-direction shape) and ``PeriodicalType.issuesConnection``
 (the nested windowed keyset seek):

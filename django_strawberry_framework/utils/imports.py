@@ -58,17 +58,21 @@ CHANNELS_FLOOR = "4.3.2"
 STRAWBERRY_FLOOR = "0.322.2"
 
 # The verified django-debug-toolbar floor, interpolated into the toolbar
-# middleware's one install hint (``middleware/debug_toolbar.py``). The
-# ``django-debug-toolbar`` dev-group row in ``pyproject.toml`` is the other place
-# it is written and must be bumped with this one; a governance row compares the
-# two, as it does for the Channels and Strawberry floors above.
+# middleware's one install hint (``middleware/debug_toolbar.py``). It is one of
+# three gated sites that must agree, with the ``django-debug-toolbar`` dev-group
+# row in ``pyproject.toml`` and the ``_HINT_SUBSTRING`` literal in
+# ``tests/middleware/test_debug_toolbar.py``; that module's comment names all
+# three and the gates. A governance row compares this constant to the dev row,
+# as it does for the Channels and Strawberry floors above.
 DEBUG_TOOLBAR_FLOOR = "7.0.0"
 
 # The verified ``djangorestframework`` floor, interpolated into the
 # serializer-mutation guard's one install hint (``rest_framework/__init__.py``).
-# The ``djangorestframework`` dev-group row in ``pyproject.toml`` is the other
-# place it is written and must be bumped with this one; a governance row
-# compares the two.
+# It is one of three gated sites that must agree, with the
+# ``djangorestframework`` dev-group row in ``pyproject.toml`` and the
+# ``_HINT_SUBSTRING`` literal in ``tests/rest_framework/test_soft_dependency.py``;
+# that package's docstring names all three and the gates. A governance row
+# compares this constant to the dev row.
 DRF_FLOOR = "3.17.0"
 
 _T = TypeVar("_T")

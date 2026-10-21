@@ -17,7 +17,6 @@ The sections below cover ``convert_order_field_to_input_annotation`` /
 from __future__ import annotations
 
 import dataclasses
-import subprocess
 import sys
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
@@ -942,10 +941,6 @@ def test_registry_clear_invokes_clear_order_input_namespace() -> None:
     module = sys.modules[INPUTS_MODULE_PATH]
     assert hasattr(module, "LedgerStubOrderInputType")
     delattr(module, "LedgerStubOrderInputType")
-
-    # Silence unused-import detector for the subprocess reference; see the
-    # sibling test below which uses ``subprocess``.
-    assert subprocess.run is not None
 
 
 def test_registry_clear_clears_helper_referenced_ordersets() -> None:
