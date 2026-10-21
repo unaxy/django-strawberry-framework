@@ -601,15 +601,17 @@ finalization and threads it the same way, so it never asks the target class.
 
 The registry is what "the target's definition" MEANS. `origin is target_type` proves only that
 whatever answered the class read names this class, and anything can name it, so the shared
-validator additionally compares its one read by IDENTITY against
-`django_strawberry_framework/registry.py::TypeRegistry.get_definition` and accepts nothing else.
+validator accepts only `django_strawberry_framework/registry.py::TypeRegistry.registered_own_definition`:
+the object the registry holds for the target, which the class attribute IS (identity) and whose
+`origin` is the target. `django_strawberry_framework/testing/relay.py::global_id_for` and
+`manage.py inspect_django_type` ask the same predicate.
 A fabricated same-origin object, a copy of the real definition, and a definition for a type the
 registry has never seen are each rejected with `ConfigurationError` at the line that constructed
 the field, rather than surfacing later as an engine runtime-type error over a GraphQL type and a
 Django model that are unrelated. List, connection, and Relay node fields all enter through that
 one validator, so "registered target" cannot drift by factory.
 
-Every identity fact the validator reads is read truthfully through
+Every identity fact the validator and the predicate read is read truthfully through
 [`django_strawberry_framework/utils/truth.py`][truth]. The class and subclass gates read the
 target's real type and MRO, so a `__class__` property that raises or lies is the typed
 `requires a DjangoType class` rejection. The definition attribute is read by

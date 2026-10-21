@@ -518,6 +518,26 @@ class TypeRegistry:
         # Any object is a valid probe (see ``model_for_type``).
         return self._definitions.get(type_cls)
 
+    def registered_own_definition(self, type_cls: object) -> DjangoTypeDefinition | None:
+        """Return ``type_cls``'s own registered definition, or ``None``.
+
+        Own means the registry holds a definition for ``type_cls`` whose ``origin``
+        is ``type_cls``, and the class's ``__django_strawberry_definition__``,
+        read from the real class namespaces (``truth.static_attr``), IS that
+        object. ``DjangoType.__init_subclass__`` writes the entry and the
+        attribute from one value, so every concrete type passes; a subclass
+        without its own ``Meta`` (the attribute is inherited), a class dropped
+        by ``clear()`` / ``unregister``, a replaced attribute (a copy or a
+        fabricated lookalike), a definition registered for another class, and
+        any non-class probe each answer ``None``. ``origin`` is read only off the
+        registry's own object, never off a replacement attribute.
+        """
+        definition = self._definitions.get(type_cls)
+        if definition is None:
+            return None
+        attribute = truth.static_attr(type_cls, "__django_strawberry_definition__")
+        return definition if attribute is definition and type_cls is definition.origin else None
+
     def definition_for_graphql_name(self, name: str) -> DjangoTypeDefinition:
         """Return the unique Relay-Node ``DjangoTypeDefinition`` for a GraphQL type ``name``.
 

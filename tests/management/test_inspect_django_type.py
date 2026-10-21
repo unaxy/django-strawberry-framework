@@ -235,6 +235,24 @@ def test_abstract_base_without_definition_raises_command_error(
         call_command("inspect_django_type", "test_module.AbstractBase")
 
 
+def test_meta_less_child_of_a_concrete_type_raises_command_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Meta-less child inherits its parent's definition attribute but registers none of its own.
+    class ConcreteParent(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    class MetaLessChild(ConcreteParent):
+        pass
+
+    finalize_django_types()
+    _make_test_module(monkeypatch, MetaLessChild=MetaLessChild)
+    with pytest.raises(CommandError, match="MetaLessChild is not a registered DjangoType"):
+        call_command("inspect_django_type", "test_module.MetaLessChild")
+
+
 def test_unfinalized_type_raises_command_error(monkeypatch: pytest.MonkeyPatch) -> None:
     # A concrete registered DjangoType whose definition.finalized is False
     # (finalize_django_types() has not run) is a distinct branch from the
