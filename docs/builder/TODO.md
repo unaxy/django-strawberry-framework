@@ -172,7 +172,7 @@ Entry format:
 - Original text: "`CHANGELOG.md`'s repetition of the retired exclusivity shape ... `CHANGELOG.md`'s two undercounts (three retired tests where six, eight live tests where nine)"
 - Current state: Open. `CHANGELOG.md` line 216 still says three `tests/types/test_converters.py` tests were removed (six were, adding the three JSON ones), still says "(eight tests" where `examples/fakeshop/test_query/test_scalars_api.py` shipped nine (the omitted one is `test_scalar_specimen_introspects_json_scalar_in_both_shapes`), and still says the paired-model layout exercises "surfaces no other example app touches". The card-body half of that homing (the `DONE-026-0.0.7` `CardItem` rows 762/763) is already clean.
 - Also tracked: Card `TODO-ALPHA-056-0.0.17` (Alpha documentation-debt discharge), `KANBAN.md` line 558 (the three errors, clause by clause; `AGENTS.md` rule 22 makes the CHANGELOG edit the maintainer's call).
-- Verdict: **IMPLEMENT**: maintainer edit: the counts were wrong on their own release; delete the counts and the "no other example app" clause rather than restate them.
+- Verdict: **IMPLEMENT** (done): maintainer edit: the counts were wrong on their own release; delete the counts and the "no other example app" clause rather than restate them.
 
 ### T-036: `types/base.py` comment names a build-process phase (`spec-032 integration pass`)
 - Source: `docs/builder/DONE/build-027-filters-0_0_8.md` (`## Surviving items migrated out of bld-final-027.md before its deletion`, first "Still live" bullet)
