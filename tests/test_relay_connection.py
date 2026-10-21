@@ -58,6 +58,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.connection import (
     DjangoConnection,
+    _build_windowed_fallback,
     _connection_type_cache,
     _connection_type_for,
     _consume_window,
@@ -71,6 +72,7 @@ from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.finalizer import _register_relation_connection_teardown
 from django_strawberry_framework.types.resolvers import _check_n1
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.connections import (
     PaginationArgumentError,
     UnwindowableConnection,
@@ -2804,6 +2806,55 @@ async def test_consume_window_unservable_window_runs_the_async_fallback() -> Non
     assert inspect.isawaitable(pending)
     conn = await pending
     assert conn.edges == []
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_consume_window_recovery_runs_the_async_pipeline_under_async_execution() -> None:
+    """The recovery the synthesized resolver carries is colored per call, like the resolver.
+
+    Under the asynchronous executor ``_build_windowed_fallback`` hands back
+    ``_pipeline_async``'s coroutine, and ``_consume_window`` awaits it before the
+    per-parent tail. The target's ``get_queryset`` is ``async def``, which the
+    synchronous pipeline refuses, so a served page proves the async pipeline ran.
+    """
+
+    async def _visible_books(
+        _cls: type[DjangoType],
+        queryset: djmodels.QuerySet[Book],
+        _info: object,
+    ) -> djmodels.QuerySet[Book]:
+        return queryset.exclude(title="hidden")
+
+    book_type = make_django_type(
+        "AsyncHookBookType",
+        Book,
+        ("id", "title"),
+        meta_extra={"connection": {"total_count": True}},
+        namespace_extra={"get_queryset": classmethod(_visible_books)},
+    )
+    await sync_to_async(finalize_django_types)()
+    definition = book_type.__django_strawberry_definition__
+    connection_cls = _connection_type_for(book_type, definition)
+    await sync_to_async(_seed_library_books)(["shown", "hidden"])
+    info = make_info()
+    window = _WindowedConnectionRows(
+        rows=_COUNT_LESS_WINDOW_ROWS,
+        fallback=_build_windowed_fallback(book_type, Book.objects.all, info, definition),
+    )
+    pending = _consume_window(
+        connection_cls,
+        window,
+        info=info,
+        before=None,
+        after=None,
+        first=2,
+        last=None,
+        max_results=100,
+        want_count=True,
+    )
+    assert inspect.isawaitable(pending)
+    conn = await pending
+    assert [read_attr(edge.node, "title") for edge in conn.edges] == ["shown"]
 
 
 @pytest.mark.django_db

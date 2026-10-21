@@ -78,6 +78,7 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.connection import (
+    _CONNECTION_ASYNC_RECOURSE,
     DjangoConnection,
     DjangoConnectionField,
     _attach_count_async,
@@ -90,6 +91,7 @@ from django_strawberry_framework.connection import (
     _offset_cursor_prefix,
     _pipeline_async,
     _pipeline_sync,
+    _resolve_awaited_source,
     _total_count_requested,
     _window_edge_class,
     _window_edge_class_cache,
@@ -1423,40 +1425,12 @@ def test_sync_context_async_get_queryset_raises_sync_misuse() -> None:
     schema = _field_schema(node_type)
     result = schema.execute_sync("{ items { edges { node { id } } } }")
     assert result.errors is not None
-    assert any(isinstance(err.original_error, SyncMisuseError) for err in result.errors)
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_async_execution_default_connection_async_get_queryset_raises_sync_misuse() -> None:
-    """A default connection field refuses an async ``get_queryset`` under async execution.
-
-    ``connection.py::_build_connection_resolver`` commits to the sync or the async
-    pipeline at field construction rather than per execution: with no consumer
-    ``resolver=``, it emits a plain ``def _resolve`` driving ``_pipeline_sync``. So
-    ``await schema.execute`` reaches ``utils/querysets.py::apply_type_visibility_sync``
-    exactly as ``execute_sync`` does, and an ``async def get_queryset`` is refused by
-    ``utils/querysets.py::reject_async_in_sync_context`` instead of being awaited.
-    Driving an async hook through a connection requires an ``async def`` ``resolver=``.
-    """
-    await sync_to_async(services.seed_data)(1)
-
-    async def get_queryset(
-        _cls: type[DjangoType],
-        qs: models.QuerySet[Category],
-        _info: object,
-    ) -> models.QuerySet[Category]:
-        return qs
-
-    node_type = _make_sidecar_node_type(
-        "AsyncVisibilityAsyncExecNode",
-        get_queryset=get_queryset,
+    (error,) = result.errors
+    assert isinstance(error.original_error, SyncMisuseError)
+    assert str(error.original_error) == (
+        "AsyncVisibilitySyncNode.get_queryset returned a coroutine in a sync resolver "
+        f"context. {_CONNECTION_ASYNC_RECOURSE}"
     )
-    schema = await sync_to_async(_field_schema)(node_type)
-    result = await schema.execute("{ items { edges { node { id } } } }")
-
-    assert result.errors is not None
-    assert any(isinstance(err.original_error, SyncMisuseError) for err in result.errors)
-    assert result.data is None  # an async pipeline would have served the seeded row
 
 
 async def test_connection_sync_resolver_returning_coroutine_raises_sync_misuse() -> None:
@@ -1483,6 +1457,32 @@ async def test_connection_sync_resolver_returning_coroutine_raises_sync_misuse()
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
     assert "returned an awaitable" in str(result.errors[0])
     assert result.data is None
+
+
+async def test_an_awaited_connection_source_resolving_to_another_awaitable_fails_closed() -> None:
+    """One await is spent on an awaitable connection source; a second awaitable is refused.
+
+    ``connection.py::_resolve_awaited_source`` is the completion step both awaitable
+    sources share (``DjangoConnection.resolve_connection`` and the windowed
+    fallback). The nested awaitable is disposed, never awaited, so neither coroutine
+    is left unawaited and the consumer step is never reached.
+    """
+
+    async def _inner() -> list[object]:
+        return []
+
+    async def _outer() -> Awaitable[list[object]]:
+        return _inner()
+
+    def _never_reached(_value: object) -> DjangoConnection[DjangoType]:
+        raise AssertionError("a nested awaitable must not reach the connection step")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ConfigurationError, match="resolved to another awaitable"):
+            await _resolve_awaited_source(_outer(), _never_reached)
+        gc.collect()
+    assert [str(warning.message) for warning in caught] == []
 
 
 async def test_connection_async_resolver_resolving_to_residual_awaitable_fails_closed() -> None:

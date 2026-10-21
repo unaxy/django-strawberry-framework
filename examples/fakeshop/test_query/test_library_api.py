@@ -1781,7 +1781,11 @@ def _assert_invalid_choice(query: str, variables: JSONObject, form_key: str) -> 
     """Assert the declared filter's own form field refused the value as "Select a valid choice"."""
     response = _post_graphql(query, variables=variables)
     assert response.status_code == 200
-    payload = response_json(response)
+    _assert_invalid_choice_payload(response_json(response), form_key)
+
+
+def _assert_invalid_choice_payload(payload: JSONObject, form_key: str) -> None:
+    """Assert ``payload`` is the declared filter's own "Select a valid choice" refusal."""
     assert payload.get("data") is None, payload
     (error,) = json_list(payload, "errors")
     assert json_at(error, "message") == "Invalid filter input"
@@ -1932,6 +1936,100 @@ def test_library_declared_model_choice_in_filter_takes_a_list_of_pks_over_http()
         variables={"pks": [north.pk, south.pk]},
     )
     _assert_invalid_choice(query, {"pks": [south.pk, restricted.pk]}, "home_branch_in")
+
+
+_ROOT_GENRES_BY_HOME_BRANCH = """
+query ($pk: Int) {
+  allLibraryGenresConnection(filter: { books: { shelf: { homeBranch: { exact: $pk } } } }) {
+    edges { node { name } }
+  }
+}
+"""
+
+_NESTED_BOOKS_BY_HOME_BRANCH = """
+query ($pk: Int) {
+  allLibraryGenresConnection {
+    edges { node { name booksConnection(filter: { shelf: { homeBranch: { exact: $pk } } }) {
+      edges { node { title } }
+    } } }
+  }
+}
+"""
+
+_NESTED_BOOKS_BY_HOME_BRANCHES = """
+query ($pk: Int!) {
+  allLibraryGenresConnection {
+    edges { node { name booksConnection(filter: { shelf: { homeBranches: { exact: [$pk] } } }) {
+      edges { node { title } }
+    } } }
+  }
+}
+"""
+
+
+def _seed_one_genre_on_home_branches() -> tuple[int, int]:
+    """Seed one genre whose one book sits on ``North``; return North's and the Vault's pks."""
+    north, _south, restricted = _seed_shelves_on_home_branches()
+    genre = models.Genre.objects.create(name="Fiction")
+    book = models.Book.objects.create(title="Dune", shelf=models.Shelf.objects.get(code="N-1"))
+    book.genres.add(genre)
+    return saved_pk(north.pk), saved_pk(restricted.pk)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_library_declared_model_choice_filter_validates_on_the_root_connection_async() -> (
+    None
+):
+    """The shipped root connection answers a declared ``ModelChoiceFilter``'s own verdicts async.
+
+    ``allLibraryGenresConnection`` declares no ``resolver=``; under the async view its
+    pipeline is the asynchronous one, so ``ShelfFilter.home_branch``, reached through
+    ``GenreFilter.books`` -> ``BookFilter.shelf``, validates with its database read off
+    the event loop: a branch inside its queryset filters the page, the restricted one is
+    its "Select a valid choice".
+    """
+    north_pk, restricted_pk = await sync_to_async(_seed_one_genre_on_home_branches)()
+
+    served = await _post_async_shipped(_ROOT_GENRES_BY_HOME_BRANCH, variables={"pk": north_pk})
+    assert "errors" not in served, served
+    assert json_at(served, "data", "allLibraryGenresConnection", "edges") == [
+        {"node": {"name": "Fiction"}},
+    ]
+    _assert_invalid_choice_payload(
+        await _post_async_shipped(_ROOT_GENRES_BY_HOME_BRANCH, variables={"pk": restricted_pk}),
+        "home_branch",
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("query", "form_key"),
+    [
+        (_NESTED_BOOKS_BY_HOME_BRANCH, "home_branch"),
+        (_NESTED_BOOKS_BY_HOME_BRANCHES, "home_branches"),
+    ],
+    ids=["model-choice", "model-multiple-choice"],
+)
+async def test_library_declared_model_choice_filter_validates_on_a_nested_connection_async(
+    query: str,
+    form_key: str,
+) -> None:
+    """The synthesized ``booksConnection`` answers a declared model-choice filter's verdicts async.
+
+    The nested sibling has no ``resolver=`` seam; under the async view its per-parent
+    pipeline is the asynchronous one too, so the declared form validates off the loop.
+    """
+    north_pk, restricted_pk = await sync_to_async(_seed_one_genre_on_home_branches)()
+
+    served = await _post_async_shipped(query, variables={"pk": north_pk})
+    assert "errors" not in served, served
+    assert json_at(served, "data", "allLibraryGenresConnection", "edges") == [
+        {"node": {"name": "Fiction", "booksConnection": {"edges": [{"node": {"title": "Dune"}}]}}},
+    ]
+    _assert_invalid_choice_payload(
+        await _post_async_shipped(query, variables={"pk": restricted_pk}),
+        form_key,
+    )
 
 
 class _FlatHomeBranchCase(NamedTuple):
@@ -7424,18 +7522,18 @@ async def _async_genres_resolver(
     _root: object,
     _info: strawberry.Info[object, object],
 ) -> QuerySet[models.Genre]:
-    """An ``async def`` consumer resolver: the connection shape that applies ``filter:`` asynchronously."""
+    """An ``async def`` consumer resolver: a connection shape that applies ``filter:`` asynchronously."""
     return models.Genre.objects.all()
 
 
 def _async_genre_connection_holder_schema() -> DjangoSchema:
     """A schema whose ``genres`` connection applies ``GenreFilter`` through ``apply_async``.
 
-    ``connection.py::_build_connection_resolver`` selects the async pipeline only for
-    a field given an ``async def`` ``resolver=``; the shipped
-    ``allLibraryGenresConnection`` declares none, so it filters through ``apply_sync``
-    on either view. Built inside the test, after the autouse reload registered the
-    ``GenreType`` it composes.
+    An ``async def`` ``resolver=`` runs ``connection.py::_pipeline_async`` on every
+    execution; the shipped ``allLibraryGenresConnection`` declares none and takes the
+    same pipeline only under the asynchronous executor
+    (``connection.py::_pipeline_for_executor``). Built inside the test, after the
+    autouse reload registered the ``GenreType`` it composes.
     """
     importlib.import_module("config.schema")
 

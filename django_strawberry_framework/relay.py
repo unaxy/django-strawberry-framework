@@ -810,9 +810,8 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
             positions.append((resolved, len(node_ids)))
             node_ids.append(node_id)
         if async_execution():
-            # ONE gathering coroutine; per-call dispatch because there is no
-            # consumer resolver to inspect at construction (the deliberate
-            # contrast with connection.py's committed-at-construction split).
+            # ONE gathering coroutine; per-call dispatch, as every package field
+            # colors its work by the executor driving the call.
             # Sequential awaits, not asyncio.gather - Django async-ORM
             # connection safety, and the spec requires only "a single
             # gathering coroutine".

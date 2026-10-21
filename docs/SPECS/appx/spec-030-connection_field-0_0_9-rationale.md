@@ -39,7 +39,7 @@ Spec: [Decision 3 — Build on Strawberry's native Relay machinery, but own the 
 
 ### Alternatives considered (and rejected)
 
-- **Rely on Strawberry to reject `first` + `last`.** Rejected: `SliceMetadata.from_arguments` does not (locked `0.324.0`); a spec must not rely on absent upstream behavior.
+- **Rely on Strawberry to reject `first` + `last`.** Rejected: `SliceMetadata.from_arguments` does not (the `uv.lock`-resolved release); a spec must not rely on absent upstream behavior.
 - **Allow `first` + `last` (drop the guard).** Rejected: the card body explicitly wants it rejected; combining them is a client error worth surfacing.
 - **Hand-roll the whole cursor / pageInfo math.** Rejected: re-implements engine behavior and balloons the test surface.
 
@@ -142,6 +142,8 @@ The Relay foundation already solved sync/async `get_queryset` dispatch and the s
 ### Alternatives considered (and rejected)
 
 **Sync-only connection resolver.** Rejected: both upstreams and the rest of this package support async.
+
+**Build-time freeze: choose the pipeline's coloring once, at construction, from the resolver's shape.** Rejected: Strawberry fixes the resolver's sync/async chain at build time, but it does not fix the pipeline's. A sync-shaped field under the asynchronous executor may return a coroutine; the sync chain hands it to `resolve_connection` unawaited, and the executor completes whatever that method returns, so the package's own override can await it. A frozen sync pipeline instead runs the sidecar sets' `apply_sync` on the event loop under the async view, where a declared `ModelChoiceFilter`'s form validation and a `check_<field>_permission` gate that reads the database raise `SynchronousOnlyOperation`, and it refuses an async `get_queryset` that an `async def` resolver on the same type awaits. Coloring per call is also the shape the list field and the Relay node fields already use.
 
 ## Decision 11 — The connection field owns its optimizer cooperation point
 
