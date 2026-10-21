@@ -540,8 +540,7 @@ These consequences are contractual and are documented rather than hidden:
   be counted without its close.
 - **A value that is not text at all is declined, not scanned.** Anything that is not a `str`
   carries no tokens to charge, and handing it to the lexer raises a raw `TypeError` /
-  `AttributeError` / `KeyError` out of graphql-core at exactly the input the package's
-  exception-containment invariant says must never escape an input decoder. Both HTTP views
+  `AttributeError` / `KeyError` out of graphql-core. Both HTTP views
   type-check the query before the extension runs; the WebSocket path performs no such check,
   so the decline is this scan's own contract rather than a transport's favor.
 - **A name is measured on its token, because no later pass sees it.** A name is never a

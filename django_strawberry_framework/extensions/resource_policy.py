@@ -293,8 +293,7 @@ def scan_document_text(policy: ResourcePolicy, query: str | None) -> None:
     A value that is not text at all is declined, not scanned: anything that is
     not a ``str`` carries no tokens to charge, and handing it to the lexer would
     raise a raw ``TypeError`` / ``AttributeError`` / ``KeyError`` from inside
-    graphql-core at exactly the input the exception-containment invariant says
-    must never escape an input decoder. The transports that type-check the query
+    graphql-core. The transports that type-check the query
     before the extension runs (both HTTP views) make this unreachable there; the
     WebSocket path performs no such check, so the decline is the scanner's own
     contract rather than a transport's favor. What the request is answered with

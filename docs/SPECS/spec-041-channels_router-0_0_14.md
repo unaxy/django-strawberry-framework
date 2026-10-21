@@ -1127,10 +1127,7 @@ So this card fixes the root cause for the **read** half:
    explicitly from the scope, and **delegates every other attribute to the wrapped
    request via `__getattr__`**, so the user-code hooks above keep working
    instead of raising `AttributeError` only under Channels. This keeps the fix
-   DRY without narrowing the framework request contract. A scope read that blows up
-   — a hostile or broken mapping — becomes a
-   [`ConfigurationError`][glossary-configurationerror] rather than escaping raw out
-   of a request-resolution helper. The
+   DRY without narrowing the framework request contract. The
    adapter is defined beside the helper, not in `routers.py` — it is a context
    shape, not a router feature, and it must work for consumers who wire
    Strawberry's Channels consumers *without* this card's router. The
@@ -1179,7 +1176,7 @@ specified in the decisions cited; **no slice bumps the version** — the joint
 | [`pyproject.toml`][pyproject] + `uv.lock` | `channels[daphne]>=4.3.2` into `[dependency-groups].dev`; lock regenerated in the same commit | 1 |
 | [`utils/imports.py`][utils-imports] | `require_optional_module(module_name, *, install_hint)` added to the shared optional-import owner (no `feature_label`), + unit tests (Helper-reuse D-P1) | 1 |
 | `django_strawberry_framework/routers.py` | `__all__ = ("DjangoGraphQLProtocolRouter",)`; `_CHANNELS_INSTALL_HINT` + a separate builder-failure message per broken half, both interpolating the [`utils/imports.py`][utils-imports] floors / `require_channels()` (thin `require_optional_module` wrapper) / `_build_router_class()` caching in `_router_class` behind a module-global lock / PEP 562 `__getattr__` → `DjangoGraphQLProtocolRouter`; the composition of [Decision 6](#decision-6--constructor-and-composition) ([Decision 3](#decision-3--the-symbol-is-djangographqlprotocolrouter--distinctly-ours-pinned-now) / [5](#decision-5--soft-channels-dependency-a-lazy-module-__getattr__--one-require_channels-guard) / [7](#decision-7--the-consumers-come-from-strawberrychannels-engine-owned-not-package-owned)) | 1 |
-| [`utils/permissions.py`][utils-permissions] | `request_from_info()` Channels-context branch + a wrapping adapter over both scope shapes (`.user` / `.session` / `.scope` explicit and contained, `__getattr__` delegation) ([Decision 11](#decision-11--the-package-request-contract-works-under-channels-request_from_info-learns-the-channels-context-shape-reads-auth-mutations-stay-deferred)) | 1 |
+| [`utils/permissions.py`][utils-permissions] | `request_from_info()` Channels-context branch + a wrapping adapter over both scope shapes (`.user` / `.session` / `.scope` explicit, `__getattr__` delegation) ([Decision 11](#decision-11--the-package-request-contract-works-under-channels-request_from_info-learns-the-channels-context-shape-reads-auth-mutations-stay-deferred)) | 1 |
 | `tests/test_routers.py` + helper unit tests | Tests 1–18 per the [Test plan](#test-plan) | 1 |
 | [`docs/GLOSSARY.md`][glossary] | Router entry body + [Auth mutations][glossary-auth-mutations] deferral rewrite; status flips deferred | 2 |
 | [`docs/TREE.md`][tree] | Regenerated (script-rendered) after the card flips Done | 2 |
@@ -1515,7 +1512,7 @@ assertions read as contract, not as attribute spelunking.
     `.scope` exposed from the scope and defaulting to `None` when the middleware
     did not run; a *delegated* attribute returns the wrapped request's value; a fake
     permission method reading **one delegated and one scope-backed** attribute
-    succeeds; a hostile scope contained into `ConfigurationError`; non-Channels
+    succeeds; non-Channels
     shapes still rejected with the family-labeled `ConfigurationError`), which live
     beside the helper's existing suite in
     [`tests/utils/test_permissions.py`][test-utils-permissions].
@@ -1554,8 +1551,8 @@ Coverage: the package gate is `fail_under = 100`; the builder body, both branche
 of the guard, **both** incompatible-install wrap messages (channels-half and
 strawberry-half), the `__getattr__` hit/miss paths, the constructor's accept and
 reject branches, and the `request_from_info()`
-Channels-shape branch (plus the wrapping adapter's explicit, delegated and
-contained-read paths) are all reached by the list above.
+Channels-shape branch (plus the wrapping adapter's explicit and delegated
+read paths) are all reached by the list above.
 
 ## Doc updates
 

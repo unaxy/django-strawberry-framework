@@ -977,9 +977,7 @@ guard is an explicit `raise AssertionError` (not the base's bare
 `assert variables is not None`), so all of them hold under `python -O` and
 share one type for `pytest.raises(AssertionError)`. Every diagnostic renders
 consumer-supplied paths and values through `utils/truth.py::render` rather
-than `{x!r}`: a builtin scalar is spelled through its own type's slot (an
-oversized `int` reads `<unprintable int>` instead of raising), and any other
-value renders through its own `__repr__`, which is that value's behaviour (D5).
+than `{x!r}` (D5).
 
 The builder is **owned, not inherited** (Decision 5 ground 2): with the path
 explicit in the public contract it needs none of the base's folder-key

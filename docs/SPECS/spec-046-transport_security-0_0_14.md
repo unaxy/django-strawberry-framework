@@ -1430,11 +1430,6 @@ revocation delay — never per operation, since the outbound frame is a checkpoi
 deployment can price and the package has no standing to second-guess. The
 guard is about values the package cannot *use*, not about values it disapproves of.
 
-The message renders through the package's one safe value-describer, since the `got ...` tail
-is built by an f-string at the *raise site* — before any exception object exists, so a value
-whose `repr` cannot be produced would otherwise replace the typed error with an unrelated
-one on exactly the hostile-configuration path where the typed error is the contract.
-
 A **positive** window cannot be combined with `websocket_consumer_class`: the window
 configures the package's own consumer, so pairing it with an injected class that owns its
 own revalidation policy is a construction error rather than a silently ignored knob. An
@@ -2321,7 +2316,7 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
 | 1 | `routers.py`, `views.py`, `examples/fakeshop/config/urls.py`, `tests/test_routers.py`, `tests/test_views.py`, live tier | protocol split; required `django_application`; `websocket_url_pattern`; the package view; live middleware / Host / CSRF / header / cache / routing proofs | **HIGH** — the breaking change; every later slice builds on the shape |
 | 2 | `views.py`, `_request_body.py`, `middleware/request_body.py`, `_boundary_ordering.py`, `conf.py`, live tier, `tests/test_views.py` | cumulative cap pre-parse, measured not materialized; the one private-attribute compatibility helper and its **three** probe outcomes ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)); the two CSRF-ordering arrangements so the gate precedes `MultiPartParser` ([Decision 18](#decision-18--the-body-gate-runs-before-djangos-multipart-parser)); `MAX_REQUEST_BODY_BYTES` + view kwarg; the regression matrix incl. the py3.10 / Django 5.2.x floor | MED-HIGH — the measurement pins private Django internals whose seekability shape differs by interpreter, the CSRF re-entry reorders a security middleware, and multipart interaction with the [`Upload`][glossary-upload-scalar] path is the sharp edge |
 | 3 | `views.py` (the mixin's `parse_json`, the charset and multipart guards, `_RawBodyRequestAdapter`), both patch modules' docstrings, `_strawberry_patches.py`, `test_products_api.py`, `test_transport_api.py`, `tests/test_cross_web_patches.py`, `tests/test_views.py` | strict UTF-8 decode on the view's `parse_json`, fed by the view's own `request_adapter_class`; the declared-`charset` refusal; the multipart control-document encoding + loss guard ([Decision 17](#decision-17--multipart-control-fields-stay-django-parsed-behind-a-strict-loss-detection-guard)); the patch gate scoped to upstream defects; the kill-switch matrix in both opt-out spellings | LOW-MED — the JSON-body half is measured behavior with one rejection branch; the multipart half adds a second boundary on a path Django decodes first |
-| 4 | `routers.py`, `consumers.py` (WS consumer + 2 handler pre-hooks + the derived outbound-frame adapter + the private Host validator), `utils/sessions.py`, `exceptions.py`, `auth/sessions.py`, `tests/test_routers.py` | injection seam with a validated factory contract; the shared revalidation decision function; the adapter-level outbound-frame gate, its connection-scoped actor lease and its one close code ([Decision 16](#decision-16--revocation-is-connection-scoped-and-gated-at-the-websocket-adapters-outbound-frame-seam)); `DjangoWebSocketHostValidator` ([Decision 19](#decision-19--a-django-backed-websocket-host-boundary-beside-channels-origin-check)); window kwarg and its typed domain; the shared safe value-describer; the multi-yield revoke-mid-subscription matrix on both protocols | **HIGH** — async, per-frame, communicator-driven, and the lease is held across a send |
+| 4 | `routers.py`, `consumers.py` (WS consumer + 2 handler pre-hooks + the derived outbound-frame adapter + the private Host validator), `utils/sessions.py`, `exceptions.py`, `auth/sessions.py`, `tests/test_routers.py` | injection seam with a validated factory contract; the shared revalidation decision function; the adapter-level outbound-frame gate, its connection-scoped actor lease and its one close code ([Decision 16](#decision-16--revocation-is-connection-scoped-and-gated-at-the-websocket-adapters-outbound-frame-seam)); `DjangoWebSocketHostValidator` ([Decision 19](#decision-19--a-django-backed-websocket-host-boundary-beside-channels-origin-check)); window kwarg and its typed domain; the shared value-describer; the multi-yield revoke-mid-subscription matrix on both protocols | **HIGH** — async, per-frame, communicator-driven, and the lease is held across a send |
 | 5 | `docs/`, glossary DB, kanban DB | migration note; transport guidance; GLOSSARY + TREE regen; card wrap | mechanical breadth; **no version literal, no `CHANGELOG.md`** |
 
 ## Helper-reuse obligations (DRY)
@@ -2436,10 +2431,8 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   `_read_started`, it never raises `HTTPException` and never reads settings, and it hands the
   view one boolean; policy — which limit, what the `413` says — stays in `views.py`.
 - **The `got {type} {value!r}` tail is rendered by `django_strawberry_framework/utils/truth.py::describe`**, the one
-  owner of that fragment, degrading to `an unprintable {type}` for a value that cannot be
-  rendered. Every typed configuration rejection on this transport uses it — the revalidation
-  window, both router injection seams, and the view's cap resolution — because the tail is
-  built at the raise site, where the exception class's own rendering guards cannot help.
+  owner of that fragment. Every typed configuration rejection on this transport uses it — the
+  revalidation window, both router injection seams, and the view's cap resolution.
 - **The session-store resolution is single-sited in `utils/sessions.py::session_store_class`**,
   imported by both `auth/sessions.py::uses_signed_cookie_sessions` and
   `consumers.py::_refreshed_actor`. One `SESSION_ENGINE` expression, hosted outside the
@@ -2603,9 +2596,8 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   during revalidation revokes and closes the connection and is logged; it never falls back to
   the stale cached actor, and it never lets the pending frame out. This mirrors the
   fail-closed posture the [auth mutations][glossary-auth-mutations] take after
-  authentication. The guard catches `BaseException` but re-raises `asyncio.CancelledError`,
-  `KeyboardInterrupt` and `SystemExit` first, so a cancellation raised while a task is being
-  torn down propagates instead of being reported to the client as a revocation. Closing on a
+  authentication. The guard catches `Exception`, so a cancellation raised while a task
+  is being torn down propagates instead of being reported to the client as a revocation. Closing on a
   transient store failure is the accepted cost of fail-closed at a connection-scoped
   boundary: an actor the package cannot validate is an actor it cannot authorize a frame for,
   and a reconnect re-reads the session honestly
