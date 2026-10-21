@@ -108,6 +108,7 @@ from django_strawberry_framework.utils.input_values import (
 )
 from django_strawberry_framework.utils.inputs import (
     FILTERSET_FIELDS_ALIAS,
+    canonicalize_set_meta_fields,
     plain_set_meta_fields,
     promote_set_meta_fields,
 )
@@ -2994,6 +2995,16 @@ class FilterSet(
         ``StrEnum`` member) filters exactly as the plain name it spells and no
         consumer ``__eq__`` / ``__hash__`` runs on the way.
 
+        After upstream's expansion, an unordered declaration is put in canonical
+        order (``utils/inputs.py::canonicalize_set_meta_fields``, the order the
+        order family expands in): a ``set`` / ``frozenset`` of names reorders the
+        names upstream kept, and a set of lookups in a dict declaration becomes
+        a sorted lookup list, so ``base_filters`` and the generated filter input
+        are identical under every ``PYTHONHASHSEED``. The declaration itself is
+        never rewritten as a ``list``, so django-filter's declared-filter
+        allowance (a ``list`` / ``tuple`` ``Meta.fields`` may name a declared
+        filter) still does not apply to a set.
+
         The upstream method is named ``get_fields`` (no underscore prefix);
         we override the same name so `super().get_filters()`'s internal call
         routes through both narrowings.
@@ -3039,6 +3050,17 @@ class FilterSet(
             )
         # Upstream's field-name-to-lookups map (see the ``override`` note above).
         fields = cast("OrderedDict[str, object]", super().get_fields())
+        # Upstream iterates the declaration as given, so a ``set`` / ``frozenset`` (of names, or
+        # of one field's lookups) arrives in hash order, which moves with ``PYTHONHASHSEED``.
+        # Put it in the canonical order the order family expands in; the declaration and the
+        # names upstream kept (``exclude`` applied) stay as they are.
+        canonical = canonicalize_set_meta_fields(meta_fields)
+        if canonical is not meta_fields and truth.is_instance(canonical, list):
+            rank = {name: index for index, name in enumerate(canonical)}
+            fields = OrderedDict(sorted(fields.items(), key=lambda pair: rank[pair[0]]))
+        elif truth.is_instance(canonical, dict):
+            for name in fields:
+                fields[name] = canonical[name]
         model = cls._meta.model
 
         # Per-field ``"__all__"`` expansion (dict form). Runs before the

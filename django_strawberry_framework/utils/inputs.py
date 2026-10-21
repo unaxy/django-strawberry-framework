@@ -594,9 +594,11 @@ def canonicalize_set_meta_fields(fields: object) -> object:
     """Return unordered ``Meta.fields`` shapes in a process-stable order.
 
     ``set`` / ``frozenset`` become lists sorted by the canonical key so
-    class-Meta expansion is identical across ``PYTHONHASHSEED``. Dict-shaped
-    lookup
-    bags keep key insertion order and sort set-valued lookup lists. Ordered
+    class-Meta expansion is identical across ``PYTHONHASHSEED`` in both set
+    families: the order family expands the result (``read_set_meta_fields``),
+    and ``filters/sets.py::FilterSet.get_fields`` reorders django-filter's field
+    map by it. Dict-shaped lookup bags keep key insertion order and sort
+    set-valued lookup lists. Ordered
     ``list`` / ``tuple`` and scalar ``"__all__"`` pass through unchanged. Each
     shape is decided by the value's real class; any other value passes through
     to the family's typed declaration gate.

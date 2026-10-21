@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 171 done, 132 to do.
+Progress: 172 done, 131 to do.
 
 ## Done
 
@@ -627,6 +627,13 @@ Progress: 171 done, 132 to do.
   `optimizer/nested_planner.py::_advise_composite_index` reads the table-owning `_meta.concrete_model` once and feeds it
   to the window columns, the order terms, the coverage check, the dedup key and the message, so a covered proxy is
   silent and an uncovered one warns once naming the concrete model; a non-proxy model is unchanged
+- [x] 249. A set-shaped `FilterSet` `Meta.fields` (or `filter_fields`, or a set of lookups in a dict declaration)
+  expanded in hash order, so `base_filters`, the generated filter input and each lookup sub-input moved with
+  `PYTHONHASHSEED`: fixed, `filters/sets.py::FilterSet.get_fields` reorders django-filter's field map by
+  `utils/inputs.py::canonicalize_set_meta_fields` (the names upstream kept, `Meta.exclude` applied, in
+  `canonical_sort_key` order; a set of lookups as a sorted list); the declaration is never rewritten as a `list`, so
+  django-filter's declared-filter allowance still refuses a set, and a list / tuple / dict of lists keeps its order. The
+  OrderSet twin's pin now fails without canonicalization in every process
 
 ## Outside review of the fixes
 
@@ -762,10 +769,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   node budget and `max_container_width` alike); 500 spreads of `__typename(a: {k: [1 x2978] k: 1})` walk about 106 ms at
   the default policy and are admitted, against spec-047's "Audited exclusion - `_charge_container`" paragraph ("runs out
   of node budget first")
-- [ ] 249. A set-shaped `FilterSet` `Meta.fields` expands in hash order: `{'name', 'description', 'id', 'is_private'}`
-  gave four `base_filters` orders under `PYTHONHASHSEED` 1-4 (an `OrderSet` gives one), because `FilterSet.get_fields`
-  never calls `utils/inputs.py::canonicalize_set_meta_fields`, whose docstring promises one order under every seed;
-  check the generated filter input SDL order too
 - [ ] 254. `rest_framework/inputs.py::serializer_schema_fingerprint`'s docstring says "This captures EVERY axis the
   generated input / SDL / reverse map depends on", but `_fingerprint_converter_extra` records only a `ListField`'s direct
   child; retract the sentence to what the fingerprint covers (no code change)
