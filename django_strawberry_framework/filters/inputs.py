@@ -275,13 +275,13 @@ _materialized_names, _field_specs, _materialize_input, _clear_input_namespace = 
 
 # Pascal-case helper for input-class names. The conversion AND the
 # no-word-character emptiness check both live in the shared
-# ``utils.strings.pascal_case_or_raise`` (single-sited, shared with
+# ``utils/strings.py::pascal_case_or_raise`` (single-sited, shared with
 # ``sets_mixins.py::ClassBasedTypeNameMixin.type_name_for``); this wrapper
 # only supplies the ``RangeFilter``-specific error.
 def _pascal_case(name: str) -> str:
     """Return ``name`` converted to ``PascalCase``, raising on a token-less input.
 
-    Delegates to ``utils.strings.pascal_case_or_raise``; an input with no
+    Delegates to ``utils/strings.py::pascal_case_or_raise``; an input with no
     word-character tokens (e.g. ``"_"``, ``""``, ``"__"``) would silently
     collide on the downstream ``RangeInputType`` naming, so it raises
     ``ConfigurationError`` instead. Direct caller today:

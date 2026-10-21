@@ -36,7 +36,7 @@ Cookbook parity,cookbook-parity,"project-level engine configuration migrates by 
 `FilterSet`,filterset,its `check_<field>_permission` input gate reads the refreshed actor for free
 `OrderSet`,orderset,same
 Django `AppConfig`,django-appconfig,"where both upstream patches install; that gate covers upstream defects only, never the wire contract (Decision 9)"
-`DjangoGraphQLView`,djangographqlview,the package's Django GraphQL view (sync and async) this card authors; the HTTP transport the router's `http` branch serves (Slice 1)
+`DjangoGraphQLView`,djangographqlview,the package's Django GraphQL view (sync and async) this card authors; the GraphQL HTTP endpoint declared in the consumer's own URLconf (Slice 1)
 Request-body cap,request-body-cap,the cumulative pre-parse body limit this card authors (Slice 2)
 UTF-8 wire contract,utf-8-wire-contract,the strict decode of HTTP bodies and WebSocket text frames this card authors (Slice 3; BOM rejected per Decision 10)
 WebSocket consumer-injection seam,websocket-consumer-injection-seam,the `websocket_consumer_class=` constructor seam this card authors (Decision 11)

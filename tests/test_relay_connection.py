@@ -2213,8 +2213,8 @@ def test_strictness_raise_malformed_cursor_surfaces_pagination_error_not_optimiz
 def test_sidecar_fallback_is_flagged_with_reason() -> None:
     """A sidecar fallback's ``"raise"`` message carries an ACTIONABLE reason.
 
-    spec-033 Decision 6 consistency pin (Risks bullet "include the fallback
-    reason in the message"): a consumer who legitimately filters a nested
+    spec-033 Decision 6 consistency pin (rationale bullet "A whole-relation
+    refusal stays visible to strictness on purpose"): a consumer who legitimately filters a nested
     connection gets a per-parent fallback that strictness flags - the message
     must explain WHY (the filter/orderBy wording) so it does not look like an
     optimizer defect.

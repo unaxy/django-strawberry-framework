@@ -287,7 +287,7 @@ SCALAR_MAP: "dict[type[ConcreteField], TypeForm[object]]" = {
     models.UUIDField: uuid.UUID,
     # FileField / ImageField stay ``str`` here on purpose: SCALAR_MAP is the
     # SHARED scalar/filter-input map (``scalar_for_field`` walks it for both the
-    # selected-field side and ``filters/inputs._scalar_from_model_field``). The
+    # selected-field side and ``filters/inputs.py::_scalar_from_model_field``). The
     # structured read-output objects live in FIELD_OUTPUT_TYPE_MAP below, so a
     # FilterSet over a file column still generates a scalar ``str`` input and no
     # output object ever leaks into a GraphQL input (spec-037 Decision 3).
@@ -390,7 +390,7 @@ def scalar_for_field(field: "ModelField") -> "TypeForm[object]":
     field resolve to the parent's scalar, and raises ``ConfigurationError`` for
     an unsupported field class. This is the single field-class -> scalar lookup
     shared by :func:`convert_scalar` (full DjangoType field conversion) and the
-    filter-input converter (``filters.inputs._scalar_from_model_field``), so a
+    filter-input converter (``filters/inputs.py::_scalar_from_model_field``), so a
     column resolves to the SAME scalar on the selected-field side and the
     filter-input side -- including consumer-registered ``SCALAR_MAP`` entries.
     It does NOT apply choice substitution or null widening; callers layer those

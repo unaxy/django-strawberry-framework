@@ -576,7 +576,7 @@ def _id_less_resolver_seams(
 # ``fields`` list naming the full editable set vs an un-narrowed create) must
 # dedupe to one type (spec-036 Edge cases #"Two mutations over one model").
 # Keying on the effective set mirrors
-# ``mutations.inputs.mutation_input_shape``'s identity tuple (cache_key /
+# ``mutations/inputs.py::mutation_input_shape``'s identity tuple (cache_key /
 # type_name), so the cache key, the generated name, the field name seam, and the
 # spec identity are single-sourced and cannot drift - two mutations with the same
 # effective shape reuse one class object so the materialize ledger dedupes

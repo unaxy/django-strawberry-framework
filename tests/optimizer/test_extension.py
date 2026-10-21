@@ -2065,9 +2065,9 @@ def _categories_list_schema(ext: DjangoOptimizerExtension) -> strawberry.Schema:
     the nested ``itemsConnection`` window lands on each category's ``to_attr``
     and the nested pagination value is baked into the cached plan - the
     end-to-end shape the cache-key rule must keep honest. A non-visibility
-    synthetic target (no ``get_queryset``), so the plan is cacheable (spec line
-    350: the visibility-bearing library shape is uncacheable for an orthogonal
-    reason and is covered elsewhere).
+    synthetic target (no ``get_queryset``), so the plan is cacheable (spec-033
+    Decision 7: the visibility-bearing library shape is uncacheable for an
+    orthogonal reason and is covered elsewhere).
     """
     type(
         "ItemType",

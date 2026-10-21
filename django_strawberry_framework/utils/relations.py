@@ -973,7 +973,7 @@ def instance_accessor(field: object) -> str:
     ``get_accessor_name`` and their ``name`` IS the instance attribute.
 
     Three-tier read, matching the two field shapes the package passes
-    around: an ``optimizer.field_meta.FieldMeta`` carries the accessor
+    around: an ``optimizer/field_meta.py::FieldMeta`` carries the accessor
     precomputed on its ``accessor_name`` slot (the builders derive it from
     the raw descriptor via this same helper); a raw Django reverse-relation
     descriptor answers ``get_accessor_name()``; everything else (forward

@@ -2275,9 +2275,12 @@ def _lookup_paths_from_parts(
 def _prefetch_lookup_paths(entries: Iterable[PrefetchLookup], prefix: str = "") -> set[str]:
     """Recursively flatten prefetch strings and nested ``Prefetch`` objects.
 
-    Unlike ``runtime_path_from_path`` the recursion carries no depth cap: its
-    input is consumer-authored ``Prefetch`` objects, finite and unreachable from
-    the wire, whereas that sibling walks the wire-derived ``info.path``.
+    Unlike ``runtime_path_from_path`` the recursion carries no depth cap. The
+    tree is the walker's own nested ``Prefetch`` chain, one level per selected
+    relation, plus the lookups a consumer ``get_queryset`` attached: acyclic by
+    construction and no deeper than the selection the walker already recursed
+    through. The sibling's cap exists only to turn a cyclic or corrupt ``prev``
+    chain into a loud failure.
     """
     paths: set[str] = set()
     for entry in entries:

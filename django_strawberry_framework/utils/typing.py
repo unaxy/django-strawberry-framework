@@ -279,7 +279,7 @@ def is_async_callable(
     """Return whether calling ``value`` yields a coroutine.
 
     ``inspect.iscoroutinefunction`` only reports on the value handed to it
-    directly; it misses three realistic wrapper shapes the field factories and the
+    directly; it misses four realistic wrapper shapes the field factories and the
     GlobalID-callable validator both must see through:
 
     1. a callable *instance* whose ``__call__`` is ``async def`` -- the instance

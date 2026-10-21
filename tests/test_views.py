@@ -2137,6 +2137,8 @@ def _strawberry_patch_opted_out() -> Generator[None, None, None]:
         patch.setattr(BaseView, "parse_json", patches._original_parse_json)
         patch.setattr(BaseView, "parse_query_params", patches._original_parse_query_params)
         assert patches._patch_is_installed() is False
+        assert BaseView.__dict__["parse_json"] is patches._original_parse_json
+        assert BaseView.__dict__["parse_query_params"] is patches._original_parse_query_params
         with override:
             yield
 

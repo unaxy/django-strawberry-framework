@@ -198,7 +198,7 @@ class DjangoTypeDefinition:
     orderset_class: type[OrderSet] | None = None
     fields_class: type[object] | None = None
     connection: dict[str, bool] | None = None
-    # Keyset-cursor opt-in (the BACKLOG ``stable_cursor_field`` contract):
+    # Keyset-cursor opt-in (the spec-030 ``## Keyset cursors`` contract):
     # the validated ``Meta.cursor_field`` order strings, or ``None`` for the
     # shipped offset-cursor behavior. When set, every connection over this
     # type is KEYSET-MODE: it orders by these columns, mints value-encoded

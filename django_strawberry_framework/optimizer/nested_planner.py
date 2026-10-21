@@ -45,7 +45,7 @@ from django_strawberry_framework.utils.connections import (
 )
 
 # Imported under its historical private name, which the walker binds to the
-# same function (``optimizer.walker._relay_max_results_from_info``, imported by
+# same function (``optimizer/walker.py::_relay_max_results_from_info``, imported by
 # ``tests/optimizer/test_walker.py``). The dig itself has one owner in
 # ``utils/connections.py``, shared with the resolve-time cap.
 from django_strawberry_framework.utils.connections import (

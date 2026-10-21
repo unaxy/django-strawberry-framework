@@ -121,7 +121,7 @@ ALLOWED_META_KEYS: frozenset[str] = frozenset(
 # ``nullable_overrides`` / ``required_overrides`` (spec-029 Decision 6),
 # ``connection`` (spec-030 Decision 8), ``globalid_strategy`` (spec-031
 # Decision 6), ``relation_shapes`` (spec-032 Decision 7), and
-# ``cursor_field`` (the BACKLOG ``stable_cursor_field`` keyset-cursor
+# ``cursor_field`` (the spec-030 ``## Keyset cursors``
 # opt-in) are net-new ALLOWED keys, NOT DEFERRED_META_KEYS promotions -
 # each one's feature ships in the same card that adds it, so they were
 # never reserved-but-nonfunctional. DEFERRED_META_KEYS stays unchanged.
@@ -325,7 +325,7 @@ def _validate_cursor_field(
 ) -> tuple[str, ...] | None:
     """Validate ``Meta.cursor_field`` SHAPE and the Relay-Node gate (keyset cursors).
 
-    Class-creation stage of the ``stable_cursor_field`` two-stage validation
+    Class-creation stage of the spec-030 ``## Keyset cursors`` two-stage validation
     (the spec-029 two-stage precedent): ``None``-short-circuits when unset;
     otherwise requires a non-empty string sequence whose entries parse as
     Django ``order_by`` strings over LOCAL columns (one optional leading
