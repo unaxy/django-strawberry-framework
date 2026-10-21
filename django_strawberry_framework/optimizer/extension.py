@@ -1125,12 +1125,10 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         )
         # Drop any optimizer stashes left on a reused ``context_value`` before
         # this operation publishes, and only for the operation that object
-        # describes. ``_stash_union`` is intentionally accumulative *within* one
-        # execution (parent + nested connection); without a start-of-execution
-        # clear, sequential ``execute_sync`` calls sharing one context object
-        # leak FK-id elisions (wrong stub data) and planned-resolver keys
-        # (masked N+1 under strictness) to a consumer reading the published plan
-        # off their request.
+        # describes. Without it, sequential ``execute_sync`` calls sharing one
+        # context object would show a consumer reading the published plan off
+        # their request a prior operation's FK-id elisions and planned-resolver
+        # keys; the package's own reads answer from ``frame`` and never see them.
         if _operation_publishes_to_context():
             _clear_optimizer_context(getattr(execution_context, "context", None))
         try:
@@ -1272,10 +1270,15 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         1. Build (or fetch from cache) an ``OptimizationPlan`` via
            ``_get_or_build_plan`` (passing ``target_type`` as ``origin`` so
            plans cache-separate by node type exactly as middleware plans do).
-        2. Publish the plan + strictness sentinels to ``info.context`` via
-           ``_publish_plan_to_context``.
-        3. Reconcile against the consumer's existing queryset optimizations
-           and apply.
+        2. Prune the ``select_related`` paths a consumer projection makes
+           Django-invalid (``prune_unsupportable_select_related``).
+        3. Reconcile a non-empty plan against the consumer's existing queryset
+           optimizations (``diff_plan_for_queryset``), which strips the resolver
+           keys of every planned prefetch the consumer's own ``Prefetch`` wins.
+        4. Publish the reconciled plan + strictness sentinels via
+           ``_publish_plan_to_context``, so a relation the plan no longer loads
+           is never published as optimizer-scoped.
+        5. Apply the plan to ``queryset``.
 
         Returns ``queryset`` unchanged when there are no root field nodes, when
         ``queryset`` is combined (``union`` / ``intersection`` / ``difference``),
@@ -1334,8 +1337,10 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # B8: reconcile against consumer queryset optimizations BEFORE
         # publishing sentinels. Consumer-wins prefetch drops must strip
         # coupled ``planned_resolver_keys`` / FK-id elisions (via
-        # ``prefetch_path_resolver_keys``) before ``_publish_plan_to_context``;
-        # publishing first left nested N+1s masked under strictness.
+        # ``prefetch_path_resolver_keys``) before ``_publish_plan_to_context``:
+        # a published key reads as optimizer-scoped, so the resolver would skip
+        # the target type's ``get_queryset`` on rows the consumer's own
+        # ``Prefetch`` loaded and ``_check_n1`` would stay silent for them.
         # Returns a fresh plan and (when an upgrade was applied) a
         # rewritten queryset; B1's cached plan is never mutated.
         if not plan.is_empty:

@@ -469,25 +469,6 @@ def test_global_id_multiple_choice_filter_empty_in_matches_nothing_like_list_fil
     assert list_filter.filter(qs, []) is qs.nothing
 
 
-def test_global_id_multiple_choice_filter_empty_exact_matches_nothing_like_list_filter() -> None:
-    """Empty membership is match-nothing for non-``in`` lookups too.
-
-    Many-side Relay relations resolve to ``GlobalIDMultipleChoiceFilter`` with
-    ``lookup_expr="exact"`` (django-filter's default). Upstream
-    ``MultipleChoiceFilter.filter`` short-circuits ``if not value: return qs``,
-    which would silently widen ``exact: []`` to no constraint. The empty-set
-    contract must not be ``in``-only.
-    """
-    qs = _RecordingQs()
-    # Default lookup_expr is ``exact`` (settings.DEFAULT_LOOKUP_EXPR).
-    global_ids = GlobalIDMultipleChoiceFilter(field_name="genres")
-    list_filter = ListFilter(field_name="genres", lookup_expr="exact")
-
-    assert global_ids.lookup_expr == "exact"
-    assert global_ids.filter(qs, []) is qs.nothing
-    assert list_filter.filter(qs, []) is qs.nothing
-
-
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     "excluding",

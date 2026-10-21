@@ -446,20 +446,16 @@ def clear_optimizer_context(context: object) -> None:
     ``DjangoOptimizerExtension.on_execute`` calls this before the operation
     runs, and only for the operation the context object describes, so
     sequential ``execute`` / ``execute_sync`` calls that reuse the same
-    ``context_value`` object cannot leak correctness sentinels to a consumer
-    reading them - while an operation nested inside another one erases nothing
-    the outer operation published there:
+    ``context_value`` object cannot show a consumer inspecting it a prior
+    operation's plan, FK-id elisions or planned-relation keys as this one's -
+    while an operation nested inside another one erases nothing the outer
+    operation published there.
 
-    - ``DST_OPTIMIZER_FK_ID_ELISIONS`` retained across executions makes a later
-      full-object selection (``category { id name }``) hit the FK-id stub path
-      and return empty scalars for fields the stub never loaded.
-    - ``DST_OPTIMIZER_PLANNED`` retained across executions masks real N+1s under
-      ``strictness="warn"|"raise"`` (keys planned for a prior operation still
-      short-circuit ``_check_n1``).
-
-    Intra-execution ``_stash_union`` (parent + nested connection publishes)
-    stays correct: the clear runs once at ``on_execute`` entry, then unions
-    accumulate only within that operation.
+    The package itself never reads these back off the context object during a
+    managed execution: ``optimizer_value`` answers from the running operation's
+    own frame, which starts empty, so a retained stash cannot reach the FK-id
+    stub path or ``_check_n1``. The clear protects consumer-visible context
+    introspection only.
 
     Per-key deletion is delegated to ``utils/context.py::clear_context_key``,
     whose dispatch mirrors ``stash_on_context``; missing keys and read-only

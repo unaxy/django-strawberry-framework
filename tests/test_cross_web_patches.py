@@ -27,8 +27,9 @@ Wire shape lives live. UTF-16 / UTF-32 (BOM and BOM-less) and a leading
 UTF-8 BOM are a controlled ``400`` on fakeshop's ``/graphql/`` in
 ``examples/fakeshop/test_query/test_products_api.py``; the async colour,
 the ``APPLY_UPSTREAM_PATCHES`` opt-out matrix, and the ``cross_web``
-half's 500-to-400 delta on Strawberry's own mount live in
-``examples/fakeshop/test_query/test_transport_api.py``. Which mechanism
+half's two effects on Strawberry's own mount (an undecodable body's
+500-to-400 delta, and the UTF-8-decodable non-UTF-8 bodies' 400-to-200 one)
+live in ``examples/fakeshop/test_query/test_transport_api.py``. Which mechanism
 refused which byte shape (``__cause__``) is invisible over the wire and
 stays in ``tests/test_views.py``.
 """
@@ -81,7 +82,13 @@ def test_patch_is_installed_on_adapter() -> None:
 
 
 def test_body_returns_raw_bytes_for_valid_utf8() -> None:
-    """Valid UTF-8 is returned as raw bytes (async parity), not decoded ``str``."""
+    """Valid UTF-8 is returned as raw bytes (async parity), not decoded ``str``.
+
+    No wire row can pin this: a decoded ``str`` of valid UTF-8 JSON parses the
+    same as its bytes. The wire verdict of the raw-bytes contract on
+    Strawberry's own mount is
+    ``test_transport_api.py::test_the_cross_web_half_gives_the_sync_mount_the_async_adapters_raw_bytes``.
+    """
     raw = b'{"a": 1}'
     adapter = DjangoHTTPRequestAdapter(_request(raw))
     assert adapter.body == raw
@@ -109,9 +116,12 @@ def test_body_returns_raw_bytes_for_utf8_bom() -> None:
     """UTF-8 BOM stays bytes here; the package view's parse is what rejects it.
 
     The adapter does not inspect the bytes. ``json.loads`` on ``bytes`` detects
-    ``utf-8-sig`` and would strip the BOM, so a patch-module parse would accept
-    this body; the live ``400`` is
-    ``test_products_api.py::test_post_utf8_bom_json_body_is_rejected_as_400``.
+    ``utf-8-sig`` and strips the BOM, so Strawberry's own mount accepts this
+    body with the patch installed; that live ``200`` (and the un-installed
+    ``400``) is the ``utf-8-sig`` row of
+    ``test_transport_api.py::test_the_cross_web_half_gives_the_sync_mount_the_async_adapters_raw_bytes``.
+    A getter that decoded the BOM away into a ``str`` would pass that row, so
+    only this in-process read pins the return type.
     """
     raw = b"\xef\xbb\xbf" + b'{"a": 1}'
     adapter = DjangoHTTPRequestAdapter(_request(raw))
@@ -125,9 +135,10 @@ def test_body_returns_raw_bytes_for_utf16_le_without_bom() -> None:
     ``encode("utf-16-le")`` is NUL-padded ASCII, hence UTF-8-decodable, so
     upstream's ``.decode()`` still succeeds into a ``str``. That is why this
     patch returns raw bytes rather than wrapping the decode: a try/except
-    around ``.decode()`` would still hand ``parse_json`` a ``str``. The live
-    ``400`` is
-    ``test_products_api.py::test_post_utf16_le_json_body_is_rejected_as_400``.
+    around ``.decode()`` would still hand ``parse_json`` a ``str``. That wrapper's
+    live cost - un-installed ``400``, installed ``200`` on Strawberry's own mount -
+    is the ``utf-16-le`` row of
+    ``test_transport_api.py::test_the_cross_web_half_gives_the_sync_mount_the_async_adapters_raw_bytes``.
     """
     raw = '{"query":"{ __typename }"}'.encode("utf-16-le")
     original_body_fget = patches._original_body_fget
