@@ -50,10 +50,13 @@ somewhere ungated. Its last rows take the switch off entirely
 in which the sync transport used to answer ``500``. It is now the same controlled
 ``400``, and one row reads all four answers across two mounts
 and two patch states so that constancy is attributable to the package view rather
-than to a patch that was quietly still installed. One further row moves the
+than to a patch that was quietly still installed. Two further rows move the
 ``cross_web`` member of that switch alone, against Strawberry's own mount, which is
 the only place the patch this package ships for that mount still has an observable
-value - and is therefore its standing retirement diagnostic.
+value: one is its standing retirement diagnostic (an undecodable body's ``500``
+becomes a ``400``), the other pins why the patch hands over raw bytes rather than
+decoding defensively (UTF-8-decodable UTF-16 / UTF-32 / UTF-8-BOM bodies are a
+``400`` un-installed and the async adapter's ``200`` installed).
 
 Three of those rows need a body shape neither ``Client`` nor ``AsyncClient`` can
 present, so they drive Django's own ``ASGIHandler`` in-process through
@@ -2371,6 +2374,64 @@ def test_the_cross_web_half_turns_upstreams_own_500_into_a_400(body: bytes) -> N
 
     assert control.status_code == 200
     assert control.json()["data"] == {"__typename": "Query"}
+
+
+#: JSON encodings ``json.loads`` auto-detects from ``bytes`` (RFC 8259) whose
+#: bytes are ALSO valid UTF-8: BOM-less UTF-16 / UTF-32 are NUL-padded ASCII, and
+#: a UTF-8 BOM is three valid UTF-8 bytes. Upstream's property decode therefore
+#: succeeds on each, into a ``str`` that ``json.loads`` refuses.
+_UTF8_DECODABLE_NON_UTF8_ENCODINGS = (
+    "utf-16-le",
+    "utf-16-be",
+    "utf-32-le",
+    "utf-32-be",
+    "utf-8-sig",
+)
+
+
+@pytest.mark.parametrize("encoding", _UTF8_DECODABLE_NON_UTF8_ENCODINGS)
+@pytest.mark.django_db
+def test_the_cross_web_half_gives_the_sync_mount_the_async_adapters_raw_bytes(
+    encoding: str,
+) -> None:
+    """The ``cross_web`` half returns raw bytes, not a defensive decode, on Strawberry's mount.
+
+    The row above pins the bodies upstream's property decode *rejects*; these are
+    the ones it *accepts*, and they are what decide the getter's shape. Each is
+    UTF-8-decodable, so a getter that decodes when it can and falls back to bytes
+    when it cannot still hands ``parse_json`` a ``str`` here, and ``json.loads``
+    refuses a ``str`` carrying NUL padding or a leading BOM. Only the raw bytes -
+    the contract of ``AsyncDjangoHTTPRequestAdapter.get_body`` - reach
+    ``json.loads``' RFC 8259 encoding detection, which accepts all five, so the
+    sync transport answers what the async adapter's bytes would.
+
+    * half un-installed -> upstream's own malformed-JSON ``400``. Upstream's
+      property decode succeeds into that ``str``; this is the state a
+      decode-when-possible getter reproduces.
+    * half installed -> ``200`` with the query's data.
+
+    The un-installed ``400`` is the trap the row above names: it is not a
+    retirement signal, because upstream's decode succeeded rather than stopped.
+    """
+    seed_data(1)
+    body = json.dumps({"query": _TYPENAME}).encode(encoding)
+
+    with _cross_web_patch_opted_out():
+        unpatched = _post_bytes(
+            Client(raise_request_exception=False),
+            body,
+            path="/upstream-graphql/",
+        )
+
+    with override_settings(ROOT_URLCONF=__name__):
+        assert cross_web_patches._patch_is_installed() is True
+        patched = _post_bytes(Client(), body, path="/upstream-graphql/")
+
+    assert unpatched.status_code == 400
+    assert unpatched.content == b"Unable to parse request body as JSON"
+
+    assert patched.status_code == 200
+    assert patched.json() == {"data": {"__typename": "Query"}}
 
 
 @pytest.mark.django_db

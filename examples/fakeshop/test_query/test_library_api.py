@@ -2445,6 +2445,47 @@ def test_relay_relation_isnull_is_boolean_not_globalid_list_over_http() -> None:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("bag", "titles"),
+    [
+        ("{ genres: { exact: [] } }", []),
+        ("{ not: { genres: { exact: [] } } }", ["Kindred", "UnshelvedNotes"]),
+    ],
+    ids=["empty-exact", "not-empty-exact"],
+)
+def test_relay_relation_empty_exact_list_matches_no_rows_over_http(
+    bag: str,
+    titles: list[str],
+) -> None:
+    """A many-side Relay relation's ``exact: []`` is the match-none membership predicate.
+
+    ``genres.exact`` binds ``GlobalIDMultipleChoiceFilter`` with the per-element
+    ``exact`` lookup. An explicit empty list matches no book (never the no-constraint
+    skip that would return every book), and its negation matches every book, with
+    and without a genre.
+    """
+    branch = models.Branch.objects.create(name="Empty Exact Branch", city="Boston")
+    shelf = models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
+    genre = models.Genre.objects.create(name="Speculative")
+    models.Book.objects.create(title="Kindred", shelf=shelf).genres.add(genre)
+    models.Book.objects.create(title="UnshelvedNotes", shelf=shelf)
+
+    registry.clear()
+    try:
+        response = _post_holder(
+            _relay_relation_isnull_holder_schema(),
+            f"query {{ books(filter: {bag}) {{ title }} }}",
+        )
+    finally:
+        registry.clear()
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"books": [{"title": title} for title in titles]}
+
+
+@pytest.mark.django_db
 def test_library_genres_filter_by_relay_own_pk_global_id_in_list() -> None:
     """Own-PK Relay ``id: {in: [...]}`` accepts a LIST of GlobalIDs, end to end.
 
@@ -17512,6 +17553,52 @@ def test_library_prefetch_child_of_proxy_targeted_relation_resolves_over_http(fi
     assert len(root_sql) == 1, library_sql
     assert "JOIN" not in root_sql[0], root_sql[0]
     assert branch_sql, library_sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "field",
+    ["allLibraryBranchNotesOverProxyChild", "allLibraryBranchNotesOverConcreteChild"],
+    ids=["proxy-child", "concrete-child"],
+)
+def test_library_consumer_prefetched_relation_keeps_target_visibility_over_http(
+    field: str,
+) -> None:
+    """A consumer ``Prefetch`` the optimizer yields to still reads the target's visibility.
+
+    The consumer's own ``Prefetch("branch", ...)`` wins over the planned one, so
+    ``branch`` is no longer optimizer-scoped: the published resolver keys must not
+    name it, and each note's branch is re-read through ``ProxyBranchType.get_queryset``.
+    The anonymous request cannot see the ``city="restricted"`` branch, so its note's
+    non-null ``branch`` resolves to null and the field fails at that row without the
+    hidden branch on the wire; staff see both branches.
+    """
+    visible = models.ProxyBranch.objects.create(name="Proxy Central", city="Boston")
+    hidden = models.ProxyBranch.objects.create(name="Proxy Vault", city="restricted")
+    models.BranchNote.objects.create(branch=visible, body="shelving audit")
+    models.BranchNote.objects.create(branch=hidden, body="vault inventory")
+    query = f"query {{ {field} {{ body branch {{ name city }} }} }}"
+
+    anonymous = _post_graphql(query)
+
+    assert anonymous.status_code == 200
+    withheld = response_json(anonymous)
+    assert withheld["data"] is None, withheld
+    assert [json_at(error, "path") for error in json_list(withheld, "errors")] == [
+        [field, 1, "branch"],
+    ]
+    assert "Proxy Vault" not in anonymous.content.decode(), withheld
+
+    staff = User.objects.create_user(username="staff", password="pw", is_staff=True)
+    client = TestClient()
+    with client.login(staff):
+        served = client.query(query)
+    assert served.data == {
+        field: [
+            {"body": "shelving audit", "branch": {"name": "Proxy Central", "city": "Boston"}},
+            {"body": "vault inventory", "branch": {"name": "Proxy Vault", "city": "restricted"}},
+        ],
+    }
 
 
 @pytest.mark.django_db
