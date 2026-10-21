@@ -50,7 +50,7 @@ import itertools
 import re
 import sys
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_origin
 
 import pytest
 import strawberry
@@ -100,6 +100,8 @@ from django_strawberry_framework.mutations.inputs import (
     related_model_of_queryset,
     relation_id_annotation,
     relation_id_scalar,
+    relation_input_annotation,
+    relation_input_python_attr,
     require_queryset_related_model,
 )
 from django_strawberry_framework.registry import registry
@@ -116,6 +118,7 @@ from django_strawberry_framework.utils.inputs import (
     RELATION_SINGLE,
     SCALAR,
 )
+from django_strawberry_framework.utils.strings import graphql_camel_name
 from tests._idioms import module_binding
 from tests.optimizer import _link_models
 
@@ -622,6 +625,94 @@ def test_model_column_write_kind_classifies_relation_file_and_scalar() -> None:
     assert model_column_write_kind(MediaSpecimen._meta.get_field("attachment")) == FILE
     assert model_column_write_kind(book._meta.get_field("shelf")) == RELATION_SINGLE
     assert model_column_write_kind(book._meta.get_field("genres")) == RELATION_MULTI
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "name",
+        "rel_type",
+        "kind",
+    ),
+    [
+        pytest.param(
+            library_models.Branch,
+            "shelves",
+            "ManyToOneRel",
+            RELATION_MULTI,
+            id="rev-fk",
+        ),
+        pytest.param(
+            library_models.Branch,
+            "tags",
+            "GenericRelation",
+            RELATION_MULTI,
+            id="generic-relation",
+        ),
+        pytest.param(
+            library_models.Patron,
+            "card",
+            "OneToOneRel",
+            RELATION_SINGLE,
+            id="rev-o2o",
+        ),
+    ],
+)
+def test_model_column_write_kind_follows_relation_collection_shape(
+    model: type[models.Model],
+    name: str,
+    rel_type: str,
+    kind: str,
+) -> None:
+    """A one_to_many relation is collection-valued, so it classifies ``relation_multi``.
+
+    A reverse FK and a ``GenericRelation`` report ``many_to_many=False`` but
+    ``one_to_many=True``: their writer assigns a list of rows, so the shared classifier
+    answers ``relation_multi`` like a many-to-many. A reverse ``OneToOneRel`` reports
+    ``one_to_many=False`` and points at one row, so it stays ``relation_single``.
+    """
+    field = model._meta.get_field(name)
+    assert type(field).__name__ == rel_type
+    assert model_column_write_kind(field) == kind
+
+
+@pytest.mark.parametrize(
+    ("model", "name", "kind"),
+    [
+        pytest.param(library_models.Book, "shelf", RELATION_SINGLE, id="fwd-fk"),
+        pytest.param(library_models.Book, "genres", RELATION_MULTI, id="fwd-m2m"),
+        pytest.param(library_models.Branch, "shelves", RELATION_MULTI, id="rev-fk"),
+        pytest.param(library_models.Branch, "tags", RELATION_MULTI, id="generic-relation"),
+        pytest.param(library_models.Patron, "card", RELATION_SINGLE, id="rev-o2o"),
+    ],
+)
+def test_relation_input_shape_follows_the_write_kind_collection_rule(
+    model: type[models.Model],
+    name: str,
+    kind: str,
+) -> None:
+    """The input attr and list-vs-single annotation agree with ``model_column_write_kind``.
+
+    A collection-valued relation (``relation_multi``) keeps its plain name and a
+    ``list[<id>]`` annotation; a single-valued one takes ``<name>_id`` and one id. The
+    classifier owns which side is a collection, so the naming and annotation siblings
+    answer from it for every relation shape, the ``one_to_many`` ones included. The
+    annotation sibling takes a ``models.Field``, so it is read for the field-backed shapes
+    (the ``GenericRelation`` is the ``one_to_many`` one); a reverse ``*Rel`` is not one.
+    """
+    field = model._meta.get_field(name)
+    assert model_column_write_kind(field) == kind
+    multi = kind == RELATION_MULTI
+    expected_attr = name if multi else f"{name}_id"
+    assert relation_input_python_attr(field) == expected_attr
+    if isinstance(field, models.Field):
+        python_attr, graphql_name, annotation = relation_input_annotation(
+            field,
+            related_primary_type=None,
+        )
+        assert python_attr == expected_attr
+        assert graphql_name == graphql_camel_name(expected_attr)
+        assert (get_origin(annotation) is list) is multi
 
 
 def test_model_column_write_annotation_maps_file_and_scalar() -> None:

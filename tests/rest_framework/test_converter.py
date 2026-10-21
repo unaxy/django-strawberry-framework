@@ -71,6 +71,7 @@ from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.mutations.inputs import model_column_write_kind
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import serializer_converter
 from django_strawberry_framework.rest_framework.accessors import bound_fields
@@ -1034,14 +1035,14 @@ def test_single_pk_related_field_over_reverse_o2o_column_emits_single() -> None:
     """A single relation over a reverse OneToOneRel stays a single id input.
 
     A ``OneToOneRel`` reports ``one_to_many=False`` (it mirrors the forward field's
-    ``many_to_one``), so the guard's model classifier calls it single-valued: the
-    single spelling passes and the emitted kind stays ``relation_single`` - the
+    ``many_to_one``), so the shared column classifier the guard compares against calls it
+    single-valued: the single spelling passes and the emitted kind stays ``relation_single`` - the
     reverse-O2O sibling of the forward-FK shape.
     """
     _register_membership_card_primary()
     rel = library_models.Patron._meta.get_field("card")
     assert type(rel).__name__ == "OneToOneRel"
-    assert serializer_converter._model_relation_cardinality(rel) is False
+    assert model_column_write_kind(rel) == RELATION_SINGLE
 
     class PatronSer(ModelSerializerBase[library_models.Patron]):
         card: _PkRelation[library_models.MembershipCard] = serializers.PrimaryKeyRelatedField(
