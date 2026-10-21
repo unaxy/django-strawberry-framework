@@ -534,23 +534,25 @@ def _authenticated_actor_or_none(request: object) -> _User | None:
     """Return the request's authenticated actor, or ``None`` when anonymous.
 
     The ONE anonymity definition the session-auth surfaces share (spec-040
-    Decision 5 / Decision 7): a request with no ``user`` attribute
-    (SessionMiddleware without AuthenticationMiddleware, or a Channels adapter
-    whose scope carries no auth-middleware user) and a request whose ``user`` is
-    not authenticated both classify as anonymous. ``logout``'s ``ok`` flag and
-    ``current_user``'s nullable return both derive from this result
-    (``actor is not None`` / the actor itself) so the classification cannot drift
-    between the two fields.
+    Decision 5 / Decision 7). ``logout``'s ``ok`` flag and ``current_user``'s
+    nullable return both derive from this result (``actor is not None`` / the
+    actor itself) so the classification cannot drift between the two fields.
+
+    Anonymous: a request with no ``user`` attribute (SessionMiddleware without
+    AuthenticationMiddleware), a ``None`` user (a Channels adapter whose scope
+    carries no auth-middleware user), a user with no ``is_authenticated``
+    attribute, and a falsy ``is_authenticated``. ``getattr``'s default reads an
+    ``AttributeError`` from either attribute read as the attribute being absent.
 
     ``is_authenticated`` is the consumer user model's own attribute. The legacy
     callable form (pre-1.10 ``is_authenticated()``) is called and its result
     classifies, because a bound method is always truthy and would otherwise
-    authenticate every caller. A pending awaitable is neither true nor false:
-    it is disposed through the package's one awaitable disposal
-    (``utils/querysets.py::_disposed_awaitable`` - a coroutine is closed so no
-    "never awaited" warning leaks out of the resolver, a future is cancelled,
-    any other awaitable has no cleanup protocol) and read as anonymous, the
-    fail-closed answer. Whatever the attribute read, the
+    authenticate every caller. A pending awaitable, read directly or returned by
+    that call, is neither true nor false: it is disposed through the package's
+    one awaitable disposal (``utils/querysets.py::_disposed_awaitable`` - a
+    coroutine is closed so no "never awaited" warning leaks out of the resolver,
+    a future is cancelled, any other awaitable has no cleanup protocol) and read
+    as anonymous, the fail-closed answer. Anything else the attribute reads, the
     call, or the truthiness test raises propagates to the schema's error policy
     like any other consumer behaviour, and never classifies the request as
     anonymous.
