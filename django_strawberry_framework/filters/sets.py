@@ -2936,7 +2936,11 @@ class FilterSet(
         to an EMPTY field map on every later pass -- exactly the divergence the
         lazy-``RelatedFilter`` re-expansion exists to serve
         (``should_cache_expansion`` refuses the first cache write while a
-        string target is unresolved, so ``_build`` re-runs). The re-readability
+        string target is unresolved, so ``_build`` re-runs). ``Meta.exclude``
+        is consumed by membership (``f not in exclude`` once per field), so a
+        one-shot exclude is exhausted by the first test and every later field,
+        the excluded column included, becomes a filter, while a bare string
+        answers by substring; it passes the same gate. The re-readability
         contract is shared with the order family's ``_expand_meta_fields``
         through ``sets_mixins.py::require_re_readable_field_declaration``,
         applied here before the first consumption so the declaration fails
@@ -2981,6 +2985,16 @@ class FilterSet(
                 accepted=(
                     "'__all__', a lookup-bag dict, or a re-readable collection of field names"
                 ),
+            )
+        if options.exclude is not None:
+            # No ``str`` exemption: upstream reads ``exclude`` only by membership, so a
+            # string would exclude every field whose name is a substring of it.
+            require_re_readable_field_declaration(
+                cls,
+                options.exclude,
+                subject="FilterSet",
+                accepted="a re-readable collection of field names",
+                meta_attr="exclude",
             )
         # Upstream's field-name-to-lookups map (see the ``override`` note above).
         fields = cast("OrderedDict[str, object]", super().get_fields())
