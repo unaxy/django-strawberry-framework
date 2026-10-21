@@ -34,10 +34,13 @@ multi-table child's inherited pk name read as the child's parent link), and when
 any of them lives off the child's table (an M2M through table, a
 multi-table-inheritance parent that declares a ``GenericRelation`` child's
 generic foreign key or a column the child orders by) no single child-table index
-serves the page, so every such shape stays silent. The advisory is deferred until
-a strategy ACCEPTS a window (a refusing custom strategy advises nothing), and a
-bounded, strategy- and request-independent dedup makes one plan shape warn at
-most once even when a custom-``get_queryset`` plan is rebuilt every request.
+serves the page, so every such shape stays silent. A proxy target (or a proxy
+of a proxy) shares its concrete model's table but declares none of its indexes
+(``models.E016``), so coverage, the recommended model and the dedup key are all
+the concrete model's. The advisory is deferred until a strategy ACCEPTS a
+window (a refusing custom strategy advises nothing), and a bounded, strategy-
+and request-independent dedup makes one plan shape warn at most once even when
+a custom-``get_queryset`` plan is rebuilt every request.
 Package tier: the helpers operate on model ``_meta`` and a strategy-agnostic join
 descriptor, unreachable from a live /graphql query (no observable schema
 surface); the deferral is driven through an in-process schema.
@@ -49,8 +52,10 @@ opclass / GIN variants are PostgreSQL-only DDL no SQLite-migrated fakeshop model
 can declare; ``_IdxMtiTag*``, ``_IdxMti*`` and ``_IdxMtiNote*`` are the
 multi-table-inheritance shapes (a parent-declared generic link, a child-declared
 partition column over inherited columns, child-declared generic links) no
-fakeshop nested connection targets; they pin the covered / absent / unknown
-tri-state in
+fakeshop nested connection targets; ``_IdxGenTag*`` and their proxies are the
+generic-link targets whose concrete model alone declares the covering index,
+unique constraint or ``unique_together`` (no fakeshop ``GenericRelation``
+targets a proxy); they pin the covered / absent / unknown tri-state in
 ``django_strawberry_framework/optimizer/nested_planner.py::_index_coverage`` and
 the warning it gates in
 ``django_strawberry_framework/optimizer/nested_planner.py::_advise_composite_index``.
@@ -114,8 +119,9 @@ from django_strawberry_framework.optimizer.nested_planner import (
 )
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.utils._narrowing import list_of, require_instance
+from django_strawberry_framework.utils._narrowing import list_of, require, require_instance
 from django_strawberry_framework.utils.imports import import_attr_if_importable
+from django_strawberry_framework.utils.relations import is_model_class
 from tests._idioms import is_object_dict, is_object_list
 from tests._relation_fixtures import RpCompositeParent
 
@@ -638,6 +644,153 @@ class _IdxChildBareProxy(_IdxChildBare):
     class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
         app_label = "tests"
         proxy = True
+
+
+class _IdxGenTagBare(models.Model):
+    """Generic-link target whose metadata covers no ``(content_type_id, object_id, tag, id)`` window."""
+
+    content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
+        ContentType,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
+        models.PositiveIntegerField()
+    )
+    content_object = GenericForeignKey("content_type", "object_id")
+    tag: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "tests"
+        managed = False
+
+
+class _IdxGenTagIndexed(models.Model):
+    """Generic-link target whose ``Meta.indexes`` covers the ``(tag, id)`` window."""
+
+    content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
+        ContentType,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
+        models.PositiveIntegerField()
+    )
+    content_object = GenericForeignKey("content_type", "object_id")
+    tag: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "tests"
+        managed = False
+        indexes = [
+            models.Index(
+                fields=[
+                    "content_type",
+                    "object_id",
+                    "tag",
+                    "id",
+                ],
+            ),
+        ]
+
+
+class _IdxGenTagUnique(models.Model):
+    """Generic-link target whose ``UniqueConstraint`` covers the ``(tag, id)`` window."""
+
+    content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
+        ContentType,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
+        models.PositiveIntegerField()
+    )
+    content_object = GenericForeignKey("content_type", "object_id")
+    tag: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "tests"
+        managed = False
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "content_type",
+                    "object_id",
+                    "tag",
+                    "id",
+                ],
+                name="idx_gen_tag_unique_cover",
+            ),
+        ]
+
+
+class _IdxGenTagTogether(models.Model):
+    """Generic-link target whose ``unique_together`` covers the ``(tag, id)`` window."""
+
+    content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
+        ContentType,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
+        models.PositiveIntegerField()
+    )
+    content_object = GenericForeignKey("content_type", "object_id")
+    tag: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "tests"
+        managed = False
+        unique_together = [
+            (
+                "content_type",
+                "object_id",
+                "tag",
+                "id",
+            ),
+        ]
+
+
+def _proxy_of(model: type[models.Model], name: str) -> type[models.Model]:
+    """A proxy model over ``model``, sharing its table.
+
+    Django keeps ``Meta.indexes`` / ``constraints`` / ``unique_together`` only on
+    the declaring class, and ``models.E016`` refuses a proxy declaring any, so a
+    proxy's own metadata is always empty however the table is indexed.
+    """
+    meta = type("Meta", (), {"app_label": "tests", "proxy": True})
+    return require(type(name, (model,), {"__module__": __name__, "Meta": meta}), is_model_class)
+
+
+_IdxGenTagBareProxy = _proxy_of(_IdxGenTagBare, "_IdxGenTagBareProxy")
+_IdxGenTagBareProxyProxy = _proxy_of(_IdxGenTagBareProxy, "_IdxGenTagBareProxyProxy")
+_IdxGenTagIndexedProxy = _proxy_of(_IdxGenTagIndexed, "_IdxGenTagIndexedProxy")
+_IdxGenTagIndexedProxyProxy = _proxy_of(_IdxGenTagIndexedProxy, "_IdxGenTagIndexedProxyProxy")
+_IdxGenTagUniqueProxy = _proxy_of(_IdxGenTagUnique, "_IdxGenTagUniqueProxy")
+_IdxGenTagUniqueProxyProxy = _proxy_of(_IdxGenTagUniqueProxy, "_IdxGenTagUniqueProxyProxy")
+_IdxGenTagTogetherProxy = _proxy_of(_IdxGenTagTogether, "_IdxGenTagTogetherProxy")
+_IdxGenTagTogetherProxyProxy = _proxy_of(_IdxGenTagTogetherProxy, "_IdxGenTagTogetherProxyProxy")
+
+
+class _IdxGenTagHolder(models.Model):
+    """Parent whose ``GenericRelation`` fields target each generic-link model and its proxies."""
+
+    bare = GenericRelation(_IdxGenTagBare)
+    bare_proxy = GenericRelation(_IdxGenTagBareProxy)
+    bare_proxy_proxy = GenericRelation(_IdxGenTagBareProxyProxy)
+    indexed = GenericRelation(_IdxGenTagIndexed)
+    indexed_proxy = GenericRelation(_IdxGenTagIndexedProxy)
+    indexed_proxy_proxy = GenericRelation(_IdxGenTagIndexedProxyProxy)
+    unique = GenericRelation(_IdxGenTagUnique)
+    unique_proxy = GenericRelation(_IdxGenTagUniqueProxy)
+    unique_proxy_proxy = GenericRelation(_IdxGenTagUniqueProxyProxy)
+    together = GenericRelation(_IdxGenTagTogether)
+    together_proxy = GenericRelation(_IdxGenTagTogetherProxy)
+    together_proxy_proxy = GenericRelation(_IdxGenTagTogetherProxyProxy)
+
+    class Meta:
+        app_label = "tests"
+        managed = False
 
 
 def _meta(model: type[models.Model]) -> "Options[models.Model]":
@@ -1833,6 +1986,80 @@ class TestAdvisoryReadsChildTableColumns:
     ) -> None:
         """A column on a parent table: no child-table index serves the page."""
         assert not _composite_index_advisories(relation, order_by, caplog)
+
+
+class TestAdvisoryReadsTheTableOwningModel:
+    """A proxy target's window is inspected, named and deduplicated as its concrete model's.
+
+    A proxy shares its concrete model's table but declares none of its indexes
+    (``models.E016``), so the advisory reads coverage from the concrete model's
+    ``Meta.indexes``, ``UniqueConstraint`` and ``unique_together``, names the
+    concrete model (where the index can be declared) and keys its dedup on it, so
+    one table warns once whichever of its models the relation targets.
+    """
+
+    @override_settings(DEBUG=True)
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "indexed",
+            "indexed_proxy",
+            "indexed_proxy_proxy",
+            "unique",
+            "unique_proxy",
+            "unique_proxy_proxy",
+            "together",
+            "together_proxy",
+            "together_proxy_proxy",
+        ],
+    )
+    def test_concrete_model_cover_is_silent(
+        self,
+        name: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The concrete model's covering metadata silences its own and its proxies' windows."""
+        relation = _relation(_IdxGenTagHolder, name)
+        assert not _composite_index_advisories(relation, ["tag", "id"], caplog)
+
+    @override_settings(DEBUG=True)
+    @pytest.mark.parametrize("name", ["bare_proxy", "bare_proxy_proxy"])
+    def test_uncovered_proxy_names_the_concrete_model(
+        self,
+        name: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An uncovered proxy window recommends the index on the concrete model."""
+        relation = _relation(_IdxGenTagHolder, name)
+        advisories = _composite_index_advisories(relation, ["tag", "id"], caplog)
+        assert len(advisories) == 1
+        assert "nested connection on tests._IdxGenTagBare has " in advisories[0]
+        assert "composite index on (content_type_id, object_id, tag, id) " in advisories[0]
+
+    @override_settings(DEBUG=True)
+    @pytest.mark.parametrize(
+        "names",
+        [
+            pytest.param(("bare", "bare_proxy"), id="concrete-then-proxy"),
+            pytest.param(("bare_proxy", "bare"), id="proxy-then-concrete"),
+            pytest.param(("bare_proxy", "bare_proxy_proxy"), id="proxy-then-proxy-of-proxy"),
+        ],
+    )
+    def test_proxy_and_concrete_share_one_advisory(
+        self,
+        names: tuple[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """One uncovered table warns once across its concrete model and its proxies."""
+        advisories: list[str] = []
+        for name in names:
+            # Every record captured so far, so the last read spans both windows.
+            advisories = _composite_index_advisories(
+                _relation(_IdxGenTagHolder, name),
+                ["tag", "id"],
+                caplog,
+            )
+        assert len(advisories) == 1
 
 
 @pytest.mark.django_db
