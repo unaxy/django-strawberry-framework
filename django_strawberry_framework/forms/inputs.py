@@ -570,9 +570,13 @@ def require_readable_choice_keys(
         if not is_model_class(model):
             continue
         try:
-            concrete = model._meta.get_field(key).concrete
+            target = model._meta.get_field(key)
         except FieldDoesNotExist:
             concrete = False
+        else:
+            # Django 5.2 counts a many-to-many field concrete (it carries a column name);
+            # 6.0 does not. Either way it is no column of the target's row.
+            concrete = target.concrete and not target.many_to_many
         if not concrete:
             raise ConfigurationError(
                 f"DjangoFormMutation for {truth.name(form_class)}: field {name!r} sets "
