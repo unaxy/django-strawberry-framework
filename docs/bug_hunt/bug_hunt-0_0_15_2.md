@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 197 done, 137 to do.
+Progress: 198 done, 137 to do.
 
 ## Done
 
@@ -780,6 +780,9 @@ Progress: 197 done, 137 to do.
 - [x] 337. `utils/querysets.py::_prefetch_path_or_defect` refused with "prefetch path is not an exact str" / "prefetch
   to_attr is not an exact str or None" while its `is_str` guard admits a `str` subclass: fixed: the messages say "is not
   a str" / "is not a str or None"; the three pinned tests in `tests/utils/test_querysets.py` move with them (411 passed)
+- [x] 338. BACKLOG.md carried the unused link definition `[card-full-relay-story-node-connection-root-validation]`:
+  fixed: the definition is dropped; the LINK DEFINITIONS block has no unused or undefined reference and keeps its ten
+  group headers
 
 ## Outside review of the fixes
 
