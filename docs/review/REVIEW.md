@@ -365,20 +365,21 @@ out of scope and no gate, `resume` appends the run w/ that line, both print `not
 Worker-0 reports and stops. `scope` lists the same changes for reading: committed w/ their `HEAD`
 blob ids, dirty or untracked (concurrent work), renames, each path w/ the item covering it (a
 module its file item, a folder's `__init__.py` that folder's integration item, the package-root
-`__init__.py` the project item). `plan` writes the plan: one file item per module minus
-`__init__.py`, one folder item per package folder carrying that folder's `__init__.py` on its
-`Init files:` line, the project item carrying the package-root `__init__.py`, the final gate, and
-`## Out of scope this run` for everything the scope leaves out. `--scope` also takes a folder's
-`__init__.py` (that folder item) or the package-root `__init__.py` (the project item, otherwise in
-scope only for the whole package). On an existing plan `plan` refuses and names `resume`; `--force`
-replaces a plan only while its `## Owned changes` and `## Outcomes` hold nothing beyond the
-generated text. `reconcile` is read-only and exits 1 when the plan and the inventory disagree: a
-`.py` w/o an item, an item whose file is gone or renamed, a folder w/o an item, an `__init__.py`
-missing from, misplaced on or gone from an `Init files:` line, an item whose status needs artifacts
-that are missing. It reports untracked `.py` files too, while `plan` and `resume` itemize tracked
-files only: a new module gets its item once it is `git add`-ed, and an untracked one no ledger row
-names is concurrent work. It checks no fingerprint and no `HEAD` drift (it reads `HEAD` only to
-spot renames); those are Worker-0's checks below.
+`__init__.py` the project item; a committed path that no longer exists, its nearest surviving
+folder's integration item, else the project item, as `--changed` takes it). `plan` writes the
+plan: one file item per module minus `__init__.py`, one folder item per package folder carrying
+that folder's `__init__.py` on its `Init files:` line, the project item carrying the package-root
+`__init__.py`, the final gate, and `## Out of scope this run` for everything the scope leaves out.
+`--scope` also takes a folder's `__init__.py` (that folder item) or the package-root `__init__.py`
+(the project item, otherwise in scope only for the whole package). On an existing plan `plan`
+refuses and names `resume`; `--force` replaces a plan only while its `## Owned changes` and
+`## Outcomes` hold nothing beyond the generated text. `reconcile` is read-only and exits 1 when the
+plan and the inventory disagree: a `.py` w/o an item, an item whose file is gone or renamed, a
+folder w/o an item, an `__init__.py` missing from, misplaced on or gone from an `Init files:` line,
+an item whose status needs artifacts that are missing. It reports untracked `.py` files too, while
+`plan` and `resume` itemize tracked files only: a new module gets its item once it is `git add`-ed,
+and an untracked one no ledger row names is concurrent work. It checks no fingerprint and no `HEAD`
+drift (it reads `HEAD` only to spot renames); those are Worker-0's checks below.
 
 Plan header: `Status: planned | in-progress | complete | partial (<scope>) | blocked`;
 `Mode: autonomous | pause-after-each-item`; `Run: <release> <date>-<n>` (repeated on every

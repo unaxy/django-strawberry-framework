@@ -58,8 +58,11 @@ settings are loaded.
     (concurrent work, with working-tree ``git hash-object`` ids), and renames.
     Every path names the plan item that covers it: a module its own file item,
     a folder's ``__init__.py`` that folder's integration item, the
-    package-root ``__init__.py`` the project item. ``--json`` emits the same
-    data machine-readably.
+    package-root ``__init__.py`` the project item. A committed path that no
+    longer exists names its nearest surviving folder's integration item, else
+    the project item, and ``Folders touched`` counts that folder and every
+    rename's old folder, as ``--changed`` does. ``--json`` emits the same data
+    machine-readably.
 
 ``reconcile --plan PATH``
     Read-only. Compare a plan's items with the current inventory and report
@@ -94,7 +97,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Container, Iterable, Sequence
 
 try:
     import _plan_common
@@ -276,6 +279,24 @@ def _covering_item(path: str) -> str:
     return _init_owner(relative) if _is_init(relative) else relative
 
 
+def _changed_folder(path: str, present: Container[str], folders: Container[str]) -> str:
+    """Return the package-relative folder a changed path is worked under, ``""`` for the root."""
+    folder = _package_relative(path).rpartition("/")[0]
+    if path in present:
+        return folder
+    while folder and folder not in folders:
+        folder = folder.rpartition("/")[0]
+    return folder
+
+
+def _changed_item(path: str, present: Container[str], folders: Container[str]) -> str:
+    """Return the label of the item covering a changed path that may no longer exist."""
+    if path in present:
+        return _covering_item(path)
+    folder = _changed_folder(path, present, folders)
+    return f"{folder}{FOLDER_SUFFIX}" if folder else PROJECT_LABEL
+
+
 def _init_field(root: Path, relatives: Sequence[str]) -> str:
     """Render the ``Init files:`` line naming each ``__init__.py`` and its definitions."""
     entries: list[str] = []
@@ -433,15 +454,10 @@ def _changed_scope(root: Path, since: str | None, tracked: Iterable[str]) -> _Ch
             paths.extend((str(entry["old"]), str(entry["new"])))
     labels: set[str] = set()
     for path in paths:
-        folder = _package_relative(path).rpartition("/")[0]
-        if path in present:
-            labels.add(_covering_item(path))
-            if folder and not _is_init(path):
-                labels.add(f"{folder}{FOLDER_SUFFIX}")
-            continue
-        while folder and folder not in folders:
-            folder = folder.rpartition("/")[0]
-        labels.add(f"{folder}{FOLDER_SUFFIX}" if folder else PROJECT_LABEL)
+        labels.add(_changed_item(path, present, folders))
+        folder = _changed_folder(path, present, folders)
+        if path in present and folder and not _is_init(path):
+            labels.add(f"{folder}{FOLDER_SUFFIX}")
     return _Changed(since=report.since, since_sha=report.since_sha, labels=frozenset(labels))
 
 
@@ -1049,12 +1065,23 @@ class ScopeReport:
     committed: list[dict[str, object]] = field(default_factory=list)
     dirty: list[dict[str, object]] = field(default_factory=list)
     renames: list[dict[str, object]] = field(default_factory=list)
+    tracked: frozenset[str] = frozenset()
 
     def folders(self) -> list[str]:
-        """Return the package-relative folders any changed path sits in."""
-        paths: list[str] = [str(entry["path"]) for entry in (*self.committed, *self.dirty)]
-        paths.extend(str(entry["new"]) for entry in self.renames)
-        folders = {_package_relative(path).rpartition("/")[0] for path in paths}
+        """Return the package-relative folders the changed paths are worked under.
+
+        A committed path or a rename's old or new path that no longer exists counts its
+        nearest surviving folder, else the package root; a dirty path counts its own folder.
+        """
+        present = self.tracked
+        known = set(_package_folders(present))
+        paths = [str(entry["path"]) for entry in self.committed]
+        for entry in self.renames:
+            paths.extend((str(entry["old"]), str(entry["new"])))
+        folders = {_changed_folder(path, present, known) for path in paths}
+        folders.update(
+            _package_relative(str(entry["path"])).rpartition("/")[0] for entry in self.dirty
+        )
         return sorted(f"{folder}/" if folder else "(package root)" for folder in folders)
 
     def as_dict(self) -> dict[str, object]:
@@ -1139,7 +1166,9 @@ def build_scope(root: Path, since: str | None) -> ScopeReport:
         since=base,
         since_sha=_git(root, "rev-parse", "--verify", f"{base}^{{commit}}").strip(),
         head_sha=_git(root, "rev-parse", "HEAD").strip(),
+        tracked=frozenset(_tracked_python(root)),
     )
+    folders = set(_package_folders(report.tracked))
     diff = _git(
         root,
         "diff",
@@ -1172,7 +1201,7 @@ def build_scope(root: Path, since: str | None) -> ScopeReport:
                     "similarity": code,
                     "where": "committed",
                     "blob": head_blobs.get(target),
-                    "item": _covering_item(target),
+                    "item": _changed_item(target, report.tracked, folders),
                 },
             )
             continue
@@ -1182,7 +1211,7 @@ def build_scope(root: Path, since: str | None) -> ScopeReport:
                 "path": path,
                 "blob": head_blobs.get(path),
                 "init": _is_init(path),
-                "item": _covering_item(path),
+                "item": _changed_item(path, report.tracked, folders),
                 "also_dirty": path in dirty_paths,
             },
         )

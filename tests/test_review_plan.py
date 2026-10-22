@@ -433,6 +433,155 @@ def test_changed_scope_covers_deleted_and_renamed_away_paths(
     assert changed.labels == expected
 
 
+@pytest.mark.parametrize(
+    (
+        "removed",
+        "renamed",
+        "modified",
+        "where",
+        "folders",
+        "items",
+    ),
+    [
+        pytest.param(
+            ("sub/beta.py",),
+            None,
+            (),
+            "committed",
+            ["sub/"],
+            {"sub/beta.py": "sub/ integration"},
+            id="delete-module",
+        ),
+        pytest.param(
+            ("sub/__init__.py",),
+            None,
+            (),
+            "committed",
+            ["sub/"],
+            {"sub/__init__.py": "sub/ integration"},
+            id="delete-sub-init-only",
+        ),
+        pytest.param(
+            ("sub/deep/gamma.py",),
+            None,
+            (),
+            "committed",
+            ["sub/"],
+            {"sub/deep/gamma.py": "sub/ integration"},
+            id="delete-subpackage-to-ancestor",
+        ),
+        pytest.param(
+            ("sub/__init__.py", "sub/beta.py", "sub/deep/gamma.py"),
+            None,
+            (),
+            "committed",
+            ["(package root)"],
+            {
+                "sub/__init__.py": "Project integration",
+                "sub/beta.py": "Project integration",
+                "sub/deep/gamma.py": "Project integration",
+            },
+            id="delete-subpackage-to-project",
+        ),
+        pytest.param(
+            ("alpha.py",),
+            None,
+            (),
+            "committed",
+            ["(package root)"],
+            {"alpha.py": "Project integration"},
+            id="delete-root-module",
+        ),
+        pytest.param(
+            (),
+            ("sub/beta.py", "sub/deep/beta.py"),
+            (),
+            "committed",
+            ["sub/", "sub/deep/"],
+            {"sub/deep/beta.py": "sub/deep/beta.py"},
+            id="rename-across-folders",
+        ),
+        pytest.param(
+            (),
+            ("sub/deep/gamma.py", "gamma.py"),
+            (),
+            "committed",
+            ["(package root)", "sub/"],
+            {"gamma.py": "gamma.py"},
+            id="rename-out-of-a-vanished-folder",
+        ),
+        pytest.param(
+            (),
+            None,
+            ("sub/beta.py",),
+            "committed",
+            ["sub/"],
+            {"sub/beta.py": "sub/beta.py"},
+            id="modify-control",
+        ),
+        pytest.param(
+            (),
+            ("sub/beta.py", "sub/deep/beta.py"),
+            (),
+            "index",
+            ["sub/", "sub/deep/"],
+            {"sub/deep/beta.py": "sub/deep/beta.py"},
+            id="staged-rename-across-folders",
+        ),
+        pytest.param(
+            (),
+            ("sub/deep/gamma.py", "gamma.py"),
+            (),
+            "index",
+            ["(package root)", "sub/"],
+            {"gamma.py": "gamma.py"},
+            id="staged-rename-out-of-a-vanished-folder",
+        ),
+    ],
+)
+def test_scope_resolves_deleted_and_renamed_paths_like_changed(
+    repo: Path,
+    removed: tuple[str, ...],
+    renamed: tuple[str, str] | None,
+    modified: tuple[str, ...],
+    where: str,
+    folders: list[str],
+    items: dict[str, str],
+) -> None:
+    _git(repo, "tag", "0.1.1")
+    package = repo / PACKAGE
+    for relative in removed:
+        (package / relative).unlink()
+    if renamed is not None:
+        old, new = renamed
+        (package / new).parent.mkdir(parents=True, exist_ok=True)
+        _git(repo, "mv", f"{PACKAGE}/{old}", f"{PACKAGE}/{new}")
+    for relative in modified:
+        _write(package / relative, "MODIFIED = 1\n")
+    if where == "committed":
+        _commit_all(repo, "change")
+
+    report = review_plan.build_scope(repo, "0.1.1")
+
+    assert report.folders() == folders
+    assert f"Folders touched: {', '.join(folders)}" in review_plan._render_scope(report)
+    assert [(entry["old"], entry["new"], entry["where"]) for entry in report.renames] == (
+        [(f"{PACKAGE}/{renamed[0]}", f"{PACKAGE}/{renamed[1]}", where)] if renamed else []
+    )
+    resolved = {str(entry["path"]): entry["item"] for entry in report.committed}
+    resolved.update((str(entry["new"]), entry["item"]) for entry in report.renames)
+    assert resolved == {f"{PACKAGE}/{path}": item for path, item in items.items()}
+    if where == "index":
+        return
+    changed = review_plan._changed_scope(repo, "0.1.1", review_plan._tracked_python(repo))
+    assert set(items.values()) <= changed.labels
+    touched = {
+        "Project integration" if folder == "(package root)" else f"{folder} integration"
+        for folder in folders
+    }
+    assert {label for label in changed.labels if label.endswith("integration")} <= touched
+
+
 def test_plan_changed_works_a_deletion_only_change(repo: Path, tmp_path: Path) -> None:
     _git(repo, "tag", "0.1.1")
     (repo / PACKAGE / "sub" / "beta.py").unlink()
