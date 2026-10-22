@@ -4,7 +4,7 @@ The flavor-neutral owner of the per-value write checks every write flavor
 runs at decode time (promoted from ``mutations/resolvers.py`` so the model
 mutation resolver is not the utility module for the other write flavors):
 
-- ``unencodable_text_error`` - the invalid-Unicode storability preflight;
+- ``unstorable_text_error`` - the text storability preflight (lone surrogate, NUL);
 - ``raw_choice_value`` - choice-enum member unwrapping;
 - ``coerce_relation_pk_or_none`` - raw relation-pk coercion;
 - ``type_check_relation_id`` - the structural relation-id check;
@@ -26,6 +26,8 @@ from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
+from django.core.exceptions import ValidationError
+from django.core.validators import ProhibitNullCharactersValidator
 from strawberry import relay
 
 from . import truth
@@ -73,23 +75,35 @@ if TYPE_CHECKING:
     _RelationDecoder: TypeAlias = Callable[..., tuple[object, FieldError | None]]
 
 
-def unencodable_text_error(field_name: str, value: object) -> FieldError | None:
-    r"""Reject an input value holding text that cannot be encoded for storage (lone surrogate).
+def unstorable_text_error(field_name: str, value: object) -> FieldError | None:
+    r"""Reject an input value holding text the package refuses to store (lone surrogate, NUL).
 
     A GraphQL ``String`` (and every string inside a list or ``JSON`` value) can carry
-    lone UTF-16 surrogate code points (e.g. U+D800 via a JSON ``\ud800`` escape in the
-    request variables) that are not valid Unicode scalar values and cannot be encoded
-    to UTF-8. Such a value would otherwise reach a DB-bound operation -
-    ``validate_unique()``'s lookup query (a unique column) or ``save()``'s INSERT (a
-    text, array-of-text or ``hstore`` column, or a consumer write of the decoded
-    value) - where the backend raises a raw ``UnicodeEncodeError``. That is a
-    ``ValueError`` the resolver does NOT map (it is neither the ``ValidationError``
-    ``full_clean`` raises nor the ``IntegrityError`` ``save`` raises), so it escapes
-    as a top-level GraphQL error with ``data: null`` instead of the field-keyed
-    envelope. Reject it HERE, at decode, before any DB-bound work, as a
-    ``FieldError`` (the same in-band envelope every other input failure returns), so
-    neither the unique-field ``validate_unique`` path nor the plain ``save`` path can
-    leak the raw exception.
+    two kinds of text no write may reach the database with:
+
+    - a lone UTF-16 surrogate code point (e.g. U+D800 via a JSON ``\ud800`` escape in
+      the request variables), which is not a valid Unicode scalar value and cannot be
+      encoded to UTF-8, so the backend raises a raw ``UnicodeEncodeError`` binding it;
+    - an embedded NUL (U+0000, a JSON ``\u0000`` escape), which PostgreSQL refuses in
+      every ``text`` / ``varchar`` / ``jsonb`` value (psycopg raises ``DataError``).
+      SQLite would store it, so the refusal is policy, not storability: it is Django's
+      and DRF's own all-backend rule (every ``forms.CharField`` and DRF ``CharField``
+      runs ``ProhibitNullCharactersValidator``), applied on every backend so a write
+      answers the same everywhere and a model-flavor write answers what a ``ModelForm``
+      or serializer one already does.
+
+    Either would otherwise reach a DB-bound operation - ``validate_unique()``'s lookup
+    query (a unique column) or ``save()``'s INSERT (a text, array-of-text, ``jsonb`` or
+    ``hstore`` column, or a consumer write of the decoded value) - and the backend's
+    error is neither the ``ValidationError`` ``full_clean`` raises nor the
+    ``IntegrityError`` ``save`` raises, so it escapes as a top-level GraphQL error with
+    ``data: null`` instead of the field-keyed envelope. Reject it HERE, at decode,
+    before any DB-bound work, as a ``FieldError`` (the same in-band envelope every other
+    input failure returns): a lone surrogate as the ``invalid`` "Text contains invalid
+    Unicode" error, a NUL as Django's own ``ProhibitNullCharactersValidator`` error
+    (``"Null characters are not allowed."``, code ``null_characters_not_allowed``,
+    run through that validator so its message and code are the ones the form and
+    serializer fields answer).
 
     Every text leaf of the value is checked, not only a top-level string: each element
     of a list and each key and value of a dict, at any depth (an explicit stack, so a
@@ -97,32 +111,25 @@ def unencodable_text_error(field_name: str, value: object) -> FieldError | None:
     to the leaf's dotted path under ``field_name`` (``tags.1``, ``attributes.color``,
     ``rows.0.name``), the same indexed grammar a nested serializer error uses; an
     unstorable dict KEY keys to the dict itself, since a path segment holding the key
-    would echo the unencodable text back in the error envelope. Containers are read
-    through the base ``list`` / ``dict`` slots, so a subclass's overridden iteration
-    cannot hide a leaf. The base ``str``'s ``encode("utf-8")`` is the universal
-    storability test: a lone surrogate fails it, while every valid scalar value
-    (including an embedded ``NUL``) passes, so this rejects ONLY genuinely unstorable
-    text. Any other leaf (an int, a ``None``, a choice enum, an upload) is passed
-    through unchanged. A ``JSON`` value is held to the same rule as a top-level string
-    rather than trusted to its column: whether a JSON column stores an escaped lone
-    surrogate depends on the backend and on the field's encoder (one dumping with
-    ``ensure_ascii=False`` cannot encode it), so the decode refuses it on every
-    backend. A relation id's coerced pk is held to the same rule
+    would echo the refused text back in the error envelope. Containers are read
+    through the base ``list`` / ``dict`` slots, and a string through the base ``str``
+    slot, so a subclass's overridden iteration or conversion cannot hide a leaf. Any
+    other leaf (an int, a ``None``, a choice enum, an upload) is passed through
+    unchanged. A ``JSON`` value is held to the same rule as a top-level string rather
+    than trusted to its column: whether a JSON column stores an escaped lone surrogate
+    or NUL depends on the backend and on the field's encoder, so the decode refuses
+    both on every backend. A relation id's coerced pk meets this check too
     (``type_check_relation_id``), since a text-keyed target binds it into the existence
-    query.
+    query; a NUL-bearing text id never reaches it, because the id coercion
+    (``querysets.py::coerce_field_value_or_none``) already answers it as naming no row.
     """
     pending: list[tuple[str, object]] = [(field_name, value)]
     while pending:
         path, current = pending.pop()
         if isinstance(current, str):
-            try:
-                _ = str.__str__(current).encode("utf-8")
-            except UnicodeEncodeError:
-                return field_error(
-                    path,
-                    "Text contains invalid Unicode (unpaired surrogate code points).",
-                    codes=FIELD_ERROR_CODE_INVALID,
-                )
+            error = _unstorable_text_leaf_error(path, str.__str__(current))
+            if error is not None:
+                return error
         elif is_list(current):
             pending.extend(
                 reversed(
@@ -143,6 +150,28 @@ def unencodable_text_error(field_name: str, value: object) -> FieldError | None:
                     ],
                 ),
             )
+    return None
+
+
+#: Django's all-backend NUL rule, the validator every ``forms.CharField`` and DRF
+#: ``CharField`` runs; its error is the one a refused NUL answers on every write flavor.
+_PROHIBIT_NULL_CHARACTERS = ProhibitNullCharactersValidator()
+
+
+def _unstorable_text_leaf_error(path: str, text: str) -> FieldError | None:
+    """Answer one base-``str`` text leaf's refusal keyed to ``path``, or ``None`` if storable."""
+    try:
+        _ = text.encode("utf-8")
+    except UnicodeEncodeError:
+        return field_error(
+            path,
+            "Text contains invalid Unicode (unpaired surrogate code points).",
+            codes=FIELD_ERROR_CODE_INVALID,
+        )
+    try:
+        _PROHIBIT_NULL_CHARACTERS(text)
+    except ValidationError as exc:
+        return field_error(path, exc.messages, codes=[leaf.code for leaf in exc.error_list])
     return None
 
 
@@ -235,14 +264,16 @@ def type_check_relation_id(
     (``None`` -> the uniform error) and never reads ``info``.
 
     The coerced pk is then held to the text storability preflight
-    (``unencodable_text_error``) before any caller binds it into an existence query: a
+    (``unstorable_text_error``) before any caller binds it into an existence query: a
     lone surrogate in the id of a text-keyed target coerces cleanly through the
     target's text pk field, and the query would raise a raw backend
     ``UnicodeEncodeError``. It is the same field-keyed ``invalid`` error a scalar text
     leaf gets, keyed to ``graphql_name`` (``editionId``), or to the element's
     ``graphql_name.<index>`` path (``boundWith.1``) when ``index`` names its position
     in a relation-id list. A pk coerced to a non-text value (an int, a UUID) passes
-    through it unchanged.
+    through it unchanged. An embedded NUL never reaches it: the coercion
+    (``querysets.py::coerce_field_value_or_none``) answers a NUL-bearing text id as
+    naming no row, so it is the uniform relation error, raw pk and ``GlobalID`` alike.
 
     The ``decode_model_global_id`` / ``GlobalIDDecode`` import is function-local:
     the package's ``relay`` module imports ``utils.querysets`` at module level, so
@@ -264,7 +295,7 @@ def type_check_relation_id(
         pk = coerce_relation_pk_or_none(related_model, value)
         if pk is None:
             return None, relation_field_error(graphql_name)
-    text_error = unencodable_text_error(_relation_id_error_path(graphql_name, index), pk)
+    text_error = unstorable_text_error(_relation_id_error_path(graphql_name, index), pk)
     if text_error is not None:
         return None, text_error
     return pk, None
@@ -280,18 +311,18 @@ def decode_scalar_leaf(graphql_name: str, value: object) -> tuple[object, FieldE
 
     The two-step compose every write flavor runs on a provided scalar value -
     ``raw_choice_value`` (a choice-enum member unwrapped to the raw Django choice
-    value) then ``unencodable_text_error`` (an unstorable lone surrogate anywhere in
-    the value - a list element, a ``JSON`` key or value - is a ``FieldError`` keyed to
-    its path at decode, never a raw backend ``UnicodeEncodeError`` at ``save()``).
-    Unwrapping MUST happen first because an enum member is not itself a string while
-    its storage value can be one; a preflight over the member would miss an
-    invalid-Unicode choice value. This owns the compose so a fourth flavor cannot
+    value) then ``unstorable_text_error`` (a lone surrogate or an embedded NUL anywhere
+    in the value - a list element, a ``JSON`` key or value - is a ``FieldError`` keyed
+    to its path at decode, never a raw backend ``UnicodeEncodeError`` / ``DataError``
+    at ``save()``). Unwrapping MUST happen first because an enum member is not itself
+    a string while its storage value can be one; a preflight over the member would
+    miss an unstorable choice value. This owns the compose so a fourth flavor cannot
     mis-order it. Returns ``(decoded, None)`` on success or ``(None, FieldError)``.
     Flavor-specific scalar steps (the model path's explicit-null rejection and
     naive-datetime coercion) stay at the call site, composed around this leaf.
     """
     decoded = raw_choice_value(value)
-    error = unencodable_text_error(graphql_name, decoded)
+    error = unstorable_text_error(graphql_name, decoded)
     if error is not None:
         return None, error
     return decoded, None
@@ -469,7 +500,7 @@ def decode_visible_relation_ids(
                 return None, relation_field_error(graphql_name)
             # The coerced id is bound into the batched NodeID query below, so it meets the
             # same text preflight ``type_check_relation_id`` holds a raw pk to.
-            text_error = unencodable_text_error(
+            text_error = unstorable_text_error(
                 _relation_id_error_path(graphql_name, index),
                 intermediate.pk,
             )

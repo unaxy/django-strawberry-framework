@@ -2291,6 +2291,53 @@ def test_create_unencodable_text_nested_in_a_json_value_is_field_error_before_sa
     assert not scalars_models.ScalarSpecimen.objects.filter(label="spec-surrogate-json").exists()
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("payload", "error_field"),
+    [({"tags": ["ok", "a\x00b"]}, "payload.tags.1"), ({"co\x00lor": "red"}, "payload")],
+    ids=["json-value", "json-key"],
+)
+def test_create_nul_in_a_json_value_is_field_error_before_save(
+    payload: dict[str, object],
+    error_field: str,
+) -> None:
+    r"""A NUL in a ``JSONField`` value or key is the null-character decode error; no row.
+
+    PostgreSQL's ``jsonb`` refuses ``\u0000`` in a string or a key, so the model flavor
+    refuses it at decode on every backend: a value keyed to its path, a key to the dict.
+    """
+    schema, CreateSpec = _build_scalar_specimen_schema()
+    assert CreateSpec._input_class is not None
+    input_name = CreateSpec._input_class.__name__
+    res = schema.execute_sync(
+        f"mutation($d: {input_name}!){{ createSpec(data:$d){{ node{{ id }} "
+        "errors{ field messages codes } } }",
+        variable_values={
+            "d": {
+                "label": "spec-nul-json",
+                "occurredOn": "2024-01-01",
+                "occurredAt": "2024-01-01T12:00:00+00:00",
+                "occurredTime": "12:00:00",
+                "externalId": _SPEC_UUID,
+                "payload": payload,
+            },
+        },
+    )
+    assert res.errors is None, res.errors
+    assert res.data is not None
+    assert res.data["createSpec"] == {
+        "node": None,
+        "errors": [
+            {
+                "field": error_field,
+                "messages": ["Null characters are not allowed."],
+                "codes": ["null_characters_not_allowed"],
+            },
+        ],
+    }
+    assert not scalars_models.ScalarSpecimen.objects.filter(label="spec-nul-json").exists()
+
+
 # ---------------------------------------------------------------------------
 # Scalar field named ``<x>_id`` regression (spec-036)
 #

@@ -55,7 +55,7 @@ from django_strawberry_framework.utils.write_values import (
     relation_into,
     scalar_into,
     store_decoded,
-    unencodable_text_error,
+    unstorable_text_error,
 )
 from tests._idioms import module_binding, saved_pk
 from tests._info import make_info, unread_info
@@ -337,6 +337,24 @@ def test_decode_scalar_leaf_normalizes_string_subclass_after_preflight() -> None
     assert decoded == "valid"
 
 
+def test_decode_scalar_leaf_refuses_a_nul_hidden_by_a_string_subclass() -> None:
+    """The NUL check reads the base ``str``, so a subclass's ``__contains__`` cannot hide one."""
+
+    class HidingText(str):
+        @override
+        def __contains__(self, key: object) -> bool:
+            return False
+
+    decoded, error = decode_scalar_leaf("name", HidingText("a\x00b"))
+    assert decoded is None
+    assert error is not None
+    assert (error.field, error.messages, error.codes) == (
+        "name",
+        ["Null characters are not allowed."],
+        ["null_characters_not_allowed"],
+    )
+
+
 class _Flag(Enum):
     BLANK = ""
     on = "on"
@@ -416,19 +434,22 @@ class _HidingDict(dict[object, object]):
         ({"rows": _HidingList(["\ud800"])}, "tags.rows.0"),
         (_HidingDict({"color": "\ud800"}), "tags.color"),
         ([_HidingDict({"\ud800": "red"})], "tags.0"),
+        (_HidingList(["ok", "a\x00"]), "tags.1"),
+        (_HidingDict({"color": "\x00"}), "tags.color"),
+        ([_HidingDict({"co\x00lor": "red"})], "tags.0"),
     ],
 )
-def test_unencodable_text_error_reads_containers_through_the_base_slots(
+def test_unstorable_text_error_reads_containers_through_the_base_slots(
     value: object,
     error_field: str,
 ) -> None:
     """A list / dict subclass's overridden iteration cannot hide an unstorable leaf."""
-    error = unencodable_text_error("tags", value)
+    error = unstorable_text_error("tags", value)
     assert error is not None
     assert error.field == error_field
 
 
-def test_unencodable_text_error_walks_nesting_deeper_than_the_recursion_limit() -> None:
+def test_unstorable_text_error_walks_nesting_deeper_than_the_recursion_limit() -> None:
     """The walk keeps an explicit stack, so a deeply nested ``JSON`` value cannot overflow it."""
     depth = sys.getrecursionlimit() * 2
     root: list[object] = []
@@ -439,7 +460,7 @@ def test_unencodable_text_error_walks_nesting_deeper_than_the_recursion_limit() 
         level = child
     level.append("\ud800")
 
-    error = unencodable_text_error("payload", root)
+    error = unstorable_text_error("payload", root)
     assert error is not None
     assert error.path == ["payload", *(["0"] * (depth + 1))]
 
@@ -762,17 +783,33 @@ def test_decode_provided_fields_handles_none_and_non_strawberry_data() -> None:
     assert dest == {}
 
 
-def test_unencodable_text_error_handles_non_strings_and_valid_strings() -> None:
-    """unencodable_text_error returns None for non-strings and valid UTF-8 strings."""
-    assert unencodable_text_error("field", None) is None
-    assert unencodable_text_error("field", 123) is None
-    assert unencodable_text_error("field", object()) is None
-    assert unencodable_text_error("field", "valid unicode string") is None
+def test_unstorable_text_error_handles_non_strings_and_valid_strings() -> None:
+    """unstorable_text_error returns None for non-strings and valid UTF-8 strings."""
+    assert unstorable_text_error("field", None) is None
+    assert unstorable_text_error("field", 123) is None
+    assert unstorable_text_error("field", object()) is None
+    assert unstorable_text_error("field", "valid unicode string") is None
 
-    err = unencodable_text_error("field", "\ud800")
+    err = unstorable_text_error("field", "\ud800")
     assert err is not None
     assert err.field == "field"
     assert err.codes == ["invalid"]
+
+    nul = unstorable_text_error("field", "a\x00b")
+    assert nul is not None
+    assert (nul.field, nul.messages, nul.codes) == (
+        "field",
+        ["Null characters are not allowed."],
+        ["null_characters_not_allowed"],
+    )
+
+
+def test_unstorable_text_error_answers_a_nul_on_a_dict_key_without_echoing_it() -> None:
+    """A NUL key keys its error to the dict, so the envelope never carries the refused key."""
+    error = unstorable_text_error("attributes", {"ok": "fine", "se\x00cret": "red"})
+    assert error is not None
+    assert (error.field, error.path) == ("attributes", ["attributes"])
+    assert error.messages == ["Null characters are not allowed."]
 
 
 @pytest.mark.django_db

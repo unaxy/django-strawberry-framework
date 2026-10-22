@@ -690,9 +690,9 @@ Consumer-visible behavior:
 | --- | --- |
 | Wrong username **or** password on `login` | payload `errors: [{field: "__all__", messages: ["Incorrect username/password"]}]`, `node: null` |
 | Inactive user under `ModelBackend`, or a backend raising `PermissionDenied`, on `login` | same `"__all__"` envelope (Django's `authenticate` returns `None` for both) |
-| Unstorable (non-UTF-8-encodable) `username` or `password` on `login` | same `"__all__"` envelope, short-circuited by the storability preflight before `authenticate` — byte-identical, never a top-level error |
+| Unstorable (non-UTF-8-encodable, or holding an embedded NUL) `username` or `password` on `login` | same `"__all__"` envelope, short-circuited by the storability preflight before `authenticate` (no backend sees the credential) — byte-identical, never a top-level error |
 | Password fails a configured validator on `register` | payload `errors` keyed to `password`, one message per failing validator |
-| Unstorable (non-UTF-8-encodable) `password` on `register` | payload `errors` keyed to `password`, from the write step's storability preflight before `validate_password` / `set_password` — never a top-level error (the `username` half is rejected earlier, by the shared decode) |
+| Unstorable (non-UTF-8-encodable, or holding an embedded NUL) `password` on `register` | payload `errors` keyed to `password`, from the write step's storability preflight before `validate_password` / `set_password` — never a top-level error (the `username` half is rejected earlier, by the shared decode); a NUL answers Django's own `"Null characters are not allowed."` / `null_characters_not_allowed` |
 | Duplicate username on `register` | payload `errors` keyed to the `USERNAME_FIELD`'s `RegisterInput` field, its GraphQL input name (`username` on the stock model; the model `full_clean()` unique check) |
 | `logout` with no authenticated session | `ok: false`, empty `errors` (not an error — idempotent logout) |
 | `login` over a Channels WebSocket, any session engine | top-level `GraphQLError` ([`ConfigurationError`][glossary-configurationerror]) refusing before authentication — never the failed-login envelope ([Decision 11](#decision-11--transport-contract-classify-first-refuse-a-transport-that-cannot-honour-the-surface-truthfully)) |
@@ -824,8 +824,11 @@ credential or session work — is
 3. `login`, credential storability preflight: a credential that is not UTF-8
    encodable (a lone surrogate) would crash `authenticate` into a raw
    `UnicodeEncodeError` from the `USERNAME_FIELD` lookup or the password hasher's
-   `.encode()`, so each of `username` / `password` is preflighted through the ONE
-   shared write-side `unencodable_text_error` primitive
+   `.encode()`, and one holding an embedded NUL is what Django's own
+   `AuthenticationForm` refuses (`ProhibitNullCharactersValidator`) and what
+   PostgreSQL cannot bind into that lookup (a raw `DataError`), so each of
+   `username` / `password` is preflighted through the ONE
+   shared write-side `unstorable_text_error` primitive
    ([`utils/write_values.py`][utils-write-values]) and an unstorable credential
    short-circuits to the SAME undifferentiated failed-login envelope as step 4 —
    never a top-level error, and byte-identical so the preflight is not an
@@ -1152,11 +1155,12 @@ to `Register`** with:
   `username` included — still runs through. Three guards, each returning the
   `password`-keyed envelope rather than a top-level error: an absent captured value
   is the standard null-field leaf; a non-`str` value is an `invalid`-coded
-  `password` leaf; and a non-UTF-8-encodable value is rejected through the SAME
-  shared [`unencodable_text_error`][utils-write-values] primitive the model decode
-  uses, byte-identically to how that decode already rejects a surrogate `username`
-  (a lone surrogate passes every configured validator — none of them encodes the
-  text — and would then crash the hasher's `.encode()`). Only then does it run
+  `password` leaf; and a non-UTF-8-encodable value, or one holding an embedded NUL,
+  is rejected through the SAME shared [`unstorable_text_error`][utils-write-values]
+  primitive the model decode uses, byte-identically to how that decode already
+  rejects such a `username` (a lone surrogate passes every configured validator —
+  none of them encodes the text — and would then crash the hasher's `.encode()`; a
+  NUL is what Django's own password forms refuse). Only then does it run
   `django.contrib.auth.password_validation.validate_password(raw_password, user)`,
   and — on failure — maps the raised error to a `password`-keyed
   [`FieldError`][glossary-fielderror-envelope] **directly, not through the generic
@@ -1803,7 +1807,7 @@ so each carries a source comment at its site.
   `IntegrityError` / M2M to the shared model write tail (`_model_write_step`, which
   is what calls `_full_clean_or_field_errors` /
   [`save_or_field_errors`][mutations-resolvers]); the auth-specific steps are exactly
-  the password preflight (`unencodable_text_error`, itself the shared write-side
+  the password preflight (`unstorable_text_error`, itself the shared write-side
   primitive), `validate_password` and `set_password`
   ([Decision 6](#decision-6--register_mutation-rides-djangomutation-a-narrow-create-over-get_user_model-with-password-hashing--not-a-fourth-flavor)).
 - [ ] **D8** — register's password error uses `field_error("password", …)` directly;
@@ -1890,7 +1894,10 @@ so each carries a source comment at its site.
   `::test_inactive_user_gets_the_same_envelope`,
   `::test_backend_raising_permission_denied_returns_the_same_envelope`, and, for the
   storability preflight,
-  `::test_login_surrogate_username_is_the_undifferentiated_envelope_not_a_crash`). Any
+  `::test_login_surrogate_username_is_the_undifferentiated_envelope_not_a_crash` and
+  `::test_login_nul_credential_is_the_undifferentiated_envelope_not_a_crash`, with
+  `::test_login_nul_credential_never_reaches_the_backend` pinning that no backend sees
+  the refused credential). Any
   other backend exception propagates as an execution error with the session untouched
   (`::test_login_backend_crash_propagates_and_leaves_session_untouched`), and the
   configured backends' order decides which one authenticates (first success wins).
@@ -2078,7 +2085,8 @@ auth test hand-rolls a `User` outside the seed helper.
 - the failed-login envelope classes of [Edge cases](#edge-cases-and-constraints) —
   wrong-password AND unknown-username byte-identical (enumeration guard pinned as a
   shape equality), inactive user, backend `PermissionDenied`, the unstorable
-  `username` / `password` rows — plus backend order (first success wins either way),
+  `username` / `password` rows (a lone surrogate, and an embedded NUL that never
+  reaches the backend) — plus backend order (first success wins either way),
   a custom backend authenticating an inactive user being honoured, a crashing backend
   propagating with the session untouched, storable unusual credentials reaching the
   backend unchanged, a non-string `username` failing GraphQL validation before the
@@ -2101,7 +2109,9 @@ auth test hand-rolls a `User` outside the seed helper.
   error) with the fakeshop validators' messages; a dict-form validator error still
   keying to `password`; the password-similar-to-username rejection (the validator
   sees the constructed instance); the `register` decode-failure field-keyed
-  envelope; the unstorable `password` row on `register`;
+  envelope; the unstorable `password` row on `register` (a lone surrogate) and the
+  NUL `username` / `password` rows, each Django's null-character error keyed to its
+  field;
 - the CSRF row: `login` and `logout` face Django's real CSRF check;
 - the sessionless refusals: `login` / `logout` with no session middleware raise the
   error naming both middleware stacks; `logout` / `me` without

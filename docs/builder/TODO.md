@@ -5,25 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 26 to do.
-
-## To do: fix before beta
-
-- [ ] 2. Under ASGI, a default root `DjangoConnectionField` or a nested relation connection whose `get_queryset` hook
-  touches the database (`user.has_perm(...)`, as fakeshop `CategoryType` does) fails with a masked "unexpected error":
-  `django_strawberry_framework/connection.py::_pipeline_sync` always runs the sync pipeline on the loop, so
-  `django_strawberry_framework/utils/querysets.py::apply_type_visibility_sync` raises `SynchronousOnlyOperation`, and an
-  `async def` hook raises `SyncMisuseError`. A root field can switch to an `async def resolver=`; a nested connection has
-  no recourse except `relation_shapes = {"x": "list"}`. `DjangoListField` already picks
-  `_execute_queryset_pipeline_async` per call, so lists work where connections fail. Confirmed live over
-  `AsyncDjangoGraphQLView` (`allCategories`, `allItems`)
-- [ ] 6. On Postgres an embedded NUL (`\u0000`) in a text value escapes as a top-level error with `data: null`:
-  `django_strawberry_framework/utils/write_values.py::unencodable_text_error` states that NUL passes, a model
-  `TextField` has no validator, and nothing in the package maps psycopg's `DataError` ("PostgreSQL text fields cannot
-  contain NUL (0x00) bytes"). Reached by model-flavor create / update, auth login / register, text-pk `node(id:)` and
-  NUL inside `JSON` values (jsonb); ModelForm, serializer and `FilterSet` text are shielded by their validators. The
-  write rolls back. The psycopg half is confirmed; the end-to-end shape needs a Postgres run, and no Postgres test sends
-  NUL through a model write
+Progress: 24 to do.
 
 ## Beta triage of `bug_hunt-0_0_15_2.md`
 

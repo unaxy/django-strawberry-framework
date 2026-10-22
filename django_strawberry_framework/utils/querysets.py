@@ -87,6 +87,7 @@ from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeGuard, TypeVar, c
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
+from django.core.validators import ProhibitNullCharactersValidator
 from django.db import models, router
 from django.db.models import Prefetch, sql
 from django.db.models import query as django_query
@@ -720,6 +721,10 @@ def to_python_value(field: _PythonCoercing, value: object) -> object:
     return field.to_python(value)
 
 
+#: Django's all-backend NUL rule; a text id holding a NUL names no row.
+_PROHIBIT_NULL_CHARACTERS = ProhibitNullCharactersValidator()
+
+
 def coerce_field_value_or_none(field: ModelField | None, value: object) -> object:
     """Coerce ``value`` through ``field``'s ``to_python`` + ``run_validators``; ``None`` if invalid.
 
@@ -750,6 +755,15 @@ def coerce_field_value_or_none(field: ModelField | None, value: object) -> objec
     to the column storing its value (``relations.py::stored_value_column``): the
     value runs the key's own validators and then that column's, whose range
     validators reject an out-of-range id.
+
+    A value coerced to text holding an embedded NUL (U+0000) identifies no row
+    either, on every backend: no write stores one (Django's all-backend
+    ``ProhibitNullCharactersValidator`` rule, which
+    ``write_values.py::unstorable_text_error`` holds every write to), and
+    PostgreSQL refuses to bind one at all (psycopg raises ``DataError``), so a NUL
+    in a text-keyed id (a decoded ``GlobalID`` node id, a raw pk, a relation
+    identity) answers the caller's not-found / invalid-id verdict before any query
+    rather than a raw backend error.
     """
     if not isinstance(field, models.Field):
         return None
@@ -759,6 +773,8 @@ def coerce_field_value_or_none(field: ModelField | None, value: object) -> objec
         field.run_validators(coerced)
         if column is not field:
             column.run_validators(coerced)
+        if isinstance(coerced, str):
+            _PROHIBIT_NULL_CHARACTERS(str.__str__(coerced))
     except (
         ValidationError,
         TypeError,

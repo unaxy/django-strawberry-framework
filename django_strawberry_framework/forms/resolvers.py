@@ -513,7 +513,7 @@ def _decode_form_data(
     place:
 
     - ``SCALAR`` -> ``provided_data[target_name]``, through the shared
-      scalar leaf ``decode_scalar_leaf`` (invalid-Unicode preflight +
+      scalar leaf ``decode_scalar_leaf`` (text storability preflight +
       choice-enum unwrap).
     - ``RELATION_SINGLE`` / ``RELATION_MULTI`` -> the visibility-checked,
       ``to_field_name``-converted relation value(s) under ``target_name``.

@@ -90,7 +90,7 @@ from django_strawberry_framework.utils.querysets import (
     run_in_one_sync_boundary,
 )
 from django_strawberry_framework.utils.sessions import actor_transition
-from django_strawberry_framework.utils.write_values import unencodable_text_error
+from django_strawberry_framework.utils.write_values import unstorable_text_error
 from django_strawberry_framework.write_mixins import (
     _validate_permission_classes,
     backing_model_of,
@@ -644,9 +644,12 @@ def _login_authenticate(
        the top-level ``GraphQLError`` and credentials are never checked);
     4. the shared storability preflight - a lone-surrogate credential is not UTF-8
        encodable and would crash ``authenticate`` into a raw ``UnicodeEncodeError``
-       (the DB ``USERNAME_FIELD`` lookup / the password hasher's ``.encode()``), so
-       it short-circuits to the SAME undifferentiated envelope (``user`` ``None``),
-       reusing the ONE write-side ``unencodable_text_error`` primitive;
+       (the DB ``USERNAME_FIELD`` lookup / the password hasher's ``.encode()``), and a
+       credential holding an embedded NUL is one Django's own ``AuthenticationForm``
+       refuses (``ProhibitNullCharactersValidator``) and PostgreSQL cannot bind into
+       that lookup (a raw ``DataError``), so either short-circuits to the SAME
+       undifferentiated envelope (``user`` ``None``) without calling ``authenticate``,
+       reusing the ONE write-side ``unstorable_text_error`` primitive;
     5. exactly ONE ``authenticate(request, username=, password=)`` call - no local
        user-model query (the actor-not-lookup rule, D-N1).
 
@@ -667,8 +670,8 @@ def _login_authenticate(
     # any request reaches this prologue.
     slot = payload_object_slot(cast("type[DjangoType]", holder_cls._primary_type))
     unstorable = (
-        unencodable_text_error("username", username) is not None
-        or unencodable_text_error("password", password) is not None
+        unstorable_text_error("username", username) is not None
+        or unstorable_text_error("password", password) is not None
     )
     user = (
         None
@@ -1266,11 +1269,12 @@ def _register_write_step(
     # scalar - including this register's own ``username`` - runs through. A
     # lone-surrogate password passes ``validate_password`` (none of its validators
     # encode the text) and then crashes ``set_password``'s hasher ``.encode()`` with a
-    # raw ``UnicodeEncodeError``. Preflight it here via the SAME shared primitive the
-    # model decode uses, so an unstorable password is the field-keyed ``password``
-    # envelope (byte-identical to how the shared decode already rejects a surrogate
-    # ``username``), never a top-level GraphQL error.
-    text_error = unencodable_text_error("password", raw_password)
+    # raw ``UnicodeEncodeError``; a NUL-bearing one is what Django's own password forms
+    # refuse (``ProhibitNullCharactersValidator``). Preflight it here via the SAME shared
+    # primitive the model decode uses, so an unstorable password is the field-keyed
+    # ``password`` envelope (byte-identical to how the shared decode already rejects such
+    # a ``username``), never a top-level GraphQL error.
+    text_error = unstorable_text_error("password", raw_password)
     if text_error is not None:
         return resolvers.StepFailure([text_error])
     try:
