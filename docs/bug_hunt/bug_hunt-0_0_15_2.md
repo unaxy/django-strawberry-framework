@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 196 done, 137 to do.
+Progress: 197 done, 137 to do.
 
 ## Done
 
@@ -777,6 +777,9 @@ Progress: 196 done, 137 to do.
   variable by its supplied value: fixed: both say the charge runs at operation admission, before validation, on the
   input as the request spelled it (a literal list as its AST, a variable by its supplied value or its default's
   literal), still before any `GlobalID` decode; GlossaryTerm 520 through the DB, GLOSSARY.md re-rendered
+- [x] 337. `utils/querysets.py::_prefetch_path_or_defect` refused with "prefetch path is not an exact str" / "prefetch
+  to_attr is not an exact str or None" while its `is_str` guard admits a `str` subclass: fixed: the messages say "is not
+  a str" / "is not a str or None"; the three pinned tests in `tests/utils/test_querysets.py` move with them (411 passed)
 
 ## Outside review of the fixes
 

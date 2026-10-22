@@ -2399,19 +2399,19 @@ def test_prefetch_str_subclass_lookup_is_carried_as_its_exact_text() -> None:
 
 
 def test_prefetch_non_str_path_fails_closed() -> None:
-    """A ``Prefetch`` whose ``prefetch_through`` is not an exact str fails closed."""
+    """A ``Prefetch`` whose ``prefetch_through`` is not a str fails closed."""
     pf = Prefetch("items")
     pf.__dict__["prefetch_through"] = object()
     _, defect = _sealed_prefetch_related_lookups((pf,), "X", None, Category)
-    assert defect == ("untrusted", "X prefetch path is not an exact str")
+    assert defect == ("untrusted", "X prefetch path is not a str")
 
 
 def test_prefetch_non_str_to_attr_fails_closed() -> None:
-    """A ``Prefetch`` whose ``to_attr`` is not an exact str / None fails closed."""
+    """A ``Prefetch`` whose ``to_attr`` is not a str / None fails closed."""
     pf = Prefetch("items")
     pf.__dict__["to_attr"] = object()
     _, defect = _sealed_prefetch_related_lookups((pf,), "X", None, Category)
-    assert defect == ("untrusted", "X prefetch to_attr is not an exact str or None")
+    assert defect == ("untrusted", "X prefetch to_attr is not a str or None")
 
 
 def test_prefetch_unrouted_child_inherits_outer_alias() -> None:
@@ -5839,7 +5839,7 @@ def test_prefetch_child_non_str_path_fails_closed() -> None:
     assert defect is not None
     code, detail = defect
     assert code == "untrusted"
-    assert "path is not an exact str" in detail
+    assert "path is not a str" in detail
 
 
 @pytest.mark.django_db
