@@ -231,11 +231,16 @@ def _noop(*_args: object, **_kwargs: object) -> None:
     """A shadow that accepts any call and does nothing (it must never run)."""
 
 
-def _as_async_hook_type(cls: type[object]) -> type[DjangoType]:
-    """Hand a class whose ``get_queryset`` is ``async def`` to the visibility substrate."""
+def _as_stand_in_hook_type(cls: type[object]) -> type[DjangoType]:
+    """Hand a plain stand-in class carrying a ``get_queryset`` to the visibility substrate.
+
+    The stand-in is either a class whose ``get_queryset`` is ``async def`` or one that
+    carries no ``DjangoType`` default stamp at all.
+    """
     # basedpyright: an async ``get_queryset`` is a supported consumer hook the sync base signature
     # does not admit, and a DjangoType subclass declaring one is reported as an incompatible
-    # override; the visibility substrate types the parameter as type[DjangoType]
+    # override; an unstamped class is by definition not a DjangoType; the visibility substrate
+    # types the parameter as type[DjangoType]
     return cls  # pyright: ignore[reportReturnType]
 
 
@@ -274,7 +279,7 @@ def _sync_type() -> type[DjangoType]:
     )
 
 
-@_as_async_hook_type
+@_as_stand_in_hook_type
 class _AsyncType:
     """Plain class with an ``async def`` ``get_queryset``."""
 
@@ -568,11 +573,96 @@ async def test_apply_type_visibility_async_awaits_async_hook() -> None:
     assert isinstance(result, models.QuerySet)
 
 
-async def test_apply_type_visibility_async_passes_sync_hook_through() -> None:
-    """The async path passes a sync ``get_queryset`` return through without awaiting."""
+async def test_apply_type_visibility_async_runs_a_custom_sync_hook_off_the_event_loop() -> None:
+    """A custom sync ``get_queryset`` runs in a worker thread and its queryset is used as is.
+
+    The hook may read the database, which Django refuses on the event-loop thread.
+    """
+    threads: dict[str, int] = {"loop": threading.get_ident()}
+
+    def _hook(
+        _cls: type,
+        queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        threads["hook"] = threading.get_ident()
+        return queryset.exclude(name="__never__")
+
     base = Category.objects.all()
-    result = await apply_type_visibility_async(_sync_type(), base, info=None)
+    result = await apply_type_visibility_async(
+        _declared_type(Category, "_WorkerHookType", _hook),
+        base,
+        info=None,
+    )
     assert isinstance(result, models.QuerySet)
+    assert threads["hook"] != threads["loop"]
+
+
+def _unstamped_sync_type() -> type[DjangoType]:
+    """A plain stand-in class with a sync ``get_queryset`` and no ``DjangoType`` default stamp."""
+
+    def _hook(
+        _cls: type,
+        queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        return queryset
+
+    return _as_stand_in_hook_type(
+        type(
+            "_UnstampedSyncType",
+            (),
+            {
+                "__django_strawberry_definition__": SimpleNamespace(model=Category),
+                "get_queryset": classmethod(_hook),
+            },
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("hook_kind", "expected_hops"),
+    [
+        pytest.param("identity-default", 0, id="identity-default-inline"),
+        pytest.param("async-def", 0, id="async-def-awaited-on-loop"),
+        pytest.param("custom-sync", 1, id="custom-sync-one-worker"),
+        pytest.param("unstamped-sync", 1, id="unstamped-sync-one-worker"),
+    ],
+)
+async def test_apply_type_visibility_async_hops_only_for_a_hook_that_may_do_io(
+    monkeypatch: pytest.MonkeyPatch,
+    hook_kind: str,
+    expected_hops: int,
+) -> None:
+    """Only a synchronous hook the package cannot prove I/O-free pays the sync boundary.
+
+    The identity default is stamped at class creation and runs inline; an
+    ``async def`` hook is awaited on the loop; a custom sync hook, or one on a
+    class carrying no stamp, runs in exactly one worker.
+    """
+    real_boundary = querysets_module.run_in_one_sync_boundary
+    hops: list[Callable[..., object]] = []
+
+    async def _counting_boundary(
+        fn: Callable[..., object],
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        hops.append(fn)
+        return await real_boundary(fn, *args, **kwargs)
+
+    monkeypatch.setattr(querysets_module, "run_in_one_sync_boundary", _counting_boundary)
+    type_cls: type[DjangoType] = {
+        "identity-default": lambda: _declared_type(Category, "_IdentityHookType"),
+        "async-def": lambda: _AsyncType,
+        "custom-sync": _sync_type,
+        "unstamped-sync": _unstamped_sync_type,
+    }[hook_kind]()
+
+    result = await apply_type_visibility_async(type_cls, Category.objects.all(), info=None)
+
+    assert isinstance(result, models.QuerySet)
+    assert len(hops) == expected_hops
 
 
 # ---------------------------------------------------------------------------
@@ -773,7 +863,7 @@ def test_hook_manager_result_is_coerced_sync() -> None:
 async def test_hook_manager_result_is_coerced_async() -> None:
     """An async-path ``Manager`` return is coerced too - previously it flowed through verbatim."""
 
-    @_as_async_hook_type
+    @_as_stand_in_hook_type
     class _ManagerAsyncType:
         __django_strawberry_definition__ = SimpleNamespace(model=Category)
 
@@ -2252,7 +2342,7 @@ async def test_async_custom_awaitable_hook_is_awaited_once() -> None:
 async def test_async_nested_awaitable_fails_closed() -> None:
     """An async hook resolving to ANOTHER awaitable fails closed after exactly one await."""
 
-    @_as_async_hook_type
+    @_as_stand_in_hook_type
     class _NestedType:
         __django_strawberry_definition__ = SimpleNamespace(model=Category)
 
@@ -2274,7 +2364,7 @@ async def test_async_nested_awaitable_fails_closed() -> None:
 async def test_async_generator_hook_result_fails_closed() -> None:
     """An async hook resolving to an async generator is not awaitable - a type rejection."""
 
-    @_as_async_hook_type
+    @_as_stand_in_hook_type
     class _AgenType:
         __django_strawberry_definition__ = SimpleNamespace(model=Category)
 
@@ -2300,7 +2390,7 @@ async def test_identity_hook_result_is_resealed_dropping_injected_cache_async() 
     """
     await Category.objects.acreate(name="visible_row", is_private=False)
 
-    @_as_async_hook_type
+    @_as_stand_in_hook_type
     class _CaptureAsyncType:
         __django_strawberry_definition__ = SimpleNamespace(model=Category)
 

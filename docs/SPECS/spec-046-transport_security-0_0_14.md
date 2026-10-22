@@ -98,8 +98,9 @@ Each top-level item maps to one commit / PR.
         consumer's URLconf
         ([Decision 6](#decision-6--the-graphql-http-endpoint-is-a-package-owned-django-view-in-the-consumers-urlconf)).
   - [ ] `AsyncDjangoGraphQLView` evaluates the lazy `request.user` in one sync boundary once
-        the body boundary admits the request, so synchronous hooks read an evaluated actor on
-        the event loop
+        the body boundary admits the request, so code reading the actor on the event loop (a
+        plain sync resolver, an `async def get_queryset` before its first `await`) reads an
+        evaluated actor
         ([Decision 6](#decision-6--the-graphql-http-endpoint-is-a-package-owned-django-view-in-the-consumers-urlconf)).
   - [ ] `examples/fakeshop/config/urls.py` mounts the package's `DjangoGraphQLView` at
         `/graphql/`, so the live tier proves the package's own view and every body-cap row is
@@ -605,11 +606,13 @@ DJANGO_STRAWBERRY_FRAMEWORK = {
   size boundary still undergoes Django's complete CSRF implementation.
 - **Non-UTF-8 request JSON gets `400`** — the same controlled response malformed JSON
   already gets, on both package views, whatever `APPLY_UPSTREAM_PATCHES` says.
-- **A synchronous hook may read `request.user` under `AsyncDjangoGraphQLView`.** Once the
-  body boundary admits a request, the async view evaluates Django's lazy `request.user` in
-  one `sync_to_async` worker, so a sync `get_queryset` or sync resolver running on the event
-  loop reads an already-loaded actor instead of raising `SynchronousOnlyOperation` on a
-  session-carrying request ([Decision 6](#decision-6--the-graphql-http-endpoint-is-a-package-owned-django-view-in-the-consumers-urlconf)).
+- **Code on the event loop may read `request.user` under `AsyncDjangoGraphQLView`.** Once
+  the body boundary admits a request, the async view evaluates Django's lazy `request.user` in
+  one `sync_to_async` worker, so a plain sync resolver, or an `async def get_queryset` before
+  its first `await`, running on the event loop reads an already-loaded actor instead of
+  raising `SynchronousOnlyOperation` on a session-carrying request. A synchronous
+  `get_queryset` does not run on the loop: `utils/querysets.py::apply_type_visibility_async`
+  runs it in a `sync_to_async` worker, where it may read the database ([Decision 6](#decision-6--the-graphql-http-endpoint-is-a-package-owned-django-view-in-the-consumers-urlconf)).
 - **A multipart `operations` / `map` control document must be effectively UTF-8 and must
   survive Django's decode intact**, or it gets the same controlled `400`: an explicit
   non-UTF-8 `charset` on the form is refused, and so is a value carrying Django's
@@ -873,8 +876,10 @@ four is hosted on the mixin itself rather than declared per view, are stated onc
 
 The async view's second subject is the request actor. Django's `AuthenticationMiddleware`
 leaves `request.user` a `SimpleLazyObject` whose first read loads the session and the user
-row, and under the async view a synchronous hook — a `get_queryset` staff split, a plain sync
-resolver — runs on the event loop, where that read raises `SynchronousOnlyOperation`.
+row, and under the async view a plain sync resolver, or an `async def get_queryset` that reads
+the actor before its first `await`, runs on the event loop, where that read raises
+`SynchronousOnlyOperation` (a synchronous `get_queryset` runs in a `sync_to_async` worker,
+`django_strawberry_framework/utils/querysets.py::apply_type_visibility_async`).
 `django_strawberry_framework/views.py::AsyncDjangoGraphQLView.run` therefore evaluates the
 proxy once, through `django_strawberry_framework/views.py::_evaluate_request_user` in one
 `django_strawberry_framework/utils/querysets.py::run_in_one_sync_boundary` worker, after the
@@ -884,7 +889,7 @@ body boundary and before CSRF and execution. It evaluates the proxy in place, by
 answering the pre-login actor for the rest of a request that ran `login`. A request without
 `AuthenticationMiddleware` has no `user` and is left as it is; a failure inside the evaluation
 (a session or user store outage) propagates. The sync view needs no counterpart, because its
-hooks already run in a sync context.
+resolvers already run in a sync context.
 
 Every upstream kwarg (`graphql_ide`, `allow_queries_via_get`,
 `multipart_uploads_enabled`) keeps working, unchanged, so the
@@ -2684,8 +2689,9 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   the alternative would be a private omitted-value sentinel in a public signature.
 - **The async view's actor evaluation is unconditional and eager.** Every admitted request
   pays one thread hop, and a request carrying a session cookie pays the session and user
-  lookup even when no hook reads the actor — a lazy read on the event loop cannot await, so
-  evaluating up front is the only way a synchronous hook can read `request.user` there at all.
+  lookup even when nothing reads the actor — a lazy read on the event loop cannot await, so
+  evaluating up front is the only way a plain sync resolver, or an `async def get_queryset`
+  before its first `await`, can read `request.user` there at all.
   A request with no session cookie loads nothing, and a body the boundary refuses is rejected
   before the evaluation runs ([Decision 6](#decision-6--the-graphql-http-endpoint-is-a-package-owned-django-view-in-the-consumers-urlconf)).
 - **ASCII-only in `.py`**; trailing-comma layout via `scripts/check_trailing_commas.py`
@@ -3056,10 +3062,9 @@ package, communicator-driven):
 
 **The async view's request actor** (live, plus package-tier for where the lookup runs):
 
-52. Over the async mount, fakeshop's `BranchType.get_queryset` — a plain sync hook whose staff
-    split reads `request.user` — answers per actor: anonymous and a non-staff session hide the
-    restricted branch, a staff session sees it, and none raises `SynchronousOnlyOperation`
-    (`test_transport_api.py`). At the package tier (`tests/test_views.py`) the lazy actor is
+52. Over an async mount, a plain sync resolver that reads `request.user` on the event loop
+    answers per actor: anonymous reads as anonymous, a non-staff and a staff session each read
+    their own user, and none raises `SynchronousOnlyOperation` (`test_transport_api.py`). At the package tier (`tests/test_views.py`) the lazy actor is
     evaluated exactly once, in a worker thread rather than on the event loop, and
     `request.auser` is never awaited.
 
@@ -3187,8 +3192,9 @@ Every generated doc is regenerated from its source, never hand-edited.
 - [ ] `django_strawberry_framework/views.py` ships `DjangoGraphQLView` /
       `AsyncDjangoGraphQLView`; the documented `urlpatterns` entry uses it.
 - [ ] `AsyncDjangoGraphQLView` evaluates the lazy `request.user` in one sync boundary
-      before execution, so a synchronous hook reading the actor on the event loop never
-      raises `SynchronousOnlyOperation`, and `request.auser`'s cache stays unprimed.
+      before execution, so a plain sync resolver or an `async def get_queryset` reading the
+      actor on the event loop never raises `SynchronousOnlyOperation`, and `request.auser`'s
+      cache stays unprimed.
 - [ ] A cumulative request-body cap is enforced pre-parse and pre-execution on the
       GraphQL HTTP path, counting received bytes rather than trusting `Content-Length`,
       with an early `413` proving neither JSON parsing nor schema execution ran; the

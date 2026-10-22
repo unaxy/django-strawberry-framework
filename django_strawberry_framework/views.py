@@ -1028,12 +1028,13 @@ def _evaluate_request_user(request: HttpRequest) -> None:
 
     Django's ``AuthenticationMiddleware`` installs ``request.user`` as a
     ``SimpleLazyObject`` whose first attribute read loads the session and the user
-    row. Under ``AsyncDjangoGraphQLView`` a synchronous consumer hook - a
-    ``get_queryset`` visibility filter, a plain sync resolver - runs on the event
-    loop, where that first read raises ``SynchronousOnlyOperation`` for any
-    request carrying a session cookie. The
+    row. Under ``AsyncDjangoGraphQLView`` a plain sync resolver, and an
+    ``async def get_queryset`` that reads the actor before its first ``await``, run
+    on the event loop, where that first read raises ``SynchronousOnlyOperation``
+    for any request carrying a session cookie. (A synchronous ``get_queryset`` runs
+    in a sync worker: ``utils/querysets.py::apply_type_visibility_async``.) The
     async view therefore runs this function in one sync boundary before execution,
-    so every hook reads an already-evaluated actor.
+    so every reader on the loop sees an already-evaluated actor.
 
     Reading ``is_authenticated`` - the attribute every Django user, anonymous
     included, defines - evaluates the proxy in place rather than replacing it with
@@ -1152,10 +1153,11 @@ class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context
 
     The one behavior the sync twin has no counterpart for: before upstream
     executes the operation, the view evaluates ``request.user`` in one sync
-    boundary (:func:`_evaluate_request_user`), so a synchronous hook that reads the
-    request actor on the event loop - a ``get_queryset`` staff split, a plain sync
-    resolver - never performs the session and user lookup there. The sync view
-    needs nothing: its hooks already run in a sync context.
+    boundary (:func:`_evaluate_request_user`), so code that reads the request actor
+    on the event loop - a plain sync resolver, an ``async def get_queryset`` - never
+    performs the session and user lookup there. A synchronous ``get_queryset`` runs
+    in a sync worker on both views. The sync view needs nothing: its resolvers
+    already run in a sync context.
     """
 
     @classonlymethod
