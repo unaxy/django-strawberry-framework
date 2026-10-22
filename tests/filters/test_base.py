@@ -104,14 +104,16 @@ def _widget_decompress(field: object, value: object) -> object:
 class _RecordingQs(QuerySet[Model]):
     """A real ``QuerySet`` whose query methods record the call instead of building SQL.
 
-    ``filter`` / ``exclude`` keep the keywords they were called with, ``distinct`` counts, and
-    ``none`` answers ``nothing``, a second real queryset the test can recognise by identity.
+    ``filter`` / ``exclude`` keep the keywords they were called with, ``exclude`` and ``distinct``
+    count their calls, and ``none`` answers ``nothing``, a second real queryset the test can
+    recognise by identity.
     """
 
     def __init__(self) -> None:
         super().__init__(model=models.Shelf)
         self.captured: dict[str, object] = {}
         self.distinct_calls = 0
+        self.exclude_calls = 0
         self.nothing: _RecordingQs | None = None
 
     @override
@@ -121,6 +123,7 @@ class _RecordingQs(QuerySet[Model]):
 
     @override
     def exclude(self, *args: object, **kwargs: object) -> Self:
+        self.exclude_calls += 1
         self.captured.update(kwargs)
         return self
 
@@ -244,6 +247,87 @@ def test_range_field_missing_pair_cleans_to_none() -> None:
     ) == ["10", "100"]
     assert _widget_decompress(field, ("10", "100")) == ["10", "100"]
     assert _widget_decompress(field, None) == [None, None]
+
+
+_ONE_SIDED_RANGES = [
+    pytest.param([5, None], {"price_span__gte": 5}, id="start-only"),
+    pytest.param([None, 9], {"price_span__lte": 9}, id="end-only"),
+]
+
+
+@pytest.mark.parametrize(("value", "expected"), _ONE_SIDED_RANGES)
+def test_range_filter_one_sided_applies_lone_bound(
+    value: list[int | None],
+    expected: dict[str, object],
+) -> None:
+    """A range with one bound applies that bound alone, never ``BETWEEN x AND NULL``.
+
+    Live: ``test_scalars_filter_api.py::test_scalars_filter_price_span_one_sided_bounds``.
+    """
+    qs = _RecordingQs()
+
+    f = RangeFilter(field_name="price_span", lookup_expr="range")
+    result = f.filter(qs, value)
+    assert result is qs
+    assert qs.captured == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [[5, 9], [0, 9], [5, 0]],
+    ids=["both-bounds", "zero-start", "zero-end"],
+)
+def test_range_filter_two_bounds_keep_declared_lookup(value: list[int]) -> None:
+    """Both bounds bind the declared ``range`` lookup unchanged; a ``0`` bound is a bound."""
+    qs = _RecordingQs()
+
+    f = RangeFilter(field_name="price_span", lookup_expr="range")
+    f.filter(qs, value)
+    assert qs.captured == {"price_span__range": value}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [[None, None], (None, None), None],
+    ids=["both-null-list", "both-null-tuple", "none"],
+)
+def test_range_filter_without_bounds_is_skipped(
+    value: list[None] | tuple[None, None] | None,
+) -> None:
+    """A range with neither bound constrains nothing: the queryset comes back untouched."""
+    qs = _RecordingQs()
+
+    f = RangeFilter(field_name="price_span", lookup_expr="range")
+    assert f.filter(qs, value) is qs
+    assert qs.captured == {}
+
+
+@pytest.mark.parametrize(("value", "expected"), _ONE_SIDED_RANGES)
+def test_range_filter_one_sided_honours_exclude(
+    value: list[int | None],
+    expected: dict[str, object],
+) -> None:
+    """Under ``exclude=True`` the lone bound goes through ``qs.exclude``."""
+    qs = _RecordingQs()
+
+    f = RangeFilter(field_name="price_span", lookup_expr="range", exclude=True)
+    f.filter(qs, value)
+    assert qs.exclude_calls == 1
+    assert qs.captured == expected
+
+
+@pytest.mark.parametrize(("value", "expected"), _ONE_SIDED_RANGES)
+def test_range_filter_one_sided_applies_distinct_when_flagged(
+    value: list[int | None],
+    expected: dict[str, object],
+) -> None:
+    """``distinct=True`` calls ``.distinct()`` before the lone bound applies."""
+    qs = _RecordingQs()
+
+    f = RangeFilter(field_name="price_span", lookup_expr="range", distinct=True)
+    f.filter(qs, value)
+    assert qs.distinct_calls == 1
+    assert qs.captured == expected
 
 
 # ---------------------------------------------------------------------------

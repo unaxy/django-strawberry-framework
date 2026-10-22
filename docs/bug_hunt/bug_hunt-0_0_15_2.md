@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 179 done, 131 to do.
+Progress: 180 done, 132 to do.
 
 ## Done
 
@@ -677,6 +677,12 @@ Progress: 179 done, 131 to do.
   `rest_framework/inputs.py::serializer_schema_fingerprint`, `_fingerprint_field_map`, `_fingerprint_converter_extra`,
   the `NestedSerializerConfig` docstring, `rest_framework/sets.py::_checked_schema_field_map` and spec-039's fingerprint
   section and nested bullet; code digest unchanged.
+- [x] 160. Still live on HEAD: `filters/base.py::RangeFilter` had no `filter()`, so a range input with one bound left
+  out or `null` reached the declared `range` lookup as `[x, None]` and compiled to `BETWEEN x AND NULL`, matching no
+  row. `RangeFilter.filter` now applies a lone start as `__gte` and a lone end as `__lte` through `_apply_lookups`
+  (django-filter's semantics; `exclude` / `distinct` honoured, no instance mutation), keeps the declared lookup for two
+  bounds and skips a range with neither; pinned by unit rows in `tests/filters/test_base.py` (zero bounds included) and
+  live rows in `test_scalars_filter_api.py` (flat, `not`, `partner` branch, explicit nulls).
 
 ## Outside review of the fixes
 
@@ -764,8 +770,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (non-QUERY never introduces, always widens); `plans.py::prune_unsupportable_select_related` then has no live caller and
   goes; live rows beside `test_query/test_library_api.py::_hooked_holder_schema`. Open for you: retracting the prune
   design in specs 004 and 035, and whether `types/resolvers.py::_FK_ELISION_UNSAFE` stays as a defensive check
-- [ ] 160. A one-sided declared range (`range: {start: ...}` or only `end`) compiles to `BETWEEN x AND NULL` and returns no rows
-  (`filters/base.py::RangeFilter`); seen early in the fixes, re-check on HEAD
 - [ ] 161. A declared `django_filters.RangeFilter` writes `_0` / `_1` keys while the installed django-filter widget may read
   `_min` / `_max`, so its bounds are ignored (`filters/inputs.py` documents the positional keys on purpose); check the
   installed django-filter's key names before fixing
@@ -900,6 +904,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 316. `filters/base.py::RangeFilter` declared with the default `lookup_expr` (`exact`) raises a raw
+  `ValidationError` for a two-bound range (`price__exact=[a, b]`), while a one-sided range now works through `__gte` /
+  `__lte`; nothing validates the declaration. Default `lookup_expr` to `range` (django-filter's `RangeFilter` ignores
+  the declared lookup), or refuse a non-`range` lookup with `ConfigurationError` at class build?
+- [ ] 315. CHANGELOG entry for item 160: a declared `RangeFilter` given only `start` (or only `end`, or the other side
+  `null`) filters `>= start` (`<= end`) instead of matching no row; both bounds keep the declared lookup and a range
+  with neither bound filters nothing
 - [ ] 309. CHANGELOG entry for items 291 and 292: a `DjangoModelFormMutation` whose bound relation field disagrees with
   the field the input decodes against (an `__init__` or `get_form` override changing `to_field_name`, or a queryset over
   another model) raises `ConfigurationError` before validation instead of linking whichever row the bound key names; a
