@@ -230,11 +230,12 @@ class NestedSerializerConfig:
     the serializer's CLASS NAME (conflating two shapes of one class) with little write-contract
     validation. This is the fail-loud counterpart: opt-in only, descriptor-keyed (folded into the
     ``SerializerInputShape`` identity so two nested shapes never collide on one name), recursively
-    fingerprinted (a nondeterministic hook that changes a nested shape is caught), depth / cycle
-    guarded, and - crucially - the framework NEVER auto-saves the nested relation: the decoded
-    nested data is passed to the parent serializer's OWN ``create()`` / ``update()`` (which the
-    mutation's ``Meta`` validation requires the serializer to override), so the nested write is
-    the serializer author's, done correctly, inside the pipeline transaction.
+    fingerprinted (a nondeterministic hook that changes a recorded axis of a nested shape is
+    caught), depth / cycle guarded, and - crucially - the framework NEVER auto-saves the nested
+    relation: the decoded nested data is passed to the parent serializer's OWN ``create()`` /
+    ``update()`` (which the mutation's ``Meta`` validation requires the serializer to override),
+    so the nested write is the serializer author's, done correctly, inside the pipeline
+    transaction.
 
     Fields (all optional):
 
@@ -458,9 +459,10 @@ def _fingerprint_choices(field: DRFField) -> tuple[tuple[str, ...], bool] | None
 def _fingerprint_converter_extra(field: DRFField) -> tuple[object, ...] | None:
     """Return converter-affecting discriminants (``ModelField`` wrapped / ``ListField`` child), else ``None``.
 
-    A ``ModelField``'s wrapped ``model_field`` and a ``ListField``'s ``child`` (its class and
-    its ``allow_null``, which decides the element's nullability) determine the generated
-    annotation, so a hook that swaps them changes the SDL - folded into the fingerprint.
+    A ``ModelField``'s wrapped ``model_field`` and a ``ListField``'s DIRECT ``child`` (its class
+    and its ``allow_null``, which decides the element's nullability) determine the generated
+    annotation, so a hook that swaps them changes the SDL - folded into the fingerprint. A deeper
+    nested child is not read.
     """
     if isinstance(field, serializers.ModelField):
         return (truth.name(truth.class_of(getattr(field, "model_field", None))),)
@@ -532,7 +534,7 @@ def _fingerprint_field_map(
 ) -> tuple[tuple[object, ...], ...]:
     """Compute the recursive fingerprint core (the nested recursion).
 
-    Captures every SDL-affecting axis per WRITABLE field (see ``serializer_schema_fingerprint``),
+    Captures the axes ``serializer_schema_fingerprint`` lists, per WRITABLE field,
     plus the recursive nested fingerprint for OPTED-IN nested fields. ``seen`` carries
     the serializer classes already on the recursion path so a nested cycle terminates;
     ``nested_configs`` is THIS level's opt-in tree (``Meta.nested_fields`` at the top, the parent
@@ -580,14 +582,19 @@ def serializer_schema_fingerprint(
     ``get_serializer_for_schema()`` must return a STABLE, request-independent field shape (the
     input is generated once at finalization, BEFORE any request), but the hook is called at
     class validation AND again at the phase-2.5 bind - a NONDETERMINISTIC hook could validate
-    one shape and bind another. This captures EVERY axis the generated input / SDL / reverse map
-    depends on, so the bind can recompute it and raise if the hook DRIFTED (turning the spec's
-    stable-shape promise into an enforced contract): each WRITABLE field's name, class,
-    source, write flag, required, allow_null, relation target model, the description inputs
-    (``help_text`` + the constraint summary), the enumerable choice members,
-    the converter discriminants (``ModelField`` wrapped field / ``ListField`` child), and - for an
-    OPTED-IN nested serializer field - a RECURSIVE fingerprint of the nested serializer's own field
-    map (bounded by an on-path cycle guard).
+    one shape and bind another. This is a drift check over the axes listed here, not a proof the
+    two shapes are identical: the bind recomputes it and raises if the hook DRIFTED on one of
+    them. The input, its descriptor name and the reverse map are built from the bind-time read
+    alone, so a hook that drifts on an axis NOT recorded (the grandchild of a ``ListField`` nested
+    in a ``ListField``, since only the outer child's class and ``allow_null`` are recorded; a
+    field attribute a consumer-registered converter reads that the listed axes omit) still builds a
+    self-consistent input from its bind-time shape - staying stable is the hook's contract. It
+    records each WRITABLE field's name, class, source, write flag, required, allow_null, relation
+    target model, the description inputs (``help_text`` + the constraint summary), the enumerable
+    choice members, the converter discriminants (``ModelField`` wrapped field class /
+    ``ListField`` DIRECT child class and ``allow_null``), and - for an OPTED-IN nested serializer
+    field - a RECURSIVE fingerprint of the nested serializer's own field map (bounded by an
+    on-path cycle guard).
 
     **Gated on the opt-in tree.** ``nested_configs`` is the mutation's
     ``Meta.nested_fields`` map - the SAME opt-in tree the input builder walks. Only nested fields it

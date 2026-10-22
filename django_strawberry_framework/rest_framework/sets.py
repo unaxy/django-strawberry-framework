@@ -231,8 +231,9 @@ def _checked_schema_field_map(
 
     The single authoritative read of the schema hook for the bind window: calls the overridable
     ``get_serializer_for_schema()`` and, when the class-validation fingerprint is present on the
-    snapshot, verifies the returned shape has NOT DRIFTED (a nondeterministic hook that validates
-    one shape and binds / names another is a clear ``ConfigurationError``). ``build_input`` is
+    snapshot, verifies the fingerprinted axes have NOT DRIFTED (``serializer_schema_fingerprint``
+    lists them; a nondeterministic hook that validates one shape and binds / names another on one
+    of them is a clear ``ConfigurationError``). ``build_input`` is
     the one caller, so neither the build nor the descriptor-derived name reads an unguarded
     field map behind the fingerprint's back.
 
