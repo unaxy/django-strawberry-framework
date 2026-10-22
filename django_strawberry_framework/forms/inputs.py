@@ -166,7 +166,11 @@ _materialized_names, _materialize_input, _clear_input_namespace = make_input_nam
 )
 
 
-def materialize_form_input_class(name: str, input_cls: type[object]) -> None:
+def materialize_form_input_class(
+    name: str,
+    input_cls: type[object],
+    owner: str | None = None,
+) -> None:
     """Set ``input_cls`` as a real module global of ``forms.inputs`` under ``name``.
 
     Thin family wrapper over the ``make_input_namespace`` materializer (which
@@ -178,11 +182,14 @@ def materialize_form_input_class(name: str, input_cls: type[object]) -> None:
     second, DIFFERENT class under one name raises ``ConfigurationError`` - the
     spec-038 finalize-time collision raise, including two different form classes
     sharing a ``__name__``, which can never dedupe because they are distinct
-    ``form_class`` identities).
+    ``form_class`` identities). ``owner`` names the declaration behind the input
+    (``write_mixins.py::build_and_stash_input`` passes the mutation class) in the
+    cross-family type-name claim, so a model or serializer input of different
+    fields under the same generated name is reported against both declarations.
 
     Defined here; called by the phase-2.5 bind.
     """
-    _materialize_input(name, input_cls)
+    _materialize_input(name, input_cls, owner)
 
 
 def clear_form_input_namespace() -> None:

@@ -209,6 +209,7 @@ def _audit_mutation_input_surface(
 def materialize_mutation_input_class(
     name: str,
     input_cls: type[WithStrawberryObjectDefinition],
+    owner: str | None = None,
 ) -> None:
     """Set ``input_cls`` as a real module global of ``mutations.inputs`` under ``name``.
 
@@ -216,13 +217,14 @@ def materialize_mutation_input_class(
     both consumer-authored fields and the generated remainder of a merged input
     are visible together. It then delegates to the ``make_input_namespace``
     materializer. See that helper for the ``LazyType.resolve_type`` contract, the
-    idempotent ``(name, input_cls)`` clause, and the distinct-class name collision
-    raise.
+    idempotent ``(name, input_cls)`` clause, the distinct-class name collision
+    raise, and the cross-family type-name claim, whose collision message names
+    ``owner`` (the ``DjangoMutation`` or auth mutation the input belongs to).
 
     Defined here; called only by the phase-2.5 bind.
     """
     _audit_mutation_input_surface(name, input_cls)
-    _materialize_input(name, input_cls)
+    _materialize_input(name, input_cls, owner)
 
 
 def clear_mutation_input_namespace() -> None:

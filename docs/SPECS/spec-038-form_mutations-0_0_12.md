@@ -1240,7 +1240,7 @@ match; the consumer disambiguates by renaming one form (there is no name-overrid
 set, basis content)` dedupe to one materialized class. The raise comes from
 [`utils/inputs.py`][utils-inputs]`::materialize_generated_input_class`, whose ledger
 raises on a second *different* class under one name (the `036` raise), so the form
-flavor has the early-`ConfigurationError`-not-late-Strawberry-error posture.
+flavor has the early-`ConfigurationError`-not-late-Strawberry-error posture. The family ledger is per family; a name another family also derives (a model input, a `ModelForm` or serializer class whose name meets it, a filter or order input) is the cross-family type-name claim at [`utils/inputs.py::claim_generated_type_name`][utils-inputs]: identical fields merge into one type, and two shapes fail any schema serving both with Strawberry's `DuplicatedTypeName`, which [`DjangoSchema`][glossary-djangoschema] restates naming both mutations.
 
 **`Meta.fields` / `Meta.exclude` are normalized + fail-loud against
 `form_class.base_fields`.** The form base validates the narrowing at **class
@@ -2509,6 +2509,7 @@ The completion contract.
 [glossary-djangomutationfield]: ../GLOSSARY.md#djangomutationfield
 [glossary-djangonodefield]: ../GLOSSARY.md#djangonodefield
 [glossary-djangooptimizerextension]: ../GLOSSARY.md#djangooptimizerextension
+[glossary-djangoschema]: ../GLOSSARY.md#djangoschema
 [glossary-djangotype]: ../GLOSSARY.md#djangotype
 [glossary-fielderror-envelope]: ../GLOSSARY.md#fielderror-envelope
 [glossary-fieldset]: ../GLOSSARY.md#fieldset

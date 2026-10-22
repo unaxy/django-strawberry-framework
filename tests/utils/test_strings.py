@@ -109,8 +109,8 @@ def test_pascal_case_handles_snake_case_inputs() -> None:
     # Leading / trailing underscore runs are preserved verbatim -- the Pascal
     # dual of ``graphql_camel_name``'s edge rule. Collapsing them made
     # ``price`` / ``price_`` / ``_price`` members of one set mint the same
-    # generated type-name stem (operator bag / range / enum), so Strawberry
-    # silently kept one and dropped the other from the schema.
+    # generated type-name stem (operator bag / range / enum), and two shapes
+    # under one name cannot share a schema.
     assert pascal_case("_leading") == "_Leading"
     assert pascal_case("trailing_") == "Trailing_"
     assert pascal_case("_price_") == "_Price_"

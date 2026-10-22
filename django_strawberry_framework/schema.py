@@ -75,6 +75,7 @@ from django.db import DatabaseError, connections, transaction
 from django.db.transaction import TransactionManagementError
 from graphql import GraphQLError, located_error, parse
 from graphql.execution.execute import ExecutionContext
+from strawberry.exceptions import DuplicatedTypeName
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.types.graphql import OperationType
 from typing_extensions import override
@@ -98,6 +99,7 @@ from .utils import truth
 from .utils._narrowing import is_mapping, mapping_get
 from .utils.errors import coded_error_extensions
 from .utils.execution_mode import OperationMode, async_execution
+from .utils.inputs import generated_type_name_collision
 from .utils.policies import copy_policy
 from .utils.private_state import PrivateAuthority, PrivateMembership
 from .utils.typing import call_forwarded
@@ -861,6 +863,15 @@ class DjangoSchema(strawberry.Schema):
     resource bounds and deadline, and the mutation transaction window each hold
     for one response per operation, and a ``@defer`` / ``@stream`` payload is
     delivered outside it.
+
+    **A generated type-name clash names its declarations.** Two generated input
+    classes of different fields under one GraphQL type name (two sets, two
+    families, or a model and a form or serializer deriving one name) cannot share
+    a schema; Strawberry refuses the pair with ``DuplicatedTypeName``, and this
+    class restates that refusal as ``ConfigurationError`` naming the two
+    declarations and members that generated them
+    (``utils/inputs.py::generated_type_name_collision``). Any other duplicate name
+    passes through with Strawberry's own error.
     """
 
     def __init__(
@@ -926,7 +937,18 @@ class DjangoSchema(strawberry.Schema):
         # in an ImportError fallback, so Schema.__init__'s signature carries Unknown; the other
         # arguments are forwarded verbatim, and ``extensions`` carries the instances Strawberry
         # accepts at run time but leaves out of its annotation
-        super().__init__(*args, extensions=entries, **forwarded)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+        try:
+            super().__init__(*args, extensions=entries, **forwarded)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+        except DuplicatedTypeName as exc:
+            # Two generated input classes of different fields under one name reached
+            # this schema (``utils/inputs.py::claim_generated_type_name`` gave the
+            # second its own identity so Strawberry refuses it here rather than merge
+            # it): restate the refusal naming the declarations that generated them.
+            # Any other duplicate is Strawberry's to report.
+            restated = generated_type_name_collision(exc.second_cls, exc.first_cls)
+            if restated is None:
+                raise
+            raise restated from exc
 
     @property
     @override

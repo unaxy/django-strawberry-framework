@@ -126,7 +126,11 @@ _materialized_names, _materialize_input, _clear_input_namespace = make_input_nam
 )
 
 
-def materialize_serializer_input_class(name: str, input_cls: type[object]) -> None:
+def materialize_serializer_input_class(
+    name: str,
+    input_cls: type[object],
+    owner: str | None = None,
+) -> None:
     """Set ``input_cls`` as a real module global of ``rest_framework.inputs`` under ``name``.
 
     Thin family wrapper over the ``make_input_namespace`` materializer (which
@@ -136,6 +140,10 @@ def materialize_serializer_input_class(name: str, input_cls: type[object]) -> No
     idempotency clause (re-materializing the same class under the same name is a
     no-op, so identical descriptors dedupe), and the distinct-class collision
     raise (a second, DIFFERENT class under one name raises ``ConfigurationError``).
+    ``owner`` names the declaration behind the input
+    (``write_mixins.py::build_and_stash_input`` passes the mutation class) in the
+    cross-family type-name claim, so a model or form input of different fields
+    under the same generated name is reported against both declarations.
 
     Defined here; called by the phase-2.5 bind. On a distinct-class name COLLISION the
     raised message is ENRICHED with the shape registered under ``name``
@@ -143,7 +151,7 @@ def materialize_serializer_input_class(name: str, input_cls: type[object]) -> No
     diagnosable (which serializer / operation / fields produced the contested name).
     """
     try:
-        _materialize_input(name, input_cls)
+        _materialize_input(name, input_cls, owner)
     except ConfigurationError as exc:
         debug = describe_serializer_input(name)
         if debug is None:
@@ -1610,6 +1618,7 @@ def dedupe_serializer_input_shape(
 def _dedupe_and_materialize_nested(
     nested_cls: type[object],
     nested_shape: SerializerInputShape,
+    owner: str,
 ) -> tuple[type[object], SerializerInputShape]:
     """Dedupe a nested input on its descriptor, materialize it, return the canonical pair.
 
@@ -1622,10 +1631,11 @@ def _dedupe_and_materialize_nested(
     (an astronomically-unlikely digest collision) still fails loud at materialize. Identical
     descriptors return the cached class; a first sighting is cached + materialized.
     Materializing a cache hit is intentionally idempotent and keeps the cache from assuming
-    that the independently reset ledger is still warm.
+    that the independently reset ledger is still warm. ``owner`` names the nested serializer
+    in the cross-family type-name claim's collision message.
     """
     nested_cls, nested_shape = dedupe_serializer_input_shape(nested_cls, nested_shape)
-    materialize_serializer_input_class(nested_shape.type_name, nested_cls)
+    materialize_serializer_input_class(nested_shape.type_name, nested_cls, owner)
     return nested_cls, nested_shape
 
 
@@ -1680,7 +1690,11 @@ def _resolve_nested_field(
         nested_configs=nested_config.nested_fields,
         _nested_path=nested_path,
     )
-    nested_cls, nested_shape = _dedupe_and_materialize_nested(nested_cls, nested_shape)
+    nested_cls, nested_shape = _dedupe_and_materialize_nested(
+        nested_cls,
+        nested_shape,
+        f"the nested input of serializer {truth.label(nested_class)}",
+    )
     kind = NESTED_MULTI if many else NESTED_SINGLE
     annotation: object = GenericAlias(list, (nested_cls,)) if many else nested_cls
     spec = InputFieldSpec(

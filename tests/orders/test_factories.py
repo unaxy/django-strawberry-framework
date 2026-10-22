@@ -35,6 +35,7 @@ from django_strawberry_framework.orders.inputs import (
 )
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr
 from django_strawberry_framework.utils.canonical import canonical_sort_key
+from django_strawberry_framework.utils.inputs import _type_name_claims
 from tests._idioms import definition_raises, type_args
 
 
@@ -45,11 +46,13 @@ def _isolate_state() -> Iterator[None]:
     _field_specs.clear()
     OrderArgumentsFactory.input_object_types.clear()
     OrderArgumentsFactory._type_orderset_registry.clear()
+    _type_name_claims.clear()
     yield
     _materialized_names.clear()
     _field_specs.clear()
     OrderArgumentsFactory.input_object_types.clear()
     OrderArgumentsFactory._type_orderset_registry.clear()
+    _type_name_claims.clear()
 
 
 # ---------------------------------------------------------------------------

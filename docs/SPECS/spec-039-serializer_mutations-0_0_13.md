@@ -1703,7 +1703,7 @@ descriptor** (a stable suffix), so two same-name-set-but-different-shape inputs 
 **distinct** names rather than silently colliding. Identical descriptors dedupe; two
 **distinct** descriptors that would still land on one generated name → a finalize-time
 [`ConfigurationError`][glossary-configurationerror] (the reused
-`materialize_generated_input_class` ledger raise, keyed by descriptor). `Meta.fields`
+`materialize_generated_input_class` ledger raise, keyed by descriptor). The family ledger is per family; a name another family also derives (a model input, a `ModelForm` or serializer class whose name meets it, a filter or order input) is the cross-family type-name claim at [`utils/inputs.py::claim_generated_type_name`][utils-inputs]: identical fields merge into one type, and two shapes fail any schema serving both with Strawberry's `DuplicatedTypeName`, which [`DjangoSchema`][glossary-djangoschema] restates naming both mutations. `Meta.fields`
 / `Meta.exclude` / `Meta.optional_fields` are normalized + fail-loud against the
 serializer's field set — a **bare string (including `"__all__"`)**, a duplicate, an
 unknown name, or an empty effective set raises
@@ -3850,6 +3850,7 @@ re-keying / opt-in-gated-fingerprint branches are package-tested.
 [glossary-djangomutationfield]: ../GLOSSARY.md#djangomutationfield
 [glossary-djangonodefield]: ../GLOSSARY.md#djangonodefield
 [glossary-djangooptimizerextension]: ../GLOSSARY.md#djangooptimizerextension
+[glossary-djangoschema]: ../GLOSSARY.md#djangoschema
 [glossary-djangotype]: ../GLOSSARY.md#djangotype
 [glossary-fielderror-envelope]: ../GLOSSARY.md#fielderror-envelope
 [glossary-fieldset]: ../GLOSSARY.md#fieldset
