@@ -55,11 +55,12 @@ is circular).
 already-charged `id()` values would serve as both cycle guard and charge-once cache, and it
 fails at both jobs:
 
-- **An `id()` is unique only among LIVE objects.** The values this walk reads are temporaries;
-  freeing one list lets the next same-sized list reuse its address, so an `id()`-keyed set
-  reports a *fresh* container as already charged. graphql-core's `value_from_ast_untyped`
-  builds fresh same-size lists whose ids recycle through CPython's free list, so thousands of
-  relation ids would be charged as dozens.
+- **An `id()` is unique only among LIVE objects.** A set of ints keeps none of them alive, and
+  every leaf the walk converts from a literal is a temporary; once one is freed the next value
+  can reuse its address, so an `id()`-keyed set reports a *fresh* value as already charged. A
+  walk over converted containers fails the same way on whole lists: converting a literal builds
+  fresh same-size lists whose ids recycle through CPython's free list, so thousands of relation
+  ids would be charged as dozens.
 - **Charge-once is not the contract.** One variable spliced into two mutation fields resolves
   to the same Python list both times, so charge-once would make the second field's relation ids
   free and the aggregate bound would never fire.

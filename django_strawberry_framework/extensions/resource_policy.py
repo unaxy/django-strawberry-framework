@@ -38,9 +38,11 @@ Three passes, in the order a request meets them:
    scalar-name rule cannot see (a raw-pk relation list is ``[Int!]`` on the
    wire). The walk is iterative and every container is cycle-guarded against
    its own ancestor path, so a self-referential value cannot spin it while
-   every reference is still charged; it runs entirely on coerced-shape input,
-   so no id is decoded and no queryset is built before it either passes or
-   rejects.
+   every reference is still charged. It runs entirely on the input as the
+   request spelled it - a literal as its AST, so an input object repeating a
+   field name is charged for every occurrence, and a variable as the
+   transport decoded it - so no id is decoded and no queryset is built before
+   it either passes or rejects.
 
 Where each pass reaches, stated as the boundary rather than as parity:
 
@@ -107,6 +109,7 @@ from graphql import (
     SchemaMetaFieldDef,
     TypeMetaFieldDef,
     TypeNameMetaFieldDef,
+    ValueNode,
     VariableNode,
     get_named_type,
     is_input_type,
@@ -178,7 +181,6 @@ if TYPE_CHECKING:
         GraphQLType,
         SelectionNode,
         TypeNode,
-        ValueNode,
         VariableDefinitionNode,
     )
     from strawberry.types import ExecutionContext
@@ -416,6 +418,25 @@ def _closes_a_cycle(container: object, path: tuple[object, ...]) -> bool:
     return any(container is ancestor for ancestor in path)
 
 
+def _popped_value(value: object, variables: Mapping[str, object] | None) -> object:
+    """Return what one value frame stands for when the walk pops it.
+
+    A literal list or input object stays its AST node, so the walk charges each
+    member the request spelled. A variable reference resolves through
+    ``variables`` by graphql-core's own ``value_from_ast_untyped`` lookup - a
+    supplied value, a default's literal AST, or ``Undefined`` for a name
+    neither carries - and to ``None`` where ``variables`` is ``None``. Any
+    other literal is converted, one leaf at a time. A Python value is itself.
+    """
+    if isinstance(value, VariableNode):
+        if variables is None:
+            return None
+        value = _value_from_ast(value, variables)
+    if not isinstance(value, ValueNode) or isinstance(value, (ListValueNode, ObjectValueNode)):
+        return value
+    return _value_from_ast(value)
+
+
 class _ValueBudget:
     """Running charges for one request's argument values.
 
@@ -434,11 +455,12 @@ class _ValueBudget:
     following it is what would not terminate.
 
     Why not a request-lifetime set of already-charged ``id()`` values: an
-    ``id()`` is only unique among LIVE
-    objects, and the coerced values this walk reads are temporaries. Freeing one
-    list lets the next same-sized list reuse its address, so a set of ints keyed
-    on ``id()`` silently reports a fresh container as already charged - measured
-    as thousands of relation ids charged as dozens. A cycle guard needs
+    ``id()`` is only unique among LIVE objects, and a set of ints keeps none of
+    them alive. Every leaf this walk converts from a literal is a temporary
+    whose address the next conversion can reuse, so a set keyed on ``id()``
+    silently reports a fresh value as already charged; a walk over converted
+    containers does the same to whole lists, measured as thousands of relation
+    ids charged as dozens. A cycle guard needs
     ancestor-scoped lifetime and owning references; a charge-once cache needs
     neither, because charging once is not the contract.
     """
@@ -526,9 +548,22 @@ class _ValueBudget:
         *,
         in_mutation: bool,
         argument: str,
+        variables: Mapping[str, object] | None = None,
         specs: Mapping[str, InputFieldSpec] | None = None,
     ) -> None:
         """Charge one argument's whole value tree against every value bound.
+
+        ``value`` is the argument's literal AST as the request carried it, or a
+        Python value (a supplied variable, a programmatic charge). A literal
+        list or input object is walked node by node, so every field the request
+        spelled is charged - a repeated field name included, which a
+        name-keyed conversion would collapse to its last occurrence before any
+        bound saw the rest. A leaf literal is converted only when it is popped,
+        and a variable reference resolves through ``variables`` exactly as
+        graphql-core's ``value_from_ast_untyped`` resolves it, to a supplied
+        value or a default's own literal AST; ``None`` there means no variable
+        is coerced at this position, and every reference is charged as
+        ``None``.
 
         Each stack entry carries the ANCESTOR PATH of the value it describes -
         the tuple of containers it hangs under - which is both the cycle guard
@@ -571,6 +606,7 @@ class _ValueBudget:
                 "an argument value nests lists or input objects deeper than the policy allows",
             )
             node_type = unwrap_non_null(node_type)
+            node_value = _popped_value(node_value, variables)
             if node_value is None:
                 continue
             if is_graphql_list(node_type):
@@ -614,7 +650,11 @@ class _ValueBudget:
                         ),
                     )
                 continue
-            if is_list_or_tuple(node_value) or is_mapping(node_value):
+            if (
+                isinstance(node_value, (ListValueNode, ObjectValueNode))
+                or is_list_or_tuple(node_value)
+                or is_mapping(node_value)
+            ):
                 # An untyped container: a JSON-shaped custom scalar, or a value
                 # whose Python shape does not match its declared input type.
                 # Charged for width and nodes, with no family classification -
@@ -671,20 +711,35 @@ class _ValueBudget:
         itself inside the budget: an over-wide container is refused for what it
         proved, at one past the limit, rather than enumerated in full so the
         refusal can quote an exact size nothing downstream will use.
+
+        A literal list or input object the request spelled is a container too,
+        and its width is the number of members it SPELLED: an input object
+        repeating a field name charges every occurrence, each queued as a child
+        of its own, because each is a subtree validation and coercion walk
+        whatever a name-keyed conversion keeps of it.
         """
-        if is_mapping(value):
-            mapping = value
-            if _closes_a_cycle(mapping, path):
-                return True
-            if is_exact_dict(mapping):
-                entries: Collection[tuple[object, object]] = mapping.items()
-                width = len(mapping)
+        if isinstance(value, ObjectValueNode) or is_mapping(value):
+            # A literal is a tree the parser built, so only a Python value can
+            # close a cycle.
+            entries: Iterable[tuple[object, object]]
+            if isinstance(value, ObjectValueNode):
+                mapping: object = value
+                fields = value.fields
+                entries = ((field.name.value, field.value) for field in fields)
+                width = len(fields)
             else:
-                entries = self._bounded_members(
-                    lambda: mapping.items(),  # noqa: PLW0108 - read inside _bounded_members' containment
-                    "max_container_width",
-                )
-                width = len(entries)
+                mapping = value
+                if _closes_a_cycle(value, path):
+                    return True
+                if is_exact_dict(value):
+                    entries = value.items()
+                    width = len(value)
+                else:
+                    entries = self._bounded_members(
+                        lambda: value.items(),  # noqa: PLW0108 - read inside _bounded_members' containment
+                        "max_container_width",
+                    )
+                    width = len(entries)
             self._reject(
                 "max_container_width",
                 width,
@@ -723,17 +778,21 @@ class _ValueBudget:
                     ),
                 )
             return True
-        if not is_list_or_tuple(value):
-            return False
-        sequence = value
-        if _closes_a_cycle(sequence, path):
-            return True
-        if type(sequence) in _EXACT_SEQUENCE_TYPES:
-            members: Collection[object] = sequence
-            width = len(sequence)
+        members: Collection[object]
+        if isinstance(value, ListValueNode):
+            sequence: object = value
+            members = value.values
+        elif is_list_or_tuple(value):
+            sequence = value
+            if _closes_a_cycle(value, path):
+                return True
+            if type(value) in _EXACT_SEQUENCE_TYPES:
+                members = value
+            else:
+                members = self._bounded_members(lambda: value, "max_container_width")
         else:
-            members = self._bounded_members(lambda: sequence, "max_container_width")
-            width = len(members)
+            return False
+        width = len(members)
         self._reject(
             "max_container_width",
             width,
@@ -1176,7 +1235,11 @@ class _DocumentWalk:
     walked with its own variable map and mutation-ness. ``variables`` is
     ``None`` where graphql-core coerces no variable (every definition but the
     selected operations), and a reference there is charged as ``None``: one
-    node, nothing below it. ``read`` collects the variables a charged value
+    node, nothing below it. ``variables`` holds each default converted, which
+    is what ``_page_bound`` narrows a page by; ``references`` is the map a
+    charged reference resolves through, the same supplied values with each
+    default as its literal AST, so a default is charged as the request spelled
+    it. ``read`` collects the variables a charged value
     referenced, and is kept only while a default is waiting to be told whether
     a use site charged it. ``argumented`` holds, per document node that carries
     directives, the ones among them that carry arguments, keyed by the node's
@@ -1199,6 +1262,7 @@ class _DocumentWalk:
         self.unshaped: set[int] = set()
         self.argumented: dict[int, tuple[DirectiveNode, ...]] = {}
         self.variables: dict[str, object] | None = None
+        self.references: dict[str, object] | None = None
         self.read: set[str] | None = None
         self.in_mutation: bool = False
 
@@ -1213,14 +1277,12 @@ class _DocumentWalk:
             argument_def = argument_defs.get(argument.name.value) if argument_defs else None
             if self.read is not None:
                 self.read.update(_variable_names(argument.value))
-            carried = self.variables
-            if carried is None:
-                carried = dict.fromkeys(_variable_names(argument.value))
             self.values.charge(
                 None if argument_def is None else graphql_type_of(argument_def),
-                _value_from_ast(argument.value, carried),
+                argument.value,
                 in_mutation=self.in_mutation,
                 argument=argument.name.value,
+                variables=self.references,
                 specs=specs,
             )
 
@@ -1271,12 +1333,15 @@ class _DocumentWalk:
         definitions = operation.variable_definitions or ()
         defaulted: dict[str, VariableDefinitionNode] = {}
         self.variables = None
+        self.references = None
         if selected:
             self.variables = dict(supplied)
+            self.references = dict(supplied)
             for var_def in definitions:
                 name = var_def.variable.name.value
                 if name not in self.variables and var_def.default_value is not None:
-                    self.variables[name] = value_from_ast_untyped(var_def.default_value)
+                    self.variables[name] = _value_from_ast(var_def.default_value)
+                    self.references[name] = var_def.default_value
                     defaulted[name] = var_def
         self.read = set() if defaulted else None
         self.in_mutation = operation.operation is OperationType.MUTATION
@@ -1298,7 +1363,7 @@ class _DocumentWalk:
                 continue
             self.values.charge(
                 _declared_input_type(graphql_schema, var_def.type),
-                _value_from_ast(var_def.default_value),
+                var_def.default_value,
                 in_mutation=self.in_mutation,
                 argument=name,
             )
@@ -1307,6 +1372,7 @@ class _DocumentWalk:
         """Walk a fragment definition no shape walk expanded, as a root of its own."""
         condition = self.graphql_schema.get_type(fragment.type_condition.name.value)
         self.variables = None
+        self.references = None
         self.read = None
         self.in_mutation = condition is not None and condition is self.graphql_schema.mutation_type
         self.charge_directives(fragment)
@@ -1496,6 +1562,7 @@ def charge_document(
             walk.operation(definition, supplied, selected=selected)
         elif not isinstance(definition, FragmentDefinitionNode):
             walk.variables = None
+            walk.references = None
             walk.read = None
             walk.in_mutation = False
             for directive in _type_system_directives(definition):

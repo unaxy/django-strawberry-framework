@@ -332,13 +332,14 @@ class ResourcePolicy:
         returned-row ceiling, not a guarantee on total physical database
         rows scanned.
 
-    The value bounds, charged over coerced-shape input before any id is decoded
-    and before any queryset is built:
+    The value bounds, charged over the input as the request spelled it before
+    any id is decoded and before any queryset is built:
 
     ``max_input_nodes``
         Every scalar, list, and object node in the request's argument values.
     ``max_container_width``
-        The widest single list or input object.
+        The widest single list or input object, an input object counting every
+        field it spells, a repeated field name included.
     ``max_value_depth``
         The deepest chain of nested lists / input objects in one argument value.
         ``max_depth`` bounds nesting spelled out in the document TEXT; a value

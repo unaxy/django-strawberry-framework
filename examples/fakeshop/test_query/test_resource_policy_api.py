@@ -33,6 +33,11 @@ Row groups, in the order a request meets them:
   defaults that are unused, shadowed by a supplied variable, or read only by a
   directive or an unknown field, argument values nothing types, and literals
   in an operation the request did not select or a fragment no spread reaches;
+- an input object repeating a field name, charged on the package-default
+  ``/graphql/`` mount for every occurrence the request spelled - in a field or
+  directive argument, a fragment expanded at every spread, and a variable
+  default whether or not a use site substitutes it - while one within every
+  bound reaches validation's own diagnostic;
 - the raw-pk relation id sets - the write inputs whose relation ids render as
   raw pks rather than ``GlobalID``s (``[Int!]`` on the wire), charged against
   the relation bounds through their bind specs rather than the id scalar's
@@ -2786,6 +2791,118 @@ def test_an_upload_variable_in_an_unselected_mutation_is_admitted() -> None:
     payload = _post_named("/rp-uploads/", query, "A")
     _no_rejection(payload)
     assert payload["data"] == {"__typename": "Query"}
+
+
+# ---------------------------------------------------------------------------
+# A repeated input-object field name: charged as the request spelled it
+# ---------------------------------------------------------------------------
+
+
+#: The package-default bounds a repeated field name would otherwise escape.
+_DEFAULT_INPUT_NODES = DEFAULT_RESOURCE_POLICY.max_input_nodes
+_DEFAULT_CONTAINER_WIDTH = DEFAULT_RESOURCE_POLICY.max_container_width
+
+#: The list width one repeated-name fragment value carries: one input object, its
+#: list, the list's items and the repeated leaf make one expansion exactly
+#: ``_DEFAULT_CONTAINER_WIDTH`` input nodes.
+_SHADOWED_LIST_WIDTH = _DEFAULT_CONTAINER_WIDTH - 3
+
+#: The expansions of that fragment ``_DEFAULT_INPUT_NODES`` admits.
+_SHADOWED_SPREADS = _DEFAULT_INPUT_NODES // _DEFAULT_CONTAINER_WIDTH
+
+
+def _shadowing_spreads(count: int) -> str:
+    """``count`` spreads of a fragment whose argument repeats ``k`` over a wide list.
+
+    A conversion keyed by field name keeps the last ``k`` and drops the list, so
+    only the literal as spelled carries the list's nodes into the budget.
+    """
+    items = ", ".join(["1"] * _SHADOWED_LIST_WIDTH)
+    spreads = " ".join(["...F"] * count)
+    return "{ %s } fragment F on Query { __typename(a: {k: [%s] k: 1}) }" % (spreads, items)
+
+
+def _repeated_fields(count: int, field: str = "k: 1") -> str:
+    """``count`` copies of one input-object field, the same name every time."""
+    return "{%s}" % " ".join([field] * count)
+
+
+#: One field past the package-default width bound.
+_OVER_WIDTH = _DEFAULT_CONTAINER_WIDTH + 1
+
+
+@pytest.mark.parametrize(
+    ("query", "bound", "charged"),
+    [
+        (_shadowing_spreads(_SHADOWED_SPREADS + 1), "max_input_nodes", _DEFAULT_INPUT_NODES + 1),
+        (
+            "{ __typename(a: %s) }" % _repeated_fields(_OVER_WIDTH),
+            "max_container_width",
+            _OVER_WIDTH,
+        ),
+        (
+            "{ allLibraryGenres(orderBy: %s) { name } }"
+            % _repeated_fields(_OVER_WIDTH, "id: null"),
+            "max_container_width",
+            _OVER_WIDTH,
+        ),
+        (
+            "{ __typename @include(if: %s) }" % _repeated_fields(_OVER_WIDTH),
+            "max_container_width",
+            _OVER_WIDTH,
+        ),
+        (
+            "query Q($v: Int = %s) { __typename }" % _repeated_fields(_OVER_WIDTH),
+            "max_container_width",
+            _OVER_WIDTH,
+        ),
+        (
+            "query Q($f: GenreFilterInputType = %s) { allLibraryGenres(filter: $f) { name } }"
+            % _repeated_fields(_OVER_WIDTH, "id: null"),
+            "max_container_width",
+            _OVER_WIDTH,
+        ),
+    ],
+    ids=[
+        "spread-fragment",
+        "untyped-argument",
+        "typed-order",
+        "directive-argument",
+        "unused-default",
+        "used-default",
+    ],
+)
+def test_a_repeated_input_field_name_is_charged_at_every_occurrence(
+    query: str,
+    bound: str,
+    charged: int,
+) -> None:
+    """Every occurrence of a repeated field is a subtree validation walks, so each is charged.
+
+    The rows sit at the package default policy: each is a document whose
+    last-occurrence-wins conversion fits every bound, and whose literal, as the
+    request spelled it, does not. A variable default is charged as its own
+    literal too, where nothing reads it and at the use site that substitutes it.
+    """
+    extensions = _rejection(_post("/graphql/", query))
+    assert extensions["bound"] == bound
+    assert extensions["charged"] == charged
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        _shadowing_spreads(_SHADOWED_SPREADS),
+        '{ allLibraryGenres(filter: {name: {exact: "x"} name: {exact: "y"}}) { name } }',
+    ],
+    ids=["spread-fragment-at-bound", "typed-filter"],
+)
+def test_a_repeated_input_field_name_within_budget_reaches_validation(query: str) -> None:
+    """The budget never refuses a repetition as such; validation names it in its own words."""
+    payload = _post("/graphql/", query)
+    _no_rejection(payload)
+    messages = [json_str(error, "message") for error in json_list(payload, "errors")]
+    assert any("There can be only one input field named" in message for message in messages)
 
 
 # ---------------------------------------------------------------------------
