@@ -7,7 +7,8 @@ in ``examples/fakeshop/tests/test_inspect_django_type.py``. What stays here has 
 fakeshop shape: argparse ``--schema`` help; a custom ``NameConverter`` (prefixing
 every SDL name would break the live GraphQL suite); empty-registry unfinalized /
 no-Meta bases; function-local UNRESOLVED forward refs; direct ``relay.Node``
-inheritance; a ``Meta.name`` / ``__name__`` collision; helper rendering
+inheritance; a ``Meta.name`` / ``__name__`` collision; the ``ImageField`` path opt-in
+(no shipped type opts an image column in); helper rendering
 (``_sdl_type_name``, ``_render_annotation``, ``_scalar_name``); and the
 ``ArrayField`` / ``HStoreField`` converter rows, which only PostgreSQL columns
 reach. A process-wide name converter in fakeshop would change the shipped SDL.
@@ -28,6 +29,7 @@ import pytest
 import strawberry
 from apps.library.models import Edition, LendingDesk, Patron, PatronProfile, Venue
 from apps.products.models import Category, Item
+from apps.scalars.models import MediaSpecimen
 from django.core.management import CommandError, call_command
 from django.db import models
 from django.utils.module_loading import import_string
@@ -326,6 +328,28 @@ def test_inspect_hstore_row_names_the_hstore_arm(monkeypatch: pytest.MonkeyPatch
     assert _connection_row(_inspect_text("TaggedLedgerType"), "attributes").endswith(
         "HStoreField -> JSON",
     )
+
+
+def test_inspect_image_path_opt_in_row_names_the_swapped_output_object() -> None:
+    """An ``ImageField`` path opt-in names ``DjangoImagePathType`` in both columns.
+
+    ``Meta.filesystem_path_fields`` swaps the image column's output object through
+    ``FILESYSTEM_PATH_OUTPUT_TYPE_MAP``; the converter column names the object the
+    converter produced, the same one the type column renders. No shipped fakeshop
+    type opts an image column in, so the row is built over ``scalars.MediaSpecimen``.
+    """
+
+    class ImagePathSpecimenType(DjangoType):
+        class Meta:
+            model = MediaSpecimen
+            fields = ("id", "image")
+            filesystem_path_fields = ("image",)
+
+    assert registry.get(MediaSpecimen) is ImagePathSpecimenType
+    finalize_django_types()
+    image_cols = _connection_row(_inspect_text("ImagePathSpecimenType"), "image").split()
+    assert image_cols[2:4] == ["DjangoImagePathType", "yes"]
+    assert " ".join(image_cols[4:]) == "convert_field_output -> DjangoImagePathType"
 
 
 def test_sdl_type_name_ignores_inherited_strawberry_definition() -> None:
