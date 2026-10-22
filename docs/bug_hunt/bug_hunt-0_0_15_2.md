@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 184 done, 128 to do.
+Progress: 186 done, 126 to do.
 
 ## Done
 
@@ -704,6 +704,11 @@ Progress: 184 done, 128 to do.
   `Meta.cursor_field` sentences), `test_library_api.py::test_stale_after_cursor_no_error`'s docstring and the board
   (CardItems 1386 and 432, card 24's planning note and CardReference 15, re-rendered). Docs and board only; no
   executable line changes.
+- [x] 155. Already fixed by `a9e7963d`: none of the nine sentences names `0.324.0` any more; specs 030, 031, 032 and the
+  spec-030 / spec-032 rationale companions now carry no locked Strawberry version literal (0 hits under `docs/SPECS/`
+  and `docs/spec-*.md`). The citation-gate rule the item left open stays unbuilt.
+- [x] 235. Already fixed by `9a97127c`: both `optimizer/nested_planner.py` comments now state the invariant without the
+  "P2-3" review label ("covering the general page;", "naming a duplicated column."); 0 hits for `P2-3` in the file.
 
 ## Outside review of the fixes
 
@@ -772,11 +777,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   validation errors stay per-cell rows. Open for you: whether a syntax error may stop writing the per-cell ERROR rows
   and the failure JSON (it still exits 2), and whether the unreadable `--query` / `--compare` refusals (exit 2 through
   `parser.error`) land in the same change
-- [ ] 155. Nine sentences in specs 030, 031, 032 and the spec-030 / spec-032 rationale companions name 0.324.0 as the
-  `uv.lock`-resolved Strawberry; the lock resolves 0.327.7. Every technical claim still holds on the locked release (26
-  executed checks; `strawberry/relay/` byte-identical), so only the number is false. Fix: drop the number, spelling it
-  "the `uv.lock`-resolved release" as spec-029 does, so a lock-only bump cannot falsify it again; floor pins and audited
-  ranges stay. Open for you: a citation-gate rule refusing a version literal beside "locked" / "`uv.lock`-resolved"
 - [ ] 158. The optimizer's operation gate (`walker.py::_enable_only_for_operation`) is decided per plan-cache key, so under
   a mutation no writer records columns and a consumer `.only()` / `.defer()` (hook, manager, resolver) is never widened:
   a hook `.only("name")` under a mutation runs 77 statements where the QUERY runs 2 (152 with one more column; a nested
@@ -824,8 +824,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 231. KANBAN.md's "`FieldError` keying" card (rendered from the kanban DB) still says
   `validation_error_to_field_errors` is an identity pass-through and that no test covers a multi-word snake_case
   field; both are stale (the key maps and `tests/utils/test_error_keys.py` landed before)
-- [ ] 235. Two comments in `optimizer/nested_planner.py` label a guard "the P2-3 defect" / "the P2-3 false-coverage defect",
-  a review label START "No process provenance" bans; restate each as the invariant it guards
 - [ ] 255. `docs/SPECS/spec-058-graph_substrate-0_1_1-terms.csv` and
   `docs/SPECS/spec-068-structural_templates-0_1_6-terms.csv` sit beside their archived specs instead of in
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
