@@ -78,7 +78,7 @@ The hooks in `.pre-commit-config.yaml` check things ruff does not, and CI runs t
 
 - **kanban-tracked-path-constants** regenerates `examples/fakeshop/apps/kanban/constants.py` from git's tracked file set. Adding or deleting a tracked package or test file means committing the regenerated constants with it; the hook only sees a new file once it is staged.
 - **source-layout** enforces trailing-comma explosion at four or more elements (two in any `models.py`), ASCII-only `.py` source, the markdown link-definition scaffold described below, and brace explosion inside JSON and GraphQL blocks. It auto-fixes, then fails the run so you re-stage.
-- **ruff-format** and **ruff-check**.
+- **ruff-check** and **ruff-format**.
 - **check-kanban-anchors** and **check-citations**. Every `path::Symbol` reference in first-party source and on the board must resolve, so a rename means sweeping `::OldName` in the same change. Cite by symbol, never by line number.
 
 ## The example project and the rendered docs
