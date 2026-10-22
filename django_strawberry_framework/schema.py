@@ -795,6 +795,28 @@ def _operation_mode(*, sync: bool) -> OperationMode:
     return OperationMode.SYNC if sync else OperationMode.ASYNC
 
 
+def _validate_schema_rules(declared: Iterable[object] | None, keyword: str) -> tuple[object, ...]:
+    """Accept only actor-only ``Rule`` objects as schema-wide rules (``keyword`` names the list)."""
+    if declared is None:
+        return ()
+    from .rules.fragment import Field, Rule, footprint
+
+    rules = tuple(declared)
+    for rule in rules:
+        if not isinstance(rule, Rule):
+            raise ConfigurationError(
+                f"DjangoSchema({keyword}=...) holds {rule!r}; every entry must be a Rule",
+            )
+        row_terms = sorted(t.path for t in footprint(rule.predicate) if isinstance(t, Field))
+        if row_terms:
+            raise ConfigurationError(
+                f"Rule {rule.name!r} reads row fields {row_terms}; its footprint is not "
+                f"contained by the schema scope, so it cannot be a schema-wide {keyword} rule. "
+                "Declare it on the model that owns those fields.",
+            )
+    return rules
+
+
 class DjangoSchema(strawberry.Schema):
     """``strawberry.Schema`` with the mutation-transaction execution context installed.
 
@@ -871,6 +893,8 @@ class DjangoSchema(strawberry.Schema):
         extensions: Iterable[_ExtensionEntry] | None = None,
         execution_context_class: type[ExecutionContext] | None = None,
         config: StrawberryConfig | None = None,
+        visibility: Iterable[object] | None = None,
+        restrictions: Iterable[object] | None = None,
         **kwargs: object,
     ) -> None:
         """Build the schema, settling the two policies and forwarding the rest to Strawberry.
@@ -878,7 +902,19 @@ class DjangoSchema(strawberry.Schema):
         ``extensions``, ``execution_context_class`` and ``config`` are Strawberry's
         own arguments, read here before they are forwarded. Every other argument is
         forwarded verbatim, so a parameter an uncapped Strawberry adds passes through.
+
+        ``visibility`` and ``restrictions`` are the schema's two rule scopes.
+        ``visibility`` holds bypasses (ORed: one that holds grants everything),
+        ``restrictions`` holds universal restrictions (ANDed above the bypasses:
+        one that fails denies everything). Both own exactly the rules whose
+        footprint names no row field, so a rule that reads a row is refused here,
+        the one scope where that is provable at construction.
         """
+        self.visibility: tuple[object, ...] = _validate_schema_rules(visibility, "visibility")
+        self.restrictions: tuple[object, ...] = _validate_schema_rules(
+            restrictions,
+            "restrictions",
+        )
         entries, declared_resource = _consumer_extension_entries(extensions)
         if declared_resource is not None and resource_policy is not None:
             raise ConfigurationError(
