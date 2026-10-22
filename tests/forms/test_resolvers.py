@@ -38,7 +38,10 @@ the keying of a save-time Django ``ValidationError`` by a name fakeshop's own
 declares, a dotted name): the ``ModelForm`` reads it against the backing model, the
 model-less plain form against its own form fields. A ``ModelForm.save()`` override
 doing work only when committing, over a client-assigned key (no fakeshop form
-carries one), pins that such a create saves through ``save(commit=False)``.
+carries one), pins that such a create saves through ``save(commit=False)``. A bound
+form whose ``__init__`` or ``get_form`` rebuilds a relation field over another model or
+key column is refused before validation; fakeshop's one rebuilt relation field
+(``ShelfRelationsForm.branch``) keeps its model and key, so the refusals live here.
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ import contextlib
 import datetime
 import decimal
 import itertools
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from enum import Enum
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeAlias
@@ -105,7 +108,10 @@ from tests._idioms import is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from django.db.models.expressions import Combinable
+    from django.forms.utils import _FilesT
 
     # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
     # out because the checker runs without the django-stubs mypy plugin that would infer them.
@@ -996,69 +1002,71 @@ def test_partial_update_preserves_unprovided_fk_with_to_field_name() -> None:
     """An omitted FK whose form field sets ``to_field_name`` survives a partial update.
 
     The single-FK twin of the M2M ``to_field_name`` case. The bound
-    ``ModelChoiceField(to_field_name="code")`` validates ``shelf`` via
-    ``queryset.get(code=value)``; ``model_to_dict`` reconstructs an OMITTED FK as the
-    stored ``shelf_id`` pk, so the bound form would run ``get(code=<pk>)`` ->
+    ``ModelChoiceField(to_field_name="name")`` validates ``patron`` via
+    ``queryset.get(name=value)``; ``model_to_dict`` reconstructs an OMITTED FK as the
+    stored ``patron_id`` pk, so the bound form would run ``get(name=<pk>)`` ->
     ``DoesNotExist`` -> ``invalid_choice`` and spuriously fail a one-field update,
-    even though a PROVIDED unchanged FK (decoded to its ``code``) passes.
-    Reconstruction now converts an omitted ``to_field_name`` FK by ``to_field_name``
-    too. Fails on the pre-fix ``model_to_dict`` reconstruction.
+    even though a PROVIDED unchanged FK (decoded to its ``name``) passes.
+    Reconstruction converts an omitted ``to_field_name`` FK by ``to_field_name``
+    too (``Patron.name`` is unique, so the name names the one patron).
     """
 
-    class BookForm(forms.ModelForm[library_models.Book]):
-        shelf = forms.ModelChoiceField(
-            queryset=library_models.Shelf.objects.all(),
-            to_field_name="code",
+    class LoanForm(forms.ModelForm[library_models.Loan]):
+        patron = forms.ModelChoiceField(
+            queryset=library_models.Patron.objects.all(),
+            to_field_name="name",
         )
 
         class Meta:
-            model = library_models.Book
-            fields = ("title", "shelf")
+            model = library_models.Loan
+            fields = ("note", "patron")
 
-    class ShelfT(DjangoType, relay.Node):
+    class PatronT(DjangoType, relay.Node):
         class Meta:
-            model = library_models.Shelf
-            fields = ("id", "code")
+            model = library_models.Patron
+            fields = ("id", "name")
             primary = True
 
-    assert registry.get(library_models.Shelf) is ShelfT
+    assert registry.get(library_models.Patron) is PatronT
 
-    class BookT(DjangoType, relay.Node):
+    class LoanT(DjangoType, relay.Node):
         class Meta:
-            model = library_models.Book
-            fields = ("id", "title")
+            model = library_models.Loan
+            fields = ("id", "note")
             primary = True
 
-    class UpdateBook(DjangoModelFormMutation):
+    class UpdateLoan(DjangoModelFormMutation):
         class Meta:
-            form_class = BookForm
+            form_class = LoanForm
             operation = "update"
             permission_classes = [_AllowAll]
 
     @strawberry.type
     class Mutation:
-        update_book = DjangoMutationField(UpdateBook)
+        update_loan = DjangoMutationField(UpdateLoan)
 
     finalize_django_types()
     schema = _schema(Mutation)
     branch = library_models.Branch.objects.create(name=_uniq("Br"))
     shelf = library_models.Shelf.objects.create(code=_uniq("Sh"), branch=branch)
     book = library_models.Book.objects.create(title="Orig", shelf=shelf)
+    patron = library_models.Patron.objects.create(name=_uniq("Pa"))
+    loan = library_models.Loan.objects.create(book=book, patron=patron, note="Orig")
     res = schema.execute_sync(
-        "mutation($id: ID!, $d: BookFormPartialInput!){ updateBook(id:$id, data:$d){ "
-        "node{ title } errors{ field messages } } }",
-        variable_values={"id": global_id_for(BookT, saved_pk(book)), "d": {"title": "Renamed"}},
+        "mutation($id: ID!, $d: LoanFormPartialInput!){ updateLoan(id:$id, data:$d){ "
+        "node{ note } errors{ field messages } } }",
+        variable_values={"id": global_id_for(LoanT, saved_pk(loan)), "d": {"note": "Renamed"}},
     )
     assert res.errors is None, res.errors
     assert res.data is not None
-    payload = _json_object(res.data, "updateBook")
+    payload = _json_object(res.data, "updateLoan")
     # The omitted to_field_name FK did NOT spuriously fail validation.
     assert payload["errors"] == [], payload["errors"]
-    assert _json_at(payload, "node", "title") == "Renamed"
-    book.refresh_from_db()
-    assert book.title == "Renamed"
+    assert _json_at(payload, "node", "note") == "Renamed"
+    loan.refresh_from_db()
+    assert loan.note == "Renamed"
     # the unchanged FK preserved
-    assert book.shelf_id == saved_pk(shelf)
+    assert saved_pk(loan.patron) == saved_pk(patron)
 
 
 @pytest.mark.django_db
@@ -1999,29 +2007,18 @@ def test_decode_form_relation_multi_keeps_a_member_whose_to_field_name_value_is_
     assert len(captured.captured_queries) == 1
 
 
-def _build_printing_bound_with_schema(
-    *,
-    to_field_name: str | None,
-) -> strawberry.Schema:
+def _build_printing_bound_with_schema() -> strawberry.Schema:
     """A ModelForm create over ``Printing`` whose ``bound_with`` names text-keyed editions.
 
     ``EditionT`` is a non-Relay primary, so ``boundWith`` takes raw ISBN text, and its
     ``get_queryset`` hides every edition whose ISBN is ``""`` or starts with ``hidden``.
-    ``to_field_name`` keys the ``bound_with`` member lookup (``None`` keeps the generated
-    field, keyed by the ISBN pk).
+    The generated ``bound_with`` field looks its members up by the ISBN pk.
     """
 
     class PrintingForm(forms.ModelForm[library_models.Printing]):
         class Meta:
             model = library_models.Printing
             fields = ("edition", "run_size", "bound_with")
-
-    if to_field_name is not None:
-        PrintingForm.base_fields["bound_with"] = forms.ModelMultipleChoiceField(
-            queryset=library_models.Edition.objects.all(),
-            to_field_name=to_field_name,
-            required=False,
-        )
 
     class EditionT(DjangoType):
         class Meta:
@@ -2067,30 +2064,19 @@ _CREATE_PRINTING = (
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("to_field_name", "isbn_10", "edition_reads"),
-    [(None, "0000000000", 2), ("isbn_10", "", 2)],
-    ids=["keyed_by_isbn", "keyed_by_isbn_10"],
-)
-def test_m2m_raw_pk_element_empty_is_decoded_never_a_clear(
-    to_field_name: str | None,
-    isbn_10: str,
-    edition_reads: int,
-) -> None:
+def test_m2m_raw_pk_element_empty_is_decoded_never_a_clear() -> None:
     """A raw-pk ``boundWith`` element ``""`` names the edition whose ISBN is ``""``, decoded.
 
     A list element is never a clear: ``""`` is the pk of an edition, so it is type-checked
     and resolved through ``EditionT.get_queryset`` like any member. That edition is hidden,
     so the element is the uniform relation error with nothing written. Bound undecoded, the
-    generated (ISBN-keyed) field would link the hidden edition, and a field keyed by
-    ``isbn_10`` would read the pk ``""`` as an ``isbn_10`` value and link the visible edition
-    whose ``isbn_10`` is ``""``. The edition table is read twice: ``editionId`` and the
-    element, each through ``EditionT.get_queryset``; the refusal precedes any form. ``EditionT``
-    is test-local: no fakeshop text-keyed type hides a row.
+    generated (ISBN-keyed) field would link the hidden edition. The edition table is read
+    twice: ``editionId`` and the element, each through ``EditionT.get_queryset``; the refusal
+    precedes any form. ``EditionT`` is test-local: no fakeshop text-keyed type hides a row.
     """
-    schema = _build_printing_bound_with_schema(to_field_name=to_field_name)
+    schema = _build_printing_bound_with_schema()
     publisher = library_models.Publisher.objects.create(name=_uniq("Pub"))
-    library_models.Edition.objects.create(isbn_13="", isbn_10=isbn_10, publisher=publisher)
+    library_models.Edition.objects.create(isbn_13="", isbn_10="0000000000", publisher=publisher)
     shown = library_models.Edition.objects.create(
         isbn_13="9780000000267",
         isbn_10="",
@@ -2110,25 +2096,17 @@ def test_m2m_raw_pk_element_empty_is_decoded_never_a_clear(
     }
     assert not library_models.Printing.objects.exists()
     reads = [q["sql"] for q in captured.captured_queries if 'FROM "library_edition"' in q["sql"]]
-    assert len(reads) == edition_reads, reads
+    assert len(reads) == 2, reads
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("to_field_name", "isbn_10"),
-    [(None, "0000000000"), ("isbn_10", "0000000267")],
-    ids=["keyed_by_isbn", "keyed_by_isbn_10"],
-)
-def test_m2m_raw_pk_element_naming_a_visible_edition_links_it(
-    to_field_name: str | None,
-    isbn_10: str,
-) -> None:
-    """A visible edition named by its raw ISBN links through either key (the control)."""
-    schema = _build_printing_bound_with_schema(to_field_name=to_field_name)
+def test_m2m_raw_pk_element_naming_a_visible_edition_links_it() -> None:
+    """A visible edition named by its raw ISBN links (the control)."""
+    schema = _build_printing_bound_with_schema()
     publisher = library_models.Publisher.objects.create(name=_uniq("Pub"))
     shown = library_models.Edition.objects.create(
         isbn_13="9780000000268",
-        isbn_10=isbn_10,
+        isbn_10="0000000000",
         publisher=publisher,
     )
     shown_pk = require_instance(pk_of(shown), str)
@@ -3382,3 +3360,637 @@ def test_modelform_create_over_a_client_key_saves_through_commit_false(
     assert res.data == {"createRow": {"errors": []}}
     assert notes == [data["note"]]
     assert committed == _COMMITTED_NOTES
+
+
+# ---------------------------------------------------------------------------
+# The bound form's model-choice fields agree with the decode basis
+# ---------------------------------------------------------------------------
+
+#: The email that hides a patron from ``_register_hiding_patron_type``'s ``get_queryset``.
+_HIDDEN_EMAIL = "hidden@example.test"
+
+#: ``ModelChoiceField`` with its model parameter solved, for a typed ``require_instance``.
+_MODEL_CHOICE_FIELD: type[forms.ModelChoiceField[models.Model]] = forms.ModelChoiceField
+
+#: Applied to the bound form at the end of its ``__init__`` (or by a ``get_form`` override).
+_Retune: TypeAlias = "Callable[[forms.BaseForm], None]"
+
+
+def _register_hiding_patron_type() -> None:
+    """Register a raw-pk ``Patron`` primary whose ``get_queryset`` hides ``_HIDDEN_EMAIL``."""
+
+    class PatronT(DjangoType):
+        class Meta:
+            model = library_models.Patron
+            fields = ("id", "name")
+            primary = True
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: models.QuerySet[library_models.Patron],
+            info: object,
+        ) -> models.QuerySet[library_models.Patron]:
+            return queryset.exclude(email=_HIDDEN_EMAIL)
+
+    assert registry.get(library_models.Patron) is PatronT
+
+
+def _model_choice(form: forms.BaseForm, name: str) -> forms.ModelChoiceField[models.Model]:
+    """The bound form's model-choice field ``name``."""
+    return require_instance(form.fields[name], _MODEL_CHOICE_FIELD)
+
+
+def _set_key(name: str, key: str | None) -> _Retune:
+    """A retune that sets the bound field ``name``'s ``to_field_name`` to ``key``."""
+
+    def retune(form: forms.BaseForm) -> None:
+        _model_choice(form, name).to_field_name = key
+
+    return retune
+
+
+def _set_queryset(name: str, queryset: models.QuerySet[models.Model]) -> _Retune:
+    """A retune that assigns the bound field ``name`` the queryset ``queryset``."""
+
+    def retune(form: forms.BaseForm) -> None:
+        _model_choice(form, name).queryset = queryset
+
+    return retune
+
+
+def _loan_patron_form(
+    *,
+    class_key: str | None,
+    retune: _Retune | None,
+) -> type[forms.ModelForm[library_models.Loan]]:
+    """A ``Loan`` ``ModelForm`` whose ``patron`` keys by ``class_key``, retuned in ``__init__``."""
+
+    class LoanPatronForm(forms.ModelForm[library_models.Loan]):
+        patron = forms.ModelChoiceField(
+            queryset=library_models.Patron.objects.all(),
+            to_field_name=class_key,
+        )
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            files: _FilesT | None = None,
+            instance: library_models.Loan | None = None,
+        ) -> None:
+            super().__init__(data=data, files=files, instance=instance)
+            if retune is not None:
+                retune(self)
+
+        class Meta:
+            model = library_models.Loan
+            fields = ("patron", "note")
+
+    return LoanPatronForm
+
+
+def _update_loan_schema(
+    loan_form: type[forms.ModelForm[library_models.Loan]],
+    *,
+    get_form_retune: _Retune | None = None,
+) -> tuple[strawberry.Schema, type[DjangoType]]:
+    """An ``updateLoan`` schema over ``loan_form``; ``get_form_retune`` runs in ``get_form``."""
+    _register_hiding_patron_type()
+
+    class LoanT(DjangoType, relay.Node):
+        class Meta:
+            model = library_models.Loan
+            fields = ("id", "note")
+            primary = True
+
+    class UpdateLoan(DjangoModelFormMutation):
+        class Meta:
+            form_class = loan_form
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+        @override
+        def get_form(
+            self,
+            info: strawberry.Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: models.Model | None = None,
+        ) -> forms.ModelForm[library_models.Loan]:
+            form = super().get_form(info, data=data, files=files, instance=instance)
+            if get_form_retune is not None:
+                get_form_retune(form)
+            return form
+
+    @strawberry.type
+    class Mutation:
+        update_loan = DjangoMutationField(UpdateLoan)
+
+    finalize_django_types()
+    return _schema(Mutation), LoanT
+
+
+def _loan_rows() -> tuple[library_models.Loan, library_models.Patron, library_models.Patron]:
+    """A loan of a visible patron, and a patron ``_register_hiding_patron_type`` hides."""
+    branch = library_models.Branch.objects.create(name=_uniq("Br"))
+    shelf = library_models.Shelf.objects.create(code=_uniq("Sh"), branch=branch)
+    book = library_models.Book.objects.create(title="Orig", shelf=shelf)
+    visible = library_models.Patron.objects.create(name=_uniq("Pa"))
+    hidden = library_models.Patron.objects.create(name=_uniq("Pa"), email=_HIDDEN_EMAIL)
+    loan = library_models.Loan.objects.create(book=book, patron=visible, note="Orig")
+    return loan, visible, hidden
+
+
+#: A refusal probe: the schema, its document and variables, the expected message, and a
+#: check that nothing was written.
+_Probe: TypeAlias = "tuple[strawberry.Schema, str, dict[str, object], str, Callable[[], None]]"
+
+_UPDATE_LOAN = (
+    "mutation($id: ID!, $d: LoanPatronFormPartialInput!){ updateLoan(id:$id, data:$d){ "
+    "node{ note } errors{ field } } }"
+)
+_KEY_ADVICE = (
+    "The to_field_name get_form or the form's __init__ sets must name the column "
+    "get_form_fields() declares."
+)
+
+
+def _loan_probe(
+    *,
+    class_key: str | None,
+    init_retune: _Retune | None = None,
+    get_form_retune: _Retune | None = None,
+    send_patron: bool,
+    bound_label: str,
+    class_label: str,
+) -> _Probe:
+    """A ``Loan`` update whose bound ``patron`` would resolve the hidden patron.
+
+    ``class_key`` names the key the decode binds (the class-level field's); the hidden
+    patron carries the visible one's key under the column the bound field reads instead.
+    """
+    schema, loan_type = _update_loan_schema(
+        _loan_patron_form(class_key=class_key, retune=init_retune),
+        get_form_retune=get_form_retune,
+    )
+    loan, visible, hidden = _loan_rows()
+    if class_key is None:
+        hidden.name = str(saved_pk(visible))
+        hidden.save(update_fields=["name"])
+    else:
+        visible.name = str(saved_pk(hidden))
+        visible.save(update_fields=["name"])
+    data: dict[str, object] = {"note": "Changed"}
+    if send_patron:
+        data["patronId"] = saved_pk(visible)
+
+    def unchanged() -> None:
+        loan.refresh_from_db()
+        assert (saved_pk(loan.patron), loan.note) == (saved_pk(visible), "Orig")
+
+    message = (
+        f"UpdateLoan: the bound form's field 'patron' resolves its choice by {bound_label}, "
+        f"but the input binds Patron rows by {class_label}. {_KEY_ADVICE}"
+    )
+    variables: dict[str, object] = {"id": global_id_for(loan_type, saved_pk(loan)), "d": data}
+    return schema, _UPDATE_LOAN, variables, message, unchanged
+
+
+def _init_sets_key() -> _Probe:
+    return _loan_probe(
+        class_key=None,
+        init_retune=_set_key("patron", "name"),
+        send_patron=True,
+        bound_label="'name'",
+        class_label="its primary key",
+    )
+
+
+def _init_clears_key() -> _Probe:
+    return _loan_probe(
+        class_key="name",
+        init_retune=_set_key("patron", None),
+        send_patron=True,
+        bound_label="its primary key",
+        class_label="'name'",
+    )
+
+
+def _get_form_sets_key() -> _Probe:
+    return _loan_probe(
+        class_key=None,
+        get_form_retune=_set_key("patron", "name"),
+        send_patron=True,
+        bound_label="'name'",
+        class_label="its primary key",
+    )
+
+
+def _omitted_relation_init_sets_key() -> _Probe:
+    return _loan_probe(
+        class_key=None,
+        init_retune=_set_key("patron", "name"),
+        send_patron=False,
+        bound_label="'name'",
+        class_label="its primary key",
+    )
+
+
+def _init_sets_unknown_key() -> _Probe:
+    return _loan_probe(
+        class_key=None,
+        init_retune=_set_key("patron", "nickname"),
+        send_patron=True,
+        bound_label="a name that is no field of its model",
+        class_label="its primary key",
+    )
+
+
+_UPDATE_BOOK_GENRES = (
+    "mutation($id: ID!, $d: BookGenresFormPartialInput!){ updateBook(id:$id, data:$d){ "
+    "node{ title } errors{ field } } }"
+)
+
+
+def _m2m_init_sets_key() -> _Probe:
+    """A ``Book`` update whose bound ``genres`` would link a genre the type hides."""
+
+    class GenreT(DjangoType):
+        class Meta:
+            model = library_models.Genre
+            fields = ("id", "name")
+            primary = True
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: models.QuerySet[library_models.Genre],
+            info: object,
+        ) -> models.QuerySet[library_models.Genre]:
+            return queryset.exclude(name__regex=r"^\d+$")
+
+    class BookT(DjangoType, relay.Node):
+        class Meta:
+            model = library_models.Book
+            fields = ("id", "title")
+            primary = True
+
+    retune = _set_key("genres", "name")
+
+    class BookGenresForm(forms.ModelForm[library_models.Book]):
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            files: _FilesT | None = None,
+            instance: library_models.Book | None = None,
+        ) -> None:
+            super().__init__(data=data, files=files, instance=instance)
+            retune(self)
+
+        class Meta:
+            model = library_models.Book
+            fields = ("title", "genres")
+
+    class UpdateBook(DjangoModelFormMutation):
+        class Meta:
+            form_class = BookGenresForm
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        update_book = DjangoMutationField(UpdateBook)
+
+    finalize_django_types()
+    assert registry.get(library_models.Genre) is GenreT
+    branch = library_models.Branch.objects.create(name=_uniq("Br"))
+    shelf = library_models.Shelf.objects.create(code=_uniq("Sh"), branch=branch)
+    book = library_models.Book.objects.create(title="Orig", shelf=shelf)
+    visible = library_models.Genre.objects.create(name=_uniq("G"))
+    library_models.Genre.objects.create(name=str(saved_pk(visible)))
+
+    def unchanged() -> None:
+        book.refresh_from_db()
+        assert (book.title, list(book.genres.all())) == ("Orig", [])
+
+    message = (
+        "UpdateBook: the bound form's field 'genres' resolves its choice by 'name', but the "
+        f"input binds Genre rows by its primary key. {_KEY_ADVICE}"
+    )
+    return (
+        _schema(Mutation),
+        _UPDATE_BOOK_GENRES,
+        {
+            "id": global_id_for(BookT, saved_pk(book)),
+            "d": {"title": "Changed", "genres": [saved_pk(visible)]},
+        },
+        message,
+        unchanged,
+    )
+
+
+def _plain_init_swaps_model() -> _Probe:
+    """A plain form whose bound ``patron`` would hand ``perform_mutate`` a ``Branch``."""
+    _register_hiding_patron_type()
+    picked: list[object] = []
+    retune = _set_queryset("patron", library_models.Branch.objects.all())
+
+    class PickPatronForm(forms.Form):
+        patron = forms.ModelChoiceField(queryset=library_models.Patron.objects.all())
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            files: _FilesT | None = None,
+        ) -> None:
+            super().__init__(data=data, files=files)
+            retune(self)
+
+    class PickPatron(DjangoFormMutation):
+        class Meta:
+            form_class = PickPatronForm
+            permission_classes = []
+
+        @override
+        def perform_mutate(
+            self,
+            form: forms.BaseForm,
+            info: strawberry.Info[object, object],
+        ) -> None:
+            del info
+            picked.append(dict_of(form.cleaned_data)["patron"])
+
+    @strawberry.type
+    class Mutation:
+        pick_patron = DjangoMutationField(PickPatron)
+
+    finalize_django_types()
+    visible = library_models.Patron.objects.create(name=_uniq("Pa"))
+    library_models.Branch.objects.create(pk=saved_pk(visible), name=_uniq("Br"))
+
+    def unchanged() -> None:
+        assert picked == []
+
+    message = (
+        "PickPatron: the bound form's field 'patron' looks its choice up among Branch rows, "
+        "but the input decodes 'patron' ids against Patron. The queryset get_form or the "
+        "form's __init__ assigns must be over the model get_form_fields() declares."
+    )
+    return (
+        _schema(Mutation),
+        "mutation($d: PickPatronFormInput!){ pickPatron(data:$d){ ok } }",
+        {"d": {"patronId": saved_pk(visible)}},
+        message,
+        unchanged,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "probe",
+    [
+        _init_sets_key,
+        _init_clears_key,
+        _get_form_sets_key,
+        _omitted_relation_init_sets_key,
+        _init_sets_unknown_key,
+        _m2m_init_sets_key,
+        _plain_init_swaps_model,
+    ],
+    ids=[
+        "init-sets-key",
+        "init-clears-key",
+        "get-form-sets-key",
+        "omitted-relation",
+        "unknown-key",
+        "many-to-many",
+        "plain-form-other-model",
+    ],
+)
+def test_bound_choice_disagreeing_with_the_decode_is_refused_before_validation(
+    probe: Callable[[], _Probe],
+) -> None:
+    """A bound model-choice field over another model or key column refuses the request.
+
+    The decode resolves the visible row and binds the key the class-level field reads off
+    it; a bound field rebuilt by ``__init__`` or ``get_form`` would look that key up under
+    another column (the hidden patron or genre carries it there) or in another model's
+    rows. The request is the fail-closed ``ConfigurationError`` and nothing is written,
+    whether the relation is provided, omitted from an update (rebound from the stored
+    key), single or many-to-many.
+    """
+    schema, document, variables, message, unchanged = probe()
+    res = schema.execute_sync(document, variable_values=variables)
+    assert res.errors is not None
+    assert [error.message for error in res.errors] == [message]
+    unchanged()
+
+
+def _plain_pick_schema(
+    field: forms.ModelChoiceField[models.Model],
+    retune: _Retune,
+) -> tuple[strawberry.Schema, list[object]]:
+    """A plain form declaring ``field`` as ``pick``, retuned in ``__init__``, and its picks."""
+    picked: list[object] = []
+
+    class PickForm(forms.Form):
+        pick = field
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            files: _FilesT | None = None,
+        ) -> None:
+            super().__init__(data=data, files=files)
+            retune(self)
+
+    class Pick(DjangoFormMutation):
+        class Meta:
+            form_class = PickForm
+            permission_classes = []
+
+        @override
+        def perform_mutate(
+            self,
+            form: forms.BaseForm,
+            info: strawberry.Info[object, object],
+        ) -> None:
+            del info
+            picked.append(dict_of(form.cleaned_data)["pick"])
+
+    @strawberry.type
+    class Mutation:
+        pick = DjangoMutationField(Pick)
+
+    finalize_django_types()
+    return _schema(Mutation), picked
+
+
+#: An admitted pick: the schema, the rows its ``perform_mutate`` picked, the id to send,
+#: and the row that id names.
+_PickBuild: TypeAlias = "tuple[strawberry.Schema, list[object], object, models.Model]"
+
+
+def _pick_patron_requeried() -> _PickBuild:
+    """``__init__`` reassigns the queryset over the same model: the request-scoped idiom."""
+    _register_hiding_patron_type()
+    schema, picked = _plain_pick_schema(
+        forms.ModelChoiceField(queryset=library_models.Patron.objects.all()),
+        _set_queryset("pick", library_models.Patron.objects.exclude(email=_HIDDEN_EMAIL)),
+    )
+    patron = library_models.Patron.objects.create(name=_uniq("Pa"))
+    return schema, picked, saved_pk(patron), patron
+
+
+def _pick_patron_by_pk_spelling(
+    key: str,
+) -> Callable[[], _PickBuild]:
+    """``__init__`` respells the pk key of a pk-keyed field as ``key``."""
+
+    def build() -> _PickBuild:
+        _register_hiding_patron_type()
+        schema, picked = _plain_pick_schema(
+            forms.ModelChoiceField(queryset=library_models.Patron.objects.all()),
+            _set_key("pick", key),
+        )
+        patron = library_models.Patron.objects.create(name=_uniq("Pa"))
+        return schema, picked, saved_pk(patron), patron
+
+    return build
+
+
+def _pick_card_by_attname() -> _PickBuild:
+    """``__init__`` respells a ``patron`` key as its attname ``patron_id``: one column."""
+
+    class CardT(DjangoType):
+        class Meta:
+            model = library_models.MembershipCard
+            fields = ("id", "barcode")
+            primary = True
+
+    schema, picked = _plain_pick_schema(
+        forms.ModelChoiceField(
+            queryset=library_models.MembershipCard.objects.all(),
+            to_field_name="patron",
+        ),
+        _set_key("pick", "patron_id"),
+    )
+    assert registry.get(library_models.MembershipCard) is CardT
+    patron = library_models.Patron.objects.create(name=_uniq("Pa"))
+    card = library_models.MembershipCard.objects.create(patron=patron, barcode=_uniq("Bc"))
+    return schema, picked, saved_pk(card), card
+
+
+def _pick_branch_from_a_proxy() -> _PickBuild:
+    """``__init__`` looks the name-keyed branch up among ``ProxyBranch`` rows, a subclass."""
+
+    class BranchT(DjangoType):
+        class Meta:
+            model = library_models.Branch
+            fields = ("id", "name")
+            primary = True
+
+    schema, picked = _plain_pick_schema(
+        forms.ModelChoiceField(queryset=library_models.Branch.objects.all(), to_field_name="name"),
+        _set_queryset("pick", library_models.ProxyBranch.objects.all()),
+    )
+    assert registry.get(library_models.Branch) is BranchT
+    branch = library_models.Branch.objects.create(name=_uniq("Br"))
+    return schema, picked, saved_pk(branch), branch
+
+
+def _pick_venue_from_a_child_table() -> _PickBuild:
+    """``__init__`` looks a pk-keyed venue up among ``LendingDesk`` rows, a multi-table child.
+
+    The child's primary key is its parent link, a different field from the venue's ``id``
+    holding the same value, so both read as the one primary key.
+    """
+
+    class VenueT(DjangoType):
+        class Meta:
+            model = library_models.Venue
+            fields = ("id", "name")
+            primary = True
+
+    schema, picked = _plain_pick_schema(
+        forms.ModelChoiceField(queryset=library_models.Venue.objects.all()),
+        _set_queryset("pick", library_models.LendingDesk.objects.all()),
+    )
+    assert registry.get(library_models.Venue) is VenueT
+    desk = library_models.LendingDesk.objects.create(name=_uniq("Desk"))
+    return schema, picked, saved_pk(desk), desk
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "build",
+    [
+        _pick_patron_requeried,
+        _pick_patron_by_pk_spelling("pk"),
+        _pick_patron_by_pk_spelling("id"),
+        _pick_card_by_attname,
+        _pick_branch_from_a_proxy,
+        _pick_venue_from_a_child_table,
+    ],
+    ids=[
+        "same-model-queryset",
+        "pk-as-pk",
+        "pk-as-id",
+        "attname",
+        "proxy-queryset",
+        "multi-table-child-queryset",
+    ],
+)
+def test_bound_choice_agreeing_with_the_decode_links_the_decoded_row(
+    build: Callable[[], _PickBuild],
+) -> None:
+    """A bound field over the target (or a subclass) and the same key column binds as decoded.
+
+    A reassigned queryset over the same model, any spelling of the primary key, a column's
+    name or attname, and a subclass of the target (a proxy, or a multi-table child whose
+    primary key is its parent link) all resolve the row the decode admitted.
+    """
+    schema, picked, pk, row = build()
+    res = schema.execute_sync(
+        "mutation($d: PickFormInput!){ pick(data:$d){ ok errors{ field } } }",
+        variable_values={"d": {"pickId": pk}},
+    )
+    assert res.errors is None, res.errors
+    assert res.data == {"pick": {"ok": True, "errors": []}}
+    assert [pk_of(require_instance(choice, models.Model)) for choice in picked] == [pk_of(row)]
+
+
+@pytest.mark.django_db
+def test_model_choice_field_over_a_scalar_column_is_bound_unchecked() -> None:
+    """A model-choice field over a column that is no relation takes a scalar, never an id.
+
+    ``note`` is a text column, so its input is the text the form looks up (a patron's
+    name), not a relation id: no decode binds a key for it, and the bound form stores
+    the patron it resolves (``str(patron)``, its name).
+    """
+
+    class LoanNoteForm(forms.ModelForm[library_models.Loan]):
+        note = forms.ModelChoiceField(
+            queryset=library_models.Patron.objects.all(),
+            to_field_name="name",
+        )
+
+        class Meta:
+            model = library_models.Loan
+            fields = ("note",)
+
+    schema, loan_type = _update_loan_schema(LoanNoteForm)
+    loan, visible, _hidden = _loan_rows()
+    res = schema.execute_sync(
+        "mutation($id: ID!, $d: LoanNoteFormPartialInput!){ updateLoan(id:$id, data:$d){ "
+        "node{ note } errors{ field } } }",
+        variable_values={
+            "id": global_id_for(loan_type, saved_pk(loan)),
+            "d": {"note": visible.name},
+        },
+    )
+    assert res.errors is None, res.errors
+    assert res.data == {"updateLoan": {"node": {"note": visible.name}, "errors": []}}

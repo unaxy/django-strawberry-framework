@@ -39,11 +39,15 @@ and the form-specific invariants this module owns:
   field is keyed by. The visible object is converted to the form-key value by
   ``to_field_name`` (``obj.serializable_value(field.to_field_name)``, or ``obj.pk``
   when the field sets none; the input build admits only ``pk`` or a concrete field of
-  the target, ``forms/inputs.py::require_readable_choice_keys``) so the bound form
-  validates by the same key it was built on. A single relation whose form-key value the
-  field cleans to empty is refused as that field's ``invalid_choice`` error rather than
-  bound as a clear. Only a whole single or list value in the field's ``empty_values`` is
-  a clear; an M2M list element never is, so every element, ``""`` included, is decoded.
+  the target unique on its own, ``forms/inputs.py::require_readable_choice_keys``) so
+  the bound form validates by the same key it was built on. The bound form's own field,
+  which an ``__init__`` or ``get_form`` override may rebuild, must query the target model
+  (or a subclass) by the same key column, or the request is a ``ConfigurationError``
+  before ``is_valid()`` (``_assert_bound_choice_agreement``). A single relation whose
+  form-key value the field cleans to empty is refused as that field's ``invalid_choice``
+  error rather than bound as a clear. Only a whole single or list value in the field's
+  ``empty_values`` is a clear; an M2M list element never is, so every element, ``""``
+  included, is decoded.
 
 - **``update`` reconstructs the full bound payload** (Decision 8 step 4): for
   every non-file declared form field the input did not provide, supply the located
@@ -152,6 +156,7 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError
 from django.forms.models import model_to_dict
 
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.resolvers import (
     StepFailure,
     adds_by_update_first,
@@ -162,7 +167,14 @@ from django_strawberry_framework.mutations.resolvers import (
     save_new_row,
     save_or_field_errors,
 )
-from django_strawberry_framework.utils._narrowing import call_method, is_str, list_of, read_attr
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_str,
+    list_of,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.errors import (
     build_error_key_map,
     save_time_error_key_map,
@@ -178,6 +190,9 @@ from django_strawberry_framework.utils.write_values import (
     materialize_relation_id_container,
 )
 from django_strawberry_framework.write_mixins import backing_model_of
+
+from .inputs import choice_key_field, relation_target_model
+from .sets import _is_form_class
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Mapping
@@ -233,8 +248,9 @@ def _to_form_key_value(obj: object, form_field: forms.Field | None) -> object:
     to_field_name)``), not the pk; an unset ``to_field_name`` keys by ``obj.pk``.
     So the bound form's ``to_python`` resolves the same value the decode produced.
     The input build admits only a ``to_field_name`` naming ``pk`` or a concrete field of
-    the target (``forms/inputs.py::require_readable_choice_keys``), so the value is
-    always read off the row itself, never replaced by a key of another column.
+    the target unique on its own (``forms/inputs.py::require_readable_choice_keys``), so
+    the value is always read off the row itself, never replaced by a key of another
+    column, and names that row alone.
     """
     to_field_name = read_attr(form_field, "to_field_name", None)
     if is_str(to_field_name) and to_field_name:
@@ -734,6 +750,92 @@ def _modelform_decode_step(
     return form_data, provided_files
 
 
+def _choice_key_identity(model: type[models.Model], key: str | None) -> object:
+    """Return the column a model-choice key resolves its choice by, as a comparable token.
+
+    Every spelling of the primary key (unset, ``""``, ``"pk"``, or the name of a
+    ``primary_key`` field, a multi-table child's parent link included) is the one ``"pk"``
+    token; any other key is the resolved field, so a name and its attname agree and two
+    columns never do. ``None`` when ``model`` has no field of that name.
+    """
+    field = choice_key_field(model, key)
+    if field is not None and field.primary_key:
+        return "pk"
+    return field
+
+
+def _choice_key_label(key: object) -> str:
+    """Render a ``_choice_key_identity`` token for a diagnostic."""
+    if key is None:
+        return "a name that is no field of its model"
+    if key == "pk":
+        return "its primary key"
+    return repr(read_attr(key, "name", None))
+
+
+def _assert_bound_choice_agreement(
+    mutation_cls: _FormMutationClass,
+    form: forms.BaseForm,
+    form_data: dict[str, object],
+) -> None:
+    """Refuse a bound model-choice field that resolves its key other than the decode did.
+
+    The decode resolves each relation id against the input's target model (the backing
+    column's related model, else the class-level field's ``queryset.model``:
+    ``forms/inputs.py::relation_target_model``) and binds the value the class-level
+    field's ``to_field_name`` reads off that row (``_to_form_key_value``); an update binds
+    an omitted relation's stored key the same way (``_reconstruct_partial_data``). The bound
+    form looks that value up through ITS field, which an ``__init__`` or ``get_form``
+    override may have rebuilt. For every bound name whose class-level and bound fields are
+    both model-choice fields and whose bound field has a queryset, the bound queryset's model
+    must be the target or a subclass of it, and the bound key must resolve to the same
+    column (``_choice_key_identity``). Otherwise the form would read the key under another
+    column or model and link a row the decode never admitted, a row the target's visibility
+    query hides included, so the request is a ``ConfigurationError`` before ``is_valid()``
+    and nothing is written. Reassigning the queryset over the same model and key (the
+    request-scoped choices idiom) agrees. A bound field that is no longer a model-choice
+    field, one whose queryset is ``None``, a name the bound form does not declare, and a
+    model-choice field over a column that is no relation (its input is a scalar, never an
+    id) are left to the form's own validation.
+    """
+    form_class = require(mutation_cls._mutation_meta.form_class, _is_form_class)
+    basis = dict(mutation_cls.get_form_fields())
+    for name in form_data:
+        basis_field = basis.get(name)
+        bound_field = form.fields.get(name)
+        if (
+            basis_field is None
+            or bound_field is None
+            or not _is_model_choice_field(basis_field)
+            or not _is_model_choice_field(bound_field)
+        ):
+            continue
+        target = relation_target_model(form_class, name, basis_field)
+        queryset = bound_field.queryset
+        # A field the input carries as a scalar (a model-choice field over a non-relation
+        # column) decodes no id, and a queryset-less field looks nothing up.
+        if target is None or queryset is None:
+            continue
+        bound_model = queryset.model
+        if not issubclass(bound_model, target):
+            raise ConfigurationError(
+                f"{truth.name(mutation_cls)}: the bound form's field {name!r} looks its "
+                f"choice up among {truth.name(bound_model)} rows, but the input decodes "
+                f"{name!r} ids against {truth.name(target)}. The queryset get_form or the "
+                "form's __init__ assigns must be over the model get_form_fields() declares.",
+            )
+        basis_key = _choice_key_identity(target, basis_field.to_field_name)
+        bound_key = _choice_key_identity(bound_model, bound_field.to_field_name)
+        if bound_key != basis_key:
+            raise ConfigurationError(
+                f"{truth.name(mutation_cls)}: the bound form's field {name!r} resolves its "
+                f"choice by {_choice_key_label(bound_key)}, but the input binds "
+                f"{truth.name(target)} rows by {_choice_key_label(basis_key)}. The "
+                "to_field_name get_form or the form's __init__ sets must name the column "
+                "get_form_fields() declares.",
+            )
+
+
 def _bound_form_or_field_errors(
     mutation_cls: _FormMutationClass,
     holder: _FormBuilder[_FormT],
@@ -753,6 +855,7 @@ def _bound_form_or_field_errors(
     """
     form_data, provided_files = decoded
     form = holder.get_form(info, data=form_data, files=provided_files, instance=instance)
+    _assert_bound_choice_agreement(mutation_cls, form, form_data)
     if not form.is_valid():
         return None, _form_errors_to_field_errors(form.errors.as_data(), mutation_cls)
     return form, None

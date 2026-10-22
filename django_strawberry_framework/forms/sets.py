@@ -489,7 +489,11 @@ def _default_get_form(
     consumer overrides this when it needs full control of instantiation (a form
     requiring positional args); the finer ``get_form_kwargs`` override suffices for
     the common "inject a kwarg" case. Single-sourced so the construction path is
-    identical for both flavors.
+    identical for both flavors. Whatever builds it, the form's model-choice fields must
+    look a relation key up as the class-level fields ``get_form_fields`` returns do: the
+    same model (or a subclass) and the same key column, or the request is a
+    ``ConfigurationError`` before ``is_valid()``
+    (``forms/resolvers.py::_assert_bound_choice_agreement``).
     """
     # Both flavors' ``_validate_meta`` store a ``require_subclass``-checked form class. It is
     # called with the hook's kwargs mapping, which no static signature can check.
