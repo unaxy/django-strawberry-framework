@@ -556,10 +556,7 @@ def relation_target_model(
     return model if is_model_class(model) else None
 
 
-def choice_key_field(
-    model: type[models.Model],
-    key: str | None,
-) -> models.Field[object, object] | None:
+def choice_key_field(model: type[models.Model], key: str | None) -> ConcreteField | None:
     """Return the field of ``model`` a model-choice ``to_field_name`` resolves its choice by.
 
     Unset, ``""`` and ``"pk"`` key by the primary key (``ModelChoiceField.to_python``
@@ -577,7 +574,7 @@ def choice_key_field(
     return field if truth.is_instance(field, models.Field) else None
 
 
-def _names_one_row(model: type[models.Model], field: models.Field[object, object]) -> bool:
+def _names_one_row(model: type[models.Model], field: ConcreteField) -> bool:
     """Return whether ``field`` alone is unique on ``model``, as Django's fields.E311 asks.
 
     ``unique=True`` (a primary key included), a one-field ``unique_together`` entry, or a
