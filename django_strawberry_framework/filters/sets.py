@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal, NoReturn, SupportsIndex, Ty
 
 import django_filters
 from django import forms
+from django.core.exceptions import FieldError
 from django.db import models
 from django.db.models import Exists, Q
 from django.db.models.constants import LOOKUP_SEP
@@ -3362,10 +3363,12 @@ class FilterSet(
         _stamp(identity_replacement, "package_replacement")
         # A forward relation whose link targets NON-pk columns (a ``to_field``
         # FK/O2O, a ``ForeignObject`` off the pk) stores and joins on those columns,
-        # but a Relay GlobalID and a raw-pk leaf both carry the target's PK. Set the
-        # BOOLEAN pk-qualification flag so the filter DERIVES the
-        # ``<relation>__pk`` path from its LIVE ``field_name`` at filter time (see
-        # ``base.py::_relation_uses_non_pk_to_field`` / ``_GLOBALID_RELATION_PK_ATTR``).
+        # but a raw-pk leaf, and a Relay GlobalID of a target whose id is its primary
+        # key, both carry the target's PK. Set the BOOLEAN pk-qualification flag so the
+        # filter DERIVES the ``<relation>__pk`` path from its LIVE ``field_name`` at
+        # filter time (see ``base.py::_relation_uses_non_pk_to_field`` /
+        # ``_GLOBALID_RELATION_PK_ATTR``); a GlobalID whose target's id is another
+        # column compiles on that column instead (``base.py::_globalid_predicate_path``).
         # A boolean (not a frozen absolute path) survives ``_expand_related_filter``'s
         # deepcopy + ``field_name`` rebase, so an expanded leaf compiles against the
         # rebased relation path instead of a stale absolute ``"<relation>__pk"``. The
@@ -4123,7 +4126,7 @@ class FilterSet(
         GlobalID type-name validation happens at queryset-evaluation
         time inside ``GlobalIDFilter.filter`` /
         ``GlobalIDMultipleChoiceFilter.filter``, which read the owner
-        through ``filter_instance.parent`` (``filters/base.py::_target_definition_for``).
+        through ``filter_instance.parent`` (``filters/base.py::_globalid_target``).
         The owner is therefore not threaded as a parameter here.
 
         Leaf form keys come from ``inputs.py::filter_lookup_table``, the one
@@ -5261,7 +5264,11 @@ class FilterSet(
         multi-table-inheritance subclass of the relation's target). A walk
         reaching a hop whose target set does not resolve has no terminal; its
         original invocation over ``queryset`` probes it, and an active one raises
-        at ``_apply_active_leaf``.
+        at ``_apply_active_leaf``. A terminal raising ``FieldError`` over the
+        unscoped rows compiled a lookup those rows cannot resolve (a column the
+        target type's ``get_queryset`` annotates), so it is active and
+        ``_apply_active_leaf`` compiles it over the rows that type shows; an
+        identity-returning filter compiles no lookup and cannot raise it.
         """
         if any(
             hop.declared and hop.target is None
@@ -5272,7 +5279,11 @@ class FilterSet(
         # ``ProjectedChildFilter``, which always carries its projection hop.
         chain = cast("_LeafChain", self._leaf_chain(filter_instance))
         rows = self._chain_base(chain, queryset)
-        return chain.terminal.filter(rows, chain.terminal_value(value)) is not rows
+        try:
+            return chain.terminal.filter(rows, chain.terminal_value(value)) is not rows
+        except FieldError:
+            # Only a compiled lookup can raise it, so the leaf constrains something.
+            return True
 
     def _chain_base(
         self,

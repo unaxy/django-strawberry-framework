@@ -62,9 +62,9 @@ from django_strawberry_framework.filters.base import (
     _decode_and_validate_global_id,
     _filter_schema,
     _filterset_model_field,
+    _globalid_target,
     _marked_pk_field_name,
     _relation_uses_non_pk_to_field,
-    _target_definition_for,
     membership_in_filter_class,
     relation_identity_column,
     resolve_globalid_target_definition,
@@ -1114,32 +1114,36 @@ def _global_id_filter_with_owner(field_name: str, owner: DjangoTypeDefinition) -
     return _bound(GlobalIDFilter(field_name=field_name), owner)
 
 
-def test_target_definition_for_returns_none_without_owner() -> None:
+def test_globalid_target_returns_none_without_owner() -> None:
     """No bound owner -> no definition (node-id-only fallback in unit contexts)."""
     f = _bound(GlobalIDFilter(field_name="id"), None)
-    assert _target_definition_for(f) is None
+    assert _globalid_target(f) is None
 
 
-def test_target_definition_for_own_pk_branch() -> None:
+def test_globalid_target_own_pk_branch() -> None:
     """When the field is the owner's PK, the owner definition itself is returned."""
     owner = _owner()
     f = _global_id_filter_with_owner("id", owner)
-    assert _target_definition_for(f) is owner
+    target = _globalid_target(f)
+    assert target is not None
+    assert target.definition is owner
 
 
-def test_target_definition_for_relation_branch() -> None:
+def test_globalid_target_relation_branch() -> None:
     """A relation head resolves through `related_target_for` to the target definition."""
     target_def = _definition(models.Genre, "GenreType")
     owner = _owner()
     f = _global_id_filter_with_owner("genres__id", owner)
-    assert _target_definition_for(f) is target_def
+    target = _globalid_target(f)
+    assert target is not None
+    assert target.definition is target_def
 
 
-def test_target_definition_for_relation_branch_unresolved_target() -> None:
+def test_globalid_target_relation_branch_unresolved_target() -> None:
     """An unresolvable relation head returns `None` (decode without validation)."""
     owner = _owner()
     f = _global_id_filter_with_owner("genres__id", owner)
-    assert _target_definition_for(f) is None
+    assert _globalid_target(f) is None
 
 
 def test_accepted_globalid_type_names_none_definition() -> None:

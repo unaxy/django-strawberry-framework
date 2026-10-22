@@ -547,6 +547,24 @@ class Edition(models.Model):
         return self.isbn_13
 
 
+class Series(models.Model):
+    """A banner a publisher issues press runs under, identified on the wire by a derived handle.
+
+    ``SeriesType`` declares ``handle`` as its Relay ``NodeID`` and its
+    ``get_queryset`` computes the handle from ``title``; no column stores it,
+    so the id names a series only on the rows that type reads itself.
+    """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
+    title: _Text = models.TextField(unique=True)
+
+    @override
+    def __str__(self) -> str:
+        return self.title
+
+
 class Printing(models.Model):
     """One press run of an edition.
 
@@ -554,6 +572,13 @@ class Printing(models.Model):
     house commissioned the run, so a publisher's ``printings_2`` reverse
     relation carries a ``<word>_<digit>`` accessor that a nested connection
     over it must resolve before the window can be planned.
+
+    ``publisher_2``, ``licensor`` (stored by the publisher's name) and
+    ``co_publishers`` point into ``PublisherType``, whose id is the house code,
+    and the relation keys ``PrintingFilter`` declares on them compare that code.
+    ``series`` points into ``SeriesType``, whose id no column holds, so its
+    relation key refuses that id while a hop into ``SeriesFilter`` compares it
+    on the series rows the type reads.
     """
 
     # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
@@ -576,6 +601,31 @@ class Printing(models.Model):
     publisher_2: _NullFK[Publisher] = models.ForeignKey(
         Publisher,
         related_name="printings_2",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    # The house licensing the run, stored by its name rather than its key, so the
+    # column is neither the publisher's primary key nor the house code its id carries.
+    licensor: _NullFK[Publisher] = models.ForeignKey(
+        Publisher,
+        to_field="name",
+        related_name="licensed_printings",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    # Further houses that co-published the run: a to-many relation into a type whose
+    # id is its house code.
+    co_publishers: models.ManyToManyField[Publisher, models.Model] = models.ManyToManyField(
+        Publisher,
+        blank=True,
+        related_name="co_printings",
+    )
+    # The series the run is issued under: a forward key into a type whose id no column holds.
+    series: _NullFK[Series] = models.ForeignKey(
+        Series,
+        related_name="printings",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
