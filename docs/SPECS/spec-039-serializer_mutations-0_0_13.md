@@ -3667,12 +3667,14 @@ injects it); package-tested (subtraction / still-raise / writable class validati
 The schema hook must return a STABLE, request-independent field shape, but it runs at class
 validation AND again at the phase-2.5 bind — a nondeterministic hook could validate one shape
 and bind another. `rest_framework/inputs.py::serializer_schema_fingerprint(field_map, *,
-nested_configs=None)` returns an ordered, hashable tuple over EVERY SDL-affecting axis of each
+nested_configs=None)` returns an ordered, hashable tuple over the axes below of each
 writable field: name, class, source, write-only flag, `required`, `allow_null`, relation
 target model, the description inputs (`help_text` + the constraint summary), the enumerable
 choice MEMBERS (the choice values and `allow_blank`), and the converter discriminants
-(`ModelField` wrapped field / `ListField` child class and its `allow_null`) — so a hook that changes a description, enum members, or converter behavior without
-changing the coarse identity still trips the guard. `_validate_meta` captures it on
+(`ModelField` wrapped field class / a `ListField`'s DIRECT child class and its `allow_null`) —
+so a hook that changes one of them still trips the guard; a drift on an unrecorded axis (a
+grandchild inside nested `ListField`s) builds from the bind-time read, and staying stable is the
+hook's contract. `_validate_meta` captures it on
 `_ValidatedMutationMeta.schema_fingerprint` at class validation; `build_input` reads the
 hook through the ONE guarded path `rest_framework/sets.py::_checked_schema_field_map` (neither
 the build nor the descriptor-derived name reads an unguarded field map), raising
@@ -3734,7 +3736,7 @@ contract:
 - **Recursively fingerprinted, scoped to the writable set, gated on the opt-in tree.**
   `serializer_schema_fingerprint` folds an OPTED-IN nested serializer's own field map into the
   determinism fingerprint (bounded by an on-path cycle guard), so a nondeterministic hook that
-  changes a nested shape is caught at the phase-2.5 bind. The fingerprint runs over the EFFECTIVE
+  changes a recorded axis of a nested shape is caught at the phase-2.5 bind. The fingerprint runs over the EFFECTIVE
   (writable + narrowed) field set — the SAME set the input build uses — and drops `read_only` /
   `HiddenField` at every level, so a read-only or narrowed-away nested serializer (e.g.
   a context-sensitive nested OUTPUT serializer whose `.fields` cannot materialize no-arg) is NEVER

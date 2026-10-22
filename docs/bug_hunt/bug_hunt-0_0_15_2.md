@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 178 done, 132 to do.
+Progress: 179 done, 131 to do.
 
 ## Done
 
@@ -669,6 +669,14 @@ Progress: 178 done, 132 to do.
   291, `forms/inputs.py::require_readable_choice_keys` requires `pk` or a column unique on its own (`unique=True`, a
   one-field `unique_together`, or an unconditional one-field `UniqueConstraint`), Django's fields.E311 rule; the guard's
   tests moved to unique columns (Branch.name, MembershipCard.patron) and Book.title / shelf are refusal rows
+- [x] 254. Not a code defect: the fingerprint only guards the class-validation vs bind drift of a nondeterministic
+  `get_serializer_for_schema()` hook, and the input, descriptor name and reverse map are built from the bind-time read
+  alone, so a drift on an unrecorded axis (a nested `ListField` grandchild's class or `allow_null`, an attribute a
+  registered converter reads outside the listed axes) builds a self-consistent input instead of failing loud (item 154's
+  "fails loud" holds for recorded axes only). Retracted "EVERY axis" in
+  `rest_framework/inputs.py::serializer_schema_fingerprint`, `_fingerprint_field_map`, `_fingerprint_converter_extra`,
+  the `NestedSerializerConfig` docstring, `rest_framework/sets.py::_checked_schema_field_map` and spec-039's fingerprint
+  section and nested bullet; code digest unchanged.
 
 ## Outside review of the fixes
 
@@ -798,9 +806,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   field; both are stale (the key maps and `tests/utils/test_error_keys.py` landed before)
 - [ ] 235. Two comments in `optimizer/nested_planner.py` label a guard "the P2-3 defect" / "the P2-3 false-coverage defect",
   a review label START "No process provenance" bans; restate each as the invariant it guards
-- [ ] 254. `rest_framework/inputs.py::serializer_schema_fingerprint`'s docstring says "This captures EVERY axis the
-  generated input / SDL / reverse map depends on", but `_fingerprint_converter_extra` records only a `ListField`'s direct
-  child; retract the sentence to what the fingerprint covers (no code change)
 - [ ] 255. `docs/SPECS/spec-058-graph_substrate-0_1_1-terms.csv` and
   `docs/SPECS/spec-068-structural_templates-0_1_6-terms.csv` sit beside their archived specs instead of in
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
