@@ -3714,6 +3714,57 @@ _VISIBLE_WORLD_ROWS = {
         ["on-secret", "on-hidden-set"],
         ("on-hidden-set", "on-secret"),
     ),
+    "own-filter-flat-over-a-visible-row": _VisibleWorldRow(
+        "allLibraryBooks",
+        "title",
+        '{ titleStarts: { startsWith: "Set" } }',
+        ["Set subtitle"],
+        ["Set subtitle"],
+    ),
+    "own-filter-flat-over-a-hidden-row": _VisibleWorldRow(
+        "allLibraryBooks",
+        "title",
+        '{ titleStarts: { startsWith: "Hidden" } }',
+        [],
+        ["Hidden null", "Hidden set"],
+    ),
+    "own-filter-projected-over-a-visible-row": _VisibleWorldRow(
+        "allLibraryGenres",
+        "name",
+        '{ booksTitleStarts: { startsWith: "Set" } }',
+        ["Set subtitle book"],
+        ["Set subtitle book"],
+    ),
+    "own-filter-projected-over-a-hidden-row": _VisibleWorldRow(
+        "allLibraryGenres",
+        "name",
+        '{ booksTitleStarts: { startsWith: "Hidden" } }',
+        [],
+        ["Hidden book only", "Beside hidden book"],
+        ("Hidden book only", "No books"),
+    ),
+    "own-filter-nested-twin-over-a-hidden-row": _VisibleWorldRow(
+        "allLibraryGenres",
+        "name",
+        '{ books: { titleStarts: { startsWith: "Hidden" } } }',
+        [],
+        ["Hidden book only", "Beside hidden book"],
+        ("Hidden book only", "No books"),
+    ),
+    "own-filter-projected-to-one-over-a-visible-row": _VisibleWorldRow(
+        "allLibraryLoans",
+        "note",
+        '{ bookTitleStarts: { startsWith: "Set" } }',
+        ["on-set"],
+        ["on-set"],
+    ),
+    "own-filter-projected-to-one-over-a-hidden-row": _VisibleWorldRow(
+        "allLibraryLoans",
+        "note",
+        '{ bookTitleStarts: { startsWith: "Hidden" } }',
+        [],
+        ["on-hidden-set"],
+    ),
     "declared-exclude-inside-logical-and": _VisibleWorldRow(
         "allLibraryGenres",
         "name",
@@ -3755,6 +3806,11 @@ def test_walked_leaf_answers_over_the_visible_world_for_anonymous(shape: str) ->
     on books, ``bookGenresWithoutBookTitled`` on loans) that leaf negates at the
     outermost parent, so a book with no genre and a loan whose book is hidden both
     match. The nested spelling stays existential over visible rows.
+    ``BookFilter.titleStarts`` holds a ``filter`` of its own: flat it runs over
+    the books the viewer sees, and reached through a projection
+    (``booksTitleStarts`` on genres, ``bookTitleStarts`` on loans) it runs
+    inside ``BookFilter`` over the visible books, as its nested twin does, so a
+    hidden match keeps no parent.
     A forward or to-many key naming a hidden target matches nothing, and a key
     outside the declaration's explicit ``queryset=`` matches nothing for any
     viewer. Each answer holds inside ``or`` / ``and`` / ``not`` arms.
@@ -3787,6 +3843,7 @@ _ASYNC_VISIBLE_WORLD_ROWS = (
     "to-many-global-id-membership-of-a-hidden-target",
     "declared-exclude-over-a-hidden-row",
     "isnull-true-inside-not",
+    "own-filter-projected-over-a-hidden-row",
 )
 
 
@@ -3797,9 +3854,10 @@ async def test_walked_leaf_answers_over_the_visible_world_async(viewer: str, sha
     """The async apply path reads every hop a supplied leaf walks before answering.
 
     The holder's ``genres`` connection applies ``GenreFilter`` through ``apply_async``,
-    so the ``isNull`` leaf, the key membership leaf and the declared ``exclude=True``
-    leaf each answer over the books the viewer can see, at the top level and
-    inside a ``not:`` arm, with the same answers as the sync rows.
+    so the ``isNull`` leaf, the key membership leaf, the declared ``exclude=True``
+    leaf and the projected leaf holding a ``filter`` of its own each answer over
+    the books the viewer can see, at the top level and inside a ``not:`` arm,
+    with the same answers as the sync rows.
     """
     world = await sync_to_async(_seed_visible_world)()
     row = _VISIBLE_WORLD_ROWS[shape]

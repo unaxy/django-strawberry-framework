@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 186 done, 126 to do.
+Progress: 187 done, 128 to do.
 
 ## Done
 
@@ -709,6 +709,17 @@ Progress: 186 done, 126 to do.
   and `docs/spec-*.md`). The citation-gate rule the item left open stays unbuilt.
 - [x] 235. Already fixed by `9a97127c`: both `optimizer/nested_planner.py` comments now state the invariant without the
   "P2-3" review label ("covering the general page;", "naming a duplicated column."); 0 hits for `P2-3` in the file.
+- [x] 269. A filter holding a `filter` of its own (a `Filter` subclass whose `__init__` stores `self.filter`) raised
+  `FieldError` on every walked path and was negated twice under `exclude=True`, because `filters/sets.py` tested
+  `method` where the condition is "holds a `filter` of its own": fixed, `sets.py::_own_filter` reads the instance
+  `filter` and replaces the `method` test in `_owner_bound_child` (a child-expanded leaf is projected and runs inside
+  its child set), `FilterSet._flat_leaf_walk` (a parent-declared leaf is not walked, as a parent `method=`),
+  `FilterSet._apply_active_leaf`'s negate line (its `filter` owns `exclude`) and `_decodes_before_binding`, which also
+  reads a projected copy through to the child filter it runs (a GlobalID filter holding its own `filter` refuses
+  unstorable text `FILTER_INVALID` flat, nested and on its own set; one whose `filter` delegates to the decode now
+  answers it `FILTER_INVALID`, not `GLOBALID_INVALID`, as `method=` does); null extension and a class-level `filter`
+  override unchanged. Live rows on `BookFilter.title_starts` (an example own-`filter` `CharFilter`), package grid,
+  mutations M1-M7 red
 
 ## Outside review of the fixes
 
@@ -829,16 +840,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
-- [ ] 269. A filter holding a `filter` of its own (a `Filter` subclass whose `__init__` stores `self.filter =
-  self._apply`, README's "a `filter` you set on the filter instance yourself") breaks on every walked path:
-  `filters/sets.py::FilterSet._bound_terminal` shallow-copies it and rebinds `field_name`, but the bound method still
-  reads the pre-copy object, so a child-expanded leaf (`patron__email`, to-many `loans__note`) and a parent-declared leaf
-  beside a `RelatedFilter` raise `FieldError: Cannot resolve keyword 'patron'`; and `FilterSet._apply_active_leaf`
-  negates an own-`filter` terminal with `exclude=True` twice (a projected child returns the excluded row, no error).
-  Root: `_owner_bound_child`, `FilterSet._flat_leaf_walk` and `_apply_active_leaf` test `method is not None` where the
-  condition is "the instance holds its own `filter`"; treat it as owner-bound and never negated, as `method=` is
-  (class-level `filter` and `null_extends` unchanged; `tests/filters/test_sets.py::test_a_filter_returning_no_queryset_fails_the_filter_queryset_assertion`
-  moves)
 - [ ] 276. A model-backed `SerializerMutation` field whose serializer kind disagrees with its column builds as the
   column's kind and then fails every write: `rest_framework/serializer_converter.py::resolve_serializer_field` types by
   `model_column_write_kind` alone (the SCALAR arm's `kind != SCALAR` line defers to the model converter, the FILE arm
@@ -908,6 +909,15 @@ tracker number are recorded there; open remainders and new defects are filed as 
   visibility seal and fails in the database adapter ("Error binding parameter") instead of the typed
   `ConfigurationError`; Django fails the same way, so decide whether the seal should keep refusing non-adaptable leaves
   with its own message. Found landing 294
+- [ ] 318. `tests/filters/test_sets.py::test_an_unordered_meta_fields_expands_in_canonical_order[set of lookups in a
+  dict]` fails under `PYTHONHASHSEED=28` ("no set over ('exact', 'icontains', 'istartswith', 'iendswith') iterates out
+  of canonical order"): its `_scrambled` helper cannot build an out-of-order set for every seed, so the row flakes with
+  the hash seed (seen at `feb83d59` and `144a64ee`; the code under test is not involved). Robustness row (test harness).
+  Found verifying 269
+- [ ] 319. Unprobed cause: a child `GlobalIDFilter` subclass whose own `filter` binds the raw value
+  (`qs.filter(title=value)`), reached through a `RelatedFilter`, answers `"plain"` with a matching parent flat
+  (`books__gid`) and no row nested (`books: {gid: ...}`), before 269 and after it alike, against README's "the two
+  spellings agree on every lookup except `isNull: true` and `exclude=True`". Found verifying 269
 
 ## To do: holes found re-checking the fixes
 
@@ -918,6 +928,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `ValidationError` for a two-bound range (`price__exact=[a, b]`), while a one-sided range now works through `__gte` /
   `__lte`; nothing validates the declaration. Default `lookup_expr` to `range` (django-filter's `RangeFilter` ignores
   the declared lookup), or refuse a non-`range` lookup with `ConfigurationError` at class build?
+- [ ] 317. CHANGELOG entry for item 269: a `Filter` subclass that stores its own `filter` on the instance now works
+  reached through a `RelatedFilter` (flat, projected and nested) and beside one, runs inside its own filter set, and is
+  never negated by the package under `exclude=True`; a GlobalID filter holding its own `filter` refuses unstorable text
+  with `FILTER_INVALID` (before: a masked error, or `GLOBALID_INVALID` when its `filter` delegated to the decode)
 - [ ] 315. CHANGELOG entry for item 160: a declared `RangeFilter` given only `start` (or only `end`, or the other side
   `null`) filters `>= start` (`<= end`) instead of matching no row; both bounds keep the declared lookup and a range
   with neither bound filters nothing

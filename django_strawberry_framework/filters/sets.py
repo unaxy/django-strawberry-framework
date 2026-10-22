@@ -806,13 +806,21 @@ _FRAMEWORK_GENERATED_ORIGINS: frozenset[FilterOrigin] = frozenset(
 def _decodes_before_binding(filter_instance: Filter | None) -> bool:
     """Whether ``filter_instance`` reads its value as a GlobalID before any query binds it.
 
-    A GlobalID filter's own ``filter`` decodes the value first and refuses text it
-    cannot read as ``GLOBALID_INVALID``; a ``method=`` install replaces that ``filter``,
-    so its value reaches the consumer's method undecoded.
+    A GlobalID filter's class ``filter`` decodes the value first and refuses text it
+    cannot read as ``GLOBALID_INVALID``; a ``filter`` the filter holds of its own
+    (``_own_filter``: the ``FilterMethod`` a ``method=`` installs, or a callable its
+    ``__init__`` stores on the instance) replaces that decode, so its value reaches
+    the consumer's code undecoded, whether or not that code decodes it in turn.
+    A projected copy (``ProjectedChildFilter``) holds no ``filter`` of its own (its
+    expansion dropped the child's), so it is read through to the child filter it
+    runs, hop by hop: the bound copy's child instance (``_projection_child``)
+    names it under the projection's name.
     """
+    while isinstance(filter_instance, ProjectedChildFilter):
+        filter_instance = filter_instance._child()._filter_named(filter_instance._projection.name)
     return (
         isinstance(filter_instance, GlobalIDFilter | GlobalIDMultipleChoiceFilter)
-        and filter_instance.method is None
+        and _own_filter(filter_instance) is None
     )
 
 
@@ -1320,18 +1328,35 @@ def _absence_filters_nothing(
     return _filter_skips(filter_class, absent) and _own_filter_skips(source, absent)
 
 
+def _own_filter(filter_instance: Filter) -> object | None:
+    """Return the ``filter`` ``filter_instance`` holds of its own, ``None`` when its class's runs.
+
+    An instance ``filter`` replaces the class's for that filter and every copy
+    of it: the ``FilterMethod`` a ``method=`` installs (django-filter's, or the
+    package's list filters' own), or any callable a consumer stores on the
+    instance (a ``Filter`` subclass whose ``__init__`` sets ``self.filter``).
+    Such a filter owns its behavior: the package never rebinds its
+    ``field_name`` onto another model (a child filter set's is projected,
+    ``_owner_bound_child``; a parent's walks no hop, ``FilterSet._flat_leaf_walk``)
+    and never negates its ``exclude`` (``FilterSet._apply_active_leaf``).
+    Read through the instance ``__dict__``, so a class-level ``filter``
+    override is not one.
+    """
+    return (truth.instance_dict(filter_instance) or {}).get("filter")
+
+
 def _own_filter_skips(source: Filter, absent: object) -> bool:
     """Whether the ``filter`` ``source`` holds of its own, if any, applies no constraint for ``absent``.
 
-    ``absent`` is a value the class's ``filter`` skips (``_filter_skips``). An
-    instance ``filter`` replaces the class's for that filter and every copy of it.
-    The one proven is the ``FilterMethod`` a ``method=`` installs: django-filter's,
-    which skips every empty value, or the package's empty-list-aware one, which
+    ``absent`` is a value the class's ``filter`` skips (``_filter_skips``); the
+    instance ``filter`` (``_own_filter``) replaces the class's. The one proven
+    is the ``FilterMethod`` a ``method=`` installs: django-filter's, which
+    skips every empty value, or the package's empty-list-aware one, which
     skips only ``None``; it must be bound to ``source`` itself and every class in
     its MRO must be django-filter's or the package's. Any other instance
     ``filter`` is unproven. Nothing is called.
     """
-    own = (truth.instance_dict(source) or {}).get("filter")
+    own = _own_filter(source)
     if own is None:
         return True
     if not (
@@ -1766,13 +1791,18 @@ class ProjectedChildFilter(Filter):
 
     Rebinding ``field_name`` reproduces a filter only while its behavior is a
     function of the filter object alone (``field_name``, ``lookup_expr``,
-    ``exclude``, ``distinct``, the form field its class builds). django-filter
-    hangs two behaviors off the OWNING filter set instead: a ``method=`` resolves
-    on ``filter.parent`` (a string by attribute lookup; a callable by the model
-    its body was written for), and a filter set ``__init__`` override may replace
-    or mutate any of ``self.filters`` after the per-request deepcopy. A plain
-    copy of such a filter on the parent has no owner: the method resolves on the
-    parent class, and the child's ``__init__`` never runs for the copy.
+    ``exclude``, ``distinct``, the form field its class builds, a class-level
+    ``filter`` override). Three behaviors belong to the OWNING filter set
+    instead: a ``method=`` resolves on ``filter.parent`` (a string by attribute
+    lookup; a callable by the model its body was written for), any other
+    ``filter`` a filter holds of its own (``_own_filter``: a callable its
+    ``__init__`` stores on the instance) was written for the owner's model and
+    may read the object it was bound to rather than a rebound copy, and a filter
+    set ``__init__`` override may replace or mutate any of ``self.filters``
+    after the per-request deepcopy. A plain copy of such a filter on the parent
+    has no owner: the method resolves on the parent class, the instance
+    ``filter`` runs its child path over the parent's rows, and the child's
+    ``__init__`` never runs for the copy.
 
     ``_expand_related_filter`` therefore builds this copy for every owner-bound
     child leaf (``_owner_bound_child``): an instance of the child filter's own
@@ -1790,8 +1820,9 @@ class ProjectedChildFilter(Filter):
     application every flat leaf walking a declared hop shares): a positive child
     filter keeps the parents reaching a matching child row, an ``isnull=True``
     one also the parents reaching no visible child row, and an ``exclude=True``
-    one the parents its positive twin does not keep (a ``method=`` child filter
-    stays positive). A child filter that is
+    one the parents its positive twin does not keep (a child filter holding a
+    ``filter`` of its own, ``method=`` included, stays positive: its ``filter``
+    owns ``exclude``). A child filter that is
     itself a relation leaf of the child set walks its own hops the same way.
     Each flat leaf stays its own predicate, as every flat leaf does: two
     owner-bound leaves may be satisfied by different child rows.
@@ -1869,18 +1900,23 @@ def _new_projected(filter_cls: type[Filter]) -> ProjectedChildFilter:
 def _owner_bound_child(child_filterset: type[FilterSet], child_filter: Filter) -> bool:
     """Whether ``child_filter``'s behavior belongs to ``child_filterset``, not to the filter object.
 
-    A ``method=`` filter resolves on, or was written for, its owner; every
-    filter of a filter set that overrides ``__init__`` may have been edited by
-    it (``FilterSet._customizes_instances``, the seam the optimizer closes for
-    the same reason); a projected copy already runs inside its owner and is
-    re-projected at the next hop. A ``RelatedFilter`` is a branch, never a flat
-    leaf, so it is copied as is.
+    A filter holding a ``filter`` of its own (``_own_filter``: the
+    ``FilterMethod`` a ``method=`` installs, which resolves on, or was written
+    for, its owner, or any callable a consumer stores on the instance, which
+    may read the object it was bound to rather than a rebound copy) was written
+    for its owner's model; every filter of a filter set that overrides
+    ``__init__`` may have been edited by it (``FilterSet._customizes_instances``,
+    the seam the optimizer closes for the same reason); a projected copy
+    already runs inside its owner and is re-projected at the next hop. A
+    class-level ``filter`` override is the filter object's own behavior, so
+    its copy is rebound. A ``RelatedFilter`` is a branch, never a flat leaf, so
+    it is copied as is.
     """
     if isinstance(child_filter, RelatedFilter):
         return False
     return (
         isinstance(child_filter, ProjectedChildFilter)
-        or child_filter.method is not None
+        or _own_filter(child_filter) is not None
         or child_filterset._customizes_instances()
     )
 
@@ -2353,7 +2389,8 @@ def _expand_related_filter(
     ``field_name`` rebound to the relation path, so the target filterset's own
     instances are never mutated. A child filter whose behavior the child filter
     set owns (``_owner_bound_child``) is copied as a ``ProjectedChildFilter``
-    instead, since a rebind cannot carry a ``method=`` or a child ``__init__``.
+    instead, since a rebind cannot carry a ``method=``, any other ``filter`` the
+    child filter holds of its own, or a child ``__init__``.
     Module-level helper because the expansion has no metaclass state - moving
     it off the metaclass keeps the call site (``get_filters``) free of
     ``cls.__class__.expand_related_filter(cls, ...)`` indirection that obscured
@@ -2373,11 +2410,12 @@ def _expand_related_filter(
             field_copy.__class__ = _projected_class_for(type(field_copy))  # truth: ok class store
             projected = cast("ProjectedChildFilter", field_copy)
             projected._projection = ChildProjection(target_filterset, child_name, filter_name)
-            # django-filter's ``method`` setter shadows ``filter`` per INSTANCE with a
-            # ``FilterMethod`` (the package's list filters install theirs the same
-            # way); the copy carried that shadow, which would resolve the method on
-            # the parent. The child's own filter, inside the child instance, keeps
-            # its shadow; the projection's class-level ``filter`` runs here.
+            # An instance ``filter`` (``_own_filter``: django-filter's ``method`` setter
+            # installs a ``FilterMethod``, the package's list filters theirs the same
+            # way, a consumer ``__init__`` any callable) shadows the class's per
+            # INSTANCE; the copy carried that shadow, which would run on the parent.
+            # The child's own filter, inside the child instance, keeps its shadow;
+            # the projection's class-level ``filter`` runs here.
             _ = truth.instance_state(projected).pop("filter", None)
         # Inherit the CHILD leaf's frozen provenance record and APPEND the child
         # filter's name as an expansion breadcrumb, without mutating the child's
@@ -4779,9 +4817,9 @@ class FilterSet(
         is held to the one rule, and a nested branch or logical arm through its own
         filterset's call here. A ``disabled`` field is skipped, since it cleans to its
         initial value and never binds what was sent. A GlobalID filter's value is exempt
-        unless a ``method=`` replaces its decode (``_decodes_before_binding``): the decode
-        refuses text it cannot read as the ``GLOBALID_INVALID`` the node-refetch path
-        answers for the same id.
+        unless a ``filter`` of its own (a ``method=`` included) replaces its decode
+        (``_decodes_before_binding``): the decode refuses text it cannot read as the
+        ``GLOBALID_INVALID`` the node-refetch path answers for the same id.
         """
         form = filterset_instance.form
         copies = filterset_instance._copied_filters
@@ -4856,15 +4894,16 @@ class FilterSet(
         nothing after the last relation). ``None`` for a leaf whose walk reads no
         visibility: a same-model leaf, a path whose relations no declaration
         claims and whose models no type scopes (``RelationHop.scope``), a
-        consumer ``method=`` declared on this set (its Python receives this
-        set's queryset and owns its own scoping; GOAL.md "Trust boundary"), a
-        ``RelatedFilter`` (a branch, never a leaf), and a
-        ``ProjectedChildFilter``, whose hop is its projection
-        (``_projection_hop``).
+        filter declared on this set holding a ``filter`` of its own
+        (``_own_filter``: a consumer ``method=`` or a callable stored on the
+        instance; its Python receives this set's queryset and owns its own
+        scoping; GOAL.md "Trust boundary"), a ``RelatedFilter`` (a branch,
+        never a leaf), and a ``ProjectedChildFilter``, whose hop is its
+        projection (``_projection_hop``).
         """
         if (
             isinstance(filter_instance, (ProjectedChildFilter, RelatedFilter))
-            or filter_instance.method is not None
+            or _own_filter(filter_instance) is not None
         ):
             return None
         hops, remainder = walk_declared_relation_path(
@@ -4965,8 +5004,9 @@ class FilterSet(
           each walked branch gate and the last target set's gate for the path
           left there (its primary key for a relation-key leaf), whatever
           lookup, ``isnull`` or ``exclude`` the filter applies;
-        - a leaf walking no hop, a ``method=`` filter declared on this set
-          included, adds none.
+        - a leaf walking no hop adds none, a filter declared on this set
+          holding a ``filter`` of its own included (``_own_filter``: a
+          ``method=``, or a callable stored on the instance).
         """
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
@@ -5281,7 +5321,10 @@ class FilterSet(
         (``_projection_child``), or for an undeclared hop the face its rows offer
         in place of one (``_UndeclaredHopSet``). A shallow copy of the
         per-request filter, so the form field it already built carries over and
-        this set's own instance is untouched.
+        this set's own instance is untouched. Only the class's ``filter`` reads
+        the copy's rebound ``field_name``: a filter holding a ``filter`` of its
+        own (``_own_filter``, whose bound receiver stays the pre-copy object)
+        never walks a hop (``_flat_leaf_walk``), so it never reaches here.
         """
         terminal = copy.copy(filter_instance)
         terminal.field_name = field_name
@@ -5419,9 +5462,14 @@ class FilterSet(
           (Django's exclude across a relation), never the child rows the
           excluding filter keeps.
 
-        A consumer ``method=`` filter is positive whatever its flags: django-filter
-        hands its value to the method and applies no lookup of its own. A
-        ``NOT EXISTS`` cannot be emptied by a ``NULL`` key the way ``NOT IN`` is.
+        A filter holding a ``filter`` of its own (``_own_filter``: a consumer
+        ``method=``, or a callable stored on the instance) is positive whatever
+        its ``exclude``: django-filter hands a ``method=`` its value and applies
+        no lookup of its own, and any other instance ``filter`` applies its own
+        ``exclude`` (negating it again would double the negation). Its
+        ``isnull`` reading still null-extends, which adds the parents reaching
+        no visible row without applying the filter twice. A ``NOT EXISTS``
+        cannot be emptied by a ``NULL`` key the way ``NOT IN`` is.
         """
         using = queryset.db
         # ``_apply_relation_leaf`` reaches here only for a leaf ``_flat_leaf_walk`` reads
@@ -5432,7 +5480,7 @@ class FilterSet(
             _ = self._hop_visible_rows(hop, using)
         chain = cast("_LeafChain", self._leaf_chain(filter_instance))
         terminal = chain.terminal
-        negate = terminal.method is None and terminal.exclude
+        negate = _own_filter(terminal) is None and terminal.exclude
         if negate:
             terminal = copy.copy(terminal)
             terminal.exclude = False
