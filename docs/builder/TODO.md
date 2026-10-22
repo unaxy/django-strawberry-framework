@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 25 to do.
+Progress: 24 to do.
 
 Every item below was re-verified at HEAD on 2026-10-22 by one research agent per item; each "Research" sub-bullet is
 that pass's finding and recommended landing.
@@ -28,10 +28,6 @@ From the full entries, 2026-10-21. Item numbers are that file's.
 
 ## To do: fix before beta
 
-- [ ] 31. `django.yml` on `main` has failed on every push since 2026-10-21 (latest `d72fb5a1`):
-  `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch` fails on both single-DB rows
-  because `django_strawberry_framework/forms/inputs.py::choice_key_field` and `_names_one_row` annotate with
-  `models.Field[object, object]`, which does not evaluate without the `django_stubs_ext` patch (`e936f7f6`)
 - [ ] 24. Under READ COMMITTED the `FOR UPDATE` lock does not re-run its visibility subquery after a lock wait, so a row
   hidden by a concurrent commit is still located and written; no test uses two Postgres connections (the `conflict`
   tests delete on the same connection)
