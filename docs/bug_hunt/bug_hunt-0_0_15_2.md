@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 189 done, 128 to do.
+Progress: 190 done, 127 to do.
 
 ## Done
 
@@ -734,6 +734,13 @@ Progress: 189 done, 128 to do.
   as AGENTS and pre-commit do; CardItem 1248 states the same pair in that order (its stale `AGENTS.md:15` line cite
   dropped) and CONTRIBUTING.md lists the hooks as ruff-check then ruff-format. Both rows written with `.update()`
   (`updated_date` kept), KANBAN.md / KANBAN.html re-rendered; archived specs keep the old order as history
+- [x] 178. fixed: `scope` and `--changed` resolve a changed path through one resolver,
+  `scripts/review_plan.py::_changed_folder` / `_changed_item`, so a deleted path or a rename's old path names its
+  nearest surviving folder's item (else Project integration) in `build_scope`'s committed `item` fields, and
+  `ScopeReport.folders` counts every rename's old folder (staged ones too); dirty paths stay lexical and the JSON shape
+  is unchanged. REVIEW.md and the module docstring say so;
+  `tests/test_review_plan.py::test_scope_resolves_deleted_and_renamed_paths_like_changed` (10 rows) pins it, mutations
+  M1-M4 red
 
 ## Outside review of the fixes
 
@@ -829,8 +836,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the C11 hook-order rows (on a test-local schema))
 - [ ] 170. No test runs `workspace.py prove` (`scripts/workspace.py::_cmd_prove`); its flow lease and copy lock are pinned only
   through `execute`; add a `main(["prove", ...])` row and a two-run contention row
-- [ ] 178. `review_plan.py scope` "Folders touched" (`ScopeReport.folders`) omits a rename's old folder and still names a
-  deleted package's integration item, while `--changed` covers both; REVIEW.md says `scope` lists the same changes
 - [ ] 183. `ruff format` on an explicit `.md` path rewrites its fenced blocks: pyproject's `exclude` does not stop explicit
   paths
 - [ ] 185. WebSocket residual after `1b6a09b1`: the Postgres steady-ping lost-write test has never run (Not defects: a
