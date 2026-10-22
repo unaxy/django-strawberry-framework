@@ -209,7 +209,7 @@ class WriteAliasContext:
     the guard grants: while ``authorization_phase()`` is open (only around the
     single permission-evaluation call), statements are permitted on the explicitly
     identified ``auth_aliases`` - the aliases the auth machinery (the user model,
-    ``auth.Permission`` / ``Group``, ``contenttypes``) reads from, which a
+    ``auth.Permission`` / ``Group``, ``contenttypes``, the session store) reads from, which a
     divergent read/write router legitimately keeps off the write alias. The
     containment is the module SECURITY MODEL's (transactional, never lexical) and
     is built by ``authorization_phase``; what is local here is the SCOPE. The

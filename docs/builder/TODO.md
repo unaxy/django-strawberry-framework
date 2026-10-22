@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 22 to do.
+Progress: 21 to do.
 
 Every item below was re-verified at HEAD on 2026-10-22 by one research agent per item; each "Research" sub-bullet is
 that pass's finding and recommended landing.
@@ -28,15 +28,6 @@ From the full entries, 2026-10-21. Item numbers are that file's.
 
 ## To do: document for beta
 
-- [ ] 8. A primary / replica router: on a vendor other than PostgreSQL or SQLite every mutation with
-  `permission_classes` fails with `ConfigurationError`, because
-  `django_strawberry_framework/utils/permissions.py::resolve_auth_aliases` returns the read alias and
-  `django_strawberry_framework/utils/write_transaction.py::_enforce_read_only_barrier` fails closed; on PostgreSQL each
-  such mutation opens a read-only transaction on the replica per call; a permission class reading an alias outside the
-  auth set (a Session or custom auth model on its own alias) is refused. All loud; the message names the fix
-  - Research: holds. The glossary barrier term covers the mechanism only; add the vendors, the per-call replica
-    transaction (`permission_classes = []` skips it) and the outside-alias refusal there (DB edit, re-render), plus a
-    pointer in README "Writing data". Size S
 - [ ] 9. `django_strawberry_framework/utils/write_transaction.py::assert_no_target_drift` compares mutable custom values
   by reference (`current is not value and current != value`), so an in-place mutation of a GeoDjango geometry,
   `memoryview` or custom `to_python` object by a hostile hook is not detected (serializer flavor only)
