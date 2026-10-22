@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 182 done, 130 to do.
+Progress: 183 done, 129 to do.
 
 ## Done
 
@@ -693,6 +693,10 @@ Progress: 182 done, 130 to do.
   `orders/inputs.py::Ordering`'s docstring does: a bare `ASC` / `DESC` leaves it to the database, SQLite and MySQL sort
   `NULL`s first on `ASC` and last on `DESC`, Postgres last on `ASC` and first on `DESC`. Docs only; the behaviour stays
   pinned on both vendors by `_ordered_with_missing`.
+- [x] 299. The `scripts/workspace.py` module docstring's `status` bullet now says what `status` prints: copies,
+  bindings, active runs and Postgres leases. `MUSE.md`'s Disk bullet drops its claim that `status` shows the 6 GB
+  free-space refusal. Docstring and prose only; the docstring-stripped code digest and both `--help` outputs are
+  unchanged.
 
 ## Outside review of the fixes
 
@@ -861,8 +865,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `-c core.excludesFile=/dev/null` turns it off. So `workspace.py`'s untracked listings (`wanted_files`, `item_diff`)
   depend on the caller, against `item_diff`'s "the caller's global git config is ignored" (`scripts/workspace.py:37`);
   here it hides `.claude/settings.local.json`
-- [ ] 299. The `scripts/workspace.py` module docstring says `status` prints disk use (line 81); it never has (since
-  `cd6a74aa`). (Its other false claim, that an idle pool keeps `state.json`, went with item 143's rewrite of that sentence.)
 - [ ] 301. `workspace.py`'s lock files (`pool.lock`, `slots/slot-N.lock`, `gate.lock`) are regular files that are only
   opened and `flock`ed, never read, so their atime stays at creation and the macOS `$TMPDIR` purge can unlink one a
   command holds across 03:35 on a pool older than 3 days; a later command then creates and locks a new inode while the

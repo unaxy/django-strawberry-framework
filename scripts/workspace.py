@@ -78,7 +78,7 @@ Worker-0 commands
         sha, the blob ids of ``pyproject.toml`` and ``uv.lock``, each suite's
         cell and the floor pins.
     ``status [<flow>]``
-        Print copies, bindings, active runs, disk use and Postgres leases.
+        Print copies, bindings, active runs and Postgres leases.
     ``gc <flow>``
         Delete everything the flow holds: copies, gate copy, run log, proof
         scratch and its Postgres databases. The Postgres container is stopped
