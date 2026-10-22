@@ -392,7 +392,9 @@ class UpdateItemWithFileViaForm(DjangoModelFormMutation):
     must leave the stored file untouched. The reconstruction supplies the row's other
     fields under their form keys but contributes NO key for a file field, so the bound
     ``ItemFileModelForm(instance=...)`` resolves ``attachment`` from its ``initial`` -
-    never re-supplied from the stored path and never cleared.
+    never re-supplied from the stored path and never cleared. An explicit
+    ``attachment: null`` is the clear: the resolver binds it as Django's ``False``
+    sentinel and the stored name is emptied.
     """
 
     class Meta:

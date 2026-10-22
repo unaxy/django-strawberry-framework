@@ -22,7 +22,9 @@ and the form-specific invariants this module owns:
   map (``mutation_cls._input_field_specs``, a list of
   ``utils/inputs.py::InputFieldSpec``) routes each provided input attr to its form
   field name + decode ``kind`` (``SCALAR`` / ``RELATION_SINGLE`` /
-  ``RELATION_MULTI`` / ``FILE``).
+  ``RELATION_MULTI`` / ``FILE``). An update binds an explicit ``null`` file as
+  Django's clear sentinel ``False`` (``_file_clears``); a required file field cannot
+  clear, so that ``null`` is its ``required`` error (``_required_file_clears``).
 
 - **The dedicated form relation decoder visibility-checks EVERY branch**
   (Decision 7 / Decision 8 step 1). Each relation id - a ``relay.GlobalID``
@@ -953,6 +955,42 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[models.Field[object, objec
     return coerced_fields
 
 
+def _file_clears(provided_files: dict[str, object]) -> dict[str, object]:
+    """Bind an update's explicit ``null`` file as Django's clear sentinel ``False``.
+
+    A Django ``FileField`` reads ``None`` as "no change" (``clean(None, initial)`` returns
+    the stored file) and ``False`` as "clear", the value ``ClearableFileInput`` returns for
+    its clear checkbox. The input has no checkbox, and an omitted file is never in
+    ``provided_files``, so a ``None`` there is the client's explicit ``null``: bound as
+    ``False``, an optional form field cleans it to ``False`` and the model field's
+    ``save_form_data`` stores the empty name. A create has no stored file to clear and
+    keeps the ``None``.
+    """
+    return {name: False if value is None else value for name, value in provided_files.items()}
+
+
+def _required_file_clears(form: forms.BaseForm) -> dict[str, list[ValidationError]]:
+    """Map each required file field the bound form was asked to clear to its ``required`` error.
+
+    A required ``FileField`` cannot clear: ``clean(False, initial)`` validates the
+    ``False`` as ``None``, which returns the stored file, so ``is_valid()`` passes and the
+    save would report success with the file the client asked to remove. ``form.files`` is
+    what ``get_form`` bound (after any override of the hook); a ``disabled`` field ignores
+    it. The error is the form field's own ``error_messages["required"]``, code
+    ``required``, the answer the same ``null`` gets on a create.
+    """
+    bound_files = dict[str, object](form.files.items())
+    errors: dict[str, list[ValidationError]] = {}
+    for name, value in bound_files.items():
+        form_field = form.fields.get(name)
+        if value is not False or form_field is None:
+            continue
+        if form_field.required and not form_field.disabled:
+            message = form_field.error_messages["required"]
+            errors[name] = [ValidationError(message, code="required")]
+    return errors
+
+
 def _column_null_errors(
     fields: list[models.Field[object, object]],
 ) -> dict[str, list[ValidationError]]:
@@ -1068,7 +1106,9 @@ def _modelform_write_step(
 
     Constructs the form via the overridable ``get_form`` hook over the decoded bound
     data, runs ``is_valid()`` once (a failure maps ``form.errors`` onto the envelope
-    via the reused ``validation_error_to_field_errors``), refuses an explicit ``null`` a
+    via the reused ``validation_error_to_field_errors``), answers an update's explicit
+    ``null`` on a required file field with its ``required`` error
+    (``_required_file_clears``), refuses an explicit ``null`` a
     ``null=False`` column's own form field cleaned to a storable value as that column's
     field-keyed ``null`` error (``_coerced_null_fields``), then writes through
     ``_modelform_save_or_field_errors`` (the form's save, split around
@@ -1078,6 +1118,8 @@ def _modelform_write_step(
     (the skeleton's ``refetch_optimized`` re-fetches it by pk under the G2 plan) or a
     ``StepFailure`` on a validation / write failure.
     """
+    if instance is not None:
+        decoded = (decoded[0], _file_clears(decoded[1]))
     bound = _bound_form_or_field_errors(
         mutation_cls,
         mutation_cls(),
@@ -1088,6 +1130,9 @@ def _modelform_write_step(
     if bound[1] is not None:
         return StepFailure(bound[1])
     form = bound[0]
+    kept_files = _required_file_clears(form)
+    if kept_files:
+        return StepFailure(_form_errors_to_field_errors(kept_files, mutation_cls))
     coerced_fields = _coerced_null_fields(form)
     if coerced_fields:
         return StepFailure(

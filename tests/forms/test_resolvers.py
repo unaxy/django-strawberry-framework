@@ -1123,6 +1123,125 @@ def test_partial_reconstruction_excludes_every_file_field_flavor(file_field_name
     assert reconstructed["label"] == specimen.label
 
 
+def _update_media_file_schema() -> tuple[strawberry.Schema, type[DjangoType]]:
+    """Build an ``updateMedia`` ModelForm mutation over every ``MediaSpecimen`` file column."""
+
+    class MediaForm(forms.ModelForm[scalars_models.MediaSpecimen]):
+        class Meta:
+            model = scalars_models.MediaSpecimen
+            fields = (
+                "label",
+                "attachment",
+                "image",
+                "optional_attachment",
+                "spare_image",
+            )
+
+    class MediaT(DjangoType, relay.Node):
+        class Meta:
+            model = scalars_models.MediaSpecimen
+            fields = ("id", "label")
+            primary = True
+
+    assert registry.get(scalars_models.MediaSpecimen) is MediaT
+
+    class UpdateMedia(DjangoModelFormMutation):
+        class Meta:
+            form_class = MediaForm
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        update_media = DjangoMutationField(UpdateMedia)
+
+    finalize_django_types()
+    return _schema(Mutation), MediaT
+
+
+def _stored_media_specimen() -> scalars_models.MediaSpecimen:
+    return scalars_models.MediaSpecimen.objects.create(
+        label=_uniq("Spec"),
+        attachment="scalar_media/files/stored.txt",
+        image="scalar_media/images/stored.png",
+        optional_attachment="scalar_media/files/optional.txt",
+        spare_image="scalar_media/images/spare.png",
+    )
+
+
+_UPDATE_MEDIA = (
+    "mutation($id: ID!, $d: MediaFormPartialInput!){ updateMedia(id:$id, data:$d){ "
+    "node{ label } errors{ field codes } } }"
+)
+
+
+@pytest.mark.django_db
+def test_update_explicit_null_on_an_optional_file_clears_it() -> None:
+    """An explicit ``null`` on an optional file field is Django's clear, never "no change".
+
+    The form flavor binds it through ``files=`` as ``False`` (``_file_clears``), which the
+    optional ``FileField`` of the ``blank=True`` column cleans to ``False`` and the model
+    field stores as the empty name. The other stored files are untouched.
+    """
+    schema, media_type = _update_media_file_schema()
+    specimen = _stored_media_specimen()
+    res = schema.execute_sync(
+        _UPDATE_MEDIA,
+        variable_values={
+            "id": global_id_for(media_type, saved_pk(specimen)),
+            "d": {"optionalAttachment": None},
+        },
+    )
+    assert res.errors is None, res.errors
+    assert _json_at(res.data, "updateMedia", "errors") == []
+    specimen.refresh_from_db()
+    assert specimen.optional_attachment.name == ""
+    assert specimen.attachment.name == "scalar_media/files/stored.txt"
+    assert specimen.spare_image.name == "scalar_media/images/spare.png"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("input_name", "column", "stored"),
+    [
+        ("attachment", "attachment", "scalar_media/files/stored.txt"),
+        ("spareImage", "spare_image", "scalar_media/images/spare.png"),
+    ],
+    ids=["blank-false-file", "null-true-blank-false-image"],
+)
+def test_update_explicit_null_on_a_required_file_is_its_required_error(
+    input_name: str,
+    column: str,
+    stored: str,
+) -> None:
+    """An explicit ``null`` on a required file field is its ``required`` error, not a kept file.
+
+    ``FileField.clean(False, initial)`` validates a required field's ``False`` as ``None``
+    and returns the stored file, so ``is_valid()`` passes;
+    ``_required_file_clears`` answers it with the form field's ``required`` error, the
+    create's answer to the same ``null``. A ``null=True`` column whose form field is
+    required (``blank=False``) is no exception. Nothing is written.
+    """
+    schema, media_type = _update_media_file_schema()
+    specimen = _stored_media_specimen()
+    res = schema.execute_sync(
+        _UPDATE_MEDIA,
+        variable_values={
+            "id": global_id_for(media_type, saved_pk(specimen)),
+            "d": {"label": "renamed", input_name: None},
+        },
+    )
+    assert res.errors is None, res.errors
+    assert _json_at(res.data, "updateMedia", "node") is None
+    assert _json_at(res.data, "updateMedia", "errors") == [
+        {"field": input_name, "codes": ["required"]},
+    ]
+    label = specimen.label
+    specimen.refresh_from_db()
+    assert specimen.label == label
+    assert read_attr(read_attr(specimen, column), "name") == stored
+
+
 @pytest.mark.django_db
 def test_required_extra_field_omitted_on_update_is_coercion_error() -> None:
     """A required non-model extra field stays required in the partial input.
