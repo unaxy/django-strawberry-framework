@@ -380,8 +380,8 @@ def test_inspect_file_and_image_rows_name_output_converters(
     that map would mis-name the converter that actually fired. ``ImageField``
     must resolve to ``DjangoImageType`` via the shared MRO walk, never silently
     fall through to ``DjangoFileType``. The path-opt-in sibling swaps the
-    displayed attachment type to ``DjangoFilePathType`` while the converter
-    column still names the ``FileField`` output-map row that fired.
+    attachment's output object to ``DjangoFilePathType``, and both the type
+    column and the converter column name that swapped object.
     """
     out = StringIO()
     call_command("inspect_django_type", type_name, stdout=out)
@@ -391,7 +391,7 @@ def test_inspect_file_and_image_rows_name_output_converters(
     attachment_cols = attachment_row.split()
     assert attachment_cols[2] == attachment_type
     assert attachment_cols[3] == "yes"
-    assert "convert_field_output -> DjangoFileType" in attachment_row
+    assert " ".join(attachment_cols[4:]) == f"convert_field_output -> {attachment_type}"
     assert "SCALAR_MAP" not in attachment_row
 
     image_row = _field_row(text, "image")

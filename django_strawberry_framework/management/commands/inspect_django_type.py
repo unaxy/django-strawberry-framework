@@ -401,15 +401,17 @@ class Command(BaseCommand):
         graphql_type = _render_annotation(annotation, scalar_namer)
         nullable = _yes_no(value=_annotation_is_optional(annotation))
         # A FileField / ImageField column is converted on the read side by
-        # ``convert_field_output`` via ``FIELD_OUTPUT_TYPE_MAP`` (-> the
-        # ``DjangoFileType`` / ``DjangoImageType`` output object), NOT by
-        # ``SCALAR_MAP`` (whose file rows stay ``str`` for the filter-input
-        # path). Naming the SCALAR_MAP row here would mis-attribute the
-        # converter, so report the output-map converter that actually fired -
-        # using the single shared MRO walk so the ordering can never drift.
-        output_type = _field_output_type_for(field)
-        if output_type is not None:
-            return graphql_type, nullable, f"convert_field_output -> {truth.name(output_type)}"
+        # ``convert_field_output`` (``FIELD_OUTPUT_TYPE_MAP``, then
+        # ``FILESYSTEM_PATH_OUTPUT_TYPE_MAP`` for a ``Meta.filesystem_path_fields``
+        # column), NOT by ``SCALAR_MAP`` (whose file rows stay ``str`` for the
+        # filter-input path). The shared MRO walk selects the arm; the output
+        # object the label names is read off the same post-swap annotation the
+        # type column renders, so the label names the object the converter
+        # produced (``DjangoFilePathType`` for a path opt-in) and the two
+        # columns cannot disagree.
+        if _field_output_type_for(field) is not None:
+            output_name = _render_annotation(annotation, truth.name).rstrip("!")
+            return graphql_type, nullable, f"convert_field_output -> {output_name}"
         return graphql_type, nullable, _scalar_route_label(field)
 
     @staticmethod
