@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 187 done, 128 to do.
+Progress: 188 done, 129 to do.
 
 ## Done
 
@@ -720,6 +720,16 @@ Progress: 187 done, 128 to do.
   answers it `FILTER_INVALID`, not `GLOBALID_INVALID`, as `method=` does); null extension and a class-level `filter`
   override unchanged. Live rows on `BookFilter.title_starts` (an example own-`filter` `CharFilter`), package grid,
   mutations M1-M7 red
+- [x] 290. A GlobalID filter into a type whose `relay.NodeID[...]` names a column other than the primary key (fakeshop
+  `PublisherType.house_code`) coerced the id against `_meta.pk` and compiled on the pk path, refusing the id the
+  server emits or selecting the row whose pk equals it: fixed, `filters/base.py::_globalid_target` resolves the
+  target, its row path and its id slot once per call, the node id coerces through `relay.py::_coerce_pk_or_none` and
+  compiles on `<row path>__<id_attr>` (over the `__pk` to_field marker) in `GlobalIDFilter` and both
+  `GlobalIDMultipleChoiceFilter` arms; a slot over a `get_queryset` annotation compares on the type's own rows and a
+  relation key into it refuses `GLOBALID_UNVALIDATABLE`; `FilterSet._leaf_applies` reads a terminal its unscoped probe
+  cannot compile as active, which also repairs a flat leaf onto a filter over a target-type annotation. Primary-key
+  targets byte-identical. Fixture `Series`, `Printing.licensor` / `co_publishers` / `series` (migration 0017), live
+  grid, mutations M1-M8 red
 
 ## Outside review of the fixes
 
@@ -851,13 +861,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   unexpected error occurred" (no data is written through the package; plain DRF writes the related row's `str()`).
   Refuse the kind mismatch at build (spec-039 "type-override conflict policy"), one predicate shared with
   `_assert_field_agreement`
-- [ ] 290. `filters/base.py::_decode_and_validate_global_id` coerces a GlobalID filter value against the target model's
-  `_meta.pk`, never the target type's id slot (`django_strawberry_framework/relay.py::_node_id_slot`), and
-  `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` compile on the pk path: for fakeshop `PublisherType.house_code:
-  relay.NodeID[str]` the GlobalID the server emits is refused `GLOBALID_INVALID` and `library.publisher:2` filters `pk=2`
-  (wrong row), on the own-pk key (`id.exact` / `id.in`), an own-pk leaf through a hop (flat `editionsPublisherId`, nested
-  `editions.publisher.id`), a forward relation key and a to-many relation key alike; the write side
-  (`relay.py::decode_model_global_id`) and the node field already use the slot
 - [ ] 295. A `ModelForm` declaring a `ModelChoiceField` under a non-relation column's name (`description =
   ModelChoiceField(queryset=Category.objects.all())`) builds as the column's scalar (`description: String!`), and
   `DjangoModelFormMutation` create and update write the chosen row's `str()` into the column:
@@ -924,10 +927,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 321. The write side passes a `relay.NodeID` over a non-column attribute (one the type's `get_queryset`
+  annotates) through as the raw primary key (`relay.py::_resolve_real_pk`, pinned by
+  `tests/test_relay_node_field.py::test_decode_model_global_id_passes_raw_value_for_non_field_node_id`), so a relation
+  write naming such a type stores whichever row's pk equals the id's text, while the filter side now refuses that slot
+  across a relation (`GLOBALID_UNVALIDATABLE`). Refuse it on writes too, or keep the pass-through? Found landing 290
 - [ ] 316. `filters/base.py::RangeFilter` declared with the default `lookup_expr` (`exact`) raises a raw
   `ValidationError` for a two-bound range (`price__exact=[a, b]`), while a one-sided range now works through `__gte` /
   `__lte`; nothing validates the declaration. Default `lookup_expr` to `range` (django-filter's `RangeFilter` ignores
   the declared lookup), or refuse a non-`range` lookup with `ConfigurationError` at class build?
+- [ ] 320. CHANGELOG entry for item 290: a GlobalID filter into a type whose `relay.NodeID[...]` names a
+  non-primary-key column compares that column on the type's own `id` key and through every relation (forward,
+  `to_field`, to-many), so the id the server emits matches its row and an id no row carries matches nothing; a node id
+  that column cannot hold answers `GLOBALID_INVALID` ("... not a valid <Model> id value"); a `relay.NodeID` over a
+  `get_queryset` annotation compares on the type's own rows and through a `RelatedFilter` hop, and a relation key into
+  that type answers `GLOBALID_UNVALIDATABLE`. A flat leaf through a `RelatedFilter` onto a filter over a target-type
+  annotation no longer fails with an unexpected error
 - [ ] 317. CHANGELOG entry for item 269: a `Filter` subclass that stores its own `filter` on the instance now works
   reached through a `RelatedFilter` (flat, projected and nested) and beside one, runs inside its own filter set, and is
   never negated by the package under `exclude=True`; a GlobalID filter holding its own `filter` refuses unstorable text

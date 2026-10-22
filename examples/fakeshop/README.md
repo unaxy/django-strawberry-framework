@@ -935,7 +935,10 @@ slice ships the demonstration is one uncomment away.
   resolve rather than assume: a relation primary key, a text primary key not named
   `id`, `<word>_<digit>` field and relation names, mixed-case field, key and
   reverse-relation names (`Distributor`, `Consignment`), a `to_field` foreign
-  key, a Relay id built off the primary key, explicitly named fields, a child
+  key, a Relay id built off the primary key (`PublisherType.house_code`, which
+  every GlobalID filter into a publisher compares, through a forward, `to_field`
+  and to-many key on `Printing` alike) and one no column holds (`SeriesType.handle`,
+  annotated by its `get_queryset`), explicitly named fields, a child
   model whose default manager cannot be windowed, and a model that clears its
   abstract parent's `Meta.ordering` with `ordering = None` (`ReadingListEntry`
   under `ReadingList`). The venue surface beside it carries the

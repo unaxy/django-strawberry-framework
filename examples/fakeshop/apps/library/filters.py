@@ -287,7 +287,10 @@ class PublisherFilter(FilterSet):
 
 
 class EditionFilter(FilterSet):
-    """Edition filterset bound to ``EditionType`` at finalize phase 2.5."""
+    """Edition filterset bound to ``EditionType`` at finalize phase 2.5.
+
+    ``publisher_2`` takes a ``PublisherType`` id, which carries the house code.
+    """
 
     publisher = RelatedFilter("PublisherFilter", field_name="publisher")
 
@@ -297,17 +300,50 @@ class EditionFilter(FilterSet):
             "isbn_13": ["exact", "in"],
             "isbn_10": ["exact"],
             "imprint": ["exact", "icontains"],
+            "publisher_2": ["exact", "in"],
         }
 
 
 class PrintingFilter(FilterSet):
-    """Printing filterset bound to ``PrintingType`` at finalize phase 2.5."""
+    """Printing filterset bound to ``PrintingType`` at finalize phase 2.5.
+
+    ``publisher_2``, ``licensor`` (a key stored by the publisher's name),
+    ``co_publishers`` and the two-hop ``edition__printings__co_publishers`` take
+    a ``PublisherType`` id, which carries the house code; ``series`` takes a
+    ``SeriesType`` id, whose handle no column holds, and refuses it.
+    ``in_series`` hops into ``SeriesFilter``, which compares the handle on the
+    series rows ``SeriesType.get_queryset`` annotates, flat (``inSeriesId``,
+    ``inSeriesHandle``) and nested alike.
+    """
 
     edition = RelatedFilter("EditionFilter", field_name="edition")
+    in_series = RelatedFilter("SeriesFilter", field_name="series")
 
     class Meta:
         model = models.Printing
-        fields = {"id": ["exact", "in"], "run_size": ["exact", "gt"]}
+        fields = {
+            "id": ["exact", "in"],
+            "run_size": ["exact", "gt"],
+            "publisher_2": ["exact", "in"],
+            "licensor": ["exact", "in"],
+            "co_publishers": ["exact", "in"],
+            "edition__printings__co_publishers": ["exact", "in"],
+            "series": ["exact", "in"],
+        }
+
+
+class SeriesFilter(FilterSet):
+    """Series filterset bound to ``SeriesType``: its id is the handle the type annotates.
+
+    ``handle`` filters that annotation directly, so it compiles only over the
+    rows ``SeriesType.get_queryset`` returns.
+    """
+
+    handle = CharFilter(field_name="handle")
+
+    class Meta:
+        model = models.Series
+        fields = {"id": ["exact", "in"]}
 
 
 class PatronProfileFilter(FilterSet):

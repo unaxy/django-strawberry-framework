@@ -5,7 +5,8 @@ from collections.abc import Mapping
 import strawberry
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
-from django.db.models import Manager, Prefetch, QuerySet
+from django.db.models import Manager, Prefetch, QuerySet, TextField, Value
+from django.db.models.functions import Concat
 from django.forms import BaseForm
 from rest_framework.serializers import ModelSerializer as DRFModelSerializer
 from strawberry import relay
@@ -577,6 +578,38 @@ class PrintingType(DjangoType):
         orderset_class = orders.PrintingOrder
 
 
+class SeriesType(DjangoType):
+    """A series published under a handle its ``get_queryset`` computes.
+
+    ``handle: relay.NodeID[str]`` names an annotation, not a column, so the
+    GlobalID a client receives is comparable only on series rows this type
+    reads: ``allLibrarySeriesConnection(filter: {id: ...})``, and a printing's
+    ``inSeries`` hop into ``SeriesFilter`` (flat or nested), whose rows come from
+    this hook. A printing's ``series`` key compares the id across the relation,
+    on rows the hook never touched, and refuses it as unvalidatable.
+    """
+
+    handle: relay.NodeID[str]
+
+    @classmethod
+    @override
+    def get_queryset(
+        cls,
+        queryset: QuerySet[models.Series],
+        info: Info,
+    ) -> QuerySet[models.Series]:
+        """Annotate every series row with its handle: the unique title under a fixed prefix."""
+        return queryset.annotate(
+            handle=Concat(Value("SER-"), "title", output_field=TextField()),
+        )
+
+    class Meta:
+        model = models.Series
+        fields = ("id", "title")
+        interfaces = (relay.Node,)
+        filterset_class = filters.SeriesFilter
+
+
 class PatronProfileType(DjangoType):
     """Patron mailing details whose Relay id comes from a relation column.
 
@@ -995,8 +1028,9 @@ class Query:
     )
 
     # The publishing surface: a publisher whose Relay id is its house code, the
-    # ISBN-keyed editions beneath it, the press runs beneath those, and the
-    # patron profile whose own key is the patron it extends.
+    # ISBN-keyed editions beneath it, the press runs beneath those, the series a
+    # run is issued under (its Relay id an annotated handle), and the patron
+    # profile whose own key is the patron it extends.
     all_library_publishers_connection: DjangoConnection[PublisherType] = DjangoConnectionField(
         PublisherType,
     )
@@ -1005,6 +1039,9 @@ class Query:
     )
     all_library_printings_connection: DjangoConnection[PrintingType] = DjangoConnectionField(
         PrintingType,
+    )
+    all_library_series_connection: DjangoConnection[SeriesType] = DjangoConnectionField(
+        SeriesType,
     )
     all_library_patron_profiles_connection: DjangoConnection[PatronProfileType] = (
         DjangoConnectionField(PatronProfileType)

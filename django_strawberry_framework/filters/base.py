@@ -31,8 +31,9 @@ five parity-floor primitives (spec-027 Decision 4):
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeVar, cast, final
+from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast, final
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -65,11 +66,12 @@ from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.relay import _coerce_pk_or_none, _node_id_slot
 from django_strawberry_framework.sets_mixins import (
     LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
 )  # re-exported via filters.__init__
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
-from django_strawberry_framework.types.definition import DjangoTypeDefinition
+from django_strawberry_framework.types.definition import DjangoTypeDefinition, _resolves_id_off_pk
 
 # ``filters -> types`` is the documented safe (acyclic) import direction:
 # ``types/relay.py`` module-top imports are stdlib/django/strawberry/``..exceptions``
@@ -80,6 +82,7 @@ from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.relay import (
     MODEL_LABEL_STRATEGIES,
     TYPE_NAME_STRATEGIES,
+    implements_relay_node,
     node_definition_for_published_name,
     published_node_type_name,
 )
@@ -140,6 +143,7 @@ if TYPE_CHECKING:
     from django_filters.filterset import BaseFilterSet
     from strawberry.schema import Schema
 
+    from django_strawberry_framework.types.relay import _RelayDjangoType
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
     from .sets import FilterSet
@@ -254,11 +258,12 @@ def _apply_lookup_predicate(
     any future whole-value filter - cannot drift back to per-element form.
 
     ``field_name`` overrides ``filter_instance.field_name`` for the lookup key
-    (the ``lookup_expr`` is always the instance's own). The GlobalID
-    non-pk-``to_field`` fix derives and passes the pk-qualified relation path
-    (``f"{live_field_name}__pk"``, computed from the LIVE ``field_name`` at filter
-    time) so the predicate compares the target's primary key - which a Relay
-    GlobalID carries - rather than the raw FK-stored ``to_field`` column.
+    (the ``lookup_expr`` is always the instance's own). A GlobalID or raw-key
+    filter passes the path its value compares (``_globalid_predicate_path``,
+    computed from the LIVE ``field_name`` at filter time): the target column a
+    consumer ``relay.NodeID[...]`` names, or the pk-qualified relation path
+    ``f"{live_field_name}__pk"`` for a forward relation stored on a non-pk
+    ``to_field``, so the predicate never compares the raw FK-stored column.
     """
     field = filter_instance.field_name if field_name is None else field_name
     lookup = f"{field}__{filter_instance.lookup_expr}"
@@ -312,10 +317,12 @@ def _materialize_list_shaped_values(value: object, *, message: str, code: str) -
 # rebase while a saved absolute string (e.g. ``"target__pk"``) would go stale and
 # compile against the wrong relation (a ``FieldError`` on the parent model). Absent
 # / falsy (the common FK-to-pk / M2M / reverse / own-PK case) the predicate stays
-# byte-identical to upstream's ``{field_name__lookup_expr: node_id}`` - a Relay
-# GlobalID carries the target PK, which Django already resolves to the local FK
-# column for an FK-to-pk, so only the genuine non-pk-``to_field`` case needs the
-# ``__pk`` qualification.
+# byte-identical to upstream's ``{field_name__lookup_expr: node_id}`` - a raw key,
+# and a Relay GlobalID of a target whose id is its primary key, carry the target
+# PK, which Django already resolves to the local FK column for an FK-to-pk, so only
+# the genuine non-pk-``to_field`` case needs the ``__pk`` qualification. A GlobalID
+# whose target's id is another column (a consumer ``relay.NodeID[...]``) compiles
+# on that column and never reads the flag (``_globalid_predicate_path``).
 _GLOBALID_RELATION_PK_ATTR = "_dst_globalid_relation_pk"
 
 
@@ -325,10 +332,10 @@ def _relation_uses_non_pk_to_field(model_field: object) -> bool:
     A ``ForeignKey``/``OneToOneField`` declared with ``to_field="<col>"``, or a
     ``ForeignObject`` whose ``to_fields`` are anything but the target's primary
     key, stores and joins on those target columns, which are NOT the target's
-    primary key. A Relay GlobalID always carries the target's PK, so
-    ``filter(<relation>=<node_id>)`` would compare the PK value against the
-    stored link columns and return wrong rows; the GlobalID relation filter must
-    qualify with ``__pk`` in exactly this case.
+    primary key. A raw key, and a Relay GlobalID of a target whose id is its
+    primary key, carry the target's PK, so ``filter(<relation>=<node_id>)`` would
+    compare the PK value against the stored link columns and return wrong rows;
+    the relation filter must qualify with ``__pk`` in exactly this case.
 
     The link's target columns come from ``utils/relations.py::relation_link``
     (a ``ForeignObject``'s ``attname`` / ``column`` name no column, so the
@@ -362,6 +369,8 @@ def _marked_pk_field_name(filter_instance: Filter) -> str | None:
     every other target keeps the raw ``{field_name__lookup_expr: node_id}`` predicate
     (``None``). Sharing the derivation keeps marked filters from drifting apart: a
     per-method copy would let the empty-``node_id`` guard reach only one of them.
+    A GlobalID filter reads it through ``_globalid_predicate_path``, which puts a
+    target whose id is not its primary key first.
     """
     if getattr(filter_instance, _GLOBALID_RELATION_PK_ATTR, False):
         field_name = getattr(filter_instance, "field_name", None)
@@ -931,13 +940,60 @@ class IntegerRangeFilter(BaseRangeFilter, NumberFilter):
         return _apply_lookups(self, qs, lookups)
 
 
-def _target_definition_for(filter_instance: Filter) -> DjangoTypeDefinition | None:
-    """Resolve the owner/target ``DjangoTypeDefinition`` for a GlobalID-aware filter.
+@dataclass(frozen=True)
+class _GlobalIDTarget:
+    """Where a GlobalID filter's node id is validated and compiled.
+
+    ``definition`` is the type the id must name. ``row_path`` is the ORM path
+    from the filter's model to that type's rows: the filter's ``field_name``
+    minus a trailing scalar primary-key segment (``""`` for the owner's own id).
+    ``slot`` is the type's id slot when its GlobalID carries an attribute other
+    than the primary key (a consumer ``relay.NodeID[...]`` annotation), ``None``
+    when it carries the primary key.
+    """
+
+    definition: DjangoTypeDefinition
+    row_path: str
+    slot: _OffPkIdSlot | None
+
+
+class _OffPkIdSlot(NamedTuple):
+    """A Relay type's id slot that is not its primary key (``relay.py::_node_id_slot``).
+
+    ``field`` is the model field behind ``id_attr``, ``None`` when no model field
+    holds it (an attribute the type's ``get_queryset`` annotates).
+    """
+
+    node_type: type[_RelayDjangoType]
+    id_attr: str
+    field: ModelField | None
+
+
+def _off_pk_id_slot(definition: DjangoTypeDefinition) -> _OffPkIdSlot | None:
+    """Return the id slot of a Relay ``definition`` whose GlobalID is not its primary key.
+
+    ``None`` for a type whose id is its primary key (a type that is not a Relay
+    node, one with no ``NodeID`` annotation, one whose ``NodeID`` names the key),
+    the one predicate FK-id elision reads (``types/definition.py::_resolves_id_off_pk``),
+    so every such filter keeps comparing the key.
+    """
+    origin = definition.origin
+    if not implements_relay_node(origin):
+        return None
+    if not _resolves_id_off_pk(origin, definition.model._meta.pk.name):
+        return None
+    return _OffPkIdSlot(origin, *_node_id_slot(origin))
+
+
+def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
+    """Resolve where a GlobalID-aware filter validates and compiles its node id.
 
     Reads the owner of the filter's runtime ``parent``: a filter set instance's
     class's own binding (``utils/permissions.py::set_bound_definition``, which
     the finalizer's phase 2.5 wires, spec-027 #"Bind the owner."), or the
-    definition an undeclared hop's face carries. Two routing branches:
+    definition an undeclared hop's face carries, and resolves the LIVE
+    ``field_name`` (a leaf ``_expand_related_filter`` rebased resolves its
+    rebased path). Two routing branches:
 
     1. **Own-PK branch.** When ``filter_instance.field_name`` matches the
        owning model's PK name (``_meta.pk.name`` or ``"pk"``) and that PK is
@@ -954,13 +1010,16 @@ def _target_definition_for(filter_instance: Filter) -> DjangoTypeDefinition | No
        target ``DjangoType`` (spec-027
        #"consult the bound owner's `related_target_for(field_name)`").
 
-    Returns ``None`` when no owner is bound (unit-test
-    contexts) or when the lookup cannot resolve a target; the filter then
-    decodes the GlobalID without type-name validation (the node-id-only
-    fallback, spec-031 Decision 13).
-    The resolution of WHICH definition (own-PK vs relation) stays single-sited
-    here so the strategy-aware acceptance check in ``_decode_and_validate_global_id``
-    consumes a single definition (spec-031 Decision 13).
+    Returns the ``_GlobalIDTarget`` (definition, row path from the walk, and the
+    off-pk id slot ``_off_pk_id_slot`` reads), resolved once per ``filter()``
+    call and threaded through every element of a list. Returns ``None`` when no
+    owner is bound (unit-test contexts) or when the lookup cannot resolve a
+    target; the filter then decodes the GlobalID without type-name validation
+    (the node-id-only fallback, spec-031 Decision 13) and compiles on its own
+    ``field_name``. The resolution of WHICH definition (own-PK vs relation)
+    stays single-sited in ``_resolve_globalid_target`` so the strategy-aware
+    acceptance check in ``_decode_and_validate_global_id`` consumes a single
+    definition (spec-031 Decision 13).
     """
     parent: object = getattr(filter_instance, "parent", None)
     # An undeclared hop's face (``filters/sets.py::_UndeclaredHopSet``) carries the
@@ -975,7 +1034,11 @@ def _target_definition_for(filter_instance: Filter) -> DjangoTypeDefinition | No
     if owner is None:
         return None
     field_name: str | None = getattr(filter_instance, "field_name", None)
-    return resolve_globalid_target_definition(owner, field_name)
+    resolved = _resolve_globalid_target(owner, field_name)
+    if resolved is None:
+        return None
+    definition, row_path = resolved
+    return _GlobalIDTarget(definition, row_path, _off_pk_id_slot(definition))
 
 
 def resolve_globalid_target_definition(
@@ -984,8 +1047,8 @@ def resolve_globalid_target_definition(
 ) -> DjangoTypeDefinition | None:
     """Resolve the target definition a GlobalID filter validates against, given its owner.
 
-    The own-PK-vs-relation resolution of ``_target_definition_for`` factored out
-    of the ``filter_instance.parent`` accessor so the finalizer's build-time
+    The target definition ``_globalid_target`` resolves, read from an owner
+    instead of a live filter's ``parent`` so the finalizer's build-time
     audit (``finalizer._audit_globalid_filter_strategies``) resolves the SAME
     target definition from a bound filterset's own binding
     (``utils/permissions.py::set_bound_definition``) + ``filter.field_name``
@@ -1007,6 +1070,23 @@ def resolve_globalid_target_definition(
     resolve to a registered target (a scalar segment before the end, an unknown
     field, an unregistered target model).
     """
+    resolved = _resolve_globalid_target(owner, field_name)
+    return None if resolved is None else resolved[0]
+
+
+def _resolve_globalid_target(
+    owner: DjangoTypeDefinition,
+    field_name: str | None,
+) -> tuple[DjangoTypeDefinition, str] | None:
+    """Resolve ``field_name`` from ``owner`` to ``(target definition, row path)``.
+
+    The walk behind ``resolve_globalid_target_definition`` and
+    ``_globalid_target``: the row path is the prefix of ``field_name`` that
+    reaches the target's rows, every segment before a terminal scalar primary
+    key (``""`` for the owner's own id), or the whole path when it ends on a
+    relation. It comes from the walk, never from trimming ``field_name``: a
+    relation may be named like the target's primary key.
+    """
     if not isinstance(field_name, str) or not field_name:
         return None
 
@@ -1026,7 +1106,7 @@ def resolve_globalid_target_definition(
         # is a relation like any other and resolves to the definition it points at.
         if segment == pk_name and not getattr(pk_field, "is_relation", False):
             if i == len(segments) - 1:
-                return current_def
+                return current_def, "__".join(segments[:i])
             return None
 
         target = current_def.related_target_for(segment)
@@ -1034,7 +1114,7 @@ def resolve_globalid_target_definition(
             return None
         current_def, _model_field = target
 
-    return current_def
+    return current_def, field_name
 
 
 def _accepted_globalid_type_names(
@@ -1148,8 +1228,9 @@ def _decode_and_validate_global_id(
     filter_instance: Filter,
     *,
     index: int | None = None,
+    target: _GlobalIDTarget | None = None,
 ) -> object:
-    """Decode `value` to a node id and validate its type and target PK per strategy.
+    """Decode `value` to a node id and validate its type and target id per strategy.
 
     Accepts both raw `str` and `strawberry.relay.GlobalID` objects per
     spec-027 #"Accepts both raw". The accepted `type_name` payload(s) are
@@ -1191,12 +1272,17 @@ def _decode_and_validate_global_id(
     `GlobalIDMultipleChoiceFilter`) remain non-error paths.
     `GlobalIDMultipleChoiceFilter` passes `index` so the rejected list element is
     named in the mismatch, malformed, and empty-id messages per spec-027
-    #"validates every element of the list independently". A resolved target's
-    ``models.Field`` primary key also owns the final coercion: an ID with a
-    correctly typed wire payload but an invalid integer / UUID / range value is
-    rejected as ``GLOBALID_INVALID`` before Django can raise while compiling the
-    queryset. Unbound unit-test filters retain the node-id-only fallback because
-    they have no model field against which to coerce.
+    #"validates every element of the list independently". The resolved target's
+    id slot owns the final coercion, the field the node field coerces against
+    (``relay.py::_coerce_pk_or_none``): its ``models.Field`` primary key, or the
+    column a consumer ``relay.NodeID[...]`` annotation names. An ID with a
+    correctly typed wire payload but an invalid integer / UUID / range / text
+    value is rejected as ``GLOBALID_INVALID`` before Django can raise while
+    compiling the queryset; a valid value no row carries matches nothing.
+    Unbound unit-test filters retain the node-id-only fallback because they have
+    no model field against which to coerce. ``target`` threads the filter's
+    ``_globalid_target`` through a list so it resolves once per call; when
+    omitted it is resolved here.
     """
     if isinstance(value, relay.GlobalID):
         decoded = value
@@ -1220,7 +1306,9 @@ def _decode_and_validate_global_id(
                 f"base64 or not a 'type_name:node_id' shape){suffix}.",
                 extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
             ) from exc
-    definition = _target_definition_for(filter_instance)
+    if target is None:
+        target = _globalid_target(filter_instance)
+    definition = None if target is None else target.definition
     if definition is not None:
         strategy = definition.effective_globalid_strategy
         if strategy not in FRAMEWORK_GLOBALID_STRATEGIES:
@@ -1248,6 +1336,21 @@ def _decode_and_validate_global_id(
                 message,
                 extensions=coded_error_extensions(GLOBALID_UNVALIDATABLE_ERROR_CODE),
             )
+    if (
+        target is not None
+        and target.slot is not None
+        and target.slot.field is None
+        and target.row_path
+    ):
+        # A ``relay.NodeID`` over an attribute no model column holds (an annotation the
+        # type's ``get_queryset`` adds) is comparable only on that type's own rows.
+        suffix = "" if index is None else f" at index {index}"
+        raise GraphQLError(
+            f"GlobalID filter target {target.definition.graphql_type_name} carries its id in "
+            f"{target.slot.id_attr!r}, which no model column holds, so a filter across a "
+            f"relation cannot compare it{suffix}.",
+            extensions=coded_error_extensions(GLOBALID_UNVALIDATABLE_ERROR_CODE),
+        )
     schema = _filter_schema(filter_instance)
     accepted = _accepted_globalid_type_names(definition, schema)
     if (
@@ -1282,6 +1385,22 @@ def _decode_and_validate_global_id(
             extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
         )
     target_model = getattr(definition, "model", None) if definition is not None else None
+    if target is not None and target.slot is not None:
+        # A consumer ``relay.NodeID[...]`` slot: the node id is that column's value.
+        slot = target.slot
+        coerced_slot_value = _coerce_pk_or_none(
+            slot.node_type,
+            decoded.node_id,
+            slot=(slot.id_attr, slot.field),
+        )
+        if coerced_slot_value is None:
+            suffix = "" if index is None else f" at index {index}"
+            raise GraphQLError(
+                f"Invalid GlobalID: {truth.render(value)} carries a node id that is not a valid "
+                f"{truth.kind(target_model)} id value{suffix}.",
+                extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
+            )
+        return coerced_slot_value
     target_pk = getattr(truth.static_attr(target_model, "_meta", None), "pk", None)
     if isinstance(target_pk, models.Field):
         coerced_node_id = coerce_field_value_or_none(target_pk, decoded.node_id)
@@ -1294,6 +1413,26 @@ def _decode_and_validate_global_id(
             )
         return coerced_node_id
     return decoded.node_id
+
+
+def _globalid_predicate_path(
+    filter_instance: Filter,
+    target: _GlobalIDTarget | None,
+) -> str | None:
+    """Return the ORM path a decoded node id compiles on, ``None`` for the filter's own.
+
+    A target whose id slot is not its primary key compares that slot on the
+    target rows, ``<row path>__<id_attr>`` (the bare ``id_attr`` for the owner's
+    own id), the predicate the node field filters ``{id_attr: node_id}`` by; the
+    slot names the target column itself, so a forward relation's stored link
+    (a non-pk ``to_field`` included) is joined through, never compared. Every
+    other target keeps ``_marked_pk_field_name``: ``<relation>__pk`` for a
+    forward relation linked off the target's primary key, else ``None``.
+    """
+    if target is not None and target.slot is not None:
+        id_attr = target.slot.id_attr
+        return f"{target.row_path}__{id_attr}" if target.row_path else id_attr
+    return _marked_pk_field_name(filter_instance)
 
 
 class GlobalIDFilter(Filter):
@@ -1312,7 +1451,9 @@ class GlobalIDFilter(Filter):
     bound owner's `related_target_for(field_name)`, or the owner
     itself when the filter targets the own PK) per spec-031 Decision 13; a
     mismatch raises `GraphQLError("GlobalID type mismatch...")` before
-    any queryset clause runs.
+    any queryset clause runs. The decoded node id is the value of the target
+    type's id slot, its primary key or the column a consumer `relay.NodeID[...]`
+    names, and is coerced and compared as that column, as `node(id:)` reads it.
     """
 
     @override
@@ -1326,22 +1467,25 @@ class GlobalIDFilter(Filter):
         ``node_id`` is ``GLOBALID_INVALID``, not a silent no-op), so ``node_id`` is
         guaranteed present and valid below.
 
-        When the filter targets a forward relation bound on a non-pk ``to_field``
-        (flagged at generation via the boolean ``_GLOBALID_RELATION_PK_ATTR``), the
-        predicate is compiled against the pk-qualified relation path
-        ``f"{self.field_name}__pk"`` - DERIVED from the LIVE ``field_name`` at filter
-        time so it stays correct after ``_expand_related_filter`` rebases the leaf -
-        so the decoded PK ``node_id`` compares against the target's primary key
-        rather than the raw FK-stored ``to_field`` column. Every other case delegates
-        to ``Filter.filter`` with the unchanged ``{field_name__lookup_expr: node_id}``
-        predicate.
+        The target resolves once (``_globalid_target``) and the predicate path comes
+        from ``_globalid_predicate_path``, DERIVED from the LIVE ``field_name`` at
+        filter time so it stays correct after ``_expand_related_filter`` rebases the
+        leaf. A target whose id is a consumer ``relay.NodeID[...]`` column compiles
+        on that column of the target rows (``<row path>__<id_attr>``). A forward
+        relation bound on a non-pk ``to_field`` (flagged at generation via the
+        boolean ``_GLOBALID_RELATION_PK_ATTR``) into a target whose id is its
+        primary key compiles on ``f"{self.field_name}__pk"``, so the decoded key
+        never compares the raw FK-stored ``to_field`` column. Every other case
+        delegates to ``Filter.filter`` with the unchanged
+        ``{field_name__lookup_expr: node_id}`` predicate.
         """
         if value is None:
             return super().filter(qs, None)
-        node_id = _decode_and_validate_global_id(value, self)
-        pk_field_name = _marked_pk_field_name(self)
-        if pk_field_name is not None:
-            return _apply_lookup_predicate(self, qs, node_id, field_name=pk_field_name)
+        target = _globalid_target(self)
+        node_id = _decode_and_validate_global_id(value, self, target=target)
+        path = _globalid_predicate_path(self, target)
+        if path is not None:
+            return _apply_lookup_predicate(self, qs, node_id, field_name=path)
         return super().filter(qs, node_id)
 
 
@@ -1465,7 +1609,8 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         sequence (which never rewinds across rolled-back tests) passed 9.
         Non-``in`` lookups (per-element semantics, e.g. a multi-valued
         relation's ``exact``) keep the upstream OR delegation for non-empty
-        lists only.
+        lists only, on a copy carrying the predicate path when the target's id
+        is not its primary key.
         """
         if value is None:
             return super().filter(qs, None)
@@ -1476,23 +1621,31 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         )
         if len(value) == 0:
             return _match_none_queryset(self, qs)
+        target = _globalid_target(self)
         node_ids = [
-            _decode_and_validate_global_id(item, self, index=idx) for idx, item in enumerate(value)
+            _decode_and_validate_global_id(item, self, index=idx, target=target)
+            for idx, item in enumerate(value)
         ]
+        path = _globalid_predicate_path(self, target)
         if self.lookup_expr != "in":
-            return super().filter(qs, node_ids)
-        # ``_marked_pk_field_name`` DERIVES the pk-qualified relation path
-        # ``f"{self.field_name}__pk"`` from the LIVE ``field_name`` (immune to
-        # ``_expand_related_filter`` rebasing) for a non-pk-``to_field`` forward relation;
-        # every other target passes ``None``, leaving the predicate byte-identical to the
-        # raw ``{field_name__in: node_ids}`` form. Framework generation stamps the marker
-        # on this filter for a forward, single-valued FK bound on a non-pk ``to_field``
-        # whose ``in`` lookup is list-shaped: ``filter_for_field`` selects
-        # ``GlobalIDMultipleChoiceFilter`` for such an ``in`` and applies the marker, so
-        # the pk-qualified path is honored identically to ``GlobalIDFilter``'s
-        # single-value ``in`` (shared derivation, one home).
-        pk_field_name = _marked_pk_field_name(self)
-        return _apply_lookup_predicate(self, qs, node_ids, field_name=pk_field_name)
+            if path is None:
+                return super().filter(qs, node_ids)
+            # Upstream's per-element predicates read ``field_name``; a copy carries the path.
+            rebound = copy.copy(self)
+            rebound.field_name = path
+            return super(GlobalIDMultipleChoiceFilter, rebound).filter(qs, node_ids)
+        # ``_globalid_predicate_path`` DERIVES the path from the LIVE ``field_name``
+        # (immune to ``_expand_related_filter`` rebasing): the target's id column for a
+        # consumer ``relay.NodeID[...]`` target, the pk-qualified relation path
+        # ``f"{self.field_name}__pk"`` for a non-pk-``to_field`` forward relation into a
+        # pk-id target; every other target passes ``None``, leaving the predicate
+        # byte-identical to the raw ``{field_name__in: node_ids}`` form. Framework
+        # generation stamps the marker on this filter for a forward, single-valued FK
+        # bound on a non-pk ``to_field`` whose ``in`` lookup is list-shaped:
+        # ``filter_for_field`` selects ``GlobalIDMultipleChoiceFilter`` for such an
+        # ``in`` and applies the marker, so the path is honored identically to
+        # ``GlobalIDFilter``'s single-value ``in`` (shared derivation, one home).
+        return _apply_lookup_predicate(self, qs, node_ids, field_name=path)
 
 
 def relation_identity_column(relation: object) -> ConcreteField | None:

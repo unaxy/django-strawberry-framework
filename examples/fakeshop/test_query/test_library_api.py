@@ -41,6 +41,7 @@ from graphql_client import (
     DeleteAfterAuthorization,
     JSONObject,
     json_at,
+    json_int,
     json_list,
     json_object,
     json_optional_str,
@@ -2849,6 +2850,431 @@ def test_library_genres_filter_mixed_empty_id_in_list_rejects_whole_input_at_ind
     assert (
         payload.get("data") is None or json_object(payload, "data").get("allLibraryGenres") is None
     ), payload
+
+
+# --------------------------------------------------------------------------- #
+# GlobalID filters into a type whose Relay id is not its primary key
+# --------------------------------------------------------------------------- #
+
+
+class _HouseShape(NamedTuple):
+    """A GlobalID filter into ``PublisherType``, whose id carries the house code.
+
+    ``filter`` is the root or nested ``filter:`` argument with ``GID`` standing for
+    the id literal; ``negated`` marks a ``not:`` arm, which answers every other row.
+    """
+
+    root: str
+    filter: str
+    negated: bool = False
+
+
+#: Each root's document with ``FILTER`` standing for its ``filter:`` argument. ``window``
+#: filters every publisher's nested ``printings2Connection``.
+_HOUSE_ROOTS = {
+    "publishers": "allLibraryPublishersConnection(filter: FILTER) { edges { node { name } } }",
+    "printings": "allLibraryPrintingsConnection(filter: FILTER) { edges { node { runSize } } }",
+    "window": (
+        "allLibraryPublishersConnection { edges { node { name "
+        "printings2Connection(filter: FILTER) { edges { node { runSize } } } } } }"
+    ),
+}
+
+#: The statements each root issues over the three seeded houses, whatever its filter
+#: matches (``test_library_house_roots_issue_the_same_statements_under_a_pk_slot_filter``
+#: pins the same counts under a filter that compares a primary key).
+_HOUSE_ROOT_QUERIES = {"publishers": 1, "printings": 1, "window": 4}
+
+#: Every GlobalID filter shape that reaches ``PublisherType``: its own id, an own-id
+#: leaf through a hop (flat and nested), a forward key, a ``to_field`` key stored by
+#: the publisher's name, a to-many key, a to-many key through hops, the ``not:`` arms
+#: and a publisher's nested ``printings2Connection(filter:)``.
+_HOUSE_SHAPES = {
+    "own-id-exact": _HouseShape("publishers", "{id: {exact: GID}}"),
+    "own-id-in": _HouseShape("publishers", "{id: {in: [GID]}}"),
+    "own-id-not": _HouseShape("publishers", "{not: {id: {exact: GID}}}", negated=True),
+    "flat-hop-exact": _HouseShape("publishers", "{editionsPublisherId: {exact: GID}}"),
+    "flat-hop-in": _HouseShape("publishers", "{editionsPublisherId: {in: [GID]}}"),
+    "nested-hop-exact": _HouseShape("publishers", "{editions: {publisher: {id: {exact: GID}}}}"),
+    "nested-hop-in": _HouseShape("publishers", "{editions: {publisher: {id: {in: [GID]}}}}"),
+    "flat-hop-forward-key-in": _HouseShape("publishers", "{editionsPublisher_2: {in: [GID]}}"),
+    "printing-flat-hop-exact": _HouseShape("printings", "{editionPublisherId: {exact: GID}}"),
+    "printing-flat-hop-in": _HouseShape("printings", "{editionPublisherId: {in: [GID]}}"),
+    "printing-nested-hop-exact": _HouseShape(
+        "printings",
+        "{edition: {publisher: {id: {exact: GID}}}}",
+    ),
+    "printing-nested-hop-in": _HouseShape(
+        "printings",
+        "{edition: {publisher: {id: {in: [GID]}}}}",
+    ),
+    "forward-key-exact": _HouseShape("printings", "{publisher_2: {exact: GID}}"),
+    "forward-key-in": _HouseShape("printings", "{publisher_2: {in: [GID]}}"),
+    "forward-key-not": _HouseShape(
+        "printings",
+        "{not: {publisher_2: {exact: GID}}}",
+        negated=True,
+    ),
+    "hop-forward-key-exact": _HouseShape("printings", "{editionPublisher_2: {exact: GID}}"),
+    "nested-forward-key-exact": _HouseShape("printings", "{edition: {publisher_2: {exact: GID}}}"),
+    "to-field-exact": _HouseShape("printings", "{licensor: {exact: GID}}"),
+    "to-field-in": _HouseShape("printings", "{licensor: {in: [GID]}}"),
+    "to-field-not": _HouseShape("printings", "{not: {licensor: {exact: GID}}}", negated=True),
+    "to-many-exact": _HouseShape("printings", "{coPublishers: {exact: [GID]}}"),
+    "to-many-in": _HouseShape("printings", "{coPublishers: {in: [GID]}}"),
+    "to-many-not": _HouseShape("printings", "{not: {coPublishers: {exact: [GID]}}}", negated=True),
+    "to-many-hops-exact": _HouseShape(
+        "printings",
+        "{editionPrintingsCoPublishers: {exact: [GID]}}",
+    ),
+    "to-many-hops-in": _HouseShape("printings", "{editionPrintingsCoPublishers: {in: [GID]}}"),
+    "to-many-hops-not": _HouseShape(
+        "printings",
+        "{not: {editionPrintingsCoPublishers: {exact: [GID]}}}",
+        negated=True,
+    ),
+    "window-to-many-exact": _HouseShape("window", "{coPublishers: {exact: [GID]}}"),
+    "window-to-field-exact": _HouseShape("window", "{licensor: {exact: GID}}"),
+    "window-forward-key-in": _HouseShape("window", "{publisher_2: {in: [GID]}}"),
+}
+
+#: The run size each seeded house's one printing carries, so a printing row names its house.
+_HOUSE_RUN_SIZES = {"Gollancz": 100, "Orbit": 200, "Tor": 300}
+
+
+def _seed_houses() -> dict[str, str]:
+    """Seed three houses, each with one edition and one printing tied to it every way.
+
+    Tor's house code is Gollancz's primary-key digits, so an id compiled on the key
+    would answer Gollancz. Returns each house's id as the server emits it.
+    """
+    gollancz = models.Publisher.objects.create(name="Gollancz", house_code="HOUSE-G")
+    orbit = models.Publisher.objects.create(name="Orbit", house_code="HOUSE-O")
+    tor = models.Publisher.objects.create(name="Tor", house_code=str(pk_of(gollancz)))
+    for index, publisher in enumerate((gollancz, orbit, tor), start=1):
+        edition = models.Edition.objects.create(
+            isbn_13=f"978000000000{index}",
+            publisher=publisher,
+            publisher_2=publisher,
+        )
+        printing = models.Printing.objects.create(
+            edition=edition,
+            publisher_2=publisher,
+            licensor=publisher,
+            run_size=_HOUSE_RUN_SIZES[publisher.name],
+        )
+        printing.co_publishers.add(publisher)
+    data = _assert_graphql_success(
+        "query { allLibraryPublishersConnection { edges { node { id name } } } }",
+    )
+    edges = json_list(data, "allLibraryPublishersConnection", "edges")
+    return {json_str(edge, "node", "name"): json_str(edge, "node", "id") for edge in edges}
+
+
+def _house_names(root: str, data: JSONObject) -> list[str]:
+    """The houses a root's rows name: a publisher by name, a printing by its run size."""
+    house_by_run_size = {run_size: name for name, run_size in _HOUSE_RUN_SIZES.items()}
+    connection_name = (
+        "allLibraryPrintingsConnection"
+        if root == "printings"
+        else "allLibraryPublishersConnection"
+    )
+    edges = json_list(data, connection_name, "edges")
+    if root == "publishers":
+        return sorted(json_str(edge, "node", "name") for edge in edges)
+    if root == "printings":
+        return sorted(house_by_run_size[json_int(edge, "node", "runSize")] for edge in edges)
+    names: list[str] = []
+    for edge in edges:
+        owner = json_str(edge, "node", "name")
+        for inner in json_list(edge, "node", "printings2Connection", "edges"):
+            # A publisher's ``printings2Connection`` lists only the runs it commissioned.
+            assert house_by_run_size[json_int(inner, "node", "runSize")] == owner
+            names.append(owner)
+    return sorted(names)
+
+
+def _house_document(shape: _HouseShape, global_id: str) -> str:
+    """The query running ``shape`` with ``global_id`` as its id literal."""
+    argument = shape.filter.replace("GID", json.dumps(global_id))
+    return "query { " + _HOUSE_ROOTS[shape.root].replace("FILTER", argument) + " }"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_HOUSE_SHAPES))
+@pytest.mark.parametrize(
+    ("payload", "matched"),
+    [
+        ("emitted", ["Gollancz"]),
+        ("house-code-shaped-like-a-key", ["Tor"]),
+        ("primary-key", []),
+        ("unknown-code", []),
+    ],
+)
+def test_library_globalid_filter_into_a_custom_node_id_compares_the_house_code(
+    shape: str,
+    payload: str,
+    matched: list[str],
+) -> None:
+    """A GlobalID filter into ``PublisherType`` compares the house code its ids carry.
+
+    The id the server emits returns its own row through every shape; Tor's id,
+    whose house code is Gollancz's primary-key digits, returns Tor rather than
+    the row that key names; an id carrying a house's primary key or a code no
+    house has matches nothing, as ``node(id:)`` answers ``null`` for it. Each
+    root issues the statements it issues under a primary-key filter.
+    """
+    emitted = _seed_houses()
+    house_shape = _HOUSE_SHAPES[shape]
+    orbit_pk = pk_of(models.Publisher.objects.get(name="Orbit"))
+    global_id = {
+        "emitted": emitted["Gollancz"],
+        "house-code-shaped-like-a-key": emitted["Tor"],
+        "primary-key": global_id_for(library_schema.PublisherType, str(orbit_pk)),
+        "unknown-code": global_id_for(library_schema.PublisherType, "HOUSE-X"),
+    }[payload]
+    with CaptureQueriesContext(connection) as captured:
+        data = _assert_graphql_success(_house_document(house_shape, global_id))
+    expected = sorted(set(_HOUSE_RUN_SIZES) - set(matched)) if house_shape.negated else matched
+    assert _house_names(house_shape.root, data) == expected
+    assert len(captured.captured_queries) == _HOUSE_ROOT_QUERIES[house_shape.root]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_HOUSE_SHAPES))
+def test_library_globalid_filter_into_a_custom_node_id_refuses_an_uncoercible_code(
+    shape: str,
+) -> None:
+    """A house code the ``house_code`` column cannot hold is ``GLOBALID_INVALID``.
+
+    A NUL character is the one value a text column refuses; the filter rejects it
+    at its GlobalID boundary, naming the list position on a list-shaped key, before
+    the filtered statement runs.
+    """
+    _seed_houses()
+    house_shape = _HOUSE_SHAPES[shape]
+    global_id = global_id_for(library_schema.PublisherType, "HOUSE\x00G")
+    with CaptureQueriesContext(connection) as captured:
+        payload = _graphql_payload(_house_document(house_shape, global_id))
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
+    suffix = " at index 0." if "[GID]" in house_shape.filter else "."
+    assert json_str(error, "message") == (
+        f"Invalid GlobalID: {global_id!r} carries a node id that is not a valid Publisher id "
+        f"value{suffix}"
+    )
+    # The window's publishers are read before their nested filter rejects the id.
+    assert len(captured.captured_queries) == (1 if house_shape.root == "window" else 0)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("root", "argument"),
+    [
+        ("publishers", '{name: {exact: "Gollancz"}}'),
+        ("printings", "{id: {exact: GID}}"),
+        ("window", "{id: {in: [GID]}}"),
+    ],
+)
+def test_library_house_roots_issue_the_same_statements_under_a_pk_slot_filter(
+    root: str,
+    argument: str,
+) -> None:
+    """Each house root's statement count under a filter that compares a primary key.
+
+    ``PrintingType``'s id carries the printing's primary key, so these are the
+    counts the custom-id rows above are held to.
+    """
+    _seed_houses()
+    printing = models.Printing.objects.get(run_size=_HOUSE_RUN_SIZES["Gollancz"])
+    global_id = global_id_for(library_schema.PrintingType, pk_of(printing))
+    document = (
+        "query { "
+        + _HOUSE_ROOTS[root].replace(
+            "FILTER",
+            argument.replace("GID", json.dumps(global_id)),
+        )
+        + " }"
+    )
+    with CaptureQueriesContext(connection) as captured:
+        data = _assert_graphql_success(document)
+    assert _house_names(root, data) == ["Gollancz"]
+    assert len(captured.captured_queries) == _HOUSE_ROOT_QUERIES[root]
+
+
+@pytest.mark.django_db
+def test_library_pk_slot_globalid_relation_key_compares_the_stored_key_column() -> None:
+    """A GlobalID into a type whose id is its primary key compares that key column.
+
+    The ``booksId`` leaf (``BookType`` through the books hop) compiles the coerced
+    integer on ``library_book.id`` inside the hop's subquery, and ``GenreType``'s own
+    ``id`` key on ``library_genre.id``: no join to a column the id does not carry.
+    """
+    genre = models.Genre.objects.create(name="SciFi")
+    global_id = global_id_for(library_schema.GenreType, pk_of(genre))
+    with CaptureQueriesContext(connection) as captured:
+        data = _assert_graphql_success(
+            "query { allLibraryGenres(filter: {booksId: {in: ["
+            + json.dumps(global_id_for(library_schema.BookType, 1))
+            + "]}}) { name } }",
+        )
+        genre_data = _assert_graphql_success(
+            "query { allLibraryGenres(filter: {id: {exact: "
+            + json.dumps(global_id)
+            + "}}) { name } }",
+        )
+    assert json_list(data, "allLibraryGenres") == []
+    assert json_list(genre_data, "allLibraryGenres") == [{"name": "SciFi"}]
+    # Identifier quoting of subquery aliases varies across Django releases.
+    statements = [query["sql"].replace('"', "") for query in captured.captured_queries]
+    assert len(statements) == 2
+    assert "FROM library_book U0" in statements[0]
+    assert "U0.id IN (1)" in statements[0]
+    assert f"WHERE library_genre.id = {pk_of(genre)}" in statements[1]
+
+
+def _series_ids() -> dict[str, str]:
+    """Seed two series and a printing under each; return each series' emitted id."""
+    night = models.Series.objects.create(title="Night Shade")
+    daybreak = models.Series.objects.create(title="Daybreak")
+    publisher = models.Publisher.objects.create(name="Gollancz", house_code="HOUSE-G")
+    edition = models.Edition.objects.create(isbn_13="9780000000001", publisher=publisher)
+    models.Printing.objects.create(
+        edition=edition,
+        publisher_2=publisher,
+        series=night,
+        run_size=100,
+    )
+    models.Printing.objects.create(edition=edition, series=daybreak, run_size=200)
+    data = _assert_graphql_success(
+        "query { allLibrarySeriesConnection { edges { node { id title } } } }",
+    )
+    return {
+        json_str(edge, "node", "title"): json_str(edge, "node", "id")
+        for edge in json_list(data, "allLibrarySeriesConnection", "edges")
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("argument", ["{id: {exact: GID}}", "{id: {in: [GID]}}"])
+@pytest.mark.parametrize(
+    ("payload", "titles"),
+    [("emitted", ["Night Shade"]), ("primary-key", [])],
+)
+def test_library_series_filter_compares_its_annotated_handle_on_its_own_rows(
+    argument: str,
+    payload: str,
+    titles: list[str],
+) -> None:
+    """``SeriesType``'s id is a handle its ``get_queryset`` annotates; its own rows compare it.
+
+    The emitted id (the prefixed title) returns its series in one statement, and
+    an id carrying the series' primary key matches nothing.
+    """
+    emitted = _series_ids()
+    assert emitted["Night Shade"] == global_id_for(library_schema.SeriesType, "SER-Night Shade")
+    night_pk = pk_of(models.Series.objects.get(title="Night Shade"))
+    global_id = {
+        "emitted": emitted["Night Shade"],
+        "primary-key": global_id_for(library_schema.SeriesType, str(night_pk)),
+    }[payload]
+    document = (
+        "query { allLibrarySeriesConnection(filter: "
+        + argument.replace("GID", json.dumps(global_id))
+        + ") { edges { node { title } } } }"
+    )
+    with CaptureQueriesContext(connection) as captured:
+        data = _assert_graphql_success(document)
+    edges = json_list(data, "allLibrarySeriesConnection", "edges")
+    assert [json_str(edge, "node", "title") for edge in edges] == titles
+    assert len(captured.captured_queries) == 1
+
+
+#: A printing's ``inSeries`` hop into ``SeriesFilter``, flat and nested, over the
+#: series id (``exact`` and ``in``) and the declared ``handle`` filter; ``VALUE`` stands
+#: for the literal.
+_SERIES_HOP_FILTERS = {
+    "flat-id-exact": "{inSeriesId: {exact: VALUE}}",
+    "nested-id-exact": "{inSeries: {id: {exact: VALUE}}}",
+    "flat-id-in": "{inSeriesId: {in: [VALUE]}}",
+    "nested-id-in": "{inSeries: {id: {in: [VALUE]}}}",
+    "flat-handle": "{inSeriesHandle: {exact: VALUE}}",
+    "nested-handle": "{inSeries: {handle: {exact: VALUE}}}",
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("spelling", list(_SERIES_HOP_FILTERS))
+@pytest.mark.parametrize(("payload", "run_sizes"), [("match", [100]), ("miss", [])])
+def test_library_series_hop_compares_the_handle_on_the_rows_its_type_reads(
+    spelling: str,
+    payload: str,
+    run_sizes: list[int],
+) -> None:
+    """A ``RelatedFilter`` hop into ``SeriesFilter`` compares the annotated handle, flat or nested.
+
+    The hop's rows are the series ``SeriesType.get_queryset`` annotates, so the
+    emitted id and the handle itself return the printing under that series, while
+    an id carrying the series' primary key and the bare title match nothing. The
+    flat spelling answers as the nested one, in the same one statement.
+    """
+    emitted = _series_ids()
+    night_pk = pk_of(models.Series.objects.get(title="Night Shade"))
+    if "handle" in spelling:
+        value = "SER-Night Shade" if payload == "match" else "Night Shade"
+    else:
+        value = (
+            emitted["Night Shade"]
+            if payload == "match"
+            else global_id_for(library_schema.SeriesType, str(night_pk))
+        )
+    argument = _SERIES_HOP_FILTERS[spelling].replace("VALUE", json.dumps(value))
+    with CaptureQueriesContext(connection) as captured:
+        data = _assert_graphql_success(
+            "query { " + _HOUSE_ROOTS["printings"].replace("FILTER", argument) + " }",
+        )
+    edges = json_list(data, "allLibraryPrintingsConnection", "edges")
+    assert [json_int(edge, "node", "runSize") for edge in edges] == run_sizes
+    assert len(captured.captured_queries) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("root", "argument"),
+    [
+        ("printings", "{series: {exact: GID}}"),
+        ("printings", "{series: {in: [GID]}}"),
+        ("printings", "{not: {series: {exact: GID}}}"),
+        ("window", "{series: {exact: GID}}"),
+    ],
+)
+def test_library_series_key_refuses_an_id_no_column_holds(root: str, argument: str) -> None:
+    """A printing's ``series`` key cannot compare a handle no ``Series`` column holds.
+
+    The handle exists only on the rows ``SeriesType.get_queryset`` annotates, so a
+    filter reaching series rows across a relation answers ``GLOBALID_UNVALIDATABLE``,
+    naming the list position on ``in``, before the filtered statement runs.
+    """
+    emitted = _series_ids()
+    document = (
+        "query { "
+        + _HOUSE_ROOTS[root].replace(
+            "FILTER",
+            argument.replace("GID", json.dumps(emitted["Night Shade"])),
+        )
+        + " }"
+    )
+    with CaptureQueriesContext(connection) as captured:
+        payload = _graphql_payload(document)
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "extensions", "code") == "GLOBALID_UNVALIDATABLE", payload
+    suffix = " at index 0." if "[GID]" in argument else "."
+    assert json_str(error, "message") == (
+        "GlobalID filter target SeriesType carries its id in 'handle', which no model column "
+        f"holds, so a filter across a relation cannot compare it{suffix}"
+    )
+    # The window's publishers are read before their nested filter rejects the id.
+    assert len(captured.captured_queries) == (1 if root == "window" else 0)
 
 
 @pytest.mark.django_db
