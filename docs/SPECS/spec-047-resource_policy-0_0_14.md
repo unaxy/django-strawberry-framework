@@ -602,11 +602,17 @@ before anything validates it.
   twenty selections and twenty aliases.
 - **Values are charged in the same pass** because family classification needs the argument's
   own GraphQL input type, which the field or directive context supplies. Four value sources
-  normalize through `value_from_ast_untyped` into one walker rather than one walker per source:
-  literal arguments; variables; literal objects with variables spliced into them; and **an
-  operation variable definition's own default**, folded into the per-operation variable map
-  before any argument value is charged (at a use site a supplied variable wins, and a default
-  stands in only where the map has no entry for its name). The default is a source in its own
+  feed one walker rather than one walker per source: literal arguments; variables; literal
+  objects with variables spliced into them; and **an operation variable definition's own
+  default**, folded into the per-operation variable map before any argument value is charged
+  (at a use site a supplied variable wins, and a default stands in only where the map has no
+  entry for its name). A literal - an argument, or a default at its definition and at every
+  use it stands in for - is walked as its AST, each leaf converted only when the walk reaches
+  it, so an input object that repeats a field name is charged for every occurrence: a
+  name-keyed conversion would keep the last and drop the rest before any bound saw them,
+  while validation and coercion still walk each one. A variable reference resolves as
+  graphql-core's `value_from_ast_untyped` resolves it. The converted default is kept beside
+  the literal only for the page bound a `first: $n` narrows. The default is a source in its own
   right because a document can carry its whole payload there — `query($p: [Int!] = [ … 5000
   items … ]) { … }` supplies no variables map at all — and a walk that charges only what the
   map holds charges nothing for it. Every one of the four is the value as the REQUEST carried
@@ -1126,7 +1132,7 @@ scan of the raw variables JSON, which duplicates the body cap's layer; `_charge_
 
 **Not this stage — what a custom scalar's `parse_value` returns.** The walk reads the RAW
 argument values a request carried: `execution_context.variables` as the transport decoded them,
-and literal arguments through `value_from_ast_untyped`. It runs before validation, which is the
+and literal arguments as their AST, leaf by leaf. It runs before validation, which is the
 one stage that would otherwise have converted an argument first — graphql-core validates a
 literal by parsing it through the scalar it is typed as — so an over-wide raw container is
 refused before any parser is called at all, whether it arrived as a supplied variable, an inline
@@ -1149,8 +1155,9 @@ than a missing one.
 (one container referenced from many places) is charged **once per reference**, which is the
 contract [Decision 4](#decision-4--the-document-and-value-budgets-are-one-iterative-walk) states.
 The work is bounded by `max_input_nodes` without a separate bound, because every reference pops a
-stack entry and charges a node before it descends — a value engineered to blow the walk up runs
-out of node budget first.
+stack entry and charges a node before it descends, and a literal is walked as its AST, so no
+subtree is converted or dropped before its nodes are charged — a value engineered to blow the
+walk up runs out of node budget first, a repeated input-object field name included.
 
 **Why the cycle guard and the charge counter are two mechanisms and cannot be one.** They have
 different lifetime requirements — ancestor-scoped and owning, versus request-scoped — and only

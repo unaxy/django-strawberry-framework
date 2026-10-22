@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 172 done, 131 to do.
+Progress: 173 done, 131 to do.
 
 ## Done
 
@@ -634,6 +634,14 @@ Progress: 172 done, 131 to do.
   `canonical_sort_key` order; a set of lookups as a sorted list); the declaration is never rewritten as a `list`, so
   django-filter's declared-filter allowance still refuses a set, and a list / tuple / dict of lists keeps its order. The
   OrderSet twin's pin now fails without canonicalization in every process
+- [x] 241. Duplicate input-object field names escaped the value budget: `charge_arguments` charged
+  `value_from_ast_untyped`'s dict, which dropped an earlier same-named field's subtree uncharged at every spread
+  expansion: fixed, `extensions/resource_policy.py::_DocumentWalk` charges each argument as its AST (`_popped_value`
+  keeps a literal list / object as its node and resolves a variable through graphql-core's own lookup;
+  `_ValueBudget._charge_container` counts an `ObjectValueNode`'s width as every spelled field, a repeated name
+  included), and an unused or used variable default is charged as its literal AST, so a duplicate-name document over a
+  bound gets the resource rejection (spread, untyped, typed-order, directive, unused-default and used-default rows) and
+  one within budget reaches graphql-core's "only one input field" validation; no new bound, code or message
 
 ## Outside review of the fixes
 
@@ -763,12 +771,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   field; both are stale (the key maps and `tests/utils/test_error_keys.py` landed before)
 - [ ] 235. Two comments in `optimizer/nested_planner.py` label a guard "the P2-3 defect" / "the P2-3 false-coverage defect",
   a review label START "No process provenance" bans; restate each as the invariant it guards
-- [ ] 241. Duplicate input-object field names escape the value budget:
-  `extensions/resource_policy.py::_DocumentWalk.charge_arguments` converts an argument's whole value AST at every reference
-  but charges the converted dict, so an overwritten duplicate field is converted and never charged by any value bound (the
-  node budget and `max_container_width` alike); 500 spreads of `__typename(a: {k: [1 x2978] k: 1})` walk about 106 ms at
-  the default policy and are admitted, against spec-047's "Audited exclusion - `_charge_container`" paragraph ("runs out
-  of node budget first")
 - [ ] 254. `rest_framework/inputs.py::serializer_schema_fingerprint`'s docstring says "This captures EVERY axis the
   generated input / SDL / reverse map depends on", but `_fingerprint_converter_extra` records only a `ListField`'s direct
   child; retract the sentence to what the fingerprint covers (no code change)
@@ -888,6 +890,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 308. CHANGELOG entry for item 241: under `ResourcePolicy` a document repeating an input-object field name
+  (directly, through a fragment spread or in a variable default) is charged for every spelled occurrence, so an
+  over-budget one gets the resource rejection (`max_input_nodes` / `max_container_width`) instead of reaching validation
+  with the repeated subtrees uncharged; a within-budget one still gets graphql-core's "only one input field" error
 - [ ] 293. CHANGELOG entry for item 137: in `DjangoModelFormMutation` and `SerializerMutation` a relation id naming a
   visible row whose `to_field` key is `NULL` is the relation error instead of silently storing `NULL` (required
   relations and many-to-many give that error instead of a field, constraint or raw error); a form `ModelChoiceField`
