@@ -2886,9 +2886,9 @@ def _prefetch_path_or_defect(
     prefetch_to = entry_state.get("prefetch_to")
     to_attr = entry_state.get("to_attr")
     if not is_str(through) or not is_str(prefetch_to):
-        return None, ("untrusted", f"{cls_name} prefetch path is not an exact str")
+        return None, ("untrusted", f"{cls_name} prefetch path is not a str")
     if to_attr is not None and not is_str(to_attr):
-        return None, ("untrusted", f"{cls_name} prefetch to_attr is not an exact str or None")
+        return None, ("untrusted", f"{cls_name} prefetch to_attr is not a str or None")
     return (
         _normalized_str(through),
         _normalized_str(prefetch_to),
