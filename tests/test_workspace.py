@@ -17,6 +17,7 @@ import contextlib
 import errno
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
@@ -29,7 +30,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 import pytest
 import yaml
@@ -2894,6 +2895,150 @@ def test_a_reader_gone_from_the_run_keeps_the_log_and_never_blocks_the_command(
 
     assert run.finish(timeout=15) == (0, None)
     assert run.log.stat().st_size == len("header\n") + 20000 * 100
+
+
+@pytest.fixture
+def started_commands(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen[bytes]]:
+    """Every command an in-process ``stream`` starts, in order."""
+    processes: list[subprocess.Popen[bytes]] = []
+    real = workspace._StopRelay.started
+
+    def record(self: workspace._StopRelay, process: subprocess.Popen[bytes]) -> None:
+        processes.append(process)
+        real(self, process)
+
+    monkeypatch.setattr(workspace._StopRelay, "started", record)
+    return processes
+
+
+def _stream_in_process(tmp_path: Path, program: str) -> workspace.Finished:
+    return workspace.stream([sys.executable, "-c", program], {}, tmp_path / "run.log", "header\n")
+
+
+def _interrupt_the_first_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the command's first ``wait`` raise ``KeyboardInterrupt``: an error out of the run."""
+    recorded = workspace._StopRelay.started
+
+    def started(self: workspace._StopRelay, process: subprocess.Popen[bytes]) -> None:
+        recorded(self, process)
+        real = process.wait
+        interrupted: list[bool] = []
+
+        def wait(timeout: float | None = None) -> int:
+            if not interrupted:
+                interrupted.append(True)
+                raise KeyboardInterrupt
+            return real(timeout)
+
+        monkeypatch.setattr(process, "wait", wait)
+
+    monkeypatch.setattr(workspace._StopRelay, "started", started)
+
+
+def _assert_pipes_closed(processes: list[subprocess.Popen[bytes]]) -> None:
+    (process,) = processes
+    assert process.stdout is not None
+    assert process.stderr is not None
+    assert process.stdout.closed
+    assert process.stderr.closed
+
+
+@pytest.mark.parametrize("code", [0, 3], ids=["success", "nonzero"])
+def test_an_in_process_stream_closes_the_pipes_it_read(
+    tmp_path: Path,
+    started_commands: list[subprocess.Popen[bytes]],
+    code: int,
+) -> None:
+    # Left open, the pipes reach the garbage collector as an unclosed-file ``ResourceWarning``.
+    finished = _stream_in_process(
+        tmp_path,
+        f"import sys; print('out'); print('err', file=sys.stderr); sys.exit({code})",
+    )
+
+    assert finished == workspace.Finished(code)
+    _assert_pipes_closed(started_commands)
+
+
+@pytest.mark.parametrize("failure", ["interrupt", "no-thread"])
+def test_an_interrupted_stream_kills_its_command_and_closes_the_pipes(
+    tmp_path: Path,
+    started_commands: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    error: type[BaseException] = KeyboardInterrupt
+    if failure == "interrupt":
+        _interrupt_the_first_wait(monkeypatch)
+    else:
+        # The second reader thread cannot start: the first is already reading.
+        real = threading.Thread.start
+        starts: list[threading.Thread] = []
+
+        def start(self: threading.Thread) -> None:
+            starts.append(self)
+            if len(starts) == 2:
+                raise RuntimeError("can't start new thread")
+            real(self)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        error = RuntimeError
+
+    # Left running, the command would hold the run's leases; closing the pipes would wait on it.
+    with pytest.raises(error, match=None if failure == "interrupt" else "can't start new thread"):
+        _ = _stream_in_process(tmp_path, "import time; print('up', flush=True); time.sleep(15)")
+
+    _assert_pipes_closed(started_commands)
+    assert started_commands[0].returncode == -signal.SIGKILL
+
+
+def test_a_stream_with_no_byte_stdout_starts_no_command(
+    tmp_path: Path,
+    started_commands: list[subprocess.Popen[bytes]],
+) -> None:
+    # An in-process caller that redirected stdout to text: the error comes before any command runs.
+    started = time.monotonic()
+    with contextlib.redirect_stdout(io.StringIO()), pytest.raises(AttributeError):
+        _ = _stream_in_process(tmp_path, "import time; time.sleep(15)")
+
+    assert time.monotonic() - started < 5
+    assert started_commands == []
+
+
+@pytest.mark.parametrize("ending", ["normal", "interrupted"])
+def test_a_slow_reader_is_joined_before_the_pipes_close(
+    tmp_path: Path,
+    started_commands: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    # A reader still copying when the pipes close loses the rest of the output.
+    real = workspace._pump
+    ended: list[int] = []
+
+    def slow(
+        source: io.BufferedReader,
+        sink: BinaryIO,
+        log: BinaryIO,
+        lock: threading.Lock,
+    ) -> None:
+        time.sleep(0.3)
+        try:
+            real(source, sink, log, lock)
+        finally:
+            ended.append(1)
+
+    monkeypatch.setattr(workspace, "_pump", slow)
+    if ending == "interrupted":
+        _interrupt_the_first_wait(monkeypatch)
+        with pytest.raises(KeyboardInterrupt):
+            _ = _stream_in_process(tmp_path, "import time; time.sleep(15)")
+        assert started_commands[0].returncode == -signal.SIGKILL
+    else:
+        assert _stream_in_process(tmp_path, "print('x' * 99)") == workspace.Finished(0)
+        assert (tmp_path / "run.log").stat().st_size == len("header\n") + 100
+
+    assert ended == [1, 1]
+    _assert_pipes_closed(started_commands)
 
 
 def _is_stopped(pid: int) -> bool:
