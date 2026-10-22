@@ -156,6 +156,7 @@ from django_strawberry_framework.utils.write_transaction import (
     conflict_error,
     forced_update_conflict_errors,
     located_row_vanished,
+    locks_rows,
     not_updated_exceptions,
     open_write_pipeline,
     pin_write_queryset,
@@ -163,6 +164,7 @@ from django_strawberry_framework.utils.write_transaction import (
     pipeline_write_phase,
     reject_substituted_row,
     require_write_pipeline,
+    rows_visible_after_lock,
     snapshot_target_state,
 )
 from django_strawberry_framework.utils.write_values import (
@@ -838,7 +840,9 @@ def locate_instance(
     pk subquery (``base_locked_queryset``) - never ``select_for_update()`` attached to the
     consumer's own queryset, whose joins / unions / annotations a ``FOR UPDATE`` cannot legally
     carry. Visibility is still enforced (a hidden row is absent from the subquery: not locked,
-    not found), and the lock is acquired inside the pipeline's transaction. On a backend without
+    not found), and the lock is acquired inside the pipeline's transaction. A row the lock
+    waited on is confirmed by a fresh visibility read (``rows_visible_after_lock``), so a row a
+    concurrent commit hid during the wait is not found either. On a backend without
     ``SELECT ... FOR UPDATE`` support (e.g. sqlite) Django silently skips the clause, so this is
     safe regardless of backend; ``Meta.select_for_update = False`` opts into weaker concurrency.
     """
@@ -854,9 +858,17 @@ def locate_instance(
     )
     queryset = base_locked_queryset(model, alias, visible) if select_for_update else visible
     try:
-        return queryset.get(pk=node_id)
+        instance = queryset.get(pk=node_id)
     except model.DoesNotExist:
         return None
+    # The locked read kept its pre-wait visibility snapshot; a fresh statement confirms the row.
+    if (
+        select_for_update
+        and locks_rows(alias)
+        and not rows_visible_after_lock(model, alias, visible, [pk_of(instance)])
+    ):
+        return None
+    return instance
 
 
 def _provided_attr_names(

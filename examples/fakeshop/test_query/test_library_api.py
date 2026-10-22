@@ -47,6 +47,8 @@ from graphql_client import (
     json_optional_str,
     json_str,
     middleware_without_debug_toolbar,
+    post_lock_reread_shapes,
+    post_lock_rereads,
     response_json,
     saved_pk,
     select_tables_after_last_delete,
@@ -13311,14 +13313,16 @@ def test_update_book_at_repair_desk_validates_the_omitted_stored_choice_over_htt
             },
             variables={"id": global_id_for(library_schema.BookType, book.pk), "d": {}},
         )
-    # The located row is read once; a refused form writes nothing, probes that the located row
-    # still exists (so its own error stands) and rolls its savepoint back, and an admitted one
-    # UPDATEs inside the forced update's own savepoint.
+    # The located row is read once (and confirmed by its post-lock re-read where rows lock); a
+    # refused form writes nothing, probes that the located row still exists (so its own error
+    # stands) and rolls its savepoint back, and an admitted one UPDATEs inside the forced
+    # update's own savepoint.
     assert [query["sql"].split()[0] for query in captured.captured_queries] == (
         [
             "SAVEPOINT",
             "SAVEPOINT",
             "SELECT",
+            *post_lock_reread_shapes(1),
             "SELECT",
             "ROLLBACK",
             "RELEASE",
@@ -13329,6 +13333,7 @@ def test_update_book_at_repair_desk_validates_the_omitted_stored_choice_over_htt
             "SAVEPOINT",
             "SAVEPOINT",
             "SELECT",
+            *post_lock_reread_shapes(1),
             "SAVEPOINT",
             "UPDATE",
             "RELEASE",
@@ -14784,6 +14789,14 @@ _PRINTING_WRITES = {
 _PRINTING_WRITE_FRAME_QUERIES = {"create": 5, "update": 7}
 
 
+def _printing_write_frame(operation: str) -> int:
+    """The statements a refused ``Printing`` write runs besides its ``Edition`` lookups.
+
+    ``_PRINTING_WRITE_FRAME_QUERIES``, plus the update's post-lock re-read of its located row.
+    """
+    return _PRINTING_WRITE_FRAME_QUERIES[operation] + post_lock_rereads(int(operation == "update"))
+
+
 def _post_printing_write(
     flavor: str,
     operation: str,
@@ -14876,8 +14889,10 @@ def test_unencodable_text_in_a_text_keyed_relation_id_is_field_error_over_http(
             },
         ],
     }
-    assert _edition_lookups(sql) == lookups_before[flavor]
-    assert len(sql) == _PRINTING_WRITE_FRAME_QUERIES[operation] + lookups_before[flavor]
+    # Every lookup before the refused id finds its edition, so each adds its post-lock re-read.
+    edition_reads = lookups_before[flavor] + post_lock_rereads(lookups_before[flavor])
+    assert _edition_lookups(sql) == edition_reads
+    assert len(sql) == _printing_write_frame(operation) + edition_reads
     assert list(models.Printing.objects.values_list("pk", "edition_id", "run_size")) == [
         (printing.pk, edition.pk, 1),
     ]
@@ -14888,13 +14903,24 @@ def test_unencodable_text_in_a_text_keyed_relation_id_is_field_error_over_http(
 @pytest.mark.parametrize("flavor", ["model", "form", "serializer"])
 @pytest.mark.parametrize("operation", ["create", "update"])
 @pytest.mark.parametrize(
-    ("relation_input", "error_field", "lookups"),
+    (
+        "relation_input",
+        "error_field",
+        "lookups",
+        "lookups_finding_a_row",
+    ),
     [
-        ({"editionId": "9789999999999"}, "editionId", {"model": 1, "form": 1, "serializer": 1}),
+        (
+            {"editionId": "9789999999999"},
+            "editionId",
+            {"model": 1, "form": 1, "serializer": 1},
+            0,
+        ),
         (
             {"boundWith": ["9780000000001", "9789999999999"]},
             "boundWith",
             {"model": 2, "form": 3, "serializer": 2},
+            2,
         ),
     ],
 )
@@ -14904,13 +14930,16 @@ def test_unknown_well_formed_text_keyed_relation_id_is_relation_error_over_http(
     relation_input: dict[str, object],
     error_field: str,
     lookups: dict[str, int],
+    lookups_finding_a_row: int,
 ) -> None:
     """A storable ISBN naming no edition reaches its lookup and is the uniform relation error.
 
     The control for the surrogate rows: the same writes with a well-formed id run the
     ``Edition`` lookup the refused id never reaches (one batched ``pk__in`` in the model and
     serializer flavors, one per member in the form flavor) and answer the relation error
-    keyed to the input, without an element index.
+    keyed to the input, without an element index. Beside a known ``boundWith`` member, the
+    ``editionId`` lookup and that member's lookup find a row, so each adds its post-lock
+    re-read.
     """
     publisher = models.Publisher.objects.create(name="SurrogatePress", house_code="SP")
     edition = models.Edition.objects.create(isbn_13="9780000000001", publisher=publisher)
@@ -14930,8 +14959,9 @@ def test_unknown_well_formed_text_keyed_relation_id_is_relation_error_over_http(
             },
         ],
     }
-    assert _edition_lookups(sql) == lookups[flavor]
-    assert len(sql) == _PRINTING_WRITE_FRAME_QUERIES[operation] + lookups[flavor]
+    edition_reads = lookups[flavor] + post_lock_rereads(lookups_finding_a_row)
+    assert _edition_lookups(sql) == edition_reads
+    assert len(sql) == _printing_write_frame(operation) + edition_reads
 
 
 #: The ``Edition`` write -> (field, data variable type or ``None`` for a delete). Every
@@ -15055,7 +15085,8 @@ def test_non_ascii_text_keyed_relation_ids_are_written_over_http(
     The relation type-check refuses only unencodable text: an id holding a valid
     non-ASCII character (an astral one, which JSON carries as a surrogate PAIR) passes
     the preflight in every write flavor, and the printing stores that edition as its
-    ``edition`` and its only ``bound_with`` member.
+    ``edition`` and its only ``bound_with`` member. The FK lookup and the member lookup
+    each find the edition, so each adds its post-lock re-read.
     """
     publisher = models.Publisher.objects.create(name="SurrogatePress", house_code="SP")
     edition = models.Edition.objects.create(isbn_13=_NON_ASCII_ISBN, publisher=publisher)
@@ -15069,7 +15100,7 @@ def test_non_ascii_text_keyed_relation_ids_are_written_over_http(
     created = models.Printing.objects.exclude(pk=printing.pk).get()
     assert created.edition_id == edition.pk
     assert list(created.bound_with.values_list("pk", flat=True)) == [_NON_ASCII_ISBN]
-    assert len(sql) == statements
+    assert len(sql) == statements + post_lock_rereads(2)
 
 
 @pytest.mark.django_db
@@ -15089,7 +15120,8 @@ def test_non_ascii_text_keyed_lookup_id_locates_its_row_over_http(
     """A storable non-ASCII ISBN ``id`` locates its ``Edition`` for update and delete.
 
     The lookup ``id`` is refused only for unencodable text: a valid non-ASCII key
-    passes the preflight and the write lands on the row it names.
+    passes the preflight and the write lands on the row it names, which its post-lock
+    re-read confirms.
     """
     publisher = models.Publisher.objects.create(name="SurrogatePress", house_code="SP")
     models.Edition.objects.create(isbn_13=_NON_ASCII_ISBN, publisher=publisher, imprint="Kept")
@@ -15104,7 +15136,7 @@ def test_non_ascii_text_keyed_lookup_id_locates_its_row_over_http(
         assert list(models.Edition.objects.values_list("isbn_13", "imprint")) == [
             (_NON_ASCII_ISBN, "Surrogate Imprint"),
         ]
-    assert len(sql) == statements
+    assert len(sql) == statements + post_lock_rereads(1)
 
 
 #: The error every write flavor answers for an embedded NUL in a text leaf: Django's own
@@ -15210,8 +15242,10 @@ def test_nul_in_a_text_keyed_relation_id_is_the_relation_error_over_http(
             },
         ],
     }
-    assert _edition_lookups(sql) == lookups_before[flavor]
-    assert len(sql) == _PRINTING_WRITE_FRAME_QUERIES[operation] + lookups_before[flavor]
+    # Every lookup before the refused id finds its edition, so each adds its post-lock re-read.
+    edition_reads = lookups_before[flavor] + post_lock_rereads(lookups_before[flavor])
+    assert _edition_lookups(sql) == edition_reads
+    assert len(sql) == _printing_write_frame(operation) + edition_reads
     assert list(models.Printing.objects.values_list("pk", "edition_id", "run_size")) == [
         (printing.pk, edition.pk, 1),
     ]
@@ -15561,7 +15595,9 @@ def _branch_batched_visibility_queries(captured: CaptureQueriesContext) -> list[
 
     Decode uses ``pk__in`` (SQLite emits ``IN (SELECT ...)``). DRF re-validation
     then ``get()``s each member (``id =``). Counting only the non-equality
-    queries isolates the batched decode from the per-member DRF lookups.
+    queries isolates the batched decode from the per-member DRF lookups. Where rows
+    lock, each relation decode that found a branch adds its post-lock re-read, a
+    ``pk__in`` too: the ``altBranches`` batch's and the ``branchId`` decode's.
     """
     return [
         sql
@@ -15607,7 +15643,7 @@ def test_serializer_m2m_alt_branches_visibility_is_one_batched_query_over_http()
 
     two = _create("BatchShelf2", alts[:2])
     five = _create("BatchShelf5", alts)
-    assert len(two) == len(five) == 1, (two, five)
+    assert len(two) == len(five) == 1 + post_lock_rereads(2), (two, five)
 
 
 @pytest.mark.django_db
@@ -15634,14 +15670,17 @@ def test_serializer_m2m_duplicate_alt_branch_pks_still_one_visibility_query() ->
     payload = response_json(response)
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "createShelfViaAltBranchesSerializer", "errors") == []
-    assert len(_branch_batched_visibility_queries(captured)) == 1
+    assert len(_branch_batched_visibility_queries(captured)) == 1 + post_lock_rereads(2)
     shelf = models.Shelf.objects.get(code="BatchShelfDupes")
     assert set(shelf.alt_branches.values_list("pk", flat=True)) == {alt1.pk, alt2.pk}
 
 
 @pytest.mark.django_db
 def test_serializer_m2m_empty_alt_branches_issues_no_visibility_in_query() -> None:
-    """An empty M2M list is a clear: it writes the shelf and issues no ``pk__in`` check."""
+    """An empty M2M list is a clear: it writes the shelf and issues no ``altBranches`` check.
+
+    The one ``pk__in`` left where rows lock is the ``branchId`` decode's post-lock re-read.
+    """
     home = models.Branch.objects.create(name="EmptyHome", city="Boston")
 
     with CaptureQueriesContext(connection) as captured:
@@ -15655,7 +15694,7 @@ def test_serializer_m2m_empty_alt_branches_issues_no_visibility_in_query() -> No
     payload = response_json(response)
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "createShelfViaAltBranchesSerializer", "errors") == []
-    assert _branch_batched_visibility_queries(captured) == []
+    assert len(_branch_batched_visibility_queries(captured)) == post_lock_rereads(1)
     shelf = models.Shelf.objects.get(code="EmptyAlts")
     assert list(shelf.alt_branches.all()) == []
 
@@ -17032,7 +17071,7 @@ def test_form_name_keyed_genre_update_refuses_a_genre_named_empty_over_http(
     ``invalid_choice`` error keyed to ``favoriteGenreId``, the form is never bound and no
     ``UPDATE`` runs, so neither ``address_2`` nor the column changes. The stored name is
     refused by its value alone, without reading the genre table; the supplied genre is
-    read once, by its id, to resolve it.
+    read once, by its id, to resolve it, then once more by its post-lock re-read.
     """
     empty = models.Genre.objects.create(name="")
     kept = models.Genre.objects.create(name="EmptyNameKept")
@@ -17078,7 +17117,7 @@ def test_form_name_keyed_genre_update_refuses_a_genre_named_empty_over_http(
     assert (column, address) == ([stored.name], ["Suite 1"])
     sql = [query["sql"] for query in captured.captured_queries]
     assert [s for s in sql if s.lstrip().upper().startswith("UPDATE")] == []
-    assert _genre_reads(sql) == genre_reads
+    assert _genre_reads(sql) == genre_reads + post_lock_rereads(int(value == "supplied_existing"))
 
 
 @pytest.mark.django_db
@@ -17172,8 +17211,9 @@ def test_form_shelf_update_refuses_a_branch_named_empty_over_http(
     projects to a key the field cleans to empty before its lookup, so binding it would
     report the required branch as missing. Either way it is the field's own
     ``invalid_choice`` error keyed to ``branchId`` and no ``UPDATE`` runs. The supplied
-    branch is refused at the decode, after its one read by pk; the omitted one after the
-    reconstruction read the stored branch once and the ``alt_branches`` members once.
+    branch is refused at the decode, after its read by pk and that read's post-lock re-read;
+    the omitted one after the reconstruction read the stored branch once and the
+    ``alt_branches`` members once.
     """
     empty = models.Branch.objects.create(name="", city="open")
     kept = models.Branch.objects.create(name="EmptyNameShelfKept", city="open")
@@ -17196,7 +17236,7 @@ def test_form_shelf_update_refuses_a_branch_named_empty_over_http(
     ]
     sql = [query["sql"] for query in captured.captured_queries]
     assert [s for s in sql if s.lstrip().upper().startswith("UPDATE")] == []
-    assert _branch_reads(sql) == branch_reads
+    assert _branch_reads(sql) == branch_reads + post_lock_rereads(int(value == "supplied"))
 
 
 @pytest.mark.django_db
@@ -17457,7 +17497,8 @@ def test_nested_shelf_alt_branches_visibility_is_one_batched_query_over_http() -
 
     two = _create("NestBatch2", alts[:2])
     five = _create("NestBatch5", alts)
-    assert len(two) == len(five) == 1, (two, five)
+    # Where rows lock, the batch's post-lock re-read is a second ``pk__in``, also one per list.
+    assert len(two) == len(five) == 1 + post_lock_rereads(1), (two, five)
 
 
 @pytest.mark.django_db
@@ -19568,6 +19609,8 @@ def _profile_form_update_race() -> _UpdateRace:
                 "SELECT",
                 "SELECT",
                 "SELECT",
+                # The shelf lookup's post-lock re-read, where rows lock.
+                *post_lock_reread_shapes(1),
                 *_forced_update_conflict('"library_book"'),
             ],
             id="updateBookViaForm",
@@ -19620,6 +19663,11 @@ def test_form_update_of_a_row_deleted_after_authorization_is_conflict_over_http(
 # from its stored key, ``full_clean`` validating the stored shelf as a co-member of a unique
 # constraint, the relation lookup of an id the input names. Every one answers ``conflict``
 # on ``id`` instead of the field error, after probing the located row.
+
+
+def _rereads(table: str) -> list[str]:
+    """``table`` once per post-lock re-read of a relation lookup that found its row."""
+    return [table] * post_lock_rereads(1)
 
 
 def _book_race(mutation: str, shape: str, deleted: str) -> _UpdateRace:
@@ -19812,7 +19860,12 @@ _STEP_FAILURE_TAIL = ["ROLLBACK", "RELEASE", "RELEASE"]
         ),
         pytest.param(
             lambda: _book_race("updateBookViaCustomInput", "genres", "shelf"),
-            ['"library_genre"', '"library_shelf"', '"library_book"'],
+            [
+                '"library_genre"',
+                *_rereads('"library_genre"'),
+                '"library_shelf"',
+                '"library_book"',
+            ],
             id="updateBookViaCustomInput-genres-shelf",
         ),
         pytest.param(
@@ -19859,6 +19912,7 @@ _STEP_FAILURE_TAIL = ["ROLLBACK", "RELEASE", "RELEASE"]
             lambda: _profile_race("names"),
             [
                 '"library_genre"',
+                *_rereads('"library_genre"'),
                 '"library_patron"',
                 '"library_genre"',
                 '"library_genre"',
@@ -19894,8 +19948,9 @@ def test_update_whose_row_vanished_before_validation_failed_is_conflict_over_htt
     The stand-in deletes the located row, directly or through a ``CASCADE``, after
     authorization. The decode or validation that runs next fails on a row that no longer
     exists (``genres`` ``required``, ``invalid_choice`` on an omitted relation, ``invalid``
-    on a named one); the pipeline probes the located row (the last read), finds it gone and
-    answers ``conflict`` on ``id`` instead. The transaction rolls back: every row the
+    on a named one; a named row that still exists is first confirmed by its post-lock
+    re-read where rows lock); the pipeline probes the located row (the last read), finds it
+    gone and answers ``conflict`` on ``id`` instead. The transaction rolls back: every row the
     stand-in deleted is stored as before.
     """
     case = race()

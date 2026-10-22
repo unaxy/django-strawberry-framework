@@ -1182,11 +1182,51 @@ def base_locked_queryset(
     ``get_queryset`` may carry (outer joins, unions, annotations - Postgres
     rejects ``FOR UPDATE`` on several of them). Visibility is still enforced (a
     hidden row is not in the subquery, so it is not locked and not found).
+
+    A row this statement waited on is NOT re-checked against visibility: under
+    READ COMMITTED Postgres re-reads the locked row after the wait but keeps the
+    subquery's pre-wait snapshot, so a row a concurrent commit hid is still
+    returned. A caller confirms what it locked with ``base_visible_queryset``, a
+    fresh statement (``rows_visible_after_lock``).
     """
-    return (
-        model._base_manager.using(alias)
-        .select_for_update()
-        .filter(pk__in=visible_queryset.values("pk"))
+    return base_visible_queryset(model, alias, visible_queryset).select_for_update()
+
+
+def base_visible_queryset(
+    model: type[_ModelT],
+    alias: str,
+    visible_queryset: QuerySet[models.Model, object],
+) -> QuerySet[_ModelT]:
+    """Build ``base_locked_queryset``'s query without the lock: the visible rows over the base manager.
+
+    The same ``pk__in`` reduction, so it carries every queryset shape the lock does.
+    """
+    return model._base_manager.using(alias).filter(pk__in=visible_queryset.values("pk"))
+
+
+def locks_rows(alias: str) -> bool:
+    """Return whether a ``select_for_update()`` read on ``alias`` takes row locks (not sqlite)."""
+    return bool(connections[alias].features.has_select_for_update)
+
+
+def rows_visible_after_lock(
+    model: type[models.Model],
+    alias: str,
+    visible_queryset: QuerySet[models.Model, object],
+    pks: Iterable[object],
+) -> set[object]:
+    """Return the ``pks`` still visible, read by a fresh statement after their row locks were taken.
+
+    ``base_locked_queryset`` answers from the snapshot its statement started with,
+    so a row hidden by a transaction it waited on is still located. Once the lock
+    is held no other writer can change the row, and READ COMMITTED gives this new
+    statement a snapshot that includes the commit the lock waited for. Visibility
+    that reads other, unlocked rows can still change after this read.
+    """
+    return set(
+        base_visible_queryset(model, alias, visible_queryset)
+        .filter(pk__in=list(pks))
+        .values_list("pk", flat=True),
     )
 
 
@@ -1218,6 +1258,24 @@ def pipeline_scoped_queryset(
     if pipeline.lock:
         queryset = base_locked_queryset(model, pipeline.alias, queryset)
     return queryset
+
+
+def pipeline_rows_visible_after_lock(
+    queryset: QuerySet[models.Model, object],
+    model: type[models.Model],
+    pks: Iterable[object],
+) -> set[object] | None:
+    """Re-read which ``pks`` are visible after ``pipeline_scoped_queryset`` locked them.
+
+    ``None`` when no row lock was taken (no pipeline, ``Meta.select_for_update = False``,
+    or a backend without ``FOR UPDATE``): the scoped read's own answer stands. Otherwise
+    the ``rows_visible_after_lock`` set, which the caller intersects with what it located.
+    """
+    pipeline = current_write_pipeline()
+    if pipeline is None or not pipeline.lock or not locks_rows(pipeline.alias):
+        return None
+    visible = pin_write_queryset(queryset, pipeline.alias)
+    return rows_visible_after_lock(model, pipeline.alias, visible, pks)
 
 
 def conflict_error() -> FieldError:

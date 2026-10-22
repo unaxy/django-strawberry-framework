@@ -72,6 +72,8 @@ from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.mutations.permissions import DjangoModelPermission
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.schema import DjangoMutationExecutionContext
+from django_strawberry_framework.utils import querysets as querysets_module
+from django_strawberry_framework.utils import write_transaction as write_transaction_module
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     dict_of,
@@ -81,6 +83,10 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
+)
+from django_strawberry_framework.utils.querysets import (
+    stringified_pks_present,
+    visible_related_object,
 )
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.write_transaction import (
@@ -99,6 +105,7 @@ from django_strawberry_framework.utils.write_transaction import (
     open_write_pipeline,
     pin_write_queryset,
     pipeline_alias_guard,
+    pipeline_rows_visible_after_lock,
     pipeline_scoped_queryset,
     pipeline_write_phase,
     pks_match,
@@ -1421,6 +1428,66 @@ def test_pipeline_scoped_queryset_locks_through_the_base_manager() -> None:
     assert scoped.query.select_for_update is True
     # The lock rides the base manager with visibility reduced to a pk subquery.
     assert "In(Col(" in str(scoped.query.where)
+
+
+def _answer(value: object) -> Callable[..., object]:
+    """A patched seam that accepts any call and answers ``value``."""
+
+    def stub(*_args: object, **_kwargs: object) -> object:
+        return value
+
+    return stub
+
+
+@pytest.mark.django_db
+def test_pipeline_rows_visible_after_lock_re_reads_only_under_a_taken_row_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``None`` unless a row lock was taken; then the pks a fresh read still sees."""
+    category = product_models.Category.objects.create(name="relock-category")
+    public = product_models.Item.objects.create(name="relock-public", category=category)
+    private = product_models.Item.objects.create(
+        name="relock-private",
+        category=category,
+        is_private=True,
+    )
+    visible = product_models.Item.objects.filter(is_private=False)
+    pks = [saved_pk(public), saved_pk(private)]
+
+    assert pipeline_rows_visible_after_lock(visible, product_models.Item, pks) is None
+    with write_pipeline("default", lock=False):
+        assert pipeline_rows_visible_after_lock(visible, product_models.Item, pks) is None
+    with write_pipeline("default", lock=True):
+        # A backend without ``FOR UPDATE`` takes no row lock, so the locked read's answer stands.
+        monkeypatch.setattr(write_transaction_module, "locks_rows", _answer(value=False))
+        assert pipeline_rows_visible_after_lock(visible, product_models.Item, pks) is None
+        monkeypatch.setattr(write_transaction_module, "locks_rows", _answer(value=True))
+        assert pipeline_rows_visible_after_lock(visible, product_models.Item, pks) == {
+            saved_pk(public),
+        }
+
+
+@pytest.mark.django_db
+def test_relation_reads_drop_a_locked_row_the_fresh_read_no_longer_sees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The batched and single relation reads keep only the rows the post-lock re-read returns."""
+    kept = product_models.Category.objects.create(name="relock-kept")
+    dropped = product_models.Category.objects.create(name="relock-dropped")
+    categories = product_models.Category.objects.all()
+    still_visible: set[object] = {saved_pk(kept)}
+    monkeypatch.setattr(
+        querysets_module,
+        "pipeline_rows_visible_after_lock",
+        _answer(still_visible),
+    )
+
+    present = stringified_pks_present(categories, [saved_pk(kept), saved_pk(dropped)])
+    assert present == {str(saved_pk(kept)): saved_pk(kept)}
+    keyed = stringified_pks_present(categories, [saved_pk(kept), saved_pk(dropped)], "name")
+    assert keyed == {str(saved_pk(kept)): "relock-kept"}
+    assert visible_related_object(product_models.Category, saved_pk(kept), None) == kept
+    assert visible_related_object(product_models.Category, saved_pk(dropped), None) is None
 
 
 def test_pipeline_scoped_queryset_fails_closed_on_a_cross_alias_queryset() -> None:
