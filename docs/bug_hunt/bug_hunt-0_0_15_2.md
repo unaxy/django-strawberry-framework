@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 192 done, 129 to do.
+Progress: 192 done, 136 to do.
 
 ## Done
 
@@ -938,6 +938,56 @@ tracker number are recorded there; open remainders and new defects are filed as 
   docs say it does not
 - [ ] 324. `tests/utils/test_querysets.py::test_additive_only_subclass_result_is_sealed_to_plain_queryset`'s docstring
   carries process provenance ("now", "The old contract"); restate it as behaviour
+- [ ] 326. A Django `ValidationError` raised at save time about the primary key of a serializer field written through
+  `source="pk"` (`key = IntegerField(source="pk")` over `Item`, a model `save()` calling `full_clean()` and raising
+  `{"id": [...]}`) is keyed `id`, a name no input exposes, instead of the renamed `key` input:
+  `utils/errors.py::save_time_error_key_map` reads the spec's source through `model._meta.get_field`, which rejects
+  `"pk"` (`FieldDoesNotExist` keeps the spelling), while `rest_framework/serializer_converter.py::written_model_field`
+  and `rest_framework/inputs.py::write_source_key` already resolve `"pk"` to the key column. Probed: a create answers
+  `("id", [...])`; `source="category"` answers the wire name. Contract row: the `save_time_error_key_map` docstring and
+  docs/README (an error raised on the model field behind a `source=` arrives under the renamed input). Fix: resolve the
+  spec source through `written_model_field` in `model_names`, with a package row beside
+  `test_save_time_django_validation_error_uses_source_aware_wire_name`; a scalar `source="pk"` on a text key
+  (`Edition.isbn_13`) takes the same row
+- [ ] 327. Relay refetch plans nothing: `types/relay.py::_resolve_nodes_default` / `_resolve_node_default` return model
+  instances, `optimizer/extension.py::DjangoOptimizerExtension._optimize` passes a non-`QuerySet` through unchanged and
+  `relay.py::DjangoNodesField` / `DjangoNodeField` never call `DjangoOptimizerExtension.apply_to`, so every nested
+  relation under `node(id:)` / `nodes(ids:)` lazy-loads per parent: `nodes(ids: [b1..bN]) { ... on BookType { loans { id
+  } } }` is 1 + N statements (same for `loansConnection`, `genresConnection`; a forward `shelf` costs 1 + 2N) against 2
+  under `allLibraryBooks` or a root connection, the root SELECT is unprojected, and under `strictness="raise"` every
+  nested relation under `node` / `nodes` raises `Unplanned N+1`. A documented limit (spec-015 Decision 3 "not wired ...
+  the seam stays open"; glossary "Relay Node integration"; pinned by
+  `test_library_api.py::_LOAN_QUERYSET_METHOD_HOOK_CASES`), but GOAL.md's `astronomy` paragraph (`strictness="raise"`
+  with `DjangoNodeField` roots) cannot run as written and no board card owns it. Fix shape if taken: plan the per-type
+  queryset before `list()` through the connection field's plan application, re-order over it, and rewrite spec-015
+  Decision 3, the glossary sentence and the pinned statement counts (card candidate)
+- [ ] 328. The serializer floor is never run: `pyproject.toml` pins `djangorestframework>=3.17.0`
+  (`utils/imports.py::DRF_FLOOR`, spec-039 Decision 12) but `docs/builder/BUILD.md` "Floor verification" and the CI
+  floor cell (`django.yml`, `compatibility_only`) install only Django and strawberry-graphql at the floor, so every
+  floor run resolves the locked DRF. Probed with `djangorestframework==3.17.0`, Python 3.10.19, Django 5.2.16,
+  strawberry-graphql 0.322.2: `tests/rest_framework` 782 passed, so nothing is broken today. Check: add the DRF floor
+  point to the BUILD.md recipe and the floor cell, or state in both that the soft dependency's floor is unexercised
+- [ ] 329. `scripts/prove_failability.py` forwards the first stop signal to the scope's whole process group, which holds
+  `uv` as well as pytest, so `uv run` hands pytest the Ctrl-C a second time and a `-n 0` scope whose teardown takes
+  longer than about 0.2 s loses it, while the module docstring says the forwarded signal "lets pytest tear down".
+  Decide: signal the group leader on the first stop and keep `killpg(SIGKILL)` for the escalation
+  (`scripts/_stop_signals.py::signal_group`, `scripts/prove_failability.py::_request_stop`), or qualify the docstring.
+  Robustness row (pytest-django recreates a leftover test database)
+- [ ] 330. `scripts/prove_failability.py::_resolve_scratch_root` names the default scratch parent `<system temporary
+  directory>/failability` for every user, and `_claim_private_directory` refuses a directory another user owns, so on a
+  shared Linux `/tmp` the first user to run the tool owns the name and every default run of a second user is refused
+  (only the owner can remove it). macOS's per-user `TMPDIR` is unaffected and an explicit `--scratch-root` always works.
+  Name the parent per user (`failability-<uid>`) or fall back to a private parent when the shared one is foreign; keep
+  the owner / symlink refusal. Check on Linux (read from the code, unprobed)
+- [ ] 331. `scripts/workspace.py::ensure_floor_venv` decides reuse with `python.exists() and key_path.is_file() and
+  key_path.read_text(...) == key`, a check followed by a separate read, the shape item 145 removed from
+  `_read_json_object` / `load_runs`; the macOS `$TMPDIR` purge can unlink the key between the two calls, which raises
+  `FileNotFoundError` out of `gate` instead of reading as "no key, rebuild". Robustness row (a two-statement window):
+  read through `_read_text_if_present`; family of items 143, 145 and 301
+- [ ] 332. `scripts/workspace.py::_remove_flow_dir` removes the marker with `marker.rmdir()` and no handling: a
+  non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
+  rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script
+  writes there): refuse with a `WorkspaceError` naming the contents, or remove them
 
 ## To do: holes found re-checking the fixes
 
