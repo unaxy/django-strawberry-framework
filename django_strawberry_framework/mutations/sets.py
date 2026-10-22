@@ -818,7 +818,11 @@ def _materialize_input_for(
             shape=shape,
         ),
     )
-    materialize_mutation_input_class(truth.name(input_cls), input_cls)
+    materialize_mutation_input_class(
+        truth.name(input_cls),
+        input_cls,
+        f"the input of DjangoMutation {mutation_name!r}",
+    )
     return input_cls
 
 

@@ -2046,13 +2046,11 @@ def test_range_input_type_name_is_scoped_per_filterset() -> None:
     ``RangeFilter`` sub-input class name derived from
     ``field_name`` alone, so two filtersets that each declare a ``RangeFilter``
     for a same-named column both stamped one GraphQL name
-    (``PriceRangeInputType``). These nested classes are embedded directly in the
-    annotation (NOT run through the Decision-9 materialization ledger nor the
-    arguments-factory collision registry), so Strawberry does NOT raise on the
-    clash -- it silently keeps whichever class it registers first and drops the
-    other, advertising the wrong axis scalar for the loser. The name is now
-    qualified by the owning filterset so the two are distinct and both survive in
-    the schema.
+    (``PriceRangeInputType``), and two ranges of different axis scalars under one
+    name cannot share a schema (the type-name claim,
+    ``utils/inputs.py::claim_generated_type_name``, refuses the pair in any schema
+    serving both). The name is qualified by the owning filterset so the two are
+    distinct and both survive in one schema.
     """
 
     class ScalarPriceFilter(FilterSet):
@@ -2095,8 +2093,7 @@ def test_range_input_type_name_is_scoped_per_filterset() -> None:
     assert r1.__annotations__["start"] != r2.__annotations__["start"]
 
     # Both nested range types survive when both operator bags land in one schema;
-    # a name clash would silently collapse the two into a single input type
-    # (Strawberry keeps whichever it registers first and drops the other).
+    # under one name the two could not share it.
     @strawberry.type
     class Query:
         ok: int
@@ -2187,11 +2184,11 @@ def test_build_input_fields_keeps_digit_boundary_operator_bags_distinct() -> Non
 
     ``ClassBasedTypeNameMixin.type_name_for`` routes through ``pascal_case``. A
     non-injective Pascal collapse (``field_2`` / ``field2`` both -> ``Field2``)
-    made both bags claim ``<FilterSet>Field2FilterInputType``. Those nested
-    classes are embedded in annotations (not the spec-027 Decision 9 ledger), so
-    Strawberry silently kept one bag and dropped the other -- wrong lookups on
-    the wire. Top-level field attrs stay distinct via ``graphql_camel_name``;
-    the type-name stem must preserve the same digit boundary.
+    made both bags claim ``<FilterSet>Field2FilterInputType``: two bags of
+    different lookups under one name in one set, which the type-name claim
+    (``utils/inputs.py::claim_generated_type_name``) refuses at finalize.
+    Top-level field attrs stay distinct via ``graphql_camel_name``; the type-name
+    stem must preserve the same digit boundary.
     """
 
     class DigitBoundaryFilter(FilterSet):
@@ -2269,13 +2266,12 @@ def test_build_input_fields_keeps_underscore_edge_operator_bags_distinct() -> No
     A ``pascal_case`` that dropped leading / trailing underscore runs would
     collapse two members whose names differ only at the edges to one
     type-name stem even though BOTH emission guards pass (the Python attrs and
-    the camel GraphQL field names stay distinct for edge variants). The two
-    bag classes are embedded in annotations (not the spec-027 Decision 9
-    ledger), so Strawberry would silently keep whichever registered first and
-    drop the other -- a ``CharFilter`` bag and a ``RangeFilter`` bag would
-    share one wire type and one member's lookups would vanish from the schema.
-    The stem preserves the edge runs (the Pascal dual of
-    ``graphql_camel_name``).
+    the camel GraphQL field names stay distinct for edge variants). A
+    ``CharFilter`` bag and a ``RangeFilter`` bag under one name in one set are
+    two shapes the type-name claim
+    (``utils/inputs.py::claim_generated_type_name``) refuses at finalize, so
+    the set could not be served. The stem preserves the edge runs (the Pascal
+    dual of ``graphql_camel_name``).
     """
 
     class UnderscoreEdgeFilter(FilterSet):
@@ -2312,8 +2308,7 @@ def test_build_input_fields_keeps_underscore_edge_operator_bags_distinct() -> No
         "UnderscoreEdgeFilterPriceFilterInputType",
         "UnderscoreEdgeFilterPrice_FilterInputType",
     }
-    # The range sub-input of the trailing-underscore member survives too
-    # (a clashing bag would be silently dropped at registration).
+    # The range sub-input of the trailing-underscore member survives too.
     assert "UnderscoreEdgeFilterCityRangeInputType" in sdl
 
 

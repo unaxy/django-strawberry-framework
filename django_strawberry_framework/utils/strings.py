@@ -170,9 +170,10 @@ def pascal_case(name: str) -> str:
     whose names differ only at the underscore edges (``price`` / ``price_`` /
     ``_price``) stay distinct as Python attrs and camel GraphQL field names,
     so their generated type-name stems must stay distinct too -- otherwise
-    two operator-bag / range / enum classes silently claim one GraphQL type
-    name and Strawberry keeps whichever registers first, dropping the other
-    member's lookups from the schema.
+    two members' operator-bag / range / enum classes would claim one GraphQL
+    type name and the set could not be served (a set whose two members mint
+    one input type name of different fields is refused at finalize; two enums
+    under one name fail Strawberry's duplicate-name check at schema build).
 
     Interior underscore runs collapse (``"double__underscore"`` ->
     ``"DoubleUnderscore"``), so a ``LOOKUP_SEP`` path PascalCases segment by
@@ -184,15 +185,20 @@ def pascal_case(name: str) -> str:
     -> ``"Field_2"``, not ``"Field2"``) because capitalization cannot encode
     that boundary. This completes the Pascal dual of ``graphql_camel_name``'s
     injectivity rule: without it, ``field_2`` and ``field2`` both become
-    ``Field2``, so per-field operator-bag / range / enum type names silently
-    collide and Strawberry keeps whichever class registers first.
+    ``Field2``, so per-field operator-bag / range / enum type names would
+    collide and the set could not be served.
 
     Per-segment ``str.capitalize()`` lower-cases every character after the
     first, so acronyms are not preserved (``"my_HTTP_response"`` ->
     ``"MyHttpResponse"``) and names differing only in letter case share a stem
     (``my_HTTP`` / ``my_http`` -> ``MyHttp``); Django and DRF accept
     upper-case field names, so the stem is injective only over lowercase
-    input.
+    input. A generated input name two declarations still share is handled by
+    ``utils/inputs.py::claim_generated_type_name``: classes of identical fields
+    merge into one type, two shapes reached from one set raise
+    ``ConfigurationError`` at finalize, and any other pair of shapes fails
+    only the schema that serves both (``schema.py::DjangoSchema`` names the
+    two declarations).
 
     An input with no word-character tokens (``""``, ``"_"``, ``"__"``)
     returns ``""``; ``pascal_case_or_raise`` turns that into the consumer's

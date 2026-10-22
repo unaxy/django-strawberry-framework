@@ -58,6 +58,7 @@ from django_strawberry_framework.types.base import DjangoType
 from django_strawberry_framework.utils import relations
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
+    _type_name_claims,
     promote_set_meta_fields,
     read_set_meta_fields,
 )
@@ -391,11 +392,13 @@ def _isolate_orderset_state() -> Iterator[None]:
     _field_specs.clear()
     OrderArgumentsFactory.input_object_types.clear()
     OrderArgumentsFactory._type_orderset_registry.clear()
+    _type_name_claims.clear()
     yield
     _materialized_names.clear()
     _field_specs.clear()
     OrderArgumentsFactory.input_object_types.clear()
     OrderArgumentsFactory._type_orderset_registry.clear()
+    _type_name_claims.clear()
 
 
 def _every_row(scope: type[DjangoType]) -> QuerySet[Model]:

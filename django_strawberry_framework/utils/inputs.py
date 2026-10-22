@@ -24,6 +24,11 @@ fingerprints ride ``resolve_set_meta_fields`` (synonym rule),
 (expansion / apply read), ``plain_set_meta_fields`` (every name as plain
 ``str`` text), and ``canonicalize_set_meta_fields`` (unordered shapes).
 FilterSet uses ``FILTERSET_FIELDS_ALIAS``; OrderSet has no synonym.
+Every generated input that reaches a schema claims its GraphQL type name across
+all families through ``claim_generated_type_name``: classes of one field shape
+share one identity and merge, a second shape under one name gets its own
+identity so a schema serving both refuses it, and two shapes reached from one
+set raise ``ConfigurationError`` at finalize.
 
 This module depends on neither family package, so both can import it without a
 cycle (same contract as ``utils/connections.py``).
@@ -37,14 +42,19 @@ from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar, cast, final
+from weakref import WeakKeyDictionary
 
 import strawberry
+from strawberry.types.base import StrawberryList, StrawberryOptional, get_object_definition
+from strawberry.types.enum import StrawberryEnumDefinition
+from strawberry.types.lazy_type import LazyType
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.registry import register_subsystem_clear
 
 from . import truth
-from ._narrowing import dict_items, is_mapping, is_str, list_of
+from ._narrowing import dict_items, is_mapping, is_str, list_of, read_attr
 from .canonical import base_container_values, canonical_sort_key
 from .imports import import_attr_if_importable
 from .input_values import UNSET
@@ -57,6 +67,7 @@ from .permissions import set_bound_definition
 # path.
 from .strings import flatten_lookup_path
 from .strings import graphql_camel_name as graphql_camel_name  # noqa: PLC0414 - explicit re-export
+from .typing import unwrap_container_type
 
 _EntryT = TypeVar("_EntryT")
 _FieldT = TypeVar("_FieldT")
@@ -99,13 +110,25 @@ if TYPE_CHECKING:
         def clear(self) -> None:
             """Drop every entry the ledger holds."""
 
+    class MaterializeFn(Protocol):
+        """A family's ``materialize_fn``: pin ``cls`` under ``name``, claimed for ``owner``."""
+
+        def __call__(
+            self,
+            name: str,
+            cls: type[object],
+            owner: str | None = None,
+            /,
+        ) -> None:
+            """Pin ``cls``; ``owner`` names its declaration in a type-name collision."""
+
     #: ``make_set_input_namespace``'s ``(ledger, field_specs, materialize_fn, clear_fn)``
     #: quartet for one set family. The family's set class appears only in the result, so
     #: each caller states it by annotating the result with this alias.
     SetInputNamespace: TypeAlias = tuple[
         dict[str, type[object]],
         dict[tuple[type[_FactorySetT], str], "GeneratedInputFieldSpec"],
-        Callable[[str, type[object]], None],
+        MaterializeFn,
         Callable[[], None],
     ]
 
@@ -433,7 +456,7 @@ class InputFieldSpec:
 def make_input_namespace(
     module_path: str,
     family_label: str,
-) -> tuple[dict[str, type[object]], Callable[[str, type[object]], None], Callable[[], None]]:
+) -> tuple[dict[str, type[object]], MaterializeFn, Callable[[], None]]:
     """Return the ``(ledger, materialize_fn, clear_fn)`` trio for a generated-input namespace.
 
     The promoted ONE-LEDGER lifecycle the mutation + form + serializer input
@@ -447,12 +470,14 @@ def make_input_namespace(
     - ``ledger`` - a fresh ``name -> input_class`` dict the caller stores as its
       module-level ledger (so any direct ``_materialized_names`` reference in the
       caller's tests keeps addressing the same object).
-    - ``materialize_fn(name, cls)`` - pins ``cls`` as a real global of
-      ``module_path`` under ``name`` via
+    - ``materialize_fn(name, cls, owner=None)`` - pins ``cls`` as a real global
+      of ``module_path`` under ``name`` via
       ``materialize_generated_input_class(..., family_label=family_label,
-      ledger=ledger)``. Inherits that helper's ``(name, cls)`` idempotency clause
-      and distinct-class collision raise (the finalize-time collision, named by
-      ``family_label``).
+      ledger=ledger, owner=owner)``. Inherits that helper's ``(name, cls)``
+      idempotency clause, its distinct-class collision raise (the finalize-time
+      collision, named by ``family_label``) and its cross-family type-name claim,
+      whose collision message names ``owner`` (the declaration that generated
+      ``cls``).
     - ``clear_fn()`` - resets the ledger via ``ledger.clear()`` ONLY.
 
     This is deliberately the LIGHT clear shape, NOT
@@ -474,13 +499,14 @@ def make_input_namespace(
     """
     ledger: dict[str, type[object]] = {}
 
-    def materialize_fn(name: str, cls: type[object]) -> None:
+    def materialize_fn(name: str, cls: type[object], owner: str | None = None, /) -> None:
         materialize_generated_input_class(
             name,
             cls,
             module_path=module_path,
             family_label=family_label,
             ledger=ledger,
+            owner=owner,
         )
 
     def clear_fn() -> None:
@@ -511,8 +537,8 @@ def make_set_input_namespace(
       ``_materialized_names``.
     - ``field_specs`` - ``(set_cls, python_attr) -> GeneratedInputFieldSpec``
       provenance table the caller stores as ``_field_specs``.
-    - ``materialize_fn(name, cls)`` - pins ``cls`` as a real global of
-      ``module_path`` via ``materialize_generated_input_class``.
+    - ``materialize_fn(name, cls, owner=None)`` - pins ``cls`` as a real global
+      of ``module_path`` via ``materialize_generated_input_class``.
     - ``clear_fn()`` - the HEAVY clear: both dicts plus the arguments-factory
       caches and per-set ``_lifecycle`` binding state named by the factory /
       set kwargs. Materialized class objects stay PARKED.
@@ -1214,8 +1240,12 @@ def build_strawberry_input_class(
     rewrites underscore-digit stems (``...Field_2FilterInputType`` ->
     ``...Field2filterinputtype``), which would again collide with a sibling
     ``...Field2FilterInputType`` after ``pascal_case`` has already kept the
-    Python class names distinct. Pinning keeps the package's injective type
-    stem on the wire.
+    Python class names distinct. Pinning keeps the package's type stem on the
+    wire. The stem is not injective (``pascal_case`` drops letter case and
+    collapses interior underscore runs, and a set name joined to a member stem
+    can spell another set's name), so two declarations can still derive one
+    name; ``claim_generated_type_name`` handles that pair once the class reaches
+    a schema.
     """
     annotations: dict[str, object] = {}
     namespace: dict[str, object] = {"__annotations__": annotations}
@@ -1308,6 +1338,7 @@ def materialize_generated_input_class(
     module_path: str,
     family_label: str,
     ledger: dict[str, type[object]],
+    owner: str | None = None,
 ) -> None:
     """Pin ``cls`` as a real module global of ``module_path`` under ``name``.
 
@@ -1324,7 +1355,12 @@ def materialize_generated_input_class(
     different class under the same ``name`` raises ``ConfigurationError`` naming
     both qualified class names plus the ``family_label`` (``FilterSet`` /
     ``OrderSet``) so the consumer sees the offending pair and family instead of
-    a cryptic schema-build error.
+    a cryptic schema-build error. A first materialization claims the GraphQL type
+    name across every family (``claim_generated_type_name``) for ``owner``, the
+    declaration that generated ``cls`` (the family label when the caller names
+    none): a class of another family or another generated input under the same
+    name merges with ``cls`` when their fields match and otherwise cannot share a
+    schema with it, whose build error names both owners.
     """
     existing = ledger.get(name)
     if existing is cls:
@@ -1340,6 +1376,10 @@ def materialize_generated_input_class(
                 rename_noun=family_label.lower(),
             ),
         )
+    claim_generated_type_name(
+        cls,
+        owner=owner if owner is not None else f"the generated {family_label} input",
+    )
     module = sys.modules[module_path]
     setattr(module, name, cls)
     ledger[name] = cls
@@ -1372,6 +1412,255 @@ def duplicate_name_message(
         f"{truth.label(claimant)}. Rename one {rename_noun} "
         "so its class-derived input type name is unique."
     )
+
+
+@dataclass(frozen=True)
+class _TypeNameClaim:
+    """One generated class's hold on its GraphQL type name, kept until ``registry.clear()``.
+
+    ``owner`` names the declaration that generated the root the class was reached
+    from; ``path`` is the input-attribute path from that root (``()`` for the root
+    itself, ``(member,)`` for a set member's nested input, ``(member, lookup)`` for
+    an input nested inside that one).
+    """
+
+    shape: tuple[object, ...]
+    owner: str
+    path: tuple[str, ...]
+
+
+@dataclass
+class _TypeNameVariant:
+    """One field shape published under a generated name, and the classes that carry it.
+
+    ``scopes`` are the set classes whose roots reached it during the current
+    finalize pass (none for a write-family input): every schema serving one of
+    them serves the variant. They are per pass, emptied before each bind
+    (``_clear_type_name_scopes``), because a set rebuilt by a rerun no longer
+    serves the class its failed pass built; the variant itself, its qualname and
+    its classes hold until ``registry.clear()``, which leaves no set class
+    reachable from a claim.
+    """
+
+    qualname: str
+    claim: _TypeNameClaim
+    classes: list[type[object]]
+    scopes: list[object]
+
+
+# Every generated input class takes its GraphQL type name from a declaration name
+# (a set, model, form or serializer class) plus member stems and a suffix, so two
+# declarations can derive one name: ``utils/strings.py::pascal_case`` drops letter
+# case and collapses interior underscore runs, and a set name followed by a member
+# stem concatenates (``BookFilter`` + ``SetCode`` = ``BookFilterSet`` + ``Code``).
+# ``build_strawberry_input_class`` gives every class it builds this module, and
+# Strawberry treats two classes of one qualname and module as one type (its
+# ``is_same_type_definition``), keeping the first and dropping the other with no
+# error. Each generated class that reaches a schema - every root, and every input
+# it embeds - therefore claims its name here with its field shape, and its
+# ``__qualname__`` names its shape variant: the first shape keeps the bare name,
+# every other shape gets a distinct one, so Strawberry's own duplicate-name error
+# fires in exactly the schemas that serve two shapes under one name, while classes
+# of one shape keep one identity and merge. The ledger lives until ``registry.clear()``,
+# not one finalize pass: a rerun after a failed pass keeps the classes the finalized
+# sets built on the first pass, so a class rebuilt on the rerun must meet their
+# variants and join the one its shape matches. Only each variant's ``scopes`` are
+# per pass, emptied before each bind: the same-set refusal must compare a set's
+# classes of this pass, never the ones a rebuilt set left behind.
+_type_name_claims: dict[str, list[_TypeNameVariant]] = {}
+
+register_subsystem_clear(_type_name_claims.clear, owner="utils.type_name_claims")
+
+
+def _clear_type_name_scopes() -> None:
+    """Forget which sets reached each variant, keeping the variants, before a bind."""
+    for variants in _type_name_claims.values():
+        for variant in variants:
+            variant.scopes.clear()
+
+
+register_subsystem_clear(
+    _clear_type_name_scopes,
+    owner="utils.type_name_scopes",
+    before_bind=True,
+)
+
+# The claim each generated class was given, read back when a schema build reports
+# two of them under one name (``generated_type_name_collision``).
+_class_claims: WeakKeyDictionary[type[object], _TypeNameClaim] = WeakKeyDictionary()
+
+
+def _claim_type_key(field_type: object) -> object:
+    """Return a comparable key for a generated field's resolved Strawberry type.
+
+    Wrappers recurse. A nested input is keyed by its GraphQL name and qualname (an
+    embedded input is claimed first, so its qualname already names its shape
+    variant), a lazy reference by its name and module, an enum by its name and its
+    class (two distinct enums of one name never make two inputs one shape); a
+    scalar, ``NewType`` or custom scalar is its own key.
+    """
+    if isinstance(field_type, StrawberryOptional):
+        return ("optional", _claim_type_key(field_type.of_type))
+    if isinstance(field_type, StrawberryList):
+        return ("list", _claim_type_key(field_type.of_type))
+    if isinstance(field_type, LazyType):
+        return ("lazy", field_type.type_name, field_type.module)
+    if isinstance(field_type, StrawberryEnumDefinition):
+        return ("enum", field_type.name, field_type.wrapped_cls)
+    definition = get_object_definition(field_type)
+    if definition is not None:
+        return ("type", definition.name, truth.qualname(field_type))
+    return field_type
+
+
+def _describe_claim(claim: _TypeNameClaim) -> str:
+    """Name the declaration a claim came from, down to the member it was reached through."""
+    if not claim.path:
+        return claim.owner
+    member = f"{claim.owner} member {claim.path[0]!r}"
+    if len(claim.path) == 1:
+        return member
+    return f"the {'.'.join(claim.path[1:])!r} input of {member}"
+
+
+def _claim_cause(prior: _TypeNameClaim, claim: _TypeNameClaim) -> str:
+    """State how two claims derived one GraphQL type name."""
+    if not prior.path and not claim.path:
+        return (
+            "Both are root inputs, each named from its declaration's name (a set, model, "
+            "form or serializer class) plus a suffix, and the two derivations meet."
+        )
+    if not prior.path or not claim.path:
+        return (
+            "A root input's name (its declaration's name plus a suffix) equals a nested "
+            "input's name (a set name, a member stem and a suffix)."
+        )
+    if len(prior.path) > 1 or len(claim.path) > 1:
+        return (
+            "A range input's name joins the set name, the PascalCase stem of the range "
+            "filter's field_name (letter case dropped, interior underscore runs "
+            "collapsed) and 'RangeInputType', so two field paths or sets can spell one "
+            "name."
+        )
+    if prior.owner != claim.owner:
+        return (
+            "A member's nested input name joins the set name and the member's PascalCase "
+            "stem, so another set/member split spells the same name."
+        )
+    # Two members of one set: their input attributes are distinct and carry no
+    # interior underscore run (``flatten_lookup_path``), and ``pascal_case``
+    # capitalizes every segment, so equal stems differ only in letter case.
+    return "The member names differ only in letter case, which the PascalCase stem drops."
+
+
+def _type_name_collision_message(name: str, prior: _TypeNameClaim, claim: _TypeNameClaim) -> str:
+    """Return the sourced sentence for two generated classes of different fields under one name."""
+    return (
+        f"Generated GraphQL type {name!r} is claimed with different fields by "
+        f"{_describe_claim(prior)} and by {_describe_claim(claim)}; a schema serves one "
+        "input type per name, so it cannot serve both. "
+        f"{_claim_cause(prior, claim)} Rename one so its generated type name is unique."
+    )
+
+
+def claim_generated_type_name(
+    cls: type[object],
+    *,
+    owner: str,
+    path: tuple[str, ...] = (),
+    scope: object | None = None,
+) -> None:
+    """Claim ``cls``'s GraphQL type name, and every generated input it embeds.
+
+    Only classes ``build_strawberry_input_class`` built are claimed. Embedded inputs
+    (``Optional`` / ``list`` wrappers peeled, lazy references skipped: a referenced
+    root claims its own name) are claimed first, under ``path + (field,)``. A class
+    already holding the name is a no-op. A class whose fields render like an
+    earlier claimant's, in any declaration order (two members whose operator bags
+    carry one lookup set, two ranges over one column, two flavors deriving one
+    input), takes that claimant's qualname, so Strawberry merges them as one
+    type. A new shape takes a distinct qualname, so a schema serving both fails
+    Strawberry's duplicate-name check, which ``schema.py::DjangoSchema``
+    restates through ``generated_type_name_collision``. When the two shapes are
+    reached from one set (``scope``), every schema serving that set serves both,
+    so the collision is refused here with ``ConfigurationError`` instead. Claims
+    hold until ``registry.clear()``.
+    """
+    definition = get_object_definition(cls)
+    if definition is None or truth.module(cls) != __name__:
+        # Only ``build_strawberry_input_class`` classes share this module; any other
+        # class keeps its own identity, and Strawberry refuses a same-named twin of
+        # it at schema build.
+        return
+    name = definition.name
+    variants = _type_name_claims.setdefault(name, [])
+    if any(held is cls for variant in variants for held in variant.classes):
+        return
+    for field in definition.fields:
+        # A lazy reference is not a class: the root it names claims its own name.
+        embedded = unwrap_container_type(field.type)
+        if not truth.is_type(embedded):
+            continue
+        embedded_definition = get_object_definition(embedded)
+        if embedded_definition is not None and embedded_definition.is_input:
+            claim_generated_type_name(
+                embedded,
+                owner=owner,
+                path=(*path, field.python_name),
+                scope=scope,
+            )
+    shape = (
+        definition.is_input,
+        tuple(
+            (
+                field.python_name,
+                field.graphql_name,
+                _claim_type_key(field.type),
+                read_attr(field, "default"),
+            )
+            for field in sorted(definition.fields, key=lambda field: field.python_name)
+        ),
+    )
+    claim = _TypeNameClaim(shape=shape, owner=owner, path=path)
+    matched: _TypeNameVariant | None = None
+    for variant in variants:
+        if variant.claim.shape == shape:
+            matched = variant
+        elif scope is not None and any(held is scope for held in variant.scopes):
+            raise ConfigurationError(_type_name_collision_message(name, variant.claim, claim))
+    if matched is None:
+        matched = _TypeNameVariant(
+            qualname=f"{name}[{len(variants)}]" if variants else name,
+            claim=claim,
+            classes=[],
+            scopes=[],
+        )
+        variants.append(matched)
+    matched.classes.append(cls)
+    if scope is not None:
+        matched.scopes.append(scope)
+    cls.__qualname__ = matched.qualname  # truth: ok minted class takes its shape variant
+    _class_claims[cls] = claim
+
+
+def generated_type_name_collision(
+    first_cls: object,
+    second_cls: object,
+) -> ConfigurationError | None:
+    """Restate Strawberry's duplicate-name error for two claimed generated classes.
+
+    Returns the sourced ``ConfigurationError`` when both classes Strawberry reported
+    were claimed by ``claim_generated_type_name``; ``None`` for any other pair, whose
+    error is not this package's to restate.
+    """
+    if not truth.is_type(first_cls) or not truth.is_type(second_cls):
+        return None
+    first = _class_claims.get(first_cls)
+    second = _class_claims.get(second_cls)
+    definition = get_object_definition(first_cls)
+    if first is None or second is None or definition is None or first.shape == second.shape:
+        return None
+    return ConfigurationError(_type_name_collision_message(definition.name, first, second))
 
 
 def iter_input_field_collisions(
@@ -1622,7 +1911,11 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
     ``*_arguments_factory.py`` BFS algorithm). The BFS walk, the per-class
     collision check, the idempotent cache, and the subclass-rejection guard are
     single-sited here; each family factory subclasses this DIRECTLY and supplies
-    its own caches plus the family hook attributes below.
+    its own caches plus the family hook attributes below. Each built root claims
+    its GraphQL type name, and the name of every input it embeds (operator bags,
+    ranges), through ``claim_generated_type_name`` scoped to its set, so two
+    fields of different shape under one generated name reached from one set raise
+    ``ConfigurationError`` at finalize naming both members.
 
     Required per-family class attributes:
 
@@ -1783,6 +2076,11 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
                 f"Declare at least one field via the {self._rename_noun}'s Meta.fields "
                 "(or add a RelatedOrder / RelatedFilter branch)."
             ),
+        )
+        claim_generated_type_name(
+            input_cls,
+            owner=f"{self._family_label} {truth.label(set_cls)}",
+            scope=set_cls,
         )
         self.input_object_types[type_name] = input_cls
         self._collision_registry[type_name] = set_cls

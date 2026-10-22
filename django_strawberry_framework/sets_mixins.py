@@ -124,6 +124,14 @@ class ClassBasedTypeNameMixin:
         call site for every consumer (``_build_input_fields`` operator-bag
         naming; the order side mints root names only, and a future
         ``AggregateSet`` shares the per-field rule).
+
+        The result is not unique per declaration: the class name and the
+        PascalCase stem concatenate, so ``BookFilter`` + ``set_code`` and
+        ``BookFilterSet`` + ``code`` both spell ``BookFilterSetCodeFilterInputType``,
+        and ``pascal_case`` drops letter case and collapses interior underscore
+        runs. The arguments factory claims every generated name through
+        ``utils/inputs.py::claim_generated_type_name``, which merges identical
+        fields and refuses two shapes in any schema that serves both.
         """
         cls_name = truth.name(cls)
         if field_path is None:

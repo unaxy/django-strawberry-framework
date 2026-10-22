@@ -569,10 +569,10 @@ def convert_filter_to_input_annotation(
 
     ``filterset_cls`` (the owning ``FilterSet`` for a leaf built through
     ``_build_input_fields``) qualifies the nested ``RangeFilter`` sub-input
-    class name so two filtersets sharing a ``field_name`` cannot mint two
-    distinct classes under one GraphQL type name (spec-027 forward path; see
-    ``_build_range_input_class``). ``None`` (direct converter callers) keeps the
-    unqualified ``<Field>RangeInputType`` name.
+    class name so two filtersets sharing a ``field_name`` mint two distinct
+    GraphQL type names (spec-027 forward path; see ``_build_range_input_class``,
+    which also covers the set/field splits that still meet). ``None`` (direct
+    converter callers) keeps the unqualified ``<Field>RangeInputType`` name.
     """
     required = bool(dict_of(filter_instance.extra).get("required", False))
 
@@ -857,17 +857,19 @@ def _build_range_input_class(
     (``ClassBasedTypeNameMixin.type_name_for``). Without this qualifier the name
     derived from ``field_name`` alone, so two filtersets that share a
     ``field_name`` for a ``RangeFilter`` (e.g. both filter a ``price`` column)
-    each mint a DISTINCT sub-input class under the SAME GraphQL type name.
-    Because these nested classes are embedded directly in the annotation (NOT
-    materialized through Decision 9's ``_materialized_names`` ledger, and NOT
-    checked by the arguments-factory collision registry), Strawberry does not
-    reject the clash -- it SILENTLY keeps whichever class it registers first and
-    drops the other, so a filterset whose ``RangeFilter`` resolves a different
-    scalar (a ``date`` range vs an ``int`` range) is advertised with the wrong
-    axis type over the wire. spec-027 assumed a duplicate-type
-    error would surface; it does not, so the per-filterset-scoped name (the
-    documented forward path) is applied here. ``None`` (direct converter callers
-    that build no schema) keeps the unqualified ``<Field>RangeInputType`` name.
+    each mint a DISTINCT sub-input class under the SAME GraphQL type name, and
+    two filtersets serving one schema with ranges of different scalars (a
+    ``date`` range vs an ``int`` range) could not share it. The qualifier keeps
+    the common case distinct; it is not injective (``A`` over ``b_c`` and ``AB``
+    over ``c`` both spell ``ABCRangeInputType``, and ``shelf__code`` /
+    ``shelf_code`` in one set share a stem). These nested classes are embedded
+    directly in the annotation, NOT materialized through Decision 9's
+    ``_materialized_names`` ledger, so the arguments factory claims each one
+    through ``utils/inputs.py::claim_generated_type_name`` when it claims its
+    set's root: two ranges of different axes under one name reached from one set
+    raise ``ConfigurationError`` at finalize, and a pair from two sets fails only
+    a schema serving both. ``None`` (direct converter callers that build no
+    schema) keeps the unqualified ``<Field>RangeInputType`` name.
     """
     field_name = getattr(filter_instance, "field_name", "field") or "field"
     prefix = truth.name(filterset_cls) if filterset_cls is not None else ""

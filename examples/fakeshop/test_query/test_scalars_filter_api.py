@@ -166,8 +166,9 @@ def test_range_input_types_are_scoped_per_filterset() -> None:
 
     ``price_span`` is a declared ``RangeFilter(field_name="price")`` on both
     ``ScalarSpecimenFilter`` and ``NullableScalarSpecimenFilter``. Unscoped,
-    both nested classes would claim ``PriceRangeInputType`` and Strawberry
-    would silently keep one. The owning-filterset qualifier keeps both
+    both nested classes would claim ``PriceRangeInputType`` (one merged type
+    while their axes match, two shapes no schema could serve once they differ).
+    The owning-filterset qualifier keeps both
     ``__type`` results non-null, each with ``start`` / ``end``.
     """
     data = _assert_graphql_success(_RANGE_TYPE_QUERY)

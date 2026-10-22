@@ -15,18 +15,26 @@ import gc
 import inspect
 import weakref
 from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass, field
+from enum import Enum
 from functools import partial
 from types import SimpleNamespace
-from typing import NoReturn, TypedDict
+from typing import TYPE_CHECKING, NoReturn, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_django
 import strawberry
-from apps.library.models import Branch
+from apps.library.models import Book, Branch, Shelf
+from django import forms
 from django.db import connection
+from django.db.models import IntegerField, Model, TextField
+from django.http import HttpRequest
+from django_filters import CharFilter
 from graphql import ExecutionContext, FieldNode, GraphQLError, NameNode, print_ast
 from graphql.pyutils import Path
+from strawberry import relay
+from strawberry.exceptions import DuplicatedTypeName
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.extensions.runner import SchemaExtensionsRunner
 from strawberry.schema.config import StrawberryConfig
@@ -36,13 +44,28 @@ from strawberry.types import ExecutionResult
 from strawberry.types.graphql import OperationType
 from typing_extensions import override
 
-from django_strawberry_framework import strawberry_config
+if TYPE_CHECKING:
+    from django.db.models.expressions import Combinable
+
+from django_strawberry_framework import (
+    DjangoConnection,
+    DjangoConnectionField,
+    DjangoModelFormMutation,
+    DjangoMutation,
+    DjangoMutationField,
+    DjangoType,
+    SerializerMutation,
+    finalize_django_types,
+    strawberry_config,
+)
 from django_strawberry_framework.error_policy import ErrorPolicy
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.extensions.error_policy import DjangoErrorPolicyExtension
 from django_strawberry_framework.extensions.operation_state import _ResumedStream
 from django_strawberry_framework.extensions.resource_policy import DjangoResourcePolicyExtension
+from django_strawberry_framework.filters import FilterSet, RangeFilter
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
+from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.resource_policy import ResourcePolicy, bounded_rows
 from django_strawberry_framework.schema import (
     _SCHEMA_ENFORCEMENT,
@@ -64,7 +87,13 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 from django_strawberry_framework.utils.typing import object_result
-from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, json_at
+from tests._idioms import (
+    ClaimsClassBase,
+    ClassReadRaisesBase,
+    ModelSerializerBase,
+    declare_django_type,
+    json_at,
+)
 
 
 def _unchecked_entries(*entries: object) -> list[SchemaExtension]:
@@ -2390,3 +2419,510 @@ async def test_a_stream_whose_runner_is_not_the_packages_is_handed_back_untouche
         assert foreign_frames[0].errors is None
     finally:
         await plain_stream.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Generated type-name clashes are per schema; DjangoSchema names their sources.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ClashSide:
+    """One declaration's half of a generated type-name clash: its root fields and a probe.
+
+    ``query`` maps a root field name to its ``(annotation, field)`` pair (the root is
+    built with ``type(...)`` because ``from __future__ import annotations`` would leave a
+    class-body annotation naming a function local unresolved); ``mutation`` maps a root
+    mutation name to its field; ``operation`` is a document only this side's schema
+    serves, run against the fakeshop tables when the side reads one.
+    """
+
+    query: dict[str, tuple[object, object]]
+    mutation: dict[str, object] = field(default_factory=dict[str, object])
+    operation: str | None = None
+
+
+def _roots(*sides: _ClashSide) -> tuple[type, type | None]:
+    """Return the query root, and the mutation root when any, serving every side given."""
+    query_fields = {name: pair for side in sides for name, pair in side.query.items()}
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {name: pair[0] for name, pair in query_fields.items()},
+                **{name: pair[1] for name, pair in query_fields.items()},
+            },
+        ),
+    )
+    mutation_fields = {name: value for side in sides for name, value in side.mutation.items()}
+    if not mutation_fields:
+        return query, None
+    return query, strawberry.type(type("Mutation", (), mutation_fields))
+
+
+def _node(
+    name: str,
+    model: type[Model],
+    fields: tuple[str, ...],
+    **meta: object,
+) -> type[DjangoType]:
+    """Declare a relay ``DjangoType`` over ``model`` with ``meta`` added to its ``Meta``."""
+    body = {
+        "model": model,
+        "fields": fields,
+        "interfaces": (relay.Node,),
+        **meta,
+    }
+    return declare_django_type(name, {"Meta": type("Meta", (), body)})
+
+
+def _connection(name: str, node: type[DjangoType]) -> dict[str, tuple[object, object]]:
+    """Return one connection root field over ``node``."""
+    return {name: (DjangoConnection[node], DjangoConnectionField(node))}
+
+
+def _set_member_split() -> tuple[_ClashSide, _ClashSide]:
+    """``BookFilter`` + ``set_code`` and ``BookFilterSet`` + ``code`` spell one bag name."""
+
+    class BookFilter(FilterSet):
+        set_code = CharFilter(field_name="name")
+
+        class Meta:
+            model = Branch
+            fields = []
+
+    class BookFilterSet(FilterSet):
+        code = RangeFilter(field_name="topic")
+
+        class Meta:
+            model = Shelf
+            fields = []
+
+    branches = _node("BranchNode", Branch, ("id", "name"), filterset_class=BookFilter)
+    shelves = _node("ShelfNode", Shelf, ("id", "code"), filterset_class=BookFilterSet)
+    return (
+        _ClashSide(
+            _connection("branches", branches),
+            operation='{ branches(filter: {setCode: {exact: "x"}}) { edges { node { id } } } }',
+        ),
+        _ClashSide(
+            _connection("shelves", shelves),
+            operation=(
+                '{ shelves(filter: {code: {exact: {start: "a", end: "b"}}}) '
+                "{ edges { node { id } } } }"
+            ),
+        ),
+    )
+
+
+def _range_split() -> tuple[_ClashSide, _ClashSide]:
+    """``A`` over ``b_c`` and ``AB`` over ``c`` spell one range name, of two axis types."""
+
+    class _IntRangeRow(Model):
+        b_c: IntegerField[int | Combinable, int] = IntegerField()
+
+        class Meta:
+            app_label = "library"
+            managed = False
+
+    class _TextRangeRow(Model):
+        c: TextField[str | Combinable, str] = TextField()
+
+        class Meta:
+            app_label = "library"
+            managed = False
+
+    class A(FilterSet):
+        x = RangeFilter(field_name="b_c")
+
+        class Meta:
+            model = _IntRangeRow
+            fields = []
+
+    class AB(FilterSet):
+        y = RangeFilter(field_name="c")
+
+        class Meta:
+            model = _TextRangeRow
+            fields = []
+
+    ints = _node("IntRangeNode", _IntRangeRow, ("id",), filterset_class=A)
+    texts = _node("TextRangeNode", _TextRangeRow, ("id",), filterset_class=AB)
+    return _ClashSide(_connection("ints", ints)), _ClashSide(_connection("texts", texts))
+
+
+def _root_and_bag() -> tuple[_ClashSide, _ClashSide]:
+    """FilterSet ``BookFilterSetFilter``'s root and ``BookFilter.set``'s bag share a name."""
+
+    class BookFilter(FilterSet):
+        set = CharFilter(field_name="name")
+
+        class Meta:
+            model = Branch
+            fields = []
+
+    class BookFilterSetFilter(FilterSet):
+        code = CharFilter(field_name="code")
+
+        class Meta:
+            model = Shelf
+            fields = []
+
+    branches = _node("BranchNode", Branch, ("id", "name"), filterset_class=BookFilter)
+    shelves = _node("ShelfNode", Shelf, ("id", "code"), filterset_class=BookFilterSetFilter)
+    return (
+        _ClashSide(
+            _connection("branches", branches),
+            operation='{ branches(filter: {set: {exact: "x"}}) { edges { node { id } } } }',
+        ),
+        _ClashSide(
+            _connection("shelves", shelves),
+            operation='{ shelves(filter: {code: {exact: "x"}}) { edges { node { id } } } }',
+        ),
+    )
+
+
+def _filter_and_order_root() -> tuple[_ClashSide, _ClashSide]:
+    """A FilterSet and an OrderSet both named ``Foo`` both mint ``FooInputType``."""
+
+    class Foo(FilterSet):
+        name = CharFilter(field_name="name")
+
+        class Meta:
+            model = Branch
+            fields = []
+
+    # The order side's class is declared under the very name the filter side's holds.
+    foo_order = type(
+        "Foo",
+        (OrderSet,),
+        {
+            "__module__": Foo.__module__,
+            "__qualname__": Foo.__qualname__,
+            "Meta": type("Meta", (), {"model": Shelf, "fields": ["code"]}),
+        },
+    )
+    branches = _node("BranchNode", Branch, ("id", "name"), filterset_class=Foo)
+    shelves = _node("ShelfNode", Shelf, ("id", "code"), orderset_class=foo_order)
+    return (
+        _ClashSide(
+            _connection("branches", branches),
+            operation='{ branches(filter: {name: {exact: "x"}}) { edges { node { id } } } }',
+        ),
+        _ClashSide(
+            _connection("shelves", shelves),
+            operation="{ shelves(orderBy: {code: ASC}) { edges { node { id } } } }",
+        ),
+    )
+
+
+def _model_input_mutation() -> dict[str, object]:
+    """Return a ``DjangoMutation`` creating a ``Shelf`` from ``code`` and ``topic``."""
+
+    class CreateShelfFromCodeAndTopic(DjangoMutation):
+        class Meta:
+            model = Shelf
+            operation = "create"
+            fields = ("code", "topic")
+            permission_classes = []
+
+    return {"create_shelf": DjangoMutationField(CreateShelfFromCodeAndTopic)}
+
+
+def _write_roots() -> dict[str, tuple[object, object]]:
+    """Declare the primary types the write flavors resolve, and a query root over them."""
+    shelves = _node("ShelfNode", Shelf, ("id", "code", "topic"))
+    _node("BranchNode", Branch, ("id", "name", "city"))
+    return _connection("shelves", shelves)
+
+
+def _model_and_form_input() -> tuple[_ClashSide, _ClashSide]:
+    """A model input narrowed to ``(code, topic)`` and a ``ModelForm`` named ``ShelfCodeTopic``."""
+    query = _write_roots()
+
+    class ShelfCodeTopic(forms.ModelForm[Branch]):
+        class Meta:
+            model = Branch
+            fields = ("name", "city")
+
+    class CreateBranchViaForm(DjangoModelFormMutation):
+        class Meta:
+            form_class = ShelfCodeTopic
+            operation = "create"
+            permission_classes = []
+
+    return (
+        _ClashSide(query, _model_input_mutation()),
+        _ClashSide(query, {"create_branch": DjangoMutationField(CreateBranchViaForm)}),
+    )
+
+
+def _model_and_serializer_input() -> tuple[_ClashSide, _ClashSide]:
+    """A model input narrowed to ``(code, topic)`` and a serializer named ``ShelfCodeTopic``."""
+    query = _write_roots()
+
+    class ShelfCodeTopic(ModelSerializerBase[Branch]):
+        class Meta:
+            model = Branch
+            fields = ("name", "city")
+
+    class CreateBranchViaSerializer(SerializerMutation):
+        class Meta:
+            serializer_class = ShelfCodeTopic
+            operation = "create"
+            permission_classes = []
+
+    return (
+        _ClashSide(query, _model_input_mutation()),
+        _ClashSide(query, {"create_branch": DjangoMutationField(CreateBranchViaSerializer)}),
+    )
+
+
+_LOCALS = "tests.test_schema.{}.<locals>.{}"
+
+# One row per way two declarations derive one generated input name: the builder, the
+# clashing name, and the message ``DjangoSchema`` restates Strawberry's refusal with.
+_GENERATED_NAME_CLASHES = [
+    pytest.param(
+        _set_member_split,
+        "BookFilterSetCodeFilterInputType",
+        "by FilterSet {} member 'set_code' and by FilterSet {} member 'code'".format(
+            _LOCALS.format("_set_member_split", "BookFilter"),
+            _LOCALS.format("_set_member_split", "BookFilterSet"),
+        ),
+        "A member's nested input name joins the set name and the member's PascalCase stem, "
+        "so another set/member split spells the same name.",
+        id="set-member-split",
+    ),
+    pytest.param(
+        _range_split,
+        "ABCRangeInputType",
+        "by the 'exact' input of FilterSet {} member 'x' and by the 'exact' input of "
+        "FilterSet {} member 'y'".format(
+            _LOCALS.format("_range_split", "A"),
+            _LOCALS.format("_range_split", "AB"),
+        ),
+        "A range input's name joins the set name, the PascalCase stem of the range filter's "
+        "field_name (letter case dropped, interior underscore runs collapsed) and "
+        "'RangeInputType', so two field paths or sets can spell one name.",
+        id="range-split",
+    ),
+    pytest.param(
+        _root_and_bag,
+        "BookFilterSetFilterInputType",
+        "by FilterSet {} and by FilterSet {} member 'set'".format(
+            _LOCALS.format("_root_and_bag", "BookFilterSetFilter"),
+            _LOCALS.format("_root_and_bag", "BookFilter"),
+        ),
+        "A root input's name (its declaration's name plus a suffix) equals a nested input's "
+        "name (a set name, a member stem and a suffix).",
+        id="root-and-bag",
+    ),
+    pytest.param(
+        _filter_and_order_root,
+        "FooInputType",
+        "by FilterSet {} and by OrderSet {}".format(
+            _LOCALS.format("_filter_and_order_root", "Foo"),
+            _LOCALS.format("_filter_and_order_root", "Foo"),
+        ),
+        "Both are root inputs, each named from its declaration's name (a set, model, form or "
+        "serializer class) plus a suffix, and the two derivations meet.",
+        id="filter-and-order-root",
+    ),
+    pytest.param(
+        _model_and_form_input,
+        "ShelfCodeTopicInput",
+        "by the input of DjangoMutation 'CreateShelfFromCodeAndTopic' and by the input of "
+        "{}".format(_LOCALS.format("_model_and_form_input", "CreateBranchViaForm")),
+        "Both are root inputs, each named from its declaration's name (a set, model, form or "
+        "serializer class) plus a suffix, and the two derivations meet.",
+        id="model-and-form-input",
+    ),
+    pytest.param(
+        _model_and_serializer_input,
+        "ShelfCodeTopicInput",
+        "by the input of DjangoMutation 'CreateShelfFromCodeAndTopic' and by the input of "
+        "{}".format(_LOCALS.format("_model_and_serializer_input", "CreateBranchViaSerializer")),
+        "Both are root inputs, each named from its declaration's name (a set, model, form or "
+        "serializer class) plus a suffix, and the two derivations meet.",
+        id="model-and-serializer-input",
+    ),
+]
+
+
+# The same rows with only the builder and the clashing name.
+_GENERATED_NAMES = [
+    pytest.param(*clash.values[:2], id=clash.id) for clash in _GENERATED_NAME_CLASHES
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize(("build", "name"), _GENERATED_NAMES)
+@pytest.mark.parametrize("side", [0, 1], ids=["first", "second"])
+@pytest.mark.parametrize("schema_class", [strawberry.Schema, DjangoSchema])
+def test_a_generated_name_clash_split_across_two_schemas_builds_and_executes(
+    build: Callable[[], tuple[_ClashSide, _ClashSide]],
+    name: str,
+    side: int,
+    schema_class: type[strawberry.Schema],
+) -> None:
+    """Each of two generated inputs of one name and different fields serves a schema of its own.
+
+    The clash is per schema: a process may build each declaration into its own schema,
+    which publishes that declaration's fields under the shared name and runs its operation.
+    """
+    served = build()[side]
+    finalize_django_types()
+    query, mutation = _roots(served)
+    schema = schema_class(query=query, mutation=mutation, config=strawberry_config())
+    assert f"input {name} " in str(schema)
+    if served.operation is not None:
+        result = schema.execute_sync(served.operation, context_value=HttpRequest())
+        assert result.errors is None, result.errors
+
+
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize(("build", "name"), _GENERATED_NAMES)
+def test_a_generated_name_clash_in_one_strawberry_schema_is_refused(
+    build: Callable[[], tuple[_ClashSide, _ClashSide]],
+    name: str,
+) -> None:
+    """A plain ``strawberry.Schema`` serving both refuses them with Strawberry's own error."""
+    sides = build()
+    finalize_django_types()
+    query, mutation = _roots(*sides)
+    with pytest.raises(DuplicatedTypeName) as raised:
+        strawberry.Schema(query=query, mutation=mutation, config=strawberry_config())
+    assert str(raised.value) == f"Type {name} is defined multiple times in the schema"
+
+
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize(
+    (
+        "build",
+        "name",
+        "sources",
+        "cause",
+    ),
+    _GENERATED_NAME_CLASHES,
+)
+def test_django_schema_names_the_declarations_behind_a_generated_name_clash(
+    build: Callable[[], tuple[_ClashSide, _ClashSide]],
+    name: str,
+    sources: str,
+    cause: str,
+) -> None:
+    """``DjangoSchema`` restates the refusal naming both declarations and the cause."""
+    sides = build()
+    finalize_django_types()
+    query, mutation = _roots(*sides)
+    with pytest.raises(ConfigurationError) as raised:
+        DjangoSchema(query=query, mutation=mutation, config=strawberry_config())
+    assert str(raised.value) == (
+        f"Generated GraphQL type {name!r} is claimed with different fields {sources}; a "
+        f"schema serves one input type per name, so it cannot serve both. {cause} Rename "
+        "one so its generated type name is unique."
+    )
+    assert isinstance(raised.value.__cause__, DuplicatedTypeName)
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize("schema_class", [strawberry.Schema, DjangoSchema])
+def test_two_bags_of_one_name_and_one_lookup_set_in_any_order_share_one_type(
+    schema_class: type[strawberry.Schema],
+) -> None:
+    """Bags whose lookups match in another declaration order are one shape.
+
+    ``BookFilter`` + ``shelf__code`` and ``BookFilterShelf`` + ``code`` both mint
+    ``BookFilterShelfCodeFilterInputType``; their lookups render the same fields, so one
+    schema serves both through one type and each member's operation runs.
+    """
+
+    class BookFilter(FilterSet):
+        class Meta:
+            model = Book
+            fields = {"shelf__code": ["exact", "icontains"]}
+
+    class BookFilterShelf(FilterSet):
+        class Meta:
+            model = Shelf
+            fields = {"code": ["icontains", "exact"]}
+
+    books = _node("BookNode", Book, ("id", "title"), filterset_class=BookFilter)
+    shelves = _node("ShelfNode", Shelf, ("id", "code"), filterset_class=BookFilterShelf)
+    finalize_django_types()
+    query, mutation = _roots(
+        _ClashSide(_connection("books", books)),
+        _ClashSide(_connection("shelves", shelves)),
+    )
+    schema = schema_class(query=query, mutation=mutation, config=strawberry_config())
+    assert str(schema).count("input BookFilterShelfCodeFilterInputType ") == 1
+    result = schema.execute_sync(
+        '{ books(filter: {shelfCode: {iContains: "x"}}) { edges { node { id } } } '
+        'shelves(filter: {code: {exact: "x", iContains: "x"}}) { edges { node { id } } } }',
+        context_value=HttpRequest(),
+    )
+    assert result.errors is None, result.errors
+
+
+def _same_named_enums() -> list[type]:
+    """Two enums both published as ``Shade``."""
+
+    @strawberry.enum(name="Shade")
+    class Light(Enum):
+        PALE = "pale"
+
+    @strawberry.enum(name="Shade")
+    class Dark(Enum):
+        DEEP = "deep"
+
+    return [Light, Dark]
+
+
+def _same_named_object_types() -> list[type]:
+    """Two object types both published as ``Shade``."""
+
+    @strawberry.type(name="Shade")
+    class Light:
+        pale: str
+
+    @strawberry.type(name="Shade")
+    class Dark:
+        deep: int
+
+    return [Light, Dark]
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(_same_named_enums, id="enums"),
+        pytest.param(_same_named_object_types, id="object-types"),
+    ],
+)
+def test_django_schema_passes_any_other_duplicate_name_through(
+    build: Callable[[], list[object]],
+) -> None:
+    """A duplicate name the package did not generate keeps Strawberry's own error."""
+    shade = build()
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"first": shade[0], "second": shade[1]},
+            },
+        ),
+    )
+    with pytest.raises(DuplicatedTypeName) as plain:
+        strawberry.Schema(query=query)
+    with pytest.raises(DuplicatedTypeName) as package:
+        DjangoSchema(query=query)
+    assert (
+        str(package.value)
+        == str(plain.value)
+        == "Type Shade is defined multiple times in the schema"
+    )

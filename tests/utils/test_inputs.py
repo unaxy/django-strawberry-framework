@@ -14,12 +14,22 @@ from typing import TYPE_CHECKING, ClassVar, NoReturn, cast
 
 import pytest
 import strawberry
+from apps.library import models as library_models
 from django.utils.functional import LazyObject, SimpleLazyObject
+from django_filters import CharFilter
+from strawberry import relay
+from strawberry.exceptions import DuplicatedTypeName, MissingReturnAnnotationError
 from typing_extensions import override
 
-from django_strawberry_framework import strawberry_config, write_mixins
+from django_strawberry_framework import (
+    DjangoSchema,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+    write_mixins,
+)
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.filters import filter_input_type
+from django_strawberry_framework.filters import FilterSet, filter_input_type
 from django_strawberry_framework.filters import inputs as filter_inputs
 from django_strawberry_framework.filters import sets as filter_sets
 from django_strawberry_framework.mutations import sets as mutation_sets
@@ -27,16 +37,19 @@ from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.orders import inputs as order_inputs
 from django_strawberry_framework.orders import sets as order_sets
 from django_strawberry_framework.orders.factories import OrderArgumentsFactory
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import inputs as ser_inputs
 from django_strawberry_framework.sets_mixins import (
     ClassBasedTypeNameMixin,
     is_re_readable_field_declaration,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
     is_list,
     is_set_or_frozenset,
     is_tuple,
+    read_attr,
 )
 from django_strawberry_framework.utils.canonical import base_container_values
 from django_strawberry_framework.utils.input_values import UNSET
@@ -48,10 +61,13 @@ from django_strawberry_framework.utils.inputs import (
     _PlainNames,
     _safe_import,
     _sorted_meta_values,
+    _type_name_claims,
     build_strawberry_input_class,
     canonicalize_set_meta_fields,
+    claim_generated_type_name,
     duplicate_name_message,
     emit_set_input_field_triples,
+    generated_type_name_collision,
     get_or_store_shape_build,
     graphql_camel_name,
     is_input_attribute_name,
@@ -518,7 +534,10 @@ def test_filter_and_order_input_namespaces_ride_make_set_input_namespace() -> No
     """Both set families unpack the same factory closures and naming helper."""
     assert filter_inputs._input_type_name_for is set_input_type_name
     assert order_inputs._input_type_name_for is set_input_type_name
-    assert filter_inputs._materialize_input.__code__ is order_inputs._materialize_input.__code__
+    assert read_attr(filter_inputs._materialize_input, "__code__") is read_attr(
+        order_inputs._materialize_input,
+        "__code__",
+    )
     assert (
         filter_inputs._clear_input_namespace.__code__
         is order_inputs._clear_input_namespace.__code__
@@ -1348,6 +1367,300 @@ def test_resolve_effective_fields_leaves_the_row_identity_out_of_the_basis() -> 
         _narrow_probe_basis(basis, fields=("name", "key"), row_identity=identity)
     with pytest.raises(ConfigurationError, match="Probe input for Row has no fields"):
         _narrow_probe_basis({"key": 1}, row_identity=identity)
+
+
+# ---------------------------------------------------------------------------
+# Generated type-name claims
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fresh_type_name_claims() -> Iterator[None]:
+    """Run a test against an empty claim ledger, and leave it empty."""
+    _type_name_claims.clear()
+    yield
+    _type_name_claims.clear()
+
+
+def _claimed_input(annotation: object, owner: str) -> type[object]:
+    """Build a generated ``XIn`` input whose one field ``v`` has ``annotation``, and claim it."""
+    built = build_strawberry_input_class("XIn", [("v", annotation, {})])
+    claim_generated_type_name(built, owner=owner)
+    return built
+
+
+def _sdl_of(*types: type[object]) -> str:
+    """Return the SDL of a schema serving ``types`` beside a one-field query."""
+
+    @strawberry.type
+    class Query:
+        ok: int
+
+    return str(strawberry.Schema(query=Query, types=list(types)))
+
+
+@pytest.mark.usefixtures("fresh_type_name_claims")
+def test_a_claim_names_each_field_shape_and_joins_the_shape_it_matches() -> None:
+    """A second shape takes its own identity; a later class joins the shape it matches.
+
+    Classes of one shape share one identity, so a schema serving them merges them into
+    one type; classes of two shapes cannot share a schema.
+    """
+    text = _claimed_input(str, "the first declaration")
+    number = _claimed_input(int, "the second declaration")
+    other_number = _claimed_input(int, "the third declaration")
+
+    assert [truth.qualname(cls) for cls in (text, number, other_number)] == [
+        "XIn",
+        "XIn[1]",
+        "XIn[1]",
+    ]
+    assert "input XIn {\n  v: Int!\n}" in _sdl_of(number, other_number)
+    assert "input XIn {\n  v: String!\n}" in _sdl_of(text, text)
+    with pytest.raises(DuplicatedTypeName):
+        _sdl_of(text, number)
+
+
+@strawberry.input(name="XIn")
+class _ConsumerInput:
+    v: str
+
+
+class _PlainClass:
+    v: str
+
+
+@pytest.mark.usefixtures("fresh_type_name_claims")
+@pytest.mark.parametrize(
+    "cls",
+    [
+        pytest.param(_ConsumerInput, id="consumer-input"),
+        pytest.param(_PlainClass, id="not-a-strawberry-type"),
+    ],
+)
+def test_a_claim_skips_a_class_utils_inputs_did_not_build(cls: type[object]) -> None:
+    """A class of its own module and qualname is not merged by name, so nothing is claimed."""
+    claim_generated_type_name(cls, owner="a consumer declaration")
+    assert _type_name_claims == {}
+    assert generated_type_name_collision(cls, _claimed_input(int, "a generated input")) is None
+
+
+@pytest.mark.usefixtures("fresh_type_name_claims")
+def test_the_claim_ledger_empties_with_the_registry() -> None:
+    """The full registry reset starts with no name claimed."""
+    _claimed_input(int, "a generated input")
+    assert _type_name_claims
+    registry.clear()
+    assert _type_name_claims == {}
+
+
+def _finalize_twice_around_a_phase_3_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, type[object]]:
+    """Mint ``BookFilterSetCodeFilterInputType`` three times, the third set rebuilt by a rerun.
+
+    ``BookFilter.set_code`` (an ``exact`` bag) and ``BookFilterSet.code`` (an
+    ``iContains`` bag) belong to types the first pass finalizes; the set named
+    ``Book`` (an ``iContains`` bag through ``filter_set_code``) belongs to a type whose
+    decoration fails, so the rerun rebuilds it while the other two keep their classes.
+    Returns each set's root input by the set's role.
+    """
+
+    class BookFilter(FilterSet):
+        set_code = CharFilter(field_name="name")
+
+        class Meta:
+            model = library_models.Branch
+            fields = []
+
+    class BookFilterSet(FilterSet):
+        code = CharFilter(field_name="code", lookup_expr="icontains")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    class Book(FilterSet):
+        filter_set_code = CharFilter(field_name="title", lookup_expr="icontains")
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    class BranchNode(DjangoType):
+        class Meta:
+            model = library_models.Branch
+            fields = ("id", "name")
+            filterset_class = BookFilter
+
+    class ShelfNode(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code")
+            filterset_class = BookFilterSet
+
+    class BookNode(DjangoType):
+        class Meta:
+            model = library_models.Book
+            fields = ("id", "title")
+            filterset_class = Book
+
+        def label_resolver(self) -> str:
+            del self  # Strawberry binds the root to ``self``; the resolver never reads it
+            return "x"
+
+        # A method resolver with no return annotation, named as the field it backs: Strawberry
+        # refuses it while decorating.
+        del label_resolver.__annotations__["return"]
+        label_resolver.__qualname__ = label_resolver.__qualname__.removesuffix("_resolver")
+        label = strawberry.field(label_resolver)
+
+    assert registry.get(library_models.Branch) is BranchNode
+    assert registry.get(library_models.Shelf) is ShelfNode
+    with pytest.raises(MissingReturnAnnotationError):
+        finalize_django_types()
+
+    def _fixed_label() -> str:
+        return "x"
+
+    # The decoration-failing field is replaced in place by the fixed one.
+    monkeypatch.setattr(BookNode, "label", strawberry.field(resolver=_fixed_label))
+    finalize_django_types()
+    # Each root is read where the schema resolves it: the ``filters.inputs`` global.
+    roots: dict[str, type[object]] = {}
+    for role, name in (
+        ("exact", "BookFilterInputType"),
+        ("icontains", "BookFilterSetInputType"),
+        ("rebuilt", "BookInputType"),
+    ):
+        root = module_binding(filter_inputs, name)
+        assert isinstance(root, type)
+        roots[role] = root
+    return roots
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+def test_a_rerun_after_a_failed_pass_joins_the_variants_the_first_pass_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set rebuilt by a recover-in-place rerun meets the classes the first pass kept.
+
+    The rebuilt ``iContains`` bag merges with the first pass's ``iContains`` bag, and a
+    schema serving it beside the first pass's ``exact`` bag still refuses the pair.
+    """
+    roots = _finalize_twice_around_a_phase_3_failure(monkeypatch)
+    assert "iContains: String = null" in _sdl_of(roots["icontains"], roots["rebuilt"])
+    with pytest.raises(DuplicatedTypeName):
+        _sdl_of(roots["exact"], roots["rebuilt"])
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize("schema_class", [strawberry.Schema, DjangoSchema])
+def test_a_set_rebuilt_by_a_rerun_is_not_refused_against_its_own_first_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    schema_class: type[strawberry.Schema],
+) -> None:
+    """A rerun's rebuilt set may change a bag's shape; its discarded first pass is no clash.
+
+    The first pass builds ``BookFilter.shelf`` as a raw-key bag; a relay ``Shelf`` type
+    declared before the rerun turns it into a global-id bag. Only the rebuilt class is
+    served, so the rerun finalizes and the schema publishes the rebuilt shape.
+    """
+
+    class BookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"shelf": ["exact"], "title": ["exact"]}
+
+    class BookNode(DjangoType):
+        class Meta:
+            model = library_models.Book
+            fields = ("id", "title")
+            filterset_class = BookFilter
+
+        def label_resolver(self) -> str:
+            del self  # Strawberry binds the root to ``self``; the resolver never reads it
+            return "x"
+
+        # A method resolver with no return annotation, named as the field it backs: Strawberry
+        # refuses it while decorating.
+        del label_resolver.__annotations__["return"]
+        label_resolver.__qualname__ = label_resolver.__qualname__.removesuffix("_resolver")
+        label = strawberry.field(label_resolver)
+
+    with pytest.raises(MissingReturnAnnotationError):
+        finalize_django_types()
+
+    class ShelfNode(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code")
+            interfaces = (relay.Node,)
+
+    assert registry.get(library_models.Shelf) is ShelfNode
+
+    def _fixed_label() -> str:
+        return "x"
+
+    # The decoration-failing field is replaced in place by the fixed one.
+    monkeypatch.setattr(BookNode, "label", strawberry.field(resolver=_fixed_label))
+    finalize_django_types()
+    root = module_binding(filter_inputs, "BookFilterInputType")
+    assert isinstance(root, type)
+
+    @strawberry.type
+    class Query:
+        ok: int
+
+    sdl = str(schema_class(query=Query, types=[root]))
+    assert "input BookFilterShelfFilterInputType {\n  exact: String = null\n}" in sdl
+
+
+@pytest.mark.usefixtures("fresh_type_name_claims")
+def test_a_collision_between_two_claimed_shapes_is_restated_with_both_owners() -> None:
+    """Two claimed classes of different fields name both declarations."""
+    text = _claimed_input(str, "the first declaration")
+    number = _claimed_input(int, "the second declaration")
+    restated = generated_type_name_collision(text, number)
+    assert isinstance(restated, ConfigurationError)
+    assert str(restated) == (
+        "Generated GraphQL type 'XIn' is claimed with different fields by the first "
+        "declaration and by the second declaration; a schema serves one input type per "
+        "name, so it cannot serve both. Both are root inputs, each named from its "
+        "declaration's name (a set, model, form or serializer class) plus a suffix, and "
+        "the two derivations meet. Rename one so its generated type name is unique."
+    )
+
+
+@pytest.mark.usefixtures("fresh_type_name_claims")
+@pytest.mark.parametrize(
+    "pair",
+    [
+        pytest.param(lambda: (None, _claimed_input(int, "a generated input")), id="no-class"),
+        pytest.param(
+            lambda: (
+                build_strawberry_input_class("XIn", [("v", int, {})]),
+                _claimed_input(int, "a generated input"),
+            ),
+            id="unclaimed",
+        ),
+        pytest.param(
+            lambda: (
+                _claimed_input(int, "the first declaration"),
+                _claimed_input(int, "the second declaration"),
+            ),
+            id="one-shape",
+        ),
+    ],
+)
+def test_any_other_duplicate_is_not_restated(
+    pair: Callable[[], tuple[object, object]],
+) -> None:
+    """Only two claimed classes of different fields are this package's to restate."""
+    first, second = pair()
+    assert generated_type_name_collision(first, second) is None
 
 
 # ---------------------------------------------------------------------------

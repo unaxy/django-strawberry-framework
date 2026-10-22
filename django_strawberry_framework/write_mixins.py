@@ -201,22 +201,23 @@ def build_and_stash_input(
     cls: WriteMutationClass,
     *,
     build: Callable[[], tuple[type[object], _PayloadT]],
-    materialize: Callable[[str, type[object]], None],
+    materialize: Callable[[str, type[object], str], None],
     specs_of: Callable[[_PayloadT], list[InputFieldSpec]],
 ) -> type[object]:
     """Materialize a built input + stash its reverse map on the mutation.
 
     The materialize-then-stash tail the form + serializer ``build_input`` seams
     share: ``build()`` returns ``(input_cls, payload)`` (the per-flavor stash value),
-    ``materialize(truth.name(input_cls), input_cls)`` pins it as a module global of the
-    flavor's input namespace, ``cls._input_field_specs = specs_of(payload)`` records
+    ``materialize(truth.name(input_cls), input_cls, owner)`` pins it as a module global
+    of the flavor's input namespace (``owner`` names ``cls`` for the cross-family
+    type-name claim's collision message), ``cls._input_field_specs = specs_of(payload)`` records
     the reverse map for the decode, and the class is returned.
     ``specs_of`` extracts the reverse-map specs from the per-flavor payload (the form
     payload IS the specs list - identity; the serializer payload is the shape, from
     which ``shape.field_specs`` is read), so the one tail serves both flavors.
     """
     input_cls, payload = build()
-    materialize(truth.name(input_cls), input_cls)
+    materialize(truth.name(input_cls), input_cls, f"the input of {truth.label(cls)}")
     cls._input_field_specs = specs_of(payload)
     return input_cls
 

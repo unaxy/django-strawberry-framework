@@ -9,21 +9,27 @@ internals a request cannot name.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Literal, get_args
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Literal, get_args
 
 import pytest
 import strawberry
 from apps.library import models as library_models
 from apps.products.models import Category
+from django.db.models import CASCADE, ForeignKey, IntegerField, Model, TextField
 from django_filters import CharFilter, NumberFilter
+from strawberry import relay
 from strawberry.types.base import get_object_definition
 
-from django_strawberry_framework import DjangoType
+if TYPE_CHECKING:
+    from django.db.models.expressions import Combinable
+
+from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import (
     FilterSet,
     GlobalIDMultipleChoiceFilter,
+    RangeFilter,
     RelatedFilter,
 )
 from django_strawberry_framework.filters.base import RelationPkFilter, RelationPkMultipleFilter
@@ -31,9 +37,11 @@ from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import _field_specs
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.relay import apply_interfaces
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr, require
 from django_strawberry_framework.utils.inputs import GeneratedInputArgumentsFactory
-from tests._idioms import comparing_metaclass, definition_raises
+from django_strawberry_framework.utils.typing import unwrap_container_type
+from tests._idioms import comparing_metaclass, declare_django_type, definition_raises
 from tests.filters.fixtures.filtersets import SelfReferentialBranchFilter
 
 
@@ -476,6 +484,212 @@ def test_filter_arguments_factory_skips_placeholder_related_filter_target() -> N
     factory = FilterArgumentsFactory(BranchFilterPlaceholder)
     _ = factory.arguments
     assert "BranchFilterPlaceholderInputType" in FilterArgumentsFactory.input_object_types
+
+
+# ---------------------------------------------------------------------------
+# Generated type-name claims reached from one set
+# ---------------------------------------------------------------------------
+
+
+def _node_over(model: type[Model], filterset: type[FilterSet], *fields: str) -> None:
+    """Declare a relay ``DjangoType`` over ``model`` serving ``filterset``."""
+    declare_django_type(
+        f"{model.__name__}Node",
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": model,
+                    "fields": ("id", *fields),
+                    "filterset_class": filterset,
+                    "interfaces": (relay.Node,),
+                },
+            ),
+        },
+    )
+
+
+def _case_variant_members() -> type[FilterSet]:
+    """``Price`` and ``price`` mint one bag name: a ``CharFilter`` bag and a range bag."""
+
+    class CaseFilter(FilterSet):
+        Price = CharFilter(field_name="name")
+        price = RangeFilter(field_name="city")
+
+        class Meta:
+            model = library_models.Branch
+            fields = []
+
+    _node_over(library_models.Branch, CaseFilter, "name")
+    return CaseFilter
+
+
+def _prefix_case_variant_members() -> type[FilterSet]:
+    """``MY_price`` and ``my_price`` mint one bag name: lookups of two filter classes."""
+
+    class PrefixCaseFilter(FilterSet):
+        MY_price = CharFilter(field_name="name")
+        my_price = CharFilter(field_name="name", lookup_expr="icontains")
+
+        class Meta:
+            model = library_models.Branch
+            fields = []
+
+    _node_over(library_models.Branch, PrefixCaseFilter, "name")
+    return PrefixCaseFilter
+
+
+def _range_field_paths() -> type[FilterSet]:
+    """Ranges over ``shelf__code`` (text) and ``shelf_code`` (integer) mint one range name."""
+
+    class _ShelfCodeRow(Model):
+        shelf: ForeignKey[library_models.Shelf | Combinable, library_models.Shelf] = ForeignKey(
+            library_models.Shelf,
+            on_delete=CASCADE,
+            related_name="+",
+        )
+        shelf_code: IntegerField[int | Combinable, int] = IntegerField()
+
+        class Meta:
+            app_label = "library"
+            managed = False
+
+    class RangePathFilter(FilterSet):
+        a = RangeFilter(field_name="shelf__code")
+        b = RangeFilter(field_name="shelf_code")
+
+        class Meta:
+            model = _ShelfCodeRow
+            fields = []
+
+    _node_over(_ShelfCodeRow, RangePathFilter)
+    return RangePathFilter
+
+
+def _declared_and_flat_members() -> type[FilterSet]:
+    """A declared ``Branch_name`` and the flat ``branch__name`` path mint one bag name."""
+
+    class BranchNameFilter(FilterSet):
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    class FlatShelfFilter(FilterSet):
+        branch = RelatedFilter(BranchNameFilter, field_name="branch")
+        Branch_name = CharFilter(field_name="code", lookup_expr="icontains")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    _node_over(library_models.Branch, BranchNameFilter, "name")
+    _node_over(library_models.Shelf, FlatShelfFilter, "code")
+    return FlatShelfFilter
+
+
+@pytest.mark.django_db
+def test_two_members_of_one_bag_name_and_one_lookup_set_in_any_order_finalize() -> None:
+    """Case-variant members whose lookups match in another order mint one shape, not a clash."""
+
+    class _CaseVariantRow(Model):
+        Price: TextField[str | Combinable, str] = TextField(db_column="price_upper")
+        price: TextField[str | Combinable, str] = TextField()
+
+        class Meta:
+            app_label = "library"
+            managed = False
+
+    class CaseOrderFilter(FilterSet):
+        class Meta:
+            model = _CaseVariantRow
+            fields = {"Price": ["exact", "icontains"], "price": ["icontains", "exact"]}
+
+    _node_over(_CaseVariantRow, CaseOrderFilter)
+    finalize_django_types()
+    root = get_object_definition(
+        FilterArgumentsFactory.input_object_types["CaseOrderFilterInputType"],
+        strict=True,
+    )
+    bags = {field.python_name: unwrap_container_type(field.type) for field in root.fields}
+    assert truth.qualname(bags["Price"]) == truth.qualname(bags["price"])
+
+
+_CASE_CAUSE = "The member names differ only in letter case, which the PascalCase stem drops."
+_RANGE_CAUSE = (
+    "A range input's name joins the set name, the PascalCase stem of the range filter's "
+    "field_name (letter case dropped, interior underscore runs collapsed) and "
+    "'RangeInputType', so two field paths or sets can spell one name."
+)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "build",
+        "type_name",
+        "first",
+        "second",
+        "cause",
+    ),
+    [
+        pytest.param(
+            _case_variant_members,
+            "CaseFilterPriceFilterInputType",
+            "member 'Price'",
+            "member 'price'",
+            _CASE_CAUSE,
+            id="case-variant",
+        ),
+        pytest.param(
+            _prefix_case_variant_members,
+            "PrefixCaseFilterMyPriceFilterInputType",
+            "member 'MY_price'",
+            "member 'my_price'",
+            _CASE_CAUSE,
+            id="prefix-case-variant",
+        ),
+        pytest.param(
+            _range_field_paths,
+            "RangePathFilterShelfCodeRangeInputType",
+            "member 'a'",
+            "member 'b'",
+            _RANGE_CAUSE,
+            id="range-field-paths",
+        ),
+        pytest.param(
+            _declared_and_flat_members,
+            "FlatShelfFilterBranchNameFilterInputType",
+            "member 'Branch_name'",
+            "member 'branch_name'",
+            _CASE_CAUSE,
+            id="declared-and-flat",
+        ),
+    ],
+)
+def test_two_shapes_of_one_generated_name_in_one_set_raise_at_finalize(
+    build: Callable[[], type[FilterSet]],
+    type_name: str,
+    first: str,
+    second: str,
+    cause: str,
+) -> None:
+    """Every schema serving the set would serve both shapes, so finalize refuses the set.
+
+    The message names both members (a range input through the member whose operator bag
+    embeds it) and how their names met.
+    """
+    filterset = build()
+    owner = f"FilterSet {truth.label(filterset)}"
+    via = "the 'exact' input of " if cause is _RANGE_CAUSE else ""
+    with pytest.raises(ConfigurationError) as raised:
+        finalize_django_types()
+    assert str(raised.value) == (
+        f"Generated GraphQL type {type_name!r} is claimed with different fields by "
+        f"{via}{owner} {first} and by {via}{owner} {second}; a schema serves one input "
+        f"type per name, so it cannot serve both. {cause} Rename one so its generated "
+        "type name is unique."
+    )
 
 
 # Touch `NumberFilter` import to ensure the import is exercised (used

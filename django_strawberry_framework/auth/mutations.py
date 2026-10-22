@@ -1398,7 +1398,11 @@ def _synthesize_register_rider(
                 fields=meta.fields,
                 shape=pinned,
             )
-            materialize_mutation_input_class(truth.name(input_cls), input_cls)
+            materialize_mutation_input_class(
+                truth.name(input_cls),
+                input_cls,
+                "the input of the auth register mutation",
+            )
             cls._input_field_specs, cls._model_fields_by_attr = mutation_input_field_specs(
                 model,
                 input_cls,
