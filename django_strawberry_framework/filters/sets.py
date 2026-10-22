@@ -93,6 +93,7 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
     coded_error_extensions,
+    unstorable_text,
 )
 from django_strawberry_framework.utils.input_values import (
     DEFAULT_SET_INPUT_TRAVERSAL_DEPTH,
@@ -800,6 +801,19 @@ _FRAMEWORK_GENERATED_ORIGINS: frozenset[FilterOrigin] = frozenset(
 # mutation of django-filter's own classes is out of contract (see
 # ``FilterSet._apply_flat_leaves``).
 # ======================================================================
+
+
+def _decodes_before_binding(filter_instance: Filter | None) -> bool:
+    """Whether ``filter_instance`` reads its value as a GlobalID before any query binds it.
+
+    A GlobalID filter's own ``filter`` decodes the value first and refuses text it
+    cannot read as ``GLOBALID_INVALID``; a ``method=`` install replaces that ``filter``,
+    so its value reaches the consumer's method undecoded.
+    """
+    return (
+        isinstance(filter_instance, GlobalIDFilter | GlobalIDMultipleChoiceFilter)
+        and filter_instance.method is None
+    )
 
 
 @dataclass(frozen=True)
@@ -4751,15 +4765,40 @@ class FilterSet(
         a recursive branch builds; the instance is passed explicitly so
         the override sees both the policy-owning class (``cls``) and the
         actual filterset whose form to validate.
+
+        A value holding text the package refuses (a lone surrogate, which no driver
+        can bind, or an embedded NUL, which PostgreSQL refuses: the shared
+        ``utils/errors.py::unstorable_text`` rule the write decode applies) is refused
+        first, keyed to its form field with that rule's message and code, before any
+        field cleans: a model-choice field's ``clean`` binds the raw value into a query
+        (``ModelMultipleChoiceField`` outside its own ``except``), and every lookup binds
+        it once the queryset runs, where the driver's error would escape as an
+        unexpected one. Each form field is read as its widget hands it to ``clean``
+        (``BoundField.data``, every sub-value of a multi-widget field included), so a
+        generated, declared, ``method=``, list, range or consumer ``field_class`` filter
+        is held to the one rule, and a nested branch or logical arm through its own
+        filterset's call here. A ``disabled`` field is skipped, since it cleans to its
+        initial value and never binds what was sent. A GlobalID filter's value is exempt
+        unless a ``method=`` replaces its decode (``_decodes_before_binding``): the decode
+        refuses text it cannot read as the ``GLOBALID_INVALID`` the node-refetch path
+        answers for the same id.
         """
-        if filterset_instance.form.is_valid():
-            return
+        form = filterset_instance.form
+        copies = filterset_instance._copied_filters
+        errors: dict[str, object] = {}
+        for bound in form:
+            if bound.field.disabled or _decodes_before_binding(copies.get(bound.name)):
+                continue
+            refusal = unstorable_text(bound.name, read_attr(bound, "data"))
+            if refusal is not None:
+                errors[bound.name] = [{"message": refusal.message, "code": refusal.code}]
+        if not errors:
+            if form.is_valid():
+                return
+            errors = form.errors.get_json_data()
         raise GraphQLError(
             "Invalid filter input",
-            extensions=coded_error_extensions(
-                FILTER_INVALID_ERROR_CODE,
-                errors=filterset_instance.form.errors.get_json_data(),
-            ),
+            extensions=coded_error_extensions(FILTER_INVALID_ERROR_CODE, errors=errors),
         )
 
     # ------------------------------------------------------------------

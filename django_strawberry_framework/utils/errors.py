@@ -20,6 +20,10 @@ write flavors):
 - ``integrity_error_field_errors`` - the save-time ``IntegrityError`` envelope;
 - ``join_error_path`` - dotted GraphQL error-path joining for nested
   flatteners;
+- ``unstorable_text`` + ``UnstorableText`` - the one refusal rule for input text
+  (a lone surrogate, an embedded NUL) and the record it answers, shared by the
+  write decode (``utils/write_values.py::unstorable_text_error``) and the filter
+  form validation (``filters/sets.py::FilterSet._validate_form_or_raise``);
 - ``null_field_error`` / ``empty_validation_error`` - the two leaves whose
   message + code pair was being re-typed by consumers of the module;
 - ``FIELD_ERROR_CODE_*`` - the ``FieldError.codes`` vocabulary, a public wire
@@ -35,15 +39,17 @@ flavor depends downward on this module.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import strawberry
 from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, ValidationError
+from django.core.validators import ProhibitNullCharactersValidator
 from django.db import models
 from django.utils.functional import Promise
 
 from . import truth
-from ._narrowing import is_char_wise, is_iterable
+from ._narrowing import dict_items, is_char_wise, is_dict, is_iterable, is_list, list_iter
+from .lazy import unwrap_lazy_object
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -71,6 +77,7 @@ __all__ = [
     "NON_FIELD_ERROR_KEY",
     "PAGINATION_INVALID_ERROR_CODE",
     "FieldError",
+    "UnstorableText",
     "build_error_key_map",
     "coded_error_extensions",
     "empty_validation_error",
@@ -82,6 +89,7 @@ __all__ = [
     "rekey_error_segment",
     "relation_field_error",
     "save_time_error_key_map",
+    "unstorable_text",
     "validation_error_to_field_errors",
 ]
 
@@ -554,3 +562,99 @@ def join_error_path(prefix: str, segment: str) -> str:
     normalized_prefix = truth.text(prefix)
     normalized_segment = truth.text(segment)
     return f"{normalized_prefix}.{normalized_segment}" if normalized_prefix else normalized_segment
+
+
+#: Django's all-backend NUL rule, the validator every ``forms.CharField`` and DRF
+#: ``CharField`` runs; its error is the one a refused NUL answers on every surface.
+_PROHIBIT_NULL_CHARACTERS = ProhibitNullCharactersValidator()
+
+
+class UnstorableText(NamedTuple):
+    """One refused input text leaf: its dotted path and the message and code it answers."""
+
+    path: str
+    message: str
+    code: str
+
+
+def unstorable_text(path: str, value: object) -> UnstorableText | None:
+    r"""Return the refusal for the first text leaf of ``value`` the package refuses, else ``None``.
+
+    A GraphQL ``String`` (and every string inside a list, input object or ``JSON``
+    value) can carry two kinds of text the package refuses before any database work:
+
+    - a lone UTF-16 surrogate code point (U+D800 via a JSON ``\ud800`` escape in the
+      request variables; a document literal cannot carry it, graphql-core refuses it as
+      a syntax error), which is not a Unicode scalar value, so every driver fails to
+      bind it (sqlite3 and psycopg both raise ``UnicodeEncodeError``). It answers the
+      ``invalid`` "Text contains invalid Unicode" refusal; the base ``str``'s
+      ``encode("utf-8")`` is the test.
+    - an embedded NUL (U+0000, a JSON ``\u0000`` escape), which PostgreSQL refuses in
+      every ``text`` / ``varchar`` / ``jsonb`` value (psycopg raises ``DataError``).
+      SQLite would store it, so this refusal is policy, not storability: Django's and
+      DRF's own all-backend rule, run through ``ProhibitNullCharactersValidator`` so
+      its message and code are the ones a ``forms.CharField`` or DRF ``CharField``
+      answers, and every surface answers the same on every backend.
+
+    Every other valid scalar value passes. Every text leaf is checked, not only a
+    top-level string: each element of a list and each key and value of a dict, at
+    any depth (an explicit stack, so a deeply nested ``JSON`` value cannot exhaust the
+    interpreter stack). The returned path joins ``path`` with each index or key
+    (``tags.1``, ``attributes.color``, ``rows.0.name``) through ``join_error_path``;
+    an unstorable dict KEY answers the dict's own path, since a segment holding the
+    key would echo the refused text. A Django lazy proxy (``SimpleLazyObject``) is
+    read as the object it stands for, and containers and strings through their base
+    ``list`` / ``dict`` / ``str`` slots, so a subclass's overridden iteration or
+    conversion cannot hide a leaf. Any other leaf (an int, ``None``, an enum member,
+    an upload) is storable here.
+    """
+    pending: list[tuple[str, object]] = [(path, value)]
+    while pending:
+        current_path, popped = pending.pop()
+        current = unwrap_lazy_object(popped)
+        if truth.is_instance(current, str):
+            refusal = _unstorable_leaf(current_path, truth.text(current))
+            if refusal is not None:
+                return refusal
+        elif is_list(current):
+            pending.extend(
+                reversed(
+                    [
+                        (join_error_path(current_path, str(index)), element)
+                        for index, element in enumerate(list_iter(current))
+                    ],
+                ),
+            )
+        elif is_dict(current):
+            # Each key is a text leaf keyed to the dict, checked before its value.
+            pending.extend(
+                reversed(
+                    [
+                        entry
+                        for key, item in dict_items(current)
+                        for entry in (
+                            (current_path, key),
+                            (join_error_path(current_path, truth.text(key)), item),
+                        )
+                    ],
+                ),
+            )
+    return None
+
+
+def _unstorable_leaf(path: str, text: str) -> UnstorableText | None:
+    """Answer one exact-``str`` text leaf's refusal keyed to ``path``, or ``None`` if storable."""
+    try:
+        _ = text.encode("utf-8")
+    except UnicodeEncodeError:
+        return UnstorableText(
+            path,
+            "Text contains invalid Unicode (unpaired surrogate code points).",
+            FIELD_ERROR_CODE_INVALID,
+        )
+    try:
+        _PROHIBIT_NULL_CHARACTERS(text)
+    except ValidationError as exc:
+        (message,) = exc.messages
+        return UnstorableText(path, message, truth.text(exc.code))
+    return None

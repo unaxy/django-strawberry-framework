@@ -90,7 +90,8 @@ class ShelfFilter(FilterSet):
     queryset (every branch but the ``city="restricted"`` ones) answers "Select a valid
     choice". ``home_branch`` takes one branch pk, ``home_branches`` a list,
     ``home_branch_named`` one branch ``name`` (its ``to_field_name``),
-    ``home_branch_in`` a list through the ``BaseInFilter`` wrapper, and
+    ``home_branch_in`` a list through the ``BaseInFilter`` wrapper,
+    ``home_branches_named`` a list of branch names, and
     ``home_branch_for_request`` one branch pk typed from the ``branch`` relation,
     since its callable queryset has no model until a request arrives.
     """
@@ -108,6 +109,11 @@ class ShelfFilter(FilterSet):
         to_field_name="name",
     )
     home_branch_in = ModelChoiceInFilter(field_name="branch", queryset=_unrestricted_branches())
+    home_branches_named = ModelMultipleChoiceFilter(
+        field_name="branch",
+        queryset=_unrestricted_branches(),
+        to_field_name="name",
+    )
     home_branch_for_request = ModelChoiceFilter(
         field_name="branch",
         # basedpyright: types-django-filter types ``queryset`` as a ``QuerySet``;
