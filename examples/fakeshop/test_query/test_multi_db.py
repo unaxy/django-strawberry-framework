@@ -1355,6 +1355,61 @@ def test_mutation_validation_envelope_rolls_back_on_the_write_alias() -> None:
     assert product_models.Item.objects.using("default").get(pk=90011).name == "pin-item-default"
 
 
+class _SessionStoreToShardBRouter:
+    """Route ``sessions.Session`` reads and writes to ``shard_b``; everything else stays default.
+
+    The session store on its own alias: the write pins ``default``, the user and
+    permission tables stay there too, and only the lazy request user's session
+    load reads ``shard_b``.
+    """
+
+    def db_for_read(self, model: type[Model], **_hints: object) -> str | None:
+        return "shard_b" if model._meta.label == "sessions.Session" else None
+
+    def db_for_write(self, model: type[Model], **_hints: object) -> str | None:
+        return "shard_b" if model._meta.label == "sessions.Session" else None
+
+
+@pytest.mark.usefixtures("_project_schema")
+@pytest.mark.django_db(databases=["default", "shard_b"], transaction=True)
+def test_mutation_authorizes_a_session_stored_on_its_own_alias() -> None:
+    """The authorization phase may read a session store the router keeps on its own alias.
+
+    ``createCategory`` locates no row, so the lazy request user is first resolved
+    inside the authorization phase, and resolving it loads the session from
+    ``shard_b``. That alias is in the auth set, so the read runs inside the
+    read-only rolled-back barrier and the write on ``default`` succeeds.
+    """
+    create_users(1)
+    user = User.objects.get(username="staff_1")
+    user.user_permissions.add(
+        Permission.objects.get(codename="add_category", content_type__app_label="products"),
+    )
+
+    with override_settings(
+        ROOT_URLCONF=__name__,
+        DATABASE_ROUTERS=[_SessionStoreToShardBRouter()],
+    ):
+        client = Client()
+        client.force_login(User.objects.get(pk=read_attr(user, "pk")))
+        clear_url_caches()
+        try:
+            res = TestClient(client=client).query(
+                "mutation($d: CategoryInput!) { createCategory(data: $d) { "
+                "node { name } errors { field messages } } }",
+                variables={"d": {"name": "zzz_session_alias_cat"}},
+            )
+        finally:
+            clear_url_caches()
+
+    assert res.data is not None
+    payload = json_object(res.data, "createCategory")
+    assert payload["errors"] == []
+    assert json_at(payload, "node", "name") == "zzz_session_alias_cat"
+    created = product_models.Category.objects.using("default")
+    assert created.filter(name="zzz_session_alias_cat").exists()
+
+
 # ---------------------------------------------------------------------------
 # Serializer-flavor write-alias pinning (the DRF hardening pass)
 # ---------------------------------------------------------------------------

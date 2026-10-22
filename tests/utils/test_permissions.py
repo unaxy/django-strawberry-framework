@@ -15,6 +15,7 @@ import strawberry
 from django.contrib.auth import get_user_model
 from django.db.models import Model
 from django.http import HttpRequest
+from django.test import modify_settings
 from graphql import GraphQLError
 from typing_extensions import override
 
@@ -1432,9 +1433,14 @@ def test_resolve_auth_aliases_tracks_a_divergent_router_read_answer(
 
     class _AuthToShardRouter:
         def db_for_read(self, model: type[Model], **_hints: object) -> str | None:
-            # Route the auth app (and its perm/contenttype companions) to a
-            # non-default alias; everything else keeps the default.
-            if model._meta.app_label in {auth_app_label, "auth", "contenttypes"}:
+            # Route the auth app (and its perm/contenttype/session companions)
+            # to a non-default alias; everything else keeps the default.
+            if model._meta.app_label in {
+                auth_app_label,
+                "auth",
+                "contenttypes",
+                "sessions",
+            }:
                 return "shard_b"
             return None
 
@@ -1443,6 +1449,31 @@ def test_resolve_auth_aliases_tracks_a_divergent_router_read_answer(
 
     settings.DATABASE_ROUTERS = [_AuthToShardRouter()]
     assert resolve_auth_aliases() == frozenset({"shard_b"})
+
+
+@pytest.mark.django_db
+def test_resolve_auth_aliases_includes_the_session_store_alias_while_sessions_is_installed(
+    settings: pytest_django.Settings,
+) -> None:
+    """A router keeping ``sessions.Session`` on its own alias adds it to the auth set.
+
+    Resolving the lazy request user loads a database-backed session, so the
+    session store's read alias joins the auth aliases. With
+    ``django.contrib.sessions`` uninstalled the model is skipped and only the
+    other auth models' alias remains.
+    """
+
+    class _SessionStoreRouter:
+        def db_for_read(self, model: type[Model], **_hints: object) -> str | None:
+            return "session_store" if model._meta.label == "sessions.Session" else None
+
+        def db_for_write(self, _model: type[Model], **_hints: object) -> None:
+            return None
+
+    settings.DATABASE_ROUTERS = [_SessionStoreRouter()]
+    assert resolve_auth_aliases() == frozenset({"default", "session_store"})
+    with modify_settings(INSTALLED_APPS={"remove": ["django.contrib.sessions"]}):
+        assert resolve_auth_aliases() == frozenset({"default"})
 
 
 def test_resolve_auth_aliases_skips_uninstalled_models() -> None:

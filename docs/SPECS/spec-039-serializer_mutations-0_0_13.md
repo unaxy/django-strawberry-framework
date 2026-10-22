@@ -1789,8 +1789,8 @@ The guard grants exactly **one** narrow, phase-scoped exception: a dedicated
 **authorization phase** (`::authorization_phase`) wraps only the single
 permission-evaluation call and permits statements on the explicitly identified **auth
 aliases** ([`utils/permissions.py`][utils-permissions]`::resolve_auth_aliases` — the
-router's read answer for the user model, `auth.Permission` / `Group`, and
-`contenttypes`), so a divergent read/write router that keeps auth off the write alias can
+router's read answer for the user model, `auth.Permission` / `Group`, `contenttypes`, and
+`sessions.Session`, which resolving the lazy user reads), so a divergent read/write router that keeps auth off the write alias can
 still resolve the user + permission set. That boundary is **transactional and
 database-enforced, never lexical**: each non-pinned auth alias runs inside a
 `transaction.atomic` put in a **backend-enforced read-only mode**

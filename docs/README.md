@@ -437,6 +437,8 @@ Relay-Node target takes its `GlobalID` (a malformed or wrong-model id is an `inv
 an uncoercible pk, a missing row, and a row the target's `get_queryset` hides are the same
 `not_found` `FieldError` on `id`.
 
+A write runs on one database alias, and the permission check of a mutation with `permission_classes` may also read the aliases your router sends the auth models to (the user model, `auth.Permission` / `Group`, `contenttypes` and `sessions.Session`), as a primary/replica router does. Each such alias is read inside a transaction the database itself holds read-only and that is always rolled back, so a permission backend cannot write there. That read-only mode exists on PostgreSQL and SQLite only: on any other vendor, such a router makes every mutation with `permission_classes` fail with a `ConfigurationError`, and the fix is to route auth and the write to the same alias. On PostgreSQL it costs one read-only, rolled-back transaction per auth alias per mutation; `permission_classes = []` skips the check and the transaction. Any other read outside the write alias and the auth aliases is refused. The full rule is in the barrier paragraph of [`GLOSSARY.md#serializermutation`][glossary-serializermutation], and it applies to every write flavor.
+
 ### Model mutations
 
 ```python

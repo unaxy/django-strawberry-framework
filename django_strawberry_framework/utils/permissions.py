@@ -313,8 +313,9 @@ def resolve_auth_aliases() -> frozenset[str]:
     a divergent read/write router that keeps auth OFF the write alias is not
     rejected as a cross-alias read. Derived from the router's own read answer for
     the auth models actually queried during permission evaluation - the user
-    model, ``auth.Permission`` / ``auth.Group``, and
-    ``contenttypes.ContentType`` - so it tracks whatever alias each deployment
+    model, ``auth.Permission`` / ``auth.Group``, ``contenttypes.ContentType``,
+    and ``sessions.Session`` (resolving the lazy request user loads a
+    database-backed session from there) - so it tracks whatever alias each deployment
     routes auth to (``default`` in the common single-database case). A model the
     deployment does not install is skipped; an empty result grants nothing. No
     pre-guard permission-cache warming is needed: the authorization phase
@@ -332,6 +333,7 @@ def resolve_auth_aliases() -> frozenset[str]:
         _safe_get_model("auth", "Permission"),
         _safe_get_model("auth", "Group"),
         _safe_get_model("contenttypes", "ContentType"),
+        _safe_get_model("sessions", "Session"),
     ]
     aliases = {router.db_for_read(model) for model in candidates if model is not None}
     aliases.discard(None)
