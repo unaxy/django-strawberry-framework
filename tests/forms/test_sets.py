@@ -1844,6 +1844,80 @@ def test_excluded_choice_field_admitting_no_column_value_still_binds() -> None:
     assert slots == {"title"}
 
 
+class _BookGenreStatusForm(forms.ModelForm[library_models.Book]):
+    """``circulation_status`` declared as a ``Genre`` choice keyed by name: a relation field."""
+
+    circulation_status = forms.ModelChoiceField(
+        queryset=library_models.Genre.objects.all(),
+        to_field_name="name",
+        required=False,
+    )
+
+    class Meta:
+        model = library_models.Book
+        fields = ("title", "circulation_status")
+
+
+def _book_t() -> type[DjangoType]:
+    class BookT(DjangoType):
+        class Meta:
+            model = library_models.Book
+            fields = ("id", "title")
+            primary = True
+
+    return BookT
+
+
+def test_update_over_a_field_of_another_kind_than_its_column_fails_finalize() -> None:
+    """An update binds every declared field, so an excluded relation field over text refuses.
+
+    The update rebinds the stored status as a ``Genre`` name on every request; the
+    refusal is raised by ``finalize_django_types()``, naming the form and the column.
+    """
+    _book_t()
+
+    class RetitleBook(DjangoModelFormMutation):
+        class Meta:
+            form_class = _BookGenreStatusForm
+            operation = "update"
+            exclude = ("circulation_status",)
+
+    assert RetitleBook._mutation_meta.form_class is _BookGenreStatusForm
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "Form _BookGenreStatusForm field 'circulation_status' (ModelChoiceField) is a "
+            "single-relation field over the scalar column Book.circulation_status",
+        ),
+    ):
+        finalize_django_types()
+
+
+def test_create_excluding_a_field_of_another_kind_binds_without_reading_its_rows() -> None:
+    """A create leaving the field out binds; the shape identity never reads its queryset.
+
+    The identity walks the whole basis, the excluded relation field over a choice column
+    included, and a ``ModelChoiceField``'s choices are its queryset's rows: this test has
+    no database access, so a read would fail the bind.
+    """
+    _book_t()
+
+    class AddBook(DjangoModelFormMutation):
+        class Meta:
+            form_class = _BookGenreStatusForm
+            operation = "create"
+            exclude = ("circulation_status",)
+
+    finalize_django_types()
+
+    assert AddBook._input_class is not None
+    slots = {
+        field.python_name
+        for field in get_object_definition(AddBook._input_class, strict=True).fields
+    }
+    assert slots == {"title"}
+
+
 def test_two_distinct_form_classes_sharing_name_still_collide() -> None:
     """Two DIFFERENT form classes with one ``__name__`` can never dedupe (documented).
 

@@ -104,7 +104,7 @@ def convert_with_mro(
        ``handler(field)`` and returns its result. Order is load-bearing: a
        relation / file / multi-choice field subclasses a scalar field whose
        registry entry would otherwise win, so the more-specific kind MUST be
-       checked first (``ModelChoiceField`` before ``ChoiceField`` -> ``str``;
+       checked first (``MultipleChoiceField`` before ``ChoiceField`` -> ``str``;
        DRF ``PrimaryKeyRelatedField`` / ``FileField`` before any scalar). A
        precheck handler may return ``MRO_CONTINUE`` to keep walking (the
        bare-``forms.Field`` exact-type pattern, and filter normalize skipping

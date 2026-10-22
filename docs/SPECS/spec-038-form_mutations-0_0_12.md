@@ -179,7 +179,8 @@ package-internal; Slice 4 is the live consumer surface.
     `CharField` parent types a JSON payload as `String`),
     `ModelChoiceField` → the target's id, `ModelMultipleChoiceField` /
     `MultipleChoiceField` → `list[<id>]` / `list[str]`, `forms.FileField` /
-    `forms.ImageField` → [`Upload`][glossary-upload-scalar]). **Fail-loud dispatch:** the fallthrough default **raises** — supported classes are registered
+    `forms.ImageField`, or any field rendered with a `forms.FileInput`, →
+    [`Upload`][glossary-upload-scalar]). **Fail-loud dispatch:** the fallthrough default **raises** — supported classes are registered
     individually (subclasses map via MRO), bare `forms.Field` is an explicit exact-type
     special case → `str`, and **no base-`forms.Field` catch-all** is registered (which
     would shadow the raise), so a custom `forms.Field` subclass with no supported
@@ -188,7 +189,9 @@ package-internal; Slice 4 is the live consumer surface.
     converts, reuse the [Scalar field conversion][glossary-scalar-field-conversion] /
     [Choice enum generation][glossary-choice-enum-generation] registry rather than
     re-deriving the scalar; a choice field whose static choices admit fewer of a choice
-    column's values publishes a generated enum of the admitted column values instead.
+    column's values publishes a generated enum of the admitted column values instead,
+    and a field whose kind (`form_field_kind`) disagrees with its backing column's, other
+    than a scalar field over a relation column, is a `ConfigurationError`.
     Record, per generated input field, a
     [`utils/inputs.py`][utils-inputs]`::InputFieldSpec` — the one reverse-map record
     type every write flavor shares, whose `target_name` on this path is the form's
@@ -950,7 +953,10 @@ Rationale companion: [Decision 6][rationale-d6].
 
 The input type derives from the **form's declared fields**
 (`form_class.base_fields`, the stable class-level set — schema-time field discovery
-above), not the model's editable columns. [`forms/converter.py`][forms-converter]
+above), not the model's editable columns: the input carries one field per form field the
+operation's input keeps; a column-backed field is typed by its column and must share its
+kind, except a scalar field over a relation column (below).
+[`forms/converter.py`][forms-converter]
 ships a `convert_form_field(field)` registry (the [graphene-django parity
 shape][upstream-forms-converter]) returning each form field's Strawberry annotation +
 required-ness from `field.required`:
@@ -982,8 +988,25 @@ required-ness from `field.required`:
   followed to the column it references — reusing the [`mutations/inputs.py`][mutations-inputs]
   `relation_input_annotation` strategy); `ModelMultipleChoiceField` →
   `list[<id>]`.
-- `forms.FileField` / `forms.ImageField` → the [`Upload`][glossary-upload-scalar]
-  scalar ([`spec-037`][spec-037]).
+- `forms.FileField` / `forms.ImageField`, and any field whose widget is a `forms.FileInput`
+  (`ClearableFileInput` included, the widget whose `value_from_datadict` reads `files`: a
+  custom field rendered with `ClearableFileInput`, a `CharField` with `FileInput`) → the
+  [`Upload`][glossary-upload-scalar] scalar ([`spec-037`][spec-037]).
+
+**A column-backed field keeps its column's kind.** A `ModelForm` field named after a model
+column is typed and decoded by that column
+([`mutations/inputs.py`][mutations-inputs]`::model_column_write_kind`: a relation id, an
+`Upload`, a scalar), while the bound form reads it by the field's own kind
+(`django_strawberry_framework/forms/converter.py::form_field_kind`), so the two must agree. A
+relation form field over a column that is no relation or over a relation of the other
+cardinality, a file field (a `FileField`, or a field with a `forms.FileInput` widget) over a
+column that is no file column, and a scalar field over a file column are a schema-build [`ConfigurationError`][glossary-configurationerror]
+(`django_strawberry_framework/forms/inputs.py::require_column_kind_agreement`) on any field
+the operation binds: every declared field for an update, whose reconstruction rebinds the
+fields the input leaves out, and the input's own fields for a create. A scalar field over a
+relation column agrees: it takes the relation's id input, and the decode hands it the
+visible row's key, as an HTML form posts it, for the form to resolve (a `clean_<field>`
+returning the row).
 
 **The related model for a relation field's id basis.** A `ModelForm` relation
 field has a backing column, so the related model (and its primary
@@ -1029,11 +1052,9 @@ writes a list); a field admitting no non-empty value the column lists is a
 passes the form). The input is built once, at schema
 build, from the field basis, so callable choices (re-evaluated on every read) and choices
 assigned in `__init__` are request-time state: they keep the column's enum and the bound form
-refuses a value outside its request-time choices. A `ModelChoiceField` keeps the column's
-type too, even over a scalar choice column: its choices are its queryset's rows, read per
-request. The narrowing covers the values a client sends; a partial update validates an
-omitted narrowed field's stored value (reconstructed from the row, Decision 8) against the
-form's choices, as Django's form does, so a row holding a value the form does not admit
+refuses a value outside its request-time choices. The narrowing covers the values a client
+sends; a partial update validates an omitted narrowed field's stored value (reconstructed
+from the row, Decision 8) against the form's choices, as Django's form does, so a row holding a value the form does not admit
 cannot be partially updated through that form (a field-keyed `invalid_choice` error,
 nothing written) until the request sends an admitted replacement. A **plain
 `Form`** field with no model column (a `captcha`, a `confirm_email`) has no read-side
@@ -1916,6 +1937,21 @@ Rationale companion: [Decision 14][rationale-d14].
   choices, as Django's form does: a row holding a value the form does not admit (a
   `checked_out` book through `BookRepairDeskForm`) is refused field-keyed with nothing
   written unless the request sends an admitted value.
+- **A declared field of another kind than its column.** A `ModelChoiceField` over a text
+  column would store the `str()` of any row its queryset holds, one the target's
+  visibility query hides included, and a file field over a text column reads `files`, so
+  it never receives the text the input carries;
+  every such pairing, other than a scalar field over a relation column, is a schema-build
+  [`ConfigurationError`][glossary-configurationerror], a narrowed-out field included on an
+  update ([Decision 7](#decision-7--form-field--strawberry-input-mapping-the-form-is-the-input-source-of-truth)).
+  A field is a file field by its class (`FileField` / `ImageField`) or by its widget's real
+  type (a `forms.FileInput`, `ClearableFileInput` included, read without running consumer
+  widget code): a custom field rendered with `ClearableFileInput` agrees with a file
+  column, and with no column it takes an `Upload`, since its form reads it from `files`,
+  which a `String` input never reaches. `needs_multipart_form` is not read: it only asks
+  for a multipart form, and a text widget setting it still reads `data` and stays a
+  `String`. A custom widget that reads `files` without subclassing `forms.FileInput` reads
+  as a scalar field; subclass `forms.FileInput` for it.
 - **Relation visibility is not delegated to the form's queryset.** A
   `ModelChoiceField`'s default queryset is `Category.objects.all()` (not
   request-scoped), so the decode type- and visibility-checks the id through the
@@ -2162,14 +2198,17 @@ behavior reachable through `/graphql/`, package tests own internals.
 - **Package-internal** ([`tests/forms/`][test-forms]):
   - `test_converter.py` — each supported form-field class → annotation +
     required-ness; `ModelChoiceField` / `ModelMultipleChoiceField` id mapping
-    (Relay-`GlobalID` vs raw pk); `forms.FileField` → [`Upload`][glossary-upload-scalar];
+    (Relay-`GlobalID` vs raw pk); `forms.FileField`, and a field rendered with a
+    `forms.FileInput`, → [`Upload`][glossary-upload-scalar];
     **the [`utils/inputs.py`][utils-inputs]`::InputFieldSpec` reverse-map record**
     (`category_id` / `categoryId` → `category` / `relation_single`; a `file`-kind flag for an
     `Upload` field); field discovery from **`form_class.base_fields`** (a form whose
     `__init__` requires kwargs still yields a shape); and **the fail-loud dispatch:
     a bare `forms.Field` → `str`, a known subclass (`EmailField`) maps, but a
     custom `class CustomField(forms.Field)` raises [`ConfigurationError`][glossary-configurationerror]**
-    (the catch-all-shadowing regression test).
+    (the catch-all-shadowing regression test); `form_field_kind` classifies by class and
+    widget's real type and never raises, a field the converter refuses included, and a
+    text widget asking for a multipart form is no file widget.
   - `test_inputs.py` — the **two generated inputs** (`<FormClass>Input` with
     `field.required` requiredness for create; `<FormClass>PartialInput` — model-backed
     fields optional, **a required non-model extra field still required**); fields
@@ -2181,7 +2220,21 @@ behavior reachable through `/graphql/`, package tests own internals.
     the read enum, `BLANK` follows `required`, an integer column keeps its `int` values, an
     `ArrayField` narrows its elements, a grouped column binds a narrowed field and refuses
     one admitting every value, and a disjoint field and a `MultipleChoiceField` over a
-    single-value column are refused. **Shape identity:**
+    single-value column are refused. **Column kind agreement:** a relation field over a
+    scalar, file or other-cardinality relation column, a file field over a scalar or
+    relation column and a scalar field over a file column are refused on both inputs, a
+    narrowed-out field on an update but not on a create, while a scalar field over a
+    relation column takes the relation's id input, a custom field with a `FileInput`
+    widget builds over a file column, or as an `Upload` with no column, and a text widget
+    asking for a multipart form stays a `String`
+    (`tests/forms/test_inputs.py::test_field_of_another_kind_than_its_column_is_refused`,
+    `::test_update_input_refuses_a_kind_mismatch_on_a_narrowed_out_field`,
+    `::test_create_input_admits_a_kind_mismatch_on_a_narrowed_out_field`,
+    `::test_scalar_field_over_relation_column_takes_the_relation_id`,
+    `::test_field_with_a_file_widget_over_a_file_column_builds`,
+    `::test_field_with_a_file_widget_maps_to_upload`,
+    `::test_field_with_a_multipart_text_widget_stays_a_string`,
+    `::test_field_with_a_multipart_text_widget_over_a_text_column_builds`). **Shape identity:**
     the same form with two different `Meta.fields` narrowings → two **distinct**
     generated names; two repeats of the **same** `(form_class, op, effective set)` →
     **dedupe** (one materialized class); two **different** form classes with the
@@ -2200,7 +2253,9 @@ behavior reachable through `/graphql/`, package tests own internals.
     input dedupe via the `"form"` sentinel**; a stateful `get_form_fields` hook narrowing a
     choice field differently per class → the materialize collision (the narrowed values are
     part of the basis content identity); registration; phase-2.5 binding (both
-    paths); the no-registered-primary-type error for `DjangoModelFormMutation`.
+    paths); the no-registered-primary-type error for `DjangoModelFormMutation`; an update
+    leaving out a field of another kind than its column fails `finalize_django_types()`,
+    and a create leaving it out binds without reading its queryset.
   - `test_resolvers.py` — create / update happy paths; `form.is_valid()` failure →
     envelope (null object), incl. a `NON_FIELD_ERRORS` `clean()` error → `"__all__"`;
     **the decode split** — `categoryId` → `{"category": pk}` in `data=`, an `Upload`
@@ -2223,9 +2278,11 @@ behavior reachable through `/graphql/`, package tests own internals.
     M2M or omitted from an update, or swaps its queryset to another model, is a
     request-time `ConfigurationError` with nothing written, while a same-model queryset,
     any pk spelling, a name-for-attname respelling and a subclass queryset bind the
-    decoded row
+    decoded row, and a bound field whose queryset `get_form` clears is left to the form's
+    own validation
     (`tests/forms/test_resolvers.py::test_bound_choice_disagreeing_with_the_decode_is_refused_before_validation`,
-    `::test_bound_choice_agreeing_with_the_decode_links_the_decoded_row`);
+    `::test_bound_choice_agreeing_with_the_decode_links_the_decoded_row`,
+    `::test_queryset_less_bound_choice_is_left_to_the_form`);
     a row whose stored key is `NULL` is the relation error, single and multi
     (`tests/forms/test_resolvers.py::test_decode_form_relation_refuses_a_row_whose_stored_key_is_null`);
     **write-time `IntegrityError`** — a valid
@@ -2373,7 +2430,9 @@ The completion contract.
    `form_class.base_fields` (bare string / duplicate / unknown name / empty set →
    `ConfigurationError`), and a narrowing that drops a required form field
    **raises** — any required field on `create`, a required **column-less** field on
-   `update` — unless `get_form_kwargs` / `get_form` is overridden; all materialized as module
+   `update` — unless `get_form_kwargs` / `get_form` is overridden; a field the operation
+   binds whose kind disagrees with its column's, other than a scalar field over a relation
+   column, **raises**; all materialized as module
    globals ([Decision 7](#decision-7--form-field--strawberry-input-mapping-the-form-is-the-input-source-of-truth)).
 
 **Slice 2 — the two base classes**

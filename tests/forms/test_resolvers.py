@@ -4085,33 +4085,29 @@ def test_bound_choice_agreeing_with_the_decode_links_the_decoded_row(
 
 
 @pytest.mark.django_db
-def test_model_choice_field_over_a_scalar_column_is_bound_unchecked() -> None:
-    """A model-choice field over a column that is no relation takes a scalar, never an id.
+def test_queryset_less_bound_choice_is_left_to_the_form() -> None:
+    """A bound model-choice field with no queryset looks nothing up, so the form decides.
 
-    ``note`` is a text column, so its input is the text the form looks up (a patron's
-    name), not a relation id: no decode binds a key for it, and the bound form stores
-    the patron it resolves (``str(patron)``, its name).
+    ``get_form`` clears the bound ``patron`` field's queryset: the agreement check has no
+    model to compare, and the form's own validation refuses the cleared relation as
+    required, with nothing written.
     """
 
-    class LoanNoteForm(forms.ModelForm[library_models.Loan]):
-        note = forms.ModelChoiceField(
-            queryset=library_models.Patron.objects.all(),
-            to_field_name="name",
-        )
+    def clear_queryset(form: forms.BaseForm) -> None:
+        patron = form.fields["patron"]
+        assert isinstance(patron, forms.ModelChoiceField)
+        patron.queryset = None
 
-        class Meta:
-            model = library_models.Loan
-            fields = ("note",)
-
-    schema, loan_type = _update_loan_schema(LoanNoteForm)
+    schema, loan_type = _update_loan_schema(
+        _loan_patron_form(class_key=None, retune=None),
+        get_form_retune=clear_queryset,
+    )
     loan, visible, _hidden = _loan_rows()
     res = schema.execute_sync(
-        "mutation($id: ID!, $d: LoanNoteFormPartialInput!){ updateLoan(id:$id, data:$d){ "
-        "node{ note } errors{ field } } }",
-        variable_values={
-            "id": global_id_for(loan_type, saved_pk(loan)),
-            "d": {"note": visible.name},
-        },
+        _UPDATE_LOAN,
+        variable_values={"id": global_id_for(loan_type, saved_pk(loan)), "d": {"patronId": None}},
     )
     assert res.errors is None, res.errors
-    assert res.data == {"updateLoan": {"node": {"note": visible.name}, "errors": []}}
+    assert res.data == {"updateLoan": {"node": None, "errors": [{"field": "patronId"}]}}
+    loan.refresh_from_db()
+    assert saved_pk(loan.patron) == saved_pk(visible)
