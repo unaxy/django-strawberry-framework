@@ -954,11 +954,13 @@ aggregate fakeshop default surface under the one-declaration-per-process rule
 **`DjangoModelPermission` is incompatible with the model-less auth fields — by
 documentation, not a factory-time guard.** Passing
 `login_mutation(permission_classes=[DjangoModelPermission])` (the *write* family's
-default class) raises at **request time**, not deny: its `has_permission` reads
-`mutation._resolve_model(mutation.Meta)` and `_OPERATION_PERMISSION_ACTION[operation]`
-([`mutations/permissions.py`][mutations-permissions]), and the holder has no `Meta`
-model and no `"login"` / `"logout"` action mapping. This is the exact hazard the
-package already documents for the model-less plain form
+default class) raises at **request time**, not deny: its `has_permission` reads the
+model the mutation validated at declaration
+([`write_mixins.py`][write-mixins]`::backing_model_of`) and
+`_OPERATION_PERMISSION_ACTION[operation]`
+([`mutations/permissions.py`][mutations-permissions]), and the holder's snapshot
+carries no model and no `"login"` / `"logout"` action mapping. This is the exact
+hazard the package already documents for the model-less plain form
 ([`DenyAll`][mutations-permissions] #"it would raise at request time, not deny"), so
 the auth surface follows the same posture: document the incompatibility (model-permission
 classes need a model + a create/update/delete operation; auth fields want a custom

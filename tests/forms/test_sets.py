@@ -803,12 +803,12 @@ def test_plain_form_permission_classes_explicit_opt_out() -> None:
 def test_plain_form_rejects_model_permission_at_class_creation() -> None:
     """``DjangoModelPermission`` on a model-less plain form is rejected at class creation.
 
-    ``DjangoModelPermission.has_permission`` reads the mutation's model via
-    ``mutation._resolve_model(mutation.Meta)`` and maps the operation to an
-    ``add`` / ``change`` / ``delete`` codename. A plain ``DjangoFormMutation`` is
-    NOT a ``DjangoMutation`` subclass (it has no ``_resolve_model``) and carries the
-    ``"form"`` operation sentinel, so the class would only surface the mismatch as a
-    raw ``AttributeError`` at REQUEST time - the exact incompatibility ``DenyAll``
+    ``DjangoModelPermission.has_permission`` reads the model the mutation validated
+    at declaration and maps the operation to an ``add`` / ``change`` / ``delete``
+    codename. A plain ``DjangoFormMutation`` validates no model (its snapshot's
+    ``model`` is ``None``) and carries the ``"form"`` operation sentinel, so the
+    class would only surface the mismatch as a raw error at REQUEST time (never a
+    deny) - the exact incompatibility ``DenyAll``
     documents and the default avoids. The plain-form ``_validate_meta`` rejects it at
     class creation instead (the package's fail-loud contract), naming the model-backed
     base and the two valid plain-form postures. A subclass of ``DjangoModelPermission``

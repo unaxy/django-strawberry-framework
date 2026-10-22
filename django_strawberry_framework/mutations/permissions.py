@@ -26,11 +26,11 @@ across read and write.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import call_method, read_attr, require
+from django_strawberry_framework.utils._narrowing import call_method, read_attr
 from django_strawberry_framework.utils.permissions import request_from_info
 from django_strawberry_framework.utils.querysets import reject_async_in_sync_context
 
@@ -47,17 +47,6 @@ if TYPE_CHECKING:
     from django_strawberry_framework.forms.sets import DjangoFormMutation
 
     from .sets import DjangoMutation
-
-    class _ModelResolvingMutation(Protocol):
-        """An instance of a concrete model-backed mutation class ``DjangoModelPermission`` reads.
-
-        The class carries its nested ``Meta`` and the ``_resolve_model`` seam.
-        """
-
-        Meta: type
-
-        @classmethod
-        def _resolve_model(cls, meta: type[object]) -> type[models.Model] | None: ...
 
     class _WritePermission(Protocol):
         """An instance of a validated ``Meta.permission_classes`` entry.
@@ -201,7 +190,7 @@ class DjangoModelPermission:
     def has_permission(
         self,
         info: Info,
-        mutation: type[_ModelResolvingMutation],
+        mutation: type[DjangoMutation],
         operation: str,
         # basedpyright: consumer hook: a narrower base fails an override typing its own data
         data: Any,  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401 - consumer hook; an override narrows it
@@ -210,23 +199,24 @@ class DjangoModelPermission:
     ) -> bool:
         """Return whether the request user holds the model perm for ``operation``.
 
-        ``mutation`` is the ``DjangoMutation`` subclass; its resolved model is
-        read via ``mutation._resolve_model(mutation.Meta)`` (the shared
-        ``_resolve_model`` seam), so the form / serializer flavors that resolve a
-        model without ``Meta.model`` authorize through the same default. ``data``
-        and ``instance`` are accepted for the spec signature (an object-level
-        subclass can inspect them); the default model-permission check ignores
-        them.
+        ``mutation`` is the ``DjangoMutation`` subclass. The checked model is the
+        one the class validated at declaration (``write_mixins.py::backing_model_of``
+        over its sealed ``_mutation_meta``), the model every write-side read of the
+        pipeline uses; the form / serializer flavors resolve it through their
+        ``_resolve_model`` override at class creation, so they authorize through
+        the same default. ``data`` and ``instance`` are accepted for the spec
+        signature (an object-level subclass can inspect them); the default
+        model-permission check ignores them.
         """
         del data, instance  # accepted for the spec signature; unused by the model check.
         request = request_from_info(info, family_label="DjangoMutation")
         user = read_attr(request, "user", None)
         if user is None:
             return False
-        # Trusted, not checked: ``Meta`` is the nested declaration class. Class-creation
-        # validation already required the seam to resolve a model from it.
-        meta = require(truth.static_attr(mutation, "Meta"), truth.is_type)
-        model = cast("type[models.Model]", mutation._resolve_model(meta))
+        # Deferred: ``write_mixins`` imports this module at module scope for the default class.
+        from django_strawberry_framework.write_mixins import backing_model_of  # noqa: PLC0415 - import cycle
+
+        model = backing_model_of(mutation._mutation_meta)
         action = _OPERATION_PERMISSION_ACTION[operation]
         codename = f"{model._meta.app_label}.{action}_{model._meta.model_name}"
         # ``user.has_perm`` is sync Django auth; an awaitable / non-bool return
@@ -244,8 +234,8 @@ class DenyAll:
 
     A plain ``DjangoFormMutation`` has no model, so the
     ``DjangoModelPermission`` default cannot apply to it: that class reads the
-    model via ``mutation._resolve_model(mutation.Meta)`` and maps the operation to
-    an ``add`` / ``change`` / ``delete`` codename, neither of which a model-less
+    model the mutation validated at declaration and maps the operation to an
+    ``add`` / ``change`` / ``delete`` codename, neither of which a model-less
     ``"form"`` mutation provides (it would raise at request time, not deny). So an
     *unset* ``Meta.permission_classes`` on a plain form installs this class
     instead (spec-038 Decision 11): it **denies every request**, keeping the

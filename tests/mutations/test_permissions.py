@@ -24,14 +24,18 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Generator, Iterator
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar, NoReturn, Protocol
+from typing import NoReturn
 
 import pytest
 import strawberry
 from apps.products import models as product_models
+from django.apps import apps
+from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.base_user import AbstractBaseUser
 from django.contrib.auth.models import AnonymousUser, Permission, User
+from django.db.models import Model
+from django.test import override_settings
 from strawberry import relay
 from strawberry.types import ExecutionResult
 from typing_extensions import override
@@ -59,14 +63,6 @@ from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._idioms import saved_pk
 from tests._info import make_info
 
-if TYPE_CHECKING:
-    from django_strawberry_framework.mutations.permissions import _ModelResolvingMutation
-
-    class _CreateItemMutation(_ModelResolvingMutation, Protocol):
-        """A bound create mutation class: what the permission seam reads."""
-
-        _mutation_meta: ClassVar[_ValidatedMutationMeta]
-
 
 @pytest.fixture(autouse=True)
 def _isolate_registry() -> Iterator[None]:
@@ -85,7 +81,7 @@ def _info_for(user: object) -> strawberry.Info[object, object]:
     return make_info(context=SimpleNamespace(request=SimpleNamespace(user=user)))
 
 
-def _create_item_mutation() -> type[_CreateItemMutation]:
+def _create_item_mutation() -> type[DjangoMutation]:
     """A ``create`` ``DjangoMutation`` over the products ``Item`` model."""
 
     class CreateItem(DjangoMutation):
@@ -159,6 +155,39 @@ def test_change_and_delete_perms_authorize_their_operations() -> None:
     info = _info_for(user)
     assert DjangoModelPermission().has_permission(info, mutation, "update", data=None) is True
     assert DjangoModelPermission().has_permission(info, mutation, "delete", data=None) is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("codename", "allowed"), [("add_item", True), ("add_property", False)])
+def test_model_permission_checks_the_model_the_class_declared(
+    codename: str,
+    *,
+    allowed: bool,
+) -> None:
+    """The default checks the model the class resolved at declaration, the one its write uses.
+
+    The class resolves its model once, through ``_resolve_model``, and the write pipeline
+    reads that validated model. A settings-driven resolver answers ``Property`` once the
+    setting changes, yet the checked permission stays ``Item``'s, so the user holding
+    ``add_item`` is authorized and the one holding only ``add_property`` is not.
+    """
+    with override_settings(PRODUCTS_WRITE_MODEL="products.Item"):
+
+        class CreateItem(DjangoMutation):
+            @classmethod
+            @override
+            def _resolve_model(cls, meta: type[object]) -> type[Model] | None:
+                return apps.get_model(str(read_attr(django_settings, "PRODUCTS_WRITE_MODEL")))
+
+            class Meta:
+                operation = "create"
+
+    info = _info_for(_user_with_perms(codename))
+    with override_settings(PRODUCTS_WRITE_MODEL="products.Property"):
+        assert (
+            DjangoModelPermission().has_permission(info, CreateItem, "create", data=None)
+            is allowed
+        )
 
 
 # ---------------------------------------------------------------------------
