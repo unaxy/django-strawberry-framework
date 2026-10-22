@@ -13,7 +13,8 @@ visibility through a relation traversal. The self-referential ``parent`` /
 not a Relay node): one pk or a list for the forward key, a list for the reverse
 one, with the README membership rules on every list. ``price_span`` is a declared
 ``RangeFilter`` on both specimen filtersets: its nested input type is scoped
-per owning filterset and the ``range`` lookup applies over the wire.
+per owning filterset and the ``range`` lookup applies over the wire; a lone
+``start`` / ``end`` applies as ``gte`` / ``lte`` and a range with no bound filters nothing.
 The per-field ``"__all__"`` leaves never publish a ``django.contrib.postgres``
 lookup Django registers onto a core field (``containedBy`` on the numeric and
 temporal leaves), whether or not a PostgreSQL driver is installed.
@@ -203,6 +204,93 @@ def test_scalars_filter_by_price_span_range() -> None:
         }
         """,
         {"allScalarSpecimens": [{"label": "mid"}]},
+    )
+
+
+_BY_FILTER = """
+query ($filter: ScalarSpecimenFilterInputType) {
+  allScalarSpecimens(filter: $filter) {
+    label
+  }
+}
+"""
+
+
+def _seed_price_tiers() -> list[models.ScalarSpecimen]:
+    """One specimen per price tier: ``cheap`` (1), ``mid`` (50), ``dear`` (50000)."""
+    return [
+        _seed_specimen("cheap", price=Decimal("1.0000")),
+        _seed_specimen("mid", price=Decimal("50.0000")),
+        _seed_specimen("dear", price=Decimal("50000.0000")),
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("price_range", "labels"),
+    [
+        pytest.param({"start": "10.0000"}, ["mid", "dear"], id="start-only"),
+        pytest.param({"end": "100.0000"}, ["cheap", "mid"], id="end-only"),
+        pytest.param({"start": "10.0000", "end": None}, ["mid", "dear"], id="start-null-end"),
+        pytest.param({"start": None, "end": "100.0000"}, ["cheap", "mid"], id="null-start-end"),
+        pytest.param({"start": None, "end": None}, ["cheap", "mid", "dear"], id="both-null"),
+        pytest.param({}, ["cheap", "mid", "dear"], id="empty"),
+        pytest.param(None, ["cheap", "mid", "dear"], id="range-null"),
+        pytest.param({"start": "10.0000", "end": "100.0000"}, ["mid"], id="both-bounds"),
+    ],
+)
+def test_scalars_filter_price_span_one_sided_bounds(
+    price_range: dict[str, str | None] | None,
+    labels: list[str],
+) -> None:
+    """A lone ``start`` keeps rows at or above it, a lone ``end`` rows at or below it.
+
+    A ``null`` bound counts as left out, and a range with neither bound filters nothing.
+    """
+    _seed_price_tiers()
+    _assert_graphql_data(
+        _BY_FILTER,
+        {"allScalarSpecimens": [{"label": label} for label in labels]},
+        variables={"filter": {"priceSpan": {"range": price_range}}},
+    )
+
+
+@pytest.mark.django_db
+def test_scalars_filter_not_price_span_start_only_keeps_the_complement() -> None:
+    """``not: { priceSpan: { range: { start } } }`` keeps exactly the rows below the start."""
+    _seed_price_tiers()
+    _assert_graphql_data(
+        _BY_FILTER,
+        {"allScalarSpecimens": [{"label": "cheap"}]},
+        variables={"filter": {"not": {"priceSpan": {"range": {"start": "10.0000"}}}}},
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("price_range", "labels"),
+    [
+        pytest.param({"start": "10.0000"}, ["of-mid", "of-dear"], id="start-only"),
+        pytest.param({"end": "100.0000"}, ["of-cheap", "of-mid"], id="end-only"),
+    ],
+)
+def test_nullable_scalars_filter_partner_price_span_one_sided_bounds(
+    price_range: dict[str, str],
+    labels: list[str],
+) -> None:
+    """A one-sided range under the ``partner`` related branch applies its lone bound too."""
+    for partner in _seed_price_tiers():
+        models.NullableScalarSpecimen.objects.create(label=f"of-{partner.label}", partner=partner)
+    _assert_graphql_data(
+        """
+        query ($filter: NullableScalarSpecimenFilterInputType) {
+          allNullableScalarSpecimens(filter: $filter) {
+            label
+          }
+        }
+        """,
+        {"allNullableScalarSpecimens": [{"label": label} for label in labels]},
+        variables={"filter": {"partner": {"priceSpan": {"range": price_range}}}},
     )
 
 

@@ -648,9 +648,35 @@ class RangeField(Field):
 
 
 class RangeFilter(TypedFilter):
-    """Filter that consumes a two-element list via `RangeField`."""
+    """Filter that consumes a two-element list via `RangeField`.
+
+    Both bounds apply the declared lookup (``lookup_expr="range"`` compiles to ``BETWEEN``). A
+    range with one bound left out or ``null`` applies that lone bound: a start alone as
+    ``<field>__gte``, an end alone as ``<field>__lte`` (django-filter's ``RangeFilter`` reads a
+    one-sided range the same way). A range with neither bound constrains nothing.
+    """
 
     field_class: type[RangeField] = RangeField
+
+    @override
+    def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
+        """Apply a one-sided range as its lone bound; a two-bound range keeps the declared lookup.
+
+        A range input with one bound left out (or ``null``) reaches here as ``[start, None]`` /
+        ``[None, end]``. The declared ``range`` lookup would compile it to ``BETWEEN x AND NULL``,
+        which matches no row, so the lone bound applies on its own through `_apply_lookups`
+        (``distinct`` and ``exclude`` honoured). ``[None, None]`` returns ``qs`` unchanged.
+        """
+        if not (is_list_or_tuple(value) and len(value) == _RANGE_BOUNDS):
+            return super().filter(qs, value)
+        start, end = value
+        if start is None and end is None:
+            return qs
+        if end is None:
+            return _apply_lookups(self, qs, {f"{self.field_name}__gte": start})
+        if start is None:
+            return _apply_lookups(self, qs, {f"{self.field_name}__lte": end})
+        return super().filter(qs, value)
 
 
 class ListFilterMethod(_EmptyListAwareFilterMethod):
