@@ -4991,6 +4991,47 @@ def test_update_item_with_file_via_form_omitting_the_file_preserves_it(tmp_path:
             assert _read_all(handle) == b"bytes that must survive"
 
 
+@pytest.mark.django_db(transaction=True)
+def test_update_item_with_file_via_form_explicit_null_clears_the_file(tmp_path: Path) -> None:
+    """An explicit `attachment: null` on `updateItemWithFileViaForm` clears the stored file.
+
+    The clear half of the file contract, over real HTTP. `null` is not an omission: the
+    resolver binds it through `files=` as Django's clear sentinel `False`, the optional
+    `FileField` cleans it to `False`, and the model field stores the empty name, as a
+    checked `ClearableFileInput` clear box would. Omitting the field keeps the file (the
+    test above).
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    item = models.Item.objects.create(name="ClearedFormWidget", category=category)
+    client = _login_with_perm("view_item_1", "change_item")
+
+    with override_settings(MEDIA_ROOT=str(tmp_path)):
+        item.attachment.save(
+            "clearme.txt",
+            SimpleUploadedFile("clearme.txt", b"bytes to clear", content_type="text/plain"),
+            save=True,
+        )
+        response = _post_graphql(
+            "mutation($id: ID!, $d: ItemFileModelFormPartialInput!) { "
+            "updateItemWithFileViaForm(id: $id, data: $d) { "
+            "node { name } errors { field messages } } }",
+            client=client,
+            variables={"id": _global_id("products.item", item.pk), "d": {"attachment": None}},
+        )
+        assert response.status_code == 200
+        payload = response_json(response)
+        assert "errors" not in payload, payload
+        result = json_at(payload, "data", "updateItemWithFileViaForm")
+        assert json_at(result, "errors") == []
+        assert json_at(result, "node") == {"name": item.name}
+
+        item.refresh_from_db()
+        assert not item.attachment
+        assert item.attachment.name == ""
+
+
 _CREATE_DEFAULT_CATEGORY_ITEM_VIA_FORM = (
     "mutation($d: DefaultCategoryItemModelFormInput!) { "
     "createDefaultCategoryItemViaForm(data: $d) { "

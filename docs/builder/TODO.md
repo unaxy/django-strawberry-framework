@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 23 to do.
+Progress: 22 to do.
 
 Every item below was re-verified at HEAD on 2026-10-22 by one research agent per item; each "Research" sub-bullet is
 that pass's finding and recommended landing.
@@ -28,12 +28,6 @@ From the full entries, 2026-10-21. Item numbers are that file's.
 
 ## To do: document for beta
 
-- [ ] 7. The ModelForm flavor ignores an explicit `null` on an optional `FileField` (Django form `None` means "no
-  change"), so `attachment: null` returns success with the file unchanged; a client likely means "clear"
-  - Research: reproduced live. The null rides `files=` and Django's `FileField.clean(None, initial)` keeps the file;
-    `c5c228c8`'s coerced-null check reads `form.data` only, so it never sees it. The generated input has no
-    `<name>-clear` key, so the flavor cannot clear a file at all; the model flavor stores the `null`. Decide: document
-    (README "Form mutations" and the `DjangoModelFormMutation` glossary body) or map an explicit `null` to a clear (M)
 - [ ] 8. A primary / replica router: on a vendor other than PostgreSQL or SQLite every mutation with
   `permission_classes` fails with `ConfigurationError`, because
   `django_strawberry_framework/utils/permissions.py::resolve_auth_aliases` returns the read alias and

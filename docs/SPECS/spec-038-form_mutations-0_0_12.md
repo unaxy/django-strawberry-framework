@@ -1416,8 +1416,9 @@ write flavor rides.
      the provided values**, overlaid by `provided_data`, and passes
      `files = provided_files` **only** (an omitted file field is
      preserved by the bound `form_class(instance=…)` via its `initial`, never
-     re-supplied and never cleared); then `form_class(**get_form_kwargs(info,
-     data=data, files=files, instance=<located row>))`.
+     re-supplied and never cleared; an explicit `null` file is bound as Django's clear
+     sentinel `False`, see [Edge cases](#edge-cases-and-constraints)); then
+     `form_class(**get_form_kwargs(info, data=data, files=files, instance=<located row>))`.
      - **The reconstruction reads the form's FULL declared field set**
        (`get_form_fields()`), not the narrowed input: a `Meta.fields` /
        `Meta.exclude` narrowing drops fields from the GraphQL input, but the bound
@@ -1564,7 +1565,7 @@ write flavor rides.
    cleaned value the consumer form supplies instead (a `clean_<field>` / `clean()`
    default) is written, as is a `disabled` field's initial. A `null=True` column stores
    the clear, an M2M empty value clears the relation, a file is bound through `files=`
-   (an explicit `null` upload changes nothing), and a form-required field fails
+   (an explicit `null` on an update is the clear sentinel `False`), and a form-required field fails
    `is_valid()` with its own `required` error first, so none of them is checked. **The
    `ModelForm` save also maps the one other failure a valid `ModelForm` reaches on its own**
    ([`forms/resolvers.py`][forms-resolvers]`::_modelform_save_or_field_errors`): over
@@ -1880,19 +1881,25 @@ Rationale companion: [Decision 14][rationale-d14].
   file field (omitted → kept via the bound form's `initial`); a provided **non-file**
   optional field the consumer wants emptied is sent explicitly (e.g. `""` for a
   `CharField`). A hidden row is not-found before the form runs.
-- **File / image form fields; CLEARING is not supported.**
+- **File / image form fields: upload, preserve, clear.**
   `forms.FileField` / `forms.ImageField` map to the
   [`Upload`][glossary-upload-scalar] scalar ([`spec-037`][spec-037]) on input, and the
   resolver routes uploaded values into the form's **`files=`** argument (a bound Django
   form reads files from `files=`, never `data=`), so `form_class(data=…, files=…,
   instance=…)` validates them — proven by a raw `django.test.Client` multipart live
-  test (Slice 4). The two supported file actions are **upload** (provide an `Upload`)
-  and **preserve** (omit it on partial update → kept via the bound
-  `ModelForm(instance=…)`'s `initial`). **Clearing** a stored file is not supported:
-  Django's `ClearableFileInput` distinguishes "no change" from "clear" with a *false
-  sentinel*, not an uploaded value, and a nullable `Upload` gives the resolver no clear
-  signal (omitting means preserve)
-  ([Out of scope](#out-of-scope-explicitly-tracked-elsewhere)).
+  test (Slice 4). The three file actions are **upload** (provide an `Upload`),
+  **preserve** (omit it on partial update → kept via the bound
+  `ModelForm(instance=…)`'s `initial`) and **clear** (an explicit `null` on update).
+  Django's `FileField` reads `None` as "no change" and `False` as "clear" (the value
+  `ClearableFileInput` returns for its checked clear box), so the update binds an
+  explicit `null` through `files=` as `False`
+  ([`forms/resolvers.py`][forms-resolvers]`::_file_clears`): an optional form field
+  cleans it to `False` and the model field's `save_form_data` stores the empty name,
+  whether the column is `null=True` or not. A required form field cannot clear
+  (`clean(False, initial)` validates it as `None` and returns the stored file), so
+  that `null` is the field's own `required` error, the create's answer to it
+  (`_required_file_clears`), and nothing is written. A create has no stored file, so
+  its `null` stays `None`.
 - **A `ModelForm` whose `Meta.fields` omits an editable column.** The omitted column
   is simply not an input field — the form's contract governs the write surface
   (graphene-django parity), and the model's column default applies on `save()`.
@@ -2316,9 +2323,6 @@ companion under [Risks and open questions][rationale-risks].
 - **Field-level read gates** ([`FieldSet`][glossary-fieldset] /
   [Per-field permission hooks][glossary-per-field-permission-hooks]) — composing on top
   of (not replacing) write authorization.
-- **Clearing a stored file/image on update** (the `ClearableFileInput` false-sentinel
-  "clear" semantics) — only upload + preserve are supported
-  ([Edge cases](#edge-cases-and-constraints)).
 - **A new `DjangoType` `Meta` key or settings key**
   ([Decision 13](#decision-13--finalization-seam-reuse-the-mutation-phase-25-bind-no-deferred_meta_keys-change)).
 
