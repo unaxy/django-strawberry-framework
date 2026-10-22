@@ -124,6 +124,7 @@ from ._narrowing import (
     is_exact_pair,
     is_exact_set_or_frozenset,
     is_exact_tuple,
+    is_str,
 )
 from ._queryset_private import (
     queryset_db,
@@ -156,6 +157,8 @@ if TYPE_CHECKING:
 
     #: A ``Prefetch`` as the seal rebuilds it: a string lookup over a model-row child.
     _SealedPrefetch: TypeAlias = Prefetch[str, models.QuerySet[models.Model], str]
+    #: A ``Prefetch``'s ``(prefetch_through, prefetch_to, to_attr)`` read as exact text.
+    _PrefetchPath: TypeAlias = tuple[str, str, str | None]
     #: A resolver source after ``Manager`` coercion: a ``QuerySet`` flagged ``True``, or
     #: any other value (a list, a generator) flagged ``False``. The flag discriminates
     #: the union, so ``source[1] is True`` narrows ``source[0]`` to the queryset.
@@ -969,8 +972,8 @@ def _base_table_defect(query: object, concrete: type[models.Model]) -> str | Non
     unshadowed) BEFORE this, so the ``.table_name`` read below dispatches no consumer
     code.
     """
-    # ``_query_container_defect`` proved ``alias_map`` an exact ``dict`` with exact-``str``
-    # keys (or absent) before this runs.
+    # ``_query_container_defect`` proved ``alias_map`` an exact ``dict`` with ``str`` keys
+    # (or absent) before this runs.
     alias_map: dict[str, _TableRef] | None = getattr(query, "alias_map", None)
     if not alias_map:
         return None
@@ -1233,24 +1236,36 @@ def _node_metadata_defect(node: object, label: str) -> tuple[str, str] | None:
 
 
 def _raw_sql_params_defect(params: object, label: str) -> tuple[str, str] | None:
-    """Return a defect unless raw-SQL parameters are an exact inert sequence.
+    """Return a defect unless raw-SQL parameters are an exact sequence of bindable leaves.
 
-    Django passes ``RawSQL.params`` and ``ExtraWhere.params`` straight to the database
-    adapter. A container subclass can dispatch while iterated, and an arbitrary parameter
-    object can dispatch from backend adaptation. Raw-SQL state therefore admits only the
-    exact builtin sequence shapes Django creates and the same exact inert leaf types the
-    expression-graph proof accepts.
+    Django passes ``RawSQL.params``, ``ExtraWhere.params`` and an ``extra(select=...)``
+    payload's params straight to the database adapter. A container subclass can dispatch
+    while iterated, and an arbitrary parameter object can dispatch from backend
+    adaptation. Raw-SQL state therefore admits only the exact builtin sequence shapes
+    Django creates, each member an inert leaf or a plain-data leaf under the same rule a
+    direct lookup value meets (``_plain_data_leaf_defect``): a ``TextChoices`` / ``StrEnum``
+    member or a ``Decimal`` / date subclass binds here exactly as it does in a lookup,
+    and canonical reconstruction rebinds it as its exact inert value
+    (``_normalized_bound_value``). A container inside the params stays refused.
     """
     if not is_exact_list_or_tuple(params):
         return ("untrusted", f"{label} params is a {truth.kind(params)}")
     for param in params:
-        if not _is_inert_value(param):
+        if not _is_inert_value(param) and _plain_data_leaf_defect(param, label) is not None:
             return ("untrusted", f"{label} params carries a {truth.kind(param)}")
     return None
 
 
 def _raw_sql_node_defect(node: object, label: str) -> tuple[str, str] | None:
-    """Validate compiler-dispatched raw-SQL payloads outside expression children."""
+    """Validate compiler-dispatched raw-SQL payloads outside expression children.
+
+    An ``ExtraWhere`` fragment is a text term (``_is_text_term``): an exact ``str``, or
+    a ``str`` subclass such as a ``StrEnum`` member that defines no
+    ``resolve_expression``, which reconstruction rebinds as its exact text. Its
+    ``params`` may be ``None``, which is what ``QuerySet.extra(where=...)`` stores when
+    no ``params=`` is given and ``ExtraWhere.as_sql`` reads as no parameters; a
+    ``RawSQL`` with ``None`` params stays refused, since Django cannot compile it.
+    """
     if type(node) is RawSQL:
         return _raw_sql_params_defect(node.params, label)
     if type(node) is ExtraWhere:
@@ -1258,8 +1273,10 @@ def _raw_sql_node_defect(node: object, label: str) -> tuple[str, str] | None:
         if type(sqls) not in (list, tuple):
             return ("untrusted", f"{label} sqls is a {truth.kind(sqls)}")
         for statement in sqls:
-            if type(statement) is not str:
+            if not _is_text_term(statement):
                 return ("untrusted", f"{label} sqls carries a {truth.kind(statement)}")
+        if node.params is None:
+            return None
         return _raw_sql_params_defect(node.params, label)
     return None
 
@@ -1545,6 +1562,24 @@ def _static_attr_present(value: object, name: str) -> bool:
     return truth.static_attr(value, name, MISSING_ATTRIBUTE) is not MISSING_ATTRIBUTE
 
 
+def _is_text_term(item: object) -> bool:
+    """Return whether ``item`` is a text term Django reads as a name or a SQL fragment.
+
+    The slots Django fills from ``order_by(...)`` / ``distinct(...)`` names and from
+    ``extra(order_by=..., tables=..., where=...)`` take any ``str``: Django asks
+    ``hasattr(item, "resolve_expression")`` and treats everything without one as text,
+    so a ``TextChoices`` / ``StrEnum`` member names a column or carries a fragment
+    exactly as its value does. The same question is asked here statically
+    (``_static_attr_present``), so a ``str`` subclass that DOES define
+    ``resolve_expression`` is an expression and is walked or refused as one, never
+    compiled as text. Canonical reconstruction rebinds an admitted subclass as its exact
+    text (``_normalized_bound_value``), so the sealed query compiles Django's own SQL.
+    """
+    return type(item) is str or (
+        is_str(item) and not _static_attr_present(item, "resolve_expression")
+    )
+
+
 def _rhs_hook_defect(value_type: type[object], label: str) -> tuple[str, str] | None:
     """Return a defect if a direct-RHS type defines an attribute hook below its data bases.
 
@@ -1576,7 +1611,8 @@ def _direct_rhs_defect(value: object, walk: _GraphWalk, label: str) -> tuple[str
     The rule is deliberately the least restrictive one that still rejects dispatchable
     state: an inert leaf or a plain container of them is data; anything else must define
     no attribute hook of its own (``_rhs_hook_defect``) and must descend from a plain-data
-    base (``_DIRECT_RHS_DATA_BASES``). That admits the domain values real schemas bind --
+    base (``_DIRECT_RHS_DATA_BASES``) -- the leaf half, ``_plain_data_leaf_defect``, which
+    a raw-SQL parameter meets too. That admits the domain values real schemas bind --
     ``TextChoices`` members, model instances, ``Decimal`` / ``UUID`` / date subclasses,
     and ``__in`` sequences of them -- while an arbitrary object, or one whose attribute
     reads run consumer code, fails closed. Every check is type-level, so no hook on the
@@ -1591,9 +1627,21 @@ def _direct_rhs_defect(value: object, walk: _GraphWalk, label: str) -> tuple[str
     """
     if _is_inert_value(value):
         return None
-    value_type = type(value)
     if _is_plain_container_value(value):
         return _container_defect(value, walk, label, _direct_rhs_defect, _expr_mapping_key_detail)
+    return _plain_data_leaf_defect(value, label)
+
+
+def _plain_data_leaf_defect(value: object, label: str) -> tuple[str, str] | None:
+    """Return a defect unless a non-container bound value is plain data the seal may bind.
+
+    The leaf half of the admitted-bound-value rule, shared by a direct lookup RHS
+    (``_direct_rhs_defect``) and a raw-SQL parameter (``_raw_sql_params_defect``): the
+    value's type defines no attribute hook of its own (``_rhs_hook_defect``) and descends
+    from a plain-data base (``_DIRECT_RHS_DATA_BASES``). Both checks read the type, so
+    no hook on the value runs while deciding.
+    """
+    value_type = type(value)
     hook_defect = _rhs_hook_defect(value_type, label)
     if hook_defect is not None:
         return hook_defect
@@ -1713,16 +1761,18 @@ def _expr_sequence_defect(holder: object, walk: _GraphWalk, label: str) -> tuple
 
     These slots hold a mix of plain field-reference strings (safe) and expressions
     the compiler dispatches ``as_sql`` on. ``None`` and a bare ``bool`` (``group_by``
-    is ``True`` / ``False`` for the default cases) carry no node. Every non-string
-    element recurses through ``_expr_graph_defect`` so a consumer ``order_by``
-    expression (never walked before spec-045 Decision 2) fails closed.
+    is ``True`` / ``False`` for the default cases) carry no node. A text term
+    (``_is_text_term``: an exact ``str``, or a ``TextChoices`` / ``StrEnum`` member
+    Django reads as the name it spells) passes; every other element recurses through
+    ``_expr_graph_defect`` so a consumer ``order_by`` expression fails closed
+    (spec-045 Decision 2).
     """
     if holder is None or type(holder) is bool:
         return None
     if not is_exact_list_or_tuple(holder):
         return ("untrusted", f"query {label} is a {truth.kind(holder)}")
     for item in holder:
-        if type(item) is str:
+        if _is_text_term(item):
             continue
         defect = _expr_graph_defect(item, walk, label)
         if defect is not None:
@@ -1738,15 +1788,17 @@ def _raw_sql_sequence_defect(holder: object, label: str) -> tuple[str, str] | No
     ``extra_tables`` become ``FROM`` aliases. No source-expression walk reaches them
     (spec-045 Decision 2), so without this check a non-``str`` element -- an object
     whose ``__str__`` runs at SQL-assembly time -- or a sequence SUBCLASS with a stateful
-    ``__iter__`` would escape. Django only ever stores an exact ``tuple`` / ``list`` of exact
-    ``str`` here; anything else fails closed.
+    ``__iter__`` would escape. Django stores an exact ``tuple`` / ``list`` here, each
+    element the ``str`` the consumer passed; an element must be a text term
+    (``_is_text_term``), which canonical reconstruction rebinds as its exact text, and
+    anything else fails closed.
     """
     if holder is None:
         return None
     if not is_exact_list_or_tuple(holder):
         return ("untrusted", f"query {label} is a {truth.kind(holder)}")
     for item in holder:
-        if type(item) is not str:
+        if not _is_text_term(item):
             return ("untrusted", f"query {label} carries a {truth.kind(item)}")
     return None
 
@@ -1863,7 +1915,7 @@ _EXACT_DICT_QUERY_ATTRS: tuple[str, ...] = (
     "_filtered_relations",
 )
 # ``extra`` is deliberately ABSENT: the raw-SQL scan below validates it as an
-# exact ``dict`` with exact-``str`` keys AND its ``(sql, params)`` payloads, in
+# exact ``dict`` with ``str`` keys AND its ``(sql, params)`` payloads, in
 # byte-identical wording, so listing it here only ran the weaker half of that
 # same check a second time on every seal.
 _EXACT_SET_QUERY_ATTRS: tuple[str, ...] = (
@@ -1878,7 +1930,7 @@ def _query_payload_defect(query: object) -> tuple[str, str] | None:
     """Return a defect if a retained container's PAYLOAD is not its exact Django shape.
 
     The keys of ``alias_refcount`` / ``external_aliases`` / ``table_map`` /
-    ``_filtered_relations`` are proven exact ``str`` by the caller; this proves what the
+    ``_filtered_relations`` are proven ``str`` by the caller; this proves what the
     dicts hold. Django's own invariants are narrow and are required exactly:
 
     - ``alias_refcount`` maps an alias to an exact ``int`` -- ``bool`` included in the
@@ -1888,35 +1940,53 @@ def _query_payload_defect(query: object) -> tuple[str, str] | None:
       composition into a consumer callback with the sealed query in scope.
     - ``external_aliases`` maps an alias to an exact ``bool`` -- read as a truth value by
       the compiler and by ``Query.change_aliases``.
-    - ``table_map`` maps a table name to an exact ``list`` of exact ``str`` aliases; the
-      list itself is shallow-copied by ``clone`` and appended to by ``Query.join``.
+    - ``table_map`` maps a table name to an exact ``list`` of ``str`` aliases; the list
+      itself is shallow-copied by ``clone`` and appended to by ``Query.join``.
+
+    A key or alias may be a ``str`` subclass (a ``StrEnum`` member naming a
+    ``FilteredRelation`` alias is stored as itself), so a defect label reads it through
+    ``_normalized_str`` and never runs the subclass's ``__repr__``; canonical
+    reconstruction rebinds every such name as its exact text.
     - ``_filtered_relations`` maps an alias to a ``FilteredRelation`` the compiler
       dispatches; it must be a genuine, unshadowed Django object like any other
       compiler-reachable node.
     """
-    # ``_query_container_defect`` proved each of these an exact ``dict`` with exact-``str``
-    # keys (or absent) before calling here.
+    # ``_query_container_defect`` proved each of these an exact ``dict`` with ``str`` keys
+    # (or absent) before calling here.
     refcount: dict[str, object] = getattr(query, "alias_refcount", None) or {}
     for alias, count in refcount.items():
         if type(count) is not int:
-            return ("untrusted", f"query alias_refcount[{alias!r}] is a {truth.kind(count)}")
+            return (
+                "untrusted",
+                f"query alias_refcount[{_normalized_str(alias)!r}] is a {truth.kind(count)}",
+            )
     external: dict[str, object] = getattr(query, "external_aliases", None) or {}
     for alias, flag in external.items():
         if type(flag) is not bool:
-            return ("untrusted", f"query external_aliases[{alias!r}] is a {truth.kind(flag)}")
+            return (
+                "untrusted",
+                f"query external_aliases[{_normalized_str(alias)!r}] is a {truth.kind(flag)}",
+            )
     table_map: dict[str, object] = getattr(query, "table_map", None) or {}
     for table, aliases in table_map.items():
         if not is_exact_list(aliases):
-            return ("untrusted", f"query table_map[{table!r}] is a {truth.kind(aliases)}")
+            return (
+                "untrusted",
+                f"query table_map[{_normalized_str(table)!r}] is a {truth.kind(aliases)}",
+            )
         for table_alias in aliases:
-            if type(table_alias) is not str:
+            if not is_str(table_alias):
+                table_label = _normalized_str(table)
                 return (
                     "untrusted",
-                    f"query table_map[{table!r}] carries a {truth.kind(table_alias)}",
+                    f"query table_map[{table_label!r}] carries a {truth.kind(table_alias)}",
                 )
     filtered_relations: dict[str, object] = getattr(query, "_filtered_relations", None) or {}
     for alias, relation in filtered_relations.items():
-        relation_defect = _genuine_node_defect(relation, f"query _filtered_relations[{alias!r}]")
+        relation_defect = _genuine_node_defect(
+            relation,
+            f"query _filtered_relations[{_normalized_str(alias)!r}]",
+        )
         if relation_defect is not None:
             return relation_defect
     return None
@@ -2191,8 +2261,10 @@ def _normalized_bound_value(value: object) -> object:
     boundary reports as an ``untrusted`` defect naming the type. This is the ONE home of
     the admitted-bound-value rule -- every bound payload reaches it through canonical
     reconstruction whether it sits in direct-lookup position, in an expression's own
-    payload slot (``Value.value``), or as a mapping key, so the verdict cannot vary with
-    where the value sits.
+    payload slot (``Value.value``), in raw-SQL params, or as a mapping key, so the verdict
+    cannot vary with where the value sits. The same normalization rebinds a ``str``
+    subclass the pre-clone checks admitted as a NAME or text term (a ``StrEnum``
+    annotation key, ``table_map`` alias or ``extra_order_by`` element) as its exact text.
     """
     # Exact retained leaves pass through unchanged (the enum ``_value_`` recursion below
     # is the one caller that can hand this function an exact leaf). ``bytearray`` is NOT
@@ -2491,10 +2563,17 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
     visibility predicate from a queryset that already passed the seal. So each retained
     container is pinned to its COMPLETE Django shape -- exact-``int`` alias refcounts,
     exact-``bool`` external-alias flags, ``table_map`` entries that are exact lists of
-    exact ``str`` aliases, exact-``str`` set members, genuine unshadowed
-    ``_filtered_relations`` values -- matching the payload validation ``extra`` /
-    ``_extra_select_cache`` already carried. Values whose own graph the AST walk proves
-    (``alias_map`` joins, ``annotations`` expressions) are validated there, not here.
+    ``str`` aliases, ``str`` set members, genuine unshadowed ``_filtered_relations``
+    values -- matching the payload validation ``extra`` / ``_extra_select_cache``
+    already carried. Values whose own graph the AST walk proves (``alias_map`` joins,
+    ``annotations`` expressions) are validated there, not here.
+
+    A name (mapping key, set member, ``extra`` alias) must be a ``str``, a subclass
+    included: Django stores the ``TextChoices`` / ``StrEnum`` member a consumer passes to
+    ``annotate`` / ``alias`` / ``extra(select=...)`` / ``FilteredRelation`` as itself.
+    The check reads the real type (``is_str``), a label reads the name through
+    ``_normalized_str``, and canonical reconstruction rebinds every such name as its
+    exact text, so the sealed query holds only exact ``str`` names.
     """
     for attr in _EXACT_DICT_QUERY_ATTRS:
         value: object = getattr(query, attr, None)
@@ -2503,7 +2582,7 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
         if not is_exact_dict(value):
             return ("untrusted", f"query {attr} is a {truth.kind(value)}")
         for key in value:
-            if type(key) is not str:
+            if not is_str(key):
                 return ("untrusted", f"query {attr} has a non-string key")
     payload_defect = _query_payload_defect(query)
     if payload_defect is not None:
@@ -2515,7 +2594,7 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
         if not is_exact_set_or_frozenset(value):
             return ("untrusted", f"query {attr} is a {truth.kind(value)}")
         for member in value:
-            if type(member) is not str:
+            if not is_str(member):
                 return ("untrusted", f"query {attr} carries a {truth.kind(member)}")
     for attr in ("extra", "_extra_select_cache"):
         extra: object = getattr(query, attr, None)
@@ -2523,9 +2602,10 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
             continue
         if not is_exact_dict(extra):
             return ("untrusted", f"query {attr} is a {truth.kind(extra)}")
-        for alias, payload in extra.items():
-            if type(alias) is not str:
+        for raw_alias, payload in extra.items():
+            if not is_str(raw_alias):
                 return ("untrusted", f"query {attr} has a non-string key")
+            alias = _normalized_str(raw_alias)
             if not is_exact_pair(payload):
                 return ("untrusted", f"query {attr}[{alias!r}] has a malformed payload")
             statement, params = payload
@@ -2570,10 +2650,15 @@ def _query_ast_defect(query: object, walk: _GraphWalk) -> tuple[str, str] | None
         if having_defect is not None:
             return having_defect
     # ``_query_container_defect`` proved ``annotations`` and ``alias_map`` exact ``dict``s
-    # with exact-``str`` keys (or absent) before this walk runs.
+    # with ``str`` keys (or absent) before this walk runs; a key that is a ``str`` subclass
+    # (a ``StrEnum`` alias) is read through ``_normalized_str`` before it is formatted.
     annotations: dict[str, object] = getattr(query, "annotations", None) or {}
     for name, expr in annotations.items():
-        annotation_defect = _expr_graph_defect(expr, walk, f"annotation {name!r}")
+        annotation_defect = _expr_graph_defect(
+            expr,
+            walk,
+            f"annotation {_normalized_str(name)!r}",
+        )
         if annotation_defect is not None:
             return annotation_defect
     for label in (
@@ -2592,7 +2677,7 @@ def _query_ast_defect(query: object, walk: _GraphWalk) -> tuple[str, str] | None
             return raw_defect
     alias_map: dict[str, object] = getattr(query, "alias_map", None) or {}
     for alias, join in alias_map.items():
-        join_defect = _join_defect(join, alias, walk)
+        join_defect = _join_defect(join, _normalized_str(alias), walk)
         if join_defect is not None:
             return join_defect
     return _select_related_defect(getattr(query, "select_related", False))
@@ -2752,29 +2837,49 @@ def _is_django_iterable_class(value: object) -> TypeGuard[type[BaseIterable[obje
     return any(value is cls for cls in _DJANGO_ITERABLE_CLASSES)
 
 
-def _rebuilt_prefetch_or_defect(
-    entry: object,
+def _prefetch_path_or_defect(
+    entry_state: Mapping[str, object],
     cls_name: str,
+) -> tuple[_PrefetchPath | None, tuple[str, str] | None]:
+    """Return a ``Prefetch``'s ``(prefetch_through, prefetch_to, to_attr)`` as exact text.
+
+    The path state is what ``Prefetch.__init__`` stores from the consumer's lookup and
+    ``to_attr``: a ``str``, the ``TextChoices`` / ``StrEnum`` member itself when the
+    consumer named the relation with one, and ``None`` for an absent ``to_attr``. Each is
+    admitted by its real type (``is_str``) and read through ``_normalized_str`` ONCE,
+    here, so the relation-target guard (``_prefetch_relation_target_or_none``), every
+    defect label and the rebuilt ``Prefetch`` all read the same exact text. Anything
+    else fails closed as ``untrusted``.
+    """
+    through = entry_state.get("prefetch_through")
+    prefetch_to = entry_state.get("prefetch_to")
+    to_attr = entry_state.get("to_attr")
+    if not is_str(through) or not is_str(prefetch_to):
+        return None, ("untrusted", f"{cls_name} prefetch path is not an exact str")
+    if to_attr is not None and not is_str(to_attr):
+        return None, ("untrusted", f"{cls_name} prefetch to_attr is not an exact str or None")
+    return (
+        _normalized_str(through),
+        _normalized_str(prefetch_to),
+        None if to_attr is None else _normalized_str(to_attr),
+    ), None
+
+
+def _rebuilt_prefetch(
+    path: _PrefetchPath,
     sealed_inner: models.QuerySet[models.Model, object] | None,
-) -> tuple[_SealedPrefetch | None, tuple[str, str] | None]:
+) -> _SealedPrefetch:
     """Rebuild a validated ``Prefetch`` as an EXACT ``django.db.models.Prefetch``.
 
     Every ``Prefetch`` -- including the ``queryset=None`` case -- is rebuilt from
     scratch so a consumer ``Prefetch`` subclass cannot survive with an executable
     ``get_current_querysets`` override that substitutes an unsealed child at fetch
-    time (spec-045 Decision 4). Only the exact-``str`` /
-    ``None`` path state Django itself stores (``prefetch_through``,
-    ``prefetch_to``, ``to_attr``) is copied forward; a subclass-injected extra
-    attribute or a non-``str`` path fails closed as ``untrusted``.
+    time (spec-045 Decision 4). Only the path state Django itself stores
+    (``prefetch_through``, ``prefetch_to``, ``to_attr``), already read as exact text by
+    ``_prefetch_path_or_defect``, is carried forward; a subclass-injected extra
+    attribute is dropped.
     """
-    entry_state = truth.instance_state(entry)
-    through = entry_state.get("prefetch_through")
-    prefetch_to = entry_state.get("prefetch_to")
-    to_attr = entry_state.get("to_attr")
-    if type(through) is not str or type(prefetch_to) is not str:
-        return None, ("untrusted", f"{cls_name} prefetch path is not an exact str")
-    if to_attr is not None and type(to_attr) is not str:
-        return None, ("untrusted", f"{cls_name} prefetch to_attr is not an exact str or None")
+    through, prefetch_to, to_attr = path
     # ``Prefetch`` is generic only in django-stubs and not subscriptable at runtime, so the
     # parametrized class is named by annotation on a plain alias of it
     prefetch_cls: type[_SealedPrefetch] = Prefetch
@@ -2784,7 +2889,7 @@ def _rebuilt_prefetch_or_defect(
     rebuilt_state["prefetch_to"] = prefetch_to
     rebuilt_state["to_attr"] = to_attr
     rebuilt_state["queryset"] = sealed_inner
-    return rebuilt, None
+    return rebuilt
 
 
 def _prefetch_relation_target_or_none(
@@ -2949,14 +3054,23 @@ def _sealed_prefetch_related_lookups(
     sealed_entries: list[str | _SealedPrefetch] = []
     for entry in lookups:
         if not isinstance(entry, Prefetch):
-            # A non-``Prefetch`` lookup must be EXACTLY ``str`` (Django builds the
-            # related queryset itself); a ``str`` subclass or arbitrary lookup
-            # object retains method dispatch and fails closed (spec-045 Decision 4).
-            if type(entry) is not str:
+            # A non-``Prefetch`` lookup must be a ``str`` (Django builds the related
+            # queryset itself), a ``TextChoices`` / ``StrEnum`` member included; it is
+            # carried as its exact text, and any other lookup object fails closed
+            # (spec-045 Decision 4).
+            if not is_str(entry):
                 return None, ("untrusted", f"{cls_name} prefetch lookup is a {truth.kind(entry)}")
-            sealed_entries.append(entry)
+            sealed_entries.append(_normalized_str(entry))
             continue
         entry_state = truth.instance_state(entry)
+        # The path is read as exact text BEFORE the relation-target guard below, so a
+        # ``StrEnum`` lookup resolves its relation exactly as its text does.
+        path, path_defect = _prefetch_path_or_defect(entry_state, cls_name)
+        if path_defect is not None:
+            return None, path_defect
+        # A ``None`` path defect means the path was read.
+        path = cast("_PrefetchPath", path)
+        lookup = path[0]
         inner = entry_state.get("queryset")
         sealed_inner: models.QuerySet[models.Model, object] | None = None
         if inner is not None:
@@ -2967,7 +3081,6 @@ def _sealed_prefetch_related_lookups(
                 _concrete_or_none(inner_state.get("model")) if inner_state is not None else None
             )
             if inner_state is None or inner_concrete is None:
-                lookup = entry_state.get("prefetch_through")
                 return None, (
                     "untrusted",
                     f"{cls_name} prefetch {lookup!r} queryset cannot be sealed",
@@ -2991,15 +3104,11 @@ def _sealed_prefetch_related_lookups(
             # concrete model, so comparing it against the declared target would
             # reject every child of such a relation -- including the relation's
             # own proxy -- for reading the very table the relation targets.
-            relation_target = _prefetch_relation_target_or_none(
-                parent_model,
-                entry_state.get("prefetch_through"),
-            )
+            relation_target = _prefetch_relation_target_or_none(parent_model, lookup)
             relation_concrete = (
                 _concrete_or_none(relation_target) if relation_target is not None else None
             )
             if relation_concrete is not None and not issubclass(inner_concrete, relation_concrete):
-                lookup = entry_state.get("prefetch_through")
                 return None, (
                     "untrusted",
                     (
@@ -3037,17 +3146,12 @@ def _sealed_prefetch_related_lookups(
                 _PREFETCH_CHILD_POLICY,
             )
             if defect is not None:
-                lookup = entry_state.get("prefetch_through")
                 code, detail = defect
                 return None, (
                     "untrusted",
                     f"{cls_name} prefetch {lookup!r} queryset cannot be sealed ({code}: {detail})",
                 )
-        rebuilt, rebuild_defect = _rebuilt_prefetch_or_defect(entry, cls_name, sealed_inner)
-        if rebuild_defect is not None:
-            return None, rebuild_defect
-        # A ``None`` rebuild defect means the rebuild produced the ``Prefetch``.
-        sealed_entries.append(cast("_SealedPrefetch", rebuilt))
+        sealed_entries.append(_rebuilt_prefetch(path, sealed_inner))
     return tuple(sealed_entries), None
 
 
@@ -3196,13 +3300,19 @@ def _queryset_state_defect(state: Mapping[str, object], cls_name: str) -> tuple[
     (spec-045 Decision 1). So each is pinned to the EXACT shape Django
     stores before it is used:
 
-    - ``_db``: ``None`` or an exact ``str`` alias;
+    - ``_db``: ``None`` or a ``str`` alias;
     - ``_hints``: ``None`` or an exact ``dict`` with exact-``str`` keys;
-    - ``_fields``: ``None`` or an exact ``tuple`` of exact ``str`` names;
+    - ``_fields``: ``None`` or an exact ``tuple`` of ``str`` names;
     - ``_sticky_filter`` / ``_for_write``: ``None`` or an exact ``bool``.
+
+    The ``_db`` alias and the ``_fields`` names are the values a consumer passed to
+    ``using(...)`` / ``values(...)`` / ``values_list(...)``, which Django stores as
+    given, so a ``TextChoices`` / ``StrEnum`` member is admitted by its real type
+    (``is_str``); the seal reads each through ``_normalized_str`` before any comparison
+    and carries the exact text forward (``_normalized_db`` / ``_normalized_fields``).
     """
     db = state.get("_db")
-    if db is not None and type(db) is not str:
+    if db is not None and not is_str(db):
         return ("untrusted", f"{cls_name}._db is a {truth.kind(db)}")
     hints = state.get("_hints")
     if hints is not None:
@@ -3216,13 +3326,27 @@ def _queryset_state_defect(state: Mapping[str, object], cls_name: str) -> tuple[
         if not is_exact_tuple(fields):
             return ("untrusted", f"{cls_name}._fields is a {truth.kind(fields)}")
         for name in fields:
-            if type(name) is not str:
+            if not is_str(name):
                 return ("untrusted", f"{cls_name}._fields carries a {truth.kind(name)}")
     for attr in ("_sticky_filter", "_for_write"):
         flag = state.get(attr)
         if flag is not None and type(flag) is not bool:
             return ("untrusted", f"{cls_name}.{attr} is a {truth.kind(flag)}")
     return None
+
+
+def _normalized_db(state: Mapping[str, object]) -> str | None:
+    """Return the ``_db`` alias ``_queryset_state_defect`` proved, as its exact text."""
+    db = state.get("_db")
+    return None if db is None else _normalized_str(cast("str", db))
+
+
+def _normalized_fields(state: Mapping[str, object]) -> tuple[str, ...] | None:
+    """Return the ``_fields`` names ``_queryset_state_defect`` proved, each its exact text."""
+    fields = state.get("_fields")
+    if fields is None:
+        return None
+    return tuple([_normalized_str(name) for name in cast("tuple[str, ...]", fields)])
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4023,7 +4147,7 @@ def _seal_or_defect(
       ``resolve_expression`` dispatch would run a consumer expression mid-bake -- and
       the candidate is never mutated) -- or a
       ``Prefetch`` in ``_prefetch_related_lookups`` carries an inner queryset that
-      cannot itself be sealed, a non-exact-``str`` lookup, a consumer
+      cannot itself be sealed, a non-``str`` lookup or path, a consumer
       ``Prefetch`` subclass (rebuilt as an exact ``Prefetch`` so no
       ``get_current_querysets`` override survives), or an inner queryset whose
       model is unrelated to the lookup path's relation target (Django ticket
@@ -4106,9 +4230,6 @@ def _seal_or_defect(
     state: dict[str, object] = truth.instance_state(candidate)
     query = state.get("_query")
     qmodel = state.get("model")
-    # Read before, used only after, ``_queryset_state_defect`` pins ``_db`` to ``None`` or
-    # an exact ``str`` below.
-    db = cast("str | None", state.get("_db"))
     iterable = state.get("_iterable_class")
     # A model class always carries its concrete model (``ModelBase`` sets it); django-stubs
     # types the attribute by ``Options``' pre-class ``None`` default.
@@ -4131,10 +4252,12 @@ def _seal_or_defect(
     state_defect = _queryset_state_defect(state, cls_name)
     if state_defect is not None:
         return None, state_defect
+    # ``_db`` is proven ``None`` or a ``str`` above; every later read takes its exact text.
+    db = _normalized_db(state)
     if expected_routing is not None:
         original_db = expected_routing.db
         original_hints = expected_routing.hints
-        candidate_db = state.get("_db")
+        candidate_db = db
         candidate_hints = state.get("_hints")
         if candidate_db != original_db or not _routing_hints_equal(
             candidate_hints,
@@ -4249,9 +4372,9 @@ def _seal_or_defect(
         return None, ("sliced", f"rows {rebuilt_query.low_mark}:{rebuilt_query.high_mark}")
     if policy.require_model_rows and iterable is not ModelIterable:
         return None, ("projection", truth.name(iterable))
-    # ``_fields`` is proven ``None`` or an exact ``tuple`` of exact ``str`` names by
-    # ``_queryset_state_defect``.
-    fields = cast("tuple[str, ...] | None", state.get("_fields"))
+    # ``_fields`` is proven ``None`` or an exact ``tuple`` of ``str`` names by
+    # ``_queryset_state_defect``, and is carried forward as exact text.
+    fields = _normalized_fields(state)
     # ``combinator`` is a plain ``str | None`` slot on the proven-genuine
     # ``sql.Query``, read off the reconstructed clone -- no consumer dispatch. A
     # combined result is served as the set of primary keys it selects: the

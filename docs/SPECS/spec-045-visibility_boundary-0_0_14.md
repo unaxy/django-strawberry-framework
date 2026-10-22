@@ -149,9 +149,13 @@ Reading state without dispatch is not the same as USING it without dispatch, so
 every `QuerySet.__dict__` field the seal carries forward — `_db`, `_hints`,
 `_fields`, `_sticky_filter`, `_for_write` — is pinned to the exact shape Django
 stores before any truthiness test, comparison, or `dict` copy runs on it: `_db`
-`None` or an exact `str`, `_hints` `None` or an exact `dict` with exact-`str`
-keys, `_fields` `None` or an exact `tuple` of exact-`str` names,
-`_sticky_filter` / `_for_write` `None` or an exact `bool`. `_hints` is copied
+`None` or a `str`, `_hints` `None` or an exact `dict` with exact-`str`
+keys, `_fields` `None` or an exact `tuple` of `str` names,
+`_sticky_filter` / `_for_write` `None` or an exact `bool`. The `_db` alias and
+the `_fields` names are what the consumer passed to `using(...)` / `values(...)`
+/ `values_list(...)`, which Django stores as given, so a `TextChoices` /
+`StrEnum` member is admitted there by its real type and read as its exact text
+before any comparison; the sealed queryset carries that text. `_hints` is copied
 into a fresh dict rather than shared, so the untrusted object retains no
 routing-control surface on the sealed queryset.
 
@@ -203,7 +207,17 @@ raw-SQL slots, `Query.extra` select payloads, `ExtraWhere` fragments, `RawSQL`
 parameters, the `alias_map` joins (and any join's `filtered_relation` resolved
 condition), and `select_related` are each walked once under a single recursive
 id-memoized traversal; inert parameter leaves terminate by EXACT type (a `str` /
-`int` / `datetime` subclass carrying `resolve_expression` is NOT inert).
+`int` / `datetime` subclass carrying `resolve_expression` is NOT inert). A text
+term (an `order_by` / `distinct` name, an `extra_order_by` / `extra_tables`
+element, an `ExtraWhere` fragment) is any `str` that defines no
+`resolve_expression`, the question Django itself asks of these slots, so a
+`TextChoices` / `StrEnum` member is admitted and reconstruction rebinds it as its
+exact text; a raw-SQL parameter leaf takes the admitted-bound-value rule of
+Decision 8 (an inert leaf, or a plain-data leaf such as a `TextChoices` member;
+never a container). An `ExtraWhere` whose params are `None` (what
+`extra(where=...)` stores without `params=`, read by `ExtraWhere.as_sql` as no
+parameters) passes; a `RawSQL` with `None` params stays refused, since Django
+cannot compile it.
 SQL-template metadata (`template` / `function` / `arg_joiner` / `connector` /
 `sql` / `base_template`) present on an instance must be exactly `str`, and an
 expression's open-ended `extra` template mapping must be an exact `dict` of
@@ -227,8 +241,13 @@ Three further properties the walk must hold, each of which a narrower reading of
   arithmetic invoked by ordinary downstream `.filter()` composition, and that
   callback can rewrite the sealed `where` tree before the new predicate is added.
   Alias refcounts must be exact `int`, external-alias flags exact `bool`,
-  `table_map` entries exact lists of exact-`str` aliases, set members exact `str`,
-  and `_filtered_relations` values genuine and unshadowed.
+  `table_map` entries exact lists of `str` aliases, set members `str`, and
+  `_filtered_relations` values genuine and unshadowed. A name (a mapping key, a
+  set member, an `extra` select alias, a `table_map` alias) may be a `TextChoices`
+  / `StrEnum` member, which Django stores as given for an `annotate` / `alias` /
+  `extra(select=...)` / `FilteredRelation` name: it is admitted by its real type,
+  read as its exact text wherever a defect names it, and rebound as that text by
+  reconstruction, so the sealed query holds exact-`str` names only.
 - **A reference cycle is untrusted state, not a shared diamond.** The walk is
   three-state: a node reached while still being visited closes a cycle and fails
   closed; a node reached after complete validation is a legitimate shared
@@ -242,7 +261,7 @@ rejection); [`::_expr_graph_defect`][querysets], [`::_where_tree_defect`][querys
 [`::_join_defect`][querysets], [`::_expr_sequence_defect`][querysets],
 [`::_raw_sql_sequence_defect`][querysets], [`::_raw_sql_node_defect`][querysets],
 [`::_raw_sql_params_defect`][querysets] (the raw-SQL payloads Django hands
-straight to the adapter); [`::_node_metadata_defect`][querysets] and
+straight to the adapter); [`::_is_text_term`][querysets] (the text-term rule); [`::_node_metadata_defect`][querysets] and
 [`::_template_params_defect`][querysets] (SQL-template metadata and the `extra`
 mapping); [`::_expression_state_defect`][querysets] (expression-owned state
 proven before the accessor runs); [`::_select_related_defect`][querysets],
@@ -304,10 +323,13 @@ unoverridden-default-hook narrowing, and the reason
 
 **Decision.** Every `Prefetch` entry — including the `queryset=None` case — is
 rebuilt from scratch as an exact `django.db.models.Prefetch` (via
-`Prefetch.__new__`, copying only the exact-`str` / `None` path state
-`prefetch_through` / `prefetch_to` / `to_attr`), so a consumer `Prefetch`
-subclass cannot survive with an executable `get_current_querysets` override.
-Non-`Prefetch` lookup entries must be EXACTLY `str`. Each inner queryset is
+`Prefetch.__new__`, copying only the path state `prefetch_through` /
+`prefetch_to` / `to_attr`), so a consumer `Prefetch` subclass cannot survive with
+an executable `get_current_querysets` override. Each path slot must be a `str`
+(`to_attr` may be `None`); a `TextChoices` / `StrEnum` member naming the relation
+is read once as its exact text, before the relation-target check below and the
+rebuild, so both see the text Django resolves. Non-`Prefetch` lookup entries must
+be a `str` and are carried as their exact text. Each inner queryset is
 recursively sealed through `_seal_or_defect` under `_PREFETCH_CHILD_POLICY`, with
 the outer effective alias as its required alias; the policy's
 `require_shared_alias` makes a child explicitly routed off a DIFFERENT alias fail
@@ -339,7 +361,8 @@ seal adopts the seed's explicit `.using(...)` as the alias the hook must keep,
 serves a combined seed as its primary-key set and refuses a sliced one.
 
 **Enforcing symbols.**
-[`utils/querysets.py::_rebuilt_prefetch_or_defect`][querysets];
+[`utils/querysets.py::_prefetch_path_or_defect`][querysets];
+[`::_rebuilt_prefetch`][querysets];
 [`::_sealed_prefetch_related_lookups`][querysets];
 [`::_prefetch_relation_target_or_none`][querysets] (the relation-target model
 check); [`::_seal_or_defect`][querysets] #"effective_alias = required_alias"
@@ -545,7 +568,7 @@ container. What it shares is:
   from which Django's own code extracts a pk.
 
 Every other bound payload — a direct `Lookup` right-hand side, an expression's own
-payload slot (`Value.value`), a mapping key — goes through the one
+payload slot (`Value.value`), a raw-SQL parameter, a mapping key — goes through the one
 admitted-bound-value rule: a plain-data subclass is normalized to an EXACT inert
 value (a `TextChoices` member becomes an exact `str`, a `date` subclass an exact
 `datetime.date`), read through the base type's own descriptors and C slots so
@@ -556,7 +579,9 @@ right-hand side is additionally validated before reconstruction
 (`_direct_rhs_defect` — an inert leaf, a plain container of them, or a value that
 defines no attribute hook of its own and descends from a plain-data base), with
 its operands read from raw instance state rather than the lookup's own discovery
-accessor.
+accessor; a raw-SQL parameter (`RawSQL` / `ExtraWhere` / `extra(select=...)`
+params) meets the same leaf half (`_plain_data_leaf_defect`), a container inside
+the params staying refused.
 
 **Enforcing symbols.** [`utils/querysets.py::_rebuild_query_payloads`][querysets]
 (the reconstruction pass over the clone's state);
@@ -567,7 +592,8 @@ fail-closed contract); [`::_normalized_bound_value`][querysets] and
 `::_BOUND_VALUE_NORMALIZERS` (the admitted-bound-value rule and its exact-value
 normalization through base-type descriptors);
 [`::_lookup_operands_defect`][querysets],
-[`::_direct_rhs_defect`][querysets], [`::_rhs_hook_defect`][querysets] and
+[`::_direct_rhs_defect`][querysets], [`::_plain_data_leaf_defect`][querysets],
+[`::_rhs_hook_defect`][querysets] and
 [`::_static_attr_present`][querysets] (a lookup's operands read from raw state
 instead of its own discovery accessor); [`::_template_params_defect`][querysets]
 (the `extra` template mapping `as_sql` interpolates).

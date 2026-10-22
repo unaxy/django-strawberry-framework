@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 173 done, 131 to do.
+Progress: 176 done, 133 to do.
 
 ## Done
 
@@ -642,6 +642,21 @@ Progress: 173 done, 131 to do.
   included), and an unused or used variable default is charged as its literal AST, so a duplicate-name document over a
   bound gets the resource rejection (spread, untyped, typed-order, directive, unused-default and used-default rows) and
   one within budget reaches graphql-core's "only one input field" validation; no new bound, code or message
+- [x] 271. Fixed with 272: `utils/querysets.py::_raw_sql_node_defect`'s `ExtraWhere` arm admits `params is None`
+  (Django's documented `extra(where=[...])` spelling, read by `ExtraWhere.as_sql` as `self.params or ()`); `RawSQL(sql,
+  None)` stays refused, since Django raises `TypeError` compiling it
+- [x] 272. A `TextChoices` / `StrEnum` member where Django takes any `str` was refused by the visibility seal: fixed,
+  one text-term predicate (`utils/querysets.py::_is_text_term`, an `is_str` with no `resolve_expression`) reads
+  `order_by` / `distinct` / `extra(order_by=, tables=)` and `ExtraWhere` fragments, and a raw-SQL param leaf passes when
+  inert or under the direct-RHS type rule (`_plain_data_leaf_defect`, extracted from `_direct_rhs_defect`); containers
+  in params and an expression-`str` stay refused, the sealed query compiles Django's SQL byte for byte, and every
+  still-refused message is unchanged
+- [x] 294. A member in a name slot (annotation / alias / `extra(select=)` keys, FilteredRelation aliases, `table_map`,
+  `using()`, `values()` fields, prefetch lookups and `Prefetch` through / to_attr) was refused at eight exact-type
+  sites: fixed with 272, every site reads `is_str` and the seal carries the normalized exact text (`_normalized_str`,
+  `_normalized_db`, `_normalized_fields`; `_prefetch_path_or_defect` reads a `Prefetch` path once and
+  `_rebuilt_prefetch` cannot fail), so a deep walk finds no `str` subclass in sealed state and the live genre-books
+  connection, root list, cascaded `values()` hook and enum-routed managers serve what their exact-text twins serve
 
 ## Outside review of the fixes
 
@@ -789,20 +804,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   condition is "the instance holds its own `filter`"; treat it as owner-bound and never negated, as `method=` is
   (class-level `filter` and `null_extends` unchanged; `tests/filters/test_sets.py::test_a_filter_returning_no_queryset_fails_the_filter_queryset_assertion`
   moves)
-- [ ] 271. A `get_queryset` hook returning `qs.extra(where=[...])` written without `params=` (Django's documented
-  spelling) is refused by the visibility seal: `Query.add_extra` stores `ExtraWhere(where, None)` and
-  `utils/querysets.py::_raw_sql_node_defect` passes `None` to `_raw_sql_params_defect`, which admits only an exact list or
-  tuple, so every connection over the type raises a `ConfigurationError` ("where clause params is a NoneType") Django
-  itself would serve; admit `None` in the `ExtraWhere` arm only (`RawSQL(sql, None)` stays refused: Django raises
-  `TypeError` compiling it). Lands with 272
-- [ ] 272. A `get_queryset` hook naming a `TextChoices` / `StrEnum` member where Django takes any `str` is refused by the
-  visibility seal with a `ConfigurationError` Django itself would serve: `extra(order_by=[member])` and
-  `extra(tables=[member])` (`utils/querysets.py::_raw_sql_sequence_defect`), `order_by(member)` / `distinct(member)`
-  (`_expr_sequence_defect`), a member as an `extra(where=[...])` fragment (`_raw_sql_node_defect`), and a member in raw
-  params (`extra(where, params=[member])`, `extra(select_params=...)`, `RawSQL(sql, [member])`: `_raw_sql_params_defect`'s
-  exact-type leaves, while spec-045 Decision 8 admits the same member as a lookup value). Canonical reconstruction already
-  rebinds each member as an exact `str` / `int` with SQL and rows equal to Django's, so the exact-type tests are the only
-  blocker; one text-term predicate (`is_str` and no `resolve_expression`) and the admitted-bound-value rule for raw params
 - [ ] 276. A model-backed `SerializerMutation` field whose serializer kind disagrees with its column builds as the
   column's kind and then fails every write: `rest_framework/serializer_converter.py::resolve_serializer_field` types by
   `model_column_write_kind` alone (the SCALAR arm's `kind != SCALAR` line defers to the model converter, the FILE arm
@@ -834,11 +835,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   single field's `queryset.get(...)` raise `MultipleObjectsReturned` (a top-level error, no payload), and a
   `ModelMultipleChoiceField` links every row with the key, a hidden one included. Require `pk` or a single-field unique
   column at build, as Django's `ForeignObject._check_unique_target` (fields.E311) does. Lands with 291
-- [ ] 294. A `get_queryset` hook or raw-list resolver naming a `TextChoices` / `StrEnum` member as an alias or lookup is
-  refused by the visibility seal while Django serves it: `qs.annotate(**{member: F(...)})` ("query annotations has a
-  non-string key", `utils/querysets.py::_query_container_defect`), `qs.extra(select={member: sql})`,
-  `qs.prefetch_related(member)` (`_sealed_prefetch_related_lookups`; spec-045 Decision 4 pins the refusal), and
-  `qs.values(member)` under the raw-list and cascade policies (`_queryset_state_defect`)
 - [ ] 295. A `ModelForm` declaring a `ModelChoiceField` under a non-relation column's name (`description =
   ModelChoiceField(queryset=Category.objects.all())`) builds as the column's scalar (`description: String!`), and
   `DjangoModelFormMutation` create and update write the chosen row's `str()` into the column:
@@ -884,12 +880,29 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "Enter a list of values.": `forms/inputs.py::_form_choice_narrowing` returns before its list-over-single-value refusal
   when the column lists no choices; the serializer twin is unchecked on purpose (spec-039), so say whether the form
   flavor refuses at build or types the field as a list
+- [ ] 312. `utils/querysets.py::_node_metadata_defect` still refuses `RawSQL(<TextChoices member>, params)` (the SQL
+  text slot read by exact type), which Django serves; the 272 text-term predicate covers order / extra / where slots but
+  not `RawSQL.sql`. Found landing 294
+- [ ] 313. Unprobed: a database router whose `db_for_read` returns a `StrEnum` alias may be refused by
+  `utils/querysets.py::_snapshot_routing_intent` (exact-type read of the routed alias) after 294 normalized
+  `using(<member>)`; probe it live and seal by `is_str` plus normalization if so. Found landing 294
+- [ ] 314. Under 272's raw-param leaf rule a model instance in `extra(where=..., params=[obj])` now passes the
+  visibility seal and fails in the database adapter ("Error binding parameter") instead of the typed
+  `ConfigurationError`; Django fails the same way, so decide whether the seal should keep refusing non-adaptable leaves
+  with its own message. Found landing 294
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 311. CHANGELOG entry for item 294: a `get_queryset` hook, manager or raw-list resolver naming a `TextChoices` /
+  `StrEnum` member as an annotation or alias name, an `extra(select=)` key, a `FilteredRelation` alias, a `using()`
+  alias, a `values()` field or a prefetch lookup / `to_attr` is served like its exact text instead of a visibility-seal
+  `ConfigurationError`
+- [ ] 310. CHANGELOG entry for items 271 and 272: a `get_queryset` hook using `extra(where=[...])` without `params=`, or
+  a `TextChoices` / `StrEnum` member in `order_by` / `distinct`, `extra(order_by=, tables=, where=)` or as a raw-SQL
+  parameter, is served as Django serves it instead of a visibility-seal `ConfigurationError`
 - [ ] 308. CHANGELOG entry for item 241: under `ResourcePolicy` a document repeating an input-object field name
   (directly, through a fragment spread or in a variable default) is charged for every spelled occurrence, so an
   over-budget one gets the resource rejection (`max_input_nodes` / `max_container_width`) instead of reaching validation
