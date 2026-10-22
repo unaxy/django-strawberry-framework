@@ -471,9 +471,10 @@ the model-construct + `full_clean()` heart.
   [`DjangoMutationField`][glossary-djangomutationfield] accepts any class carrying
   the mutation protocol (`_has_mutation_protocol`).
   [`mutations/permissions.py`][mutations-permissions]'s
-  [`DjangoModelPermission`][glossary-djangomodelpermission] reads the model via
-  `mutation._resolve_model(mutation.Meta)`, so the `ModelForm` flavor authorizes
-  through the same default; `DenyAll` is the plain form's unset default.
+  [`DjangoModelPermission`][glossary-djangomodelpermission] checks the model the
+  mutation resolved through `_resolve_model` at declaration, so the `ModelForm`
+  flavor authorizes through the same default; `DenyAll` is the plain form's unset
+  default.
 - **The products app demonstrates both flavors** (`apps/products/forms.py` +
   `apps/products/schema.py`). The `Item` model carries the
   `unique_item_per_category` `UniqueConstraint` — a `ModelForm` over `Item` surfaces
@@ -869,9 +870,10 @@ Rationale companion: [Decision 5][rationale-d5].
 overriding [`_resolve_model`][spec-036] to return `Meta.form_class._meta.model`. It
 reuses what the base provides — the primary [`DjangoType`][glossary-djangotype]
 payload resolution (the uniform `node` / `result` slot), the
-[`DjangoModelPermission`][glossary-djangomodelpermission] default (which reads the
-model via `_resolve_model`, so the override authorizes it for free), the
-visibility-scoped `update` locate, the optimizer re-fetch, and the phase-2.5
+[`DjangoModelPermission`][glossary-djangomodelpermission] default (which checks the
+model the class resolved through `_resolve_model` at declaration, so the override
+authorizes it for free), the visibility-scoped `update` locate, the optimizer
+re-fetch, and the phase-2.5
 [`bind_mutations`][mutations-sets] pass — and overrides the base's four write-path
 seams (the model flavor keeps every default; [`SerializerMutation`][glossary-serializermutation]
 overrides the same seams):
@@ -1706,11 +1708,11 @@ Rationale companion: [Decision 10][rationale-d10].
 ### Decision 11 — Write authorization: reuse the `036` seam (`DjangoModelPermission` for the `ModelForm`, explicit classes for the plain form)
 
 The `ModelForm` flavor inherits [`DjangoModelPermission`][glossary-djangomodelpermission]
-unchanged: because `has_permission` reads the model via
-`mutation._resolve_model(mutation.Meta)`, the `_resolve_model` override
+unchanged: because `has_permission` checks the model the class resolved through the
+`_resolve_model` override
 ([Decision 6](#decision-6--base-class-strategy-djangomodelformmutation-rides-the-djangomutation-base-the-plain-form-is-the-model-less-sibling))
-makes the `add` / `change` model-permission default work for free — an anonymous or
-under-privileged caller is denied before the form runs. The visibility-scoped
+at declaration, the `add` / `change` model-permission default works for free — an
+anonymous or under-privileged caller is denied before the form runs. The visibility-scoped
 `update` locate (Decision 8 step 1) and the write-auth check are the same separate
 layers `036` set ("can view" ≠ "can write").
 
@@ -1723,14 +1725,13 @@ explicit opt-in (`Meta.permission_classes = []`, the `036` AllowAny opt-out). An
 key is never a configuration error.
 
 The plain base additionally **rejects a `DjangoModelPermission` subclass** in
-`Meta.permission_classes` at class creation. That class resolves the write permission
-from `mutation._resolve_model(mutation.Meta)` and maps the operation to an `add` /
-`change` / `delete` codename; a model-less `DjangoFormMutation` supplies neither (it is
-not a [`DjangoMutation`][glossary-djangomutation] subclass, so it has no
-`_resolve_model`, and its operation is the `"form"` sentinel). The generic
+`Meta.permission_classes` at class creation. That class checks the model the mutation
+validated at declaration and maps the operation to an `add` / `change` / `delete`
+codename; a model-less `DjangoFormMutation` supplies neither (its validated snapshot
+carries no model, and its operation is the `"form"` sentinel). The generic
 permission-class validation accepts it — it *is* a class with a callable
 `has_permission` — so without the targeted reject the misconfiguration finalizes
-cleanly and surfaces only as a raw `AttributeError` at request time. The error names
+cleanly and surfaces only as a raw error at request time, never a deny. The error names
 [`DjangoModelFormMutation`][glossary-djangomodelformmutation] as the model-backed base
 and the two valid plain-form postures.
 

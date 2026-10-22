@@ -2289,9 +2289,9 @@ Rationale companion — this Decision's justification and its two rejected alter
 
 The flavor inherits the [`spec-036`][spec-036] Decision 15 write-authorization seam
 unchanged: `Meta.permission_classes` defaults to `[DjangoModelPermission]`, which
-resolves the model via the `_resolve_model` override
-(`Meta.serializer_class.Meta.model`) and enforces the Django `add` / `change` model
-perm (`create` requires `add`, `update` requires `change`). An anonymous or
+checks the model the class resolved at declaration through the `_resolve_model`
+override (`Meta.serializer_class.Meta.model`) and enforces the Django `add` / `change`
+model perm (`create` requires `add`, `update` requires `change`). An anonymous or
 under-privileged caller is denied with a top-level `GraphQLError` before any write.
 Write authorization stays **separate** from [`get_queryset`][glossary-get_queryset-visibility-hook]
 visibility (can-view ≠ can-write) and from the serializer's own validation. The

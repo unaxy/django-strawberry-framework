@@ -1093,14 +1093,14 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
             unset_default=(DenyAll,),
         )
         # A model-less plain form cannot carry a model-requiring permission class.
-        # ``DjangoModelPermission`` (and any subclass) reads the mutation's model via
-        # ``mutation._resolve_model(mutation.Meta)`` and maps the operation to an
-        # ``add`` / ``change`` / ``delete`` codename - neither of which a plain
-        # ``DjangoFormMutation`` provides (it is not a ``DjangoMutation`` subclass, so
-        # it has no ``_resolve_model``, and its operation is the ``"form"`` sentinel).
+        # ``DjangoModelPermission`` (and any subclass) reads the model the mutation
+        # validated at declaration and maps the operation to an ``add`` / ``change`` /
+        # ``delete`` codename - neither of which a plain ``DjangoFormMutation``
+        # provides (its snapshot's model is ``None``, and its operation is the
+        # ``"form"`` sentinel).
         # ``_validate_permission_classes`` accepts it (it IS a class with a callable
         # ``has_permission``), so without this guard the misconfiguration finalizes
-        # cleanly and only surfaces as a raw ``AttributeError`` at REQUEST time - the
+        # cleanly and only surfaces as a raw error at REQUEST time (never a deny) - the
         # exact model-permission incompatibility ``DenyAll`` documents and the default
         # avoids. Reject it at class creation (the package's fail-loud contract), naming
         # the model-backed base + the two valid plain-form postures.
