@@ -506,10 +506,12 @@ class CirculationDeskFilter(FilterSet):
     """Circulation-desk filterset bound to ``CirculationDeskType`` at finalize phase 2.5.
 
     The whole-set ``"__all__"`` sweep over the model carrying every relation kind: it
-    keeps the forward single-column relations (``shelf``, and ``content_type``, whose
-    target model no ``DjangoType`` exposes) as primary-key ``exact`` leaves and never
-    includes the many-to-many ``genres`` or a reverse relation. The declared ``branch``
-    ``RelatedFilter`` takes the place of the swept ``branch`` leaf.
+    keeps the forward single-column relation ``shelf`` as a primary-key ``exact`` leaf
+    and never includes the many-to-many ``genres`` or a reverse relation. The declared
+    ``branch`` ``RelatedFilter`` takes the place of the swept ``branch`` leaf.
+    ``Meta.exclude`` drops the generic foreign key's ``content_type`` / ``object_id``
+    columns, which ``CirculationDeskType`` does not publish, so the sweep exposes no
+    filter key on a column the type hides.
     """
 
     branch = RelatedFilter("BranchFilter", field_name="branch")
@@ -517,6 +519,7 @@ class CirculationDeskFilter(FilterSet):
     class Meta:
         model = models.CirculationDesk
         fields = "__all__"
+        exclude = ("content_type", "object_id")
 
 
 class DeskShiftFilter(FilterSet):

@@ -1018,17 +1018,15 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         # unknown key): a model-less mutation has no model operation (Decision 10).
         # Reject it by KEY PRESENCE, not value, so an explicit ``operation = None``
         # is rejected too - the fixed ``"form"`` sentinel must not accept ANY copied
-        # ``Meta.operation`` key (spec-038 Decision 10; a value check let
-        # ``None`` slip through as if absent). Presence MUST follow the MRO
-        # (``truth.static_attr``), NOT ``vars(meta)`` own-keys-only: ``form_class`` /
+        # ``Meta.operation`` key (spec-038 Decision 10). Presence follows the MRO
+        # (``truth.static_attr``), not ``vars(meta)`` own-keys-only: ``form_class`` /
         # ``permission_classes`` / ``fields`` / ``exclude`` are resolved
         # MRO-visible, and the ModelForm flavor honors an inherited
         # ``operation`` the same way - so a shared ``Meta`` parent that carries
         # ``operation`` (the common "copy a ModelForm Meta / share a base Meta"
-        # pattern) must be rejected here too. ``vars(meta)`` alone let
-        # ``class Meta(Shared): pass`` with ``Shared.operation = ...`` finalize as
-        # if absent while ``Submit.Meta.operation`` still resolved to the inherited
-        # value. Reject it FIRST with a targeted message naming the reason, so a
+        # pattern), e.g. ``class Meta(Shared): pass`` with
+        # ``Shared.operation = ...``, is rejected here too. Reject it FIRST with a
+        # targeted message naming the reason, so a
         # consumer who copied a ``DjangoModelFormMutation`` ``Meta`` sees
         # "operation is not supported" rather than a generic
         # "unknown keys: ['operation']" - then run the promoted typo guard over the

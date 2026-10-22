@@ -101,10 +101,11 @@ def _require_strategy(name: object) -> StrategySelection:
     legitimate "no strategy override" default - without a factory-side
     check, ``strategy(None)`` would become a silent no-op.
 
-    The typed rejection is unconditional and owned by
-    ``nested_fetch.resolve_strategy`` itself: its name-or-class test asks the
-    real type and never reads ``__class__``, so a non-``str`` lookalike takes
-    the typed ``ConfigurationError``. This factory check keeps only its own
+    The typed rejection is owned by ``nested_fetch.resolve_strategy`` itself:
+    its name-or-class test asks the real type and never reads ``__class__``,
+    so a non-``str`` lookalike takes the typed ``ConfigurationError``; what the
+    value's own ``__repr__`` or a strategy's ``plan`` read raises propagates
+    unchanged. This factory check keeps only its own
     contract: an
     explicit ``None`` must reject here rather than resolve the
     ``NESTED_CONNECTION_STRATEGY`` setting the way ``resolve_strategy(None)``

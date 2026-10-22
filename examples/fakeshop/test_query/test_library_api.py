@@ -2467,12 +2467,13 @@ def test_library_flat_leaves_over_a_to_many_relation_stay_independent_over_http(
 
 @pytest.mark.django_db
 def test_library_all_fields_filterset_sweeps_forward_relation_columns_only_over_http() -> None:
-    """``fields = "__all__"`` keeps forward single-column relations, never M2M or reverse ones."""
+    """``fields = "__all__"`` keeps forward single-column relations, never M2M or reverse ones.
+
+    ``Meta.exclude`` keeps the generic foreign key's columns, which the type hides, out.
+    """
     fields = _input_field_names("CirculationDeskFilterInputType")
     assert {
         "shelf",
-        "contentType",
-        "objectId",
         "name",
         "id",
         "branch",
@@ -2483,6 +2484,8 @@ def test_library_all_fields_filterset_sweeps_forward_relation_columns_only_over_
         "profile",
         "tags",
         "contentObject",
+        "contentType",
+        "objectId",
     }
     assert _input_field_names("CirculationDeskFilterShelfFilterInputType") == {"exact"}
     assert _input_field_type("CirculationDeskFilterShelfFilterInputType", "exact") == {
@@ -2494,24 +2497,17 @@ def test_library_all_fields_filterset_sweeps_forward_relation_columns_only_over_
 
 @pytest.mark.django_db
 def test_library_all_fields_filterset_filters_by_forward_relation_pks_over_http() -> None:
-    """The swept ``shelf`` (non-Relay target) and ``contentType`` (no ``DjangoType``) keys.
+    """The swept ``shelf`` key (non-Relay target) filters by the related row's raw pk.
 
-    Both filter by the related row's raw pk. A desk on a ``topic="secret"`` shelf is
-    hidden from the anonymous request by the desk's own visibility cascade, so its
-    shelf's pk matches nothing, the same answer as a pk no shelf carries.
+    A desk on a ``topic="secret"`` shelf is hidden from the anonymous request by the
+    desk's own visibility cascade, so its shelf's pk matches nothing, the same answer
+    as a pk no shelf carries.
     """
     branch = models.Branch.objects.create(name="Home", city="Boston")
     open_shelf = models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
     other_shelf = models.Shelf.objects.create(code="B-2", topic="general", branch=branch)
     secret_shelf = models.Shelf.objects.create(code="C-3", topic="secret", branch=branch)
-    book_type = ContentType.objects.get_for_model(models.Book)
-    models.CirculationDesk.objects.create(
-        name="Front",
-        branch=branch,
-        shelf=open_shelf,
-        content_type=book_type,
-        object_id=1,
-    )
+    models.CirculationDesk.objects.create(name="Front", branch=branch, shelf=open_shelf)
     models.CirculationDesk.objects.create(name="Back", branch=branch, shelf=other_shelf)
     models.CirculationDesk.objects.create(name="Vault", branch=branch, shelf=secret_shelf)
     query = """
@@ -2526,8 +2522,6 @@ def test_library_all_fields_filterset_filters_by_forward_relation_pks_over_http(
         ({"shelf": {"exact": open_shelf.pk}}, ["Front"]),
         ({"shelf": {"exact": secret_shelf.pk}}, []),
         ({"shelf": {"exact": saved_pk(secret_shelf.pk) + 1000}}, []),
-        ({"contentType": {"exact": book_type.id}}, ["Front"]),
-        ({"contentType": {"exact": book_type.id + 1000}}, []),
     ):
         _assert_graphql_data(
             query,

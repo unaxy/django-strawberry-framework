@@ -469,7 +469,7 @@ def included_field_selections(
     Non-``list``/``tuple`` iterables are materialized once at entry. The
     fast-path probe loop and the rebuild loop below BOTH iterate the
     collection, so a one-shot iterable (Strawberry's converter always builds
-    lists, but a consumer-crafted SelectionState may present a generator)
+    lists, but the parameter accepts any ``Iterable`` from a direct caller)
     would be silently exhausted between them: fields before the first
     fragment, and a fragment's whole body, would vanish from the plan
     without any error. Re-iterable list/tuple inputs keep the identity

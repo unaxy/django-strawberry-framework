@@ -759,8 +759,8 @@ def test_upstream_patches_enabled_hostile_key_isinstance_becomes_configurationer
         upstream_patches_enabled("django")
 
 
-def test_normalize_hostile_metaclass_name_property_contained() -> None:
-    """A hostile metaclass ``__name__`` must not replace the typed rejection.
+def test_normalize_rejection_skips_raising_metaclass_name() -> None:
+    """A non-mapping whose metaclass ``__name__`` raises takes the typed rejection.
 
     The non-mapping rejection assembles its message with the received
     value's type name at the raise site - before any exception object
@@ -788,8 +788,8 @@ def test_normalize_hostile_metaclass_name_property_contained() -> None:
         Settings(Evil())  # pyright: ignore[reportArgumentType]
 
 
-def test_upstream_patches_enabled_hostile_metaclass_value_contained() -> None:
-    """A non-bool/non-mapping toggle whose type name raises stays contained."""
+def test_upstream_patches_toggle_rejection_skips_raising_metaclass_name() -> None:
+    """A non-bool/non-mapping toggle whose metaclass ``__name__`` raises is refused typed."""
 
     class BadMeta(type):
         @property
@@ -811,8 +811,8 @@ def test_upstream_patches_enabled_hostile_metaclass_value_contained() -> None:
         upstream_patches_enabled("django")
 
 
-def test_upstream_patches_enabled_hostile_metaclass_mapping_value_contained() -> None:
-    """A non-bool per-dependency value with hostile type metadata stays contained."""
+def test_upstream_patches_mapping_value_rejection_skips_raising_metaclass_name() -> None:
+    """A non-bool per-dependency value whose metaclass ``__name__`` raises is refused typed."""
 
     class BadMeta(type):
         @property

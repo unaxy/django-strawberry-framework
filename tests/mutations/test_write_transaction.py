@@ -1190,9 +1190,10 @@ class _DeleteTargetOutFromUnder:
 
     Runs AFTER the locate (the auth seam's position in the pipeline), so the
     located instance's row is gone by the time the write executes - the
-    concurrent-delete race, made deterministic. sqlite ignores ``FOR UPDATE``,
-    so the default lock cannot serialize the two "transactions" here; on a
-    locking backend the same race surfaces only under ``select_for_update=False``.
+    concurrent-delete race, made deterministic. The delete runs on the write's
+    own connection, which a row lock never blocks, so the default lock cannot
+    serialize the two here on any backend; on a row-locking backend a delete
+    from another connection reaches the write only under ``select_for_update=False``.
     """
 
     def has_permission(

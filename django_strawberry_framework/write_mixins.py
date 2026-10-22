@@ -645,7 +645,7 @@ def make_meta_validating_metaclass(
 
         @override
         def __setattr__(cls, name: str, value: object) -> None:
-            """Keep the validated ``Meta`` snapshot write-once (0.0.15 auth hardening).
+            """Keep the validated ``Meta`` snapshot write-once.
 
             The metaclass stashes ``_mutation_meta`` exactly once at class
             creation; any post-creation rebind of that head would swap the
@@ -687,16 +687,16 @@ class _ValidatedMutationMeta:
     ``types/base.py::_ValidatedMeta`` in role: validation happens once at class
     creation, then every downstream reader trusts this snapshot.
 
-    The snapshot is SEALED once ``__init__`` finishes (0.0.15 authorization
-    hardening): the record is the write side's per-request authorization source
+    The snapshot is SEALED once ``__init__`` finishes: the record is the write
+    side's per-request authorization source
     (``mutations/permissions.py::run_permission_classes`` reads
     ``type(self)._mutation_meta.permission_classes``), and a ``has_permission``
     hook runs INSIDE the walk with the mutation class in hand - a mutable slot
     would let one request's hook rebind the validated set (e.g. to the empty
     allow-any posture) for every later request: a persistent cross-request
-    authorization bypass. Any attribute write or delete on a sealed snapshot
-    raises ``ConfigurationError``; the validated configuration is immutable for
-    the life of the process (a consumer who needs different authorization declares
+    authorization bypass. Any attribute write or delete through the record's own
+    ``__setattr__`` / ``__delattr__`` on a sealed snapshot raises
+    ``ConfigurationError`` (a consumer who needs different authorization declares
     a new mutation class).
     """
 

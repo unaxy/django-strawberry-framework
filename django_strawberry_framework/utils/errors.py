@@ -1,7 +1,7 @@
 """The ``FieldError`` envelope type and the write-error constructors shared by every write flavor.
 
 The flavor-neutral owner of the write-error envelope's type and leaf
-construction (promoted from ``mutations/resolvers.py`` so the model mutation
+construction (kept out of ``mutations/resolvers.py`` so the model mutation
 resolver is not the utility module for the form, serializer, auth, and future
 write flavors):
 
@@ -24,8 +24,9 @@ write flavors):
   (a lone surrogate, an embedded NUL) and the record it answers, shared by the
   write decode (``utils/write_values.py::unstorable_text_error``) and the filter
   form validation (``filters/sets.py::FilterSet._validate_form_or_raise``);
-- ``null_field_error`` / ``empty_validation_error`` - the two leaves whose
-  message + code pair was being re-typed by consumers of the module;
+- ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
+  for an explicit null on a non-nullable field and a validation failure
+  carrying no details, each one message + code pair;
 - ``FIELD_ERROR_CODE_*`` - the ``FieldError.codes`` vocabulary, a public wire
   contract named once here rather than left as the union of string literals at
   its raise sites;
@@ -283,10 +284,9 @@ def empty_validation_error(path: str = "") -> FieldError:
 
     Public because the DRF flattener needs it: a serializer whose ``is_valid()``
     fails with an empty (or unreadable) error payload still owes the envelope a
-    leaf, and ``rest_framework/resolvers.py`` was hand-building this exact
-    message + code pair at two sites purely because the name started with an
-    underscore. The module docstring's claim that the DRF flattener calls the
-    single leaf constructor is only true once this is reachable.
+    leaf, and ``rest_framework/resolvers.py`` builds it here, as
+    ``validation_error_to_field_errors`` does for an empty Django
+    ``ValidationError``.
     """
     return field_error(
         path,
@@ -306,11 +306,9 @@ def null_field_error(path: str) -> FieldError:
     path, the message being the column's Django ``error_messages["null"]``
     (``forms/resolvers.py::_column_null_errors``); the serializer flavor hands
     the ``null`` to the serializer, whose DRF ``allow_null`` check refuses it in
-    ``is_valid()`` with DRF's own message, code ``null``. The auth flavor
-    reached this leaf through ``mutations/resolvers.py`` - importing a
-    write-envelope leaf from the MODEL mutation resolver is exactly the
-    layering the promotion of these constructors into ``utils/errors.py``
-    exists to undo.
+    ``is_valid()`` with DRF's own message, code ``null``. Both callers import
+    it from here, so the auth flavor does not depend on the model mutation
+    resolver.
 
     The M2M "send an empty list to clear it" rejection is a different
     condition with its own message and is deliberately NOT folded in here.

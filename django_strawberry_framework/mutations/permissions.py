@@ -149,11 +149,11 @@ def run_permission_classes(
     # class, authorizing every later request: a persistent cross-request
     # authorization bypass. The AND contract (every entry must allow) is sound
     # only over the validated set captured at class creation, never over
-    # whatever a hook leaves behind. The storage side makes that guarantee hold:
-    # the validated snapshot is a SEALED record (see
-    # ``sets.py::_ValidatedMutationMeta``) - the permission set is an immutable
-    # tuple and the snapshot refuses reassignment, so a hook cannot empty,
-    # lengthen, or swap the configuration this walk is running inside.
+    # whatever a hook leaves behind. The storage side backs that: the validated
+    # snapshot is a SEALED record (see
+    # ``write_mixins.py::_ValidatedMutationMeta``) - the permission set is an
+    # immutable tuple and the record's ``__setattr__`` / ``__delattr__`` refuse
+    # ordinary reassignment or deletion of its slots.
     for permission_class in tuple(meta.permission_classes):
         allowed = _require_sync_bool_auth_result(
             permission_class().has_permission(
