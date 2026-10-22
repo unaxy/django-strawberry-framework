@@ -121,7 +121,7 @@ The dataclass is an **extension point**, and later subsystems have taken it up. 
 | `connection` | `spec-030-connection_field-0_0_9.md` |
 | `globalid_strategy`, `effective_globalid_strategy` | `spec-031-globalid_encoding-0_0_9.md` |
 | `relation_shapes`, `relation_connections` | `spec-032-full_relay-0_0_9.md` |
-| `cursor_field` | the `stable_cursor_field` keyset-cursor opt-in |
+| `cursor_field` | `spec-030-connection_field-0_0_9.md` (the `Meta.cursor_field` keyset-cursor opt-in) |
 
 `aggregate_class` and `search_fields` are **not** slots. They stay in `DEFERRED_META_KEYS` — `_validate_meta` rejects them — and the dataclass carries nothing for them, because a reserved slot only earns its place when the shape it will hold is already known.
 The instance is stored on the class as `cls.__django_strawberry_definition__` (mirrors strawberry-graphql-django's `__strawberry_django_definition__` at `strawberry_django/type.py:410`, kept namespace-distinct to avoid collisions).

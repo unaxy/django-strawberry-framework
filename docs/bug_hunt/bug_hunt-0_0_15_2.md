@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 183 done, 129 to do.
+Progress: 184 done, 128 to do.
 
 ## Done
 
@@ -697,6 +697,13 @@ Progress: 183 done, 129 to do.
   bindings, active runs and Postgres leases. `MUSE.md`'s Disk bullet drops its claim that `status` shows the 6 GB
   free-space refusal. Docstring and prose only; the docstring-stripped code digest and both `--help` outputs are
   unchanged.
+- [x] 174. BACKLOG.md no longer carries `stable_cursor_field` or `permission_aware_cursor_decoding`, both shipped as
+  `Meta.cursor_field` (spec-030 `## Keyset cursors`); its "Moved out of this file" section records the move, and the
+  `polymorphic_interface_connections` and `cascade_permission_prefetch_enforcement` entries name the shipped surface.
+  The same future-work claim is gone from spec-010's slot table, spec-032 (viewer-scoped decode folded into its
+  `Meta.cursor_field` sentences), `test_library_api.py::test_stale_after_cursor_no_error`'s docstring and the board
+  (CardItems 1386 and 432, card 24's planning note and CardReference 15, re-rendered). Docs and board only; no
+  executable line changes.
 
 ## Outside review of the fixes
 
@@ -800,7 +807,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 173. The KANBAN "Before a release" checklist (BoardDoc 11) runs `ruff format .` before `ruff check --fix .`, the reverse
   of AGENTS and pre-commit; reverse it through the DB and re-render (archived specs 015, 034, 041, 042, 044, 046 and 057 keep
   the old order as history)
-- [ ] 174. BACKLOG `stable_cursor_field` describes the shipped `Meta.cursor_field` keyset cursors as future work
 - [ ] 178. `review_plan.py scope` "Folders touched" (`ScopeReport.folders`) omits a rename's old folder and still names a
   deleted package's integration item, while `--changed` covers both; REVIEW.md says `scope` lists the same changes
 - [ ] 183. `ruff format` on an explicit `.md` path rewrites its fenced blocks: pyproject's `exclude` does not stop explicit
