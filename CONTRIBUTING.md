@@ -74,12 +74,19 @@ uv run ruff format .
 uvx pre-commit run --files <paths you changed>
 ```
 
-The hooks in `.pre-commit-config.yaml` check things ruff does not, and CI runs the same checks:
+The hooks in `.pre-commit-config.yaml` run in this order, and CI's lint job runs the same checks:
 
 - **kanban-tracked-path-constants** regenerates `examples/fakeshop/apps/kanban/constants.py` from git's tracked file set. Adding or deleting a tracked package or test file means committing the regenerated constants with it; the hook only sees a new file once it is staged.
 - **source-layout** enforces trailing-comma explosion at four or more elements (two in any `models.py`), ASCII-only `.py` source, the markdown link-definition scaffold described below, and brace explosion inside JSON and GraphQL blocks. It auto-fixes, then fails the run so you re-stage.
 - **ruff-check** and **ruff-format**.
-- **check-kanban-anchors** and **check-citations**. Every `path::Symbol` reference in first-party source and on the board must resolve, so a rename means sweeping `::OldName` in the same change. Cite by symbol, never by line number.
+- **basedpyright** type-checks every Python file in the scope `[tool.basedpyright]` sets, not only the staged ones, so a signature change that breaks a caller fails here.
+- **basedpyright-floor** re-runs the same scope at the Python floor (`pyrightconfig.floor.json`), catching a newer stdlib or `typing` name.
+- **check-type-suppressions** refuses an ignore on a locked rule and any file-level directive, and holds the ignore and `typing.cast` counts to the exact budget in `[tool.type-suppressions]`.
+- **check-public-types** builds the package into its own environment and requires `basedpyright --verifytypes` at 100% on the public API.
+- **truthful-reads** keeps identity reads of consumer objects off dunder attribute lookups and refuses a handler that swallows `BaseException`.
+- **check-kanban-anchors** refuses colliding card and glossary anchors.
+- **import-spec-terms-check** requires every done card's glossary rows to equal its spec terms CSV.
+- **check-citations** runs last. Every `path::Symbol` reference in first-party source and on the board must resolve, so a rename means sweeping `::OldName` in the same change. Cite by symbol, never by line number.
 
 ## The example project and the rendered docs
 
