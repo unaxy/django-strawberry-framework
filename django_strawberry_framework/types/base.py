@@ -907,6 +907,15 @@ class DjangoType:
         runs the hook; on the optimizer's ``Prefetch`` path that is the
         resolver whose plan reaches this type.
 
+        ``queryset`` is a fresh instance of the class that supplied it - for
+        every framework-seeded read, the ``QuerySet`` class behind the model's
+        default manager (``ProjectQuerySet.as_manager()``,
+        ``Manager.from_queryset(...)``) - so an override can call that class's
+        own methods. It carries the source's query state, routing, hints and
+        prefetch lookups, not attributes the class sets on an instance outside
+        Django's constructor arguments. Whatever the override returns is rebuilt
+        into a plain ``QuerySet`` before the framework composes onto it.
+
         An override may be ``def`` or ``async def``. Under the asynchronous
         executor a ``def`` override runs off the event loop in a thread-sensitive
         ``sync_to_async`` worker - its own per call, or the worker an optimizer

@@ -46,7 +46,7 @@ Row groups, in the order a request meets them:
 - the collection bounds the fields enforce (raw-list rows, connection page size,
   and the list sibling that used to bypass the connection cap), together with
   what a bounded many-side relation COSTS when its rows arrive already fetched:
-  the fakeshop ``Loan`` model's no-op ``LoanQuerySet.as_manager()`` declaration
+  the fakeshop ``Loan`` model's override-free ``LoanQuerySet.as_manager()`` declaration
   is rebuilt at that seam and, under a prefetching plan, must answer its payload
   in the absolute two-query budget (one parent query plus one prefetch), and a
   manager routing it through ``using(<TextChoices / StrEnum member>)`` is served
@@ -477,7 +477,7 @@ CARRY_RELATION_ROWS = 10
 
 #: The absolute query count one prefetched ``patrons { loans }`` request costs -
 #: the parent query plus one prefetch. The fakeshop ``Loan`` model declares its
-#: no-op project queryset through ``as_manager()``, so this is measured directly
+#: override-free project queryset through ``as_manager()``, so this is measured directly
 #: against the public project shape rather than a test-only manager mount.
 CARRY_RELATION_QUERIES = 2
 

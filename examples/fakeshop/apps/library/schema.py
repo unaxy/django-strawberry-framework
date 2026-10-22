@@ -166,7 +166,26 @@ class LoanType(DjangoType):
       ``OptimizerHint.prefetch(Prefetch("book", queryset=Book.objects.all()))``, a
       consumer queryset that does not repeat ``BookType.get_queryset``'s filter, so
       live SQL can pin that the hook still scopes the hinted rows.
+    - ``FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK``: define a ``get_queryset`` that
+      narrows through the project ``LoanQuerySet.with_note()`` method, so live
+      requests can pin that the hook receives the default manager's own queryset
+      class. When absent, ``LoanType`` keeps the default pass-through hook.
     """
+
+    if getattr(settings, "FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK", False):
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Loan],
+            info: Info,
+        ) -> QuerySet[models.Loan]:
+            """Hide note-less loans through the project ``LoanQuerySet`` method."""
+            if not isinstance(queryset, models.LoanQuerySet):
+                msg = f"LoanType.get_queryset expected a LoanQuerySet, got {type(queryset)!r}"
+                raise TypeError(msg)
+            return queryset.with_note()
 
     class Meta:
         model = models.Loan

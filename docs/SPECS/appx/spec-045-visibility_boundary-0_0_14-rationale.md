@@ -15,11 +15,11 @@ Decision numbers are a package-wide identifier: source and test docstrings acros
 [`tests/utils/test_querysets.py`][queryset-tests] cite them as `spec-045 Decision N`, so
 renumbering a decision is a source-wide rename, not a documentation edit.
 
-## Decision 1 — The hook and source objects are untrusted query state, rebuilt into a framework-owned plain `django.db.models.QuerySet`
+## Decision 1 — The hook and source objects are untrusted query state, rebuilt from that state and never returned
 
 Spec decision:
 [Decision 1][spec-decision-1]
-(`#decision-1--the-hook-and-source-objects-are-untrusted-query-state-rebuilt-into-a-framework-owned-plain-djangodbmodelsqueryset`).
+(`#decision-1--the-hook-and-source-objects-are-untrusted-query-state-rebuilt-from-that-state-and-never-returned`).
 
 **Alternatives rejected.**
 
@@ -269,7 +269,7 @@ Spec decision:
 <!-- docs/SPECS/ -->
 
 [spec]: ../spec-045-visibility_boundary-0_0_14.md
-[spec-decision-1]: ../spec-045-visibility_boundary-0_0_14.md#decision-1--the-hook-and-source-objects-are-untrusted-query-state-rebuilt-into-a-framework-owned-plain-djangodbmodelsqueryset
+[spec-decision-1]: ../spec-045-visibility_boundary-0_0_14.md#decision-1--the-hook-and-source-objects-are-untrusted-query-state-rebuilt-from-that-state-and-never-returned
 [spec-decision-2]: ../spec-045-visibility_boundary-0_0_14.md#decision-2--fail-closed-prove-then-clone-ast-trust
 [spec-decision-3]: ../spec-045-visibility_boundary-0_0_14.md#decision-3--the-identity-fast-path-is-removed-hook-results-are-always-re-sealed-and-result-caches-dropped
 [spec-decision-4]: ../spec-045-visibility_boundary-0_0_14.md#decision-4--prefetch-rebuild-as-an-exact-django-class--alias-threading-with-require_shared_alias
