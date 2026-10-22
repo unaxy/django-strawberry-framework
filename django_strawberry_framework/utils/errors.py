@@ -299,11 +299,18 @@ def null_field_error(path: str) -> FieldError:
     """Build the uniform "required field was sent as null" ``FieldError``.
 
     Siblings :func:`relation_field_error`: one message + code pair for the
-    rejection every write flavor makes when a non-nullable field arrives
-    explicitly null. The auth flavor reached this leaf through
-    ``mutations/resolvers.py`` - importing a write-envelope leaf from the MODEL
-    mutation resolver is exactly the layering the promotion of these
-    constructors into ``utils/errors.py`` exists to undo.
+    rejection the model flavor (``mutations/resolvers.py``) and the auth
+    mutations (``auth/mutations.py``) return when a non-nullable field arrives
+    explicitly null. The ``ModelForm`` flavor answers a ``null=False`` column
+    its form neither refuses nor resolves with the same field, code ``null`` and
+    path, the message being the column's Django ``error_messages["null"]``
+    (``forms/resolvers.py::_column_null_errors``); the serializer flavor hands
+    the ``null`` to the serializer, whose DRF ``allow_null`` check refuses it in
+    ``is_valid()`` with DRF's own message, code ``null``. The auth flavor
+    reached this leaf through ``mutations/resolvers.py`` - importing a
+    write-envelope leaf from the MODEL mutation resolver is exactly the
+    layering the promotion of these constructors into ``utils/errors.py``
+    exists to undo.
 
     The M2M "send an empty list to clear it" rejection is a different
     condition with its own message and is deliberately NOT folded in here.
