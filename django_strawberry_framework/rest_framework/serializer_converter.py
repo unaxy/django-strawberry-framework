@@ -39,7 +39,9 @@ hits the raising fallthrough (no silent ``String``). Mirrors the read-side
 ``ChoiceField`` (or a ``ListField``'s choice child, as a list) is upgraded to a generated
 GraphQL enum at the build site;
 a consumer-declared serializer field whose scalar disagrees with its backing model
-column's scalar fails loud rather than silently picking the column.
+column's scalar fails loud rather than silently picking the column, and so does any
+serializer field whose kind (scalar / file / relation) disagrees with the kind of the
+column it writes (``serializer_field_fits_kind``).
 
 **The reverse map + the ``source`` axis (spec-039 Decision 7).** The generated
 input GraphQL name comes from the DECLARED serializer field name via the id-like
@@ -715,6 +717,86 @@ def _reject_relation_column_source(field: DRFField, column: ModelField) -> None:
     )
 
 
+# The serializer field classes a scalar input cannot be: each validates to something other
+# than one plain value (a nested object, a related instance, an uploaded file).
+_NON_SCALAR_FIELD_CLASSES = (
+    serializers.BaseSerializer,
+    serializers.RelatedField,
+    serializers.ManyRelatedField,
+    serializers.FileField,
+)
+
+# The wording a kind takes in the kind-mismatch diagnostic.
+_KIND_NOUNS: dict[str, str] = {
+    SCALAR: "scalar",
+    FILE: "file",
+    RELATION_SINGLE: "relation",
+    RELATION_MULTI: "relation",
+}
+
+# What DRF validates a field of each kind to, in the kind-mismatch diagnostic's words, for the
+# kinds a scalar column refuses.
+_VALIDATED_VALUES: dict[str, str] = {"file": "uploaded file", "relation": "related instance"}
+
+
+def serializer_field_fits_kind(field: DRFField, kind: str) -> bool:
+    """Return whether a serializer field validates the shape an input of ``kind`` carries.
+
+    The one reading of serializer-field / input-kind agreement, shared by the schema build
+    (``resolve_serializer_field``, which types a model-backed field by its column's kind) and
+    the per-request guard (``rest_framework/resolvers.py::_assert_field_agreement``). A file
+    input needs a ``FileField`` (``ImageField`` included); a scalar input refuses a nested
+    serializer, a relation and a file field. A relation kind answers ``True``: the relation
+    arms keep their own checks (a PK relation, its cardinality, its related model).
+    """
+    if kind == FILE:
+        return isinstance(field, serializers.FileField)
+    if kind == SCALAR:
+        return not isinstance(field, _NON_SCALAR_FIELD_CLASSES)
+    return True
+
+
+def _serializer_kind_noun(field: DRFField) -> str:
+    """Return the kind a serializer field validates, in the kind-mismatch diagnostic's words."""
+    if isinstance(field, serializers.FileField):
+        return _KIND_NOUNS[FILE]
+    if isinstance(field, (serializers.RelatedField, serializers.ManyRelatedField)):
+        return _KIND_NOUNS[RELATION_SINGLE]
+    return _KIND_NOUNS[SCALAR]
+
+
+def _reject_kind_mismatch(field: DRFField, column: ModelField, kind: str) -> None:
+    """Reject a serializer field whose kind disagrees with the ``kind`` of the column it writes.
+
+    Two shapes, each with no correct write. Over a scalar column, DRF writes what it validates
+    the field to (a related instance, an uploaded file) into the column ``source`` names, which
+    cannot hold it: a relation or file field there, or a relation over a scalar primary key's
+    ``pk`` alias (depending on the shape, the per-request agreement guard refuses it, the
+    database rejects it, or a text column silently stores the related row's ``str()``). Over a
+    file column, the input is the column's ``Upload``, which anything but a ``FileField``
+    cannot validate. Either fails loud at construction, naming the field, its class, its
+    ``source``, the column and both kinds. The check reads the schema-time field, the input's
+    source of truth.
+    """
+    if serializer_field_fits_kind(field, kind):
+        return
+    field_kind = _serializer_kind_noun(field)
+    column_kind = _KIND_NOUNS[kind]
+    field_class = truth.name(type(field))
+    consequence = (
+        f"whose input is an Upload the {field_class} cannot validate"
+        if kind == FILE
+        else f"which cannot hold the {_VALIDATED_VALUES[field_kind]} DRF validates the field to"
+    )
+    raise ConfigurationError(
+        f"Serializer field {field.field_name!r} ({field_class}, source "
+        f"{field.source or _bound_field_name(field)!r}) is a {field_kind} field, but the model "
+        f"column it writes, {truth.name(column.model)}.{column.name}, is a {column_kind} column, "
+        f"{consequence}. Declare a {column_kind} field for that column, or point source at a "
+        f"{field_kind} column.",
+    )
+
+
 def serializer_field_graphql_name(field_name: str, kind: str) -> tuple[str, str]:
     """Return ``(input_attr, graphql_name)`` for a serializer field by the id-like-suffix rule.
 
@@ -861,8 +943,10 @@ def backing_model_field(model: type[models.Model] | None, field: DRFField) -> Mo
     one-segment source names no concrete column (a serializer-only extra field),
     yields ``None`` - the caller routes it through the model-less path. So does the
     ``pk`` alias, which is no ``Options.get_field`` name: a scalar over it keeps the
-    model-less scalar, and a PK relation over the alias of a relation primary key is
-    refused there (``_reject_relation_column_source`` against ``written_model_field``).
+    model-less scalar, a PK relation over the alias of a scalar primary key is refused
+    there as a kind mismatch (``_reject_kind_mismatch``), and one over the alias of a
+    relation primary key as a column binding (``_reject_relation_column_source``), both
+    against ``written_model_field``.
 
     **Dotted ``source`` / ``source="*"`` is rejected** for a model-column-converting
     field (spec-039 Decision 7 - the renamed-fields rule) via
@@ -1177,7 +1261,9 @@ def _model_backed_scalar_annotation(
     An AUTO-generated ``ModelSerializer`` field routes through the read-side
     ``convert_scalar`` (so a ``choices`` column resolves to the SAME enum the read
     ``DjangoType`` synthesizes - the symmetric wire contract, and the model-backed
-    enum-reuse keeps).
+    enum-reuse keeps), once it is a scalar: a non-declared field ``get_fields()`` adds, or
+    one a ``serializer_field_mapping`` override builds, may be a relation or file field,
+    which ``_reject_kind_mismatch`` refuses.
 
     A CONSUMER-DECLARED field is an EXPLICIT serializer contract, so its declared scalar
     must AGREE with the model column's scalar; a disagreement (``count =
@@ -1186,9 +1272,11 @@ def _model_backed_scalar_annotation(
     graphene-django trap this improves on). The ``source`` is in the diagnostic so a benign
     rename (``display_name = CharField(source="name")`` - str vs str, agrees) is trivially
     told apart from a true type mismatch. A ``choices`` column keeps the enum symmetry (both
-    sides intend the enum), so the check is skipped there; a consumer-declared field whose
-    serializer converter is not a plain scalar defers to the model converter (its own guards
-    apply).
+    sides intend the enum), so the check is skipped there. A consumer-declared field that is
+    not a scalar at all (a ``PrimaryKeyRelatedField``, a ``FileField``) is refused by
+    ``_reject_kind_mismatch`` after its own conversion, so a declared non-PK relation keeps
+    the conversion's refusal; a registered scalar converter returning no annotation defers to the
+    model converter.
 
     **Declared choices are a schema-affecting override.** A CONSUMER-DECLARED
     ``ChoiceField`` / ``MultipleChoiceField`` / ``ListField(child=ChoiceField)`` (even
@@ -1217,9 +1305,15 @@ def _model_backed_scalar_annotation(
     _reject_read_enum_over_grouped_column(field, column)
     model_annotation = convert_scalar(column, type_name, force_nullable=False)
     if not _is_consumer_declared(field):
+        # A field ``get_fields()`` adds, or one a ``serializer_field_mapping`` override builds,
+        # is not declared yet can be of another kind than its column.
+        _reject_kind_mismatch(field, column, SCALAR)
         return model_annotation
     serializer_conversion = convert_serializer_field(field)
-    if serializer_conversion.kind != SCALAR or serializer_conversion.annotation is None:
+    # After the conversion, so a declared non-PK relation keeps its own refusal; every field
+    # that passes converts to a scalar (a registered converter may return no annotation).
+    _reject_kind_mismatch(field, column, SCALAR)
+    if serializer_conversion.annotation is None:
         return model_annotation
     model_scalar = scalar_for_field(column)
     serializer_scalar = serializer_conversion.annotation
@@ -1360,7 +1454,11 @@ def resolve_serializer_field(
     from the field's ``queryset.model`` (``serializer_only_relation_annotation``);
     a scalar via ``_model_backed_scalar_annotation`` (type-override conflict
     policy: a CONSUMER-DECLARED model-backed scalar whose declared type disagrees
-    with the column's fails loud rather than silently picking the column). Every
+    with the column's fails loud rather than silently picking the column). A field
+    whose kind disagrees with its column's (a relation or file field over a scalar
+    column, anything but a ``FileField`` over a file column) is refused
+    (``_reject_kind_mismatch``), and so is a relation over ``pk`` where the primary key is
+    a scalar, which has no backing column but writes one. Every
     branch names the field through ``serializer_field_graphql_name`` over the DECLARED
     name, never ``source``. A column-less field uses
     ``convert_serializer_field`` (the model-less table) for the kind, and the
@@ -1429,6 +1527,7 @@ def resolve_serializer_field(
                     primary_of=lambda model: _require_relation_primary(field_name, model),
                 )
         elif kind == FILE:
+            _reject_kind_mismatch(field, column, FILE)
             annotation = model_column_write_annotation(
                 column,
                 type_name,
@@ -1453,9 +1552,11 @@ def resolve_serializer_field(
             python_attr, graphql_name = serializer_field_graphql_name(field_name, kind)
         elif kind in (RELATION_SINGLE, RELATION_MULTI):
             # ``pk`` is the one source ``Options.get_field`` misses that still writes a model
-            # field: over a relation primary key it spells the key's column.
+            # field: over a scalar primary key it writes no relation at all, and over a
+            # relation primary key it spells the key's column.
             written = written_model_field(model, field.source or field_name) if model else None
             if written is not None:
+                _reject_kind_mismatch(field, written, model_column_write_kind(written))
                 _reject_relation_column_source(field, written)
             python_attr, annotation, related_model = serializer_only_relation_annotation(
                 field,

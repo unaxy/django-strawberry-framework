@@ -232,8 +232,10 @@ from .serializer_converter import (
     NESTED_SINGLE,
     RELATION_MULTI,
     RELATION_SINGLE,
+    SCALAR,
     nested_serializer_child,
     resolve_serializer_field,
+    serializer_field_fits_kind,
 )
 
 if TYPE_CHECKING:
@@ -1295,7 +1297,8 @@ def _assert_field_agreement(
     runtime ``serializer.fields`` must contain ``spec.target_name``, have it WRITABLE, bind
     the SAME ``source``, keep a relation as a ``PrimaryKeyRelatedField`` /
     ``ManyRelatedField(PrimaryKeyRelatedField)`` over the SAME ``related_model``, and keep a
-    file / scalar kind compatible. Any divergence is a framework ``ConfigurationError`` at
+    file / scalar kind compatible (``serializer_field_fits_kind``, the reading the schema
+    build refuses a kind mismatch by). Any divergence is a framework ``ConfigurationError`` at
     the boundary.
     """
     runtime_fields = bound_fields(serializer)
@@ -1331,21 +1334,13 @@ def _assert_field_agreement(
     elif spec.kind in (NESTED_SINGLE, NESTED_MULTI):
         _assert_nested_agreement(mutation_cls, spec, runtime)
     elif spec.kind == FILE:
-        if not isinstance(runtime, serializers.FileField):
+        if not serializer_field_fits_kind(runtime, FILE):
             raise ConfigurationError(
                 f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} is a file input "
                 f"in the schema but {truth.name(type(runtime))} at runtime; the kind moved. Align "
                 "the runtime serializer field with get_serializer_for_schema().",
             )
-    elif isinstance(
-        runtime,
-        (
-            serializers.BaseSerializer,
-            serializers.RelatedField,
-            serializers.ManyRelatedField,
-            serializers.FileField,
-        ),
-    ):
+    elif not serializer_field_fits_kind(runtime, SCALAR):
         raise ConfigurationError(
             f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} is a scalar in the "
             f"schema but a relation / file / nested serializer ({truth.name(type(runtime))}) at "

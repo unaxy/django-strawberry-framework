@@ -206,6 +206,14 @@ the runtime serializer validates:
   it, so the input would promise a create that can never succeed; the relation's name is
   the one spelling DRF writes correctly. Plain DRF fails the same way, and so does its own
   auto-built `pk` field over a one-to-one primary key.
+- **Kinds.** A field of another kind than the column it writes (a relation or file field
+  over a scalar column, a relation over a scalar primary key's `pk` alias, anything but a
+  `FileField` over a file column) is rejected, declared or not, because no write through it
+  is correct. Over a scalar column, DRF writes the related instance or uploaded file it
+  validates into a column that cannot hold it: depending on the shape the runtime agreement
+  guard refuses it, the database rejects it, or a text column silently stores the related
+  row's `str()`, the degrade plain DRF ships. Over a file column, the input is the column's
+  `Upload`, which only a `FileField` validates.
 - **Descriptor identity.** `rest_framework/inputs.py::SerializerInputShape` keys the cache
   on every value that shapes the emitted type (field specs, post-widening annotations,
   descriptions, effective requiredness, `optional_fields`). The `036` / `038` name-only
