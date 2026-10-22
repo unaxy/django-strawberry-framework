@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 195 done, 137 to do.
+Progress: 196 done, 137 to do.
 
 ## Done
 
@@ -772,6 +772,11 @@ Progress: 195 done, 137 to do.
   `async_recourse` and `key_attname` and the batched form's `dict[str, object]` result: fixed: both sites print the
   helpers' signatures from `utils/querysets.py` and say the batched form maps each visible pk, stringified, to the key
   the relation stores; spec-036 / spec-038 carry no signature spelling
+- [x] 336. GLOSSARY (the `DjangoNodesField` term) and spec-032 said the `nodes(ids:)` width charge runs on
+  "coerced-shape input", while `extensions/resource_policy.py` charges a literal argument as its parsed AST and a
+  variable by its supplied value: fixed: both say the charge runs at operation admission, before validation, on the
+  input as the request spelled it (a literal list as its AST, a variable by its supplied value or its default's
+  literal), still before any `GlobalID` decode; GlossaryTerm 520 through the DB, GLOSSARY.md re-rendered
 
 ## Outside review of the fixes
 
