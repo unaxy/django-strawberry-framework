@@ -179,6 +179,8 @@ From the full entries, 2026-10-21. Item numbers are that file's.
   head
   - Research: the three sharded paths pass locally at `feb83d59` (113 passed). The last green dispatch with the multi-DB
     rows is `f0885b9e` (2026-10-19), 94 commits behind. Closes on the next green dispatch or weekly run
+  - Same run as `bug_hunt-0_0_15_2.md` item 29 (the hunt's final gate, Postgres and sharded runs included); one green
+    dispatch on the current head closes both
 
 ## To do: tooling
 
@@ -199,6 +201,9 @@ From the full entries, 2026-10-21. Item numbers are that file's.
     repo-wide write form also appears in `docs/dry/worker-1.md`, `docs/dry/DRY.md`, `docs/bug_hunt/worker-1.md`,
     `docs/bug_hunt/HUNT.md`, the `scripts/bug_hunt.py` template, `examples/fakeshop/test_query/README.md`,
     `CONTRIBUTING.md` and `MUSE.md`. Read-only `.` checks in CI stay. Decide how far the sweep goes
+  - Overlaps `bug_hunt-0_0_15_2.md` item 173 (the KANBAN "Before a release" checklist runs `ruff format .` before
+    `ruff check --fix .`; the same checklist line changes here) and item 183 (`ruff format` on an explicit `.md` path
+    rewrites its fenced blocks, so a touched-path rule must pass Python paths only)
 
 <!-- LINK DEFINITIONS -->
 
