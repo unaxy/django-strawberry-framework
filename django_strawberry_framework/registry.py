@@ -199,8 +199,9 @@ class TypeRegistry:
         """
         types = self._types[model]
         # Both callers hold ``type_cls`` in ``_types[model]`` (the lock-step
-        # invariant above), so the identity search always finds it.
-        del types[cast("int", _identity_index(types, type_cls))]
+        # invariant above), so the search always finds it; by identity, since
+        # ``list.index`` / ``list.remove`` compare with ``==``.
+        del types[next(index for index, candidate in enumerate(types) if candidate is type_cls)]
         if not types:
             _ = self._types.pop(model, None)
         _ = self._models.pop(type_cls, None)
@@ -238,10 +239,9 @@ class TypeRegistry:
         - First registration appends ``type_cls`` to ``_types[model]`` and
           sets ``_primaries[model] = type_cls`` when ``primary=True``.
           Returns ``True``.
-        - Idempotent re-register of the same ``type_cls`` (by identity, so a
-          metaclass ``__eq__`` is never consulted) for the same model is a
-          no-op when the ``primary`` flag matches the stored state; returns
-          ``False``.  A mismatched ``primary`` flag in either direction
+        - Idempotent re-register of the same ``type_cls`` (by identity) for
+          the same model is a no-op when the ``primary`` flag matches the
+          stored state; returns ``False``.  A mismatched ``primary`` flag in either direction
           raises (primary status is a declaration, not a mutable property).
         - Registering a different ``type_cls`` for the same model appends
           to ``_types[model]``. If ``primary=True`` and ``_primaries[model]``
@@ -266,7 +266,7 @@ class TypeRegistry:
                 truth.name(existing_model),
             )
         existing_types = self._types.setdefault(model, [])
-        if _identity_index(existing_types, type_cls) is not None:
+        if truth.is_among(type_cls, existing_types):
             stored_as_primary = self._primaries.get(model) is type_cls
             if primary != stored_as_primary:
                 raise ConfigurationError(
@@ -697,19 +697,6 @@ class TypeRegistry:
         # import instead of silently leaving stale state behind here.
         for clear in iter_subsystem_clears():
             clear()
-
-
-def _identity_index(types: list[type[DjangoType]], type_cls: type[DjangoType]) -> int | None:
-    """Return the position of ``type_cls`` in ``types`` by identity, or ``None``.
-
-    ``list.__contains__`` / ``list.remove`` compare with ``==``, which a
-    metaclass ``__eq__`` answers; the registry's per-model lists are searched
-    by ``is`` instead.
-    """
-    for index, candidate in enumerate(types):
-        if candidate is type_cls:
-            return index
-    return None
 
 
 registry: TypeRegistry = TypeRegistry()

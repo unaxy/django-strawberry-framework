@@ -139,6 +139,7 @@ from django_strawberry_framework.resource_policy import (
 )
 from django_strawberry_framework.utils._narrowing import (
     is_exact_dict,
+    is_exact_list_or_tuple,
     is_list_or_tuple,
     is_mapping,
     is_memoryview,
@@ -398,11 +399,6 @@ def _nested_specs_map(spec: InputFieldSpec | None) -> Mapping[str, InputFieldSpe
     if not nested:
         return None
     return {nested_spec.input_attr: nested_spec for nested_spec in nested}
-
-
-#: The sequence types whose ``__len__`` and iteration are the interpreter's own,
-#: so a member list does not have to be built to count them honestly.
-_EXACT_SEQUENCE_TYPES = (list, tuple)
 
 
 def _closes_a_cycle(container: object, path: tuple[object, ...]) -> bool:
@@ -786,7 +782,9 @@ class _ValueBudget:
             sequence = value
             if _closes_a_cycle(value, path):
                 return True
-            if type(value) in _EXACT_SEQUENCE_TYPES:
+            # An exact list / tuple's ``__len__`` and iteration are the interpreter's own,
+            # so a member list does not have to be built to count it honestly.
+            if is_exact_list_or_tuple(value):
                 members = value
             else:
                 members = self._bounded_members(lambda: value, "max_container_width")

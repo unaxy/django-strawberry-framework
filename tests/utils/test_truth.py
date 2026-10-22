@@ -1318,6 +1318,55 @@ def test_a_scalar_subclass_override_is_consumer_behaviour_and_propagates(
         render()
 
 
+# --- IdentitySet / is_exact_one_of / is_among ---
+
+
+def test_identity_set_never_hashes_or_compares_members() -> None:
+    members: truth.IdentitySet[type] = truth.IdentitySet((_EqualsEverything, _Base))
+    assert _EqualsEverything in members
+    assert _Unrelated not in members
+    assert len(members) == 2
+    assert list(members) == [_EqualsEverything, _Base]
+    members.add(_Unrelated)
+    members.add(_Unrelated)
+    assert _Unrelated in members
+    assert list(members) == [_EqualsEverything, _Base, _Unrelated]
+    assert "hash" not in DISPATCHED
+    assert "eq" not in DISPATCHED
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [_EqualsEverythingTwin, _Unrelated, _Base],
+    ids=["eq-claiming-class", "unrelated-class", "base-class"],
+)
+def test_identity_set_admits_only_its_own_members(probe: type) -> None:
+    members: truth.IdentitySet[type] = truth.IdentitySet((_EqualsEverything,))
+    assert probe not in members
+    assert DISPATCHED == []
+
+
+def test_is_exact_one_of_matches_the_real_class_only() -> None:
+    classes: truth.IdentitySet[type[object]] = truth.IdentitySet((str, _EqualsEverything))
+    assert truth.is_exact_one_of("text", classes) is True
+    assert truth.is_exact_one_of(_EqualsEverything(), classes) is True
+    assert truth.is_exact_one_of(_EqualsEverythingTwin(), classes) is False
+    assert truth.is_exact_one_of(_ClassClaimer(), classes) is False
+    true_value: object = True
+    assert truth.is_exact_one_of(true_value, truth.IdentitySet((int,))) is False
+    assert truth.is_exact_one_of(None, truth.IdentitySet()) is False
+    assert DISPATCHED == []
+
+
+def test_is_among_compares_by_identity_only() -> None:
+    path: tuple[type, ...] = (_Base, _EqualsEverything)
+    assert truth.is_among(_EqualsEverything, path) is True
+    assert truth.is_among(_EqualsEverythingTwin, path) is False
+    assert truth.is_among(_Unrelated, ()) is False
+    assert truth.is_among(_Unrelated, iter([_Unrelated])) is True
+    assert DISPATCHED == []
+
+
 # --- IdentityMap ---
 
 
@@ -1343,6 +1392,16 @@ def test_identity_map_never_hashes_or_compares_keys() -> None:
     assert _Base not in registry
     registry.clear()
     assert len(registry) == 0
+    assert "hash" not in DISPATCHED
+    assert "eq" not in DISPATCHED
+
+
+def test_identity_map_starts_with_the_given_entries_by_identity() -> None:
+    registry: truth.IdentityMap[type, str] = truth.IdentityMap(
+        [(_EqualsEverything, "hostile"), (_Base, "base")],
+    )
+    assert registry.items() == [(_EqualsEverything, "hostile"), (_Base, "base")]
+    assert _EqualsEverythingTwin not in registry
     assert "hash" not in DISPATCHED
     assert "eq" not in DISPATCHED
 

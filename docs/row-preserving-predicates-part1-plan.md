@@ -858,11 +858,12 @@ not routable / no snapshot row
     since routing is decided at build time, that gate is now the ONLY thing closing this
     seam, which is why it must not be weakened.
   - **An AUDITED supported family.**
-    `django_strawberry_framework/filters/sets.py::_FILTER_FAMILY_REGISTRY` — a frozen
-    `type -> _FilterFamilyProfile` map — is the SINGLE executable source of truth for
-    which generated families this package has reviewed against the correlated rewrite.
+    `django_strawberry_framework/filters/sets.py::_FILTER_FAMILY_REGISTRY` — an
+    identity-keyed `type -> _FilterFamilyProfile` map (`truth.IdentityMap`) — is the
+    SINGLE executable source of truth for which generated families this package has
+    reviewed against the correlated rewrite.
     `_family_profile_for` matches it by **exact class first**
-    (`_FILTER_FAMILY_REGISTRY[type(instance)]`, no MRO walk); with no exact key it falls
+    (`_FILTER_FAMILY_REGISTRY.get(type(instance))`, no MRO walk); with no exact key it falls
     back to `django_strawberry_framework/filters/sets.py::_dynamic_csv_profile_for`, which
     structurally recognizes ONLY django-filter's genuine empty-body dynamic
     `ConcreteInFilter` / `ConcreteRangeFilter` — exactly `(BaseInFilter | BaseRangeFilter,

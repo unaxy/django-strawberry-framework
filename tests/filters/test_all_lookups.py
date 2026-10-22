@@ -15,6 +15,7 @@ from django.test.utils import register_lookup
 
 from django_strawberry_framework.filters import sets
 from django_strawberry_framework.filters.sets import _lookups_for_field
+from django_strawberry_framework.utils import truth
 
 _CORE_RANGE_OPERAND_FIELDS: tuple[type[models.Field[object, object]], ...] = (
     models.IntegerField,
@@ -30,7 +31,8 @@ _CORE_RANGE_OPERAND_FIELDS: tuple[type[models.Field[object, object]], ...] = (
 @pytest.fixture(autouse=True)
 def _fresh_lookup_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give each test an empty class-keyed memo, so a registration it makes is crawled."""
-    monkeypatch.setattr(sets, "_lookups_for_field_class_cache", {})
+    cache: truth.IdentityMap[type[models.Field[object, object]], list[str]] = truth.IdentityMap()
+    monkeypatch.setattr(sets, "_lookups_for_field_class_cache", cache)
 
 
 @pytest.mark.parametrize("field_class", _CORE_RANGE_OPERAND_FIELDS)

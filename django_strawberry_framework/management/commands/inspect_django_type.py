@@ -480,7 +480,7 @@ def _yes_no(*, value: bool) -> str:
 def _annotation_is_optional(annotation: object) -> bool:
     """Return whether ``annotation`` is a ``T | None`` union."""
     if is_union(annotation):
-        return type(None) in typing.get_args(annotation)
+        return truth.is_among(type(None), typing.get_args(annotation))
     return False
 
 

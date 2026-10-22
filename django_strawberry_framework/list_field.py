@@ -541,27 +541,25 @@ def _synthesized_list_signature(
 #: ``as_sql``. ``VisibleRowExists`` decides only whether an ``OrderSet`` term reads
 #: its column or ``NULL``, and its rows are a target type's ``get_queryset``, which
 #: this guard trusts for the parent rows as well.
-_READABLE_ORDER_LEAVES = frozenset(
-    {
+_READABLE_ORDER_LEAVES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         models.Value,
         Col,
         Star,
         VisibleRowExists,
-    },
+    ),
 )
 
 #: Expressions whose own SQL is punctuation around their sources - the branches of
 #: a ``CASE``, an operator between two operands, a wrapper that only supplies an
 #: output field, the direction marker on a term. A node listed here orders by
 #: whatever its sources order by and by nothing else, so it is read through.
-_TRANSPARENT_ORDER_EXPRESSIONS = frozenset(
-    {
-        Case,
-        CombinedExpression,
-        ExpressionWrapper,
-        OrderBy,
-        When,
-    },
+_TRANSPARENT_ORDER_EXPRESSIONS: tuple[type[object], ...] = (
+    Case,
+    CombinedExpression,
+    ExpressionWrapper,
+    OrderBy,
+    When,
 )
 
 #: Database functions whose SQL is a deterministic function of their arguments:
@@ -571,30 +569,26 @@ _TRANSPARENT_ORDER_EXPRESSIONS = frozenset(
 #: likes, so it is not this class and is not approved. Nothing is listed for
 #: being harmless-looking: a function reaches this set only by being one of
 #: Django's own and pure.
-_APPROVED_ORDER_FUNCTIONS = frozenset(
-    {
-        Cast,
-        Coalesce,
-        Concat,
-        ConcatPair,
-        Length,
-        Lower,
-        Upper,
-    },
+_APPROVED_ORDER_FUNCTIONS: tuple[type[object], ...] = (
+    Cast,
+    Coalesce,
+    Concat,
+    ConcatPair,
+    Length,
+    Lower,
+    Upper,
 )
 
 #: Aggregates under the same rule:
 #: ``orders/sets.py::OrderSet._resolve_order_expressions`` annotates ``Min`` /
 #: ``Max`` for a to-many ordering path, and ``Count`` admits the row-count
 #: aggregate a consumer ordering may annotate.
-_APPROVED_ORDER_AGGREGATES = frozenset(
-    {models.Count, models.Max, models.Min},
-)
+_APPROVED_ORDER_AGGREGATES: tuple[type[object], ...] = (models.Count, models.Max, models.Min)
 
 #: Transforms a predicate's left-hand side may apply before its lookup, under the
 #: same purity rule and the same exact-type match.
-_APPROVED_ORDER_TRANSFORMS = frozenset(
-    {
+_APPROVED_ORDER_TRANSFORMS: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         ExtractDay,
         ExtractMonth,
         ExtractYear,
@@ -604,7 +598,7 @@ _APPROVED_ORDER_TRANSFORMS = frozenset(
         TruncMonth,
         TruncYear,
         Upper,
-    },
+    ),
 )
 
 #: Lookups a predicate may compare with: Django's own comparison, membership and
@@ -613,8 +607,8 @@ _APPROVED_ORDER_TRANSFORMS = frozenset(
 #: spellings are listed beside the general ones because Django substitutes them
 #: by field type for the same operators - an exact-type match sees the class the
 #: field hands back, not the base it derives from.
-_APPROVED_ORDER_LOOKUPS = frozenset(
-    {
+_APPROVED_ORDER_LOOKUPS: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         Exact,
         GreaterThan,
         GreaterThanOrEqual,
@@ -635,13 +629,13 @@ _APPROVED_ORDER_LOOKUPS = frozenset(
         RelatedIsNull,
         RelatedLessThan,
         RelatedLessThanOrEqual,
-    },
+    ),
 )
 
 #: Every node read THROUGH to its sources. A term whose type is absent from this
 #: union and from ``_READABLE_ORDER_LEAVES`` is refused, whatever it holds.
-_APPROVED_ORDER_NODES = (
-    _TRANSPARENT_ORDER_EXPRESSIONS | _APPROVED_ORDER_FUNCTIONS | _APPROVED_ORDER_AGGREGATES
+_APPROVED_ORDER_NODES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (*_TRANSPARENT_ORDER_EXPRESSIONS, *_APPROVED_ORDER_FUNCTIONS, *_APPROVED_ORDER_AGGREGATES),
 )
 
 
@@ -876,7 +870,6 @@ def _is_deterministic_order_term(
     not certify as repeatable across the two queries an offset window spans.
     """
     if hasattr(term, "resolve_expression"):
-        node = type(term)
         if type(term) is models.F:
             # ``F.name`` is the path ``F.__init__`` stored; a non-``str`` one is a term this
             # classifier cannot read, so it is refused like any other unreadable term.
@@ -884,11 +877,14 @@ def _is_deterministic_order_term(
             return is_str(name) and _is_deterministic_order_reference(query, name, prefix)
         if type(term) is models.Q:
             return _is_deterministic_order_condition(query, term, opts, seen, start, prefix)
-        if node in _READABLE_ORDER_LEAVES:
+        if truth.is_exact_one_of(term, _READABLE_ORDER_LEAVES):
             return True
         # Every approved node is a ``BaseExpression`` subclass, so the instance test only
         # states for the reader of ``get_source_expressions`` what the membership proved.
-        if node not in _APPROVED_ORDER_NODES or not isinstance(term, BaseExpression):
+        if not truth.is_exact_one_of(term, _APPROVED_ORDER_NODES) or not isinstance(
+            term,
+            BaseExpression,
+        ):
             return False
         return all(
             _is_deterministic_order_term(query, source, opts, seen, start, prefix)

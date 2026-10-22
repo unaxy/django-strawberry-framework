@@ -19,8 +19,13 @@ metaclass ``__eq__`` / ``__hash__`` could intercept:
   ``str`` slot: it comes back an exact ``str`` and the subclass's own methods
   never run. Functions, builtins and C descriptors are named the same way,
   through their own types' slots.
-- Membership in a read MRO is tested by identity (``is``), never ``in`` or
-  ``==``, so a metaclass ``__eq__`` cannot claim to be a framework base.
+- Membership is decided by identity, never by ``in`` / ``==`` / ``hash`` on the
+  probed class: a read MRO and any other sequence through ``is_among``, a set of
+  classes the package declares through ``IdentitySet`` (``is_exact_one_of`` asks
+  whether an object's real class is one of them), a table keyed by class through
+  ``IdentityMap``. A metaclass ``__eq__`` / ``__hash__`` therefore cannot claim to
+  be a framework base or a listed class. ``scripts/check_truthful_reads.py``
+  refuses ``type(...) in`` outside this module.
 - Declared attributes (``static_attr`` / ``mro_attr`` / ``overrides`` / ``instance_dict``) are
   looked up in the real MRO's raw namespaces, never through ``__getattr__`` /
   ``__getattribute__`` or a descriptor. ``inspect.getattr_static`` is not
@@ -35,8 +40,9 @@ planted non-``str`` key whose hash collides, which runs that key's ``__eq__``
 a namespace: ``module`` / ``label`` of a class, ``static_attr``, ``mro_attr``,
 ``overrides``, ``instance_dict``, the name of a callable instance, and the class and scalar
 spellings of ``render`` / ``text`` / ``describe``. The reads that consult no
-namespace (``class_of``, ``is_type``, ``is_instance``, ``is_one_of``, ``is_mapping_dict``,
-``is_subclass``, ``is_exact``, ``mro``, ``bases``, ``class_dict``, ``kind``,
+namespace (``class_of``, ``is_type``, ``is_instance``, ``is_one_of``,
+``is_mapping_dict``, ``is_subclass``, ``is_exact``, ``is_exact_one_of``, ``is_among``,
+``IdentitySet`` / ``IdentityMap`` membership, ``mro``, ``bases``, ``class_dict``, ``kind``,
 ``stored_function``, and ``name`` / ``qualname`` of a class, function, builtin
 or C descriptor) never raise and run no consumer code for any object. ``render`` /
 ``text`` / ``describe`` spell a builtin scalar through the builtin's own slot only
@@ -57,7 +63,7 @@ from __future__ import annotations
 import enum
 import sys
 import types
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeGuard, TypeVar, overload
 
 if TYPE_CHECKING:  # pragma: no cover - type-checking-only imports.
@@ -65,13 +71,16 @@ if TYPE_CHECKING:  # pragma: no cover - type-checking-only imports.
 
 __all__ = (
     "IdentityMap",
+    "IdentitySet",
     "bases",
     "class_dict",
     "class_of",
     "describe",
     "instance_dict",
     "instance_state",
+    "is_among",
     "is_exact",
+    "is_exact_one_of",
     "is_instance",
     "is_mapping_dict",
     "is_one_of",
@@ -211,9 +220,13 @@ _K = TypeVar("_K")
 _V = TypeVar("_V")
 
 
-def _is_in(candidate: object, classes: tuple[type, ...]) -> bool:
-    """Whether ``candidate`` is one of ``classes`` by identity, never by ``__eq__``."""
-    return any(candidate is entry for entry in classes)
+def is_among(obj: object, objects: Iterable[object]) -> bool:
+    """Whether ``obj`` itself is one of ``objects``.
+
+    For an ordered or short-lived collection (an MRO, a recursion path, a list of
+    bases); a fixed set of classes is an ``IdentitySet``.
+    """
+    return any(obj is entry for entry in objects)
 
 
 def class_of(obj: object) -> type:
@@ -229,7 +242,7 @@ def mro(cls: object) -> tuple[type, ...]:
 
 def is_type(obj: object) -> TypeIs[type[object]]:
     """Whether ``obj`` is a class, decided by its real metaclass chain."""
-    return _is_in(type, _get_mro(type(obj)))
+    return is_among(type, _get_mro(type(obj)))
 
 
 # The checker solves ``type[_T]`` from a bare generic class (``dict``, ``list``,
@@ -272,23 +285,26 @@ def is_instance(obj: object, cls: type[_T]) -> TypeIs[_T]: ...
 
 def is_instance(obj: object, cls: type[object]) -> bool:
     """``isinstance`` by the real class; no ``__class__`` or ``__instancecheck__`` runs."""
-    return _is_in(cls, _get_mro(type(obj)))
+    return is_among(cls, _get_mro(type(obj)))
 
 
 def is_one_of(obj: object, classes: tuple[type[object], ...]) -> bool:
-    """``isinstance(obj, classes)`` by the real class; no ``__class__`` or ``__instancecheck__`` runs."""
+    """``isinstance(obj, classes)`` by the real class; no ``__class__`` or ``__instancecheck__`` runs.
+
+    A subclass instance answers ``True``; ``is_exact_one_of`` is the exact-class form.
+    """
     found = _get_mro(type(obj))
-    return any(_is_in(cls, found) for cls in classes)
+    return any(is_among(cls, found) for cls in classes)
 
 
 def is_mapping_dict(obj: Mapping[_K, _V] | None) -> TypeIs[dict[_K, _V]]:
     """``is_instance(obj, dict)`` for a value typed as a ``Mapping``, keeping its key and value types."""
-    return _is_in(dict, _get_mro(type(obj)))
+    return is_among(dict, _get_mro(type(obj)))
 
 
 def is_subclass(sub: object, cls: type[_T]) -> TypeIs[type[_T]]:
     """``issubclass`` by the real MRO; ``False`` for a non-class, never a ``TypeError``."""
-    return is_type(sub) and _is_in(cls, _get_mro(sub))
+    return is_type(sub) and is_among(cls, _get_mro(sub))
 
 
 def mro_entry(mapping: Mapping[_K, _V], cls: object) -> tuple[_K, _V] | None:
@@ -341,6 +357,14 @@ def is_exact(obj: object, cls: type[object]) -> bool:
     is not a ``cls``, since a subclass instance also answers ``False``.
     """
     return type(obj) is cls
+
+
+def is_exact_one_of(obj: object, classes: IdentitySet[type[object]]) -> bool:
+    """Whether ``obj``'s real class is exactly one of ``classes`` (no subclass accepted).
+
+    ``is_one_of`` is the subclass-accepting form.
+    """
+    return id(type(obj)) in classes._members
 
 
 def bases(cls: object) -> tuple[type, ...]:
@@ -549,7 +573,7 @@ def _namespace_reader(
     descriptor_type = type(descriptor)
     for reader_type, get_name, get_objclass in _NAMESPACE_DESCRIPTOR_READERS:
         if descriptor_type is reader_type:
-            if get_name(descriptor) == "__dict__" and _is_in(get_objclass(descriptor), obj_mro):
+            if get_name(descriptor) == "__dict__" and is_among(get_objclass(descriptor), obj_mro):
                 return _namespace_getter(descriptor_type)
             return None
     return None
@@ -690,7 +714,7 @@ def _class_repr(cls: type) -> str:
     metaclass's own ``__repr__`` never runs.
     """
     if _mro_lookup(type(cls), "__repr__") is _ENUM_TYPE_REPR:
-        prefix = _FLAG_REPR_PREFIX if _is_in(enum.Flag, _get_mro(cls)) else "<enum"
+        prefix = _FLAG_REPR_PREFIX if is_among(enum.Flag, _get_mro(cls)) else "<enum"
         return f"{prefix} {str.__repr__(_get_name(cls))}>"
     owner = _class_module(cls)
     if is_instance(owner, str) and str.__str__(owner) != "builtins":
@@ -748,7 +772,7 @@ def _scalar_repr(value: object, *, as_text: bool = False) -> str | _Unrendered:
     value_type = type(value)
     value_mro = _get_mro(value_type)
     for builtin, builtin_repr, builtin_str in _SCALAR_SLOTS:
-        if _is_in(builtin, value_mro):
+        if is_among(builtin, value_mro):
             if value_type is not builtin and (
                 _mro_lookup(value_type, "__repr__") is not builtin_repr
                 or (as_text and _mro_lookup(value_type, "__str__") is not builtin_str)
@@ -820,6 +844,37 @@ def describe(value: object) -> str:
 _D = TypeVar("_D")
 
 
+class IdentitySet(Generic[_K]):
+    """``IdentityMap``'s set form: ``x in members`` asks whether ``x`` is this very object.
+
+    Keys are ``id(member)`` and each entry holds its member, so an id cannot be
+    recycled while the entry lives. Iteration yields a snapshot of the members in
+    insertion order.
+    """
+
+    __slots__: tuple[str, ...] = ("_members",)
+
+    def __init__(self, members: Iterable[_K] = ()) -> None:
+        """Start with ``members``."""
+        self._members: dict[int, _K] = {id(member): member for member in members}
+
+    def __contains__(self, member: object) -> bool:
+        """Whether ``member`` (this very object) is in the set."""
+        return id(member) in self._members
+
+    def __len__(self) -> int:
+        """Return the number of members."""
+        return len(self._members)
+
+    def __iter__(self) -> Iterator[_K]:
+        """Iterate over a snapshot of the members."""
+        return iter(list(self._members.values()))
+
+    def add(self, member: _K) -> None:
+        """Add ``member`` by identity."""
+        self._members[id(member)] = member
+
+
 class IdentityMap(Generic[_K, _V]):
     """A mapping keyed by object identity, never by the key's ``__hash__`` / ``__eq__``.
 
@@ -833,9 +888,9 @@ class IdentityMap(Generic[_K, _V]):
 
     __slots__: tuple[str, ...] = ("_entries",)
 
-    def __init__(self) -> None:
-        """Start with no entries."""
-        self._entries: dict[int, tuple[_K, _V]] = {}
+    def __init__(self, entries: Iterable[tuple[_K, _V]] = ()) -> None:
+        """Start with ``entries``, each ``(key, value)`` stored by the key's identity."""
+        self._entries: dict[int, tuple[_K, _V]] = {id(key): (key, value) for key, value in entries}
 
     def __contains__(self, key: object) -> bool:
         """Whether ``key`` (this very object) has an entry."""

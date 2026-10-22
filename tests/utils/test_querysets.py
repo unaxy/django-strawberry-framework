@@ -1512,6 +1512,28 @@ class _ForeignDeferredValue:
     """A deferred-filter value that is neither inert nor a genuine Django expression."""
 
 
+class _ProjectList(list[object]):
+    """A project's own ``list`` subclass with no overrides: not the exact builtin."""
+
+
+class _ProjectStr(str):
+    """A project's own ``str`` subclass with no overrides: not the exact builtin."""
+
+    __slots__ = ()
+
+
+class _ProjectTuple(tuple[object, ...]):
+    """A project's own ``tuple`` subclass with no overrides: not the exact builtin."""
+
+    __slots__ = ()
+
+
+class _ProjectInt(int):
+    """A project's own ``int`` subclass with no overrides: not the exact builtin."""
+
+    __slots__ = ()
+
+
 @pytest.mark.parametrize(
     ("deferred", "detail"),
     [
@@ -1522,12 +1544,22 @@ class _ForeignDeferredValue:
             (False, (), {"name": _ForeignDeferredValue()}),
             "_PendingFilterQuerySet deferred filter 'name' is a _ForeignDeferredValue",
         ),
+        (
+            (False, (), {"name__in": _ProjectList(["x"])}),
+            "_PendingFilterQuerySet deferred filter 'name__in' is a _ProjectList",
+        ),
+        (
+            (False, (), {"name__in": _ProjectTuple(("x",))}),
+            "_PendingFilterQuerySet deferred filter 'name__in' is a _ProjectTuple",
+        ),
     ],
     ids=[
         "wrong-arity",
         "negate-not-a-bool",
         "kwargs-not-a-dict",
         "foreign-value",
+        "list-subclass-value",
+        "tuple-subclass-value",
     ],
 )
 def test_a_subclass_deferred_filter_state_django_never_writes_fails_closed(
@@ -3626,6 +3658,8 @@ def test_func_extra_string_template_parameter_seals() -> None:
         (SimpleNamespace(), "annotation 'c' extra is a SimpleNamespace"),
         ({5: "UPPER"}, "annotation 'c' extra has a non-string key"),
         ({"function": b"UPPER"}, "annotation 'c' extra['function'] is a bytes"),
+        ({"function": _ProjectStr("UPPER")}, "annotation 'c' extra['function'] is a _ProjectStr"),
+        ({"precision": _ProjectInt(1)}, "annotation 'c' extra['precision'] is a _ProjectInt"),
     ],
 )
 def test_func_extra_non_inert_template_state_fails_closed(extra: object, detail: str) -> None:
@@ -3813,6 +3847,29 @@ def test_extra_where_non_sequence_sqls_fails_closed() -> None:
     assert sealed is None
     assert defect == ("untrusted", "where clause sqls is a _EvilSqls")
     assert fired == []
+
+
+@pytest.mark.parametrize(
+    ("sqls", "detail"),
+    [
+        (_ProjectList(["1 = 1"]), "where clause sqls is a _ProjectList"),
+        (_ProjectTuple(("1 = 1",)), "where clause sqls is a _ProjectTuple"),
+    ],
+    ids=["list-subclass", "tuple-subclass"],
+)
+def test_extra_where_sqls_sequence_subclass_fails_closed(sqls: object, detail: str) -> None:
+    """An ``ExtraWhere`` ``sqls`` container is admitted only as the exact builtin Django stores.
+
+    A ``list`` / ``tuple`` subclass is not that builtin: its own iteration could build
+    the raw fragment, so it is refused before any member is read.
+    """
+    source = Category.objects.extra(where=["1 = 1"])
+    extra_where = source.query.where.children[0]
+    assert type(extra_where) is ExtraWhere
+    extra_where.__dict__["sqls"] = sqls
+    sealed, defect = _seal_or_defect(source, Category, None)
+    assert sealed is None
+    assert defect == ("untrusted", detail)
 
 
 def test_extra_where_non_sequence_params_fails_closed() -> None:
@@ -6297,9 +6354,10 @@ def test_every_admitted_plain_container_has_a_rebuild_branch() -> None:
 def test_bound_value_normalizers_mirror_the_inert_inventory() -> None:
     """Every inert type (except ``bool``) has a normalizer, and nothing extra does.
 
-    ``_BOUND_VALUE_NORMALIZERS`` is hand-ordered on purpose - ``datetime`` before
-    ``date`` because the first subclasses the second - so it cannot be derived
-    from the frozenset. What it can be is CHECKED against it. An inert type
+    ``_BOUND_VALUE_NORMALIZERS`` pairs each base with its normalizer in a hand-set
+    order - ``datetime`` before ``date`` because the first subclasses the second -
+    so it is written out, not derived from ``_INERT_VALUE_TYPES``. What it can be
+    is CHECKED against it. An inert type
     admitted with no normalizer entry makes SUBCLASS instances of that type fail
     the seal closed; exact instances short-circuit before the normalizer runs, so
     nothing surfaces the gap until such a subclass appears. ``bool`` is excluded

@@ -557,10 +557,8 @@ def make_declaration_registry(label: str) -> DeclarationRegistry[_DeclarationT]:
                 f"Cannot declare {label} {truth.name(declaration_cls)} after finalization; "
                 "mutation declarations are import-time only (call registry.clear() first).",
             )
-        # Identity-scan dedup (NOT ``not in``): the ledger contract is idempotence
-        # by identity, and ``list.__contains__`` would dispatch the metaclass
-        # ``__eq__``; for every class the ``is`` answer is the ``type.__eq__`` answer.
-        if not any(declaration_cls is stored for stored in store):
+        # The ledger contract is idempotence by identity.
+        if not truth.is_among(declaration_cls, store):
             store.append(declaration_cls)
 
     def clear() -> None:
