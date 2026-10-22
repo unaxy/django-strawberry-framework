@@ -213,8 +213,8 @@ What to read:
   its last sentence is always `In flight now: …`. Item statuses `verified/stale/pending/hunting`.
 - Disk: workspace copies are the consumer. In-tree `hunt-ws/` copies once held 1.5 GB steady and
   recursed `hunt-ws/*/hunt-ws/` four deep (free space 24 → 17 GB in a day); `scripts/workspace.py`
-  now keeps a capped pool per flow outside the tree and refuses a new copy below 6 GB free
-  (`workspace.py status` shows it). Warn below 10 GB.
+  now keeps a capped pool per flow outside the tree and refuses a new copy below 6 GB free.
+  Warn below 10 GB.
 - Coverage-gate regressions are NOT loop material unless the maintainer asked; the hunt's
   guards + tests land uncommitted and are its business.
 
