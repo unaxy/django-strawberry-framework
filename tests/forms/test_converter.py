@@ -41,6 +41,7 @@ from django_strawberry_framework.forms.converter import (
     RELATION_SINGLE,
     SCALAR,
     convert_form_field,
+    form_field_kind,
     form_field_required,
 )
 from django_strawberry_framework.forms.inputs import build_form_input_class
@@ -230,6 +231,63 @@ def test_file_and_image_fields_are_file_kind() -> None:
     """``FileField`` / ``ImageField`` -> kind ``file`` (the ``Upload`` annotation is build-site)."""
     assert convert_form_field(forms.FileField()).kind == FILE
     assert convert_form_field(forms.ImageField()).kind == FILE
+
+
+class _UnsupportedField(forms.Field):
+    """A custom field with no supported ancestor: ``convert_form_field`` refuses it."""
+
+
+class _CustomModelChoiceField(forms.ModelChoiceField[models.Model]):
+    pass
+
+
+class _FileWidgetField(forms.Field):
+    """A custom field with no ``FileField`` ancestor, rendered as an upload."""
+
+    widget = forms.ClearableFileInput
+
+
+class _MultipartTextarea(forms.Textarea):
+    """A text widget that asks for a multipart form yet reads ``data``, as every ``Textarea``."""
+
+    needs_multipart_form = True
+
+
+_MODEL_CHOICE: forms.ModelChoiceField[models.Model] = forms.ModelChoiceField(queryset=None)
+_MODEL_MULTIPLE_CHOICE: forms.ModelMultipleChoiceField[models.Model] = (
+    forms.ModelMultipleChoiceField(queryset=None)
+)
+
+
+@pytest.mark.parametrize(
+    ("field", "kind"),
+    [
+        pytest.param(_MODEL_MULTIPLE_CHOICE, RELATION_MULTI, id="mmcf"),
+        pytest.param(_MODEL_CHOICE, RELATION_SINGLE, id="mcf"),
+        pytest.param(_CustomModelChoiceField(queryset=None), RELATION_SINGLE, id="mcf-subclass"),
+        pytest.param(forms.FileField(), FILE, id="file"),
+        pytest.param(forms.ImageField(), FILE, id="image"),
+        pytest.param(forms.MultipleChoiceField(), SCALAR, id="multiple-choice"),
+        pytest.param(forms.ChoiceField(), SCALAR, id="choice"),
+        pytest.param(forms.Field(), SCALAR, id="bare-field"),
+        pytest.param(_UnsupportedField(), SCALAR, id="unsupported-custom"),
+        pytest.param(forms.SplitDateTimeField(), SCALAR, id="unsupported-builtin"),
+        pytest.param(_FileWidgetField(), FILE, id="custom-field-file-widget"),
+        pytest.param(forms.CharField(widget=forms.FileInput), FILE, id="char-file-widget"),
+        pytest.param(forms.FileField(widget=forms.TextInput), FILE, id="file-text-widget"),
+        pytest.param(
+            forms.CharField(widget=_MultipartTextarea),
+            SCALAR,
+            id="multipart-textarea",
+        ),
+    ],
+)
+def test_form_field_kind_reads_the_class_and_widget(field: forms.Field, kind: str) -> None:
+    """``form_field_kind`` reads the class and the widget's real type, a refused field included.
+
+    A widget asking for a multipart form is no file widget unless it is a ``FileInput``.
+    """
+    assert form_field_kind(field) == kind
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 198 done, 137 to do.
+Progress: 199 done, 138 to do.
 
 ## Done
 
@@ -352,8 +352,9 @@ Progress: 198 done, 137 to do.
 - [x] 124. ModelForm: an explicit `null` on a non-required choice field or `CharField` over a non-blank text choice
   column stores `""`: not a defect (upstream-matching): Django's `BaseModelForm._get_validation_exclusions` skips model
   validation of an empty value on a non-required form field, and the write rolls back
-- [x] 125. ModelForm: no check that a declared field's kind agrees with its column: not a defect (intended): the
-  declared form field is the input type, and a value the column refuses is an ordinary field-keyed form error
+- [x] 125. ModelForm: no check that a declared field's kind agrees with its column: a defect, superseded by 295 (the
+  build refuses a field of another kind than its column on any field the operation binds; a scalar field over a
+  relation column agrees)
 - [x] 126. A plain `Form` `ChoiceField` publishing `String`: not a defect (upstream-matching): graphene-django's
   `forms/converter.py::convert_form_field_to_string` registers `forms.ChoiceField`
 - [x] 127. Lead: a serializer single `ChoiceField` over an `ArrayField` skipping the column's choice check: not a
@@ -783,6 +784,18 @@ Progress: 198 done, 137 to do.
 - [x] 338. BACKLOG.md carried the unused link definition `[card-full-relay-story-node-connection-root-validation]`:
   fixed: the definition is dropped; the LINK DEFINITIONS block has no unused or undefined reference and keeps its ten
   group headers
+- [x] 295. A `ModelForm` field named after a model column but of another kind (a relation field over a scalar, JSON or
+  file column, a file field over a non-file column, a scalar field over a file column, a single / multi relation
+  mismatch) typed, decoded and routed by the column while the bound form read by its own kind: it wrote the chosen
+  row's `str()` unchecked (a row the type hides included), dropped the value while reporting success, or never
+  succeeded, and one left out of an update input failed every update: fixed,
+  `forms/inputs.py::require_column_kind_agreement` refuses the field at schema build on every field the operation
+  binds (an update: every declared field), reading the field through `forms/converter.py::form_field_kind` (class, or
+  a `forms.FileInput` widget; `convert_form_field` reads the same, so a column-less `FileInput` field is an `Upload`);
+  a scalar field over a relation column still takes the relation id. Supersedes 125. Three shapes that built at the
+  parent now refuse: a `FileField` over text or a `CharField` over a file column left out of an update-only input
+  (inert there), and a custom widget that reads `files` without subclassing `forms.FileInput` (remedy: subclass it).
+  Mutations M1-M7 red
 
 ## Outside review of the fixes
 
@@ -896,11 +909,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
-- [ ] 295. A `ModelForm` declaring a `ModelChoiceField` under a non-relation column's name (`description =
-  ModelChoiceField(queryset=Category.objects.all())`) builds as the column's scalar (`description: String!`), and
-  `DjangoModelFormMutation` create and update write the chosen row's `str()` into the column:
-  `forms/inputs.py::_field_triple_and_spec` types by the column alone and the form flavor has no runtime kind check
-  (census the file / scalar siblings too; the serializer twin is 276)
 - [ ] 297. `scripts/review_changed_python_diffs_against_head.py --against worktree` has 146's stitched, index-dependent new
   side: a package `.py` that was untracked at the baseline is listed as `A`, as if the item added it (`D` then `A` under
   141's snapshot baseline)
@@ -1017,12 +1025,26 @@ tracker number are recorded there; open remainders and new defects are filed as 
   configured package coverage" into every generated hunt, against AGENTS rule 16 (the full suite and the coverage gate
   run only in GitHub Actions); restate it as the dispatched `django.yml` matrix the release checklist (BoardDoc 11)
   names, and regenerate nothing else
+- [ ] 340. A `ModelForm` relation field whose class-level queryset is over another model than its relation column's
+  target (`category = ModelChoiceField(queryset=Genre.objects.all())` over `Item.category`) builds `categoryId: ID!`,
+  and every create / update is a request-time `ConfigurationError` from
+  `forms/resolvers.py::_assert_bound_choice_agreement`; both models are known at build, so
+  `forms/inputs.py::require_column_kind_agreement`'s bound-basis walk could refuse it at `finalize_django_types()`
+  (GOAL "Configuration is validated at construction"), the request-time check staying for `__init__` / `get_form`
+  rebuilds. Found landing 295
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 341. CHANGELOG entry for item 295: a `ModelForm` field named after a model column but of another kind (a
+  `ModelChoiceField` / `ModelMultipleChoiceField` over a non-relation column or a relation of the other cardinality, a
+  file field over a non-file column, a scalar field over a file column) is refused at schema build with
+  `ConfigurationError` naming both kinds, on every field the operation binds (an update binds every declared field),
+  instead of writing the chosen row's `str()`, a row the type hides included, or dropping the value; a field rendered
+  with a `forms.FileInput` is a file field, so a column-less one is an `Upload` input; a scalar field over a relation
+  column is unchanged
 - [ ] 325. CHANGELOG entry for item 163: a `DjangoType.get_queryset` hook receives an instance of the source's own
   `QuerySet` class (the default manager's, e.g. `as_manager()` / `Manager.from_queryset`), so a project `QuerySet`
   method is callable inside the hook; the hook's return is still rebuilt into a plain `QuerySet`

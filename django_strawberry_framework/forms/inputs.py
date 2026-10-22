@@ -23,11 +23,12 @@ The shape is the ``036`` discipline adapted to forms (spec-038 Decision 7):
   form still has a discoverable shape), not the model's editable columns.
 - Where a ``ModelForm`` field has a backing model column, the annotation routes
   through ``model_column_input_annotation`` so the wire contract is symmetric
-  with the read ``DjangoType``; a choice field whose static choices admit fewer of
-  a choice column's values than the column lists publishes a generated enum of the
-  admitted values instead (``_form_choice_narrowing``). A plain ``Form`` field with
-  no column uses ``converter.convert_form_field`` (the model-less table). The two key spaces
-  (``forms.Field`` / ``models.Field``) stay strictly separate: the column is
+  with the read ``DjangoType``, and the field's own kind must agree with the
+  column's (``require_column_kind_agreement``); a choice field whose static choices
+  admit fewer of a choice column's values than the column lists publishes a generated
+  enum of the admitted values instead (``_form_choice_narrowing``). A plain ``Form``
+  field with no column uses ``converter.convert_form_field`` (the model-less table).
+  The two key spaces (``forms.Field`` / ``models.Field``) stay strictly separate: the column is
   resolved first, then handed to the ``models.Field``-keyed converters.
 - Shape identity is ``(form_class, operation_kind, frozenset(effective field
   names), basis content projection)`` keyed on the FORM CLASS OBJECT (not its
@@ -95,6 +96,7 @@ from .converter import (
     RELATION_SINGLE,
     SCALAR,
     convert_form_field,
+    form_field_kind,
     form_field_required,
 )
 
@@ -553,10 +555,11 @@ def relation_target_model(
 ) -> type[models.Model] | None:
     """Return the model a relation form field's ids are decoded against, or ``None``.
 
-    The backing column's related model for a ``ModelForm`` column, else the field's
-    class-level ``queryset.model``: the basis the input build records on the field's
-    ``InputFieldSpec.related_model``. ``None`` when neither names a model (a scalar
-    column, or a column-less field whose queryset is assigned per request).
+    The backing column's related model for a ``ModelForm`` column (a relation column:
+    ``require_column_kind_agreement`` refuses a relation field over any other), else the
+    field's class-level ``queryset.model``: the basis the input build records on the field's
+    ``InputFieldSpec.related_model``. ``None`` when neither names a model (a column-less
+    field whose queryset is assigned per request).
     """
     column = _model_column_for(form_class, name)
     model = _related_model_of(field) if column is None else column.related_model
@@ -594,6 +597,56 @@ def _names_one_row(model: type[models.Model], field: ConcreteField) -> bool:
     return any(set(group) in alone for group in model._meta.unique_together) or any(
         set(constraint.fields) in alone for constraint in model._meta.total_unique_constraints
     )
+
+
+# The plain-word name of each write kind, for the kind-agreement refusal's message.
+_KIND_WORDS: dict[str, str] = {
+    SCALAR: "scalar",
+    RELATION_SINGLE: "single-relation",
+    RELATION_MULTI: "multi-relation",
+    FILE: "file",
+}
+
+
+def require_column_kind_agreement(
+    form_class: FormClass,
+    form_fields: Mapping[str, forms.Field] | None = None,
+) -> None:
+    """Refuse a declared field whose kind disagrees with the model column it is named after.
+
+    The input types and decodes a column-backed field by the column's kind
+    (``model_column_write_kind``: a relation id, an ``Upload``, a scalar), and an update
+    rebinds an omitted field from the row's stored value; the bound form reads the field by
+    its own kind (``converter.form_field_kind``): a relation field looks a key up in its
+    queryset, a file field (by class, or by a ``forms.FileInput`` widget) reads ``files``,
+    a scalar field reads ``data``. A field of another kind than its column fails or drops
+    every value the input carries or the row stores, or writes a value no relation decode
+    checked (a ``ModelChoiceField`` over a text column
+    stores the ``str()`` of any row its queryset holds, one the target's visibility query
+    hides included), so it is a ``ConfigurationError``. A scalar field over a relation
+    column agrees: the decode hands it the visible row's key, as an HTML form posts it,
+    and the form resolves the key itself (a ``clean_<field>`` returning the row).
+    ``form_fields`` is the set the operation binds, as for ``require_readable_choice_keys``:
+    every declared field for an update, the input's own fields for a create.
+    """
+    for name, field in _form_field_basis(form_class, form_fields).items():
+        column = _model_column_for(form_class, name)
+        if column is None:
+            continue
+        column_kind = model_column_write_kind(column)
+        field_kind = form_field_kind(field)
+        if field_kind == column_kind or (
+            field_kind == SCALAR and column_kind in (RELATION_SINGLE, RELATION_MULTI)
+        ):
+            continue
+        raise ConfigurationError(
+            f"Form {truth.name(form_class)} field {name!r} ({truth.kind(field)}) is a "
+            f"{_KIND_WORDS[field_kind]} field over the {_KIND_WORDS[column_kind]} column "
+            f"{truth.name(column.model)}.{column.name}: the input carries the column's value "
+            "and the form reads the field's. Declare a form field of the column's kind, or name "
+            "the field after no model column; an update binds every declared field, including "
+            "those Meta.fields / Meta.exclude leave out of its input.",
+        )
 
 
 def require_readable_choice_keys(
@@ -742,10 +795,13 @@ def _form_choice_narrowing(
     no list is a value the column lists. A field admitting no non-empty value the column lists
     is refused: its input could carry at most the empty value (where the column lists ``""``
     and the form admits it), and every other value fails validation. A column without choices, a
-    relation or file column (even one declaring choices), a non-choice form field, a
-    ``ModelChoiceField`` (its choices are its queryset's rows, read per request, even over a
-    scalar choice column) and a single-value ``ChoiceField`` over an ``ArrayField`` keep the
-    column's type.
+    relation or file column (even one declaring choices), a non-choice form field and a
+    single-value ``ChoiceField`` over an ``ArrayField`` keep the column's type. A
+    ``ModelChoiceField`` never narrows: its choices are its queryset's rows, read per request,
+    and the shape identity (``_choice_narrowing_identity``) reaches this for every basis field,
+    one over a scalar choice column that ``require_column_kind_agreement`` has not refused yet,
+    or never will (a field a create's input leaves out) included, so reading them would query
+    the database at schema build.
     """
     if not truth.is_instance(field, forms.ChoiceField) or truth.is_instance(
         field,
@@ -866,9 +922,9 @@ def _field_triple_and_spec(
 ) -> tuple[str, object, InputFieldSpec, bool]:
     """Resolve one form field to its ``(python_attr, base_annotation, InputFieldSpec, required)``.
 
-    A ``ModelForm`` field with a backing column routes through
-    ``model_column_input_annotation`` (keyed on the resolved ``models.Field``):
-    a relation column -> ``<name>_id`` / ``categoryId`` + the Relay-vs-raw-pk
+    A ``ModelForm`` field with a backing column (one ``require_column_kind_agreement``
+    already admitted) routes through ``model_column_input_annotation`` (keyed on the
+    resolved ``models.Field``): a relation column -> ``<name>_id`` / ``categoryId`` + the Relay-vs-raw-pk
     id type, ``relation_single`` / ``relation_multi``; a file/image column ->
     ``Upload`` (``file``); else the read-side scalar / choice-enum (``scalar``),
     except a choice field admitting fewer of a choice column's values than it
@@ -1019,6 +1075,11 @@ def build_form_input_class(
     misconfiguration the generator would otherwise silently resolve to a
     create-shaped input, so it fails loud naming the form and the received
     value.
+
+    Before any field is built, every field the operation binds (every declared field for
+    an update, the input's own for a create) must agree with its backing column's kind
+    (``require_column_kind_agreement``) and read a relation key that names one row
+    (``require_readable_choice_keys``).
     """
     if operation_kind not in CREATE_SHAPED_KINDS | {PARTIAL}:
         raise ConfigurationError(
@@ -1035,6 +1096,7 @@ def build_form_input_class(
     )
     # The update reconstruction rebinds every declared field; a create binds only its own.
     bound_fields = form_fields if operation_kind == PARTIAL else effective
+    require_column_kind_agreement(form_class, bound_fields)
     require_readable_choice_keys(form_class, bound_fields)
     # The un-narrowed shape of the same operation: the canonical-name comparison basis,
     # so an update input that drops only the row identity keeps the canonical name.

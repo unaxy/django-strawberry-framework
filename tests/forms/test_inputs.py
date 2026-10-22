@@ -36,6 +36,7 @@ fail-loud, shape identity, and throwaway-type id mapping.
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Callable, Iterator
 from enum import Enum
@@ -700,6 +701,67 @@ def test_file_field_maps_to_upload() -> None:
     assert spec.kind == FILE
 
 
+class _FileWidgetField(forms.Field):
+    """A custom field with no ``FileField`` ancestor, rendered as an upload: it reads ``files``."""
+
+    widget = forms.ClearableFileInput
+
+
+def test_field_with_a_file_widget_maps_to_upload() -> None:
+    """A column-less field whose widget reads ``files`` takes an ``Upload``, never a ``String``.
+
+    The bound form reads the value from ``files``, so a ``String`` input could never fill it.
+    """
+
+    class ScanForm(forms.Form):
+        scan = _FileWidgetField()
+
+    cre, specs = build_form_input_class(ScanForm, operation_kind=FORM)
+    assert _inner_type(_field_map(cre)["scan"]) is Upload
+    assert [spec.kind for spec in specs] == [FILE]
+
+
+class _MultipartTextarea(forms.Textarea):
+    """A text widget that asks for a multipart form yet reads ``data``, as every ``Textarea``."""
+
+    needs_multipart_form = True
+
+
+def test_field_with_a_multipart_text_widget_stays_a_string() -> None:
+    """A column-less field whose widget only asks for a multipart form still takes a ``String``."""
+
+    class NoteForm(forms.Form):
+        note = forms.CharField(widget=_MultipartTextarea)
+
+    cre, specs = build_form_input_class(NoteForm, operation_kind=FORM)
+    assert _inner_type(_field_map(cre)["note"]) is str
+    assert [spec.kind for spec in specs] == [SCALAR]
+
+
+@pytest.mark.parametrize("operation_kind", [CREATE, PARTIAL])
+def test_field_with_a_multipart_text_widget_over_a_text_column_builds(
+    operation_kind: str,
+) -> None:
+    """A text field rendered with a multipart text widget agrees with its text column."""
+    form_class = _column_form(
+        product_models.Item,
+        "description",
+        forms.CharField(widget=_MultipartTextarea, required=False),
+    )
+    built, specs = build_form_input_class(form_class, operation_kind=operation_kind)
+    assert _inner_type(_field_map(built)["description"]) is str
+    assert [spec.kind for spec in specs] == [SCALAR]
+
+
+@pytest.mark.parametrize("operation_kind", [CREATE, PARTIAL])
+def test_field_with_a_file_widget_over_a_file_column_builds(operation_kind: str) -> None:
+    """A custom field with a file widget over a file column agrees with it on both inputs."""
+    form_class = _column_form(product_models.Item, "attachment", _FileWidgetField())
+    built, specs = build_form_input_class(form_class, operation_kind=operation_kind)
+    assert _inner_type(_field_map(built)["attachment"]) is Upload
+    assert [spec.kind for spec in specs] == [FILE]
+
+
 # ---------------------------------------------------------------------------
 # ChoiceField over a ModelForm model's choices -> the SAME read-side enum
 # ---------------------------------------------------------------------------
@@ -858,33 +920,268 @@ def test_choice_field_admitting_every_column_value_keeps_read_enum(
     assert _enum_of(_field_map(cre)["circulation_status"]) is read_enum
 
 
-@pytest.mark.django_db
+def _column_form(
+    model: type[models.Model],
+    name: str,
+    field: forms.Field,
+    fields: tuple[str, ...] = (),
+) -> FormClass:
+    """A ``model`` ``ModelForm`` declaring the ``name`` column's field as ``field``."""
+    meta = type("Meta", (), {"model": model, "fields": (name, *fields)})
+    return type("KindForm", (forms.ModelForm,), {name: field, "Meta": meta})
+
+
+def _genres() -> models.QuerySet[Genre]:
+    return Genre.objects.all()
+
+
+def _categories() -> models.QuerySet[Category]:
+    return Category.objects.all()
+
+
 @pytest.mark.parametrize(
-    "stored",
+    (
+        "model",
+        "name",
+        "make_field",
+        "kinds",
+    ),
     [
-        pytest.param(["available", "repair"], id="rows-matching-two-values"),
-        pytest.param([], id="no-rows"),
+        pytest.param(
+            Book,
+            "circulation_status",
+            lambda: forms.ModelChoiceField(queryset=_genres(), to_field_name="name"),
+            "(ModelChoiceField) is a single-relation field over the scalar column",
+            id="model-choice-over-choice-column",
+        ),
+        pytest.param(
+            product_models.Item,
+            "is_private",
+            lambda: forms.ModelChoiceField(queryset=_categories()),
+            "(ModelChoiceField) is a single-relation field over the scalar column",
+            id="model-choice-over-boolean",
+        ),
+        pytest.param(
+            scalar_models.NullableScalarSpecimen,
+            "payload",
+            lambda: forms.ModelChoiceField(queryset=_categories()),
+            "(ModelChoiceField) is a single-relation field over the scalar column",
+            id="model-choice-over-json",
+        ),
+        pytest.param(
+            Book,
+            "title",
+            lambda: forms.ModelMultipleChoiceField(queryset=_genres()),
+            "(ModelMultipleChoiceField) is a multi-relation field over the scalar column",
+            id="model-multiple-choice-over-text",
+        ),
+        pytest.param(
+            product_models.Item,
+            "attachment",
+            lambda: forms.ModelChoiceField(queryset=_categories()),
+            "(ModelChoiceField) is a single-relation field over the file column",
+            id="model-choice-over-file",
+        ),
+        pytest.param(
+            Book,
+            "genres",
+            lambda: forms.ModelChoiceField(queryset=_genres()),
+            "(ModelChoiceField) is a single-relation field over the multi-relation column",
+            id="model-choice-over-m2m",
+        ),
+        pytest.param(
+            product_models.Item,
+            "category",
+            lambda: forms.ModelMultipleChoiceField(queryset=_categories()),
+            "(ModelMultipleChoiceField) is a multi-relation field over the single-relation column",
+            id="model-multiple-choice-over-fk",
+        ),
+        pytest.param(
+            product_models.Item,
+            "attachment",
+            lambda: forms.ModelMultipleChoiceField(queryset=_categories()),
+            "(ModelMultipleChoiceField) is a multi-relation field over the file column",
+            id="model-multiple-choice-over-file",
+        ),
+        pytest.param(
+            Book,
+            "genres",
+            forms.FileField,
+            "(FileField) is a file field over the multi-relation column",
+            id="file-over-m2m",
+        ),
+        pytest.param(
+            scalar_models.NullableScalarSpecimen,
+            "payload",
+            forms.ImageField,
+            "(ImageField) is a file field over the scalar column",
+            id="image-over-json",
+        ),
+        pytest.param(
+            product_models.Item,
+            "description",
+            lambda: forms.FileField(required=False),
+            "(FileField) is a file field over the scalar column",
+            id="file-over-text",
+        ),
+        pytest.param(
+            product_models.Item,
+            "category",
+            forms.FileField,
+            "(FileField) is a file field over the single-relation column",
+            id="file-over-fk",
+        ),
+        pytest.param(
+            product_models.Item,
+            "attachment",
+            lambda: forms.CharField(required=False),
+            "(CharField) is a scalar field over the file column",
+            id="scalar-over-file",
+        ),
     ],
 )
-def test_model_choice_field_over_scalar_choice_column_keeps_read_enum(stored: list[str]) -> None:
-    """A ``ModelChoiceField`` over a scalar choice column publishes the column's read enum.
+@pytest.mark.parametrize("operation_kind", [CREATE, PARTIAL])
+def test_field_of_another_kind_than_its_column_is_refused(
+    model: type[models.Model],
+    name: str,
+    make_field: Callable[[], forms.Field],
+    kinds: str,
+    operation_kind: str,
+) -> None:
+    """A field whose kind differs from its column's is refused, whichever input carries it.
 
-    Its choices are the rows of its queryset, read per request, so no row set at build
-    narrows the input: whichever ``Genre`` rows exist (two whose ``to_field_name`` values
-    the column lists, or none), ``Book.circulation_status`` keeps its read enum and the
-    bound form resolves the value against its queryset at request time.
+    The input types and decodes the field by its column's kind while the bound form reads
+    it by its own, so the two disagree on every value; only a scalar field over a relation
+    column agrees.
     """
-    for name in stored:
-        Genre.objects.create(name=name)
-    column = library_models.Book._meta.get_field("circulation_status")
-    assert isinstance(column, models.Field)
-    read_enum = convert_choices_to_enum(column, "BookType")
-    status_field = forms.ModelChoiceField(queryset=Genre.objects.all(), to_field_name="name")
-    form_class = _book_status_form(status_field)
-    cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
-    par, _ = build_form_input_class(form_class, operation_kind=PARTIAL)
-    assert _enum_of(_field_map(cre)["circulation_status"]) is read_enum
-    assert _enum_of(_field_map(par)["circulation_status"]) is read_enum
+    form_class = _column_form(model, name, make_field())
+    with pytest.raises(ConfigurationError, match=re.escape(f"field {name!r} {kinds}")):
+        _ = build_form_input_class(form_class, operation_kind=operation_kind)
+
+
+def test_kind_refusal_names_the_form_the_column_and_the_remedy() -> None:
+    """The refusal names the form, the field and its class, both kinds, the column and the fix."""
+    form_class = _column_form(
+        product_models.Item,
+        "description",
+        forms.ModelChoiceField(queryset=_categories()),
+    )
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = build_form_input_class(form_class, operation_kind=CREATE)
+    assert str(excinfo.value) == (
+        "Form KindForm field 'description' (ModelChoiceField) is a single-relation field "
+        "over the scalar column Item.description: the input carries the column's value and "
+        "the form reads the field's. Declare a form field of the column's kind, or name the "
+        "field after no model column; an update binds every declared field, including those "
+        "Meta.fields / Meta.exclude leave out of its input."
+    )
+
+
+#: A field of another kind than its column, every one optional so a create may leave it out:
+#: a relation field over text (the stored text is looked up as a ``Category`` key), a file
+#: field over text (it reads ``files``, never the stored text) and a scalar field over a
+#: file column (it reads ``data``, never the stored file).
+_NARROWED_OUT_MISMATCHES = [
+    pytest.param(
+        "description",
+        lambda: forms.ModelChoiceField(queryset=_categories(), required=False),
+        "(ModelChoiceField) is a single-relation field over the scalar column",
+        id="model-choice-over-text",
+    ),
+    pytest.param(
+        "description",
+        lambda: forms.FileField(required=False),
+        "(FileField) is a file field over the scalar column",
+        id="file-over-text",
+    ),
+    pytest.param(
+        "attachment",
+        lambda: forms.CharField(required=False),
+        "(CharField) is a scalar field over the file column",
+        id="scalar-over-file",
+    ),
+]
+
+
+@pytest.mark.parametrize(("name", "make_field", "kinds"), _NARROWED_OUT_MISMATCHES)
+def test_update_input_refuses_a_kind_mismatch_on_a_narrowed_out_field(
+    name: str,
+    make_field: Callable[[], forms.Field],
+    kinds: str,
+) -> None:
+    """An update rebinds every declared field from the row, the narrowed-out one included."""
+    form_class = _column_form(product_models.Item, name, make_field(), fields=("name",))
+    with pytest.raises(ConfigurationError, match=re.escape(f"field {name!r} {kinds}")):
+        _ = build_form_input_class(form_class, operation_kind=PARTIAL, fields=("name",))
+
+
+@pytest.mark.parametrize(("name", "make_field", "kinds"), _NARROWED_OUT_MISMATCHES)
+def test_create_input_admits_a_kind_mismatch_on_a_narrowed_out_field(
+    name: str,
+    make_field: Callable[[], forms.Field],
+    kinds: str,
+) -> None:
+    """A create binds only its input's fields, so a narrowed-out field is never bound."""
+    del kinds
+    form_class = _column_form(product_models.Item, name, make_field(), fields=("name",))
+    _cls, specs = build_form_input_class(form_class, operation_kind=CREATE, fields=("name",))
+
+    assert [spec.target_name for spec in specs] == ["name"]
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "name",
+        "make_field",
+        "attr",
+        "kind",
+    ),
+    [
+        pytest.param(
+            product_models.Item,
+            "category",
+            forms.IntegerField,
+            "category_id",
+            RELATION_SINGLE,
+            id="integer-over-fk",
+        ),
+        pytest.param(
+            product_models.Item,
+            "category",
+            forms.CharField,
+            "category_id",
+            RELATION_SINGLE,
+            id="text-over-fk",
+        ),
+        pytest.param(
+            Book,
+            "genres",
+            forms.MultipleChoiceField,
+            "genres",
+            RELATION_MULTI,
+            id="multiple-choice-over-m2m",
+        ),
+    ],
+)
+@pytest.mark.parametrize("operation_kind", [CREATE, PARTIAL])
+def test_scalar_field_over_relation_column_takes_the_relation_id(
+    model: type[models.Model],
+    name: str,
+    make_field: Callable[[], forms.Field],
+    attr: str,
+    kind: str,
+    operation_kind: str,
+) -> None:
+    """A scalar field over a relation column builds the relation's id input and kind.
+
+    The decode hands the field the visible row's key, as an HTML form posts it, and the
+    form resolves the key itself.
+    """
+    form_class = _column_form(model, name, make_field())
+    built, specs = build_form_input_class(form_class, operation_kind=operation_kind)
+    assert list(_field_map(built)) == [attr]
+    assert [spec.kind for spec in specs] == [kind]
 
 
 @pytest.mark.parametrize(
@@ -1647,7 +1944,8 @@ def test_digit_boundary_form_fields_survive_distinct_in_sdl() -> None:
     assert "field2:" in block
 
 
-def test_model_choice_field_with_none_queryset_is_fail_loud() -> None:
+@pytest.mark.parametrize("to_field_name", [None, "name"])
+def test_model_choice_field_with_none_queryset_is_fail_loud(to_field_name: str | None) -> None:
     """A model-less ``ModelChoiceField(queryset=None)`` raises a diagnosable error at schema build.
 
     The queryset-in-``__init__`` idiom raises ``ConfigurationError``, not a bare
@@ -1655,11 +1953,15 @@ def test_model_choice_field_with_none_queryset_is_fail_loud() -> None:
 
     Schema-time discovery reads ``base_fields`` without instantiating the form, so a
     ``queryset`` assigned in ``__init__`` is ``None`` here and the related model cannot be
-    resolved; the guard names the form / field rather than failing on ``None.model``.
+    resolved; the guard names the form / field rather than failing on ``None.model``. A
+    ``to_field_name`` names no target the key check could read, so it is this refusal too.
     """
 
     class LateQuerysetForm(forms.Form):
-        target: forms.ModelChoiceField[Model] = forms.ModelChoiceField(queryset=None)
+        target: forms.ModelChoiceField[Model] = forms.ModelChoiceField(
+            queryset=None,
+            to_field_name=to_field_name,
+        )
 
     with pytest.raises(ConfigurationError) as exc:
         build_form_input_class(LateQuerysetForm, operation_kind=FORM)

@@ -15,7 +15,9 @@ at the ``forms/inputs.py`` build site (keyed on the resolved ``models.Field``),
 so a ``choices`` form field resolves to the SAME generated enum the read
 ``DjangoType`` synthesizes (the symmetric wire contract), unless its static choices
 admit fewer of the column's values, when it publishes the generated enum of the
-admitted values (``forms/inputs.py::_form_choice_narrowing``). The two key spaces -
+admitted values (``forms/inputs.py::_form_choice_narrowing``). The bound form still
+reads such a field by its class and widget, so its kind (``form_field_kind``) must agree with
+the column's (``forms/inputs.py::require_column_kind_agreement``). The two key spaces -
 ``forms.Field`` here, ``models.Field`` on the read side - stay strictly separate.
 
 **Fail-loud dispatch.** The registry registers each supported class
@@ -100,6 +102,36 @@ class FormFieldConversion(FieldConversionBase):
 # The value shape of every form converter table entry: a ``forms.Field`` in, its
 # ``FormFieldConversion`` out.
 FormFieldConverter = Callable[[forms.Field], FormFieldConversion]
+
+
+def form_field_kind(field: forms.Field) -> str:
+    """Return the decode kind a form field reads its value as, by its class and widget.
+
+    A ``ModelMultipleChoiceField`` reads a list of rows (``relation_multi``, checked before
+    the ``ModelChoiceField`` it subclasses), a ``ModelChoiceField`` one row
+    (``relation_single``), a ``FileField`` / ``ImageField``, or any field whose widget is a
+    ``forms.FileInput`` (``ClearableFileInput`` included: Django's widget whose
+    ``value_from_datadict`` reads ``files``; a custom field rendered with it, a ``CharField``
+    with ``FileInput``), an upload (``file``), and every other field a ``data`` value
+    (``scalar``). The widget is read statically and checked by its real type, so no
+    consumer code runs; ``needs_multipart_form`` is not read, since it only asks for a
+    multipart form and a widget setting it may still read ``data``. A custom widget that
+    reads ``files`` without subclassing ``forms.FileInput`` reads as ``scalar``: subclass
+    ``forms.FileInput`` for it. A pure static read that never converts, so a field
+    ``convert_form_field`` refuses still has a kind. It is the kind ``convert_form_field``
+    gives a column-less field and the kind
+    ``forms/inputs.py::require_column_kind_agreement`` compares with a backing column's.
+    """
+    if truth.is_instance(field, forms.ModelMultipleChoiceField):
+        return RELATION_MULTI
+    if truth.is_instance(field, forms.ModelChoiceField):
+        return RELATION_SINGLE
+    if truth.is_instance(field, forms.FileField) or truth.is_instance(
+        truth.static_attr(field, "widget", None),
+        forms.FileInput,
+    ):
+        return FILE
+    return SCALAR
 
 
 def form_field_required(field: forms.Field, *, column: object = None) -> bool:
@@ -221,12 +253,19 @@ def _bare_form_field(field: forms.Field) -> FormFieldConversion | object:
     return MRO_CONTINUE
 
 
-# Kind prechecks that must win BEFORE the scalar walk reaches a parent class
-# (``ModelChoiceField`` subclasses ``ChoiceField`` -> ``str``, etc.). Relation /
-# file annotations are finalized at the build site (``annotation=None``).
+# The relation / file kinds ``form_field_kind`` answers, each converted before the scalar
+# walk could reach a parent class (``ModelChoiceField`` subclasses ``ChoiceField`` -> ``str``).
+# Relation / file annotations are finalized at the build site (``annotation=None``).
 _CONVERT_RELATION_MULTI = _kind_converter(RELATION_MULTI)
 _CONVERT_RELATION_SINGLE = _kind_converter(RELATION_SINGLE)
 _CONVERT_FILE = _kind_converter(FILE)
+_CONVERT_KIND: dict[str, FormFieldConverter] = {
+    RELATION_MULTI: _CONVERT_RELATION_MULTI,
+    RELATION_SINGLE: _CONVERT_RELATION_SINGLE,
+    FILE: _CONVERT_FILE,
+}
+# ``MultipleChoiceField`` subclasses ``ChoiceField``, so its ``list[str]`` must win before
+# the scalar walk reaches ``ChoiceField`` -> ``str``.
 _CONVERT_MULTIPLE_CHOICE = _kind_converter(SCALAR, list[str])
 
 
@@ -247,9 +286,12 @@ def convert_form_field(field: forms.Field) -> FormFieldConversion:
     (which would shadow the raise so every custom field silently became
     ``String`` - spec-038 Decision 7):
 
-    - relation / file kinds are matched first by ``isinstance`` (``ModelChoiceField``
-      subclasses ``ChoiceField``, so it MUST win before the scalar walk reaches
-      ``ChoiceField`` -> ``str``; ``FileField`` / ``ImageField`` likewise);
+    - a relation / file field (``form_field_kind``) returns its kind first, its
+      annotation finalized at the build site (``ModelChoiceField`` subclasses
+      ``ChoiceField``, so it MUST win before the scalar walk reaches ``ChoiceField``
+      -> ``str``; ``FileField`` / ``ImageField`` likewise, and a field rendered with a
+      ``forms.FileInput`` is an ``Upload``: its form reads it from ``files``, which a
+      ``String`` input never reaches);
     - then ``MultipleChoiceField`` -> ``list[str]`` (it subclasses ``ChoiceField``
       and so must be checked before the scalar ``ChoiceField`` entry);
     - then the scalar registry MRO walk (``EmailField`` resolves under
@@ -262,17 +304,17 @@ def convert_form_field(field: forms.Field) -> FormFieldConversion:
     - else the fallthrough **raises** ``ConfigurationError`` naming the field /
       class.
 
-    The relation / multi pre-checks run before the scalar walk because
+    The relation / multi checks run before the scalar walk because
     ``ModelChoiceField`` / ``ModelMultipleChoiceField`` / ``MultipleChoiceField``
     all subclass ``ChoiceField`` (which the scalar table maps to ``str``), so the
     more-specific kind must win.
     """
+    kind = form_field_kind(field)
+    if kind != SCALAR:
+        return _CONVERT_KIND[kind](field)
     result = convert_with_mro(
         field,
         isinstance_prechecks=[
-            (forms.ModelMultipleChoiceField, _CONVERT_RELATION_MULTI),
-            (forms.ModelChoiceField, _CONVERT_RELATION_SINGLE),
-            (forms.FileField, _CONVERT_FILE),
             (forms.MultipleChoiceField, _CONVERT_MULTIPLE_CHOICE),
             (forms.Field, _bare_form_field),
         ],

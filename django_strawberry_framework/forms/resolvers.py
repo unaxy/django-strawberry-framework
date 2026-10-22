@@ -27,7 +27,9 @@ and the form-specific invariants this module owns:
   clear, so that ``null`` is its ``required`` error (``_required_file_clears``).
 
 - **The dedicated form relation decoder visibility-checks EVERY branch**
-  (Decision 7 / Decision 8 step 1). Each relation id - a ``relay.GlobalID``
+  (Decision 7 / Decision 8 step 1). Every model-choice field the input carries is a
+  relation id (the build refuses one over a column that is no relation,
+  ``forms/inputs.py::require_column_kind_agreement``). Each relation id - a ``relay.GlobalID``
   *or* a raw pk - is type-checked (``decode_model_global_id`` for the Relay
   branch, ``coerce_relation_pk_or_none`` for the raw-pk branch), then **resolved
   to the visible object through the related primary ``DjangoType.get_queryset``**
@@ -183,7 +185,10 @@ from django_strawberry_framework.utils.errors import (
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.querysets import sync_pipeline_recourse
-from django_strawberry_framework.utils.relations import is_single_column_foreign_key
+from django_strawberry_framework.utils.relations import (
+    is_model_class,
+    is_single_column_foreign_key,
+)
 from django_strawberry_framework.utils.write_transaction import pipeline_write_phase
 from django_strawberry_framework.utils.write_values import (
     decode_field_handlers,
@@ -796,9 +801,11 @@ def _assert_bound_choice_agreement(
     query hides included, so the request is a ``ConfigurationError`` before ``is_valid()``
     and nothing is written. Reassigning the queryset over the same model and key (the
     request-scoped choices idiom) agrees. A bound field that is no longer a model-choice
-    field, one whose queryset is ``None``, a name the bound form does not declare, and a
-    model-choice field over a column that is no relation (its input is a scalar, never an
-    id) are left to the form's own validation.
+    field, one whose queryset is ``None``, and a name the bound form does not declare are
+    left to the form's own validation. The build names a target for every model-choice field
+    an operation binds (``forms/inputs.py::require_column_kind_agreement`` refuses one over a
+    column that is no relation, and a column-less one needs a class-level queryset), so the
+    target is always a model here.
     """
     form_class = require(mutation_cls._mutation_meta.form_class, _is_form_class)
     basis = dict(mutation_cls.get_form_fields())
@@ -812,11 +819,10 @@ def _assert_bound_choice_agreement(
             or not _is_model_choice_field(bound_field)
         ):
             continue
-        target = relation_target_model(form_class, name, basis_field)
+        target = require(relation_target_model(form_class, name, basis_field), is_model_class)
         queryset = bound_field.queryset
-        # A field the input carries as a scalar (a model-choice field over a non-relation
-        # column) decodes no id, and a queryset-less field looks nothing up.
-        if target is None or queryset is None:
+        # A queryset-less bound field looks nothing up.
+        if queryset is None:
             continue
         bound_model = queryset.model
         if not issubclass(bound_model, target):
