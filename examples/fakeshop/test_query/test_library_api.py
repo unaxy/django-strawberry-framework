@@ -35,6 +35,7 @@ from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
+from django.utils.functional import SimpleLazyObject
 from django_filters import CharFilter, Filter, TypedChoiceFilter
 from graphql_client import (
     DeleteAfterAuthorization,
@@ -81,7 +82,7 @@ from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import decode_global_id, global_id_for
-from django_strawberry_framework.utils._narrowing import pk_of
+from django_strawberry_framework.utils._narrowing import pk_of, read_attr
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
@@ -3850,6 +3851,354 @@ def test_apply_raises_graphqlerror_on_invalid_filter_input() -> None:
     field_errors = json_list(extensions, "errors", "email_must_have_at_sign")
     assert any("missing @" in json_str(entry, "message") for entry in field_errors)
     assert any(json_at(entry, "code") == "missing_at_sign" for entry in field_errors)
+
+
+#: A lone UTF-16 surrogate: a JSON ``\ud800`` escape in the request variables decodes to it.
+_LONE_SURROGATE = "\ud800"
+
+#: ``(query, variables, form key)``: one filter text value no database can bind per
+#: shape the filter pipeline reaches, each a variable (a document literal cannot carry it).
+_UNSTORABLE_FILTER_ROWS: dict[str, tuple[str, JSONObject, str]] = {
+    "lookup-list-field": (
+        "query($v: String) { allLibraryBranches(filter: { name: { exact: $v } }) { name } }",
+        {"v": f"a{_LONE_SURROGATE}"},
+        "name",
+    ),
+    "lookup-connection": (
+        (
+            "query($v: String) { allLibraryGenresConnection(filter: { name: { iContains: $v } }) {"
+            " edges { node { name } } } }"
+        ),
+        {"v": _LONE_SURROGATE},
+        "name__icontains",
+    ),
+    "in-member-text-pk": (
+        (
+            "query($v: [String!]) { allLibraryPrintingsConnection("
+            "filter: { editionIsbn_13: { in: $v } }) { edges { node { runSize } } } }"
+        ),
+        {"v": ["978", f"a{_LONE_SURROGATE}"]},
+        "edition__isbn_13__in",
+    ),
+    "flat-related-path": (
+        (
+            "query($v: String) { allLibraryBooks(filter: { shelfBranchName: { exact: $v } }) {"
+            " title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "shelf__branch__name",
+    ),
+    "nested-related-filter": (
+        (
+            "query($v: String) { allLibraryBooks(filter: { shelf: { branch: { name: { exact: $v } }"
+            " } }) { title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "name",
+    ),
+    "logic-or": (
+        (
+            "query($v: String) { allLibraryBooks(filter: { or: [{ title: { exact: $v } },"
+            ' { subtitle: { iContains: "z" } }] }) { title } }'
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "title",
+    ),
+    "logic-not": (
+        (
+            "query($v: String) { allLibraryBooks(filter: { not: { title: { exact: $v } } }) {"
+            " title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "title",
+    ),
+    "declared-exclude": (
+        (
+            "query($v: String) { allLibraryGenres(filter: { withoutBookTitled: { exact: $v } }) {"
+            " name } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "without_book_titled",
+    ),
+    "declared-method": (
+        (
+            "query($v: String) { allLibraryPatrons(filter: { emailMustHaveAtSign: { exact: $v } })"
+            " { name } }"
+        ),
+        {"v": f"a@{_LONE_SURROGATE}"},
+        "email_must_have_at_sign",
+    ),
+    "model-choice-to-field-name": (
+        (
+            "query($v: String) { allLibraryShelves(filter: { homeBranchNamed: { exact: $v } }) {"
+            " code } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "home_branch_named",
+    ),
+    "model-multiple-choice-to-field-name": (
+        (
+            "query($v: [String!]) { allLibraryShelves(filter: { homeBranchesNamed: { exact: $v } })"
+            " { code } }"
+        ),
+        {"v": ["North", f"a{_LONE_SURROGATE}"]},
+        "home_branches_named",
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_UNSTORABLE_FILTER_ROWS))
+def test_filter_text_no_database_can_bind_answers_filter_invalid(shape: str) -> None:
+    """A filter value holding a lone surrogate is the form's ``FILTER_INVALID``, never a raw error.
+
+    Without the refusal the driver raises ``UnicodeEncodeError`` when the queryset (or a
+    model-choice field's own clean) binds the text, and the client gets the masked
+    unexpected error with ``data: null``. The refusal is the write decode's rule and message
+    (``utils/errors.py::unstorable_text``), keyed to the form field that holds the
+    value, on every shape the pipeline reaches: a generated lookup on a list or connection
+    field, an ``in`` member, a flat related path, a nested ``RelatedFilter`` branch, a
+    logical arm, and a declared ``exclude=True``, ``method=`` or model-choice filter.
+    """
+    north = models.Branch.objects.create(name="North", city="Boston")
+    models.Shelf.objects.create(code="N-1", topic="general", branch=north)
+    query, variables, form_key = _UNSTORABLE_FILTER_ROWS[shape]
+
+    response = _post_graphql(query, variables=variables)
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "message") == "Invalid filter input"
+    assert json_object(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {
+            form_key: [
+                {
+                    "message": "Text contains invalid Unicode (unpaired surrogate code points).",
+                    "code": "invalid",
+                },
+            ],
+        },
+    }
+
+
+@pytest.mark.django_db
+def test_filter_text_refusal_admits_every_unicode_scalar_value() -> None:
+    """A surrogate PAIR escape is one astral character, which the refusal admits and filters by."""
+    models.Branch.objects.create(name="North \U0001f600", city="Boston")
+    models.Branch.objects.create(name="South", city="Boston")
+
+    _ = _assert_graphql_data(
+        "query($v: String) { allLibraryBranches(filter: { name: { iContains: $v } }) { name } }",
+        {"allLibraryBranches": [{"name": "North \U0001f600"}]},
+        variables={"v": "\U0001f600"},
+    )
+
+
+@pytest.mark.django_db
+def test_library_genres_filter_global_id_holding_a_lone_surrogate_raises_globalid_invalid() -> (
+    None
+):
+    """A GlobalID filter decodes before any query binds its value, so its decode refuses it.
+
+    The answer is the node-refetch path's ``GLOBALID_INVALID`` for the same id, not the
+    form's text refusal.
+    """
+    models.Genre.objects.create(name="SciFi")
+
+    response = _post_graphql(
+        "query($v: String) { allLibraryGenres(filter: { id: { exact: $v } }) { name } }",
+        variables={"v": _LONE_SURROGATE},
+    )
+
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
+
+
+def _unstorable_text_holder_schema() -> strawberry.Schema:
+    """Holder schema over ``Printing`` with the filters the refusal reads specially.
+
+    ``HolderUnstorableEditionType`` is not a Relay node, so ``edition`` filters by the
+    edition's text primary key through a plain-``Field`` relation filter. ``isbn`` is a
+    GlobalID filter whose ``method=`` replaces its decode, so the consumer's method binds
+    the value as sent; ``imprint_fixed`` is a disabled field whose ``initial`` is ``"B"``,
+    so it never binds what was sent; and the resolver swaps ``imprint``'s value for a
+    ``SimpleLazyObject`` over ``lazyImprint`` when one is given.
+    """
+
+    class HolderUnstorablePrintingFilter(FilterSet):
+        isbn = GlobalIDFilter(field_name="id", method="filter_isbn")
+        imprint = CharFilter(field_name="edition__imprint")
+        imprint_fixed = _InitDisabledFilter(field_name="edition__imprint")
+
+        class Meta:
+            model = models.Printing
+            fields = {"edition": ["exact"]}
+
+        def filter_isbn(
+            self,
+            queryset: QuerySet[models.Printing],
+            _name: str,
+            value: object,
+        ) -> QuerySet[models.Printing]:
+            return queryset.filter(edition__isbn_13=value)
+
+    class HolderUnstorableEditionType(DjangoType):
+        class Meta:
+            model = models.Edition
+            fields = ("isbn_13", "imprint")
+            name = "HolderUnstorableEditionType"
+
+    assert registry.get(models.Edition) is HolderUnstorableEditionType
+
+    class HolderUnstorablePrintingType(DjangoType):
+        class Meta:
+            model = models.Printing
+            fields = ("run_size", "edition")
+            interfaces = (relay.Node,)
+            filterset_class = HolderUnstorablePrintingFilter
+            name = "HolderUnstorablePrintingType"
+
+    @strawberry.type
+    class Query:
+        def _printings(
+            self,
+            info: Info,
+            filter: FilterInput[HolderUnstorablePrintingFilter] | None = None,  # noqa: A002
+            lazy_imprint: str | None = None,
+        ) -> QuerySet[models.Printing]:
+            queryset = models.Printing.objects.order_by("run_size")
+            if filter is None:
+                return queryset
+            if lazy_imprint is not None:
+                vars(read_attr(filter, "imprint"))["exact"] = SimpleLazyObject(
+                    lambda: lazy_imprint,
+                )
+            return HolderUnstorablePrintingFilter.apply_sync(filter, queryset, info)
+
+        printings: QuerySet[models.Printing] = strawberry.field(
+            resolver=_printings,
+            graphql_type=list[HolderUnstorablePrintingType],
+        )
+
+    finalize_django_types()
+    return strawberry.Schema(query=Query, config=strawberry_config())
+
+
+def _post_unstorable_holder(query: str, variables: Mapping[str, object]) -> JSONObject:
+    """POST ``query`` against a fresh ``_unstorable_text_holder_schema`` and return its payload."""
+    registry.clear()
+    try:
+        response = _post_holder(_unstorable_text_holder_schema(), query, variables=variables)
+    finally:
+        registry.clear()
+    assert response.status_code == 200
+    return response_json(response)
+
+
+def _seed_unstorable_holder_rows() -> None:
+    """Two editions (imprints ``B`` and ``A``) with one printing each (run sizes 100 and 200)."""
+    publisher = models.Publisher.objects.create(name="Pub", house_code="P")
+    for isbn, imprint, run_size in (("9780000000001", "B", 100), ("9780000000002", "A", 200)):
+        edition = models.Edition.objects.create(
+            isbn_13=isbn,
+            publisher=publisher,
+            imprint=imprint,
+        )
+        models.Printing.objects.create(edition=edition, run_size=run_size)
+
+
+def _refused(form_key: str, message: str, code: str) -> JSONObject:
+    """The ``FILTER_INVALID`` extensions refusing ``form_key`` with ``message`` / ``code``."""
+    return {"code": "FILTER_INVALID", "errors": {form_key: [{"message": message, "code": code}]}}
+
+
+_SURROGATE_MESSAGE = "Text contains invalid Unicode (unpaired surrogate code points)."
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("bag", "value", "expected"),
+    [
+        pytest.param(
+            "isbn",
+            f"a{_LONE_SURROGATE}",
+            _refused("isbn", _SURROGATE_MESSAGE, "invalid"),
+            id="method-global-id-surrogate",
+        ),
+        pytest.param(
+            "edition",
+            "9780000000001\x00",
+            _refused("edition", "Null characters are not allowed.", "null_characters_not_allowed"),
+            id="text-pk-relation-nul",
+        ),
+        pytest.param("imprintFixed", _LONE_SURROGATE, [100], id="disabled-surrogate"),
+    ],
+)
+def test_filter_text_refusal_reads_what_a_filter_would_bind(
+    bag: str,
+    value: str,
+    expected: JSONObject | list[int],
+) -> None:
+    """The refusal holds a value to the rule exactly when a query would bind it as sent.
+
+    A GlobalID filter whose ``method=`` replaces its decode hands the value to the
+    consumer's method undecoded, and a relation key on a text primary key is a plain
+    form field that cleans any text, so each answers ``FILTER_INVALID`` (a NUL with
+    Django's ``ProhibitNullCharactersValidator`` message and code, on every backend)
+    rather than the driver's raw error; a disabled field cleans to its ``initial``, so
+    what was sent filters nothing and the request answers as it would for any other text.
+    """
+    _seed_unstorable_holder_rows()
+
+    payload = _post_unstorable_holder(
+        f"query($v: String) {{ printings(filter: {{ {bag}: {{ exact: $v }} }}) {{ runSize }} }}",
+        {"v": value},
+    )
+
+    if isinstance(expected, list):
+        assert payload == {"data": {"printings": [{"runSize": size} for size in expected]}}
+        return
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_object(error, "extensions") == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("lazy", "expected"),
+    [
+        pytest.param("B", [100], id="clean-text"),
+        pytest.param(_LONE_SURROGATE, None, id="lone-surrogate"),
+    ],
+)
+def test_filter_text_refusal_reads_a_lazy_value_as_its_text(
+    lazy: str,
+    expected: list[int] | None,
+) -> None:
+    """A ``SimpleLazyObject`` a resolver hands the filter is read as the text it stands for.
+
+    Clean text filters as the plain string would; a lone surrogate inside the proxy is
+    refused like one sent on the wire.
+    """
+    _seed_unstorable_holder_rows()
+
+    payload = _post_unstorable_holder(
+        'query($lazy: String) { printings(filter: { imprint: { exact: "placeholder" } },'
+        " lazyImprint: $lazy) { runSize } }",
+        {"lazy": lazy},
+    )
+
+    if expected is not None:
+        assert payload == {"data": {"printings": [{"runSize": size} for size in expected]}}
+        return
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_object(error, "extensions") == _refused("imprint", _SURROGATE_MESSAGE, "invalid")
 
 
 @pytest.mark.django_db
