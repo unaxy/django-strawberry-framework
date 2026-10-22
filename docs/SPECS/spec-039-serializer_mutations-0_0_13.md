@@ -3689,13 +3689,14 @@ populates it: the DRF flattener passes each leaf `ErrorDetail.code`
 (`rest_framework/resolvers.py::_error_detail_codes`), the Django flat mapper passes each
 `ValidationError.code` (read off `error.error_list`), and framework-generated errors pass a
 code from the `utils/errors.py` `FIELD_ERROR_CODE_*` vocabulary (`invalid` for a bad relation
-id / bad lookup id / unstorable text, `null` for an explicit null, `not_found` for a locate
-miss, `constraint` for the `IntegrityError` fallback, `protected` for a protected delete,
+id / bad lookup id / text holding a lone surrogate, `null` for an explicit null, `not_found`
+for a locate miss, `constraint` for the `IntegrityError` fallback, `protected` for a protected delete,
 `conflict` for a located row that vanished before the write (a forced update matching no
 row, the serializer's witnessed re-INSERT, a failed delete, a decode or validation failure
 over a row the probe then finds gone), `truncated` when the DRF error
-flattening hits its node budget). A client branches on `required` / `invalid` / `unique` / …
-without parsing localized text. Uniform across all three write flavors (the leaf is shared).
+flattening hits its node budget); text holding an embedded NUL carries Django's own
+`null_characters_not_allowed`, the code a form or DRF `CharField` answers for it. A client
+branches on `required` / `invalid` / `unique` / … without parsing localized text. Uniform across all three write flavors (the leaf is shared).
 Live-tested (`createShelfViaMetadataSerializer`: a `max_length` DRF code).
 
 ### Structured error `path` in addition to the dotted `field`

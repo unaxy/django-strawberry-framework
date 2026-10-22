@@ -445,12 +445,12 @@ def _decode_input_object(
     internally):
 
     - ``SCALAR`` -> through the shared scalar leaf ``decode_scalar_leaf`` (the ``036`` /
-      ``038`` invalid-Unicode preflight + choice-enum unwrap).
+      ``038`` text storability preflight + choice-enum unwrap).
     - ``RELATION_SINGLE`` / ``RELATION_MULTI`` -> the visibility-checked relation pk(s),
       type-checked against the relation's target model.
     - ``NESTED_SINGLE`` / ``NESTED_MULTI`` -> a RECURSIVELY-decoded nested dict / list of
       dicts, using the nested reverse map ``spec.nested_specs`` - so a nested relation is
-      visibility-checked and a nested scalar Unicode-preflighted exactly like a top-level one.
+      visibility-checked and a nested scalar text-preflighted exactly like a top-level one.
     - ``FILE`` -> the ``Upload`` value, routed into ``data`` like any other value (the
       deliberate DRF contrast with the form flavor's ``files=`` split).
 

@@ -440,14 +440,12 @@ def test_login_backend_crash_propagates_and_leaves_session_untouched() -> None:
     [
         "",
         "  spaced  ",
-        "with\x00nul",
         "x" * 500,
         "naive-Unicode-\u00fc\u00e9",
     ],
     ids=[
         "empty",
         "spaced",
-        "nul",
         "long",
         "unicode",
     ],
@@ -732,6 +730,94 @@ def test_login_surrogate_password_is_the_undifferentiated_envelope_not_a_crash()
     assert surrogate["errors"] == [
         {"field": "__all__", "messages": ["Incorrect username/password"], "codes": []},
     ]
+
+
+#: Credentials holding an embedded NUL, which Django's own ``AuthenticationForm`` refuses
+#: (``ProhibitNullCharactersValidator``) and PostgreSQL cannot bind into the
+#: ``USERNAME_FIELD`` lookup (a raw ``DataError``).
+_NUL_CREDENTIALS = pytest.mark.parametrize(
+    ("username", "password"),
+    [
+        ("staff\x00_1", TEST_USER_PASSWORD),
+        ("staff_1", "pass\x00word"),
+        ("with\x00nul", "with\x00nul"),
+    ],
+    ids=["username", "password", "both"],
+)
+
+
+@pytest.mark.django_db
+@_NUL_CREDENTIALS
+def test_login_nul_credential_is_the_undifferentiated_envelope_not_a_crash(
+    username: str,
+    password: str,
+) -> None:
+    """A NUL credential authenticates no one: the byte-identical failed-login envelope."""
+    create_users(1)
+    nul = _login(Client(), username, password)
+    assert nul["node"] is None
+    assert nul["errors"] == [
+        {"field": "__all__", "messages": ["Incorrect username/password"], "codes": []},
+    ]
+    assert nul == _login(Client(), "staff_1", "not-the-password")
+
+
+@pytest.mark.django_db
+@_NUL_CREDENTIALS
+def test_login_nul_credential_never_reaches_the_backend(username: str, password: str) -> None:
+    """A NUL credential is refused before ``authenticate``: no backend sees it."""
+    create_users(1)
+    RecordingBackend.seen = []
+
+    with override_settings(AUTHENTICATION_BACKENDS=["test_auth_api.RecordingBackend"]):
+        nul = _login(Client(), username, password)
+
+    assert RecordingBackend.seen == []
+    assert nul["errors"] == [
+        {"field": "__all__", "messages": ["Incorrect username/password"], "codes": []},
+    ]
+
+
+#: The field-keyed error ``register`` answers for a NUL in ``username`` or ``password``:
+#: Django's own null-character message and code.
+_NUL_FIELD_ERROR = {
+    "messages": ["Null characters are not allowed."],
+    "codes": ["null_characters_not_allowed"],
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("username", "password", "error_field"),
+    [
+        ("nul\x00reg_user", _STRONG_PASSWORD, "username"),
+        ("nul_reg_user", "correct-horse-9\x00battery-staple", "password"),
+    ],
+    ids=["username", "password"],
+)
+def test_register_nul_credential_keys_to_its_field_not_a_crash(
+    username: str,
+    password: str,
+    error_field: str,
+) -> None:
+    """A NUL ``username`` or ``password`` on ``register`` is that field's error; no user.
+
+    ``username`` is refused by the shared decode and ``password`` (which rides the
+    register exclusion seam) by the write step's preflight, both with the error Django's
+    own user-creation form answers, before ``validate_password`` or any write.
+    """
+    create_users(1)
+    before = User.objects.count()
+    payload = json_object(
+        _graphql_data(
+            _REGISTER,
+            variables={"d": {"username": username, "password": password}},
+        ),
+        "register",
+    )
+    assert payload["node"] is None
+    assert json_list(payload, "errors") == [{"field": error_field, **_NUL_FIELD_ERROR}]
+    assert User.objects.count() == before
 
 
 @pytest.mark.django_db

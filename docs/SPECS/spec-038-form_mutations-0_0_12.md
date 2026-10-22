@@ -1108,7 +1108,8 @@ M2M element such as a raw text pk `""` gets steps (ii)-(iv) like any id, and a h
 missing row is the same per-element relation error rather than an undecoded key the
 `ModelMultipleChoiceField` would look up, linking a hidden row or reading a pk as
 another row's `to_field_name` value),
-(ii) type-checks and coerces the id (a bad `GlobalID` or an uncoercible raw pk is the
+(ii) type-checks and coerces the id (a bad `GlobalID` or an uncoercible raw pk, a text
+id holding an embedded NUL included since it names no row, is the
 uniform field-keyed `FieldError`; a coerced pk holding unencodable text, such as a lone
 surrogate in the id of a text-keyed target, is the text preflight's field-keyed `invalid`
 error, keyed to the element's index in a list, before any query), (iii) for **both**
@@ -1341,7 +1342,8 @@ write flavor rides.
    reused `036` `coerce_lookup_id` — the same `node(id: ID!)` contract the shipped
    [`DjangoNodeField`][glossary-djangonodefield] uses, **distinct** from a relation
    `data:` field whose value is a
-   Strawberry-coerced `GlobalID`); a malformed / wrong-model / uncoercible `id:`, or a
+   Strawberry-coerced `GlobalID`); a malformed / wrong-model / uncoercible `id:` (a text
+   id holding an embedded NUL names no row: the not-found error), or a
    raw pk holding unencodable text (a lone surrogate in a text-keyed primary's id), is an
    `id`-keyed `FieldError` **before** any lookup (no existence leak — the mutation
    surface returns the `FieldError` envelope, **not** the node field's

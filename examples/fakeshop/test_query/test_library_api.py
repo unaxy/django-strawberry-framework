@@ -14274,6 +14274,286 @@ def test_non_ascii_text_keyed_lookup_id_locates_its_row_over_http(
     assert len(sql) == statements
 
 
+#: The error every write flavor answers for an embedded NUL in a text leaf: Django's own
+#: ``ProhibitNullCharactersValidator`` message and code, on every backend.
+_NUL_ERROR = {
+    "messages": ["Null characters are not allowed."],
+    "codes": ["null_characters_not_allowed"],
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("nul_input", "error_field"),
+    [
+        ({"tags": ["ok", "a\x00b"]}, "tags.1"),
+        ({"attributes": {"color": "re\x00d"}}, "attributes.color"),
+        ({"attributes": {"co\x00lor": "red"}}, "attributes"),
+        ({"attributes": {"sizes": ["s", {"m": "\x00"}]}}, "attributes.sizes.1.m"),
+    ],
+    ids=[
+        "list-element",
+        "json-value",
+        "json-key",
+        "nested-json-value",
+    ],
+)
+def test_serializer_nul_in_a_list_or_json_leaf_is_field_error_over_http(
+    nul_input: dict[str, object],
+    error_field: str,
+) -> None:
+    """An embedded NUL inside a list element or a ``JSON`` key / value is refused at decode.
+
+    PostgreSQL refuses a NUL in any ``text`` or ``jsonb`` value, so the decode refuses it
+    on every backend with Django's own null-character error, keyed to the leaf's dotted
+    path and a refused KEY to the dict itself (never echoing the key). The ``tags``
+    element is the error DRF's ``CharField`` child answers itself; the ``DictField`` ->
+    ``JSON`` leaves are ones DRF never inspects. No shelf is written.
+    """
+    branch = models.Branch.objects.create(name="NulBranch", city="Boston")
+
+    response = _post_graphql(
+        "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
+        "result { code } errors { field messages codes path } } }",
+        variables={"d": {"code": "NulShelf", "branchId": branch.pk, **nul_input}},
+    )
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_object(payload, "data", "createShelfViaMetadataSerializer") == {
+        "result": None,
+        "errors": [{"field": error_field, **_NUL_ERROR, "path": error_field.split(".")}],
+    }
+    assert not models.Shelf.objects.filter(code="NulShelf").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("flavor", ["model", "form", "serializer"])
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(
+    ("relation_input", "error_field", "lookups_before"),
+    [
+        ({"editionId": "\x00"}, "editionId", {"model": 0, "form": 0, "serializer": 0}),
+        ({"editionId": "978\x00"}, "editionId", {"model": 0, "form": 0, "serializer": 0}),
+        ({"boundWith": ["\x00"]}, "boundWith", {"model": 1, "form": 1, "serializer": 1}),
+        (
+            {"boundWith": ["9780000000001", "978\x00"]},
+            "boundWith",
+            {"model": 1, "form": 2, "serializer": 1},
+        ),
+    ],
+)
+def test_nul_in_a_text_keyed_relation_id_is_the_relation_error_over_http(
+    flavor: str,
+    operation: str,
+    relation_input: dict[str, object],
+    error_field: str,
+    lookups_before: dict[str, int],
+) -> None:
+    """A NUL in a relation id over a text-keyed target names no row and is never looked up.
+
+    ``Edition``'s primary key is its ISBN text, and PostgreSQL cannot bind a NUL into the
+    existence query (a raw ``DataError``). The id coercion answers a NUL-bearing id as
+    naming no row on every backend, so every write flavor, on create and on update,
+    answers the uniform relation error before the refused id's lookup, and nothing is
+    written. The only ``Edition`` reads are the lookups of ids decoded before it.
+    """
+    publisher = models.Publisher.objects.create(name="NulPress", house_code="NP")
+    edition = models.Edition.objects.create(isbn_13="9780000000001", publisher=publisher)
+    printing = models.Printing.objects.create(edition=edition, run_size=1)
+    data = {"editionId": edition.pk, "runSize": 2, **relation_input}
+
+    result, sql = _post_printing_write(flavor, operation, data, printing)
+
+    assert result == {
+        "node": None,
+        "errors": [
+            {
+                "field": error_field,
+                "messages": [f"Invalid id for relation '{error_field}'."],
+                "codes": ["invalid"],
+                "path": [error_field],
+            },
+        ],
+    }
+    assert _edition_lookups(sql) == lookups_before[flavor]
+    assert len(sql) == _PRINTING_WRITE_FRAME_QUERIES[operation] + lookups_before[flavor]
+    assert list(models.Printing.objects.values_list("pk", "edition_id", "run_size")) == [
+        (printing.pk, edition.pk, 1),
+    ]
+    assert not printing.bound_with.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("write", list(_EDITION_LOCATING_WRITES))
+@pytest.mark.parametrize("lookup_id", ["\x00", "978\x00"])
+def test_nul_in_a_text_keyed_lookup_id_is_not_found_over_http(write: str, lookup_id: str) -> None:
+    """A NUL in the raw ``id`` of a text-keyed primary names no row and is never looked up.
+
+    The update / delete ``id`` of the non-Relay ``EditionType`` is a raw ISBN that the
+    locate query binds, which PostgreSQL refuses for a NUL. Every flavor's update (and
+    the model delete) answers the not-found error on ``id`` without reading ``Edition``,
+    and the row is untouched.
+    """
+    publisher = models.Publisher.objects.create(name="NulPress", house_code="NP")
+    models.Edition.objects.create(isbn_13="9780000000001", publisher=publisher, imprint="Kept")
+
+    result, sql = _post_edition_locating_write(write, lookup_id)
+
+    assert result == {
+        "result": None,
+        "errors": [
+            {
+                "field": "id",
+                "messages": ["No matching row found."],
+                "codes": ["not_found"],
+                "path": ["id"],
+            },
+        ],
+    }
+    assert _edition_lookups(sql) == 0
+    assert len(sql) == _EDITION_WRITE_FRAME_QUERIES
+    assert list(models.Edition.objects.values_list("isbn_13", "imprint")) == [
+        ("9780000000001", "Kept"),
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("isbn", "house_code", "error"),
+    [
+        ("97800\x0000002", "NP", {"field": "isbn_13", **_NUL_ERROR, "path": ["isbn_13"]}),
+        (
+            "9780000000002",
+            "NP\x00",
+            {
+                "field": "publisherId",
+                "messages": ["Invalid id for relation 'publisherId'."],
+                "codes": ["invalid"],
+                "path": ["publisherId"],
+            },
+        ),
+    ],
+    ids=["nul-text-key", "nul-node-id-relation"],
+)
+def test_model_create_edition_with_a_nul_is_refused_before_any_write_over_http(
+    isbn: str,
+    house_code: str,
+    error: JSONObject,
+) -> None:
+    """A model-flavor create refuses a NUL in its text key and in a ``GlobalID`` relation id.
+
+    The ISBN is the text primary key, refused at decode with Django's null-character
+    error. ``publisherId`` is a ``GlobalID`` whose node id is ``PublisherType``'s text
+    ``house_code``: a NUL in it names no publisher, so it is the relation error before
+    the node-id lookup PostgreSQL would refuse to bind. Neither reads ``Publisher`` and
+    no edition is written.
+    """
+    publisher = models.Publisher.objects.create(name="NulPress", house_code="NP")
+    models.Edition.objects.create(isbn_13="9780000000001", publisher=publisher, imprint="Kept")
+
+    with CaptureQueriesContext(connection) as captured:
+        result = _post_keyed_create(
+            "createEdition",
+            "EditionInput",
+            {
+                "isbn_13": isbn,
+                "imprint": "New",
+                "publisherId": global_id_for(library_schema.PublisherType, house_code),
+            },
+        )
+
+    assert result == {"createEdition": {"errors": [error]}}
+    assert not any('FROM "library_publisher"' in q["sql"] for q in captured.captured_queries)
+    assert list(models.Edition.objects.values_list("isbn_13", "imprint")) == [
+        ("9780000000001", "Kept"),
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("house_code", "node", "publisher_reads"),
+    [("NP", {"__typename": "PublisherType", "name": "NulPress"}, 1), ("NP\x00", None, 0)],
+    ids=["well-formed", "nul"],
+)
+def test_node_id_holding_a_nul_resolves_to_null_without_a_query_over_http(
+    house_code: str,
+    node: JSONObject | None,
+    publisher_reads: int,
+) -> None:
+    """A ``GlobalID`` whose text node id holds a NUL is ``null`` from ``node`` and ``nodes``.
+
+    ``PublisherType`` publishes its text ``house_code`` as the node id, which the lookup
+    binds; PostgreSQL refuses a NUL there with a raw ``DataError``. The id coercion
+    answers it as naming no row on every backend, so ``node(id:)`` and ``nodes(ids:)``
+    resolve it to ``null`` without reading ``Publisher``. The well-formed id is the
+    control: it runs the lookup and resolves the publisher.
+    """
+    models.Publisher.objects.create(name="NulPress", house_code="NP")
+    global_id = global_id_for(library_schema.PublisherType, house_code)
+    selection = "__typename ... on PublisherType { name }"
+
+    with CaptureQueriesContext(connection) as captured:
+        single = _post_node(global_id, selection)
+        many = response_json(
+            _post_graphql(f'query {{ nodes(ids: ["{global_id}"]) {{ {selection} }} }}'),
+        )
+
+    assert single == {"data": {"node": node}}
+    assert many == {"data": {"nodes": [node]}}
+    reads = sum('FROM "library_publisher"' in q["sql"] for q in captured.captured_queries)
+    assert reads == 2 * publisher_reads
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("edition_filter", "error_key"),
+    [
+        ('{ isbn_13: { exact: "978\\u0000" } }', "isbn_13"),
+        ('{ isbn_13: { in: ["978\\u0000"] } }', "isbn_13__in"),
+        ('{ imprint: { iContains: "K\\u0000" } }', "imprint__icontains"),
+    ],
+    ids=["exact", "in", "icontains"],
+)
+def test_filter_text_holding_a_nul_is_the_form_error_over_http(
+    edition_filter: str,
+    error_key: str,
+) -> None:
+    """A NUL in a ``FilterSet`` text value is the form's null-character error, never a query.
+
+    A generated text filter cleans its value (each ``in`` member included) through a
+    Django ``forms.CharField``, which runs ``ProhibitNullCharactersValidator`` on every
+    backend, so the value never reaches the ``WHERE`` clause PostgreSQL would refuse to
+    bind: the request is the ``FILTER_INVALID`` error naming the filter, with Django's
+    message and code, and no ``Edition`` is read.
+    """
+    publisher = models.Publisher.objects.create(name="NulPress", house_code="NP")
+    edition = models.Edition.objects.create(
+        isbn_13="9780000000001",
+        publisher=publisher,
+        imprint="Kept",
+    )
+    models.Printing.objects.create(edition=edition, run_size=1)
+
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_graphql(
+            "query { allLibraryPrintingsConnection(filter: { edition: "
+            f"{edition_filter} }}) {{ edges {{ node {{ id }} }} }} }}",
+        )
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    error = json_object(payload, "errors", 0)
+    assert error["message"] == "Invalid filter input"
+    assert json_at(error, "extensions", "code") == "FILTER_INVALID"
+    assert json_at(error, "extensions", "errors", error_key) == [
+        {"message": "Null characters are not allowed.", "code": "null_characters_not_allowed"},
+    ]
+    assert not any("library_edition" in q["sql"] for q in captured.captured_queries)
+
+
 @pytest.mark.django_db
 def test_serializer_error_envelope_carries_codes_and_path_over_http() -> None:
     """The mutation error envelope carries structured ``codes`` + ``path`` alongside ``field`` / ``messages``.

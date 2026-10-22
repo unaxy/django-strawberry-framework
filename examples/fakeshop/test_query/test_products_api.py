@@ -760,6 +760,98 @@ def test_create_category_surrogate_in_nonunique_description_is_field_error_no_cr
     assert not models.Category.objects.filter(name="surrogate-description-only").exists()
 
 
+#: The error every write flavor answers for an embedded NUL: Django's own
+#: ``ProhibitNullCharactersValidator`` message and code, on every backend.
+_NUL_ERROR = {
+    "messages": ["Null characters are not allowed."],
+    "codes": ["null_characters_not_allowed"],
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("data", "error_field"),
+    [
+        ({"name": "nul-\x00-name", "description": "fine"}, "name"),
+        ({"name": "nul-description-only", "description": "a\x00b"}, "description"),
+    ],
+    ids=["unique-name", "nonunique-description"],
+)
+def test_create_category_nul_in_text_is_field_error_nothing_written(
+    data: dict[str, object],
+    error_field: str,
+) -> None:
+    """An embedded NUL in a model-flavor create's text is a field-keyed error; no row is written.
+
+    PostgreSQL refuses a NUL in any ``text`` value, so it would otherwise reach
+    ``validate_unique()``'s lookup (the unique ``name``) or ``save()``'s INSERT
+    (``description``) as a raw ``DataError`` and escape as a top-level error. The decode
+    refuses it first on every backend with the error a ``ModelForm`` or serializer field
+    answers for the same text.
+    """
+    create_users(1)
+    client = _login_with_perm("view_category_1", "add_category")
+    before = models.Category.objects.count()
+
+    response = _post_graphql(
+        "mutation($d: CategoryInput!) { createCategory(data: $d) { "
+        "node { name } errors { field messages codes path } } }",
+        client=client,
+        variables={"d": data},
+    )
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "createCategory") == {
+        "node": None,
+        "errors": [{"field": error_field, **_NUL_ERROR, "path": [error_field]}],
+    }
+    assert models.Category.objects.count() == before
+
+
+#: The ``Item`` update per write flavor: (field, partial input type).
+_ITEM_NAME_UPDATES = {
+    "model": ("updateItem", "ItemPartialInput"),
+    "form": ("updateItemViaForm", "ItemModelFormPartialInput"),
+    "serializer": ("updateItemViaSerializer", "ItemSerializerPartialInput"),
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("flavor", list(_ITEM_NAME_UPDATES))
+def test_update_item_nul_in_name_is_the_same_field_error_in_every_flavor(flavor: str) -> None:
+    """An embedded NUL in an update's text is one field-keyed error in every write flavor.
+
+    The ``ModelForm`` and serializer fields refuse a NUL themselves; the model flavor
+    has no such validator, so its update refuses it at decode with the identical
+    envelope, and the row keeps its stored name.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    item = models.Item.objects.create(name="Before", description="keep me", category=category)
+    client = _login_with_perm("staff_1", "change_item")
+    field, input_type = _ITEM_NAME_UPDATES[flavor]
+
+    response = _post_graphql(
+        f"mutation($id: ID!, $d: {input_type}!) {{ {field}(id: $id, data: $d) {{ "
+        "node { name } errors { field messages codes path } } }",
+        client=client,
+        variables={"id": _global_id("products.item", item.pk), "d": {"name": "After\x00"}},
+    )
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", field) == {
+        "node": None,
+        "errors": [{"field": "name", **_NUL_ERROR, "path": ["name"]}],
+    }
+    item.refresh_from_db()
+    assert (item.name, item.description) == ("Before", "keep me")
+
+
 @pytest.mark.django_db(transaction=True)
 def test_create_category_explicit_null_on_nonnullable_description_is_field_error() -> None:
     """An explicit ``null`` on the non-nullable ``description`` -> ``FieldError``, not a vague ``__all__``.

@@ -172,7 +172,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_visible_relation_ids,
     decoded_into,
     relation_into,
-    unencodable_text_error,
+    unstorable_text_error,
 )
 
 from . import inputs
@@ -1774,9 +1774,12 @@ def coerce_lookup_id(
     and a missing row stay indistinguishable. A GlobalID string sent here is just
     an uncoercible literal. A coerced pk holding unencodable text (a lone surrogate in
     the id of a text-keyed primary, which coerces cleanly through its text pk field) is
-    the text preflight's ``invalid`` ``FieldError`` on ``id`` (``unencodable_text_error``)
+    the text preflight's ``invalid`` ``FieldError`` on ``id`` (``unstorable_text_error``)
     before the locate query, which would otherwise raise a raw backend
-    ``UnicodeEncodeError``.
+    ``UnicodeEncodeError``. A text id holding an embedded NUL, raw or a ``GlobalID``'s
+    decoded node id, is the **not-found** ``FieldError`` on ``id`` before any query: the
+    coercion (``utils/querysets.py::coerce_field_value_or_none``) answers it as naming no
+    row, since no write stores a NUL and PostgreSQL refuses to bind one.
 
     Returns ``(pk, None)`` on success or ``(None, FieldError)`` otherwise.
     """
@@ -1785,7 +1788,7 @@ def coerce_lookup_id(
         pk = coerce_relation_pk_or_none(target_model, id_)
         if pk is None:
             return None, not_found_error()
-        text_error = unencodable_text_error("id", pk)
+        text_error = unstorable_text_error("id", pk)
         if text_error is not None:
             return None, text_error
         return pk, None
