@@ -17,6 +17,8 @@ substrate):
   field admitting fewer of the column's values publishing the generated enum of the
   admitted values (or refused at build when it admits no non-empty one, or writes a
   list over a single-value column);
+- the ``to_field_name`` build guard: a key must be the primary key or a column of the
+  target unique on its own (``require_readable_choice_keys``);
 - ``Meta.fields`` / ``Meta.exclude`` narrowing + fail-loud, the empty-effective-set
   raise, and the create-required-narrowing guard + its waiver;
 - shape-identity dedupe + the distinct-shape / same-``__name__`` collision raise
@@ -1830,8 +1832,38 @@ def test_basis_diagnostic_message_is_pinned() -> None:
 
 
 # ---------------------------------------------------------------------------
-# require_readable_choice_keys: ``to_field_name`` must be a value the row carries
+# require_readable_choice_keys: ``to_field_name`` must name one row of the target
 # ---------------------------------------------------------------------------
+
+
+class _KeyedRow(models.Model):
+    """An unmanaged target whose text columns are unique alone, together, or conditionally.
+
+    ``together_code`` is unique through a one-field ``unique_together`` entry and
+    ``constraint_code`` through a ``UniqueConstraint`` over it alone: each names one row,
+    as Django's fields.E311 reads them. ``pair_left`` is unique only with ``pair_right``
+    and ``partial_code`` only where ``live`` is set, so neither names one row.
+    """
+
+    together_code: models.TextField[str | Combinable, str] = models.TextField()
+    constraint_code: models.TextField[str | Combinable, str] = models.TextField()
+    pair_left: models.TextField[str | Combinable, str] = models.TextField()
+    pair_right: models.TextField[str | Combinable, str] = models.TextField()
+    partial_code: models.TextField[str | Combinable, str] = models.TextField()
+    live: models.BooleanField[bool | Combinable, bool] = models.BooleanField()
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_choice_keys"
+        unique_together = (("together_code",), ("pair_left", "pair_right"))
+        constraints = (
+            models.UniqueConstraint(fields=("constraint_code",), name="keyed_row_constraint"),
+            models.UniqueConstraint(
+                fields=("partial_code",),
+                condition=models.Q(live=True),
+                name="keyed_row_partial",
+            ),
+        )
 
 
 def _loan_form(
@@ -1854,16 +1886,19 @@ def _loan_form(
     return LoanBookForm
 
 
-def _plain_book_form(to_field_name: str) -> type[forms.Form]:
-    """A plain ``Form`` (no model column) whose ``book`` keys its choices by ``to_field_name``."""
+def _plain_choice_form(
+    queryset: models.QuerySet[models.Model],
+    to_field_name: str,
+) -> type[forms.Form]:
+    """A plain ``Form`` (no model column) whose ``pick`` keys its choices by ``to_field_name``."""
 
-    class PlainBookForm(forms.Form):
-        book: forms.ModelChoiceField[Book] = forms.ModelChoiceField(
-            queryset=Book.objects.all(),
+    class PlainPickForm(forms.Form):
+        pick: forms.ModelChoiceField[models.Model] = forms.ModelChoiceField(
+            queryset=queryset,
             to_field_name=to_field_name,
         )
 
-    return PlainBookForm
+    return PlainPickForm
 
 
 @pytest.mark.parametrize(
@@ -1872,17 +1907,36 @@ def _plain_book_form(to_field_name: str) -> type[forms.Form]:
         None,
         "",
         "pk",
-        "title",
         "id",
-        "shelf",
-        "shelf_id",
     ],
 )
-def test_require_readable_choice_keys_admits_pk_and_concrete_fields(
+def test_require_readable_choice_keys_admits_every_spelling_of_the_primary_key(
     to_field_name: str | None,
 ) -> None:
-    """Unset, ``pk``, and a concrete field of the target by name or attname are readable."""
+    """Unset, ``""``, ``pk`` and the primary key's own name key the choice by its pk."""
     require_readable_choice_keys(_loan_form(to_field_name))
+
+
+@pytest.mark.parametrize(
+    ("queryset", "to_field_name"),
+    [
+        pytest.param(Branch.objects.all(), "name", id="unique"),
+        pytest.param(library_models.MembershipCard.objects.all(), "patron", id="unique-fk"),
+        pytest.param(
+            library_models.MembershipCard.objects.all(),
+            "patron_id",
+            id="unique-fk-attname",
+        ),
+        pytest.param(_KeyedRow.objects.all(), "together_code", id="unique-together-alone"),
+        pytest.param(_KeyedRow.objects.all(), "constraint_code", id="unique-constraint-alone"),
+    ],
+)
+def test_require_readable_choice_keys_admits_a_column_unique_on_its_own(
+    queryset: models.QuerySet[models.Model],
+    to_field_name: str,
+) -> None:
+    """A concrete column of the target, by name or attname, that is unique alone is readable."""
+    require_readable_choice_keys(_plain_choice_form(queryset, to_field_name))
 
 
 @pytest.mark.parametrize(
@@ -1897,13 +1951,20 @@ def test_require_readable_choice_keys_admits_pk_and_concrete_fields(
         pytest.param("nope", None, id="unknown"),
         pytest.param("loans", None, id="reverse-relation"),
         pytest.param("genres", None, id="many-to-many"),
+        pytest.param("title", None, id="non-unique"),
+        pytest.param("shelf", None, id="non-unique-fk"),
+        pytest.param("shelf_id", None, id="non-unique-fk-attname"),
     ],
 )
-def test_require_readable_choice_keys_refuses_a_key_the_row_does_not_carry(
+def test_require_readable_choice_keys_refuses_a_key_naming_no_one_row(
     to_field_name: str,
     queryset: models.QuerySet[Book] | None,
 ) -> None:
-    """A path, an annotation, an unknown name, a reverse relation or an M2M is refused at build."""
+    """A path, an annotation, an unknown name, a relation or a shared column is refused.
+
+    ``Book.title`` and ``Book.shelf`` are unique only together (a ``UniqueConstraint``
+    over both), so two books may share either one.
+    """
     form_class = _loan_form(to_field_name, queryset)
 
     with pytest.raises(ConfigurationError) as exc_info:
@@ -1911,17 +1972,56 @@ def test_require_readable_choice_keys_refuses_a_key_the_row_does_not_carry(
 
     assert str(exc_info.value) == (
         f"DjangoFormMutation for LoanBookForm: field 'book' sets to_field_name="
-        f"{to_field_name!r}, which is not a concrete field of Book. A relation id names its "
-        "row by primary key and the form key is read off that row, so to_field_name must be "
-        "'pk' or a concrete field of Book."
+        f"{to_field_name!r}, which is not a unique concrete field of Book. A relation id names "
+        "its row by primary key and the form looks up the key read off that row, so "
+        "to_field_name must be 'pk' or a concrete field of Book that is unique on its own "
+        "(unique=True, a one-field unique_together, or a UniqueConstraint over it alone with "
+        "no condition)."
     )
+
+
+def test_require_readable_choice_keys_refuses_a_non_unique_key_on_a_text_keyed_m2m() -> None:
+    """``Printing.bound_with`` keyed by ``isbn_10``, which two editions may share, is refused.
+
+    A ``ModelMultipleChoiceField`` would link every edition carrying the key, so the build
+    refuses the field the operation binds.
+    """
+
+    class PrintingForm(forms.ModelForm[library_models.Printing]):
+        bound_with: forms.ModelMultipleChoiceField[library_models.Edition] = (
+            forms.ModelMultipleChoiceField(
+                queryset=library_models.Edition.objects.all(),
+                to_field_name="isbn_10",
+                required=False,
+            )
+        )
+
+        class Meta:
+            model = library_models.Printing
+            fields = ("edition", "run_size", "bound_with")
+
+    with pytest.raises(
+        ConfigurationError,
+        match="field 'bound_with' sets to_field_name='isbn_10', which is not a unique concrete "
+        "field of Edition",
+    ):
+        require_readable_choice_keys(PrintingForm)
+
+
+@pytest.mark.parametrize("to_field_name", ["pair_left", "partial_code"])
+def test_require_readable_choice_keys_refuses_a_column_unique_only_with_others(
+    to_field_name: str,
+) -> None:
+    """A column unique only beside another, or only where a condition holds, is refused."""
+    with pytest.raises(ConfigurationError, match="which is not a unique concrete field"):
+        require_readable_choice_keys(_plain_choice_form(_KeyedRow.objects.all(), to_field_name))
 
 
 def test_require_readable_choice_keys_reads_a_column_less_field_target_from_its_queryset() -> None:
     """A plain-form field has no model column; its queryset's model is the target."""
-    require_readable_choice_keys(_plain_book_form("title"))
-    with pytest.raises(ConfigurationError, match="field 'book' sets to_field_name='genres'"):
-        require_readable_choice_keys(_plain_book_form("genres"))
+    require_readable_choice_keys(_plain_choice_form(Branch.objects.all(), "name"))
+    with pytest.raises(ConfigurationError, match="field 'pick' sets to_field_name='shelves'"):
+        require_readable_choice_keys(_plain_choice_form(Branch.objects.all(), "shelves"))
 
 
 def test_update_input_refuses_an_unreadable_key_on_a_narrowed_out_field() -> None:
@@ -1987,7 +2087,10 @@ def test_relation_spec_records_the_column_a_to_field_relation_stores(
 
 def test_relation_spec_of_a_column_less_field_records_no_stored_column() -> None:
     """A plain-form relation stores nothing itself, so it records no ``key_attname``."""
-    _cls, specs = build_form_input_class(_plain_book_form("title"), operation_kind=FORM)
+    _cls, specs = build_form_input_class(
+        _plain_choice_form(Branch.objects.all(), "name"),
+        operation_kind=FORM,
+    )
 
     [spec] = specs
-    assert (spec.related_model, spec.key_attname) == (Book, None)
+    assert (spec.related_model, spec.key_attname) == (Branch, None)

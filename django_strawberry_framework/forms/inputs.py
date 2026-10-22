@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from django import forms
 from django.core.exceptions import FieldDoesNotExist
+from django.db import models
 from django.utils.choices import CallableChoiceIterator
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -100,8 +101,6 @@ from .converter import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from typing import TypeAlias
-
-    from django.db import models
 
     from django_strawberry_framework.utils.typing import ConcreteField
 
@@ -540,24 +539,84 @@ def _model_column_for(form_class: FormClass, name: str) -> ConcreteField | None:
     return cast("ConcreteField", column)
 
 
+def relation_target_model(
+    form_class: FormClass,
+    name: str,
+    field: forms.Field,
+) -> type[models.Model] | None:
+    """Return the model a relation form field's ids are decoded against, or ``None``.
+
+    The backing column's related model for a ``ModelForm`` column, else the field's
+    class-level ``queryset.model``: the basis the input build records on the field's
+    ``InputFieldSpec.related_model``. ``None`` when neither names a model (a scalar
+    column, or a column-less field whose queryset is assigned per request).
+    """
+    column = _model_column_for(form_class, name)
+    model = _related_model_of(field) if column is None else column.related_model
+    return model if is_model_class(model) else None
+
+
+def choice_key_field(
+    model: type[models.Model],
+    key: str | None,
+) -> models.Field[object, object] | None:
+    """Return the field of ``model`` a model-choice ``to_field_name`` resolves its choice by.
+
+    Unset, ``""`` and ``"pk"`` key by the primary key (``ModelChoiceField.to_python``
+    looks up ``to_field_name or "pk"``); any other name resolves by name or attname.
+    ``None`` when ``model`` has no column of that name.
+    """
+    if not key or key == "pk":
+        return model._meta.pk
+    try:
+        field = model._meta.get_field(key)
+    except FieldDoesNotExist:
+        return None
+    # ``get_field`` answers a ``models.Field`` for every forward name; a reverse relation
+    # or a generic relation is no column of the row and reads as ``None`` below.
+    return field if truth.is_instance(field, models.Field) else None
+
+
+def _names_one_row(model: type[models.Model], field: models.Field[object, object]) -> bool:
+    """Return whether ``field`` alone is unique on ``model``, as Django's fields.E311 asks.
+
+    ``unique=True`` (a primary key included), a one-field ``unique_together`` entry, or a
+    ``UniqueConstraint`` over that field alone with no condition and no expression
+    (``Options.total_unique_constraints``).
+    """
+    if field.unique:
+        return True
+    alone = ({field.name}, {field.attname})
+    return any(set(group) in alone for group in model._meta.unique_together) or any(
+        set(constraint.fields) in alone for constraint in model._meta.total_unique_constraints
+    )
+
+
 def require_readable_choice_keys(
     form_class: FormClass,
     form_fields: Mapping[str, forms.Field] | None = None,
 ) -> None:
-    """Refuse a model-choice field whose ``to_field_name`` is not a concrete field of its target.
+    """Refuse a model-choice field whose ``to_field_name`` is not a unique column of its target.
 
     A relation id names its row by primary key. The decode reads that row through the
     target's visibility query and binds the value ``to_field_name`` reads off it
     (``forms/resolvers.py::_to_form_key_value``); an omitted relation is rebound the same
-    way from the stored row. So ``to_field_name`` must be unset, ``"pk"``, or a concrete
-    field of the target, by name or attname. A lookup path, an annotation, a property, a
-    relation that is not a column, or an unknown name is a ``ConfigurationError``: the row
-    carries no such value, and the form's ``queryset.get(<to_field_name>=key)`` would resolve
-    a row other than the one the decode admitted. ``form_fields`` is the set the operation
-    binds: the full declared basis for an update, whose reconstruction rebinds every declared
-    field, including those the input leaves out, and the input's own fields for a create. A
-    field whose target model is unknown at build (no model column and no class-level
-    queryset) is refused by its relation annotation instead.
+    way from the stored row. The bound form then resolves that value with
+    ``queryset.get(<to_field_name>=key)`` (a ``ModelMultipleChoiceField`` with
+    ``filter(<to_field_name>__in=keys)``), so the key must name the one row the decode
+    admitted. ``to_field_name`` must be unset, ``""``, ``"pk"``, or a concrete field of the
+    target, by name or attname, that is unique on its own: ``unique=True``, a one-field
+    ``unique_together`` entry, or a ``UniqueConstraint`` over that field alone with no
+    condition (Django's fields.E311 test for a ``ForeignKey.to_field``). A lookup path, an
+    annotation, a property, a relation that is not a column, an unknown name, or a column
+    two rows may share is a ``ConfigurationError``: the single field's lookup would raise
+    ``MultipleObjectsReturned`` or resolve another row, and the multiple field would link
+    every row sharing the key, a row the target's visibility query hides included.
+    ``form_fields`` is the set the operation binds: the full declared basis for an update,
+    whose reconstruction rebinds every declared field, including those the input leaves
+    out, and the input's own fields for a create. A field whose target model is unknown at
+    build (no model column and no class-level queryset) is refused by its relation
+    annotation instead.
     """
     for name, field in _form_field_basis(form_class, form_fields).items():
         if not truth.is_instance(field, _MODEL_CHOICE_FIELD):
@@ -565,25 +624,26 @@ def require_readable_choice_keys(
         key = read_attr(field, "to_field_name", None)
         if not is_str(key) or not key or key == "pk":
             continue
-        column = _model_column_for(form_class, name)
-        model = _related_model_of(field) if column is None else column.related_model
-        if not is_model_class(model):
+        model = relation_target_model(form_class, name, field)
+        if model is None:
             continue
-        try:
-            target = model._meta.get_field(key)
-        except FieldDoesNotExist:
-            concrete = False
-        else:
-            # Django 5.2 counts a many-to-many field concrete (it carries a column name);
-            # 6.0 does not. Either way it is no column of the target's row.
-            concrete = target.concrete and not target.many_to_many
-        if not concrete:
+        target = choice_key_field(model, key)
+        # Django 5.2 counts a many-to-many field concrete (it carries a column name);
+        # 6.0 does not. Either way it is no column of the target's row.
+        if (
+            target is None
+            or not target.concrete
+            or target.many_to_many
+            or not _names_one_row(model, target)
+        ):
             raise ConfigurationError(
                 f"DjangoFormMutation for {truth.name(form_class)}: field {name!r} sets "
-                f"to_field_name={key!r}, which is not a concrete field of "
+                f"to_field_name={key!r}, which is not a unique concrete field of "
                 f"{truth.name(model)}. A relation id names its row by primary key and the "
-                "form key is read off that row, so to_field_name must be 'pk' or a concrete "
-                f"field of {truth.name(model)}.",
+                "form looks up the key read off that row, so to_field_name must be "
+                f"'pk' or a concrete field of {truth.name(model)} that is unique on its own "
+                "(unique=True, a one-field unique_together, or a UniqueConstraint over it "
+                "alone with no condition).",
             )
 
 

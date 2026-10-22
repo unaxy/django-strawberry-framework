@@ -1131,14 +1131,30 @@ GraphQL id fail form validation. So after the visibility query yields the visibl
 **object**, the decoder converts it with the form field's own key:
 `obj.serializable_value(field.to_field_name)` when `to_field_name` is set, else
 `obj.pk`, and places that under the form field name (per element for
-`ModelMultipleChoiceField`). The input build admits only a `to_field_name` the row
-carries: unset, `"pk"`, or a concrete field of the target by name or attname
+`ModelMultipleChoiceField`). The input build admits only a `to_field_name` that names
+one row the decoded row carries: unset, `""`, `"pk"`, or a concrete field of the target,
+by name or attname, that is unique on its own (`unique=True`, a one-field
+`unique_together` entry, or a `UniqueConstraint` over it alone with no condition:
+Django's fields.E311 test for a `ForeignKey.to_field`)
 (`django_strawberry_framework/forms/inputs.py::require_readable_choice_keys`, run over
 the fields the operation binds: the full declared field set for an update, whose
-reconstruction rebinds every declared field, and the input's own fields for a create). A lookup path, an annotation, a property or an unknown name is a schema-build
-`ConfigurationError`, never a fall back to `obj.pk`, which the form's
-`queryset.get(<to_field_name>=pk)` would resolve to another row; an annotation
-`to_field_name`, which plain Django accepts, is refused for that reason. A visible row
+reconstruction rebinds every declared field, and the input's own fields for a create).
+A lookup path, an annotation, a property, an unknown name or a column two rows may share
+is a schema-build `ConfigurationError`, never a fall back to `obj.pk`: the form's
+`queryset.get(<to_field_name>=key)` would resolve another row or raise
+`MultipleObjectsReturned`, and a `ModelMultipleChoiceField` would link every row sharing
+the key, a hidden one included; an annotation `to_field_name`, which plain Django
+accepts, is refused for that reason. The bound form must look the key up the same way:
+each bound model-choice field, which an `__init__` or `get_form` override may rebuild,
+must query the target model or a subclass of it and resolve its choice by the same
+column as the class-level field the decode read, every spelling of the primary key
+counting as one column
+(`django_strawberry_framework/forms/resolvers.py::_assert_bound_choice_agreement`, run
+after `get_form` and before `is_valid()` over every bound name, an update's
+reconstructed relations included). A disagreeing field is a `ConfigurationError` on the
+request with nothing written; reassigning the queryset over the same model and key (the
+request-scoped choices idiom) agrees, and a bound field that is no longer a model-choice
+field or has no queryset is left to the form. A visible row
 whose stored key (the column a `ForeignKey(to_field=…)` stores) is `NULL` names no row,
 whatever column the form field is keyed by: the spine's visibility read admits only rows
 whose key is set (`django_strawberry_framework/utils/querysets.py::linkable_rows`), so it
@@ -1915,9 +1931,13 @@ Rationale companion: [Decision 14][rationale-d14].
   object, the decoder feeds the form `obj.serializable_value(field.to_field_name)`
   (else `obj.pk`), so a valid GraphQL id does not fail form validation
   ([Decision 7](#decision-7--form-field--strawberry-input-mapping-the-form-is-the-input-source-of-truth)).
-  A `to_field_name` that is not `pk` or a concrete field of the target (a lookup path,
-  an annotation, a property) is a schema-build `ConfigurationError`, on an update even on a
-  field the input leaves out; a create never binds such a field and builds. A row whose stored `to_field` key is `NULL` is the relation error,
+  A `to_field_name` that is not `pk` or a concrete field of the target unique on its own
+  (a lookup path, an annotation, a property, a column two rows may share) is a
+  schema-build `ConfigurationError`, on an update even on a field the input leaves out; a
+  create never binds such a field and builds. A bound form whose `__init__` or `get_form`
+  rebuilt a relation field over another model (a subclass of the target agrees) or another
+  key column is a request-time `ConfigurationError` before `is_valid()`, nothing written,
+  on a provided relation and on one an update rebinds from the stored key alike. A row whose stored `to_field` key is `NULL` is the relation error,
   whatever the field is keyed by, including a field keyed by the stored column itself;
   a key `""` stays the field's `invalid_choice` error (below). An `update` that omits the field rebinds the located row's related object the same
   way whenever the form's key is not the column the relation stores, including a
@@ -2180,12 +2200,22 @@ behavior reachable through `/graphql/`, package tests own internals.
     `ModelMultipleChoiceField`; **a raw-pk /
     wrong-model relation id** → `FieldError`; **`to_field_name`** — a `ModelChoiceField`
     / `ModelMultipleChoiceField` with `to_field_name` set validates the decoded value
-    by the target field, not pk, and a path, annotation, unknown, reverse-relation or
-    M2M `to_field_name` is refused at build, a narrowed-out field included on an update
-    but not on a create, which never binds it
-    (`tests/forms/test_inputs.py::test_require_readable_choice_keys_refuses_a_key_the_row_does_not_carry`,
+    by the target field, not pk, and a path, annotation, unknown, reverse-relation, M2M
+    or non-unique `to_field_name` is refused at build, a narrowed-out field included on an
+    update but not on a create, which never binds it, while a column unique alone
+    (`unique=True`, a one-field `unique_together`, a total `UniqueConstraint`) is admitted
+    (`tests/forms/test_inputs.py::test_require_readable_choice_keys_refuses_a_key_naming_no_one_row`,
+    `::test_require_readable_choice_keys_refuses_a_column_unique_only_with_others`,
+    `::test_require_readable_choice_keys_admits_a_column_unique_on_its_own`,
     `::test_update_input_refuses_an_unreadable_key_on_a_narrowed_out_field`,
-    `::test_create_input_admits_an_unreadable_key_on_a_narrowed_out_field`);
+    `::test_create_input_admits_an_unreadable_key_on_a_narrowed_out_field`); a bound
+    form whose `__init__` or `get_form` sets, clears or misnames a relation's key, single,
+    M2M or omitted from an update, or swaps its queryset to another model, is a
+    request-time `ConfigurationError` with nothing written, while a same-model queryset,
+    any pk spelling, a name-for-attname respelling and a subclass queryset bind the
+    decoded row
+    (`tests/forms/test_resolvers.py::test_bound_choice_disagreeing_with_the_decode_is_refused_before_validation`,
+    `::test_bound_choice_agreeing_with_the_decode_links_the_decoded_row`);
     a row whose stored key is `NULL` is the relation error, single and multi
     (`tests/forms/test_resolvers.py::test_decode_form_relation_refuses_a_row_whose_stored_key_is_null`);
     **write-time `IntegrityError`** — a valid

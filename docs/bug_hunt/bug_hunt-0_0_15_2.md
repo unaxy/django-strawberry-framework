@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 176 done, 133 to do.
+Progress: 178 done, 132 to do.
 
 ## Done
 
@@ -657,6 +657,18 @@ Progress: 176 done, 133 to do.
   `_normalized_db`, `_normalized_fields`; `_prefetch_path_or_defect` reads a `Prefetch` path once and
   `_rebuilt_prefetch` cannot fail), so a deep walk finds no `str` subclass in sealed state and the live genre-books
   connection, root list, cascaded `values()` hook and enum-routed managers serve what their exact-text twins serve
+- [x] 291. A ModelForm whose bound relation field disagreed with the class-level field the decode reads was bound
+  unchecked (an `__init__` / `get_form` override setting or clearing `to_field_name` linked a hidden row with `errors:
+  []`; a queryset swapped to another model handed `perform_mutate` that model's row): fixed,
+  `forms/resolvers.py::_assert_bound_choice_agreement` runs after `get_form()` and before `is_valid()` over every bound
+  name (a reconstructed update relation included) and raises `ConfigurationError` when the bound queryset's model is not
+  the decode target (a subclass, proxy or MTI child, passes) or the bound key resolves to another column than the basis
+  (every pk spelling is one key); a model-choice field over a scalar column stays unchecked
+- [x] 292. A relation `to_field_name` naming a concrete non-unique column passed the build guard and then raised
+  `MultipleObjectsReturned` (single) or linked every row with the key, a hidden one included (many-to-many): fixed with
+  291, `forms/inputs.py::require_readable_choice_keys` requires `pk` or a column unique on its own (`unique=True`, a
+  one-field `unique_together`, or an unconditional one-field `UniqueConstraint`), Django's fields.E311 rule; the guard's
+  tests moved to unique columns (Branch.name, MembershipCard.patron) and Book.title / shelf are refusal rows
 
 ## Outside review of the fixes
 
@@ -822,19 +834,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (wrong row), on the own-pk key (`id.exact` / `id.in`), an own-pk leaf through a hop (flat `editionsPublisherId`, nested
   `editions.publisher.id`), a forward relation key and a to-many relation key alike; the write side
   (`relay.py::decode_model_global_id`) and the node field already use the slot
-- [ ] 291. A ModelForm whose bound relation field disagrees with the class-level field the decode reads is bound unchecked:
-  `forms/resolvers.py::_bound_form_or_field_errors` calls `get_form()` then `is_valid()` without comparing the bound
-  model-choice fields to the `get_form_fields()` basis. An `__init__` or `get_form` override setting (or clearing)
-  `to_field_name` links a hidden row with `errors: []` (visible pk 1, hidden `name="1"`), on single and many-to-many
-  fields and on an update omitting the relation (reconstruction binds the stored pk under the class key); an `__init__`
-  swapping the queryset to another model hands `perform_mutate` that model's row. Refuse at bind (`ConfigurationError`,
-  as `rest_framework/resolvers.py::_assert_relation_agreement` does) when the bound queryset's model or key column
-  differs; a same-column reassignment stays admitted
-- [ ] 292. A ModelForm relation field whose `to_field_name` names a concrete non-unique column passes the item 137 build
-  guard (`forms/inputs.py::require_readable_choice_keys` checks `.concrete` only): two rows sharing the key make the
-  single field's `queryset.get(...)` raise `MultipleObjectsReturned` (a top-level error, no payload), and a
-  `ModelMultipleChoiceField` links every row with the key, a hidden one included. Require `pk` or a single-field unique
-  column at build, as Django's `ForeignObject._check_unique_target` (fields.E311) does. Lands with 291
 - [ ] 295. A `ModelForm` declaring a `ModelChoiceField` under a non-relation column's name (`description =
   ModelChoiceField(queryset=Category.objects.all())`) builds as the column's scalar (`description: String!`), and
   `DjangoModelFormMutation` create and update write the chosen row's `str()` into the column:
@@ -896,6 +895,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 309. CHANGELOG entry for items 291 and 292: a `DjangoModelFormMutation` whose bound relation field disagrees with
+  the field the input decodes against (an `__init__` or `get_form` override changing `to_field_name`, or a queryset over
+  another model) raises `ConfigurationError` before validation instead of linking whichever row the bound key names; a
+  relation `to_field_name` must be `pk` or a column unique on its own, refused at schema build instead of
+  `MultipleObjectsReturned` or linking every row sharing the key
 - [ ] 311. CHANGELOG entry for item 294: a `get_queryset` hook, manager or raw-list resolver naming a `TextChoices` /
   `StrEnum` member as an annotation or alias name, an `extra(select=)` key, a `FilteredRelation` alias, a `using()`
   alias, a `values()` field or a prefetch lookup / `to_attr` is served like its exact text instead of a visibility-seal
