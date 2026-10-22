@@ -16,8 +16,16 @@ rows pin the planned child's hook to the connection the walker seeded it on, so 
 hook that pins an alias of its own fails the relation closed while a hook that only
 narrows still serves its scoped page. A list-returning root with the optimizer
 installed still pays ``1 + N`` for a nested connection.
+
+The last rows run synchronous hooks that read the database on the async package
+view, where they run in a worker thread rather than on the event loop: the shipped
+products hooks (``user.has_perm`` for every non-staff session) under each non-staff
+seeded user, and a planned child hook (an ``.exists()``) that runs while a cold plan
+is built, under a list root and a connection root. Each answers the sync view's
+verdict.
 """
 
+import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
@@ -28,12 +36,13 @@ from apps.products import schema as products_schema
 from apps.products import services
 from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
+from config import schema as config_schema
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
-from django.test import Client, override_settings
+from django.test import AsyncClient, Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import clear_url_caches, path
 from graphql_client import (
@@ -52,7 +61,14 @@ from strawberry import relay
 from strawberry.django.views import GraphQLView
 from typing_extensions import override
 
-from django_strawberry_framework import DjangoType, finalize_django_types, strawberry_config
+from django_strawberry_framework import (
+    DjangoConnection,
+    DjangoConnectionField,
+    DjangoListField,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+)
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
@@ -1235,3 +1251,204 @@ def test_planned_prefetch_child_still_serves_rows_when_the_hook_only_narrows() -
         Item.objects.filter(is_private=False).values_list("name", flat=True),
     )
     assert "hidden-from-planned-child" not in served
+
+
+# ---------------------------------------------------------------------------
+# Synchronous hooks that read the database, on the async package view. A sync
+# ``get_queryset`` and a plan build that runs one each run in a worker thread, so
+# a hook reading the database (``user.has_perm``, an ``.exists()``) serves the
+# verdict the sync view serves instead of Django's ``SynchronousOnlyOperation``.
+# ---------------------------------------------------------------------------
+
+
+def _shipped_document(shape: str) -> str:
+    """The shipped-schema document for ``shape``, its Relay ids minted from the seeded rows."""
+    if shape == "allCategories":
+        return "{ allCategories { edges { node { name } } } }"
+    if shape == "allItems":
+        return "{ allItems { edges { node { name category { name } } } } }"
+    categories = list(Category.objects.order_by("pk"))
+    ids = [global_id_for(products_schema.CategoryType, row.pk) for row in categories]
+    if shape == "node":
+        hidden = next(row for row in categories if row.is_private)
+        node_id = global_id_for(products_schema.CategoryType, hidden.pk)
+        return f'{{ node(id: "{node_id}") {{ ... on CategoryType {{ name }} }} }}'
+    assert shape == "nodes"
+    return f"{{ nodes(ids: {json.dumps(ids)}) {{ ... on CategoryType {{ name }} }} }}"
+
+
+def _sync_shipped_payload(document: str, username: str) -> JSONObject:
+    """The shipped sync ``/graphql/`` answer to ``document`` for ``username``: the reference."""
+    client = Client()
+    client.force_login(get_user_model().objects.get(username=username))
+    response = post_graphql(document, client=client)
+    assert response.status_code == 200
+    return response_json(response)
+
+
+async def _async_payload(
+    schema: strawberry.Schema,
+    document: str,
+    *,
+    client: AsyncClient | None = None,
+) -> JSONObject:
+    """POST ``document`` against ``schema`` on the async package view at ``/graphql-async/``."""
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            res = await AsyncTestClient(client=client).query(
+                document,
+                assert_no_errors=False,
+                url="/graphql-async/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+    assert res.response.status_code == 200
+    return response_json(res.response)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "allCategories",
+        "allItems",
+        "node",
+        "nodes",
+    ],
+)
+@pytest.mark.parametrize(
+    "username",
+    [
+        "regular_1",
+        "view_category_1",
+        "view_item_1",
+        "view_property_1",
+        "view_entry_1",
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+async def test_async_view_serves_the_shipped_permission_hooks_the_sync_verdict(
+    username: str,
+    shape: str,
+) -> None:
+    """A shipped hook calling ``user.has_perm`` answers on the async view as on the sync one.
+
+    Every shipped products hook asks a non-staff session ``has_perm``, which loads
+    the permission cache from the database. The async view runs that sync hook in a
+    worker thread, so each non-staff seeded user gets the sync view's rows - the
+    hidden category's ``node`` stays ``null`` and ``nodes`` nulls only the private
+    rows - rather than a masked ``SynchronousOnlyOperation``.
+    """
+    await sync_to_async(services.seed_data)(1)
+    await sync_to_async(services.create_users)(1)
+    document = await sync_to_async(_shipped_document)(shape)
+    expected = await sync_to_async(_sync_shipped_payload)(document, username)
+    assert "errors" not in expected, expected
+    client = AsyncClient()
+    await client.aforce_login(await get_user_model().objects.aget(username=username))
+
+    payload = await _async_payload(config_schema.schema, document, client=client)
+
+    assert payload == expected
+
+
+def _public_items_when_any_is_private(
+    _cls: type[DjangoType],
+    queryset: QuerySet[Item],
+    _info: strawberry.Info[object, object],
+) -> QuerySet[Item]:
+    """A child hook that reads the database (``.exists()``) before it narrows."""
+    if Item.objects.filter(is_private=True).exists():
+        return queryset.filter(is_private=False)
+    return queryset
+
+
+def _cold_planned_child_schema() -> strawberry.Schema:
+    """Two optimized roots over a default-hooked type whose planned child hook reads the DB.
+
+    The root type keeps the identity ``get_queryset``, so the only consumer code a
+    request runs is the child's hook, and it runs while the walker BUILDS the plan
+    (``django_strawberry_framework/optimizer/walker.py::_build_child_queryset``). The
+    hook's ``.exists()`` makes the plan uncacheable, so every request builds it cold:
+    ``categories`` through the list root's middleware plan, ``categoriesConnection``
+    through the connection pipeline's own plan step.
+    """
+    registry.clear()
+    make_django_type(
+        "ColdChildItemType",
+        Item,
+        ("id", "name"),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(_public_items_when_any_is_private)},
+    )
+
+    class ColdRootCategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name", "items")
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        categories: list[ColdRootCategoryType] = DjangoListField(ColdRootCategoryType)
+        categories_connection: DjangoConnection[ColdRootCategoryType] = DjangoConnectionField(
+            ColdRootCategoryType,
+        )
+
+    optimizer = DjangoOptimizerExtension()
+    return strawberry.Schema(
+        query=Query,
+        config=strawberry_config(),
+        extensions=[lambda: optimizer],
+    )
+
+
+def _cold_served_names(payload: JSONObject, root: str) -> list[str]:
+    """Every child item name ``payload`` serves under ``root``, sorted."""
+    data = json_object(payload, "data")
+    parents = (
+        json_list(data, root)
+        if root == "categories"
+        else [json_object(edge, "node") for edge in json_list(data, root, "edges")]
+    )
+    return sorted(
+        json_str(row, "name") for parent in parents for row in json_list(parent, "items")
+    )
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        pytest.param("categories", id="list-root-middleware-plan"),
+        pytest.param("categoriesConnection", id="connection-pipeline-plan"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+async def test_async_view_builds_a_cold_plan_whose_child_hook_reads_the_database(
+    root: str,
+) -> None:
+    """A planned child's DB-reading hook runs while the plan is built, off the event loop.
+
+    The verdict equals the sync view's on the same schema: the hook hides the private
+    items, every public one is served, and no error is masked.
+    """
+    await sync_to_async(services.seed_data)(1)
+    schema = await sync_to_async(_cold_planned_child_schema)()
+    selection = "name items { name }"
+    document = (
+        f"{{ categories {{ {selection} }} }}"
+        if root == "categories"
+        else f"{{ categoriesConnection {{ edges {{ node {{ {selection} }} }} }} }}"
+    )
+    expected = await sync_to_async(_post_visibility_query)(schema, document)
+    assert "errors" not in expected, expected
+    public_names = await sync_to_async(
+        lambda: sorted(Item.objects.filter(is_private=False).values_list("name", flat=True)),
+    )()
+    assert _cold_served_names(expected, root) == public_names
+
+    payload = await _async_payload(schema, document)
+
+    assert payload == expected

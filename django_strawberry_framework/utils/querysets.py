@@ -135,7 +135,7 @@ from ._queryset_private import (
     set_queryset_sticky_filter,
 )
 from .relations import leading_relation_hops, order_column_paths, stored_value_column
-from .typing import MISSING_ATTRIBUTE
+from .typing import MISSING_ATTRIBUTE, is_async_callable
 from .write_transaction import (
     current_write_pipeline,
     pin_write_queryset,
@@ -902,8 +902,17 @@ async def run_in_one_sync_boundary(
 
     The generic one-boundary primitive (spec-040 D17): every async surface
     that must keep a consumer-overridable sync hook off the event loop shares
-    this call, so the boundary discipline (one worker per resolution,
-    ``thread_sensitive=True``, never per-step hops) cannot drift.
+    this call, so the boundary discipline (``thread_sensitive=True``, never
+    per-step hops inside one unit of work) cannot drift. The unit differs by
+    surface. An auth or mutation resolution enters it exactly once, with its
+    permission gate and write pipeline inside (spec-040 D17 pins that count for
+    auth). A sidecar ``apply_async`` enters it once for its permission pass. A
+    read path enters it once per custom synchronous ``get_queryset`` call
+    (``apply_type_visibility_async``; a cascade walk inside that hook rides the
+    same worker) and once per optimizer plan build
+    (``DjangoOptimizerExtension._optimize_async``,
+    ``apply_connection_optimization_async``), so one read resolution may enter it
+    more than once.
     A ``sync_to_async`` worker is itself a sync context, so the standing
     ``SyncMisuseError`` guards still fire inside ``fn``.
 
@@ -5435,11 +5444,15 @@ async def apply_type_visibility_async(
 ) -> models.QuerySet[models.Model, object]:
     """Run ``type_cls.get_queryset`` in an async context, awaiting awaitables.
 
-    Sync ``get_queryset`` returns the queryset directly and is passed
-    through. Async ``get_queryset`` returns a coroutine which is awaited
-    here before the caller's tail runs - the Decision 9 contract that an
-    earlier implementation broke (it called the hook synchronously then
-    invoked ``.filter`` on a coroutine).
+    A custom synchronous ``get_queryset`` runs in ONE thread-sensitive worker
+    (``run_in_one_sync_boundary``), never on the event loop: a hook may read the
+    database (``user.has_perm``, an ``.exists()``, a cascade walk) and Django
+    refuses that on the loop thread. The identity default runs inline, because it
+    is package code that does no I/O. An ``async def`` hook is called here and
+    its coroutine awaited before the caller's tail runs - the Decision 9 contract
+    that an earlier implementation broke (it called the hook synchronously then
+    invoked ``.filter`` on a coroutine) - and a synchronous hook that returns an
+    awaitable has it awaited here after its worker returns.
 
     The hook is invoked once and AT MOST ONE returned awaitable is awaited;
     a second-level awaitable after that await is malformed (an ``async def``
@@ -5466,7 +5479,19 @@ async def apply_type_visibility_async(
         model=model,
         policy=policy,
     )
-    result: object = type_cls.get_queryset(queryset, info)
+    hook = type_cls.get_queryset
+    # A synchronous hook runs in ONE thread-sensitive worker, never on the event
+    # loop: it may read the database (``user.has_perm``, an ``.exists()``, a
+    # cascade walk), which Django refuses on the loop thread. Only the identity
+    # default, stamped at class creation (``DjangoType.has_custom_get_queryset``),
+    # is known to do no I/O and runs inline; an ``async def`` hook is called here
+    # and awaited on the loop.
+    identity = truth.static_attr(type_cls, "_is_default_get_queryset", default=False)
+    result: object = (
+        hook(queryset, info)
+        if identity is True or is_async_callable(hook)
+        else await run_in_one_sync_boundary(hook, queryset, info)
+    )
     if is_awaitable(result):
         result = await result
         if _disposed_awaitable(result):

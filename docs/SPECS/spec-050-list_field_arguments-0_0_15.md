@@ -224,8 +224,11 @@ sidecars.
    keep the visibility bypass for plain iterable returns while bounding them.
 7. Complete bounded querysets safely through sync and async GraphQL views, so that
    framework-owned final queryset completion performs no synchronous ORM evaluation inside
-   the event loop. The field neither can nor does promise the same of a consumer resolver or
-   `get_queryset` hook that runs synchronous ORM calls in its own body.
+   the event loop. The field neither can nor does promise the same of a plain `def` consumer
+   resolver that runs synchronous ORM calls in its own body; a synchronous `get_queryset`
+   hook runs in a `sync_to_async` worker
+   (`django_strawberry_framework/utils/querysets.py::apply_type_visibility_async`), so its
+   body may.
 8. Cover the reachable production lines through live GraphQL HTTP tests and keep package
    tests only for construction and execution shapes unavailable from that mount.
 
@@ -1024,10 +1027,11 @@ whether a consumer or visibility hook is awaited.
 
 The safety claim is scoped to FRAMEWORK-OWNED FINAL QUERYSET COMPLETION and is written that
 way everywhere it appears. The adapter removes the one iteration the framework itself hands to
-graphql-core. It cannot stop a plain `def` consumer resolver or a synchronous `get_queryset`
-hook from calling `list(qs)`, `.exists()`, `.count()`, or any other synchronous ORM method
-while already running on the event-loop thread, and the field keeps the callable-color rule
-for those hooks. The async acceptance suite accordingly exercises CONFORMING lazy sync
+graphql-core. It cannot stop a plain `def` consumer resolver from calling `list(qs)`,
+`.exists()`, `.count()`, or any other synchronous ORM method while already running on the
+event-loop thread, and the field keeps the callable-color rule for that resolver. A
+synchronous `get_queryset` hook is not on the loop: it runs in a `sync_to_async` worker, so
+its body may call those methods. The async acceptance suite accordingly exercises CONFORMING lazy sync
 resolvers - ones that return a queryset or manager without evaluating it
 (`test_async_queryset_completion_sync_manager_resolver`,
 `test_async_queryset_completion_sync_queryset_resolver`) - and never implies that an

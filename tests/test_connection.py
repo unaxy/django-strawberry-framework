@@ -1843,7 +1843,7 @@ def test_pipeline_async_coerces_manager_source_and_finalizes() -> None:
     """``_pipeline_async`` coerces a Manager to a queryset and applies the default pk ordering.
 
     Async twin of the sync default-ordering path: a ``Manager`` source is run through
-    ``.all()``, the async ``get_queryset`` hook, then ``_finalize_queryset`` (which
+    ``.all()``, the async ``get_queryset`` hook, then ``_finalize_queryset_async`` (which
     appends the pk tiebreaker to the otherwise-unordered base).
     """
     node_type = _make_sidecar_node_type("AsyncManagerNode")

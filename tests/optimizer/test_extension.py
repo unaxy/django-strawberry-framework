@@ -723,12 +723,61 @@ def test_apply_to_returns_a_combined_queryset_unplanned(caplog: pytest.LogCaptur
     assert any("combined (union) queryset" in r.message for r in caplog.records)
 
 
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        pytest.param("cold", True, id="cold-builds"),
+        pytest.param("cold-in-execution", True, id="memo-miss-builds"),
+        pytest.param("cached", False, id="cache-hit-reuses"),
+        pytest.param("memoized", False, id="memo-hit-reuses"),
+        pytest.param("combined", False, id="combined-plans-nothing"),
+        pytest.param("no-field-nodes", False, id="no-field-nodes-plans-nothing"),
+    ],
+)
+def test_builds_plan_is_true_only_when_apply_to_would_run_the_walker(
+    state: str,
+    expected: bool,  # noqa: FBT001
+) -> None:
+    """The async plan hop's gate answers exactly ``apply_to``'s walker-run question.
+
+    A plan built off the event loop costs one worker hop, so the gate mirrors
+    ``apply_to``'s two pass-throughs (no root field nodes, a combined queryset)
+    and ``_get_or_build_plan``'s two lookups (the cross-request cache, the
+    execution memo): only the remaining case runs the walker, and so consumer
+    hooks.
+    """
+    ext = DjangoOptimizerExtension()
+    info = make_info(field_name="allCategories")._raw_info
+    queryset: QuerySet[Category] = Category.objects.all()
+    key = DjangoOptimizerExtension._build_cache_key(info, Category, None)
+    if state == "cached":
+        ext._plan_cache[key] = OptimizationPlan()
+    elif state == "combined":
+        queryset = Category.objects.filter(pk__lt=0).union(Category.objects.all())
+    elif state == "no-field-nodes":
+        info = info._replace(field_nodes=[])
+    frame = (
+        begin_execution_frame({}, nested=False)
+        if state in {"memoized", "cold-in-execution"}
+        else None
+    )
+    try:
+        memo = execution_plan_memo()
+        if memo is not None and state == "memoized":
+            memo[key] = OptimizationPlan()
+        assert ext._builds_plan(info, Category, None, queryset) is expected
+    finally:
+        if frame is not None:
+            end_execution_frame(frame)
+
+
 @pytest.mark.django_db
 def test_resolve_async_passes_through_evaluated_queryset(monkeypatch: pytest.MonkeyPatch) -> None:
     """Async mirror: the await -> ``_optimize`` wrapper inherits the G1 guard.
 
     The async path (``_async_optimize`` awaits the resolver then calls
-    ``_optimize``) routes an evaluated queryset through the same guard. The
+    ``_optimize_async``, which hands an evaluated queryset straight to
+    ``_optimize``) routes it through the same guard. The
     tripwire on ``_resolve_model_from_return_type`` proves ``_optimize``
     short-circuits BEFORE return-type resolution / plan build - if the guard
     failed to fire, the tripwire would raise.

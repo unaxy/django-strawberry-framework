@@ -906,6 +906,12 @@ class DjangoType:
         ``info`` is the schema's ``strawberry.Info`` for the resolver that
         runs the hook; on the optimizer's ``Prefetch`` path that is the
         resolver whose plan reaches this type.
+
+        An override may be ``def`` or ``async def``. Under the asynchronous
+        executor a ``def`` override runs off the event loop in a thread-sensitive
+        ``sync_to_async`` worker - its own per call, or the worker an optimizer
+        plan build runs in - so it may read the database; an ``async def``
+        override is awaited on the event loop.
         """
         # the identity default reads no ``info``, but the readers pass it to every override
         del info

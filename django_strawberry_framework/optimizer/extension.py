@@ -66,6 +66,7 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.querysets import (
     normalize_query_source,
+    run_in_one_sync_boundary,
     unwrap_async_queryset_adapter,
     wrap_async_queryset_adapter,
 )
@@ -269,6 +270,7 @@ __all__ = (
     "DjangoOptimizerExtension",
     "_stash_on_context",
     "apply_connection_optimization",
+    "apply_connection_optimization_async",
 )
 
 
@@ -1153,7 +1155,8 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
 
         Handles both sync and async resolvers: when ``_next`` returns a
         coroutine (async resolver), returns an async wrapper that awaits
-        the result before running ``_optimize``. Strawberry's
+        the result before running ``_optimize_async``, which builds a plan off
+        the event loop. Strawberry's
         ``SchemaExtension.resolve`` returns ``AwaitableOrValue`` for
         exactly this reason.
         """
@@ -1163,7 +1166,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         if is_awaitable(result):
 
             async def _async_optimize() -> object:
-                return self._optimize(await result, info)
+                return await self._optimize_async(await result, info)
 
             return _async_optimize()
         return self._optimize(result, info)
@@ -1246,6 +1249,53 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # (a ``values()`` root is not refused before ``apply_to``).
         root_queryset = cast("models.QuerySet[models.Model]", inner_result)
         return finish(self.apply_to(resolved.origin, resolved.model, root_queryset, info))
+
+    async def _optimize_async(self, result: object, info: "GraphQLResolveInfo") -> object:
+        """``_optimize`` for a root the asynchronous executor awaited.
+
+        Building a plan runs consumer code: the walker applies each planned
+        relation target's ``get_queryset`` to its prefetch child
+        (``walker.py::_build_child_queryset``), and a hook may read the database,
+        which Django refuses on the event-loop thread. So a plan the walker must
+        build is built, applied and published in ONE sync boundary off the loop;
+        a plan already cached (or memoized for this execution) is applied here,
+        because applying a plan runs no consumer code. A plan that embeds a hook
+        result is never cached, so every request that plans one hops.
+        """
+        inner_result, _ = unwrap_async_queryset_adapter(result)
+        normalized = normalize_query_source(inner_result)
+        if normalized[1] is True and normalized[0]._result_cache is None:
+            resolved = _resolve_model_from_return_type(info)
+            if resolved is not None and self._builds_plan(
+                info,
+                resolved.model,
+                resolved.origin,
+                normalized[0],
+            ):
+                return await run_in_one_sync_boundary(self._optimize, result, info)
+        return self._optimize(result, info)
+
+    def _builds_plan(
+        self,
+        info: "GraphQLResolveInfo",
+        target_model: type[models.Model],
+        origin: "type[DjangoType] | None",
+        queryset: "models.QuerySet[models.Model, object]",
+    ) -> bool:
+        """Whether ``apply_to`` would run the walker for ``queryset`` rather than skip or reuse a plan.
+
+        Mirrors ``apply_to``'s two pass-throughs (no root field nodes, a combined
+        queryset), which plan nothing, then ``_get_or_build_plan``'s two lookups
+        (the cross-request cache, then the execution memo), which reuse a plan.
+        Only the remaining case runs the walker and so consumer hooks.
+        """
+        if not info.field_nodes or queryset.query.combinator:
+            return False
+        cache_key = self._build_cache_key(info, target_model, origin)
+        if cache_key in self._plan_cache:
+            return False
+        exec_memo = _execution_plan_memo()
+        return exec_memo is None or cache_key not in exec_memo
 
     def apply_to(
         self,
@@ -1697,12 +1747,44 @@ def apply_connection_optimization(
     # the middleware path uses. ``Info._raw_info`` is that object; the
     # ``getattr`` fallback keeps the helper usable when a caller already passes
     # a raw info (e.g. a direct test).
-    # A Strawberry ``Info`` carries its raw info at ``_raw_info``; a raw info is itself.
-    raw_info = cast("GraphQLResolveInfo", getattr(info, "_raw_info", info))
     return optimizer.apply_to(
         target_type,
         target_model,
         queryset,
-        raw_info,
+        _raw_resolve_info(info),
         selection_extractor=selection_extractor,
     )
+
+
+def _raw_resolve_info(info: "EitherInfo") -> "GraphQLResolveInfo":
+    """Return the graphql-core info behind ``info`` (a Strawberry ``Info`` or a raw one)."""
+    # A Strawberry ``Info`` carries its raw info at ``_raw_info``; a raw info is itself.
+    return cast("GraphQLResolveInfo", getattr(info, "_raw_info", info))
+
+
+async def apply_connection_optimization_async(
+    target_type: "type[DjangoType]",
+    queryset: "models.QuerySet[_M]",
+    info: "EitherInfo",
+) -> "models.QuerySet[_M]":
+    """``apply_connection_optimization`` for the asynchronous connection pipeline.
+
+    A plan the walker must build runs the planned targets' ``get_queryset`` hooks,
+    so it is built in ONE sync boundary off the event loop
+    (``DjangoOptimizerExtension._optimize_async`` states the rule); a reusable plan
+    is applied here.
+    """
+    target_model = registry.model_for_type(target_type)
+    optimizer = _active_optimizer()
+    if (
+        target_model is not None
+        and optimizer is not None
+        and optimizer._builds_plan(_raw_resolve_info(info), target_model, target_type, queryset)
+    ):
+        return await run_in_one_sync_boundary(
+            apply_connection_optimization,
+            target_type,
+            queryset,
+            info,
+        )
+    return apply_connection_optimization(target_type, queryset, info)

@@ -89,7 +89,7 @@ from .keyset import (
 )
 from .list_field import _validate_relay_djangotype_target
 from .optimizer._context import window_cursor_state
-from .optimizer.extension import apply_connection_optimization
+from .optimizer.extension import apply_connection_optimization, apply_connection_optimization_async
 from .optimizer.plans import (
     WINDOW_KEYSET_SEEK_COUNT,
     WINDOW_ROW_NUMBER,
@@ -1822,12 +1822,14 @@ def _finalize_queryset(
     *,
     definition: DjangoTypeDefinition,
 ) -> models.QuerySet[models.Model]:
-    """Apply the color-agnostic pipeline tail: deterministic total order, then optimizer plan.
+    """Apply the sync pipeline tail: deterministic total order, then optimizer plan.
 
-    Steps 5-6 of the Decision 7 pipeline. Single-sited so the sync and async
-    resolver bodies share one implementation of the steps that do no I/O (the
-    default ``order_by`` and the optimizer plan are pure queryset-method calls
-    on a lazy queryset):
+    Steps 5-6 of the Decision 7 pipeline; ``_finalize_queryset_async`` is the
+    async pipeline's twin. Both colors share step 5 through
+    ``_ordered_for_window``, whose order is pure queryset-method calls on a lazy
+    queryset. Step 6 is not I/O-free: building a plan runs each planned target's
+    ``get_queryset``, so the async twin builds it off the event loop
+    (``optimizer/extension.py::apply_connection_optimization_async``).
 
     5. Deterministic TOTAL ordering - the connection's positional offset cursors
         (Strawberry's ``ListConnection``) are only stable across separate
@@ -1848,7 +1850,7 @@ def _finalize_queryset(
         ``order_by()`` inverts it, the tiebreaker extends the extra ordering
         rather than replacing it, and the order applied, sought and minted is
         the one compiled.
-     6. Optimizer plan - ``apply_connection_optimization`` applies
+    6. Optimizer plan - ``apply_connection_optimization`` applies
         ``select_related`` / ``prefetch_related`` / ``only()`` using the node
         type / model explicitly (the connection field's own cooperation
         point, spec-030 Decision 11), because the schema middleware never
@@ -1866,6 +1868,19 @@ def _finalize_queryset(
     check rejects) travels as that exception for the error policy to classify,
     as it does when the plan-time window order reads the same declaration.
     """
+    return apply_connection_optimization(
+        target_type,
+        _ordered_for_window(qs, definition=definition),
+        info,
+    )
+
+
+def _ordered_for_window(
+    qs: models.QuerySet[models.Model],
+    *,
+    definition: DjangoTypeDefinition,
+) -> models.QuerySet[models.Model]:
+    """Apply ``_finalize_queryset``'s step 5, the deterministic total order, for both colors."""
     target_model = definition.model
     cursor_field = definition.cursor_field
     # A hook / manager ``extra(order_by=...)`` ordering becomes ``order_by`` terms, and a
@@ -1876,7 +1891,22 @@ def _finalize_queryset(
     ordered = effective_connection_order(cursor_field, qs.query, target_model)
     if ordered != applied:
         qs = qs.order_by(*ordered)
-    return apply_connection_optimization(target_type, qs, info)
+    return qs
+
+
+async def _finalize_queryset_async(
+    target_type: type[DjangoType],
+    qs: models.QuerySet[models.Model],
+    info: Info[object, object],
+    *,
+    definition: DjangoTypeDefinition,
+) -> models.QuerySet[models.Model]:
+    """``_finalize_queryset`` for the async pipeline: a plan to build is built off the loop."""
+    return await apply_connection_optimization_async(
+        target_type,
+        _ordered_for_window(qs, definition=definition),
+        info,
+    )
 
 
 def _prepare_pipeline_source(
@@ -2108,7 +2138,7 @@ async def _pipeline_async(
                 info,
                 model=definition.model,
             )
-    return _finalize_queryset(target_type, qs, info, definition=definition)
+    return await _finalize_queryset_async(target_type, qs, info, definition=definition)
 
 
 def _pipeline_for_executor(

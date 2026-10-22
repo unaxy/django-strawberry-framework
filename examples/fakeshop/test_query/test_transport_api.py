@@ -15,9 +15,9 @@ authenticated GET (row 5), Django's own exact routing policy including the
 ``APPEND_SLASH`` redirect (row 6), and ``graphql_ide=None`` /
 ``allow_queries_via_get=False`` on a second mount of the package view (row 7).
 An async probe adds the ``AsyncDjangoGraphQLView`` colour of row 1 + row 2, and
-one more async row proves the view hands a sync ``get_queryset`` an evaluated
-session actor: anonymous, non-staff and staff sessions each read the right
-visibility verdict on the event loop instead of ``SynchronousOnlyOperation``.
+one more async row proves the view hands a plain sync resolver an evaluated
+session actor: anonymous, non-staff and staff sessions each read their own actor
+on the event loop instead of ``SynchronousOnlyOperation``.
 One further mount proves ``docs/README.md``'s combined production-profile
 recipe (row 7's two knobs plus introspection disabled through
 ``AddValidationRules``) as a single unit over the real fakeshop schema.
@@ -81,7 +81,6 @@ from typing import TYPE_CHECKING, ParamSpec, TypeVar, overload
 
 import pytest
 import strawberry
-from apps.library import models as library_models
 from apps.products import models
 from apps.products.services import create_users, seed_data
 from asgiref.sync import sync_to_async
@@ -98,7 +97,6 @@ from django.urls import include, path, resolve
 from graphql import NoSchemaIntrospectionCustomRule
 from graphql_client import (
     assert_graphql_data,
-    json_list,
     json_object,
     json_str,
     middleware,
@@ -289,6 +287,29 @@ async def _async_graphql_view(
 ) -> HttpResponseBase:
     """The async twin, mounted so Django dispatches it on the event loop."""
     view = AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)
+    return await view(request, *args, **kwargs)
+
+
+def _resolve_session_actor(info: strawberry.Info[object, object]) -> str:
+    """Name the request actor from a plain sync resolver, which the async view runs on the loop."""
+    request = read_attr(info.context, "request")
+    assert isinstance(request, HttpRequest)
+    user = request.user
+    return user.get_username() if user.is_authenticated else "anonymous"
+
+
+@strawberry.type
+class _SessionActorQuery:
+    session_actor: str = strawberry.field(resolver=_resolve_session_actor)
+
+
+async def _async_session_actor_view(
+    request: HttpRequest,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    """The async package view over a schema whose one resolver reads the actor on the loop."""
+    view = AsyncDjangoGraphQLView.as_view(schema=strawberry.Schema(query=_SessionActorQuery))
     return await view(request, *args, **kwargs)
 
 
@@ -535,6 +556,7 @@ urlpatterns = [
     path("ide-off/", _ide_off_view),
     path("production-profile/", _production_profile_view),
     path("async-graphql/", _async_graphql_view),
+    path("async-session-actor/", _async_session_actor_view),
     path("cap-tiny/", _capped_view(DjangoGraphQLView, _TINY_CAP)),
     path("cap-spy/", _capped_view(_ParseSpyView, _TINY_CAP)),
     path("cap-off/", _capped_view(DjangoGraphQLView, _ROOMY_CAP)),
@@ -1404,32 +1426,29 @@ async def test_the_async_package_view_parses_a_multibyte_utf8_body_unchanged() -
 
 
 @pytest.mark.parametrize(
-    ("username", "expected_cities"),
+    ("username", "expected_actor"),
     [
-        pytest.param(None, ["Boston"], id="anonymous"),
-        pytest.param("regular_1", ["Boston"], id="regular-session"),
-        pytest.param("staff_1", ["Boston", "restricted"], id="staff-session"),
+        pytest.param(None, "anonymous", id="anonymous"),
+        pytest.param("regular_1", "regular_1", id="regular-session"),
+        pytest.param("staff_1", "staff_1", id="staff-session"),
     ],
 )
 @pytest.mark.django_db(transaction=True)
-async def test_the_async_package_view_hands_sync_hooks_an_evaluated_session_actor(
+async def test_the_async_package_view_hands_loop_side_readers_an_evaluated_session_actor(
     username: str | None,
-    expected_cities: list[str],
+    expected_actor: str,
 ) -> None:
-    """A sync ``get_queryset`` reading ``request.user`` sees the session actor on the async view.
+    """A plain sync resolver reading ``request.user`` sees the session actor on the async view.
 
-    ``BranchType.get_queryset`` is a plain sync hook whose staff split reads
-    ``info.context.request.user``, and under ``AsyncDjangoGraphQLView`` it runs on
-    the event loop. Django's ``request.user`` is a lazy object whose first read
-    loads the session and the user row, so a session-carrying request would raise
-    ``SynchronousOnlyOperation`` there unless the view evaluated the actor off the
-    loop first. All three verdicts ride one shipped root field: an anonymous
-    request and a non-staff session both keep the restricted branch hidden, and
-    the staff session sees it - so the hook read the real actor, not a fallback.
+    Under ``AsyncDjangoGraphQLView`` a plain sync resolver runs on the event loop
+    (a synchronous ``get_queryset`` does not: it runs in a worker thread). Django's
+    ``request.user`` is a lazy object whose first read loads the session and the
+    user row, so a session-carrying request would raise ``SynchronousOnlyOperation``
+    there unless the view evaluated the actor off the loop first. Each session
+    reads back as its own user, and the anonymous request as anonymous, so the
+    resolver read the real actor, not a fallback.
     """
     await sync_to_async(create_users)(1)
-    await library_models.Branch.objects.acreate(name="Main", city="Boston")
-    await library_models.Branch.objects.acreate(name="Annex", city="restricted")
     client = AsyncClient()
     if username is not None:
         await client.aforce_login(await User.objects.aget(username=username))
@@ -1437,18 +1456,13 @@ async def test_the_async_package_view_hands_sync_hooks_an_evaluated_session_acto
     with override_settings(ROOT_URLCONF=__name__):
         response = await _post_bytes(
             client,
-            json.dumps({"query": "{ allLibraryBranchesViaListField { city } }"}),
-            path="/async-graphql/",
+            json.dumps({"query": "{ sessionActor }"}),
+            path="/async-session-actor/",
         )
 
     assert response.status_code == 200
     payload = response_json(response)
-    assert "errors" not in payload, payload
-    cities = [
-        json_str(row, "city")
-        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
-    ]
-    assert sorted(cities) == expected_cities
+    assert payload == {"data": {"sessionActor": expected_actor}}
 
 
 # ---------------------------------------------------------------------------
