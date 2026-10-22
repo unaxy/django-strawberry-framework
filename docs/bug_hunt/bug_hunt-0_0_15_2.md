@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 191 done, 127 to do.
+Progress: 192 done, 129 to do.
 
 ## Done
 
@@ -750,6 +750,14 @@ Progress: 191 done, 127 to do.
   unchanged. Two shapes that wrote at the parent now refuse: a relation over a text primary key's `pk` alias (it stored
   the related row's `str()` as the key) and a schema-map field of another kind than its runtime twin (spec-039
   Decision 7)
+- [x] 163. fixed in code, not docs (the `queryset & Model.objects.<method>()` recipe drops annotations and slices):
+  `utils/querysets.py::_seal_or_defect` takes `keep_class`, passed only by `apply_type_visibility_sync` / `_async`, so
+  the hook's input is rebuilt from the source's validated state as the source's own `QuerySet` class (Django's `_clone`
+  constructor shape) and a project method works on every read path (root, connection, node, nested, sync and async,
+  optimizer on or off); the hook's result and the cascade's source seal stay plain. spec-045 Decision 1, spec-020,
+  `DjangoType.get_queryset`, README and GLOSSARY pks 468 / 553 / 554 say so, including the limit (instance attributes
+  set outside the constructor arguments are not carried). Fakeshop `LoanQuerySet.with_note()` behind a default-off
+  `LoanType` hook flag; live sync + async rows and package rows, mutations M1-M5 red
 
 ## Outside review of the fixes
 
@@ -834,8 +842,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 162. A NaN bound on a declared range reaches the model field and raises a raw `ValidationError` instead of
   `FILTER_INVALID`: `filters/base.py::RangeField` overrides only `to_python` and never cleans its bounds with the column's
   form field
-- [ ] 163. The `get_queryset` hook receives a plain `QuerySet`, so a project `QuerySet` method raises `AttributeError`; README,
-  GLOSSARY and the `DjangoType.get_queryset` docstring never say so (recommend `queryset & Model.objects.<method>()`)
 - [ ] 165. Item 12's deadline checks fail forward-FK and one-to-one hops inside a mutation payload (rolling back a write that
   used to commit) and error subscription frames past the budget; spec-047 Decision 9 states both (`8d4f66bd`) but no test
   pins either; the async deadline rows also cannot tell a head check from a check inside the `sync_to_async` closure
@@ -925,12 +931,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`qs.filter(title=value)`), reached through a `RelatedFilter`, answers `"plain"` with a matching parent flat
   (`books__gid`) and no row nested (`books: {gid: ...}`), before 269 and after it alike, against README's "the two
   spellings agree on every lookup except `isNull: true` and `exclude=True`". Found verifying 269
+- [ ] 323. Inside a `get_queryset` hook, `apply_cascade_permissions(cls, queryset, info)` returns a plain `QuerySet`
+  even when handed the project `QuerySet` class the hook receives (the cascade seals its source with the recomposing
+  policy), so a project method chained after the cascade raises `AttributeError`; README says the cascade returns "a
+  queryset of the same model and row type it was given". Decide whether the cascade's output keeps the class, or the
+  docs say it does not
+- [ ] 324. `tests/utils/test_querysets.py::test_additive_only_subclass_result_is_sealed_to_plain_queryset`'s docstring
+  carries process provenance ("now", "The old contract"); restate it as behaviour
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 325. CHANGELOG entry for item 163: a `DjangoType.get_queryset` hook receives an instance of the source's own
+  `QuerySet` class (the default manager's, e.g. `as_manager()` / `Manager.from_queryset`), so a project `QuerySet`
+  method is callable inside the hook; the hook's return is still rebuilt into a plain `QuerySet`
 - [ ] 321. The write side passes a `relay.NodeID` over a non-column attribute (one the type's `get_queryset`
   annotates) through as the raw primary key (`relay.py::_resolve_real_pk`, pinned by
   `tests/test_relay_node_field.py::test_decode_model_global_id_passes_raw_value_for_non_field_node_id`), so a relation

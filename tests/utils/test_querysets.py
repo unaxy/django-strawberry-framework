@@ -761,15 +761,200 @@ def test_active_write_pipeline_rejects_divergent_source_alias() -> None:
         apply_type_visibility_sync(_sync_type(), Category.objects.using("other"), info=None)
 
 
+class _ProjectCategoryQuerySet(models.QuerySet[Category]):
+    """A project queryset class with one method of its own, as a manager would declare."""
+
+    def named(self, name: str) -> Self:
+        """Narrow to the categories called ``name``."""
+        return self.filter(name=name)
+
+
+def _project_method_hook(
+    seen: dict[str, object],
+) -> Callable[[type, models.QuerySet[Category], object], models.QuerySet[Category]]:
+    """A visibility hook that records its input and narrows through the project method."""
+
+    def _hook(
+        _cls: type,
+        queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        seen["qs"] = queryset
+        return require_instance(queryset, _ProjectCategoryQuerySet).named("visible")
+
+    return _hook
+
+
+def test_hook_receives_the_sources_own_queryset_class() -> None:
+    """The hook gets a rebuild of the source's own class, so a project method is callable.
+
+    The input is a fresh instance (never the source object) carrying the source's
+    predicate; the hook's RESULT is still sealed into a plain ``QuerySet``.
+    """
+    seen: dict[str, object] = {}
+    source = _ProjectCategoryQuerySet(model=Category).filter(name__startswith="v")
+    result = apply_type_visibility_sync(
+        _stub_type(Category, _project_method_hook(seen)),
+        source,
+        info=None,
+    )
+    assert type(seen["qs"]) is _ProjectCategoryQuerySet
+    assert seen["qs"] is not source
+    assert type(result) is models.QuerySet
+    sql = str(result.query)
+    assert "LIKE v%" in sql
+    assert "= visible" in sql
+
+
+async def test_async_hook_receives_the_sources_own_queryset_class() -> None:
+    """The async runner hands the hook the source's own class too."""
+    seen: dict[str, object] = {}
+    source = _ProjectCategoryQuerySet(model=Category).filter(name__startswith="v")
+    result = await apply_type_visibility_async(
+        _stub_type(Category, _project_method_hook(seen)),
+        source,
+        info=None,
+    )
+    assert type(seen["qs"]) is _ProjectCategoryQuerySet
+    assert seen["qs"] is not source
+    assert type(result) is models.QuerySet
+    assert "= visible" in str(result.query)
+
+
+def test_exact_queryset_source_reaches_the_hook_as_an_exact_queryset() -> None:
+    """A plain ``QuerySet`` source stays a plain ``QuerySet`` at the hook."""
+    seen: dict[str, object] = {}
+
+    def _capture(
+        _cls: type,
+        queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        seen["qs"] = queryset
+        return queryset
+
+    apply_type_visibility_sync(_stub_type(Category, _capture), Category.objects.all(), info=None)
+    assert type(seen["qs"]) is models.QuerySet
+
+
+def test_hook_returning_its_project_class_input_is_sealed_plain() -> None:
+    """A hook that returns its own project-class input gets a plain ``QuerySet`` back."""
+    source = _ProjectCategoryQuerySet(model=Category).filter(name="visible")
+    result = apply_type_visibility_sync(
+        _stub_type(Category, lambda _cls, queryset, _info: queryset),
+        source,
+        info=None,
+    )
+    assert type(result) is models.QuerySet
+    assert "= visible" in str(result.query)
+
+
+def test_project_class_rebuild_keeps_the_sources_query_state() -> None:
+    """The class-keeping rebuild carries filters, annotations, ordering, routing and prefetch."""
+    seen: dict[str, object] = {}
+
+    def _capture(
+        _cls: type,
+        queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        seen["qs"] = queryset
+        return queryset
+
+    source = (
+        _ProjectCategoryQuerySet(model=Category)
+        .using("other")
+        .filter(name__startswith="a")
+        .annotate(flag=models.Value(1))
+        .order_by("-name")
+        .prefetch_related("items")
+    )
+    apply_type_visibility_sync(_stub_type(Category, _capture), source, info=None)
+    received = require_instance(seen["qs"], _ProjectCategoryQuerySet)
+    assert "flag" in received.query.annotations
+    assert received.query.order_by == ("-name",)
+    assert "LIKE a%" in str(received.query)
+    assert queryset_db(received) == "other"
+    assert queryset_prefetch_lookups(received) == ("items",)
+
+
+def test_project_class_projection_source_still_fails_closed() -> None:
+    """Keeping the class admits nothing new: a ``.values()`` project source is refused."""
+    with pytest.raises(ConfigurationError, match="projection"):
+        apply_type_visibility_sync(
+            _sync_type(),
+            _ProjectCategoryQuerySet(model=Category).values("id"),
+            info=None,
+        )
+
+
+def test_active_write_pipeline_pins_a_project_class_source() -> None:
+    """Under a write pipeline the project-class input is pinned and keeps its class."""
+    seen: dict[str, object] = {}
+
+    def _capture(
+        _cls: type,
+        queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        seen["qs"] = queryset
+        return queryset
+
+    with write_pipeline("default", lock=False):
+        result = apply_type_visibility_sync(
+            _stub_type(Category, _capture),
+            _ProjectCategoryQuerySet(model=Category),
+            info=None,
+        )
+    received = require_instance(seen["qs"], _ProjectCategoryQuerySet)
+    assert queryset_db(received) == "default"
+    assert queryset_db(result) == "default"
+
+
+def _seal_by_default(source: models.QuerySet[Category]) -> models.QuerySet[Category]:
+    """Seal ``source`` with the caller's default class choice."""
+    return _prepared_visibility_source(_sync_type(), source)[0]
+
+
+def _seal_plain(source: models.QuerySet[Category]) -> models.QuerySet[Category]:
+    """Seal ``source`` into a plain ``QuerySet``."""
+    return _prepared_visibility_source(_sync_type(), source, keep_class=False)[0]
+
+
+def _seal_keeping_the_class(source: models.QuerySet[Category]) -> models.QuerySet[Category]:
+    """Seal ``source`` keeping its own class."""
+    return _prepared_visibility_source(_sync_type(), source, keep_class=True)[0]
+
+
+@pytest.mark.parametrize(
+    ("seal", "expected"),
+    [
+        pytest.param(_seal_by_default, models.QuerySet, id="default-plain"),
+        pytest.param(_seal_plain, models.QuerySet, id="plain"),
+        pytest.param(_seal_keeping_the_class, _ProjectCategoryQuerySet, id="keep-class"),
+    ],
+)
+def test_prepared_visibility_source_keeps_the_class_only_on_request(
+    seal: Callable[[models.QuerySet[Category]], models.QuerySet[Category]],
+    expected: type[models.QuerySet[Category]],
+) -> None:
+    """The source seal is plain unless the caller asks to keep the class.
+
+    The cascade relies on the default: it recomposes onto the sealed source, so
+    that seal is a plain ``QuerySet``.
+    """
+    assert type(seal(_ProjectCategoryQuerySet(model=Category))) is expected
+
+
 def test_hostile_source_all_override_is_neutralized_by_sealing() -> None:
     """A source subclass overriding ``.all()`` is neutralized - the override never runs.
 
     The predicate-erasure vector: a hostile ``.all()`` that would return a fresh
-    unfiltered queryset. The boundary never dispatches through the consumer
-    object; it seals the source into a fresh framework-owned plain ``QuerySet``
-    rebuilt from the extracted query state, so the overridden ``.all()`` is never
-    called and the visibility ``WHERE`` survives. The hook (``_sync_type()``) then
-    runs on that sealed plain queryset.
+    unfiltered queryset. The boundary never dispatches through the source object;
+    it rebuilds the hook's input from the extracted query state, and the hook
+    (``_sync_type()``) narrows that rebuild without calling ``.all()``. The hook's
+    result is sealed into a fresh framework-owned plain ``QuerySet``, so the
+    overridden ``.all()`` is never called and the visibility ``WHERE`` survives.
     """
 
     class _StickySource(models.QuerySet[Category]):
@@ -1097,9 +1282,10 @@ def test_predicate_dropping_all_override_source_is_neutralized_by_sealing() -> N
     """A source ``.all()`` that would return a fresh UNFILTERED queryset is neutralized.
 
     The core predicate-erasure vector: the override would return a same-model,
-    same-alias, unevaluated queryset with NO ``WHERE`` clause. Because the seal
-    rebuilds from the source's extracted query state and never dispatches the
-    override, the visibility predicate is preserved.
+    same-alias, unevaluated queryset with NO ``WHERE`` clause. Both seals rebuild
+    from extracted query state and the framework never calls ``.all()`` on the
+    hook's input, so the override never runs and the visibility predicate is
+    preserved in the plain result.
     """
 
     class _DropFilter(models.QuerySet[Category]):

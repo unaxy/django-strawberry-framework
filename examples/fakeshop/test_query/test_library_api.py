@@ -996,6 +996,224 @@ def test_library_prefetch_object_book_hint_is_scoped_by_book_type_get_queryset(
     assert "circulation_status" in hidden_book_sql[0].lower().split(" where ", 1)[1]
 
 
+#: No rows in a list or connection the hook emptied.
+_NO_ROWS: list[JSONObject] = []
+
+
+def _seed_loan_note_graph() -> dict[str, int]:
+    """Seed the library graph plus a note-less loan on a second book, ``Dune``.
+
+    Returns the primary keys the loan-note documents' GlobalID slots name.
+    """
+    _seed_library_graph()
+    kindred = models.Book.objects.get(title="Kindred")
+    dune = models.Book.objects.create(title="Dune", shelf=kindred.shelf)
+    note_less = models.Loan.objects.create(
+        book=dune,
+        patron=models.Patron.objects.get(name="Grace"),
+    )
+    return {
+        "kindred": saved_pk(kindred.pk),
+        "dune": saved_pk(dune.pk),
+        "noted": saved_pk(models.Loan.objects.get(note="first checkout").pk),
+        "note_less": saved_pk(note_less.pk),
+    }
+
+
+def _loan_note_document(document: str, pks: Mapping[str, int]) -> str:
+    """Fill a loan-note document's GlobalID slots against the current project schema.
+
+    Only the slots the document names are minted: ``LoanType`` is a Relay Node
+    only under the connection flag.
+    """
+    types = {
+        "kindred": library_schema.BookType,
+        "dune": library_schema.BookType,
+        "noted": library_schema.LoanType,
+        "note_less": library_schema.LoanType,
+    }
+    return document % {
+        slot: global_id_for(types[slot], pk)
+        for slot, pk in pks.items()
+        if f"%({slot})s" in document
+    }
+
+
+#: The framework-owned paths that hand ``LoanType.get_queryset`` its source, each as
+#: (extra settings, document, response without the hook, response with it, loan
+#: statements per request). The ``%(...)s`` slots take GlobalIDs
+#: (``_loan_note_document``); the nested rows start from ``nodes(ids:)``, a root
+#: both executors serve, which resolves each book's loans with its own statement.
+_LOAN_QUERYSET_METHOD_HOOK_CASES = [
+    pytest.param(
+        {"FAKESHOP_TEST_LOAN_CONNECTION": True},
+        "query { allLibraryLoansConnection(orderBy: [{ id: ASC }]) { edges { node { note } } } }",
+        {
+            "allLibraryLoansConnection": {
+                "edges": [{"node": {"note": "first checkout"}}, {"node": {"note": ""}}],
+            },
+        },
+        {"allLibraryLoansConnection": {"edges": [{"node": {"note": "first checkout"}}]}},
+        1,
+        id="root-connection",
+    ),
+    pytest.param(
+        {},
+        """
+        query {
+          nodes(ids: ["%(kindred)s", "%(dune)s"]) { ... on BookType { title loans { note } } }
+        }
+        """,
+        {
+            "nodes": [
+                {"title": "Kindred", "loans": [{"note": "first checkout"}]},
+                {"title": "Dune", "loans": [{"note": ""}]},
+            ],
+        },
+        {
+            "nodes": [
+                {"title": "Kindred", "loans": [{"note": "first checkout"}]},
+                {"title": "Dune", "loans": _NO_ROWS},
+            ],
+        },
+        2,
+        id="nested-list",
+    ),
+    pytest.param(
+        {"FAKESHOP_TEST_LOAN_CONNECTION": True},
+        """
+        query {
+          nodes(ids: ["%(kindred)s", "%(dune)s"]) {
+            ... on BookType { title loansConnection { edges { node { note } } } }
+          }
+        }
+        """,
+        {
+            "nodes": [
+                {
+                    "title": "Kindred",
+                    "loansConnection": {"edges": [{"node": {"note": "first checkout"}}]},
+                },
+                {"title": "Dune", "loansConnection": {"edges": [{"node": {"note": ""}}]}},
+            ],
+        },
+        {
+            "nodes": [
+                {
+                    "title": "Kindred",
+                    "loansConnection": {"edges": [{"node": {"note": "first checkout"}}]},
+                },
+                {"title": "Dune", "loansConnection": {"edges": _NO_ROWS}},
+            ],
+        },
+        2,
+        id="nested-connection",
+    ),
+    pytest.param(
+        {"FAKESHOP_TEST_LOAN_CONNECTION": True},
+        """
+        query {
+          noted: node(id: "%(noted)s") { ... on LoanType { note } }
+          noteLess: node(id: "%(note_less)s") { ... on LoanType { note } }
+        }
+        """,
+        {"noted": {"note": "first checkout"}, "noteLess": {"note": ""}},
+        {"noted": {"note": "first checkout"}, "noteLess": None},
+        2,
+        id="node",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "flags",
+        "document",
+        "expected",
+        "expected_with_hook",
+        "loan_statements",
+    ),
+    _LOAN_QUERYSET_METHOD_HOOK_CASES,
+)
+def test_library_loan_get_queryset_calls_a_project_queryset_method(
+    project_schema_override: Callable[[], None],
+    flags: dict[str, bool],
+    document: str,
+    expected: JSONObject,
+    expected_with_hook: JSONObject,
+    loan_statements: int,
+) -> None:
+    """``LoanType.get_queryset`` narrows through a ``LoanQuerySet`` method on every path.
+
+    ``Loan.objects`` is ``LoanQuerySet.as_manager()``, so the framework seeds each
+    read from a ``LoanQuerySet``, and the hook receives that class: under
+    ``FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK`` the hook returns
+    ``queryset.with_note()``, a method plain ``QuerySet`` does not have, and the
+    note-less loan drops out of the root connection, the nested list, the nested
+    connection and the node refetch alike. The same document without the hook is
+    the control: it returns the note-less loan, and the hook's narrowing rides in
+    the loan statements' ``WHERE`` at the same query count and the case's fixed
+    number of loan statements.
+    """
+    pks = _seed_loan_note_graph()
+
+    def _post(*, hook: bool) -> tuple[JSONObject, int, list[str]]:
+        with override_settings(**flags, FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK=hook):
+            project_schema_override()
+            filled = _loan_note_document(document, pks)
+            with CaptureQueriesContext(connection) as captured:
+                response = _post_graphql(filled)
+        assert response.status_code == 200
+        loan_sql = _sql_from_table(captured, "library_loan")
+        return response_json(response), len(captured), loan_sql
+
+    payload, queries, loan_sql = _post(hook=False)
+    hooked_payload, hooked_queries, hooked_loan_sql = _post(hook=True)
+
+    assert payload == {"data": expected}
+    assert hooked_payload == {"data": expected_with_hook}
+    assert hooked_queries == queries
+    assert len(loan_sql) == loan_statements, loan_sql
+    assert len(hooked_loan_sql) == loan_statements, hooked_loan_sql
+    assert all('"note"' not in sql.partition(" WHERE ")[2] for sql in loan_sql), loan_sql
+    assert all('"note"' in sql.partition(" WHERE ")[2] for sql in hooked_loan_sql), hooked_loan_sql
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "flags",
+        "document",
+        "expected",
+        "expected_with_hook",
+        "loan_statements",
+    ),
+    _LOAN_QUERYSET_METHOD_HOOK_CASES,
+)
+async def test_async_library_loan_get_queryset_calls_a_project_queryset_method(
+    project_schema_override: Callable[[], None],
+    flags: dict[str, bool],
+    document: str,
+    expected: JSONObject,
+    expected_with_hook: JSONObject,
+    loan_statements: int,
+) -> None:
+    """The async executor hands ``LoanType.get_queryset`` a ``LoanQuerySet`` too.
+
+    The same documents over ``/graphql-async/``: the sync hook runs in a worker
+    thread and its ``with_note()`` call narrows every path as it does on the sync
+    view.
+    """
+    # The no-hook control and the statement counts run on the sync twin.
+    del expected, loan_statements
+    pks = await sync_to_async(_seed_loan_note_graph)()
+    with override_settings(**flags, FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK=True):
+        project_schema_override()
+        payload = await _post_async_shipped(_loan_note_document(document, pks))
+    assert payload == {"data": expected_with_hook}
+
+
 #: One document posted twice by the plan-cache row, so the two requests differ
 #: in nothing but their ordinal. Neither ``MembershipCardType`` nor its
 #: ``patron`` target declares a ``get_queryset`` hook, so the plan this document

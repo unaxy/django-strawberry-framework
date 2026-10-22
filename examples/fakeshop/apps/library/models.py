@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, TypeAlias, TypeVar
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
-from typing_extensions import override
+from typing_extensions import Self, override
 
 if TYPE_CHECKING:
     from datetime import date
@@ -450,7 +450,15 @@ class Issue(models.Model):
 
 
 class LoanQuerySet(models.QuerySet["Loan"]):
-    """A no-op project queryset used by the real ``Loan`` manager declaration."""
+    """An override-free project queryset used by the real ``Loan`` manager declaration.
+
+    It adds one project method and overrides none of Django's, so the manager it
+    backs behaves as Django's own does.
+    """
+
+    def with_note(self) -> Self:
+        """Return the loans that carry a note."""
+        return self.exclude(note="")
 
 
 class Loan(models.Model):

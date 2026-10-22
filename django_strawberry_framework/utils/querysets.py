@@ -39,8 +39,12 @@ queryset as untrusted query STATE: it reads that state without dispatching any
 consumer code (every read comes from the real instance ``__dict__`` via
 ``truth.instance_dict``, so a custom ``__getattribute__``, a class-level
 ``__dict__`` override or an instance-shadowed attribute cannot lie or run code),
-validates it, then rebuilds a framework-owned plain ``django.db.models.QuerySet``
-from the validated state. It NEVER returns the consumer object.
+validates it, then rebuilds a fresh queryset from the validated state. It NEVER
+returns the consumer object. Every rebuild the framework composes onto or hands
+back is a plain ``django.db.models.QuerySet``; the one rebuild that keeps the
+source's own ``QuerySet`` class is the hook's input, so a hook can call the
+project methods of the class that supplied it (the framework seeds each read from
+the model's default manager), and the hook's result is sealed plain again.
 
 What the seal preserves: the SQL query state (filters, annotations, joins,
 ordering, values projection), database routing / hints, and the prefetch
@@ -48,9 +52,9 @@ metadata Django needs -- everything that determines which rows the SQL selects.
 A combinator is preserved as the set of primary keys it selects, rebuilt as a
 ``pk__in`` membership test the recomposing surfaces can narrow (the raw-list row
 source keeps it as it is), and a combinator whose rows that rewrite would change
-fails closed (``combined``). What it deliberately drops: the consumer's executable
-override dispatch (the subclass identity itself), because that is precisely the
-leak vector. A
+fails closed (``combined``). What it deliberately drops on every rebuild the
+framework composes onto or returns: the consumer's executable override dispatch
+(the subclass identity itself), because that is precisely the leak vector. A
 seal rebuilds only state made of Django's own objects, so anything else in it -- a
 consumer-defined query, expression, lookup or join class, a method assigned onto a
 query instance, a foreign row iterable, deferred-filter state Django never writes --
@@ -4097,6 +4101,11 @@ def _pk_membership_query_or_defect(
     return rewritten.query, None
 
 
+def _is_queryset_class(value: object) -> TypeIs[type[models.QuerySet[models.Model, object]]]:
+    """Whether ``value`` is a ``QuerySet`` class by its real MRO."""
+    return truth.is_subclass(value, models.QuerySet)
+
+
 def _seal_or_defect(
     candidate: object,
     model: type[models.Model],
@@ -4104,12 +4113,22 @@ def _seal_or_defect(
     policy: _SealPolicy[object] = _DEFAULT_SEAL_POLICY,
     *,
     expected_routing: _RoutingIntent | None = None,
+    keep_class: bool = False,
 ) -> tuple[models.QuerySet[models.Model, object] | None, tuple[str, str] | None]:
-    """Rebuild a framework-owned plain ``QuerySet`` from ``candidate``'s validated state.
+    """Rebuild a framework-owned ``QuerySet`` from ``candidate``'s validated state.
 
     The single sealing primitive both boundary sites run. Returns
     ``(sealed_queryset, None)`` on success, or ``(None, (code, detail))`` on the
-    first defect. The codes ``type`` / ``table`` / ``untrusted`` / ``routing`` /
+    first defect. The rebuild is a plain ``QuerySet`` unless ``keep_class`` asks
+    for an instance of ``candidate``'s own class, constructed as Django's
+    ``QuerySet._clone`` constructs one (``model`` / ``query`` / ``using`` /
+    ``hints``) and given the same state as the plain rebuild; attributes the class
+    sets on an instance outside those constructor arguments are not carried. Only
+    the visibility runners ask, for the hook's input: the framework calls nothing
+    on that object but ``.using()`` (the write-pipeline pin), and it re-seals
+    whatever the hook returns.
+
+    The codes ``type`` / ``table`` / ``untrusted`` / ``routing`` /
     ``evaluated`` / ``sliced`` / ``projection`` / ``combined`` / ``alias`` are the
     one vocabulary every message-building site shares (a new code owes an arm at
     every site that can reach it); they are not one execution order. The checks
@@ -4232,7 +4251,7 @@ def _seal_or_defect(
 
     An instance-shadowed clone / evaluation method (``.all()``, ``Query.chain``,
     ``.filter()``, ``_values``, ``.first()``, ``.__aiter__()`` probes) is neutralized WITHOUT
-    rejection: the seal never dispatches through the consumer object, it rebuilds a plain
+    rejection: the seal never dispatches through the consumer object, it rebuilds a fresh
     queryset from the extracted query and clones that query through the unbound
     ``sql.Query.clone``. Clone-safety is not assumed from the outer exact-type alone:
     ``sql.Query.clone`` dispatches ``where.clone()``, container ``.copy()`` methods, and (at
@@ -4252,7 +4271,8 @@ def _seal_or_defect(
     # consumer code. The real type is the one thing the candidate cannot restate, so
     # the shape proof starts from it and a spoofed class stays the typed ``type``
     # defect every other unusable shape is.
-    if not truth.is_subclass(type(candidate), models.QuerySet):
+    candidate_class = type(candidate)
+    if not _is_queryset_class(candidate_class):
         return None, ("type", truth.kind(candidate))
     state: dict[str, object] = truth.instance_state(candidate)
     query = state.get("_query")
@@ -4436,7 +4456,10 @@ def _seal_or_defect(
     # django-stubs types ``QuerySet`` hint values as model instances (the ``instance`` hint
     # Django itself writes); the proof above covers the dict shape and its ``str`` keys.
     hints = cast("dict[str, models.Model] | None", state.get("_hints"))
-    sealed: models.QuerySet[models.Model, object] = models.QuerySet(
+    queryset_class: type[models.QuerySet[models.Model, object]] = (
+        candidate_class if keep_class else models.QuerySet
+    )
+    sealed: models.QuerySet[models.Model, object] = queryset_class(
         model=qmodel,
         query=rebuilt_query,
         using=using,
@@ -4821,6 +4844,7 @@ def _prepared_visibility_source(
     model: type[models.Model] | None = ...,
     render_error: Callable[[str, str], str] | None = ...,
     policy: _SealPolicy[object] = ...,
+    keep_class: bool = ...,
 ) -> tuple[models.QuerySet[_ModelT, _RowT], str | None]: ...
 @overload
 def _prepared_visibility_source(
@@ -4830,6 +4854,7 @@ def _prepared_visibility_source(
     model: type[models.Model] | None = ...,
     render_error: Callable[[str, str], str] | None = ...,
     policy: _SealPolicy[object] = ...,
+    keep_class: bool = ...,
 ) -> tuple[models.QuerySet[models.Model, object], str | None]: ...
 def _prepared_visibility_source(
     type_cls: type[DjangoType],
@@ -4838,6 +4863,7 @@ def _prepared_visibility_source(
     model: type[models.Model] | None = None,
     render_error: Callable[[str, str], str] | None = None,
     policy: _SealPolicy[object] = _DEFAULT_SEAL_POLICY,
+    keep_class: bool = False,
 ) -> tuple[models.QuerySet[models.Model, object], str | None]:
     """Validate and SEAL the source queryset before the visibility hook runs.
 
@@ -4849,15 +4875,19 @@ def _prepared_visibility_source(
     ``policy`` (a ``_SealPolicy``, default ``_DEFAULT_SEAL_POLICY``) requires:
     model rows and no slice (the cascade admits a projection), with a
     combinator served as its primary-key set. The
-    sealed object is a fresh framework-owned plain ``QuerySet`` rebuilt from the
-    source's query state, so the hook receives a trusted queryset regardless of
-    what the caller passed; an already-evaluated source seals to a fresh,
-    unevaluated queryset (this seal's policies do not carry ``_result_cache``
-    forward), so cached rows never reach the hook. The required alias is then
+    sealed object is a fresh framework-owned ``QuerySet`` rebuilt from the
+    source's query state, so the hook never receives the caller's object, only
+    state rebuilt from it. It is a plain ``QuerySet`` by default; ``keep_class``
+    rebuilds it as the source's own class instead (``_seal_or_defect``), which the
+    visibility runners ask for so a hook can call its project ``QuerySet``
+    methods, and which the cascade, recomposing onto the sealed source, leaves off.
+    An already-evaluated source seals to a fresh, unevaluated queryset (this
+    seal's policies do not carry ``_result_cache`` forward), so cached rows never
+    reach the hook. The required alias is then
     resolved in priority order:
 
     1. An active write pipeline's alias - the sealed source is pinned through
-       ``pin_write_queryset`` (a genuine ``.using()`` on the trusted object),
+       ``pin_write_queryset`` (a ``.using()`` on the rebuilt source),
        which fail-closes an explicitly divergent source alias.
     2. The sealed source's own explicit ``_db`` (a caller that routed with
        ``.using(...)`` keeps that routing through the hook).
@@ -4890,7 +4920,7 @@ def _prepared_visibility_source(
     ``object`` source is typed ``QuerySet[Model, object]``.
     """
     model = _captured_model(type_cls, model)
-    candidate, defect = _seal_or_defect(queryset, model, None, policy)
+    candidate, defect = _seal_or_defect(queryset, model, None, policy, keep_class=keep_class)
     if defect is not None:
         code, detail = defect
         if render_error is not None:
@@ -5048,8 +5078,10 @@ def apply_type_visibility_sync(
     The source is prepared and the result normalized through the shared sealed
     boundary (``_prepared_visibility_source`` / ``_normalized_visibility_result``):
     the source and the hook result are each SEALED into a fresh framework-owned
-    plain ``QuerySet`` rebuilt from validated query state (shape, concrete +
-    actual-base table, sealability, model-row, alias), with required-alias
+    ``QuerySet`` rebuilt from validated query state (shape, concrete +
+    actual-base table, sealability, model-row, alias) - the source as an instance
+    of its own class, so the hook can call project ``QuerySet`` methods, the
+    result as a plain ``QuerySet`` - with required-alias
     resolution (write pipeline > explicit source ``.using`` > none), Manager
     coercion with alias preservation, and fail-closed rejection of every
     non-sealable shape. ``SyncMisuseError`` stays reserved for this sync
@@ -5083,6 +5115,7 @@ def apply_type_visibility_sync(
         queryset,
         model=model,
         policy=policy,
+        keep_class=True,
     )
     result = type_cls.get_queryset(queryset, info)
     result = reject_async_in_sync_context(
@@ -5475,7 +5508,8 @@ async def apply_type_visibility_async(
     a second-level awaitable after that await is malformed (an ``async def``
     returning another coroutine / future) and fails closed - never a
     recursive await over an unbounded chain. The source and result then run
-    the same shared hardened boundary as the sync runner
+    the same shared hardened boundary as the sync runner (the hook's input keeps
+    the source's own class, its result is sealed plain)
     (``_prepared_visibility_source`` / ``_normalized_visibility_result``),
     so the two colored paths cannot drift. ``render_error`` and ``policy`` are
     the sync runner's own seams, declared here for that reason: a surface whose
@@ -5495,6 +5529,7 @@ async def apply_type_visibility_async(
         queryset,
         model=model,
         policy=policy,
+        keep_class=True,
     )
     hook = type_cls.get_queryset
     # A synchronous hook runs in ONE thread-sensitive worker, never on the event

@@ -126,8 +126,9 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
         context can neither publish into nor claim from a closed ledger.
   - [ ] The raw-list seam windows a source that arrives evaluated from the rows it already
         holds, exact queryset and rebuilt subclass alike, with the query count pinned at zero
-        in the package tier and the fakeshop `Loan` model's no-op `LoanQuerySet.as_manager()`
-        declaration pinned live at an absolute two-query prefetch cost, its pending
+        in the package tier and the fakeshop `Loan` model's override-free
+        `LoanQuerySet.as_manager()` declaration pinned live at an absolute two-query prefetch
+        cost, its pending
         reverse-relation predicate baked onto the rebuild by the same unbound `Query.add_q` an
         exact queryset's is, and a deferred-filter state Django never writes refused with the
         typed error at both tiers. The dynamic manager stays migration-safe through Django's
@@ -1359,9 +1360,9 @@ that through its own `__bool__`. Sealability therefore does not depend on which 
 boundary, and at the post-sidecar result seal alike.
 
 The fakeshop acceptance model uses that declaration directly: `Loan` declares
-`objects = LoanQuerySet.as_manager()` over a no-op `LoanQuerySet`, so Django's ordinary manager
-and reverse-relation machinery hand the live plan a `QuerySet` subclass. The dynamic manager is
-left out of migration state through Django's `use_in_migrations=False` default.
+`objects = LoanQuerySet.as_manager()` over an override-free `LoanQuerySet`, so Django's ordinary
+manager and reverse-relation machinery hand the live plan a `QuerySet` subclass. The dynamic
+manager is left out of migration state through Django's `use_in_migrations=False` default.
 
 Counting a sealable subclass into a Python list would restore the row ceiling but lose the SQL
 `LIMIT` for a legitimate project queryset class. The shape is read from `type(value)` rather
@@ -2904,8 +2905,8 @@ carries one loan on the sync transport and one on `AsyncDjangoGraphQLView`
 `test_a_relation_manager_cannot_widen_the_raw_list_bound_on_the_async_transport`); the same
 document with Django's own manager is the control
 (`test_an_ordinary_relation_manager_is_bounded_the_same_way`). A second pair exercises the
-fakeshop `Loan` model's no-op `LoanQuerySet.as_manager()` declaration under a prefetching plan
-at two parent cardinalities and asserts the expected payload and an ABSOLUTE two-query count -
+fakeshop `Loan` model's override-free `LoanQuerySet.as_manager()` declaration under a
+prefetching plan at two parent cardinalities and asserts the expected payload and an ABSOLUTE two-query count -
 one parent query plus one prefetch
 (`test_a_project_queryset_class_relation_costs_two_prefetch_queries`); equality alone would be
 vacuous, and the second cardinality is what distinguishes a prefetch from an N+1. The async
@@ -3144,8 +3145,8 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       response carries `max_list_rows` rows, not the relation's.
 - [ ] A source that arrives evaluated is windowed from the rows it holds with no further
       query, exact queryset and rebuilt subclass alike, through `bounded_rows` and
-      `bounded_rows_async`; the fakeshop `Loan` model's no-op `LoanQuerySet.as_manager()`
-      declaration returns the expected rows at an ABSOLUTE two-query prefetch cost at two
+      `bounded_rows_async`; the fakeshop `Loan` model's override-free
+      `LoanQuerySet.as_manager()` declaration returns the expected rows at an ABSOLUTE two-query prefetch cost at two
       parent cardinalities, and returns those same rows on the async transport (Decision 8).
       The declared manager sets no `use_in_migrations`, so no library migration carries it.
 - [ ] Visibility runs before order; order runs before one combined slice; order permission

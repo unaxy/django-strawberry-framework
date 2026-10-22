@@ -71,7 +71,9 @@ trust the consumer object at all.
 
 - [`django_strawberry_framework/utils/querysets.py`][querysets] owns the boundary
   and is covered under the repository's `fail_under = 100` gate.
-- Both the source (before the hook) and the hook result (after) are rebuilt into
+- Both the source (before the hook) and the hook result (after) are rebuilt from
+  their validated state: the source as a fresh instance of its own `QuerySet`
+  class, so the hook can call a project `QuerySet`'s methods, and the result as
   a framework-owned plain `django.db.models.QuerySet`; the consumer object is
   never returned, and the rebuilt query's whole state is canonically
   reconstructed so it shares no mutable object with the candidate graph
@@ -129,7 +131,7 @@ Decision numbers are load-bearing beyond this document: source and test
 docstrings across the package cite them in the form `spec-045 Decision N`.
 Renumbering a decision is a package-wide rename, not a documentation edit.
 
-### Decision 1 — The hook and source objects are untrusted query state, rebuilt into a framework-owned plain `django.db.models.QuerySet`
+### Decision 1 — The hook and source objects are untrusted query state, rebuilt from that state and never returned
 
 **Decision.** The boundary does not validate a finite inventory of method
 overrides on the consumer `QuerySet` class and return the consumer object. It
@@ -137,13 +139,22 @@ treats both the source queryset (before the hook) and the hook's return value as
 untrusted query STATE: it reads that state from the instance `__dict__` via
 `object.__getattribute__` (so a custom `__getattribute__`, an instance-shadowed
 attribute, or a redefined `query` / `_query` descriptor cannot run code or lie
-during extraction), validates it, then rebuilds a fresh framework-owned plain
-`django.db.models.QuerySet` from the validated state. It NEVER returns the
-consumer object. Preserved: SQL query state (filters, annotations, joins,
-ordering, values projection; a combinator is rebuilt as the set of primary keys
-it selects, Decision 5), database routing / hints, and prefetch metadata.
-Dropped: the consumer's executable override dispatch (the subclass identity),
-which is the leak vector.
+during extraction), validates it, then rebuilds a fresh queryset from the
+validated state. It NEVER returns the consumer object. Preserved: SQL query
+state (filters, annotations, joins, ordering, values projection; a combinator is
+rebuilt as the set of primary keys it selects, Decision 5), database routing /
+hints, and prefetch metadata. The hook's result, and every seal the framework
+itself composes onto (the cascade's source included), is a framework-owned plain
+`django.db.models.QuerySet`: the consumer's executable override dispatch (the
+subclass identity), which is the leak vector, is dropped there. The hook's
+INPUT keeps the source's own class (the class behind the model's default manager
+for every framework-seeded read), constructed as Django's `QuerySet._clone`
+constructs one and given the same validated state, so a hook can call its
+project `QuerySet` methods. Nothing leaks through it: the framework calls only
+`.using()` on that object (the write-pipeline pin) and re-seals whatever the
+hook returns, and a project `QuerySet` class is trusted application Python
+(GOAL "Trust boundary"). Attributes a project class sets on an instance outside
+Django's constructor arguments are not carried.
 
 Reading state without dispatch is not the same as USING it without dispatch, so
 every `QuerySet.__dict__` field the seal carries forward — `_db`, `_hints`,
@@ -162,10 +173,14 @@ routing-control surface on the sealed queryset.
 **Enforcing symbols.**
 [`utils/querysets.py::_seal_or_defect`][querysets] (the single sealing
 primitive: extracts state via `object.__getattribute__`, clones once through the
-unbound `sql.Query.clone`, constructs a plain `models.QuerySet`);
+unbound `sql.Query.clone`, constructs a plain `models.QuerySet`, or the
+candidate's own class when `keep_class` asks);
 [`::_queryset_state_defect`][querysets] (the retained-state exact-shape gate);
 [`::_prepared_visibility_source`][querysets] (seals the source before the hook
-runs); [`::_normalized_visibility_result`][querysets] (seals the hook result).
+runs; plain unless `keep_class`, which only
+[`::apply_type_visibility_sync`][querysets] and
+[`::apply_type_visibility_async`][querysets] pass);
+[`::_normalized_visibility_result`][querysets] (seals the hook result).
 
 **Deliberation.** The rejected class-level method inventory and the rejected
 name-blacklist fix are recorded in the [rationale companion][rationale].
@@ -174,7 +189,22 @@ name-blacklist fix are recorded in the [rationale companion][rationale].
 shared seal / rebuild suite) plus the row-survival surfaces in
 [`tests/test_relay_node_field.py`][relay-tests],
 [`tests/test_connection.py`][connection-tests], and
-[`tests/test_list_field.py`][list-tests].
+[`tests/test_list_field.py`][list-tests]. The hook's input keeping the source's
+class: `test_hook_receives_the_sources_own_queryset_class`,
+`test_async_hook_receives_the_sources_own_queryset_class`,
+`test_exact_queryset_source_reaches_the_hook_as_an_exact_queryset`,
+`test_hook_returning_its_project_class_input_is_sealed_plain`,
+`test_project_class_rebuild_keeps_the_sources_query_state`,
+`test_active_write_pipeline_pins_a_project_class_source`,
+`test_project_class_projection_source_still_fails_closed` and
+`test_prepared_visibility_source_keeps_the_class_only_on_request` there; the
+cascade's source seal staying plain:
+`tests/test_permissions.py::test_root_queryset_filter_override_is_neutralized_by_sealing`;
+and live
+[`examples/fakeshop/test_query/test_library_api.py`][library-api-tests]
+`test_library_loan_get_queryset_calls_a_project_queryset_method` and
+`test_async_library_loan_get_queryset_calls_a_project_queryset_method` (root
+connection, nested list, nested connection and node refetch).
 
 ### Decision 2 — Fail-closed prove-then-clone AST trust
 
@@ -670,9 +700,10 @@ This card's Slice 1 doc set (the only surface it touches):
   [`docs/SPECS/appx/spec-045-visibility_boundary-0_0_14-rationale.md`][rationale] (the
   deliberative layer).
 
-`README.md`, `docs/README.md`, `docs/TREE.md`, `GOAL.md`, `TODAY.md`, and
-`CHANGELOG.md` are untouched: the boundary is internal security-boundary
-hardening with no consumer-visible surface change.
+`README.md`, `docs/TREE.md`, `GOAL.md`, `TODAY.md`, and `CHANGELOG.md` are
+untouched: the boundary is internal security-boundary hardening, and its one
+consumer-visible statement is the `docs/README.md` sentence on the hook's input,
+a fresh instance of the source's own `QuerySet` class.
 
 ## Constraints on the supported query surface
 
@@ -751,6 +782,8 @@ These are deliberate constraints of the contract above, not defects:
 [relay-tests]: ../../tests/test_relay_node_field.py
 
 <!-- examples/ -->
+
+[library-api-tests]: ../../examples/fakeshop/test_query/test_library_api.py
 
 <!-- scripts/ -->
 
