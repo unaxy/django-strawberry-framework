@@ -90,6 +90,8 @@ from django_strawberry_framework.utils._narrowing import (
     is_iterable,
     is_list,
     is_list_or_tuple,
+    is_set_or_frozenset,
+    is_str,
     list_of,
     read_attr,
     require,
@@ -173,6 +175,7 @@ from tests._django_private import (
     has_resolved_condition,
 )
 from tests._idioms import (
+    STR_ENUM,
     ClaimsClassBase,
     ClassReadRaisesBase,
     is_object_list,
@@ -2100,14 +2103,23 @@ def test_combined_branch_missing_model_fails_closed_as_table() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_prefetch_non_str_lookup_fails_closed() -> None:
-    """A non-exact-``str`` prefetch lookup entry fails closed."""
+def test_prefetch_str_subclass_lookup_is_carried_as_its_exact_text() -> None:
+    """A ``str`` subclass prefetch lookup is carried as an exact ``str``; a non-``str`` one fails closed.
+
+    Django stores the lookup a consumer passes to ``prefetch_related`` as given, so a
+    ``TextChoices`` / ``StrEnum`` member (any ``str`` subclass) names the relation its
+    text names, and the sealed lookups hold that text, never the subclass.
+    """
 
     class _StrSub(str):
         pass
 
-    _, defect = _sealed_prefetch_related_lookups((_StrSub("items"),), "X", None, Category)
-    assert defect == ("untrusted", "X prefetch lookup is a _StrSub")
+    lookups, defect = _sealed_prefetch_related_lookups((_StrSub("items"),), "X", None, Category)
+    assert defect is None
+    assert lookups is not None
+    assert [(lookup, type(lookup)) for lookup in lookups] == [("items", str)]
+    _, refused = _sealed_prefetch_related_lookups((object(),), "X", None, Category)
+    assert refused == ("untrusted", "X prefetch lookup is a object")
 
 
 def test_prefetch_non_str_path_fails_closed() -> None:
@@ -6883,3 +6895,164 @@ def test_snapshot_routing_intent_keeps_a_non_dict_hints_slot_by_reference() -> N
     expected = _snapshot_routing_intent(source_qs, "MyOrderSet.apply_sync")
     assert expected.hints is hostile
     assert _routing_hints_equal({}, expected.hints) is False
+
+
+# ---------------------------------------------------------------------------
+# A ``TextChoices`` / ``StrEnum`` member in a slot Django fills from any ``str``.
+# ---------------------------------------------------------------------------
+
+
+class _TermChoices(models.TextChoices):
+    """Names and SQL a hook spells through ``TextChoices`` members."""
+
+    TITLE = "title"
+    DESCENDING_TITLE = "-title"
+    LATER_TITLES = "library_book.title >= 'B'"
+    TITLE_PARAMETER = "B"
+    BRANCH_TABLE = "library_branch"
+    HEADLINE = "headline"
+    SHELVED = "shelved"
+    DEFAULT = "default"
+    GENRES = "genres"
+
+
+#: The same terms as ``enum.StrEnum`` members.
+_TermEnum = STR_ENUM(
+    "_TermEnum",
+    {name: str(member) for name, member in _TermChoices.__members__.items()},
+)
+
+
+def _term(kind: str, name: str) -> str:
+    """``name``'s term as a ``TextChoices`` or a ``StrEnum`` member."""
+    member = read_attr(_TermChoices if kind == "text-choices" else _TermEnum, name)
+    assert is_str(member)
+    return member
+
+
+#: Every member-term shape the seal admits: the raw-SQL and order slots, the bound raw
+#: parameters, and the name slots of the query and the queryset.
+_MEMBER_TERM_SHAPES: dict[str, Callable[[str], models.QuerySet[Book, object]]] = {
+    "order-by": lambda kind: Book.objects.order_by(_term(kind, "DESCENDING_TITLE")),
+    "distinct": lambda kind: Book.objects.order_by("title").distinct(_term(kind, "TITLE")),
+    "extra-order-by": lambda kind: Book.objects.extra(order_by=[_term(kind, "DESCENDING_TITLE")]),
+    "extra-tables": lambda kind: Book.objects.extra(tables=[_term(kind, "BRANCH_TABLE")]),  # noqa: S610 - the member term is the input under test
+    "extra-where": lambda kind: Book.objects.extra(where=[_term(kind, "LATER_TITLES")]),  # noqa: S610 - the member term is the input under test
+    "extra-where-parameter": lambda kind: Book.objects.extra(
+        where=["library_book.title >= %s"],
+        params=[_term(kind, "TITLE_PARAMETER")],
+    ),
+    "extra-select-parameter": lambda kind: Book.objects.extra(
+        select={"later": "library_book.title >= %s"},
+        select_params=[_term(kind, "TITLE_PARAMETER")],
+    ),
+    "raw-sql-parameter": lambda kind: Book.objects.annotate(
+        later=RawSQL("library_book.title >= %s", [_term(kind, "TITLE_PARAMETER")]),
+    ),
+    "annotate": lambda kind: Book.objects.annotate(**{_term(kind, "HEADLINE"): F("title")}),
+    "alias": lambda kind: Book.objects.alias(**{_term(kind, "HEADLINE"): F("title")}),
+    "extra-select": lambda kind: Book.objects.extra(select={_term(kind, "HEADLINE"): "1"}),  # noqa: S610 - the member term is the input under test
+    "filtered-relation": lambda kind: Book.objects.annotate(
+        **{_term(kind, "SHELVED"): FilteredRelation("shelf", condition=Q(shelf__code__gte=""))},
+    ).filter(shelved__code__gte=""),
+    "using": lambda kind: Book.objects.using(_term(kind, "DEFAULT")),
+    "values": lambda kind: Book.objects.values(_term(kind, "TITLE")),
+    "values-keyword": lambda kind: Book.objects.values(**{_term(kind, "HEADLINE"): F("title")}),
+    "values-list": lambda kind: Book.objects.values_list(_term(kind, "TITLE")),
+    "prefetch-lookup": lambda kind: Book.objects.prefetch_related(_term(kind, "GENRES")),
+    "prefetch": lambda kind: Book.objects.prefetch_related(Prefetch(_term(kind, "GENRES"))),
+    "prefetch-to-attr": lambda kind: Book.objects.prefetch_related(
+        Prefetch("genres", to_attr=_term(kind, "HEADLINE")),
+    ),
+}
+
+
+def _str_subclass_leaves(value: object, seen: set[int]) -> list[object]:
+    """Every ``str`` SUBCLASS instance reachable through ``value``'s Django-owned state."""
+    if id(value) in seen:
+        return []
+    seen.add(id(value))
+    if is_str(value):
+        return [] if type(value) is str else [value]
+    if is_list_or_tuple(value) or is_set_or_frozenset(value):
+        return [leaf for item in value for leaf in _str_subclass_leaves(item, seen)]
+    if is_dict(value):
+        return [
+            leaf
+            for key, item in value.items()
+            for leaf in _str_subclass_leaves(key, seen) + _str_subclass_leaves(item, seen)
+        ]
+    if isinstance(value, (type, models.Field, models.Model)):
+        return []
+    state = read_attr(value, "__dict__", None)
+    if state is None or not type(value).__module__.startswith("django.db.models"):
+        return []
+    return _str_subclass_leaves(state, seen)
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.parametrize("shape", list(_MEMBER_TERM_SHAPES))
+def test_member_term_seals_to_the_exact_text_of_every_slot(shape: str, kind: str) -> None:
+    """A member Django stores as given is admitted and sealed as its exact text.
+
+    The candidate holds the member itself; the sealed queryset (its query, its
+    ``_db`` / ``_fields`` and its prefetch lookups) holds no ``str`` subclass
+    anywhere, and compiles to the SQL Django compiles for the candidate.
+    """
+    candidate = _MEMBER_TERM_SHAPES[shape](kind)
+    sealed, defect = _seal_or_defect(candidate, Book, None, _CASCADE_SEAL_POLICY)
+
+    assert defect is None
+    assert sealed is not None
+    assert _str_subclass_leaves(dict(candidate.__dict__), set())
+    assert _str_subclass_leaves({**sealed.__dict__, "model": None}, set()) == []
+    if shape != "distinct":
+        assert str(sealed.query) == str(candidate.query)
+
+
+def test_extra_where_without_params_seals_with_none_params() -> None:
+    """``extra(where=...)`` with no ``params=`` stores ``None``, which ``ExtraWhere`` reads as ``()``."""
+    sealed, defect = _seal_or_defect(Book.objects.extra(where=["1 = 1"]), Book, None)
+    assert defect is None
+    assert sealed is not None
+    extra_where = sealed.query.where.children[0]
+    assert type(extra_where) is ExtraWhere
+    assert extra_where.params is None
+
+
+def test_raw_sql_with_none_params_fails_closed() -> None:
+    """A ``RawSQL`` with ``None`` params stays refused: Django cannot compile it."""
+    raw = RawSQL("1", ())
+    raw.__dict__["params"] = None
+    _, defect = _seal_or_defect(Book.objects.annotate(x=raw), Book, None)
+    assert defect == ("untrusted", "annotation 'x' params is a NoneType")
+
+
+def test_str_subclass_order_term_defining_resolve_expression_is_walked_as_an_expression() -> None:
+    """A ``str`` subclass that defines ``resolve_expression`` is no text term: it is refused."""
+
+    class _ExpressionName(str):
+        def resolve_expression(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError((self, args, kwargs))
+
+    for slot in ("order_by", "extra_order_by"):
+        source = Book.objects.all()
+        setattr(source.query, slot, (_ExpressionName("title"),))
+        _, defect = _seal_or_defect(source, Book, None)
+        assert defect is not None
+        assert defect[0] == "untrusted"
+        assert "_ExpressionName" in defect[1]
+
+
+def test_member_prefetch_path_resolves_the_relation_target_guard() -> None:
+    """A ``Prefetch`` named by a member resolves its relation as its text does.
+
+    The child over an unrelated table therefore meets the relation-target refusal,
+    and the refusal names the path as its text.
+    """
+    entry = Prefetch(_term("str-enum", "GENRES"), queryset=Shelf.objects.all())
+    _, defect = _sealed_prefetch_related_lookups((entry,), "X", None, Book)
+    assert defect is not None
+    assert defect[1].startswith(
+        "X prefetch 'genres' queryset is over Shelf rows, but the 'genres' relation targets Genre",
+    )

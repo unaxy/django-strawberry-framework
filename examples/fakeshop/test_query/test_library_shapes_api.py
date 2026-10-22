@@ -45,11 +45,24 @@ One shape per planner rule, each read off the wire and off the SQL the request e
   them with no optimizer. A related ``"?"``, an ordering loop and a
   condition item raise Django's own error with and without the optimizer.
 - A ``Book`` hook order through ``extra(order_by=...)``, which Django compiles
-  in place of every other ordering - a descending field, the book's own
+  in place of every other ordering - a descending field (as text, a
+  ``TextChoices`` member and a ``StrEnum`` member), the book's own
   ``table.column``, its foreign key's raw column, a joined shelf column and a
   quoted table name, each as written and reversed: the window pages it from
   one ``ROW_NUMBER`` statement exactly as the library schema pages it with no
   optimizer and as Django orders the hook queryset itself.
+- A hook spelling a name, a SQL fragment or a bound value as a ``TextChoices`` /
+  ``StrEnum`` member where Django takes any ``str``: an ``extra(where=...)``
+  fragment (also with no ``params=`` and ``params=None``), an ``extra`` table
+  and parameter, an ``order_by`` name, a ``RawSQL`` parameter, an ``annotate`` /
+  ``alias`` / ``extra(select=...)`` name, a ``FilteredRelation`` alias and a
+  prefetch lookup, path or ``to_attr``. Each genre's page under every window
+  is the page the same hook spelled with text serves, from the same SQL, and
+  a root book list serves the same rows as the text (a ``using`` alias
+  included); a ``ShelfType`` hook projecting through a member cascades onto
+  ``allLibraryCirculationDesks`` as its text does. A ``RawSQL`` with ``None``
+  params, an order term defining ``resolve_expression`` and a member-named
+  ``Prefetch`` over an unrelated table are refused with the boundary's error.
 - Mixed-case Django names, whose published spelling reverses to a name the model
   lacks: ``Distributor.displayName`` projects its own column, the forward key
   ``Consignment.distributorRef`` plans one ``JOIN``, and its reverse
@@ -63,6 +76,7 @@ One shape per planner rule, each read off the wire and off the SQL the request e
   order off, and its connection pages in primary-key order instead.
 """
 
+import enum
 from collections.abc import Callable
 
 import pytest
@@ -70,7 +84,21 @@ import strawberry
 from apps.library import models
 from apps.library import schema as library_schema
 from django.db import connection
-from django.db.models import Case, F, FloatField, Model, Q, QuerySet, Value, When
+from django.db.models import (
+    BooleanField,
+    Case,
+    F,
+    FilteredRelation,
+    FloatField,
+    Model,
+    Prefetch,
+    Q,
+    QuerySet,
+    TextChoices,
+    Value,
+    When,
+)
+from django.db.models.expressions import RawSQL
 from django.db.models.functions import Abs, Lower, Random
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
@@ -93,6 +121,7 @@ from strawberry.relay.utils import to_base64
 
 from django_strawberry_framework import (
     DjangoConnectionField,
+    DjangoListField,
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
@@ -1159,12 +1188,58 @@ def test_relation_name_book_order_pages_genre_books_connection_like_the_pipeline
     assert optimized == unoptimized
 
 
+class _BookTermChoices(TextChoices):
+    """Names and SQL fragments a hook spells through ``TextChoices`` members."""
+
+    DESCENDING_TITLE = "-title"
+    LATER_TITLES = "library_book.title >= 'Book 3'"
+    LATER_TITLE_PARAMETER = "library_book.title >= %s"
+    BOOK_3 = "Book 3"
+    BRANCH_TABLE = "library_branch"
+    HEADLINE = "headline"
+    SHELVED = "shelved"
+    DEFAULT = "default"
+    GENRES = "genres"
+    CODE = "code"
+
+
+class _BookTermEnum(str, enum.Enum):
+    """The same terms as ``enum.StrEnum`` members, the shape spelled by hand so 3.10 reads it too."""
+
+    __str__ = str.__str__
+    __format__ = str.__format__
+
+    DESCENDING_TITLE = "-title"
+    LATER_TITLES = "library_book.title >= 'Book 3'"
+    LATER_TITLE_PARAMETER = "library_book.title >= %s"
+    BOOK_3 = "Book 3"
+    BRANCH_TABLE = "library_branch"
+    HEADLINE = "headline"
+    SHELVED = "shelved"
+    DEFAULT = "default"
+    GENRES = "genres"
+    CODE = "code"
+
+
+#: A hook term by its member name: the exact text, a ``TextChoices`` member, or a
+#: ``StrEnum`` member. Django takes any ``str`` in every slot a term fills.
+_BOOK_TERMS: dict[str, Callable[[str], str]] = {
+    "str": lambda name: str(_BookTermChoices[name]),
+    "text-choices": lambda name: _BookTermChoices[name],
+    "str-enum": lambda name: _BookTermEnum[name],
+}
+
 #: A book order through the hook's ``extra(order_by=...)``, each total by itself so
 #: Django's own compile of the hook queryset is the order every page is cut from: a
-#: descending field, the book's own ``table.column``, its foreign key's raw column, a
-#: column of the shelf table the hook joins through a filter, and a quoted table name.
+#: descending field (as text, a ``TextChoices`` member and a ``StrEnum`` member), the
+#: book's own ``table.column``, its foreign key's raw column, a column of the shelf
+#: table the hook joins through a filter, and a quoted table name.
 _EXTRA_BOOK_HOOK_ORDERS: dict[str, _BookShuffle] = {
     "field": lambda books: books.extra(order_by=["-title"]),
+    "text-choices-field": lambda books: books.extra(
+        order_by=[_BookTermChoices.DESCENDING_TITLE],
+    ),
+    "str-enum-field": lambda books: books.extra(order_by=[_BookTermEnum.DESCENDING_TITLE]),
     "table-column": lambda books: books.extra(order_by=["-library_book.title"]),
     "foreign-key": lambda books: books.extra(order_by=["library_book.shelf_id", "-title"]),
     "joined-table": lambda books: books.filter(shelf__code__gte="").extra(
@@ -1648,3 +1723,300 @@ def test_multi_column_relation_name_label_order_pages_like_the_pipeline(
     assert len(planned_sql) == 2, planned_sql
     assert ["ROW_NUMBER" in sql.upper() for sql in planned_sql] == [False, True], planned_sql
     assert planned == served
+
+
+#: A hook body over the books it is handed, spelling its terms through ``term``.
+_BookTermHook = Callable[[QuerySet[models.Book], Callable[[str], str]], QuerySet[models.Book]]
+
+#: A hook spelling a raw-SQL term or bound value through ``term``, each ordered totally
+#: by title: an ``extra(where=...)`` fragment with no ``params=`` (Django's documented
+#: spelling) and with ``params=None``, an ``order_by`` name, an ``extra`` fragment, an
+#: ``extra`` table, an ``extra`` parameter and a ``RawSQL`` parameter.
+_BOOK_TEXT_TERM_HOOKS: dict[str, _BookTermHook] = {
+    "where-without-params": lambda books, term: books.extra(  # noqa: S610 - the member term is the input under test
+        where=[term("LATER_TITLES")],
+    ),
+    "where-params-none": lambda books, term: books.extra(  # noqa: S610 - the member term is the input under test
+        where=[term("LATER_TITLES")],
+        params=None,
+    ),
+    "order-by": lambda books, term: books.order_by(term("DESCENDING_TITLE")),
+    "where-fragment": lambda books, term: books.extra(  # noqa: S610 - the member term is the input under test
+        where=[term("LATER_TITLES")],
+        order_by=[term("DESCENDING_TITLE")],
+    ),
+    "table": lambda books, term: books.extra(  # noqa: S610 - the member term is the input under test
+        tables=[term("BRANCH_TABLE")],
+        where=["library_branch.name = 'North'"],
+    ),
+    "where-parameter": lambda books, term: books.extra(  # noqa: S610 - the member term is the input under test
+        where=[term("LATER_TITLE_PARAMETER")],
+        params=[term("BOOK_3")],
+    ),
+    "raw-sql-parameter": lambda books, term: books.alias(
+        later=RawSQL(
+            "library_book.title >= %s",
+            [term("BOOK_3")],
+            BooleanField(),
+        ),
+    ).filter(later=True),
+}
+
+#: A hook naming a query slot through ``term``: an ``annotate`` / ``alias`` /
+#: ``extra(select=...)`` name, a ``FilteredRelation`` alias, and a prefetch lookup as a
+#: string, as a ``Prefetch`` with and without its own queryset, and as a ``Prefetch``
+#: ``to_attr``.
+_BOOK_NAME_TERM_HOOKS: dict[str, _BookTermHook] = {
+    "annotate": lambda books, term: books.annotate(**{term("HEADLINE"): Lower("title")}),
+    "alias": lambda books, term: books.alias(**{term("HEADLINE"): Lower("title")}).filter(
+        headline__gte="book 3",
+    ),
+    "extra-select": lambda books, term: books.extra(  # noqa: S610 - the member term is the input under test
+        select={term("HEADLINE"): "library_book.title"},
+    ),
+    "filtered-relation": lambda books, term: books.annotate(
+        **{term("SHELVED"): FilteredRelation("shelf", condition=Q(shelf__code__gte="B"))},
+    ).filter(shelved__code__gte="B"),
+    "prefetch-lookup": lambda books, term: books.prefetch_related(term("GENRES")),
+    "prefetch": lambda books, term: books.prefetch_related(Prefetch(term("GENRES"))),
+    "prefetch-queryset": lambda books, term: books.prefetch_related(
+        Prefetch(term("GENRES"), queryset=models.Genre.objects.all()),
+    ),
+    "prefetch-to-attr": lambda books, term: books.prefetch_related(
+        Prefetch("genres", to_attr=term("HEADLINE")),
+    ),
+}
+
+#: Every member-term hook. Each is ordered by descending title unless it orders itself,
+#: so Django's compile of the hook queryset is the total order every page is cut from.
+_BOOK_TERM_HOOKS: dict[str, _BookTermHook] = {**_BOOK_TEXT_TERM_HOOKS, **_BOOK_NAME_TERM_HOOKS}
+
+
+#: The root-only hook: a ``using`` alias, which a nested page refuses whatever its
+#: spelling because the nested child is pinned to its parent's unrouted alias.
+_ROOT_BOOK_TERM_HOOKS: dict[str, _BookTermHook] = {
+    **_BOOK_NAME_TERM_HOOKS,
+    "using": lambda books, term: books.using(term("DEFAULT")),
+}
+
+
+def _book_term_order(source: str, kind: str) -> _BookShuffle:
+    """The ``source`` hook body with its terms spelled as ``kind``, ordered by title if unordered."""
+    hook = {**_BOOK_TERM_HOOKS, **_ROOT_BOOK_TERM_HOOKS}[source]
+    term = _BOOK_TERMS[kind]
+    if source in ("order-by", "where-fragment"):
+        return lambda books: hook(books, term)
+    return lambda books: hook(books, term).order_by("-title")
+
+
+@pytest.mark.parametrize("window", list(_SHUFFLED_BOOKS_WINDOWS))
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.parametrize("source", list(_BOOK_TERM_HOOKS))
+@pytest.mark.django_db
+def test_enum_member_hook_term_serves_genre_books_connection_like_its_text(
+    source: str,
+    kind: str,
+    window: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hook spelling a name, SQL fragment or bound value as a member serves what its text serves.
+
+    Django takes any ``str`` in each of these slots and stores the ``TextChoices`` /
+    ``StrEnum`` member as given, so the visibility boundary admits the member and
+    seals the text it spells. With the optimizer and without it, every genre's page
+    under every window is the page the same hook spelled with exact text serves,
+    from the same SQL statements, and that page is cut from the order Django
+    compiles for the member hook's own queryset.
+    """
+    _seed_shelved_genres()
+    _order_books_by(monkeypatch, _book_term_order(source, "str"))
+    text_pages, text_sql = _genre_books_pages(window)
+    monkeypatch.undo()
+
+    order = _book_term_order(source, kind)
+    _order_books_by(monkeypatch, order)
+    optimized, optimized_sql = _genre_books_pages(window)
+    unoptimized, _ = _genre_books_pages(window, schema=_unoptimized_library_schema())
+
+    assert optimized_sql == text_sql
+    assert optimized == unoptimized == text_pages
+    rows = _SHUFFLED_BOOKS_SLICES[window]
+    assert {
+        name: [json_str(edge, "node", "title") for edge in json_list(page, "edges")]
+        for name, page in optimized.items()
+    } == {
+        genre.name: [book.title for book in order(genre.books.all())][rows]
+        for genre in models.Genre.objects.all()
+    }
+
+
+def _book_list_schema() -> DjangoSchema:
+    """A root ``DjangoListField(BookType)``, which runs and seals ``BookType``'s hook itself."""
+    book_type = library_schema.BookType
+    query = strawberry.type(
+        type(
+            "BookListQuery",
+            (),
+            {
+                "__annotations__": {"books": list[book_type]},
+                "__doc__": "A root list over ``BookType``.",
+                "books": DjangoListField(book_type),
+            },
+        ),
+    )
+    return DjangoSchema(query=query, config=strawberry_config())
+
+
+def _root_book_titles(monkeypatch: pytest.MonkeyPatch, order: _BookShuffle) -> list[str]:
+    """The titles a root book list serves with ``BookType``'s hook running ``order``."""
+    _order_books_by(monkeypatch, order)
+    payload = _post("{ books { title } }", schema=_book_list_schema())
+    assert "errors" not in payload, payload
+    titles = [json_str(book, "title") for book in json_list(payload, "data", "books")]
+    monkeypatch.undo()
+    return titles
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.parametrize("source", list(_ROOT_BOOK_TERM_HOOKS))
+@pytest.mark.django_db
+def test_enum_member_hook_name_serves_the_root_book_list_like_its_text(
+    source: str,
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hook naming a slot with a member serves the root list its text serves, in Django's order.
+
+    A root ``DjangoListField(BookType)`` runs and seals ``BookType``'s hook at the
+    root, where an explicit ``using`` alias is the resolution's own, so every
+    naming slot (``using`` included) is read off one sealed root queryset.
+    """
+    _seed_shelved_genres()
+    order = _book_term_order(source, kind)
+    titles = _root_book_titles(monkeypatch, order)
+
+    assert titles == _root_book_titles(monkeypatch, _book_term_order(source, "str"))
+    assert titles == [book.title for book in order(models.Book.objects.order_by("id"))]
+    assert titles
+
+
+#: A ``ShelfType`` hook projecting the shelves it keeps through ``term``: ``values`` by
+#: name, ``values`` by keyword and ``values_list``. The desk cascade re-projects the
+#: sealed shelves to their key, so a projection is a shape it serves.
+_SHELF_PROJECTION_HOOKS: dict[
+    str,
+    Callable[[QuerySet[models.Shelf], Callable[[str], str]], object],
+] = {
+    "values": lambda shelves, term: shelves.values(term("CODE")),
+    "values-keyword": lambda shelves, term: shelves.values(**{term("HEADLINE"): F("code")}),
+    "values-list": lambda shelves, term: shelves.values_list(term("CODE")),
+}
+
+
+def _cascaded_desk_names(monkeypatch: pytest.MonkeyPatch, source: str, kind: str) -> list[str]:
+    """The desks ``allLibraryCirculationDesks`` serves under the ``source`` shelf projection."""
+    shipped_hook = library_schema.ShelfType.get_queryset
+    projection = _SHELF_PROJECTION_HOOKS[source]
+
+    def projected_hook(
+        _cls: type[library_schema.ShelfType],
+        queryset: QuerySet[models.Shelf],
+        info: strawberry.Info[object, object],
+    ) -> object:
+        return projection(shipped_hook(queryset, info), _BOOK_TERMS[kind])
+
+    monkeypatch.setattr(library_schema.ShelfType, "get_queryset", classmethod(projected_hook))
+    payload = _post("{ allLibraryCirculationDesks(orderBy: [{ name: ASC }]) { name } }")
+    monkeypatch.undo()
+    assert "errors" not in payload, payload
+    return [
+        json_str(desk, "name") for desk in json_list(payload, "data", "allLibraryCirculationDesks")
+    ]
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.parametrize("source", list(_SHELF_PROJECTION_HOOKS))
+@pytest.mark.django_db
+def test_enum_member_projection_in_a_cascaded_hook_hides_the_desks_its_text_hides(
+    source: str,
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``ShelfType`` hook projecting through a member cascades onto the desks like its text.
+
+    ``CirculationDeskType`` cascades over ``shelf``, sealing ``ShelfType``'s hook
+    result under the cascade policy, which keeps a projection. Named through a
+    member, the projection hides exactly the desk on the secret shelf, as its text
+    does.
+    """
+    branch = models.Branch.objects.create(name="Central")
+    for code, topic in (("A", "Fiction"), ("B", "secret"), ("C", "History")):
+        shelf = models.Shelf.objects.create(code=code, topic=topic, branch=branch)
+        models.CirculationDesk.objects.create(name=f"Desk {code}", branch=branch, shelf=shelf)
+
+    names = _cascaded_desk_names(monkeypatch, source, kind)
+
+    assert names == _cascaded_desk_names(monkeypatch, source, "str")
+    assert names == ["Desk A", "Desk C"]
+
+
+def _raw_sql_with_none_params() -> RawSQL:
+    """A ``RawSQL`` whose ``params`` slot holds ``None``, which Django cannot compile."""
+    raw = RawSQL("1", ())
+    raw.__dict__["params"] = None
+    return raw
+
+
+class _ExpressionName(str):
+    """A ``str`` that defines ``resolve_expression``, so Django compiles it as an expression."""
+
+    def resolve_expression(self, *args: object, **kwargs: object) -> object:
+        """Never reached: the boundary refuses the term before any compile."""
+        raise AssertionError((self, args, kwargs))
+
+
+#: A hook the boundary refuses, with the error its field answers: a ``RawSQL`` with
+#: ``None`` params (which Django cannot compile), an order term defining
+#: ``resolve_expression``, and a ``Prefetch`` named by a member whose child queryset
+#: reads a table the relation does not target.
+_REFUSED_BOOK_TERM_HOOKS: dict[str, tuple[_BookShuffle, str]] = {
+    "raw-sql-none-params": (
+        lambda books: books.annotate(later=_raw_sql_with_none_params()).order_by("-title"),
+        "annotation 'later' params is a NoneType",
+    ),
+    "expression-order-term": (
+        lambda books: books.order_by(_ExpressionName("title")),
+        "order_by carries a _ExpressionName node",
+    ),
+    "member-prefetch-unrelated-child": (
+        lambda books: books.prefetch_related(
+            Prefetch(_BookTermEnum.GENRES, queryset=models.Shelf.objects.all()),
+        ),
+        "prefetch 'genres' queryset is over Shelf rows, but the 'genres' relation targets Genre",
+    ),
+}
+
+
+@pytest.mark.parametrize("optimizer", [True, False], ids=["optimized", "unoptimized"])
+@pytest.mark.parametrize("source", list(_REFUSED_BOOK_TERM_HOOKS))
+@pytest.mark.django_db
+def test_unsealable_book_hook_term_is_refused_at_the_genre_books_connection(
+    source: str,
+    optimizer: bool,  # noqa: FBT001 - a pytest parameter
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hook term Django cannot serve as text is refused by the boundary, naming the term.
+
+    Each genre's ``booksConnection`` answers the visibility boundary's error, whose
+    message names what could not be sealed.
+    """
+    _seed_shelved_genres()
+    order, detail = _REFUSED_BOOK_TERM_HOOKS[source]
+    _order_books_by(monkeypatch, order)
+    query = _SHUFFLED_BOOKS_QUERY % _SHUFFLED_BOOKS_WINDOWS["first"]
+
+    payload = _post(query, schema=None if optimizer else _unoptimized_library_schema())
+
+    messages = {json_str(error, "message") for error in json_list(payload, "errors")}
+    assert len(messages) == 1, messages
+    assert detail in messages.pop()

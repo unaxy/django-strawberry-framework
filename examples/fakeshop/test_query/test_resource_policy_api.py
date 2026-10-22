@@ -48,7 +48,9 @@ Row groups, in the order a request meets them:
   what a bounded many-side relation COSTS when its rows arrive already fetched:
   the fakeshop ``Loan`` model's no-op ``LoanQuerySet.as_manager()`` declaration
   is rebuilt at that seam and, under a prefetching plan, must answer its payload
-  in the absolute two-query budget (one parent query plus one prefetch);
+  in the absolute two-query budget (one parent query plus one prefetch), and a
+  manager routing it through ``using(<TextChoices / StrEnum member>)`` is served
+  on the resolver and the prefetch-cache seams alike;
 - the cooperative deadline, one row per seam that hands work to the database,
   the generated nested relation resolvers included (single-valued and many-side,
   sync and async), with an optimizer-mounted twin proving the single-valued check
@@ -76,6 +78,7 @@ ladder, the narrowing rule, and the walker's degenerate inputs.
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 import threading
 import warnings
@@ -96,7 +99,7 @@ from config import schema as config_schema
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
-from django.db.models import QuerySet
+from django.db.models import Manager, QuerySet, TextChoices
 from django.http import HttpRequest, HttpResponseBase
 from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
@@ -4470,6 +4473,74 @@ def test_a_project_queryset_class_relation_answers_the_same_rows_when_awaited() 
     payload = response_json(response.response)
     _no_rejection(payload)
     assert payload["data"] == _carry_relation_payload(2)
+
+
+class _AliasChoices(TextChoices):
+    """A database alias a project names through ``TextChoices``."""
+
+    DEFAULT = "default"
+
+
+class _AliasEnum(str, enum.Enum):
+    """The same alias as an ``enum.StrEnum`` member, the shape spelled by hand so 3.10 reads it."""
+
+    __str__ = str.__str__
+    __format__ = str.__format__
+
+    DEFAULT = "default"
+
+
+#: The relation's two raw-list seams: the unprefetched resolver (``rp-hostile-relation``,
+#: bound to one row) and the prefetch cache the optimizer fills (``rp-carry-relation``).
+_RAW_LIST_RELATION_MOUNTS = {
+    "resolver": ("/rp-hostile-relation/", HOSTILE_RELATION_ROWS),
+    "prefetch-cache": ("/rp-carry-relation/", CARRY_RELATION_LOANS),
+}
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [_AliasChoices.DEFAULT, _AliasEnum.DEFAULT],
+    ids=["text-choices", "str-enum"],
+)
+@pytest.mark.parametrize("mount", list(_RAW_LIST_RELATION_MOUNTS))
+@pytest.mark.django_db
+def test_a_project_manager_routing_through_an_enum_member_alias_is_served(
+    mount: str,
+    alias: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``LoanQuerySet`` manager routed with ``using(<member>)`` reaches the raw-list bound.
+
+    Django stores the member as the queryset's alias and routes it as its text, so
+    the rebuild of the project queryset class reads the alias as that text: the
+    resolver's own source and the prefetch cache's entry both answer every
+    patron's loans up to the mount's bound.
+    """
+    _seed_carry_relation(2, CARRY_RELATION_LOANS)
+    manager_cls = type(library_models.Loan._default_manager)
+    shipped = manager_cls.get_queryset
+
+    def routed(self: Manager[library_models.Loan]) -> QuerySet[library_models.Loan]:
+        return shipped(self).using(alias)
+
+    monkeypatch.setattr(manager_cls, "get_queryset", routed)
+    url, rows = _RAW_LIST_RELATION_MOUNTS[mount]
+
+    payload = _post(url, _HOSTILE_RELATION_QUERY)
+
+    _no_rejection(payload)
+    assert payload["data"] == {
+        "patrons": [
+            {
+                "name": f"carry-patron-{patron_index}",
+                "loans": [
+                    {"note": f"loan-{patron_index}-{loan_index}"} for loan_index in range(rows)
+                ],
+            }
+            for patron_index in range(min(rows, 2))
+        ],
+    }
 
 
 @pytest.mark.django_db

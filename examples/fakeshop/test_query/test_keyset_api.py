@@ -65,6 +65,7 @@ because the payload is authenticated-encrypted opaque bytes (the codec contract)
 
 import base64
 import datetime
+import enum
 import uuid
 from collections.abc import Callable, Mapping
 
@@ -77,7 +78,7 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import connection
-from django.db.models import Model, QuerySet
+from django.db.models import Model, QuerySet, TextChoices
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Lower, Random
 from django.http import HttpRequest
@@ -2170,12 +2171,31 @@ def test_order_by_beside_a_reversed_hook_pages_every_row_once() -> None:
 # ``B1`` ``a``, created in that order (the ``m2m`` books each on their own shelf,
 # shelf codes ``A-1`` .. ``B-1`` in that order too).
 
-#: Per relation shape and spelling, the hook's ``extra`` ordering: a field, a descending
-#: field, the child's own ``table.column``, its foreign key's raw column, a column of the
-#: table the hook joins through a filter, and a quoted table name.
+
+class _OrderTermChoices(TextChoices):
+    """An ``extra`` order term a hook spells through a ``TextChoices`` member."""
+
+    TITLE = "title"
+
+
+class _OrderTermEnum(str, enum.Enum):
+    """The same term as an ``enum.StrEnum`` member, the shape spelled by hand so 3.10 reads it."""
+
+    __str__ = str.__str__
+    __format__ = str.__format__
+
+    TITLE = "title"
+
+
+#: Per relation shape and spelling, the hook's ``extra`` ordering: a field (as text, a
+#: ``TextChoices`` member and a ``StrEnum`` member), a descending field, the child's own
+#: ``table.column``, its foreign key's raw column, a column of the table the hook joins
+#: through a filter, and a quoted table name.
 _EXTRA_HOOK_ORDERS: dict[str, dict[str, _ChildOrder]] = {
     "fk": {
         "field": lambda issues: issues.extra(order_by=["title"]),
+        "text-choices-field": lambda issues: issues.extra(order_by=[_OrderTermChoices.TITLE]),
+        "str-enum-field": lambda issues: issues.extra(order_by=[_OrderTermEnum.TITLE]),
         "descending-field": lambda issues: issues.extra(order_by=["-number"]),
         "table-column": lambda issues: issues.extra(order_by=["library_issue.title"]),
         "foreign-key": lambda issues: issues.extra(
@@ -2188,6 +2208,8 @@ _EXTRA_HOOK_ORDERS: dict[str, dict[str, _ChildOrder]] = {
     },
     "m2m": {
         "field": lambda books: books.extra(order_by=["title"]),
+        "text-choices-field": lambda books: books.extra(order_by=[_OrderTermChoices.TITLE]),
+        "str-enum-field": lambda books: books.extra(order_by=[_OrderTermEnum.TITLE]),
         "descending-field": lambda books: books.extra(order_by=["-id"]),
         "table-column": lambda books: books.extra(order_by=["library_book.title"]),
         "foreign-key": lambda books: books.extra(order_by=["-library_book.shelf_id"]),
@@ -2199,7 +2221,13 @@ _EXTRA_HOOK_ORDERS: dict[str, dict[str, _ChildOrder]] = {
 }
 
 #: The spellings a value cursor can anchor: each names a non-relation column of the child.
-_ANCHORED_EXTRA_SPELLINGS = ("field", "descending-field", "table-column")
+_ANCHORED_EXTRA_SPELLINGS = (
+    "field",
+    "text-choices-field",
+    "str-enum-field",
+    "descending-field",
+    "table-column",
+)
 
 #: The spellings no value cursor can anchor: a foreign key's raw column (as
 #: ``order_by("periodical_id")`` is not), and the raw ``table.column`` SQL below.
@@ -2212,6 +2240,8 @@ _RAW_EXTRA_SPELLINGS = ("joined-table", "quoted-table")
 #: the forward order made total by the pk), one label per row.
 _EXTRA_ROOT_ORDERS: dict[str, tuple[str, str]] = {
     "field": ("B1 A2 A3 A1", "A1 A3 A2 B1"),
+    "text-choices-field": ("B1 A2 A3 A1", "A1 A3 A2 B1"),
+    "str-enum-field": ("B1 A2 A3 A1", "A1 A3 A2 B1"),
     "descending-field": ("A3 A2 A1 B1", "B1 A1 A2 A3"),
     "table-column": ("B1 A2 A3 A1", "A1 A3 A2 B1"),
     "foreign-key": ("A3 A2 A1 B1", "B1 A1 A2 A3"),
@@ -2222,6 +2252,8 @@ _EXTRA_ROOT_ORDERS: dict[str, tuple[str, str]] = {
 #: Parent ``A``'s ``first: 2`` page per spelling, forward and reversed, on either shape.
 _EXTRA_NESTED_PAGES: dict[str, tuple[str, str]] = {
     "field": ("2 3", "1 3"),
+    "text-choices-field": ("2 3", "1 3"),
+    "str-enum-field": ("2 3", "1 3"),
     "descending-field": ("3 2", "1 2"),
     "table-column": ("2 3", "1 3"),
     "foreign-key": ("3 2", "1 2"),
