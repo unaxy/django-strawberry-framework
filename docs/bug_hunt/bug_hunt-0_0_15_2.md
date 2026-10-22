@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 194 done, 137 to do.
+Progress: 195 done, 137 to do.
 
 ## Done
 
@@ -767,6 +767,11 @@ Progress: 194 done, 137 to do.
   check-type-suppressions, check-public-types, truthful-reads, import-spec-terms-check) and said the hooks check "things
   ruff does not" while listing ruff: fixed: the list names every hook of `.pre-commit-config.yaml` in config order with
   what each checks, and the lead-in says they run in that order and CI's lint job runs the same checks
+- [x] 335. spec-039's "Relation-decode core" helper row (and the batched-decode prose) printed
+  `visible_related_object(related_model, pk, info)` / `visible_related_objects(related_model, pks, info)`, missing
+  `async_recourse` and `key_attname` and the batched form's `dict[str, object]` result: fixed: both sites print the
+  helpers' signatures from `utils/querysets.py` and say the batched form maps each visible pk, stringified, to the key
+  the relation stores; spec-036 / spec-038 carry no signature spelling
 
 ## Outside review of the fixes
 
