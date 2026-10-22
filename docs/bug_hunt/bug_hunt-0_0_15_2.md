@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 180 done, 132 to do.
+Progress: 181 done, 131 to do.
 
 ## Done
 
@@ -683,6 +683,12 @@ Progress: 180 done, 132 to do.
   (django-filter's semantics; `exclude` / `distinct` honoured, no instance mutation), keeps the declared lookup for two
   bounds and skips a range with neither; pinned by unit rows in `tests/filters/test_base.py` (zero bounds included) and
   live rows in `test_scalars_filter_api.py` (flat, `not`, `partner` branch, explicit nulls).
+- [x] 300. `scripts/workspace.py::stream` now runs its command in `with subprocess.Popen(...)`, so both pipes close on
+  every path once their pump threads are joined; an error out of the start or wait step first SIGKILLs the command's
+  process group (the `subprocess.run` idiom), so closing never waits on a still-running command, and the output sinks
+  are resolved before the command starts, so a caller without byte stdout starts nothing. Pinned by seven in-process
+  rows in `tests/test_workspace.py` (success, non-zero, interrupted wait, failed thread start, no byte stdout, slow
+  reader on both paths).
 
 ## Outside review of the fixes
 
@@ -857,8 +863,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   here it hides `.claude/settings.local.json`
 - [ ] 299. The `scripts/workspace.py` module docstring says `status` prints disk use (line 81); it never has (since
   `cd6a74aa`). (Its other false claim, that an idle pool keeps `state.json`, went with item 143's rewrite of that sentence.)
-- [ ] 300. `workspace.py::stream` never closes its pipe file objects: harmless in a CLI run, but an in-process `stream` call
-  leaves them to the garbage collector, so under `filterwarnings = error` no test can call it in-process
 - [ ] 301. `workspace.py`'s lock files (`pool.lock`, `slots/slot-N.lock`, `gate.lock`) are regular files that are only
   opened and `flock`ed, never read, so their atime stays at creation and the macOS `$TMPDIR` purge can unlink one a
   command holds across 03:35 on a pool older than 3 days; a later command then creates and locks a new inode while the

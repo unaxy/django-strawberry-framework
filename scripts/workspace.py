@@ -2077,14 +2077,18 @@ def stream(
     relayed to the command's whole process group (:class:`_StopRelay`), and
     Ctrl-Z suspends that group with this process (``fg`` continues both);
     this returns once the command has ended and its output is drained. A
-    command that died by signal ``N`` reads as exit ``128 + N``.
+    command that died by signal ``N`` reads as exit ``128 + N``. The
+    command's pipes are closed on every path, each only once its reader has
+    finished; an error out of the run first kills the command's process
+    group, so the command never outlives the run holding its leases.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     relay = _StopRelay()
     with log_path.open("wb") as log, _stop_signals.routed_to(relay, group=relay.group):
         _ = log.write(header.encode("utf-8"))
         log.flush()
-        process = subprocess.Popen(  # the worker's own command, in its copy
+        out_sink, err_sink = sys.stdout.buffer, sys.stderr.buffer
+        with subprocess.Popen(  # the worker's own command, in its copy
             list(command),
             env=env,
             cwd=cwd,
@@ -2092,34 +2096,40 @@ def stream(
             stderr=subprocess.PIPE,
             start_new_session=True,
             pass_fds=tuple(holding),
-        )
-        relay.started(process)
-        lock = threading.Lock()
-        pumps = [
-            threading.Thread(
-                target=_pump,
-                args=(
-                    process.stdout,
-                    sys.stdout.buffer,
-                    log,
-                    lock,
+        ) as process:
+            lock = threading.Lock()
+            pumps = [
+                threading.Thread(
+                    target=_pump,
+                    args=(
+                        process.stdout,
+                        out_sink,
+                        log,
+                        lock,
+                    ),
                 ),
-            ),
-            threading.Thread(
-                target=_pump,
-                args=(
-                    process.stderr,
-                    sys.stderr.buffer,
-                    log,
-                    lock,
+                threading.Thread(
+                    target=_pump,
+                    args=(
+                        process.stderr,
+                        err_sink,
+                        log,
+                        lock,
+                    ),
                 ),
-            ),
-        ]
-        for pump in pumps:
-            pump.start()
-        code = process.wait()
-        for pump in pumps:
-            pump.join()
+            ]
+            try:
+                relay.started(process)
+                for pump in pumps:
+                    pump.start()
+                code = process.wait()
+            except BaseException:
+                _stop_signals.signal_group_id(process.pid, signal.SIGKILL)
+                raise
+            finally:
+                for pump in pumps:
+                    if pump.is_alive():
+                        pump.join()
     return Finished(128 - code if code < 0 else code, relay.signum)
 
 
