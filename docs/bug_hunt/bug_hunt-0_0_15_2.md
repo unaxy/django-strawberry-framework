@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 181 done, 131 to do.
+Progress: 182 done, 130 to do.
 
 ## Done
 
@@ -689,6 +689,10 @@ Progress: 181 done, 131 to do.
   are resolved before the command starts, so a caller without byte stdout starts nothing. Pinned by seven in-process
   rows in `tests/test_workspace.py` (success, non-zero, interrupted wait, failed thread start, no byte stdout, slow
   reader on both paths).
+- [x] 150. `docs/bug_hunt/pbugs.md` item 20's `Scrutiny:` line now states the placement as
+  `orders/inputs.py::Ordering`'s docstring does: a bare `ASC` / `DESC` leaves it to the database, SQLite and MySQL sort
+  `NULL`s first on `ASC` and last on `DESC`, Postgres last on `ASC` and first on `DESC`. Docs only; the behaviour stays
+  pinned on both vendors by `_ordered_with_missing`.
 
 ## Outside review of the fixes
 
@@ -757,10 +761,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   validation errors stay per-cell rows. Open for you: whether a syntax error may stop writing the per-cell ERROR rows
   and the failure JSON (it still exits 2), and whether the unreadable `--query` / `--compare` refusals (exit 2 through
   `parser.error`) land in the same change
-- [ ] 150. `docs/bug_hunt/pbugs.md` item 20 has `DESC` `NULL` placement backwards for both backends: SQLite sorts `NULL`s
-  last on `DESC` (executed) and Postgres first (its docs; Django's `nulls_order_largest`). The only false sentence of six
-  that state a per-backend direction; no package code relies on it. Fix: reword it like `orders/inputs.py::Ordering`'s
-  docstring; no test (already pinned on both vendors by `_ordered_with_missing`)
 - [ ] 155. Nine sentences in specs 030, 031, 032 and the spec-030 / spec-032 rationale companions name 0.324.0 as the
   `uv.lock`-resolved Strawberry; the lock resolves 0.327.7. Every technical claim still holds on the locked release (26
   executed checks; `strawberry/relay/` byte-identical), so only the number is false. Fix: drop the number, spelling it
