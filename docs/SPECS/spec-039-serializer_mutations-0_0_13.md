@@ -302,7 +302,8 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth)
     **Renamed fields**: omitted / one-segment `source` supported, dotted `source` /
     `source="*"` rejected for a model-column-converting field, a relation bound to its
-    `attname` or to the `pk` alias of a relation key rejected). The whole module is
+    `attname` or to the `pk` alias of a relation key rejected, a field whose kind
+    disagrees with the column it writes rejected). The whole module is
     behind the DRF soft-import guard
     ([Decision 12](#decision-12--soft-djangorestframework-dependency-and-the-100-coverage-strategy)).
   - [ ] [`rest_framework/inputs.py`][rf-inputs]: build **two** `@strawberry.input`
@@ -353,8 +354,9 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     and preserve the declared name in the reverse map; **the id-like suffix rule** —
     `category` → `categoryId`, `category_id` → `categoryId`, `category_pk` →
     `categoryPk` (no doubled `…IdId` / `…PkId`); a **dotted `source`** / `source="*"` on
-    a model-column-converting field, and a relation bound to its forward relation's
-    `attname` or to the `pk` alias of a relation key, raise
+    a model-column-converting field, a relation bound to its forward relation's
+    `attname` or to the `pk` alias of a relation key, and a field whose kind (scalar /
+    file / relation) disagrees with the column it writes, raise
     [`ConfigurationError`][glossary-configurationerror]; the unknown serializer-field
     [`ConfigurationError`][glossary-configurationerror]. And
     [`tests/rest_framework/test_inputs.py`][test-rest-framework] — the serializer-derived
@@ -1468,7 +1470,11 @@ supported `source` scope:
   it to `patron_id`. It is refused by the same guard, which resolves the source through
   [`rest_framework/serializer_converter.py`][rf-converter]`::written_model_field` (the field
   a source writes, `pk` included); the remedy is `source="patron"`. A scalar over `pk` keeps
-  the model-less scalar path. A
+  the model-less scalar path; a relation over the `pk` alias of a scalar primary key
+  (`ref = PrimaryKeyRelatedField(source="pk")` over `Item.id`) writes a scalar column, so it
+  is refused as a kind mismatch
+  ([Model-backed serializer type-override conflict policy](#model-backed-serializer-type-override-conflict-policy)),
+  as `source="id"` is. A
   `read_only` field is dropped before the converter, so a read-only echo of the attname is
   unaffected.
 - A **dotted `source`** (`source="user.email"`) or **`source="*"`** is **rejected** for
@@ -2998,8 +3004,10 @@ same transport, different app.
     — a `source="category"` FK and a `source="name"` scalar derive the GraphQL name from
     the declared field name, resolve the backing column via `source`, and preserve the
     declared name in the reverse map; a **dotted `source`** / `source="*"` on a
-    model-column-converting field, and a relation bound to its `attname` or to the `pk`
-    alias of a relation key, raise
+    model-column-converting field, a relation bound to its `attname` or to the `pk`
+    alias of a relation key, and a field whose kind disagrees with the column it writes (a
+    relation over a scalar or file column, the scalar key's `pk` alias included, a file
+    field over a scalar column, any other field over a file column), raise
     [`ConfigurationError`][glossary-configurationerror]; **the fail-loud dispatch — a
     known field maps, but a custom `class CustomField(serializers.Field)` raises
     [`ConfigurationError`][glossary-configurationerror]** (the catch-all-shadowing
@@ -3228,7 +3236,8 @@ The completion contract.
    (`category`/`category_id` → `categoryId`, `category_pk` → `categoryPk`, no doubled
    suffix), `source` → backing column, declared name preserved as the DRF write-back
    key; dotted `source` / `source="*"` on a model-column-converting field rejected; a
-   relation bound to its `attname` or to the `pk` alias of a relation key rejected; a choice
+   relation bound to its `attname` or to the `pk` alias of a relation key rejected; a field
+   whose kind disagrees with the column it writes rejected; a choice
    field admitting a value its choice
    column's read enum has no member for rejected; a `MultipleChoiceField` or a `ListField`
    choice child over a single-value choice column rejected).
@@ -3472,8 +3481,31 @@ silently picking the model column (the graphene-django trap). A benign rename
 (`display_name = CharField(source="name")` — str vs str) agrees and resolves to the model
 scalar; a `choices` column keeps the enum symmetry (the check is skipped there); a
 consumer-declared `ChoiceField` is handled by the declared-choices rule (it emits the
-serializer-only enum, above) BEFORE this scalar-disagreement check. This is a class-creation /
-bind-time raise (an invalid configuration), so it is package-tested, not live.
+serializer-only enum, above) BEFORE this scalar-disagreement check.
+
+The policy covers the KIND too, for every model-backed field: a declared one, an
+auto-generated one (a `serializer_field_mapping` override can build a file field for a scalar
+column) and one `get_fields()` adds. No write through such a field is correct. Over a scalar
+column, DRF writes what it validates a relation or file field to (a related instance, an
+uploaded file) into the column `source` names, which cannot hold it: depending on the shape
+the runtime agreement guard (below) refuses it, the database rejects it, or a text column
+stores the related row's `str()`. Over a file column, the input is the column's `Upload`,
+which anything but a `FileField` cannot validate. A relation (`PrimaryKeyRelatedField`, `many=True`
+included) or file field (`FileField` / `ImageField`) over a scalar column, and any field other
+than a `FileField` over a file column, FAIL LOUD naming the field, its class, its `source`,
+the column, both kinds and the remedy (declare a field of the column's kind, or point
+`source` at a column of the field's kind). A relation over `pk` where the primary key is a
+scalar (an integer or a text key) has no backing column but writes one, so it is refused the
+same way. The check reads the schema-time field (`get_serializer_for_schema()`, the input's
+source of truth per
+[Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth)),
+so a wrong-kind field there is refused even when the runtime
+`serializer_class` declares a matching one. The agreement reading is one predicate,
+`rest_framework/serializer_converter.py::serializer_field_fits_kind`, which the runtime
+guard's file and scalar arms share. Over a scalar column a declared field converts first,
+so a declared `SlugRelatedField` / `HyperlinkedRelatedField` there keeps the conversion's own
+"only PrimaryKeyRelatedField is supported" refusal. This is a class-creation / bind-time
+raise (an invalid configuration), so it is package-tested, not live.
 
 ### Thread DRF field metadata into the SDL
 
@@ -3494,7 +3526,8 @@ Earned live by `createShelfViaMetadataSerializer`'s `label` field.
 
 `rest_framework/inputs.py::_walk_serializer_fields` COLLECTS every per-field conversion error
 (unsupported field, non-PK relation, a relation bound to its `attname` or `pk` alias, missing
-relation-primary, dotted / `source="*"`, the type-override conflict) instead of raising on
+relation-primary, dotted / `source="*"`, the type-override conflict, a kind mismatch)
+instead of raising on
 the first, folds in the input-attr / GraphQL-name / source collision messages
 (`_collect_input_attr_collision_messages`), and raises ONE `ConfigurationError`
 (`_aggregate_field_problems`). A SINGLE problem is raised verbatim (so the precise per-field
@@ -3517,7 +3550,8 @@ serializer must contain `spec.target_name`, have it WRITABLE (not `read_only`), 
 `source`, keep a relation as `PrimaryKeyRelatedField` /
 `ManyRelatedField(PrimaryKeyRelatedField)` over the same `related_model`, and keep a file /
 scalar kind compatible (a scalar that became a relation or file, or vice versa, is a
-mismatch). It additionally holds two drift arms the coarse checks cannot see: the runtime
+mismatch; `serializer_field_fits_kind`, the predicate the schema build refuses a kind
+mismatch by). It additionally holds two drift arms the coarse checks cannot see: the runtime
 field's **requiredness** must match what the schema emitted (given the operation and
 `Meta.optional_fields`), and its emitted **annotation `repr`** must match the one the
 descriptor recorded. Any divergence is a framework `ConfigurationError` at the boundary, NOT a

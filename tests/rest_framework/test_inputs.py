@@ -1244,6 +1244,44 @@ def test_column_bound_key_relation_builds_on_update_and_is_refused_on_create(
         build_serializer_input_class(serializer_class, operation_kind=CREATE)
 
 
+@pytest.mark.parametrize(
+    ("declared", "field_class"),
+    [
+        pytest.param({"source": "id"}, "PrimaryKeyRelatedField", id="pk-column"),
+        pytest.param({"source": "pk"}, "PrimaryKeyRelatedField", id="pk-alias"),
+        pytest.param({"source": "pk", "many": True}, "ManyRelatedField", id="pk-alias-many"),
+    ],
+)
+def test_relation_over_a_scalar_key_builds_on_update_and_is_refused_on_create(
+    declared: dict[str, object],
+    field_class: str,
+) -> None:
+    """A relation written to a scalar primary key builds the update input and refuses the create.
+
+    The update leaves every field writing the key out before any field converts, so the update
+    input builds without it; the create converts it and refuses the kind mismatch, prefixed
+    with the field's name by the walk.
+    """
+    _register_products_types()
+    ref: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
+        queryset=product_models.Category.objects.all(),
+        **declared,
+    )
+    serializer_class = _keyed_serializer(product_models.Item, "name", ref=ref)
+    message = (
+        f"ref: Serializer field 'ref' ({field_class}, source {declared['source']!r}) is a "
+        "relation field, but the model column it writes, Item.id, is a scalar column, which "
+        "cannot hold the related instance DRF validates the field to. Declare a scalar field "
+        "for that column, or point source at a relation column."
+    )
+
+    partial_cls, _shape = build_serializer_input_class(serializer_class, operation_kind=PARTIAL)
+
+    assert set(_field_map(partial_cls)) == {"name"}
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        build_serializer_input_class(serializer_class, operation_kind=CREATE)
+
+
 def test_writable_source_collisions_keys_by_resolved_model_attribute() -> None:
     """With a model, the attname and ``pk`` spellings collide with the field they alias."""
     assert serializer_inputs.writable_source_collisions(

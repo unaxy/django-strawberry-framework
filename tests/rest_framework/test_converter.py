@@ -14,6 +14,10 @@ Covers ``django_strawberry_framework/rest_framework/serializer_converter.py``:
   ``source``; declared name preserved as ``target_name``), the id-like-suffix rule,
   the dotted-``source`` rejection, the serializer-only relation (``queryset.model``),
   and the missing-primary-DjangoType raise;
+- a field whose kind (scalar / file / relation) disagrees with the column it writes (refused:
+  a relation over a scalar, file or scalar-key column, the ``pk`` alias included, a file field
+  over a scalar column, any other field over a file column) beside the matching-kind controls
+  and a ``SlugRelatedField`` over a scalar column keeping its own refusal;
 - a choice field admitting a value (a declared choice, or ``""`` from ``allow_blank``) its
   choice column does not list (refused: declared, ``source``-mapped, ``extra_kwargs``, an
   integer column) beside the accepted ``blank=True`` column, the read-back comparison and the
@@ -74,7 +78,7 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import model_column_write_kind
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import serializer_converter
-from django_strawberry_framework.rest_framework.accessors import bound_fields
+from django_strawberry_framework.rest_framework.accessors import base_fields, bound_fields
 from django_strawberry_framework.rest_framework.serializer_converter import (
     FILE,
     RELATION_MULTI,
@@ -820,6 +824,420 @@ def test_relation_bound_to_the_pk_alias_of_its_key_is_refused(
     )
     with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
         resolve_serializer_field(field, model, "ProbeInput")
+
+
+def _categories() -> models.QuerySet[product_models.Category]:
+    """The ``Category`` queryset a probe relation field validates against."""
+    return product_models.Category.objects.all()
+
+
+def _pk_relation(**kwargs: object) -> DRFField:
+    """A ``PrimaryKeyRelatedField`` over ``Category`` (``many=True`` builds a ``ManyRelatedField``)."""
+    relation: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
+        queryset=_categories(),
+        **kwargs,
+    )
+    return relation
+
+
+def _slug_relation(**kwargs: object) -> DRFField:
+    """A ``SlugRelatedField`` over ``Category.name``."""
+    relation: _SlugRelation[product_models.Category] = serializers.SlugRelatedField(
+        slug_field="name",
+        queryset=_categories(),
+        **kwargs,
+    )
+    return relation
+
+
+def _kind_mismatch_message(
+    name: str,
+    field_class: str,
+    source: str,
+    column: str,
+    kinds: tuple[str, str],
+) -> str:
+    """The full kind-mismatch refusal for ``name``; ``kinds`` is (field kind, column kind)."""
+    field_kind, column_kind = kinds
+    if column_kind == "file":
+        consequence = f"whose input is an Upload the {field_class} cannot validate"
+    else:
+        validated = "uploaded file" if field_kind == "file" else "related instance"
+        consequence = f"which cannot hold the {validated} DRF validates the field to"
+    return (
+        f"Serializer field {name!r} ({field_class}, source {source!r}) is a {field_kind} field, "
+        f"but the model column it writes, {column}, is a {column_kind} column, {consequence}. "
+        f"Declare a {column_kind} field for that column, or point source at a {field_kind} "
+        "column."
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "name",
+        "make_field",
+        "field_class",
+        "source",
+        "column",
+        "kinds",
+    ),
+    [
+        pytest.param(
+            "ref",
+            lambda: _pk_relation(source="description"),
+            "PrimaryKeyRelatedField",
+            "description",
+            "Item.description",
+            ("relation", "scalar"),
+            id="rel-over-text",
+        ),
+        pytest.param(
+            "refs",
+            lambda: _pk_relation(source="description", many=True),
+            "ManyRelatedField",
+            "description",
+            "Item.description",
+            ("relation", "scalar"),
+            id="rel-many-over-text",
+        ),
+        pytest.param(
+            "ref",
+            lambda: _pk_relation(source="is_private"),
+            "PrimaryKeyRelatedField",
+            "is_private",
+            "Item.is_private",
+            ("relation", "scalar"),
+            id="rel-over-bool",
+        ),
+        pytest.param(
+            "ref",
+            lambda: _pk_relation(source="attachment"),
+            "PrimaryKeyRelatedField",
+            "attachment",
+            "Item.attachment",
+            ("relation", "file"),
+            id="rel-over-file",
+        ),
+        pytest.param(
+            "refs",
+            lambda: _pk_relation(source="attachment", many=True),
+            "ManyRelatedField",
+            "attachment",
+            "Item.attachment",
+            ("relation", "file"),
+            id="rel-many-over-file",
+        ),
+        pytest.param(
+            "ref",
+            lambda: _pk_relation(source="id"),
+            "PrimaryKeyRelatedField",
+            "id",
+            "Item.id",
+            ("relation", "scalar"),
+            id="rel-over-pk-column",
+        ),
+        pytest.param(
+            "ref",
+            lambda: _pk_relation(source="pk"),
+            "PrimaryKeyRelatedField",
+            "pk",
+            "Item.id",
+            ("relation", "scalar"),
+            id="rel-over-pk-alias",
+        ),
+        pytest.param(
+            "refs",
+            lambda: _pk_relation(source="pk", many=True),
+            "ManyRelatedField",
+            "pk",
+            "Item.id",
+            ("relation", "scalar"),
+            id="rel-many-over-pk-alias",
+        ),
+        pytest.param(
+            "attachment",
+            lambda: serializers.FileField(source="name"),
+            "FileField",
+            "name",
+            "Item.name",
+            ("file", "scalar"),
+            id="file-over-text",
+        ),
+        pytest.param(
+            "picture",
+            lambda: serializers.ImageField(source="description"),
+            "ImageField",
+            "description",
+            "Item.description",
+            ("file", "scalar"),
+            id="image-over-text",
+        ),
+        pytest.param(
+            "upload",
+            lambda: serializers.FileField(source="id"),
+            "FileField",
+            "id",
+            "Item.id",
+            ("file", "scalar"),
+            id="file-over-pk-column",
+        ),
+        pytest.param(
+            "label",
+            lambda: serializers.CharField(source="attachment"),
+            "CharField",
+            "attachment",
+            "Item.attachment",
+            ("scalar", "file"),
+            id="char-over-file",
+        ),
+        pytest.param(
+            "count",
+            lambda: serializers.IntegerField(source="attachment"),
+            "IntegerField",
+            "attachment",
+            "Item.attachment",
+            ("scalar", "file"),
+            id="int-over-file",
+        ),
+        pytest.param(
+            "ref",
+            lambda: _slug_relation(source="attachment"),
+            "SlugRelatedField",
+            "attachment",
+            "Item.attachment",
+            ("relation", "file"),
+            id="slug-over-file",
+        ),
+    ],
+)
+def test_field_whose_kind_disagrees_with_its_column_is_refused(
+    name: str,
+    make_field: Callable[[], DRFField],
+    field_class: str,
+    source: str,
+    column: str,
+    kinds: tuple[str, str],
+) -> None:
+    """A serializer field of another kind than the column it writes fails loud at build.
+
+    The build would type the input as the column (a scalar, or ``Upload``) while DRF validates
+    the declared field, so the per-request agreement guard would refuse every write. The
+    refusal names the field, its class, its ``source``, the column and both kinds, for a
+    relation over a scalar or file column (``many=True`` included), a relation over the
+    scalar primary key by its name or the ``pk`` alias, a file field over a scalar column, and
+    any field but a ``FileField`` over a file column.
+    """
+    _register_products_types()
+    field = bound_fields(_relation_field_serializer(product_models.Item, name, make_field())())[
+        name
+    ]
+    message = _kind_mismatch_message(name, field_class, source, column, kinds)
+
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        resolve_serializer_field(field, product_models.Item, "ProbeInput")
+
+
+def _get_fields_serializer(
+    make_probe: Callable[[], DRFField],
+) -> type[serializers.ModelSerializer[product_models.Item]]:
+    """An ``Item`` serializer over ``name`` whose ``get_fields()`` adds ``probe`` undeclared."""
+
+    class GetFieldsSer(ModelSerializerBase[product_models.Item]):
+        class Meta:
+            model = product_models.Item
+            fields = ("name",)
+
+        @override
+        def get_fields(self) -> dict[str, DRFField]:
+            fields = base_fields(super())
+            fields["probe"] = make_probe()
+            return fields
+
+    return GetFieldsSer
+
+
+def _field_mapping_serializer() -> type[serializers.ModelSerializer[models.Model]]:
+    """An ``Item`` serializer whose ``serializer_field_mapping`` builds a ``BooleanField`` as a file."""
+    mapping = dict_of(read_attr(serializers.ModelSerializer, "serializer_field_mapping"))
+    mapping[models.BooleanField] = serializers.FileField
+    meta = type("Meta", (), {"model": product_models.Item, "fields": ("is_private",)})
+    return type(
+        "FieldMappingSer",
+        (serializers.ModelSerializer,),
+        {"serializer_field_mapping": mapping, "Meta": meta},
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "make_serializer",
+        "name",
+        "field_class",
+        "source",
+        "column",
+        "kinds",
+    ),
+    [
+        pytest.param(
+            lambda: _get_fields_serializer(lambda: _pk_relation(source="description")),
+            "probe",
+            "PrimaryKeyRelatedField",
+            "description",
+            "Item.description",
+            ("relation", "scalar"),
+            id="get-fields-rel-over-text",
+        ),
+        pytest.param(
+            lambda: _get_fields_serializer(lambda: serializers.FileField(source="description")),
+            "probe",
+            "FileField",
+            "description",
+            "Item.description",
+            ("file", "scalar"),
+            id="get-fields-file-over-text",
+        ),
+        pytest.param(
+            _field_mapping_serializer,
+            "is_private",
+            "FileField",
+            "is_private",
+            "Item.is_private",
+            ("file", "scalar"),
+            id="field-mapping-file-over-bool",
+        ),
+    ],
+)
+def test_undeclared_field_whose_kind_disagrees_with_its_column_is_refused(
+    make_serializer: Callable[[], type[serializers.ModelSerializer[models.Model]]],
+    name: str,
+    field_class: str,
+    source: str,
+    column: str,
+    kinds: tuple[str, str],
+) -> None:
+    """A field the serializer builds without declaring it is kind-checked like a declared one.
+
+    ``get_fields()`` can add a relation or file field, and a ``serializer_field_mapping``
+    override can build a file field for a scalar column; neither is in ``_declared_fields``,
+    yet DRF writes what it validates the field to into the column all the same.
+    """
+    _register_products_types()
+    field = bound_fields(make_serializer()())[name]
+    message = _kind_mismatch_message(name, field_class, source, column, kinds)
+
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        resolve_serializer_field(field, product_models.Item, "ProbeInput")
+
+
+@pytest.mark.parametrize(
+    ("name", "declared"),
+    [
+        pytest.param("ref", {"source": "pk"}, id="rel-over-text-pk-alias"),
+        pytest.param("refs", {"source": "pk", "many": True}, id="rel-many-over-text-pk-alias"),
+    ],
+)
+def test_relation_over_the_pk_alias_of_a_text_key_is_refused(
+    name: str,
+    declared: dict[str, object],
+) -> None:
+    """A relation over ``pk`` where the primary key is a text column is a kind mismatch.
+
+    DRF would write the related instance under ``pk``, and a text key stores its ``str()``.
+    """
+    relation: _PkRelation[library_models.Publisher] = serializers.PrimaryKeyRelatedField(
+        queryset=library_models.Publisher.objects.all(),
+        **declared,
+    )
+    field = bound_fields(_relation_field_serializer(library_models.Edition, name, relation)())[
+        name
+    ]
+    field_class = "ManyRelatedField" if "many" in declared else "PrimaryKeyRelatedField"
+    message = _kind_mismatch_message(
+        name,
+        field_class,
+        "pk",
+        "Edition.isbn_13",
+        ("relation", "scalar"),
+    )
+
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        resolve_serializer_field(field, library_models.Edition, "ProbeInput")
+
+
+@pytest.mark.parametrize(
+    ("make_field", "kind", "annotation"),
+    [
+        pytest.param(
+            lambda: serializers.FileField(source="attachment"),
+            FILE,
+            Upload,
+            id="file-over-file",
+        ),
+        pytest.param(
+            lambda: serializers.ImageField(source="attachment"),
+            FILE,
+            Upload,
+            id="image-over-file",
+        ),
+        pytest.param(
+            lambda: serializers.CharField(source="description"),
+            SCALAR,
+            str,
+            id="char-over-text",
+        ),
+    ],
+)
+def test_field_whose_kind_matches_its_column_builds(
+    make_field: Callable[[], DRFField],
+    kind: str,
+    annotation: object,
+) -> None:
+    """A file field over a file column and a scalar over a scalar column build as before."""
+    _register_products_types()
+    field = bound_fields(_relation_field_serializer(product_models.Item, "probe", make_field())())[
+        "probe"
+    ]
+
+    _attr, built, spec = resolve_serializer_field(field, product_models.Item, "ProbeInput")
+
+    assert (spec.kind, built) == (kind, annotation)
+
+
+def test_pk_relation_over_a_relation_column_passes_the_kind_check() -> None:
+    """A ``PrimaryKeyRelatedField`` over a foreign key builds its relation input as before."""
+    _register_products_types()
+    field = bound_fields(
+        _relation_field_serializer(product_models.Item, "cat", _pk_relation(source="category"))(),
+    )["cat"]
+
+    _attr, annotation, spec = resolve_serializer_field(field, product_models.Item, "ProbeInput")
+
+    assert (spec.kind, spec.related_model, annotation) == (
+        RELATION_SINGLE,
+        product_models.Category,
+        int,
+    )
+
+
+def test_slug_relation_over_a_scalar_column_keeps_the_pk_relation_refusal() -> None:
+    """A ``SlugRelatedField`` over a scalar column keeps the conversion's own refusal text."""
+    _register_products_types()
+    field = bound_fields(
+        _relation_field_serializer(
+            product_models.Item,
+            "ref",
+            _slug_relation(source="description"),
+        )(),
+    )["ref"]
+    message = (
+        "Serializer relation field 'ref' is a SlugRelatedField; only PrimaryKeyRelatedField is "
+        "supported (the relation input decodes to a primary key). A slug / URL / custom related "
+        "field has no pk-based input shape - drop it via Meta.fields / Meta.exclude, or use a "
+        "PrimaryKeyRelatedField."
+    )
+
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        resolve_serializer_field(field, product_models.Item, "ProbeInput")
 
 
 @pytest.mark.parametrize(
@@ -2590,21 +3008,25 @@ def test_unbound_model_backed_field_is_treated_as_auto_generated() -> None:
     assert annotation is str
 
 
-def test_declared_model_backed_non_scalar_conversion_defers_to_model_annotation() -> None:
-    """A declared model-backed field whose converter is not scalar falls back to the column type."""
+@pytest.mark.usefixtures("_restore_converter_registry")
+def test_declared_model_backed_scalar_without_an_annotation_takes_the_column_type() -> None:
+    """A registered scalar converter returning no annotation defers to the column's scalar.
+
+    The field is a scalar, so it passes the kind check; with no declared scalar to compare,
+    the column's own annotation types the input.
+    """
     _register_products_types()
+    register_serializer_field_converter(
+        _CustomHexField,
+        lambda field: SerializerFieldConversion(annotation=None, required=field.required),
+    )
+    field = bound_fields(
+        _relation_field_serializer(product_models.Item, "hex", _CustomHexField(source="name"))(),
+    )["hex"]
 
-    class FileOverrideSer(ModelSerializerBase[product_models.Item]):
-        attachment = serializers.FileField(source="name")
-
-        class Meta:
-            model = product_models.Item
-            fields = ("attachment",)
-
-    field = bound_fields(FileOverrideSer())["attachment"]
     _attr, annotation, spec = resolve_serializer_field(field, product_models.Item, "X")
-    assert spec.kind == SCALAR
-    assert annotation is str
+
+    assert (spec.kind, annotation) == (SCALAR, str)
 
 
 def test_auto_generated_model_field_is_not_conflict_checked() -> None:

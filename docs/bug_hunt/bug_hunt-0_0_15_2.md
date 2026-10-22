@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 190 done, 127 to do.
+Progress: 191 done, 127 to do.
 
 ## Done
 
@@ -741,6 +741,15 @@ Progress: 190 done, 127 to do.
   is unchanged. REVIEW.md and the module docstring say so;
   `tests/test_review_plan.py::test_scope_resolves_deleted_and_renamed_paths_like_changed` (10 rows) pins it, mutations
   M1-M4 red
+- [x] 276. A model-backed `SerializerMutation` field whose serializer kind disagreed with its column (a
+  `PrimaryKeyRelatedField` or `FileField` over a scalar column, anything but a `FileField` over a file column, a
+  relation over a scalar primary key's `pk` alias) built as the column's kind and failed every write with a masked
+  error: fixed, `rest_framework/serializer_converter.py::serializer_field_fits_kind` is the one kind reading (shared
+  with `resolvers.py::_assert_field_agreement`) and `_reject_kind_mismatch` refuses the field at schema build, declared,
+  auto-generated or added in `get_fields()`, as `get_serializer_for_schema()` returns it; existing refusal texts
+  unchanged. Two shapes that wrote at the parent now refuse: a relation over a text primary key's `pk` alias (it stored
+  the related row's `str()` as the key) and a schema-map field of another kind than its runtime twin (spec-039
+  Decision 7)
 
 ## Outside review of the fixes
 
@@ -856,17 +865,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
-- [ ] 276. A model-backed `SerializerMutation` field whose serializer kind disagrees with its column builds as the
-  column's kind and then fails every write: `rest_framework/serializer_converter.py::resolve_serializer_field` types by
-  `model_column_write_kind` alone (the SCALAR arm's `kind != SCALAR` line defers to the model converter, the FILE arm
-  never checks), while `rest_framework/resolvers.py::_assert_field_agreement` refuses the same field per request. Shapes:
-  `PrimaryKeyRelatedField(source="id" | "description" | "is_private")` builds `Int!` / `String!` / `Boolean!` (`many=True`
-  too, not even a list), over `attachment` builds `Upload!`, `source="pk"` over a scalar pk builds `refId: ID!`
-  (`_reject_relation_column_source` returns: an `AutoField`'s attname equals its name), `FileField(source="description")`
-  builds `String!`, `CharField(source="attachment")` builds `Upload!`; every create / update answers the masked "An
-  unexpected error occurred" (no data is written through the package; plain DRF writes the related row's `str()`).
-  Refuse the kind mismatch at build (spec-039 "type-override conflict policy"), one predicate shared with
-  `_assert_field_agreement`
 - [ ] 295. A `ModelForm` declaring a `ModelChoiceField` under a non-relation column's name (`description =
   ModelChoiceField(queryset=Category.objects.all())`) builds as the column's scalar (`description: String!`), and
   `DjangoModelFormMutation` create and update write the chosen row's `str()` into the column:
@@ -942,6 +940,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `ValidationError` for a two-bound range (`price__exact=[a, b]`), while a one-sided range now works through `__gte` /
   `__lte`; nothing validates the declaration. Default `lookup_expr` to `range` (django-filter's `RangeFilter` ignores
   the declared lookup), or refuse a non-`range` lookup with `ConfigurationError` at class build?
+- [ ] 322. CHANGELOG entry for item 276: a `SerializerMutation` field whose kind disagrees with the model column it
+  writes (a relation or file field over a scalar column, anything but a `FileField` over a file column, a relation over
+  a scalar primary key's `pk` alias) is refused at schema build with `ConfigurationError` naming both kinds, instead of
+  building as the column's kind and failing every write with "An unexpected error occurred"; a relation over a text
+  primary key's `pk` alias no longer stores the related row's `str()` as the key
 - [ ] 320. CHANGELOG entry for item 290: a GlobalID filter into a type whose `relay.NodeID[...]` names a
   non-primary-key column compares that column on the type's own `id` key and through every relation (forward,
   `to_field`, to-many), so the id the server emits matches its row and an id no row carries matches nothing; a node id

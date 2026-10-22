@@ -1645,6 +1645,122 @@ def test_lone_relation_bound_to_the_pk_alias_of_its_key_fails_the_bind(
         finalize_django_types()
 
 
+def _item_ref_serializer(source: str) -> type[serializers.ModelSerializer[models.Model]]:
+    """``Item`` over ``name`` plus ``ref``, a ``Category`` relation written to ``source``."""
+    ref: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
+        source=source,
+        queryset=product_models.Category.objects.all(),
+    )
+    return _alias_serializer(product_models.Item, {"ref": ref}, ("name", "ref"))
+
+
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_relation_over_a_scalar_column_fails_the_bind(operation: str) -> None:
+    """A relation field written to a scalar column fails the bind on create and update alike.
+
+    The input would be typed as the column's scalar while DRF validates a related instance, so
+    every write would fail the per-request agreement guard; ``finalize_django_types`` refuses
+    the mutation instead, the field named by the walk.
+    """
+    _declare_products_primaries()
+    mutation_meta = type(
+        "Meta",
+        (),
+        {
+            "permission_classes": [],
+            "serializer_class": _item_ref_serializer("description"),
+            "operation": operation,
+        },
+    )
+    mutation = type("RefOverTextMut", (SerializerMutation,), {"Meta": mutation_meta})
+    assert mutation in iter_mutations()
+
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "ref: Serializer field 'ref' (PrimaryKeyRelatedField, source 'description') is a "
+            "relation field, but the model column it writes, Item.description, is a scalar "
+            "column, which cannot hold the related instance DRF validates the field to.",
+        ),
+    ):
+        finalize_django_types()
+
+
+def test_schema_hook_field_of_another_kind_fails_the_bind() -> None:
+    """The kind check reads the schema-time field, whatever the runtime serializer declares.
+
+    ``get_serializer_for_schema()`` is the input's source of truth: a relation over a text
+    column there fails the bind even though the runtime ``serializer_class`` declares a
+    matching ``CharField`` under the same name.
+    """
+    _declare_products_primaries()
+    probe: DRFField = serializers.CharField(source="description")
+    runtime_serializer = _alias_serializer(
+        product_models.Item,
+        {"probe": probe},
+        ("name", "probe"),
+    )
+    schema_probe: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
+        source="description",
+        queryset=product_models.Category.objects.all(),
+    )
+    schema_serializer = _alias_serializer(
+        product_models.Item,
+        {"probe": schema_probe},
+        ("name", "probe"),
+    )
+
+    class SchemaKindMut(SerializerMutation):
+        class Meta:
+            serializer_class = runtime_serializer
+            operation = "create"
+            permission_classes = []
+
+        @classmethod
+        @override
+        def get_serializer_for_schema(cls) -> dict[str, DRFField]:
+            return dict(bound_fields(schema_serializer()))
+
+    assert SchemaKindMut in iter_mutations()
+
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "probe: Serializer field 'probe' (PrimaryKeyRelatedField, source 'description') is "
+            "a relation field, but the model column it writes, Item.description, is a scalar "
+            "column,",
+        ),
+    ):
+        finalize_django_types()
+
+
+def test_update_relation_over_the_scalar_key_builds_without_it() -> None:
+    """An update leaves a relation written to the scalar primary key out, so the bind succeeds.
+
+    The update input drops every field that writes the key before any field converts, so the
+    kind mismatch the create refuses never reaches the update.
+    """
+    _declare_products_primaries()
+    mutation_meta = type(
+        "Meta",
+        (),
+        {
+            "permission_classes": [],
+            "serializer_class": _item_ref_serializer("id"),
+            "operation": "update",
+        },
+    )
+    mutation = type("RefOverKeyUpdateMut", (SerializerMutation,), {"Meta": mutation_meta})
+    assert mutation in iter_mutations()
+
+    finalize_django_types()
+
+    bound = read_attr(mutation, "_input_class")
+    assert isinstance(bound, type)
+    definition = get_object_definition(bound, strict=True)
+    assert {field.python_name for field in definition.fields} == {"name"}
+
+
 # ---------------------------------------------------------------------------
 # Meta.optional_fields is the MUTATION's key
 # ---------------------------------------------------------------------------
