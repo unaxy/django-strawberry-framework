@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 192 done, 136 to do.
+Progress: 193 done, 137 to do.
 
 ## Done
 
@@ -758,6 +758,11 @@ Progress: 192 done, 136 to do.
   `DjangoType.get_queryset`, README and GLOSSARY pks 468 / 553 / 554 say so, including the limit (instance attributes
   set outside the constructor arguments are not carried). Fakeshop `LoanQuerySet.with_note()` behind a default-off
   `LoanType` hook flag; live sync + async rows and package rows, mutations M1-M5 red
+- [x] 333. The KANBAN release-readiness checklist (BoardDoc 11) asked for a local `uv run pytest` passing with 100%
+  package coverage, against AGENTS rule 16 (the full suite and the coverage gate run only in GitHub Actions): fixed: the
+  bullet requires the full dispatched `django.yml` matrix (`gh workflow run django.yml`: every Python / Django cell,
+  single-DB and `FAKESHOP_SHARDED=1`, the lint job) to pass on the release commit, the `fail_under = 100` coverage gate
+  included; BoardDoc 11 written with `.update()`, KANBAN.md / KANBAN.html re-rendered
 
 ## Outside review of the fixes
 
@@ -988,6 +993,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
   rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script
   writes there): refuse with a `WorkspaceError` naming the contents, or remove them
+- [ ] 339. `scripts/bug_hunt.py::_final_gate_block` renders "Run `uv run pytest`; require a passing suite and 100%
+  configured package coverage" into every generated hunt, against AGENTS rule 16 (the full suite and the coverage gate
+  run only in GitHub Actions); restate it as the dispatched `django.yml` matrix the release checklist (BoardDoc 11)
+  names, and regenerate nothing else
 
 ## To do: holes found re-checking the fixes
 

@@ -4027,7 +4027,7 @@ Before a release:
 - New source modules have mirrored tests in the correct tree.
 - `uv run ruff check --fix .` passes.
 - `uv run ruff format .` passes.
-- `uv run pytest` passes with 100% package coverage when explicitly run for release validation.
+- The full `django.yml` matrix, dispatched with `gh workflow run django.yml` (every Python / Django cell, single-DB and `FAKESHOP_SHARDED=1`, plus the lint job), passes on the release commit, including the `fail_under = 100` package coverage gate on the latest single-DB cell.
 
 ## Notes for Kanban maintenance
 
