@@ -237,12 +237,10 @@ def masking_is_active(policy: ErrorPolicy) -> bool:
     """Whether ``policy`` masks anything for the operation being answered now.
 
     The ``DEBUG`` read fails toward MASKING, because this is the question the
-    mask asks: a ``DEBUG`` that cannot be read at all is treated as not exactly
-    ``True``. An unreadable ``DEBUG`` is not hypothetical: deleting the attribute
-    (the proxy caches reads in its own ``__dict__``, so both layers must lose it)
-    or answering a schema outside a configured Django process both raise on the
-    read (``AttributeError`` / ``ImproperlyConfigured``), and letting that escape
-    would answer a masking question by exception. ``enabled`` is an exact
+    mask asks: a read that raises ``AttributeError`` (the setting is absent) or
+    ``ImproperlyConfigured`` (no configured Django settings) is treated as a
+    ``DEBUG`` that is not exactly ``True``, so masking stays on rather than the
+    question being answered by exception. ``enabled`` is an exact
     ``bool`` field of an exact ``ErrorPolicy`` and is read as stored.
     """
     try:

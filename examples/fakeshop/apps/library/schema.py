@@ -1279,10 +1279,9 @@ class Query:
     ) -> QuerySet[models.CirculationDesk]:
         """Acceptance surface for the whole-set ``"__all__"`` filter sweep over every relation kind.
 
-        ``CirculationDeskFilter`` declares ``fields = "__all__"``, so its ``shelf`` and
-        ``contentType`` keys filter by the related row's primary key (``ShelfType`` is not
-        a Relay node and no ``DjangoType`` exposes ``ContentType``). The desk's own
-        ``get_queryset`` cascade runs first.
+        ``CirculationDeskFilter`` declares ``fields = "__all__"``, so its ``shelf`` key
+        filters by the related row's primary key (``ShelfType`` is not a Relay node). The
+        desk's own ``get_queryset`` cascade runs first.
         """
         queryset = CirculationDeskType.get_queryset(
             models.CirculationDesk.objects.order_by("id"),

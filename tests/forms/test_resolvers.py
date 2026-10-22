@@ -26,13 +26,14 @@ field on a partial input, ``to_field_name`` reconstruction (including an M2M mem
 whose ``to_field_name`` value is ``""``), a raw-pk M2M element ``""`` decoded through a
 hiding text-keyed type (no fakeshop text-keyed type hides a row), ImageField
 reconstruction key absence, decode-helper envelopes, optimizer
-``dst_optimizer_plan`` G2, and the save-time blank non-text choice column shapes
-fakeshop has no column for (omitted with no default, decimal / date, update
-``null``, a filling-in model ``save()``, an unrelated consumer ``ValueError``), the
-save-time ``None`` on a ``blank=True, null=False`` column fakeshop's live
-``createItemHoldViaForm`` does not reach (a plain integer column sent ``null``, omitted
-or updated to ``null``, a filling-in model ``save()``, and an ``ItemHold`` update
-sending ``itemId: null``, which no fakeshop form offers), and
+``dst_optimizer_plan`` G2, and the save-time rule for a ``blank=True, null=False``
+column the form cleans to a value it cannot store (``None``, foreign key included, or
+``""`` on a non-text choice column) over the shapes fakeshop has no column for: ``""``
+on a non-text choice column (omitted with no default, decimal / date, update ``null``,
+a filling-in model ``save()``, an unrelated consumer ``ValueError``), and ``None``
+where fakeshop's live ``createItemHoldViaForm`` does not reach it (a plain integer
+column sent ``null``, omitted or updated to ``null``, a filling-in model ``save()``,
+and an ``ItemHold`` update sending ``itemId: null``, which no fakeshop form offers), and
 the keying of a save-time Django ``ValidationError`` by a name fakeshop's own
 ``Item.save()`` rule never raises (a relation ``attname``, a name only the form
 declares, a dotted name): the ``ModelForm`` reads it against the backing model, the
@@ -2605,7 +2606,8 @@ def test_reconstruct_partial_data_m2m_does_not_exist(monkeypatch: pytest.MonkeyP
 
 
 # ---------------------------------------------------------------------------
-# Save-time blank non-text choice column (``_modelform_save_or_field_errors``)
+# Save-time unstorable ``blank=True, null=False`` column: ``""`` on a non-text choice column
+# (``_modelform_save_or_field_errors``)
 # ---------------------------------------------------------------------------
 
 

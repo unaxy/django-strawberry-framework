@@ -287,9 +287,9 @@ def _match_none_queryset(filter_instance: Filter, qs: models.QuerySet[_M]) -> mo
 def _materialize_list_shaped_values(value: object, *, message: str, code: str) -> list[object]:
     """Fail-closed materialization of a filter's list-shaped input.
 
-    Django's form fields normally supply a plain list, but callers can invoke
-    a filter directly (and a malformed raw filter mapping can bypass form
-    coercion) with an arbitrary object. Only the list/tuple shapes accepted by
+    A FilterSet hands each filter its form field's cleaned value, a plain
+    list, but a caller can invoke a filter's ``filter`` directly with an
+    arbitrary object. Only the list/tuple shapes accepted by
     the form contract are meaningful; every other shape fails closed with the
     caller's coded GraphQL error instead of leaking a raw ``TypeError`` from a
     ``len()`` / iteration the shape can never satisfy.
