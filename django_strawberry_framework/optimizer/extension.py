@@ -243,8 +243,8 @@ _PAGINATION_ARG_NAMES = frozenset(
 # insert a fresh key that evicts live plans from the bounded LRU. Membership is
 # tested with exact ``type()``, so subclasses (which may override equality) are
 # still excluded.
-_SAFE_CACHE_SCALAR_TYPES = frozenset(
-    {
+_SAFE_CACHE_SCALAR_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         type(None),
         bool,
         int,
@@ -258,7 +258,7 @@ _SAFE_CACHE_SCALAR_TYPES = frozenset(
         datetime.timedelta,
         decimal.Decimal,
         uuid.UUID,
-    },
+    ),
 )
 
 # ``_stash_on_context`` is ``utils/context.py::stash_on_context`` (re-exported
@@ -432,11 +432,8 @@ def _hashable_variable_value(value: object) -> "FrozenVariableValue":
 
 def _freeze_variable_value(value: object, active_containers: set[int]) -> "FrozenVariableValue":
     """Recursive implementation for ``_hashable_variable_value``."""
-    value_type = type(value)
-    value_type_id = id(value_type)
-    # Exact-type identity, never ``in`` on a set of classes (which would hash
-    # and compare ``value_type`` through its metaclass).
-    if any(value_type is scalar_type for scalar_type in _SAFE_CACHE_SCALAR_TYPES):
+    value_type_id = id(type(value))
+    if truth.is_exact_one_of(value, _SAFE_CACHE_SCALAR_TYPES):
         return ("scalar", value_type_id, value)
     value_is_mapping = is_mapping(value)
     value_is_set = is_abstract_set(value)
@@ -747,7 +744,7 @@ class CacheInfo(NamedTuple):
     size: int
 
 
-def _collect_schema_reachable_types(schema: object) -> "set[type[DjangoType]]":
+def _collect_schema_reachable_types(schema: object) -> "truth.IdentitySet[type[DjangoType]]":
     """Return the set of ``DjangoType`` classes reachable from the schema's root types.
 
     Traverses from ``query_type``, ``mutation_type``, and
@@ -761,7 +758,7 @@ def _collect_schema_reachable_types(schema: object) -> "set[type[DjangoType]]":
     schema construction are excluded to avoid false-positive audit
     warnings.
     """
-    reachable: set[type[DjangoType]] = set()
+    reachable: truth.IdentitySet[type[DjangoType]] = truth.IdentitySet()
     # Strawberry's ``Schema.__init__`` stores the graphql-core schema it builds at
     # ``_schema``.
     gql_schema: GraphQLSchema | None = getattr(schema, "_schema", None)

@@ -483,7 +483,7 @@ def _fingerprint_converter_extra(field: DRFField) -> tuple[object, ...] | None:
 def _fingerprint_nested(
     field: DRFField,
     field_name: str,
-    seen: frozenset[type[DRFBaseSerializer]],
+    seen: tuple[type[DRFBaseSerializer], ...],
     nested_configs: Mapping[str, NestedSerializerConfig] | None,
 ) -> tuple[object, ...] | None:
     """Return a fingerprint of a nested serializer field, else ``None``.
@@ -491,7 +491,7 @@ def _fingerprint_nested(
     A nested ``Serializer`` / ``ListSerializer`` field's generated input derives from the NESTED
     serializer's fields, so a hook that changes an OPTED-IN nested shape changes the SDL - folded
     into the fingerprint recursively so the phase-2.5 drift guard is sensitive to nested changes
-    too. The recursion is bounded by the visited-class ``seen`` set: a serializer class already on
+    too. The recursion is bounded by the visited-class ``seen`` path: a serializer class already on
     the recursion path yields a terminal cycle marker instead of recursing forever (a
     self-referential nested serializer terminates). A non-nested field yields ``None``.
 
@@ -524,12 +524,12 @@ def _fingerprint_nested(
         # the SDL and the field walk raises the canonical opt-in error. Record a shallow marker
         # WITHOUT reading child.fields (an unopted context-sensitive child may raise).
         return ("<unopted-nested>", truth.name(child_class), many)
-    if child_class in seen:
+    if truth.is_among(child_class, seen):
         return ("<cycle>", truth.name(child_class), many)
     child_field_map = read_nested_serializer_fields(child)
     child_fingerprint = _fingerprint_field_map(
         child_field_map,
-        seen | {child_class},
+        (*seen, child_class),
         nested_config.nested_fields,
     )
     return (many, child_fingerprint)
@@ -537,7 +537,7 @@ def _fingerprint_nested(
 
 def _fingerprint_field_map(
     field_map: dict[str, DRFField],
-    seen: frozenset[type[DRFBaseSerializer]],
+    seen: tuple[type[DRFBaseSerializer], ...],
     nested_configs: Mapping[str, NestedSerializerConfig] | None = None,
 ) -> tuple[tuple[object, ...], ...]:
     """Compute the recursive fingerprint core (the nested recursion).
@@ -620,7 +620,7 @@ def serializer_schema_fingerprint(
     never descended into. Deterministic + hashable; the ordered tuple preserves field order (which
     drives the descriptor identity).
     """
-    return _fingerprint_field_map(field_map, frozenset(), nested_configs)
+    return _fingerprint_field_map(field_map, (), nested_configs)
 
 
 def _serializer_meta_value(serializer_class: type[DRFBaseSerializer], name: str) -> object:
@@ -1576,9 +1576,7 @@ def guard_nested_recursion(
     ``_NESTED_MAX_DEPTH`` is the DEPTH cap (an absurdly deep but acyclic nesting). Both are
     class-creation / bind-time configuration errors, not silent truncation.
     """
-    # Identity scan, not ``in``: ``nested_path`` is a chain of class objects, and
-    # ``tuple.__contains__`` would dispatch a consumer metaclass ``__eq__``.
-    if any(visited is nested_class for visited in nested_path):
+    if truth.is_among(nested_class, nested_path):
         raise ConfigurationError(
             f"Nested serializer field {field_name!r} re-enters {truth.name(nested_class)}, which is "
             "already on the nesting path (a nested-serializer cycle); the recursive input build "

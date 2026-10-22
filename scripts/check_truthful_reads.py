@@ -63,6 +63,15 @@ Tier 1 -- fails the gate:
 * **TR008** an ``.mro`` attribute (``cls.mro()``, ``type.mro(cls)``): a
   metaclass may override ``mro``. ``truth.mro`` (any ``truth.<name>``
   function) is the replacement and is not flagged.
+* **TR009** an ``in`` / ``not in`` test whose left operand is a class read:
+  a direct ``type(x)`` / ``truth.class_of(x)`` call, a walrus around one, or a
+  plain name the same scope assigns one to (``value_type = type(value)`` ...
+  ``value_type in TYPES``). Nothing else is followed: not a parameter, a name
+  bound in another function or a closure, a loop target, tuple unpacking, a
+  subscript, ``.get`` / ``__contains__``, or ``==``. Membership hashes and
+  compares the class through its metaclass; ``truth.is_exact_one_of`` against a
+  ``truth.IdentitySet`` (or ``truth.is_among`` for a sequence) decides it by
+  identity.
 * **TR900** a ``# truth: ok`` marker with no reason text. It suppresses
   nothing.
 
@@ -195,6 +204,7 @@ TIER_1 = frozenset(
         "TR006",
         "TR007",
         "TR008",
+        "TR009",
         "TR900",
     },
 )
@@ -653,6 +663,55 @@ def _scan_node(node: ast.AST, names: _Names, emit: Emit) -> None:
                 emit(exit_node.lineno, exit_node.col_offset, "TR005", message)
     elif type(node) is ast.Call:
         _scan_call(node, names, emit)
+    if type(node) is ast.Module or isinstance(node, _NESTED_SCOPES):
+        _scan_class_membership(node, names, emit)
+
+
+def _scan_class_membership(scope: ast.AST, names: _Names, emit: Emit) -> None:
+    """Emit TR009 for every ``in`` / ``not in`` of a class read in ``scope``'s own body."""
+    nodes = [node for child in ast.iter_child_nodes(scope) for node in _scope_nodes(child)]
+    local: dict[str, list[ast.expr]] = {}
+    for node in nodes:
+        if type(node) is ast.Assign:
+            for target in node.targets:
+                if type(target) is ast.Name:
+                    local.setdefault(target.id, []).append(node.value)
+        elif (type(node) is ast.AnnAssign or type(node) is ast.NamedExpr) and (
+            type(node.target) is ast.Name and node.value is not None
+        ):
+            local.setdefault(node.target.id, []).append(node.value)
+    for node in nodes:
+        if type(node) is not ast.Compare:
+            continue
+        left = node.left
+        for op, right in zip(node.ops, node.comparators, strict=True):
+            membership = type(op) is ast.In or type(op) is ast.NotIn
+            if membership and _is_class_read(left, names, local):
+                message = "`in` on a class read runs its metaclass; use truth.is_exact_one_of"
+                emit(left.lineno, left.col_offset, "TR009", message)
+            left = right
+
+
+def _is_class_read(
+    node: ast.expr,
+    names: _Names,
+    local: dict[str, list[ast.expr]],
+    seen: frozenset[str] = _NO_NAMES,
+) -> bool:
+    """Return whether ``node`` is ``type(x)`` / ``truth.class_of(x)`` or a local name bound to one."""
+    if type(node) is ast.NamedExpr:
+        return _is_class_read(node.value, names, local, seen)
+    if type(node) is ast.Call and len(node.args) == 1 and not node.keywords:
+        targets = names.targets(node.func)
+        return "builtins.type" in targets or any(
+            target.split(".")[-2:] == [TRUTH_MODULE, "class_of"] for target in targets
+        )
+    if type(node) is ast.Name and node.id not in seen:
+        return any(
+            _is_class_read(value, names, local, seen | {node.id})
+            for value in local.get(node.id, ())
+        )
+    return False
 
 
 def _is_truth_call(targets: set[str]) -> bool:
@@ -789,6 +848,7 @@ TIER_1_CODES = (
     "TR006",
     "TR007",
     "TR008",
+    "TR009",
     "TR900",
 )
 

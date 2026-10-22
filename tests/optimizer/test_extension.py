@@ -3108,7 +3108,7 @@ def test_cache_key_includes_fragment_spread_directive_variable_value() -> None:
 
 def test_collect_schema_reachable_types_returns_empty_without_graphql_schema() -> None:
     """B6: schemas without a graphql-core schema expose no reachable types."""
-    assert _collect_schema_reachable_types(SimpleNamespace()) == set()
+    assert len(_collect_schema_reachable_types(SimpleNamespace())) == 0
 
 
 def test_check_schema_skips_unreachable_and_missing_field_map(

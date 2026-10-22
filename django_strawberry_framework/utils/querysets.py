@@ -1083,8 +1083,8 @@ def _type_is_genuinely_django(node_type: type[object]) -> bool:
 # prove genuine-Django provenance like any other object (spec-045 Decision 2).
 # ``datetime.datetime`` is listed explicitly because exact-type
 # membership does not inherit it from ``datetime.date``.
-_INERT_VALUE_TYPES: frozenset[type[object]] = frozenset(
-    {
+_INERT_VALUE_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         str,
         bytes,
         bytearray,
@@ -1098,7 +1098,7 @@ _INERT_VALUE_TYPES: frozenset[type[object]] = frozenset(
         datetime.time,
         datetime.timedelta,
         uuid.UUID,
-    },
+    ),
 )
 
 
@@ -1112,7 +1112,7 @@ def _is_inert_value(value: object) -> bool:
     (walked member-wise) or an object that must prove provenance before the seal lets
     the compiler dispatch it.
     """
-    return value is None or type(value) in _INERT_VALUE_TYPES
+    return value is None or truth.is_exact_one_of(value, _INERT_VALUE_TYPES)
 
 
 def _shadow_defect(node: object, label: str) -> tuple[str, str] | None:
@@ -1200,13 +1200,13 @@ _SQL_TEMPLATE_ATTRS: tuple[str, ...] = (
 # state (no class supplies it), so validating it needs no class-level proof. Values are
 # pinned to the exact inert scalars Django itself stores there; a consumer object under
 # any key fails closed before the seal returns.
-_TEMPLATE_PARAM_VALUE_TYPES: frozenset[type[object]] = frozenset(
-    {
+_TEMPLATE_PARAM_VALUE_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         str,
         int,
         float,
         bool,
-    },
+    ),
 )
 
 
@@ -1228,7 +1228,7 @@ def _template_params_defect(node_dict: Mapping[str, object], label: str) -> tupl
     for key, value in extra.items():
         if type(key) is not str:
             return ("untrusted", f"{label} extra has a non-string key")
-        if value is not None and type(value) not in _TEMPLATE_PARAM_VALUE_TYPES:
+        if value is not None and not truth.is_exact_one_of(value, _TEMPLATE_PARAM_VALUE_TYPES):
             return ("untrusted", f"{label} extra[{key!r}] is a {truth.kind(value)}")
     return None
 
@@ -1301,7 +1301,7 @@ def _raw_sql_node_defect(node: object, label: str) -> tuple[str, str] | None:
         return _raw_sql_params_defect(node.params, label)
     if type(node) is ExtraWhere:
         sqls = node.sqls
-        if type(sqls) not in (list, tuple):
+        if not is_exact_list_or_tuple(sqls):
             return ("untrusted", f"{label} sqls is a {truth.kind(sqls)}")
         for statement in sqls:
             if not _is_text_term(statement):
@@ -1425,7 +1425,7 @@ def _expression_state_defect(node: object, label: str) -> tuple[str, str] | None
     """
     node_dict = truth.instance_state(node)
     for attr in _EXPRESSION_SEQUENCE_STATE_ATTRS:
-        if attr in node_dict and type(node_dict[attr]) not in (list, tuple):
+        if attr in node_dict and not is_exact_list_or_tuple(node_dict[attr]):
             return ("untrusted", f"{label} {attr} is a {truth.kind(node_dict[attr])}")
     return None
 
@@ -1470,14 +1470,14 @@ def _genuine_node_defect(
 # fails the seal CLOSED with no indication that the inventories disagree.
 # ``tests/utils/test_querysets.py`` asserts the rebuild side answers for every
 # member of this set, so the two cannot drift silently.
-_PLAIN_CONTAINER_TYPES: frozenset[type[object]] = frozenset(
-    {
+_PLAIN_CONTAINER_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         list,
         tuple,
         set,
         frozenset,
         dict,
-    },
+    ),
 )
 
 
@@ -1576,7 +1576,9 @@ _DIRECT_RHS_DATA_BASES: tuple[type[object], ...] = (*_INERT_VALUE_TYPES, enum.En
 
 # MRO entries whose own hook definitions are trusted: the data bases themselves plus
 # ``object`` (whose ``__getattribute__`` every type inherits).
-_DIRECT_RHS_TRUSTED_MRO: tuple[type[object], ...] = (*_DIRECT_RHS_DATA_BASES, object)
+_DIRECT_RHS_TRUSTED_MRO: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (*_DIRECT_RHS_DATA_BASES, object),
+)
 
 
 def _static_attr_present(value: object, name: str) -> bool:
@@ -1617,11 +1619,10 @@ def _rhs_hook_defect(value_type: type[object], label: str) -> tuple[str, str] | 
     The real MRO and each class's real namespace are read (``truth.mro`` /
     ``truth.class_dict``), so a consumer METACLASS overriding ``__getattribute__`` cannot
     run code (or lie) during the very read meant to reject the type. Classes in
-    ``_DIRECT_RHS_TRUSTED_MRO`` are skipped by identity: their hooks are the interpreter's
-    own.
+    ``_DIRECT_RHS_TRUSTED_MRO`` are skipped: their hooks are the interpreter's own.
     """
     for klass in truth.mro(value_type):
-        if any(klass is trusted for trusted in _DIRECT_RHS_TRUSTED_MRO):
+        if klass in _DIRECT_RHS_TRUSTED_MRO:
             continue
         klass_dict = truth.class_dict(klass)
         for hook in _RHS_ATTRIBUTE_HOOKS:
@@ -2032,10 +2033,13 @@ def _query_payload_defect(query: object) -> tuple[str, str] | None:
 # instance) and exact ``zoneinfo.ZoneInfo``, both immutable values whose every method is
 # the interpreter's own. Every retained member is immutable, so sharing one between the
 # candidate and the sealed query is unobservable.
-_RETAINED_LEAF_TYPES: frozenset[type[object]] = (_INERT_VALUE_TYPES - {bytearray}) | {
-    datetime.timezone,
-    zoneinfo.ZoneInfo,
-}
+_RETAINED_LEAF_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
+        *(leaf for leaf in _INERT_VALUE_TYPES if leaf is not bytearray),
+        datetime.timezone,
+        zoneinfo.ZoneInfo,
+    ),
+)
 
 # Schema surfaces canonical reconstruction retains BY REFERENCE rather than rebuilds or
 # normalizes: classes (``Query.model`` and every ``output_field`` class reference are
@@ -2061,12 +2065,12 @@ _RETAINED_SCHEMA_BASES: tuple[type[object], ...] = (
 # schema: the ONE writer is ``_is_reconstructable_node``'s ``_RETAINED_SCHEMA_BASES``
 # branch, so nothing a hostile hook plants can enter the set and thereby win the inline
 # retain-by-reference test in every LATER seal this process runs.
-_RETAINED_TYPES: set[type[object]] = set(_RETAINED_LEAF_TYPES)
+_RETAINED_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(_RETAINED_LEAF_TYPES)
 
 # Positive-only memo of ``_is_reconstructable_node``: exact genuine Django AST classes
 # proven once. Never holds a consumer type, so it cannot grow with consumer-defined
 # classes.
-_RECONSTRUCTABLE_NODE_TYPES: set[type[object]] = set()
+_RECONSTRUCTABLE_NODE_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet()
 
 
 def _is_reconstructable_node(node_type: type[object]) -> bool:
@@ -2242,9 +2246,9 @@ _BOUND_VALUE_NORMALIZERS: tuple[tuple[type[object], Callable[[Any], object]], ..
     (uuid.UUID, _normalized_uuid),
 )
 # This is a hand-ordered MIRROR of ``_INERT_VALUE_TYPES`` minus ``bool`` (whose
-# subclasses cannot exist), and the ORDER is semantic -- ``datetime`` before
-# ``date`` because the first subclasses the second, scalars before ``Enum`` --
-# so it must not be derived from the frozenset, which would reorder it.
+# subclasses cannot exist): it pairs each base with its normalizer, and its ORDER is
+# semantic -- ``datetime`` before ``date`` because the first subclasses the second --
+# so it is written out rather than derived from the inert set.
 # What CAN be checked without losing the order is that the two inventories still
 # agree, and they must: an inert type admitted there with no normalizer entry
 # here makes SUBCLASS instances of it fail the seal closed, and exact instances
@@ -2301,7 +2305,7 @@ def _normalized_bound_value(value: object) -> object:
     # is the one caller that can hand this function an exact leaf). ``bytearray`` is NOT
     # in the retained set, so an exact one still routes to its copying normalizer rather
     # than being shared by reference.
-    if value is None or type(value) in _RETAINED_LEAF_TYPES:
+    if value is None or truth.is_exact_one_of(value, _RETAINED_LEAF_TYPES):
         return value
     value_type = type(value)
     for base, primitive in _BOUND_VALUE_NORMALIZERS:
@@ -2369,7 +2373,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     survives the seal as a consumer object.
     """
     value_type = type(value)
-    if value is None or value_type in _RETAINED_TYPES:
+    if value is None or truth.is_exact_one_of(value, _RETAINED_TYPES):
         return value
     # Sealing is a hot path and query state is overwhelmingly retained leaves (alias
     # strings, flags, marks), so every comprehension below tests ``_RETAINED_TYPES``
@@ -2390,7 +2394,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
         return frozen_type(
             [
                 item
-                if item is None or type(item) in _RETAINED_TYPES
+                if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
                 else _reconstructed_value(item, memo)
                 for item in frozen
             ],
@@ -2411,7 +2415,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
         rebuilt_list.extend(
             [
                 item
-                if item is None or type(item) in _RETAINED_TYPES
+                if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
                 else _reconstructed_value(item, memo)
                 for item in cast("list[object]", value)
             ],
@@ -2428,10 +2432,10 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
         # failed closed -- exactly like a value in the same slot.
         for raw_key, raw_item in cast("dict[object, object]", value).items():
             key = raw_key
-            if not (key is None or type(key) in _RETAINED_TYPES):
+            if not (key is None or truth.is_exact_one_of(key, _RETAINED_TYPES)):
                 key = _reconstructed_value(key, memo)
             item = raw_item
-            if not (item is None or type(item) in _RETAINED_TYPES):
+            if not (item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)):
                 item = _reconstructed_value(item, memo)
             rebuilt_dict[key] = item
         return rebuilt_dict
@@ -2441,7 +2445,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
         rebuilt_set.update(
             [
                 item
-                if item is None or type(item) in _RETAINED_TYPES
+                if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
                 else _reconstructed_value(item, memo)
                 for item in cast("set[object]", value)
             ],
@@ -2473,7 +2477,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     rebuilt_state.update(
         {
             key: item
-            if item is None or type(item) in _RETAINED_TYPES
+            if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
             else _reconstructed_value(item, memo)
             for key, item in source_state.items()
         },
@@ -2848,24 +2852,20 @@ def _combined_query_table_defect(
 # of ``.values()`` / ``.values_list()``. Anything else is a consumer-supplied
 # row synthesizer (the ``.first()`` / ``.__aiter__()`` synthetic-row vector) and
 # cannot be sealed.
-_DJANGO_ITERABLE_CLASSES: frozenset[type[object]] = frozenset(
-    {
+_DJANGO_ITERABLE_CLASSES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         ModelIterable,
         ValuesIterable,
         ValuesListIterable,
         NamedValuesListIterable,
         FlatValuesListIterable,
-    },
+    ),
 )
 
 
 def _is_django_iterable_class(value: object) -> TypeGuard[type[BaseIterable[object]]]:
-    """Return whether ``value`` IS one of Django's own row-iterable classes.
-
-    Identity membership, never ``in`` on the frozenset: set membership would hash the
-    candidate, dispatching a consumer metaclass ``__hash__`` / ``__eq__``.
-    """
-    return any(value is cls for cls in _DJANGO_ITERABLE_CLASSES)
+    """Return whether ``value`` IS one of Django's own row-iterable classes."""
+    return value in _DJANGO_ITERABLE_CLASSES
 
 
 def _prefetch_path_or_defect(
@@ -3620,13 +3620,15 @@ def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingInte
     return _RoutingIntent(db=None, hints=hints, effective_alias=alias)
 
 
-_ROUTING_SCALAR_TYPES = (
-    int,
-    float,
-    bool,
-    str,
-    bytes,
-    type(None),
+_ROUTING_SCALAR_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
+        int,
+        float,
+        bool,
+        str,
+        bytes,
+        type(None),
+    ),
 )
 
 
@@ -3646,7 +3648,7 @@ def _routing_repr(value: object) -> str:
         items: list[str] = []
         for k in sorted(value.keys(), key=truth.text):
             v = value[k]
-            if any(type(v) is scalar for scalar in _ROUTING_SCALAR_TYPES):
+            if truth.is_exact_one_of(v, _ROUTING_SCALAR_TYPES):
                 v_repr = truth.render(v)
             else:
                 v_repr = f"<{truth.name(v)} at {hex(id(v))}>"
@@ -4383,9 +4385,6 @@ def _seal_or_defect(
             # drive this branch, so it is marked unreachable rather than surfaced with a
             # synthetic test that would have to bypass the pre-bake proof.
             return None, post_bake_defect
-    # Identity membership, never ``in`` on the frozenset: set membership would hash the
-    # candidate iterable, dispatching a consumer metaclass ``__hash__`` / ``__eq__``
-    # (spec-045 Decision 5). ``is`` compares object identity only.
     if not _is_django_iterable_class(iterable):
         detail = truth.name(iterable)
         return None, ("untrusted", f"{cls_name}._iterable_class is {detail}")

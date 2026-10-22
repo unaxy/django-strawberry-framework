@@ -139,8 +139,8 @@ _PostgresBTreeIndex: type[models.Index] | None = cast(
     import_attr_if_importable("django.contrib.postgres.indexes", "BTreeIndex"),
 )
 
-_BTREE_INDEX_TYPES: tuple[type[models.Index], ...] = (
-    (models.Index,) if _PostgresBTreeIndex is None else (models.Index, _PostgresBTreeIndex)
+_BTREE_INDEX_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (models.Index,) if _PostgresBTreeIndex is None else (models.Index, _PostgresBTreeIndex),
 )
 
 
@@ -371,7 +371,7 @@ def _index_leading_terms(
       so the direction is trusted only when EVERY alias supports it -
       ``_every_backend_supports_index_column_ordering``).
     """
-    if type(index) not in _BTREE_INDEX_TYPES:
+    if not truth.is_exact_one_of(index, _BTREE_INDEX_TYPES):
         return None
     if getattr(index, "condition", None) is not None:
         return None

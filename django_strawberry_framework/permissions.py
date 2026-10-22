@@ -686,9 +686,7 @@ def apply_cascade_permissions(
                 f"alias {root_alias!r} but {_root_alias_phrase(state.alias)}; a cascade "
                 f"cannot compose cross-database subqueries.",
             )
-        # Identity scan, not ``in``: ``state.active`` is a chain of class objects, and
-        # ``tuple.__contains__`` would dispatch a consumer metaclass ``__eq__``.
-        if any(active is cls for active in state.active):
+        if truth.is_among(cls, state.active):
             if names_to_walk == set():
                 # The documented cycle-breaking recourse: an explicit zero-edge
                 # scope (``fields=[]``) walks nothing and composes nothing, so

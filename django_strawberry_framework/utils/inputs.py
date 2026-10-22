@@ -1594,7 +1594,7 @@ def claim_generated_type_name(
         return
     name = definition.name
     variants = _type_name_claims.setdefault(name, [])
-    if any(held is cls for variant in variants for held in variant.classes):
+    if truth.is_among(cls, (held for variant in variants for held in variant.classes)):
         return
     for field in definition.fields:
         # A lazy reference is not a class: the root it names claims its own name.
@@ -1626,7 +1626,7 @@ def claim_generated_type_name(
     for variant in variants:
         if variant.claim.shape == shape:
             matched = variant
-        elif scope is not None and any(held is scope for held in variant.scopes):
+        elif scope is not None and truth.is_among(scope, variant.scopes):
             raise ConfigurationError(_type_name_collision_message(name, variant.claim, claim))
     if matched is None:
         matched = _TypeNameVariant(
@@ -1961,10 +1961,8 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
         # The two family factories subclass this base directly. A class whose
         # bases do NOT include the base (by identity) is a grand-subclass of a concrete
         # factory -- reject it (its caches would be the family's, not its own).
-        # Identity scan, not ``not in``: ``tuple.__contains__`` over the bases would
-        # dispatch a consumer metaclass ``__eq__`` on a mixin listed before the factory.
         bases = truth.bases(cls)
-        if not any(base is GeneratedInputArgumentsFactory for base in bases):
+        if not truth.is_among(GeneratedInputArgumentsFactory, bases):
             parent = bases[0]
             raise TypeError(
                 f"{truth.name(parent)} does not support subclassing "

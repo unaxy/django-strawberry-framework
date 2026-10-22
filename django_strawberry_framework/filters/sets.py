@@ -245,7 +245,9 @@ _QUERYSET: type[models.QuerySet[models.Model, object]] = models.QuerySet
 # recreates DjangoTypes / FilterSets, never Django's field classes). It
 # therefore needs no clear hook -- the keys are Django field classes, not
 # package types.
-_lookups_for_field_class_cache: dict[type[ModelField], list[str]] = {}
+_lookups_for_field_class_cache: truth.IdentityMap[type[ModelField], list[str]] = (
+    truth.IdentityMap()
+)
 
 # Every operator-bag lookup attr ``LOOKUP_NAME_MAP`` can generate; a mapping
 # whose keys all name one is an operator bag (``FilterSet._operator_bag_items``).
@@ -886,7 +888,7 @@ _ALL_FAMILY_PROFILES: tuple[_FilterFamilyProfile, ...] = (
 # two bases directly. An arbitrary subclass of any key below is NOT audited (it may
 # override ``.filter`` or add state this package never reviewed) and therefore resolves
 # to NO profile.
-_FILTER_FAMILY_REGISTRY: Mapping[type[object], _FilterFamilyProfile] = MappingProxyType(
+_FILTER_FAMILY_REGISTRY: truth.IdentityMap[type[object], _FilterFamilyProfile] = truth.IdentityMap(
     {
         # Package Relay-GlobalID relation families.
         GlobalIDMultipleChoiceFilter: _GLOBALID_MULTIPLE_PROFILE,
@@ -929,7 +931,7 @@ _FILTER_FAMILY_REGISTRY: Mapping[type[object], _FilterFamilyProfile] = MappingPr
         TimeFilter: _SCALAR_LOOKUP_PROFILE,
         DurationFilter: _SCALAR_LOOKUP_PROFILE,
         UUIDFilter: _SCALAR_LOOKUP_PROFILE,
-    },
+    }.items(),
 )
 
 
@@ -962,18 +964,6 @@ def _inherits_unchanged(cls: type[FilterSet], attr: str) -> bool:
     binding the attribute through the consumer's metaclass.
     """
     return truth.static_attr(cls, attr) is truth.static_attr(FilterSet, attr)
-
-
-def _registered_profile(klass: type[object]) -> _FilterFamilyProfile | None:
-    """Return the ``_FILTER_FAMILY_REGISTRY`` profile keyed by exactly ``klass``, by identity.
-
-    A dict lookup would hash and compare the probed class through its metaclass;
-    the identity scan decides membership from the class object alone.
-    """
-    return next(
-        (profile for key, profile in _FILTER_FAMILY_REGISTRY.items() if key is klass),
-        None,
-    )
 
 
 def _dynamic_csv_profile_for(klass: type[object]) -> _FilterFamilyProfile | None:
@@ -1026,7 +1016,7 @@ def _dynamic_csv_profile_for(klass: type[object]) -> _FilterFamilyProfile | None
             return None
     if csv_base is not BaseInFilter and csv_base is not BaseRangeFilter:
         return None
-    if _registered_profile(scalar_base) is None:
+    if scalar_base not in _FILTER_FAMILY_REGISTRY:
         return None
     if frozenset(truth.class_dict(klass)) != _EMPTY_BODY_DYNAMIC_CSV_ATTRS:
         return None
@@ -1038,7 +1028,7 @@ def _family_profile_for(filter_instance: object) -> _FilterFamilyProfile | None:
 
     Resolution is fail-closed and never rediscovered from arbitrary ancestry:
 
-    1. EXACT match first -- ``_FILTER_FAMILY_REGISTRY[type(filter_instance)]``. No MRO
+    1. EXACT match first -- ``_FILTER_FAMILY_REGISTRY.get(type(filter_instance))``. No MRO
        walk, so an unregistered subclass of an audited base is NOT accepted through its
        ancestor: a consumer subclass may override ``.filter`` or add state this package
        has never reviewed against the correlated rewrite.
@@ -1054,7 +1044,7 @@ def _family_profile_for(filter_instance: object) -> _FilterFamilyProfile | None:
     outer invocation. Upgrading django-filter therefore cannot add a routable default
     class merely through inheritance.
     """
-    profile = _registered_profile(type(filter_instance))
+    profile = _FILTER_FAMILY_REGISTRY.get(type(filter_instance))
     if profile is not None:
         return profile
     return _dynamic_csv_profile_for(type(filter_instance))
@@ -1558,13 +1548,13 @@ def _null_value_is_absent(null_value: object, absent: object) -> bool:
 
 
 # The built-in types whose empty instances django-filter's filters skip (``EMPTY_VALUES``).
-_BUILTIN_EMPTY_TYPES: frozenset[type[object]] = frozenset(
-    {
+_BUILTIN_EMPTY_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         str,
         list,
         tuple,
         dict,
-    },
+    ),
 )
 
 
@@ -1581,7 +1571,7 @@ def _filter_skips(filter_class: type[object], absent: object) -> bool:
     """
     if absent is None:
         return True
-    if type(absent) not in _BUILTIN_EMPTY_TYPES or absent:
+    if not truth.is_exact_one_of(absent, _BUILTIN_EMPTY_TYPES) or absent:
         return False
     filters = (
         method
@@ -2961,17 +2951,14 @@ class FilterSet(
     ) -> OrderedDict[str, Filter]:
         """Return the filters this set contributes as the target of the last set on ``path``.
 
-        The cycle rule of the flat surface. A set already on ``path`` (by identity,
-        so a metaclass ``__eq__`` is never consulted) contributes its own filters
-        unexpanded (``_unexpanded_filters``), its ``RelatedFilter`` heads included,
-        so every path ends one step after it returns to a set it passed. A set
-        that reaches no set on ``path`` expands exactly as it does alone, so its
-        own surface (``get_filters``, cached) is copied; any other set expands
-        along ``path`` without caching.
+        The cycle rule of the flat surface. A set already on ``path`` (by identity)
+        contributes its own filters unexpanded (``_unexpanded_filters``), its
+        ``RelatedFilter`` heads included, so every path ends one step after it
+        returns to a set it passed. A set that reaches no set on ``path`` expands
+        exactly as it does alone, so its own surface (``get_filters``, cached) is
+        copied; any other set expands along ``path`` without caching.
         """
-        # Identity scan, not ``in``: ``path`` is a chain of class objects, and
-        # ``tuple.__contains__`` would dispatch a consumer metaclass ``__eq__``.
-        if any(visited is cls for visited in path):
+        if truth.is_among(cls, path):
             return cls._unexpanded_filters()
         if _reachable_filtersets(cls, scope).isdisjoint(id(visited) for visited in path):
             return cls.get_filters()

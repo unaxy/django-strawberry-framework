@@ -516,6 +516,42 @@ def test_tr008_ignores_the_truthful_replacement(source: str) -> None:
     assert _codes(source) == []
 
 
+# --------------------------------------------------------------------------- TR009
+
+
+@pytest.mark.parametrize(
+    ("source", "line"),
+    [
+        ("found = type(value) in TYPES\n", 1),
+        ("found = type(value) not in (list, tuple)\n", 1),
+        ("import builtins\nfound = builtins.type(value) in TYPES\n", 2),
+        ("from . import truth\nfound = truth.class_of(value) in TYPES\n", 2),
+        ("def f(value):\n    kind = type(value)\n    return kind in TYPES\n", 3),
+        ("def f(value):\n    if (kind := type(value)) in TYPES:\n        pass\n", 2),
+        ("found = 0 < len(x) and type(value) in TYPES\n", 1),
+    ],
+)
+def test_tr009_flags_membership_of_a_class_read(source: str, line: int) -> None:
+    assert _codes(source) == [(line, "TR009")]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from . import truth\nfound = truth.is_exact_one_of(value, TYPES)\n",
+        "found = type(value) is str\n",
+        "found = type(None) == other\n",
+        "found = type in TYPES\n",
+        "found = type(name, bases, ns) in TYPES\n",
+        "def f(kind):\n    return kind in TYPES\n",
+        "def g(value):\n    kind = type(value)\n\ndef f(kind):\n    return kind in TYPES\n",
+        "found = value in TYPES\n",
+    ],
+)
+def test_tr009_ignores_identity_tests_and_names_bound_elsewhere(source: str) -> None:
+    assert _codes(source) == []
+
+
 # --------------------------------------------------------------------------- promoted rules
 
 
@@ -528,6 +564,7 @@ PROMOTED = [
     ('reader = operator.attrgetter("__qualname__"){m}\nimport operator\n', "TR006"),
     ("state = vars(self){m}\n", "TR007"),
     ("order = cls.mro(){m}\n", "TR008"),
+    ("found = type(value) in TYPES{m}\n", "TR009"),
 ]
 
 
@@ -734,7 +771,7 @@ def test_default_scan_uses_configured_paths_and_skips_exempt(
     assert _summary(out) == (
         "truthful-reads: checked 2 file(s); exempt 2; "
         "tier-1 1 (TR001 1, TR002 0, TR003 0, TR004 0, TR005 0, TR006 0, TR007 0, TR008 0, "
-        "TR900 0); tier-2 1; markers 0; errors 0"
+        "TR009 0, TR900 0); tier-2 1; markers 0; errors 0"
     )
 
 

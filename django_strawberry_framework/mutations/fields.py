@@ -171,14 +171,9 @@ def _is_registered_mutation_target(mutation_cls: type[object]) -> bool:
     """Return whether either phase-2.5 declaration ledger will bind ``mutation_cls``.
 
     Membership is by identity, the contract both ledgers record under
-    (``django_strawberry_framework/write_mixins.py::make_declaration_registry``);
-    an equality test would dispatch a consumer metaclass's ``__eq__``, so a class
-    drained by ``registry.clear()`` that compares equal to its redeclaration would
-    pass, and a raising ``__eq__`` would escape at the construction line.
+    (``django_strawberry_framework/write_mixins.py::make_declaration_registry``).
     """
-    return any(
-        mutation_cls is declared for declared in (*iter_mutations(), *iter_form_mutations())
-    )
+    return truth.is_among(mutation_cls, (*iter_mutations(), *iter_form_mutations()))
 
 
 def _lazy_ref(type_name: str, module_path: str) -> object:

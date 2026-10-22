@@ -1009,13 +1009,15 @@ def check_deadline(info: object) -> None:
 #: ``[a:b]`` is the interpreter's own subscript rather than a method the value
 #: brought with it. Everything else is bounded by COUNTING instead - see
 #: ``_windowed_rows``.
-_SLICE_BOUNDED_ROW_TYPES = (
-    list,
-    tuple,
-    str,
-    bytes,
-    bytearray,
-    QuerySet,
+_SLICE_BOUNDED_ROW_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
+        list,
+        tuple,
+        str,
+        bytes,
+        bytearray,
+        QuerySet,
+    ),
 )
 
 
@@ -1033,7 +1035,7 @@ def _bounds_by_its_own_slice(
     rebuilt into an exact framework-owned queryset by
     ``utils/querysets.py::normalized_row_source``, or not at all.
     """
-    return type(result) in _SLICE_BOUNDED_ROW_TYPES
+    return truth.is_exact_one_of(result, _SLICE_BOUNDED_ROW_TYPES)
 
 
 def _consumer_rows(result: object) -> Iterator[object]:

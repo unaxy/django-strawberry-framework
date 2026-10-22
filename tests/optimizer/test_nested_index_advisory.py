@@ -148,7 +148,7 @@ def test_btree_index_soft_import_uses_shared_optional_import_owner() -> None:
     expected = import_attr_if_importable("django.contrib.postgres.indexes", "BTreeIndex")
     assert nested_planner._PostgresBTreeIndex is expected
     assert nested_planner._PostgresBTreeIndex is BTreeIndex
-    assert (models.Index, BTreeIndex) == nested_planner._BTREE_INDEX_TYPES
+    assert list(nested_planner._BTREE_INDEX_TYPES) == [models.Index, BTreeIndex]
 
 
 class _IdxParent(models.Model):

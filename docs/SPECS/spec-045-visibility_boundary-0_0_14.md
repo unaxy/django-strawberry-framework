@@ -420,8 +420,7 @@ and for the raw-list row source); a non-`ModelIterable` `_iterable_class` where
 the policy sets `require_model_rows` (`projection` defect; every surface except
 the cascade and the raw-list row source); an `_iterable_class` that is not one of
 Django's own row iterables, membership tested by object identity against
-`_DJANGO_ITERABLE_CLASSES`, never `in` on a frozenset which would hash the
-candidate; a foreign `_query` type or a foreign `combined_queries` branch, an
+`_DJANGO_ITERABLE_CLASSES`; a foreign `_query` type or a foreign `combined_queries` branch, an
 unresolvable / malformed deferred filter, or an unsealable prefetch child
 (`untrusted` defect); a contributing table that is not the registered concrete
 table (`table` defect). Wherever the policy sets `rewrite_combined` (every
