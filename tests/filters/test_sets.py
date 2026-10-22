@@ -13131,6 +13131,69 @@ def _patron_child_plain() -> type[FilterSet]:
     return Child
 
 
+class _OwnFilterCharFilter(CharFilter):
+    """A ``CharFilter`` whose ``__init__`` stores a ``filter`` of its own on the instance.
+
+    The bound method reads the object it was bound to, never a shallow copy of
+    it with a rebound ``field_name``; it applies the filter's own lookup and
+    ``exclude``.
+    """
+
+    def __init__(
+        self,
+        field_name: str,
+        *,
+        lookup_expr: str = "exact",
+        exclude: bool = False,
+    ) -> None:
+        super().__init__(field_name=field_name, lookup_expr=lookup_expr, exclude=exclude)
+        self.filter = self._own_filter
+
+    def _own_filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return CharFilter.filter(self, qs, value)
+
+
+class _OwnFilterBooleanFilter(BooleanFilter):
+    """A ``BooleanFilter`` whose ``__init__`` stores a ``filter`` of its own on the instance."""
+
+    def __init__(self, field_name: str, *, lookup_expr: str = "exact") -> None:
+        super().__init__(field_name=field_name, lookup_expr=lookup_expr)
+        self.filter = self._own_filter
+
+    def _own_filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return BooleanFilter.filter(self, qs, value)
+
+
+class _ClassFilterCharFilter(CharFilter):
+    """A ``CharFilter`` overriding ``filter`` on its class: behavior of the filter object itself."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return super().filter(qs, value)
+
+
+def _patron_child_with_own_filter() -> type[FilterSet]:
+    class Child(FilterSet):
+        email = _OwnFilterCharFilter("email")
+
+        class Meta:
+            model = library_models.Patron
+            fields = {"name": ["icontains"]}
+
+    return Child
+
+
+def _patron_child_with_class_filter() -> type[FilterSet]:
+    class Child(FilterSet):
+        email = _ClassFilterCharFilter(field_name="email")
+
+        class Meta:
+            model = library_models.Patron
+            fields = {"name": ["icontains"]}
+
+    return Child
+
+
 class _OwnerBoundCase(NamedTuple):
     """One child filter set shape, the leaf expanded under ``patron``, and the verdict."""
 
@@ -13161,6 +13224,8 @@ _OWNER_BOUND_CASES = {
         "loans",
         projected=False,
     ),
+    "own_filter": _OwnerBoundCase(_patron_child_with_own_filter, "email", projected=True),
+    "class_filter": _OwnerBoundCase(_patron_child_with_class_filter, "email", projected=False),
     "declared_plain": _OwnerBoundCase(_patron_child_plain, "email", projected=False),
     "generated_plain": _OwnerBoundCase(_patron_child_plain, "name__icontains", projected=False),
 }
@@ -13170,11 +13235,13 @@ _OWNER_BOUND_CASES = {
 def test_expand_related_filter_projects_owner_bound_children_only(label: str) -> None:
     """A child leaf is projected iff its behavior belongs to the child filter set.
 
-    A ``method=`` (string or callable) and every leaf of a child overriding
-    ``__init__`` are projected; a plain declared or generated leaf is a rebound
-    copy; a child ``RelatedFilter`` is a branch, never a flat leaf, so it is
-    copied as is even under an ``__init__`` override. Either way the copy keeps
-    the child filter's class and carries the rebound ORM path.
+    A ``method=`` (string or callable), any other ``filter`` the child filter
+    holds on its instance, and every leaf of a child overriding ``__init__`` are
+    projected; a plain declared or generated leaf, and one overriding ``filter``
+    on its class, is a rebound copy; a child ``RelatedFilter`` is a branch,
+    never a flat leaf, so it is copied as is even under an ``__init__``
+    override. Either way the copy keeps the child filter's class and carries
+    the rebound ORM path.
     """
     case = _OWNER_BOUND_CASES[label]
     child = case.build_child()
@@ -13195,8 +13262,9 @@ def test_expand_related_filter_projects_owner_bound_children_only(label: str) ->
         projected = copy
         assert isinstance(projected, ProjectedChildFilter)
         assert projected._projection == ChildProjection(child, case.leaf, "patron")
-        # The per-instance ``FilterMethod`` shadow a ``method=`` installs is the
-        # child's; the projection's own ``filter`` runs on the parent.
+        # The per-instance ``filter`` shadow (a ``method=``'s ``FilterMethod``, a
+        # consumer's own callable) is the child's; the projection's own ``filter``
+        # runs on the parent.
         assert "filter" not in vars(projected)
 
 
@@ -15968,6 +16036,342 @@ def test_projected_method_filter_stays_existential_whatever_its_exclude_flag() -
     assert _applied(parent, {"genres__named_by_method": "secret"}, base) == set()
 
 
+def _own_filter_sets() -> dict[type[django_models.Model], type[FilterSet]]:
+    """Filter sets whose leaves hold a ``filter`` of their own, keyed by root model.
+
+    ``Loan`` reaches ``Patron`` and ``Book`` to-one; ``Shelf`` reaches ``Book``
+    to-many and declares ``book_titled`` on the same path beside the branch;
+    ``Genre`` reaches ``Book`` many-to-many; ``Book`` filters its own column.
+    """
+    _register_plain_types(library_models.Patron)
+
+    class PatronChild(FilterSet):
+        email = _OwnFilterCharFilter("email")
+
+        class Meta:
+            model = library_models.Patron
+            fields = []
+
+    class BookChild(FilterSet):
+        titled = _OwnFilterCharFilter("title")
+        not_titled = _OwnFilterCharFilter("title", exclude=True)
+        subtitle_missing = _OwnFilterBooleanFilter("subtitle", lookup_expr="isnull")
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    class LoanParent(FilterSet):
+        patron = RelatedFilter(PatronChild, field_name="patron")
+        book = RelatedFilter(BookChild, field_name="book")
+
+        class Meta:
+            model = library_models.Loan
+            fields = []
+
+    class ShelfParent(FilterSet):
+        books = RelatedFilter(BookChild, field_name="books")
+        book_titled = _OwnFilterCharFilter("books__title")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    class GenreParent(FilterSet):
+        books = RelatedFilter(BookChild, field_name="books")
+
+        class Meta:
+            model = library_models.Genre
+            fields = []
+
+    return {
+        library_models.Loan: LoanParent,
+        library_models.Shelf: ShelfParent,
+        library_models.Genre: GenreParent,
+        library_models.Book: BookChild,
+    }
+
+
+class _OwnFilterRow(NamedTuple):
+    """One leaf holding a ``filter`` of its own and Django's answer for it."""
+
+    root: type[django_models.Model]
+    filter_input: dict[str, object]
+    lookups: dict[str, object]
+    projected: bool
+    hide_repair: bool
+
+
+def _not_x() -> QuerySet[library_models.Book]:
+    return library_models.Book.objects.exclude(title="x")
+
+
+_OWN_FILTER_ROWS = {
+    "child-to-one": _OwnFilterRow(
+        library_models.Loan,
+        {"patron__email": "p1@x"},
+        {"patron__email": "p1@x"},
+        projected=True,
+        hide_repair=True,
+    ),
+    "child-to-one-over-a-hidden-row": _OwnFilterRow(
+        library_models.Loan,
+        {"book__titled": "x"},
+        {"book__title": "x"},
+        projected=True,
+        hide_repair=True,
+    ),
+    "child-to-many": _OwnFilterRow(
+        library_models.Shelf,
+        {"books__titled": "x"},
+        {"books__title": "x"},
+        projected=True,
+        hide_repair=True,
+    ),
+    "parent-declared-beside-the-branch": _OwnFilterRow(
+        library_models.Shelf,
+        {"book_titled": "x"},
+        {"books__title": "x"},
+        projected=False,
+        hide_repair=False,
+    ),
+    "child-to-one-exclude": _OwnFilterRow(
+        library_models.Loan,
+        {"book__not_titled": "x"},
+        {"book__in": _not_x},
+        projected=True,
+        hide_repair=True,
+    ),
+    "child-to-many-exclude": _OwnFilterRow(
+        library_models.Shelf,
+        {"books__not_titled": "x"},
+        {"books__in": _not_x},
+        projected=True,
+        hide_repair=True,
+    ),
+    "child-to-many-isnull-null-extends": _OwnFilterRow(
+        library_models.Shelf,
+        {"books__subtitle_missing": True},
+        {"books__subtitle__isnull": True},
+        projected=True,
+        hide_repair=True,
+    ),
+    "child-many-to-many-exclude": _OwnFilterRow(
+        library_models.Genre,
+        {"books__not_titled": "x"},
+        {"books__in": _not_x},
+        projected=True,
+        hide_repair=True,
+    ),
+    "child-many-to-many-isnull-null-extends": _OwnFilterRow(
+        library_models.Genre,
+        {"books__subtitle_missing": True},
+        {"books__subtitle__isnull": True},
+        projected=True,
+        hide_repair=True,
+    ),
+    "flat": _OwnFilterRow(
+        library_models.Book,
+        {"titled": "x"},
+        {"title": "x"},
+        projected=False,
+        hide_repair=False,
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_OWN_FILTER_ROWS))
+def test_a_leaf_holding_its_own_filter_answers_as_its_owner_runs_it(shape: str) -> None:
+    """A leaf whose instance holds its own ``filter`` runs where its owner runs it.
+
+    Expanded from a child set, it is projected and runs inside the child set
+    over the branch's visible rows (``repair`` books hidden), to-one or
+    to-many or many-to-many. Its ``filter`` owns ``exclude``, so the package keeps it positive
+    (the parents reaching a visible row it keeps, Django's ``__in`` over the
+    filter's own answer) and never negates it again; its ``isnull`` reading
+    null-extends (a shelf or genre whose only book is hidden matches ``True``). Declared
+    on the parent beside the branch, it walks no hop: it runs over the parent's
+    rows and owns its scoping, so a hidden book still matches. Flat on its own
+    set it runs as declared.
+    """
+    _hide(library_models.Book, circulation_status="repair")
+    sets = _own_filter_sets()
+    row = _OWN_FILTER_ROWS[shape]
+    filterset = sets[row.root]
+    leaf = filterset.get_filters()[next(iter(row.filter_input))]
+    assert isinstance(leaf, ProjectedChildFilter) is row.projected
+    x_open = _book("x")
+    x_hidden = _book("x", subtitle="s", hidden=True)
+    plain = _book("plain", shelf=x_open.shelf)
+    _book("alone")
+    p1 = library_models.Patron.objects.create(name="p1", email="p1@x")
+    p2 = library_models.Patron.objects.create(name="p2", email="p2@x")
+    for book, patron in ((x_open, p1), (x_hidden, p2), (plain, p2)):
+        library_models.Loan.objects.create(book=book, patron=patron, note=book.title)
+    for name, books in (
+        ("open_x", [x_open]),
+        ("hidden_x", [x_hidden]),
+        ("mixed", [x_open, plain]),
+        ("bookless", []),
+    ):
+        library_models.Genre.objects.create(name=name).books.set(books)
+    model = row.root
+    lookups = {key: value() if callable(value) else value for key, value in row.lookups.items()}
+    hidden = [library_models.Book.objects.filter(circulation_status="repair")]
+    expected = _absent_world(model, lookups, hidden=hidden if row.hide_repair else [])
+    assert expected
+    assert _applied(filterset, row.filter_input, model._default_manager.all()) == expected
+
+
+class _RawOwnFilterGlobalIDFilter(GlobalIDFilter):
+    """A ``GlobalIDFilter`` whose ``__init__`` stores its own ``filter``, binding the raw value."""
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.filter = self._raw_filter
+
+    def _raw_filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return qs.filter(title=value)
+
+
+class _DecodingOwnFilterGlobalIDFilter(GlobalIDFilter):
+    """A ``GlobalIDFilter`` whose ``__init__`` stores its own ``filter``, delegating to the decode."""
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.filter = self._decoding_filter
+
+    def _decoding_filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return GlobalIDFilter.filter(self, qs, value)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [("\ud800", "invalid"), ("a\x00b", "null_characters_not_allowed")],
+    ids=["lone-surrogate", "nul"],
+)
+@pytest.mark.parametrize(
+    "filter_class",
+    [_RawOwnFilterGlobalIDFilter, _DecodingOwnFilterGlobalIDFilter],
+    ids=["raw", "decoding"],
+)
+def test_a_global_id_filter_holding_its_own_filter_refuses_unstorable_text(
+    filter_class: type[GlobalIDFilter],
+    value: str,
+    code: str,
+) -> None:
+    """A ``filter`` of its own replaces a GlobalID filter's decode, so text no database stores is refused.
+
+    The value reaches the consumer's code undecoded, which may bind it as sent (a
+    lone surrogate no driver encodes, a NUL PostgreSQL refuses), so it answers
+    ``FILTER_INVALID`` keyed to the field before any query, whether or not that
+    code decodes it in turn, as a ``method=`` does.
+    """
+
+    class BookIds(FilterSet):
+        gid = filter_class("id")
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    _book("plain")
+    with pytest.raises(GraphQLError) as exc_info:
+        list(BookIds.apply_sync({"gid": value}, library_models.Book.objects.all(), _make_info()))
+    extensions: dict[str, object] = dict(exc_info.value.extensions or {})
+    assert extensions["code"] == "FILTER_INVALID"
+    errors = require(extensions["errors"], is_object_dict)
+    (entry,) = require(errors["gid"], is_object_list)
+    assert require(entry, is_object_dict)["code"] == code
+
+
+def _book_ids_by_raw_title(
+    queryset: QuerySet[library_models.Book],
+    _name: str,
+    value: object,
+) -> QuerySet[library_models.Book]:
+    """A ``method=`` body binding a GlobalID filter's value undecoded."""
+    return queryset.filter(title=value)
+
+
+def _global_id_child(kind: str) -> GlobalIDFilter:
+    """The ``gid`` filter of a ``Book`` child set: a ``method=``, an own ``filter``, or plain."""
+    if kind == "method":
+        return GlobalIDFilter(field_name="id", method=_book_ids_by_raw_title)
+    if kind == "own-raw":
+        return _RawOwnFilterGlobalIDFilter("id")
+    if kind == "own-decoding":
+        return _DecodingOwnFilterGlobalIDFilter("id")
+    return GlobalIDFilter(field_name="id")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "refusal"),
+    [("\ud800", "invalid"), ("a\x00b", "null_characters_not_allowed")],
+    ids=["lone-surrogate", "nul"],
+)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "method",
+        "own-raw",
+        "own-decoding",
+        "plain",
+    ],
+)
+def test_a_projected_global_id_child_is_judged_by_the_child_filter_it_runs(
+    kind: str,
+    value: str,
+    refusal: str,
+) -> None:
+    """A flat copy of a child GlobalID filter decodes before binding only when its child filter does.
+
+    The projected copy on the parent holds no ``filter`` of its own, so the
+    refusal reads the child filter it runs: a child whose ``method=`` or own
+    ``filter`` replaces the decode answers ``FILTER_INVALID`` keyed to the flat
+    name, and a plain child keeps its decode's ``GLOBALID_INVALID``.
+    """
+    _register_plain_types(library_models.Book)
+
+    class BookChild(FilterSet):
+        gid = _global_id_child(kind)
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    class ShelfParent(FilterSet):
+        books = RelatedFilter(BookChild, field_name="books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    assert isinstance(ShelfParent.get_filters()["books__gid"], ProjectedChildFilter) is (
+        kind != "plain"
+    )
+    _book("plain")
+    with pytest.raises(GraphQLError) as exc_info:
+        list(
+            ShelfParent.apply_sync(
+                {"books__gid": value},
+                library_models.Shelf.objects.all(),
+                _make_info(),
+            ),
+        )
+    extensions: dict[str, object] = dict(exc_info.value.extensions or {})
+    if kind == "plain":
+        assert extensions["code"] == "GLOBALID_INVALID"
+        return
+    assert extensions["code"] == "FILTER_INVALID"
+    errors = require(extensions["errors"], is_object_dict)
+    (entry,) = require(errors["books__gid"], is_object_list)
+    assert require(entry, is_object_dict)["code"] == refusal
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("name", ["open", "secret"])
 def test_to_many_relation_key_on_a_to_field_compares_the_target_to_field_column(name: str) -> None:
@@ -16077,8 +16481,9 @@ def _gated_branch_parent(branch_attr: str) -> type[FilterSet]:
     """``BranchParent`` declares ``branch_attr`` over ``shelves`` with a gate denying ``request.denied``.
 
     ``has_code`` is a declared filter whose ``field_name`` walks the branch;
-    ``code_by_method`` is a ``method=`` filter on the same path, which owns its
-    scoping and walks no branch.
+    ``code_by_method`` is a ``method=`` filter on the same path and
+    ``code_by_own_filter`` one holding a ``filter`` of its own, which own their
+    scoping and walk no branch.
     """
     _register_plain_types(library_models.Shelf)
 
@@ -16106,6 +16511,7 @@ def _gated_branch_parent(branch_attr: str) -> type[FilterSet]:
             branch_attr: RelatedFilter(ShelfChild, field_name="shelves"),
             "has_code": CharFilter(field_name="shelves__code"),
             "code_by_method": CharFilter(field_name="shelves__code", method="filter_code"),
+            "code_by_own_filter": _OwnFilterCharFilter("shelves__code"),
             "filter_code": code_by_method,
             f"check_{branch_attr}_permission": branch_gate,
             "Meta": type(
@@ -16151,8 +16557,18 @@ def _gate_outcome(filterset: type[FilterSet], filter_input: object, *, denied: b
 )
 @pytest.mark.parametrize(
     ("spelling", "gated"),
-    [("has_code", True), ("nested", True), ("code_by_method", False)],
-    ids=["declared-flat", "nested-twin", "method"],
+    [
+        ("has_code", True),
+        ("nested", True),
+        ("code_by_method", False),
+        ("code_by_own_filter", False),
+    ],
+    ids=[
+        "declared-flat",
+        "nested-twin",
+        "method",
+        "own-filter",
+    ],
 )
 def test_declared_filter_walking_a_branch_fires_the_branch_gate_its_nested_twin_fires(
     branch_attr: str,
@@ -16162,8 +16578,9 @@ def test_declared_filter_walking_a_branch_fires_the_branch_gate_its_nested_twin_
 ) -> None:
     """A declared filter whose ``field_name`` walks a declared branch is gated like the nested branch.
 
-    A ``method=`` filter declared on the parent receives the parent queryset and
-    owns its scoping, so it walks no branch and fires only its own gate.
+    A filter declared on the parent holding a ``filter`` of its own (``method=``
+    or an instance callable) receives the parent queryset and owns its scoping,
+    so it walks no branch and fires only its own gate.
     """
     parent = _gated_branch_parent(branch_attr)
     filter_input = {branch_attr: {"code": "x"}} if spelling == "nested" else {spelling: "x"}
@@ -16171,8 +16588,8 @@ def test_declared_filter_walking_a_branch_fires_the_branch_gate_its_nested_twin_
     assert _gate_outcome(parent, filter_input, denied=True) == ("denied" if gated else "allowed")
 
 
-def _returns_a_list(_qs: object, _value: object) -> list[object]:
-    """A consumer ``Filter.filter`` replacement that breaks the ``QuerySet`` return contract."""
+def _returns_a_list(_self: Filter, _qs: object, _value: object) -> list[object]:
+    """A consumer ``Filter.filter`` override that breaks the ``QuerySet`` return contract."""
     return []
 
 
@@ -16194,7 +16611,9 @@ def test_a_filter_returning_no_queryset_fails_the_filter_queryset_assertion(
 
     A same-model leaf runs in ``_apply_flat_leaves``; a forward relation-key leaf
     walking a declared branch runs over the parent rows, and a leaf through the
-    branch runs over the branch target's rows (``_apply_relation_leaf``).
+    branch runs over the branch target's rows (``_apply_relation_leaf``). The
+    override sits on the filter's class: a ``filter`` held on the instance walks
+    no branch.
     """
     _register_plain_types(library_models.Shelf)
 
@@ -16203,8 +16622,9 @@ def test_a_filter_returning_no_queryset_fails_the_filter_queryset_assertion(
             model = library_models.Shelf
             fields = {"code": ["exact"]}
 
-    probe = CharFilter(field_name=field_name)
-    setattr(probe, "filter", _returns_a_list)  # noqa: B010
+    probe = type("ListReturningFilter", (CharFilter,), {"filter": _returns_a_list})(
+        field_name=field_name,
+    )
     parent = type(
         "BookParent",
         (FilterSet,),
@@ -16345,6 +16765,7 @@ def _gate_recording_branch_parent(branch_attr: str) -> type[FilterSet]:
         "no_shelf": BooleanFilter(field_name="shelves", lookup_expr="isnull"),
         "shelf_is": NumberFilter(field_name="shelves"),
         "code_by_method": CharFilter(field_name="shelves__code", method="filter_code"),
+        "code_by_own_filter": _OwnFilterCharFilter("shelves__code"),
     }
     attrs = {
         branch_attr: RelatedFilter(ShelfChild, field_name="shelves"),
@@ -16399,11 +16820,15 @@ def test_declared_walked_leaf_fires_exactly_its_nested_twins_gates_plus_its_own(
 
 
 @pytest.mark.django_db
-def test_parent_method_filter_fires_only_its_own_gate() -> None:
-    """A ``method=`` filter declared on the parent owns its scoping, walking no branch or twin gate."""
+@pytest.mark.parametrize("leaf", ["code_by_method", "code_by_own_filter"], ids=["method", "own"])
+def test_parent_method_filter_fires_only_its_own_gate(leaf: str) -> None:
+    """A parent filter holding a ``filter`` of its own owns its scoping, walking no branch or twin gate.
+
+    ``method=`` installs one; ``code_by_own_filter``'s ``__init__`` stores another.
+    """
     parent = _gate_recording_branch_parent("shelves")
-    fired = _fired_gates(parent, {"code_by_method": "x"}, library_models.Branch.objects.all())
-    assert fired == {"Branch.code_by_method"}
+    fired = _fired_gates(parent, {leaf: "x"}, library_models.Branch.objects.all())
+    assert fired == {f"Branch.{leaf}"}
 
 
 @pytest.mark.django_db

@@ -150,13 +150,36 @@ class ShelfFilter(FilterSet):
         }
 
 
+class TitleStartsFilter(CharFilter):
+    """A ``CharFilter`` whose ``__init__`` stores a ``filter`` of its own on the instance.
+
+    ``_starts_with`` reads ``field_name`` from the filter it was bound to, so
+    the filter set that declares it owns it: reached flat from another filter
+    set (``booksTitleStarts`` on genres and shelves) it runs inside a
+    ``BookFilter`` over the books ``BookType.get_queryset`` lets the viewer see,
+    as the nested ``books: {titleStarts: ...}`` does.
+    """
+
+    def __init__(self, field_name: str) -> None:
+        """Declare the filter over ``field_name`` and install its own ``filter``."""
+        super().__init__(field_name=field_name, lookup_expr="startswith")
+        self.filter = self._starts_with
+
+    def _starts_with(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        """Keep the rows whose ``field_name`` starts with ``value``; an empty value keeps all."""
+        if value is None or value == "":
+            return qs
+        return qs.filter(**{f"{self.field_name}__startswith": value})
+
+
 class BookFilter(FilterSet):
     """Book filterset bound to ``BookType`` at finalize phase 2.5.
 
     ``BookFilter.genres`` uses the absolute-import-path form
     ``"apps.library.filters_genre.GenreFilter"`` so the Layer-2
     ``import_string`` first-attempt branch resolves cross-module per
-    spec-027.
+    spec-027. ``title_starts`` is a ``TitleStartsFilter``, a filter holding a
+    ``filter`` of its own.
     """
 
     shelf = RelatedFilter("ShelfFilter", field_name="shelf")
@@ -165,6 +188,7 @@ class BookFilter(FilterSet):
         field_name="genres",
     )
     loans = RelatedFilter("LoanFilter", field_name="loans")
+    title_starts = TitleStartsFilter("title")
 
     class Meta:
         model = models.Book

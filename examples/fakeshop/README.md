@@ -358,6 +358,7 @@ class BookFilter(FilterSet):
     shelf = RelatedFilter("ShelfFilter", field_name="shelf")
     genres = RelatedFilter("apps.library.filters_genre.GenreFilter", field_name="genres")
     loans = RelatedFilter("LoanFilter", field_name="loans")
+    title_starts = TitleStartsFilter("title")
 
     class Meta:
         model = models.Book
@@ -390,7 +391,10 @@ package's [`FilterSet`][glossary-filterset] is a `django_filters` `BaseFilterSet
 subclass, so an existing filterset migrates with a parent-class swap.
 [`RelatedFilter`][glossary-relatedfilter] and [`RelatedOrder`][glossary-relatedorder]
 traverse relations, and accept a class, an import path string, or an unqualified
-name from the same module for the circular cases.
+name from the same module for the circular cases. `TitleStartsFilter` is a `CharFilter`
+whose `__init__` stores a `filter` of its own on the instance; reached flat from another
+filter set (`booksTitleStarts` on genres) it runs inside a `BookFilter` over the books the
+viewer can see, as its nested spelling `books: { titleStarts: ... }` does.
 
 `BookType.Meta` bound both sidecars in Part 2, so the arguments are already on
 `allLibraryBooks`:
