@@ -58,11 +58,12 @@ settings are loaded.
     (concurrent work, with working-tree ``git hash-object`` ids), and renames.
     Every path names the plan item that covers it: a module its own file item,
     a folder's ``__init__.py`` that folder's integration item, the
-    package-root ``__init__.py`` the project item. A committed path that no
-    longer exists names its nearest surviving folder's integration item, else
-    the project item, and ``Folders touched`` counts that folder and every
-    rename's old folder, as ``--changed`` does. ``--json`` emits the same data
-    machine-readably.
+    package-root ``__init__.py`` the project item. A committed path that is no
+    longer tracked names its nearest surviving folder's integration item, else
+    the project item, as ``--changed`` does; ``Folders touched`` resolves every
+    committed path and both paths of every rename (staged ones included) the
+    same way, and counts a dirty path's own folder. ``--json`` emits the same
+    data machine-readably.
 
 ``reconcile --plan PATH``
     Read-only. Compare a plan's items with the current inventory and report
