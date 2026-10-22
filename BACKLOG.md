@@ -1153,56 +1153,6 @@ await createItem.mutateAsync({ name: "bar" });
 
 ## Relay
 
-### `stable_cursor_field`
-
-**Realistic**: 8/10 — Keyset pagination is a known technique; authenticated encryption is standard crypto plumbing.
-
-**Impact**: 8/10 — Cursor drift on inserts/deletes is where Relay teams give up; this is the fix.
-
-**Difficulty**: 4/10 — Tuple-comparison decode + enforced order_by + opaque payload + pageInfo recomputation.
-
-**Source**: item 39, sub-feature 3.
-
-**What we'd do**: declarative stable cursors that survive inserts and deletes.
-
-**Spec**:
-
-```python path=null start=null
-class ItemType(DjangoType):
-    class Meta:
-        model = Item
-        cursor_field = ("created_at", "id")    # stable cursor; survives inserts/deletes
-```
-
-- The cursor encodes the row's `(created_at, id)` tuple; decoding produces a `WHERE (created_at, id) > (value, value)` tuple-comparison filter — insert-safe and delete-safe.
-- The connection machinery enforces a matching `order_by` on the queryset so cursor order and result order can't diverge; a final unique tiebreak column (pk) is required and validated at finalization.
-- **The cursor payload is opaque to clients: authenticated-encrypted (tamper-evident and confidential).** A cleartext cursor encoding `created_at` discloses column data from the row it points at — including rows a different viewer shouldn't see when cursors leak across contexts. Opacity is part of the contract, not a hardening afterthought.
-- When `cursor_field` is unset, the default opaque-offset behavior applies; stability is opt-in.
-
-**Composes with**: shipped `DjangoConnectionField`, `permission_aware_cursor_decoding`.
-
-**Sequencing**: this card hardens the cursor semantics the [structural templates][card-structural-templates] card's batched nested connections assert (per-parent windows, per-parent `totalCount`, cursors that replay). Batched sidecar pages and stable cursors must agree on the deterministic ordering appended after the declared `OrderSet`, or a cursor minted under one strategy stops replaying under another.
-
-### `permission_aware_cursor_decoding`
-
-**Realistic**: 9/10 — Apply the decode filter to `get_queryset` output instead of the raw table; small change.
-
-**Impact**: 7/10 — Closes a real cross-viewer row-leak privacy bug.
-
-**Difficulty**: 2/10 — One decode-path change plus the documented residual.
-
-**Source**: item 39, sub-feature 6.
-
-**What we'd do**: cursor decode that re-applies row visibility, so a cursor minted under one user's visibility doesn't leak rows under another's.
-
-**Spec**:
-- The decode filter is applied to `cls.get_queryset(qs, info)` — never to the raw table. A cursor minted under admin privileges and replayed by a regular user paginates only the rows that user can see: no row leak, no inconsistent pagination.
-- Documented residual: position-based information (how many rows precede the cursor) is inherently visibility-relative and recomputed per viewer; combined with `stable_cursor_field`'s opaque payloads, neither values nor positions disclose hidden rows.
-
-**Composes with**: `stable_cursor_field`, `declarative_row_and_field_permissions`, shipped `get_queryset` hook.
-
-**Sequencing**: cursor decode re-applying `get_queryset` visibility is the pagination-time form of the [graph substrate][card-graph-substrate] card's edge-scope rule — a value minted under one viewer must not leak rows under another. State the rule once and consume it in both places rather than deriving a private cursor-side visibility path.
-
 ### `globalid_alias_map`
 
 **Realistic**: 10/10 — A dict lookup at decode time; ~30 lines.
@@ -1248,9 +1198,9 @@ DJANGO_STRAWBERRY_FRAMEWORK = {
 **Spec**:
 - `DjangoConnectionField` accepts an interface type; resolution walks the polymorphic queryset (cooperating with `django-polymorphic` when present, `ContentType` lookups otherwise), dispatches each row through the shipped `is_type_of` injection to its concrete `DjangoType`, and emits the right `__typename` per edge.
 - The optimizer's walker recognizes the interface-edge shape and plans per-concrete-type prefetches for the relations each concrete type's selections need.
-- Cursor semantics inherit from the connection foundation; `stable_cursor_field` declarations on the interface require the cursor columns to exist on every concrete type (validated at finalization).
+- Cursor semantics inherit from the connection foundation; a `Meta.cursor_field` declaration on the interface requires the cursor columns to exist on every concrete type (validated at finalization).
 
-**Composes with**: `django_polymorphic_union_types` (shared dispatch machinery — that card is the non-Relay half), shipped Node foundation, `stable_cursor_field`.
+**Composes with**: `django_polymorphic_union_types` (shared dispatch machinery — that card is the non-Relay half), shipped Node foundation, shipped `Meta.cursor_field`.
 
 **Carries forward (spec-035 G3 deferral)**: this card is the scheduled home for the deferred **G3 — fragment type-condition narrowing** from [spec-035][spec-035] (Decisions 6–7). G3 is parity (`strawberry-graphql-django` narrows fragment planning to concrete types), but it has **no reachable trigger until this card's per-concrete-type optimizer cooperation exists**: today an interface / union root field never enters the walker, because `DjangoOptimizerExtension._resolve_model_from_return_type` resolves the abstract `origin` (the interface / union class, not a registered `DjangoType`) and `registry.model_for_type(origin)` returns `None`, so `_optimize` passes the queryset through before any planning runs. G3 therefore ships *with* this card, never before it. Carry-forward requirements distilled from the spec's analysis:
 
@@ -1440,7 +1390,7 @@ schema = DjangoSchema(query=Query, visibility=[StaffBypass], restrictions=[Activ
 - Relay surfaces inherit it: `resolve_node`, root `node(id:)` / `nodes(ids:)`, and connection lookups all pass through the same visibility combinator (per the parking lot's Relay-aware-permissions note).
 - The behavioral baseline already shipped in-package (`DONE-034-0.0.10`): `permissions.py::apply_cascade_permissions` / `aapply_cascade_permissions` narrow forward FK / OneToOne edges through each target type's `get_queryset` as `__in`-subquery composition — but as a **callable** consumers invoke from their own `get_queryset`, acting on the root queryset's forward edges only. This card is the step past it: declarative (`Meta.permissions`), enforced inside every optimizer-built `Prefetch` (the reverse/many side the callable can't reach), and with the `select_related` boundary downgrade.
 
-**Composes with**: `declarative_row_and_field_permissions` (prerequisite), `soft_delete_cooperation` (shared combinator seam), the promoted [Optimizer explain mode][card-optimizer-explain-mode] card (plans show permission filters and downgrade reasons), `permission_aware_cursor_decoding`.
+**Composes with**: `declarative_row_and_field_permissions` (prerequisite), `soft_delete_cooperation` (shared combinator seam), the promoted [Optimizer explain mode][card-optimizer-explain-mode] card (plans show permission filters and downgrade reasons).
 
 **Sequencing**: this card's "visibility combinator seam" and the [graph substrate][card-graph-substrate] card's `EdgeScope` are **one abstraction**, not two — the closest sibling relationship in this file. Whichever lands first defines the seam; this card must not ship a permission-private child-scoping mechanism parallel to the contextual edge scope. `soft_delete_cooperation` composes through the same seam as a third consumer.
 
@@ -1941,6 +1891,8 @@ Items 36, 37, and 38 were process rules, not feature cards; they move to `AGENTS
 Item 13 (`Meta.field_overrides` for scalar fields) shipped in `0.0.6` as `DONE-019-0.0.6` (consumer override semantics for scalar fields) — deliberately **without** a `Meta.field_overrides` key: consumer-authored annotations / assignments are the override surface. It carries no card here. Parking-lot entries covered by shipped 0.0.9 work (root node fields, `DjangoConnectionField`, GlobalID test helpers, the model-anchored encoding) are likewise retired.
 
 Item 3 (`drf_serializer_mutations`) shipped in `0.0.13` as `DONE-039-0.0.13` — `SerializerMutation` and the `rest_framework/` subpackage (spec-039), emitting into the shared `FieldError` envelope; its card is retired here (2026-07-10). The public-adapter remainder lives on as `form_and_serializer_error_adapters`.
+
+Item 39 sub-features 3 and 6 (`stable_cursor_field`, `permission_aware_cursor_decoding`) ship as `Meta.cursor_field` (spec-030 `## Keyset cursors`).
 
 ---
 

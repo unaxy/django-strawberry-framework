@@ -7586,7 +7586,7 @@ def test_stale_after_cursor_no_error() -> None:
     Pins ONLY the no-error property: Strawberry's offset cursors encode a
     position, not row identity, so no skip / duplicate / next-row assertion
     is made - positional stability under deletes is deliberately NOT part of
-    the contract (keyset cursors are BACKLOG item 39 sub-feature 3).
+    the contract (the opt-in ``Meta.cursor_field`` keyset cursors carry row identity).
     """
     _seed_genres("Alpha", "Beta", "Gamma", "Delta")
 
