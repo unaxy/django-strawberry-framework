@@ -4025,8 +4025,8 @@ Before a release:
 - `docs/README.md`, `docs/GLOSSARY.md`, `docs/TREE.md`, and any active design docs agree on shipped/planned state.
 - No stale skipped tests refer to already-shipped slices.
 - New source modules have mirrored tests in the correct tree.
-- `uv run ruff format .` passes.
 - `uv run ruff check --fix .` passes.
+- `uv run ruff format .` passes.
 - `uv run pytest` passes with 100% package coverage when explicitly run for release validation.
 
 ## Notes for Kanban maintenance

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 188 done, 129 to do.
+Progress: 189 done, 128 to do.
 
 ## Done
 
@@ -730,6 +730,10 @@ Progress: 188 done, 129 to do.
   cannot compile as active, which also repairs a flat leaf onto a filter over a target-type annotation. Primary-key
   targets byte-identical. Fixture `Series`, `Printing.licensor` / `co_publishers` / `series` (migration 0017), live
   grid, mutations M1-M8 red
+- [x] 173. fixed: the KANBAN release-readiness checklist (BoardDoc 11) runs `ruff check --fix .` before `ruff format .`,
+  as AGENTS and pre-commit do; CardItem 1248 states the same pair in that order (its stale `AGENTS.md:15` line cite
+  dropped) and CONTRIBUTING.md lists the hooks as ruff-check then ruff-format. Both rows written with `.update()`
+  (`updated_date` kept), KANBAN.md / KANBAN.html re-rendered; archived specs keep the old order as history
 
 ## Outside review of the fixes
 
@@ -825,9 +829,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the C11 hook-order rows (on a test-local schema))
 - [ ] 170. No test runs `workspace.py prove` (`scripts/workspace.py::_cmd_prove`); its flow lease and copy lock are pinned only
   through `execute`; add a `main(["prove", ...])` row and a two-run contention row
-- [ ] 173. The KANBAN "Before a release" checklist (BoardDoc 11) runs `ruff format .` before `ruff check --fix .`, the reverse
-  of AGENTS and pre-commit; reverse it through the DB and re-render (archived specs 015, 034, 041, 042, 044, 046 and 057 keep
-  the old order as history)
 - [ ] 178. `review_plan.py scope` "Folders touched" (`ScopeReport.folders`) omits a rename's old folder and still names a
   deleted package's integration item, while `--changed` covers both; REVIEW.md says `scope` lists the same changes
 - [ ] 183. `ruff format` on an explicit `.md` path rewrites its fenced blocks: pyproject's `exclude` does not stop explicit
