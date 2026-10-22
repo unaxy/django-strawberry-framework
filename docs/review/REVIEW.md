@@ -365,7 +365,7 @@ out of scope and no gate, `resume` appends the run w/ that line, both print `not
 Worker-0 reports and stops. `scope` lists the same changes for reading: committed w/ their `HEAD`
 blob ids, dirty or untracked (concurrent work), renames, each path w/ the item covering it (a
 module its file item, a folder's `__init__.py` that folder's integration item, the package-root
-`__init__.py` the project item; a committed path that no longer exists, its nearest surviving
+`__init__.py` the project item; a committed path no longer tracked, its nearest surviving
 folder's integration item, else the project item, as `--changed` takes it). `plan` writes the
 plan: one file item per module minus `__init__.py`, one folder item per package folder carrying
 that folder's `__init__.py` on its `Init files:` line, the project item carrying the package-root
