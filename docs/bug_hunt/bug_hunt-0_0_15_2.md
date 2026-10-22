@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 193 done, 137 to do.
+Progress: 194 done, 137 to do.
 
 ## Done
 
@@ -763,6 +763,10 @@ Progress: 193 done, 137 to do.
   bullet requires the full dispatched `django.yml` matrix (`gh workflow run django.yml`: every Python / Django cell,
   single-DB and `FAKESHOP_SHARDED=1`, the lint job) to pass on the release commit, the `fail_under = 100` coverage gate
   included; BoardDoc 11 written with `.update()`, KANBAN.md / KANBAN.html re-rendered
+- [x] 334. CONTRIBUTING.md's pre-commit hook list named six of the twelve hooks (no basedpyright, basedpyright-floor,
+  check-type-suppressions, check-public-types, truthful-reads, import-spec-terms-check) and said the hooks check "things
+  ruff does not" while listing ruff: fixed: the list names every hook of `.pre-commit-config.yaml` in config order with
+  what each checks, and the lead-in says they run in that order and CI's lint job runs the same checks
 
 ## Outside review of the fixes
 
