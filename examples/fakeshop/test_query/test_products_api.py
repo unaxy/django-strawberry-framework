@@ -77,6 +77,7 @@ from graphql_client import (
     json_object,
     json_str,
     middleware_without_debug_toolbar,
+    post_lock_rereads,
     response_json,
     select_tables_after_last_delete,
     statement_shapes,
@@ -1887,8 +1888,9 @@ def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
     #   post-write re-fetch: products_item                = 1 (optimizer-planned)
     #   the `category` relation:  products_category       = 1 (select_related/prefetch;
     #                                                         no N+1, no lazy refetch)
+    # plus, where rows lock, the decode's post-lock re-read of products_category.
     sql = [query["sql"] for query in captured]
-    assert len(captured) == 14, sql
+    assert len(captured) == 14 + post_lock_rereads(1), sql
     # G2 load-bearing property: the re-fetch reads the item once and the relation
     # once - a deferred-field lazy refetch or an N+1 would add EXTRA products SELECTs.
     item_selects = [
@@ -1901,10 +1903,11 @@ def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
     ]
     # One re-fetch SELECT for the item, plus the validate_constraints SELECT-1.
     assert len([s for s in item_selects if "select 1" not in s.lower()]) == 1, sql
-    # TWO real category SELECTs (plus the validate_constraints SELECT-1): the
-    # relation-id visibility decode and the post-write re-fetch
-    # relation - neither is an N+1 / lazy refetch.
-    assert len([s for s in category_selects if "select 1" not in s.lower()]) == 2, sql
+    # TWO real category SELECTs (plus the validate_constraints SELECT-1, and the
+    # decode's post-lock re-read where rows lock): the relation-id visibility decode
+    # and the post-write re-fetch relation - neither is an N+1 / lazy refetch.
+    category_reads = [s for s in category_selects if "select 1" not in s.lower()]
+    assert len(category_reads) == 2 + post_lock_rereads(1), sql
 
 
 @pytest.mark.django_db
@@ -5552,7 +5555,8 @@ def test_item_save_time_validation_error_returns_the_name_keyed_envelope(mutatio
     code (no top-level error, no masked policy message), the write rolled back, and
     the exact query count of a request whose write was refused: an update or delete
     counts the existence probe of its located row the refusal runs (the row is still
-    there, so the refusal stands).
+    there, so the refusal stands). Each write locks one row it finds (the located item,
+    or a create's category), so where rows lock it adds that row's post-lock re-read.
     """
     seed_data(1)
     create_users(1)
@@ -5572,7 +5576,7 @@ def test_item_save_time_validation_error_returns_the_name_keyed_envelope(mutatio
     assert "errors" not in payload, payload
     result = json_at(payload, "data", mutation)
     assert result == {"node": None, "errors": _SAVE_REJECTED_ERRORS}
-    assert len(captured.captured_queries) == row.queries, [
+    assert len(captured.captured_queries) == row.queries + post_lock_rereads(1), [
         query["sql"] for query in captured.captured_queries
     ]
     _assert_save_rejected_rolled_back(row.operation, item, before)
@@ -5638,7 +5642,8 @@ async def test_item_save_time_validation_error_returns_the_envelope_over_graphql
     boundary, so the model flavor's create / update / delete and the ``ModelForm`` and
     serializer creates answer with the same ``name``-keyed envelope, write nothing,
     and run the exact statement count of a refused write (an update or delete probing
-    its located row once).
+    its located row once, and each write's post-lock re-read of the row it locked where
+    rows lock).
     """
     await sync_to_async(seed_data)(1)
     await sync_to_async(create_users)(1)
@@ -5664,7 +5669,8 @@ async def test_item_save_time_validation_error_returns_the_envelope_over_graphql
     assert "errors" not in payload, payload
     assert json_at(payload, "data", mutation) == {"node": None, "errors": _SAVE_REJECTED_ERRORS}
     statements = [sql for sql in recorded if sql != "BEGIN"]
-    assert len(statements) == _ASYNC_SAVE_REJECTED_QUERIES[mutation], statements
+    expected = _ASYNC_SAVE_REJECTED_QUERIES[mutation] + post_lock_rereads(1)
+    assert len(statements) == expected, statements
     await sync_to_async(_assert_save_rejected_rolled_back)(row.operation, item, before)
 
 
@@ -6281,8 +6287,9 @@ def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count
     #   the `category` relation: products_category           = 1 (select_related /
     #                                                            prefetch; no N+1, no
     #                                                            lazy refetch)
+    # plus, where rows lock, the decode's post-lock re-read of products_category.
     sql = [query["sql"] for query in captured]
-    assert len(captured) == 17, sql
+    assert len(captured) == 17 + post_lock_rereads(1), sql
     # G2 load-bearing property (NOT a column-exact snapshot - that is the package
     # mirror's job): the re-fetch reads the item once (the `SELECT 1` EXISTS is the
     # unique validator, not a row read) and the relation through select_related /
@@ -6302,8 +6309,9 @@ def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count
     assert len([s for s in item_selects if "select 1" not in s.lower()]) == 2, sql
     # THREE real category SELECTs: the relation-id visibility decode, DRF's FK
     # validation re-fetch in is_valid(), and the post-write re-fetch relation -
-    # none an N+1 / lazy refetch.
-    assert len([s for s in category_selects if "select 1" not in s.lower()]) == 3, sql
+    # none an N+1 / lazy refetch - plus the decode's post-lock re-read where rows lock.
+    category_reads = [s for s in category_selects if "select 1" not in s.lower()]
+    assert len(category_reads) == 3 + post_lock_rereads(1), sql
     # The post-write re-fetch is the LAST real `products_item` SELECT; the other one
     # is the post-save FK attestation's single-column `values()` read above it.
     refetch_select = [s for s in item_selects if "select 1" not in s.lower()][-1]
@@ -6709,7 +6717,8 @@ _ITEM_REFUSED_TAIL = ["ROLLBACK", "RELEASE", "RELEASE"]
         pytest.param(
             "updateItemViaSerializer",
             "names-other",
-            3,
+            # The named other category still exists: its decode adds a post-lock re-read.
+            3 + post_lock_rereads(1),
             id="updateItemViaSerializer-names-other",
         ),
     ],

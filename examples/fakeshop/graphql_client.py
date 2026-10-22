@@ -2,9 +2,9 @@
 
 Single-sites the live-tier request contracts: JSON GraphQL posts, raw-body posts,
 status-code assertions, parsed payload extraction, GraphQL-error rejection,
-exact-data assertions, and the verb-and-table reading of captured SQL. Superset
-signatures keep simple callers terse while letting variable-driven and custom-client
-tests use the same envelope.
+exact-data assertions, the verb-and-table reading of captured SQL, and the post-lock
+re-reads a vendor adds to it. Superset signatures keep simple callers terse while
+letting variable-driven and custom-client tests use the same envelope.
 
 The JSON path routes through the package's own
 :class:`django_strawberry_framework.testing.TestClient` (spec-043), so
@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from django.conf import settings
+from django.db import connection
 from django.test import Client
 from typing_extensions import TypeIs
 
@@ -161,6 +162,22 @@ def statement_shapes(sqls: Sequence[str]) -> list[str]:
         else:
             shapes.append(words[0])
     return shapes
+
+
+def post_lock_rereads(locked_reads_found: int) -> int:
+    """Return the fresh visibility re-reads that ``locked_reads_found`` locked reads add.
+
+    A write confirms each row its ``SELECT ... FOR UPDATE`` located (an update / delete
+    target, or relation targets a batched lookup found) with one unlocked visibility read,
+    where the backend takes row locks (``utils/write_transaction.py::rows_visible_after_lock``).
+    SQLite takes none, so it runs none; a locked read that found no row adds none either.
+    """
+    return locked_reads_found if connection.features.has_select_for_update else 0
+
+
+def post_lock_reread_shapes(locked_reads_found: int) -> list[str]:
+    """Return the ``statement_shapes`` of ``post_lock_rereads``: one ``SELECT`` each."""
+    return ["SELECT"] * post_lock_rereads(locked_reads_found)
 
 
 def statement_shapes_after_last_delete(sqls: Sequence[str]) -> list[str]:

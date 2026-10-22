@@ -72,6 +72,7 @@ from graphql_client import (
     json_list,
     json_object,
     json_str,
+    post_lock_reread_shapes,
     select_tables_after_last_delete,
     statement_shapes,
     statement_shapes_after_last_delete,
@@ -1036,12 +1037,14 @@ def _stored_desk(desk_pk: int | None) -> tuple[list[tuple[str, int]], list[str]]
     )
 
 
-#: A desk update's statements in every flavor: the locate, then both tables UPDATEd inside
-#: the write's own savepoint (the forced update's, or the serializer save's), the re-fetch.
+#: A desk update's statements in every flavor: the locate (and its post-lock re-read where
+#: rows lock), then both tables UPDATEd inside the write's own savepoint (the forced update's,
+#: or the serializer save's), the re-fetch.
 _DESK_UPDATE = [
     "SAVEPOINT",
     "SAVEPOINT",
     "SELECT",
+    *post_lock_reread_shapes(1),
     "SAVEPOINT",
     'UPDATE "library_venue"',
     'UPDATE "library_lendingdesk"',

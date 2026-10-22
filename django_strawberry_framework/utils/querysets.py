@@ -126,6 +126,7 @@ from ._narrowing import (
     is_exact_set_or_frozenset,
     is_exact_tuple,
     is_str,
+    pk_of,
 )
 from ._queryset_private import (
     queryset_db,
@@ -139,6 +140,7 @@ from .typing import MISSING_ATTRIBUTE, is_async_callable
 from .write_transaction import (
     current_write_pipeline,
     pin_write_queryset,
+    pipeline_rows_visible_after_lock,
     pipeline_scoped_queryset,
 )
 
@@ -5282,16 +5284,28 @@ def stringified_pks_present(
     membership read doubles as the relation-target row lock: a base-manager
     ``SELECT ... FOR UPDATE`` constrained by the (pinned) queryset's pk subquery,
     so an FK / M2M target confirmed visible here cannot be deleted out from under
-    the write before the transaction commits. Read surfaces run with no pipeline
-    context and are byte-unchanged.
+    the write before the transaction commits. The locked rows are then confirmed
+    by a fresh visibility read (``pipeline_rows_visible_after_lock``): a row a
+    concurrent commit hid while this read waited on its lock is absent. Read
+    surfaces run with no pipeline context and are byte-unchanged.
     """
-    queryset = linkable_rows(
+    scoped = linkable_rows(
         pipeline_scoped_queryset(queryset, queryset.model),
         key_attname,
     ).filter(pk__in=list(query_pks))
     if key_attname is None:
-        return _by_str_pk(queryset.values_list("pk", flat=True))
-    return _keys_by_str_pk(queryset.values_list("pk", key_attname))
+        pks: list[object] = list(scoped.values_list("pk", flat=True))
+        rows: list[tuple[object, object]] = [(pk, pk) for pk in pks]
+    else:
+        rows = list(scoped.values_list("pk", key_attname))
+    still_visible = pipeline_rows_visible_after_lock(
+        queryset,
+        queryset.model,
+        [pk for pk, _key in rows],
+    )
+    if still_visible is not None:
+        rows = [(pk, key) for pk, key in rows if pk in still_visible]
+    return _keys_by_str_pk(rows)
 
 
 def linkable_rows(
@@ -5310,11 +5324,6 @@ def linkable_rows(
     if key_attname is None:
         return queryset
     return queryset.filter(**{f"{key_attname}__isnull": False})
-
-
-def _by_str_pk(pks: Iterable[object]) -> dict[str, object]:
-    """Index each ``pk`` by its ``str`` form."""
-    return {str(pk): pk for pk in pks}
 
 
 def _keys_by_str_pk(rows: Iterable[tuple[object, object]]) -> dict[str, object]:
@@ -5380,10 +5389,18 @@ def visible_related_object(
     # active write pipeline the read is pinned to the write alias (fail-closed on
     # a hook alias switch) and - when the operation locks - acquired as a
     # base-manager ``FOR UPDATE`` constrained by the visibility pk subquery, the
-    # same relation-target lock the batched membership check applies.
+    # same relation-target lock (and post-lock visibility re-read) the batched
+    # membership check applies.
     queryset = related_visibility_queryset_or_default(related_model, info, async_recourse)
-    queryset = pipeline_scoped_queryset(queryset, related_model)
-    return linkable_rows(queryset, key_attname).filter(pk=pk).first()
+    obj = (
+        linkable_rows(pipeline_scoped_queryset(queryset, related_model), key_attname)
+        .filter(pk=pk)
+        .first()
+    )
+    if obj is None:
+        return None
+    still_visible = pipeline_rows_visible_after_lock(queryset, related_model, [pk_of(obj)])
+    return None if still_visible is not None and pk_of(obj) not in still_visible else obj
 
 
 def visible_related_objects(

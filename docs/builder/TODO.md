@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 24 to do.
+Progress: 23 to do.
 
 Every item below was re-verified at HEAD on 2026-10-22 by one research agent per item; each "Research" sub-bullet is
 that pass's finding and recommended landing.
@@ -25,21 +25,6 @@ From the full entries, 2026-10-21. Item numbers are that file's.
   236, 269, 271, 272, 276, 278, 279, 281, 294, 295, the Postgres `ArrayField` rows 45-47, and upstream 205 and 219
 - Release paperwork: the "CHANGELOG entry for item N" rows (maintainer edits) and the decisions 114, 201, 242, 262
 - Not beta-relevant: the `workspace.py` / script tooling rows and internal-doc prose rows
-
-## To do: fix before beta
-
-- [ ] 24. Under READ COMMITTED the `FOR UPDATE` lock does not re-run its visibility subquery after a lock wait, so a row
-  hidden by a concurrent commit is still located and written; no test uses two Postgres connections (the `conflict`
-  tests delete on the same connection)
-  - Research: reproduced on `postgres:16` with raw SQL in the package's query shape
-    (`django_strawberry_framework/utils/write_transaction.py::base_locked_queryset`, `pk__in` over the visible
-    subquery): after the concurrent commit the locked fetch returns the now-hidden row; a fresh statement returns none.
-    Fix: re-check `visible.filter(pk=pk).exists()` after the lock in
-    `django_strawberry_framework/mutations/resolvers.py::locate_instance` and for relation targets (not
-    lock-then-filter, which would lock hidden rows); answer `not_found` / the relation error. Tests (`pg`,
-    `transaction=True`): a lock blocks a second connection's writer (`lock_timeout`), and the visibility race answers
-    `not_found`. Adds one query per locate and relation target (check query-count baselines). Visibility that reads
-    other, unlocked rows stays racy. Size M
 
 ## To do: document for beta
 

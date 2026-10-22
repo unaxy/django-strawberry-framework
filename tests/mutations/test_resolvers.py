@@ -43,7 +43,10 @@ from __future__ import annotations
 import contextlib
 import inspect
 import itertools
+import threading
+import time
 from collections.abc import Callable, Generator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeAlias, TypeVar
 from unittest import mock
@@ -59,7 +62,7 @@ from django import forms
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError, connection, models, transaction
+from django.db import IntegrityError, OperationalError, connection, models, transaction
 from django.db.models import Model, QuerySet
 from django.db.models.signals import m2m_changed, post_save, pre_save
 from django.test.utils import CaptureQueriesContext
@@ -95,10 +98,15 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework.resolvers import resolve_serializer_sync
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import pk_of, read_attr, require_instance
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    pk_of,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils.errors import validation_error_to_field_errors
 from django_strawberry_framework.utils.input_values import UNSET
-from django_strawberry_framework.utils.querysets import SyncMisuseError
+from django_strawberry_framework.utils.querysets import SyncMisuseError, visible_related_object
 from django_strawberry_framework.utils.typing import (
     call_forwarded,
     graphql_input_fields,
@@ -199,6 +207,7 @@ def _schema(mutation_type: type, *, mask_errors: bool = True) -> strawberry.Sche
 def _build_item_schema(
     *,
     category_get_queryset: object | None = None,
+    item_get_queryset: object | None = None,
     input_cls: object | None = None,
     mask_errors: bool = True,
 ) -> tuple[strawberry.Schema, tuple[type[DjangoType], type[DjangoType]]]:
@@ -214,21 +223,16 @@ def _build_item_schema(
         category_body["get_queryset"] = category_get_queryset
     CategoryT = type("CategoryT", (DjangoType, relay.Node), category_body)
 
-    ItemT = type(
-        "ItemT",
-        (DjangoType, relay.Node),
-        {
-            "Meta": type(
-                "Meta",
-                (),
-                {
-                    "model": product_models.Item,
-                    "fields": ("id", "name", "category"),
-                    "primary": True,
-                },
-            ),
-        },
-    )
+    item_body: dict[str, object] = {
+        "Meta": type(
+            "Meta",
+            (),
+            {"model": product_models.Item, "fields": ("id", "name", "category"), "primary": True},
+        ),
+    }
+    if item_get_queryset is not None:
+        item_body["get_queryset"] = item_get_queryset
+    ItemT = type("ItemT", (DjangoType, relay.Node), item_body)
 
     create_meta: dict[str, object] = {
         "model": product_models.Item,
@@ -2559,6 +2563,196 @@ def test_locate_instance_locks_through_base_manager_subquery_by_default() -> Non
             )
             is None
         )
+
+
+@pytest.mark.django_db
+def test_locate_instance_confirms_the_locked_row_with_a_fresh_visibility_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A locked row is located only when a second, unlocked statement still sees it.
+
+    SQLite takes no row lock, so the re-read is forced on here; the Postgres race it
+    closes is ``test_locate_instance_misses_a_row_hidden_while_its_lock_waited``.
+    """
+    ItemT = _build_item_schema()[1][1]
+    category = product_models.Category.objects.create(name=_category_name())
+    item = product_models.Item.objects.create(name="Lockable", category=category)
+    monkeypatch.setattr(mutation_resolvers, "locks_rows", _returning(value=True))
+
+    with transaction.atomic(), CaptureQueriesContext(connection) as captured:
+        located = mutation_resolvers.locate_instance(
+            ItemT,
+            saved_pk(item),
+            unread_info(),
+            alias="default",
+        )
+    assert located is not None
+    assert saved_pk(located) == saved_pk(item)
+    assert len(captured) == 2
+
+    no_rows: set[object] = set()
+    monkeypatch.setattr(mutation_resolvers, "rows_visible_after_lock", _returning(no_rows))
+    with transaction.atomic():
+        assert (
+            mutation_resolvers.locate_instance(
+                ItemT,
+                saved_pk(item),
+                unread_info(),
+                alias="default",
+            )
+            is None
+        )
+
+
+_RowT = TypeVar("_RowT", bound=Model)
+
+
+def _public_rows(
+    _cls: type[DjangoType],
+    queryset: QuerySet[_RowT],
+    _info: strawberry.Info,
+) -> QuerySet[_RowT]:
+    """A ``get_queryset`` hook that hides every ``is_private`` row."""
+    return queryset.filter(is_private=False)
+
+
+def _await_a_lock_waiter() -> None:
+    """Return once another backend of this database waits on a lock; fail after 10 seconds."""
+    deadline = time.monotonic() + 10
+    with connection.cursor() as cursor:
+        while time.monotonic() < deadline:
+            cursor.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                "AND datname = current_database() AND pid <> pg_backend_pid()",
+            )
+            if call_method(cursor, "fetchall") != [(0,)]:
+                return
+            time.sleep(0.01)
+    pytest.fail("no backend waited on the held row lock")
+
+
+def _hide_while_a_reader_waits(model: type[Model], pk: object, held: threading.Event) -> None:
+    """On this thread's connection, mark a row private and commit once another backend waits on it."""
+    try:
+        with transaction.atomic():
+            model._base_manager.filter(pk=pk).update(is_private=True)
+            held.set()
+            _await_a_lock_waiter()
+    finally:
+        connection.close()
+
+
+@contextlib.contextmanager
+def _hidden_while_waited_on(model: type[Model], pk: object) -> Generator[None]:
+    """Run the body while another connection holds ``pk``'s row and hides it once the body waits."""
+    held = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as other:
+        hiding = other.submit(_hide_while_a_reader_waits, model, pk, held)
+        assert held.wait(10)
+        yield
+        hiding.result()
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+def test_locate_instance_misses_a_row_hidden_while_its_lock_waited() -> None:
+    """Under READ COMMITTED a row the lock's wait saw hidden is not found.
+
+    The locked statement re-reads the row after the wait but keeps its visibility
+    subquery's snapshot, so it still returns the row; the fresh re-read does not.
+    """
+    ItemT = _build_item_schema(item_get_queryset=classmethod(_public_rows))[1][1]
+    category = product_models.Category.objects.create(name=_category_name())
+    item = product_models.Item.objects.create(name="Hidden mid-lock", category=category)
+
+    with _hidden_while_waited_on(product_models.Item, saved_pk(item)), transaction.atomic():
+        located = mutation_resolvers.locate_instance(
+            ItemT,
+            saved_pk(item),
+            unread_info(),
+            alias="default",
+        )
+
+    assert located is None
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+def test_locate_instance_lock_blocks_a_second_connections_writer() -> None:
+    """The located row stays locked until the write transaction ends."""
+    ItemT = _build_item_schema()[1][1]
+    category = product_models.Category.objects.create(name=_category_name())
+    item = product_models.Item.objects.create(name="Lockable", category=category)
+
+    def _write_with_a_short_lock_timeout() -> None:
+        try:
+            with transaction.atomic():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout = '100ms'")
+                product_models.Item.objects.filter(pk=saved_pk(item)).update(name="Overwritten")
+        finally:
+            connection.close()
+
+    with transaction.atomic():
+        assert mutation_resolvers.locate_instance(
+            ItemT,
+            saved_pk(item),
+            unread_info(),
+            alias="default",
+        )
+        with (
+            ThreadPoolExecutor(max_workers=1) as other,
+            pytest.raises(OperationalError, match="lock timeout"),
+        ):
+            other.submit(_write_with_a_short_lock_timeout).result()
+
+    item.refresh_from_db()
+    assert item.name == "Lockable"
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+def test_relation_target_hidden_while_its_lock_waited_is_a_relation_error() -> None:
+    """A create's category, hidden by the commit its row lock waited on, answers the relation error."""
+
+    @strawberry.input
+    class GidItemInput:
+        category_id: relay.GlobalID = strawberry.field(description="custom category ref")
+
+    schema, (CategoryT, _ItemT) = _build_item_schema(
+        category_get_queryset=classmethod(_public_rows),
+        input_cls=GidItemInput,
+    )
+    category = product_models.Category.objects.create(name=_category_name())
+    variables = {
+        "d": {
+            "name": "Linked mid-lock",
+            "categoryId": global_id_for(CategoryT, saved_pk(category)),
+        },
+    }
+
+    with _hidden_while_waited_on(product_models.Category, saved_pk(category)):
+        res = schema.execute_sync(_CREATE, variable_values=variables)
+
+    assert_mutation_field_error(res, "createItem", "categoryId")
+    assert not product_models.Item.objects.filter(name="Linked mid-lock").exists()
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+def test_visible_related_object_misses_a_target_hidden_while_its_lock_waited() -> None:
+    """The single-object relation decode re-reads visibility after its row lock too."""
+    _build_item_schema(category_get_queryset=classmethod(_public_rows))
+    category = product_models.Category.objects.create(name=_category_name())
+
+    with (
+        _hidden_while_waited_on(product_models.Category, saved_pk(category)),
+        transaction.atomic(),
+        write_pipeline("default", lock=True),
+    ):
+        found = visible_related_object(product_models.Category, saved_pk(category), unread_info())
+
+    assert found is None
 
 
 _T = TypeVar("_T")

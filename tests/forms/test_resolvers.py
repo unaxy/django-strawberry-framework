@@ -67,6 +67,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, models
 from django.db.models.signals import pre_save
 from django.test.utils import CaptureQueriesContext
+from graphql_client import post_lock_rereads
 from strawberry import relay
 from strawberry.types.base import get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
@@ -931,8 +932,8 @@ def test_m2m_member_whose_to_field_name_value_is_empty_stays_linked(
     ``GlobalID`` to ``""`` and links it. Both shapes read the genre table four times (the
     omitted members' reconstruction or the supplied member's decode, then the bound form's
     initial members, the field's lookup and the save's member set), so the empty key costs
-    no extra lookup. No fakeshop form keys an M2M by a text column a member can hold ``""``
-    in.
+    no extra lookup; where rows lock, the supplied member's decode adds its post-lock
+    re-read. No fakeshop form keys an M2M by a text column a member can hold ``""`` in.
     """
 
     class BookForm(forms.ModelForm[library_models.Book]):
@@ -994,7 +995,7 @@ def test_m2m_member_whose_to_field_name_value_is_empty_stays_linked(
         for query in captured.captured_queries
         if query["sql"].startswith("SELECT") and 'FROM "library_genre"' in query["sql"]
     ]
-    assert len(reads) == genre_reads, reads
+    assert len(reads) == genre_reads + post_lock_rereads(int(value == "supplied")), reads
 
 
 @pytest.mark.django_db
@@ -2071,8 +2072,9 @@ def test_m2m_raw_pk_element_empty_is_decoded_never_a_clear() -> None:
     and resolved through ``EditionT.get_queryset`` like any member. That edition is hidden,
     so the element is the uniform relation error with nothing written. Bound undecoded, the
     generated (ISBN-keyed) field would link the hidden edition. The edition table is read
-    twice: ``editionId`` and the element, each through ``EditionT.get_queryset``; the refusal
-    precedes any form. ``EditionT`` is test-local: no fakeshop text-keyed type hides a row.
+    twice: ``editionId`` and the element, each through ``EditionT.get_queryset``, plus the
+    visible ``editionId``'s post-lock re-read where rows lock; the refusal precedes any
+    form. ``EditionT`` is test-local: no fakeshop text-keyed type hides a row.
     """
     schema = _build_printing_bound_with_schema()
     publisher = library_models.Publisher.objects.create(name=_uniq("Pub"))
@@ -2096,7 +2098,7 @@ def test_m2m_raw_pk_element_empty_is_decoded_never_a_clear() -> None:
     }
     assert not library_models.Printing.objects.exists()
     reads = [q["sql"] for q in captured.captured_queries if 'FROM "library_edition"' in q["sql"]]
-    assert len(reads) == 2, reads
+    assert len(reads) == 2 + post_lock_rereads(1), reads
 
 
 @pytest.mark.django_db
