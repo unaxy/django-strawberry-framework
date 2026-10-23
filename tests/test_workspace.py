@@ -14,6 +14,7 @@ these rows can move there. There is no live sibling in
 """
 
 import contextlib
+import dataclasses
 import errno
 import fcntl
 import hashlib
@@ -3132,6 +3133,259 @@ def test_run_refuses_a_uv_command_with_the_refusal_exit_code(
 
 def test_run_refuses_a_missing_command() -> None:
     assert workspace.main(["run", "review/pkg/a.py/perf-1"]) == workspace.REFUSED
+
+
+def _flow_is_leased(layout: workspace.Layout) -> bool:
+    """Whether a command holds the flow's lease: the exclusive ``flock`` ``gc`` takes fails."""
+    try:
+        descriptor = workspace._lock_flow_dir(layout, fcntl.LOCK_EX | fcntl.LOCK_NB, create=False)
+    except BlockingIOError:
+        return True
+    if descriptor is not None:
+        os.close(descriptor)
+    return False
+
+
+def _file_id(path: Path) -> tuple[int, int]:
+    found = path.stat()
+    return found.st_dev, found.st_ino
+
+
+@dataclasses.dataclass(frozen=True)
+class _Started:
+    """A command a run started: its argv, its environment, and the locks held while it ran."""
+
+    command: list[str]
+    env: dict[str, str]
+    holding: list[tuple[int, int]]
+    flow_leased: bool
+    copy_locked: bool
+
+
+class _StartedCommands(list[_Started]):
+    """The commands started, in order, and the exit code each one reports: ``code``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.code = 0
+
+
+@pytest.fixture
+def started(
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _StartedCommands:
+    """Every command ``main`` starts in this process, in order; none of them runs.
+
+    ``Layout.for_flow`` answers under the test's pool for any flow, ``uv sync`` is ``syncs``,
+    the provenance probe reports the copy itself, and ``stream`` records the command with
+    whether the flow's lease and the copy's lock are held while it would run, then reports
+    ``code`` as its exit.
+    """
+    del syncs
+    commands = _StartedCommands()
+
+    def for_flow(flow: str) -> workspace.Layout:
+        return workspace.Layout(layout.repo_root, layout.base, flow)
+
+    def probe(directory: Path, _env: dict[str, str]) -> workspace._ProbeResult:
+        return _probe(directory)
+
+    def stream(
+        command: Sequence[str],
+        env: dict[str, str],
+        _log_path: Path,
+        _header: str,
+        _cwd: Path | None = None,
+        *,
+        holding: Sequence[int] = (),
+    ) -> workspace.Finished:
+        copy = Path(command[list(command).index("--directory") + 1])
+        owner = for_flow(copy.parent.parent.name)
+        commands.append(
+            _Started(
+                list(command),
+                env,
+                [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in holding],
+                _flow_is_leased(owner),
+                _lock_is_held(owner.slot_lock(copy.name)),
+            ),
+        )
+        return workspace.Finished(commands.code)
+
+    monkeypatch.setattr(workspace.Layout, "for_flow", staticmethod(for_flow))
+    monkeypatch.setattr(workspace, "probe", probe)
+    monkeypatch.setattr(workspace, "stream", stream)
+    return commands
+
+
+def _prove(manifest: Path | str, *flags: str, address: str = _ADDRESS) -> int:
+    return workspace.main(
+        [
+            "prove",
+            address,
+            str(manifest),
+            *flags,
+        ],
+    )
+
+
+@pytest.mark.parametrize("given", ["proofs.json", "~/proofs.json"], ids=["relative", "home"])
+@pytest.mark.parametrize("flow", ["review", "hunt"])
+def test_prove_runs_the_proof_script_on_its_flows_copy_and_logs_the_run(
+    flow: str,
+    given: str,
+    layout: workspace.Layout,
+    started: _StartedCommands,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _write(tmp_path / "proofs.json", "{}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    started.code = 3
+
+    code = _prove(given, "--", "--only", "1", address=f"{flow}/pkg/a.py/perf-1")
+
+    owner = workspace.Layout(layout.repo_root, layout.base, flow)
+    record = _run_record(owner)
+    copy = owner.slot_dir("slot-1")
+    scratch = owner.evidence / "proofs" / "pkg__a.py" / "perf-1"
+    proof = [
+        "python",
+        "scripts/prove_failability.py",
+        str(manifest),
+        "--workspace",
+        str(copy),
+        "--scratch-root",
+        str(scratch),
+        "--json",
+        str(scratch / f"{record['run_id']}.json"),
+        "--only",
+        "1",
+    ]
+    assert code == 3
+    assert [run.command for run in started] == [
+        [
+            "uv",
+            "run",
+            "--directory",
+            str(copy),
+            "--frozen",
+            "--group",
+            "pg",
+            "--",
+            *proof,
+        ],
+    ]
+    assert (record["address"], record["command"], record["exit"]) == (
+        f"{flow}/pkg/a.py/perf-1",
+        proof,
+        3,
+    )
+
+
+def test_prove_runs_its_command_holding_the_flow_lease_and_the_copy_lock(
+    layout: workspace.Layout,
+    started: _StartedCommands,
+    tmp_path: Path,
+) -> None:
+    assert _prove(_write(tmp_path / "proofs.json", "{}\n")) == 0
+
+    (run,) = started
+    assert (run.flow_leased, run.copy_locked) == (True, True)
+    assert run.holding == [_file_id(layout.flow_dir), _file_id(layout.slot_lock("slot-1"))]
+
+
+@pytest.mark.parametrize(
+    ("flags", "sharded"),
+    [((), None), (("--cell", "sharded"), "1")],
+    ids=["default", "sharded"],
+)
+def test_prove_runs_its_command_in_its_cell(
+    flags: tuple[str, ...],
+    sharded: str | None,
+    started: _StartedCommands,
+    tmp_path: Path,
+) -> None:
+    assert _prove(_write(tmp_path / "proofs.json", "{}\n"), *flags) == 0
+
+    assert [run.env.get("FAKESHOP_SHARDED") for run in started] == [sharded]
+
+
+@pytest.mark.parametrize(("fresh", "kept"), [(False, True), (True, False)], ids=["reuse", "fresh"])
+@pytest.mark.usefixtures("started")
+def test_prove_reuses_its_copy_with_its_edits_and_fresh_resyncs_it(
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    tmp_path: Path,
+    *,
+    fresh: bool,
+    kept: bool,
+) -> None:
+    manifest = _write(tmp_path / "proofs.json", "{}\n")
+    assert _prove(manifest) == 0
+    edit = _write(layout.slot_dir("slot-1") / "edit.txt", "kept\n")
+
+    assert _prove(manifest, *(["--fresh"] if fresh else [])) == 0
+
+    assert edit.exists() is kept
+    assert syncs == [layout.slot_dir("slot-1")] * (2 if fresh else 1)
+
+
+@pytest.mark.parametrize("name", ["missing.json", "folder"], ids=["missing", "directory"])
+def test_prove_refuses_a_manifest_that_is_not_a_file_before_it_binds_a_copy(
+    name: str,
+    layout: workspace.Layout,
+    started: _StartedCommands,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "folder").mkdir()
+    manifest = (tmp_path / name).resolve()
+
+    code = _prove(manifest)
+
+    assert code == workspace.REFUSED
+    assert capsys.readouterr().err == f"workspace: manifest {manifest} is not a file\n"
+    assert started == []
+    assert not layout.flow_dir.exists()
+
+
+def test_gc_refuses_while_a_prove_waits_for_its_copy(
+    layout: workspace.Layout,
+    actors: _Actors,
+    tmp_path: Path,
+) -> None:
+    manifest = _write(tmp_path / "proofs.json", "{}\n")
+    actors.start("P", "prove", _ADDRESS, str(manifest), pauses=("bound",))
+    assert actors.reached("P", "bound")
+
+    refused = _gc_refused(layout)
+    actors.go("P", "bound")
+
+    assert refused
+    assert actors.finish("P")[0] == 0
+    assert actors.ran("P") == {"slot": "slot-1", "seen": []}
+
+
+def test_a_second_prove_waits_for_the_first_to_finish_in_their_copy(
+    actors: _Actors,
+    tmp_path: Path,
+) -> None:
+    manifest = _write(tmp_path / "proofs.json", "{}\n")
+    actors.start("P", "prove", _ADDRESS, str(manifest), pauses=("in",))
+    assert actors.reached("P", "in")
+    actors.start("Q", "prove", _ADDRESS, str(manifest))
+    assert actors.reached("Q", "bound")
+
+    waited = not actors.reached("Q", "in", within=0.5)
+    actors.go("P", "in")
+
+    assert waited
+    assert [actors.finish("P")[0], actors.finish("Q")[0]] == [0, 0]
+    assert actors.ran("Q") == {"slot": "slot-1", "seen": ["P"]}
 
 
 def test_only_run_and_prove_take_a_command_after_the_separator() -> None:
