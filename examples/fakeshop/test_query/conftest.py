@@ -20,6 +20,11 @@ the full rebuild under ambient settings, including after an assertion failure.
 update's located row between the locate and the write: it wraps the fakeshop mutation's
 ``check_permission`` so the row is deleted once authorization has run, outside any
 savepoint the write opens.
+
+``record_compiled_sql`` records the read statements a request compiles where the compiler
+builds them. ``CaptureQueriesContext`` watches one connection object, and the async
+pipeline hands its ORM work to a ``sync_to_async`` executor thread holding a different one,
+so an async suite counts statements here instead.
 """
 
 from __future__ import annotations
@@ -28,7 +33,9 @@ import sys
 from collections.abc import Callable, Iterator
 
 import pytest
-from graphql_client import DeleteAfterAuthorization
+from django.core.exceptions import EmptyResultSet
+from django.db.models.sql.compiler import SQLCompiler
+from graphql_client import DeleteAfterAuthorization, RecordCompiledSql
 from schema_reload import (
     _PROJECT_APP_SCHEMA_MODULES,
     reload_all_project_schemas,
@@ -143,3 +150,44 @@ def delete_after_authorization(monkeypatch: pytest.MonkeyPatch) -> DeleteAfterAu
         monkeypatch.setattr(mutation_cls, "check_permission", deleting)
 
     return arm
+
+
+def _pass_through(method: Callable[..., object]) -> Callable[..., object]:
+    """``method`` as a blind forwarding target that binds none of its own overloads.
+
+    A recorder hands its arguments on untouched, so no single overload of the
+    wrapped method describes the call; seen through this signature, the call
+    answers ``object`` instead of an overload the arguments cannot select.
+    """
+    return method
+
+
+@pytest.fixture
+def record_compiled_sql(monkeypatch: pytest.MonkeyPatch) -> RecordCompiledSql:
+    """Return a recording callable; each call returns the list it appends statements to.
+
+    A query Django compiles to "no rows possible" never reaches the database, so it
+    is skipped rather than recorded. Only the plain SELECT compiler is read:
+    compiling a write compiler a second time re-runs its pre-SQL setup, which for a
+    multi-table update executes a SELECT and rewrites the query's own filter, so an
+    instrument must not ask one for its SQL. The compiler is restored at teardown.
+    """
+
+    def record(table: str = "", /) -> list[str]:
+        recorded: list[str] = []
+        original_execute_sql = _pass_through(SQLCompiler.execute_sql)
+
+        def _recording_execute_sql(self: SQLCompiler, *args: object, **kwargs: object) -> object:
+            if type(self) is SQLCompiler:
+                try:
+                    sql = self.as_sql()[0]
+                except EmptyResultSet:
+                    sql = ""
+                if sql and table in sql:
+                    recorded.append(sql)
+            return original_execute_sql(self, *args, **kwargs)
+
+        monkeypatch.setattr(SQLCompiler, "execute_sql", _recording_execute_sql)
+        return recorded
+
+    return record

@@ -38,7 +38,6 @@ from apps.library.orders import BranchOrder
 from apps.products import services
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import AbstractUser, Permission, User
-from django.core.exceptions import EmptyResultSet
 from django.db import models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models.expressions import Combinable, Func, OrderBy, RawSQL
@@ -53,6 +52,7 @@ from django.utils.functional import cached_property
 from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
+    RecordCompiledSql,
     json_at,
     json_list,
     json_object,
@@ -1318,52 +1318,10 @@ def _offset_guard_schema() -> DjangoSchema:
     return DjangoSchema(query=_OffsetGuardQuery, config=strawberry_config())
 
 
-def _pass_through(method: Callable[..., object]) -> Callable[..., object]:
-    """``method`` as a blind forwarding target that binds none of its own overloads.
-
-    A recorder hands its arguments on untouched, so no single overload of the
-    wrapped method describes the call; seen through this signature, the call
-    answers ``object`` instead of an overload the arguments cannot select.
-    """
-    return method
-
-
-def _record_table_sql(monkeypatch: pytest.MonkeyPatch, table: str = "library_branch") -> list[str]:
-    """Record every statement against ``table`` the request compiles, whichever thread runs it.
-
-    ``CaptureQueriesContext`` watches one connection object, and the async
-    pipeline hands its ORM work to a ``sync_to_async`` executor thread holding a
-    different one - so the sync suite's instrument reads empty here for reasons
-    that have nothing to do with the ordering under test. Recording at the
-    compiler is the same observable taken one layer in: the statement is captured
-    where it is built, which is inside whichever thread ends up building it.
-
-    A query Django compiles to "no rows possible" never reaches the database and
-    carries no ordering, so it is skipped rather than recorded. Only the plain
-    SELECT compiler is read: compiling a write compiler a second time re-runs its
-    pre-SQL setup, which for a multi-table update executes a SELECT and rewrites
-    the query's own filter, so an instrument must not ask one for its SQL.
-    """
-    recorded: list[str] = []
-    original_execute_sql = _pass_through(SQLCompiler.execute_sql)
-
-    def _recording_execute_sql(self: SQLCompiler, *args: object, **kwargs: object) -> object:
-        if type(self) is SQLCompiler:
-            try:
-                sql = self.as_sql()[0]
-            except EmptyResultSet:
-                sql = ""
-            if table in sql:
-                recorded.append(sql)
-        return original_execute_sql(self, *args, **kwargs)
-
-    monkeypatch.setattr(SQLCompiler, "execute_sql", _recording_execute_sql)
-    return recorded
-
-
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_rejects_a_random_model_default(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """The async coloring reads the same effective order the sync one does.
 
@@ -1386,7 +1344,7 @@ async def test_async_offset_rejects_a_random_model_default(
         return queryset
 
     monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_apply_unchanged))
-    branch_sql = _record_table_sql(monkeypatch)
+    branch_sql = record_compiled_sql("library_branch")
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
@@ -1435,6 +1393,7 @@ def _coin_case_ordering(lookup: str = "coin__gt", threshold: object = 0.5) -> tu
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_rejects_a_relation_default_that_expands_to_a_random_order(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """The async coloring expands a relation term the same way the sync one does.
 
@@ -1446,7 +1405,7 @@ async def test_async_offset_rejects_a_relation_default_that_expands_to_a_random_
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", ("branch",))
     monkeypatch.setattr(library_models.Branch._meta, "ordering", (Random(),))
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1459,12 +1418,13 @@ async def test_async_offset_rejects_a_relation_default_that_expands_to_a_random_
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_accepts_a_relation_default_that_expands_to_a_stable_order(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """The control for the row above: the expansion is read, not assumed random."""
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", ("branch",))
     monkeypatch.setattr(library_models.Branch._meta, "ordering", ("name",))
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1478,12 +1438,13 @@ async def test_async_offset_accepts_a_relation_default_that_expands_to_a_stable_
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_accepts_a_relation_attname_over_a_random_related_default(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """Naming the foreign-key column instead of the relation never reaches the related default."""
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", ("branch_id",))
     monkeypatch.setattr(library_models.Branch._meta, "ordering", (Random(),))
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1506,13 +1467,14 @@ async def test_async_offset_accepts_a_relation_attname_over_a_random_related_def
 )
 async def test_async_offset_accepts_an_expression_reference_to_a_relation(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
     shelf_ordering: _ModelOrdering,
 ) -> None:
     """Only a STRING ordering term expands; an expression reference is a column order."""
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", shelf_ordering)
     monkeypatch.setattr(library_models.Branch._meta, "ordering", (Random(),))
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1561,6 +1523,7 @@ def _patch_orderings_passing_checks(
 )
 async def test_async_offset_rejects_a_to_many_relation_default_that_expands_to_a_random_order(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
     shelf_ordering: _ModelOrdering,
     target: type[models.Model],
     target_ordering: _ModelOrdering,
@@ -1568,7 +1531,7 @@ async def test_async_offset_rejects_a_to_many_relation_default_that_expands_to_a
     """The async coloring expands a many-to-many or generic relation name the same way."""
     await sync_to_async(_seed_three_shelves_with_genres_and_tags)()
     _patch_orderings_passing_checks(monkeypatch, shelf_ordering, target, target_ordering)
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1588,6 +1551,7 @@ async def test_async_offset_rejects_a_to_many_relation_default_that_expands_to_a
 )
 async def test_async_offset_accepts_a_to_many_relation_default_that_expands_to_a_stable_order(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
     shelf_ordering: _ModelOrdering,
     target: type[models.Model],
     target_ordering: _ModelOrdering,
@@ -1595,7 +1559,7 @@ async def test_async_offset_accepts_a_to_many_relation_default_that_expands_to_a
     """The controls for the row above: the expansion is read, not assumed random."""
     await sync_to_async(_seed_three_shelves_with_genres_and_tags)()
     _patch_orderings_passing_checks(monkeypatch, shelf_ordering, target, target_ordering)
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1610,11 +1574,12 @@ async def test_async_offset_accepts_a_to_many_relation_default_that_expands_to_a
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_rejects_a_conditional_order_over_a_random_predicate(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """The async coloring reads both sides of a predicate the same way the sync one does."""
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", _coin_case_ordering())
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
     schema = _shelf_offset_schema(
         resolver=lambda _root, _info: library_models.Shelf.objects.alias(coin=Random()),
     )
@@ -1630,11 +1595,12 @@ async def test_async_offset_rejects_a_conditional_order_over_a_random_predicate(
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_accepts_a_conditional_order_over_a_column_alias_predicate(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """The control for the row above: a predicate comparing a column alias still pages."""
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", _coin_case_ordering())
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
     schema = _shelf_offset_schema(
         resolver=lambda _root, _info: library_models.Shelf.objects.alias(coin=models.F("code")),
     )
@@ -1700,6 +1666,7 @@ class _ProjectTransform(Transform):
 )
 async def test_async_offset_reads_an_expression_by_its_approved_form(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
     ordering: _ModelOrdering,
     *,
     served: bool,
@@ -1707,7 +1674,7 @@ async def test_async_offset_reads_an_expression_by_its_approved_form(
     """The async coloring names the same approved forms the sync one does."""
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", ordering)
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1773,6 +1740,7 @@ def _case_ordering_over(condition: models.Q) -> tuple[models.Case]:
 )
 async def test_async_offset_reads_a_term_by_the_form_it_resolves_into(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
     ordering: _ModelOrdering,
     *,
     served: bool,
@@ -1780,7 +1748,7 @@ async def test_async_offset_reads_a_term_by_the_form_it_resolves_into(
     """The async coloring reads a reference by its exact type the same way the sync one does."""
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", ordering)
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1805,6 +1773,7 @@ async def test_async_offset_reads_a_term_by_the_form_it_resolves_into(
 )
 async def test_async_offset_reads_a_conditional_predicate_by_its_exact_type(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
     condition: models.Q,
     *,
     served: bool,
@@ -1817,7 +1786,7 @@ async def test_async_offset_reads_a_conditional_predicate_by_its_exact_type(
     """
     await _seed_three_shelves_async()
     monkeypatch.setattr(library_models.Shelf._meta, "ordering", _case_ordering_over(condition))
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
 
@@ -1838,6 +1807,7 @@ async def test_async_offset_reads_a_conditional_predicate_by_its_exact_type(
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_rejects_a_predicate_chain_of_project_sql(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """A project transform on a built-in field is SQL the predicate wraps its column in."""
     await _seed_three_shelves_async()
@@ -1846,7 +1816,7 @@ async def test_async_offset_rejects_a_predicate_chain_of_project_sql(
         "ordering",
         _coin_case_ordering(lookup="code__jitter__gt", threshold=0.5),
     )
-    shelf_sql = _record_table_sql(monkeypatch, "library_shelf")
+    shelf_sql = record_compiled_sql("library_shelf")
 
     with register_lookup(models.TextField, _ProjectTransform):
         payload = await _post_async(_shelf_offset_schema(), _ASYNC_RELATION_DEFAULT_OFFSET)
@@ -1860,6 +1830,7 @@ async def test_async_offset_rejects_a_predicate_chain_of_project_sql(
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_accepts_extra_ordering_over_a_dormant_random_order(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """The async twin of the acceptance half: a superseded ``"?"`` cannot reject the offset.
 
@@ -1882,7 +1853,7 @@ async def test_async_offset_accepts_extra_ordering_over_a_dormant_random_order(
         return queryset.order_by("?").extra(order_by=["id"])
 
     monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_extra_supersedes_random))
-    branch_sql = _record_table_sql(monkeypatch)
+    branch_sql = record_compiled_sql("library_branch")
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
@@ -1899,6 +1870,7 @@ async def test_async_offset_accepts_extra_ordering_over_a_dormant_random_order(
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_rejects_extra_random_ordering_over_a_stable_order(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """The control for the acceptance above: the same precedence, opposite verdict.
 
@@ -1920,7 +1892,7 @@ async def test_async_offset_rejects_extra_random_ordering_over_a_stable_order(
         return queryset.order_by("name").extra(order_by=["?"])
 
     monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_random_extra_supersedes_stable))
-    branch_sql = _record_table_sql(monkeypatch)
+    branch_sql = record_compiled_sql("library_branch")
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
@@ -1933,6 +1905,7 @@ async def test_async_offset_rejects_extra_random_ordering_over_a_stable_order(
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_rejects_an_annotated_random_order(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """The async coloring resolves an ordering alias the same way the sync one does.
 
@@ -1953,7 +1926,7 @@ async def test_async_offset_rejects_an_annotated_random_order(
         return queryset.annotate(rnd=Random()).order_by("rnd")
 
     monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_random_annotation))
-    branch_sql = _record_table_sql(monkeypatch)
+    branch_sql = record_compiled_sql("library_branch")
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
@@ -1966,6 +1939,7 @@ async def test_async_offset_rejects_an_annotated_random_order(
 @pytest.mark.django_db(transaction=True)
 async def test_async_offset_rejects_an_extra_select_ordering(
     monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """Raw SQL reached through ``extra`` is opaque on this coloring too.
 
@@ -1986,7 +1960,7 @@ async def test_async_offset_rejects_an_extra_select_ordering(
         return queryset.extra(select={"rnd": "RANDOM()"}, order_by=["rnd"])
 
     monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_extra_select_ordering))
-    branch_sql = _record_table_sql(monkeypatch)
+    branch_sql = record_compiled_sql("library_branch")
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 
@@ -1997,7 +1971,10 @@ async def test_async_offset_rejects_an_extra_select_ordering(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_async_offset_rejects_a_raw_sql_order(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_async_offset_rejects_a_raw_sql_order(
+    monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
     """A raw SQL leaf is unreadable on this coloring for the same reason.
 
     Both pipelines classify the sealed queryset with one term reader, so the
@@ -2016,7 +1993,7 @@ async def test_async_offset_rejects_a_raw_sql_order(monkeypatch: pytest.MonkeyPa
         return queryset.order_by(RawSQL("RANDOM()", []))
 
     monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_raw_sql_ordering))
-    branch_sql = _record_table_sql(monkeypatch)
+    branch_sql = record_compiled_sql("library_branch")
 
     payload = await _post_async(_offset_guard_schema(), _ASYNC_OFFSET_WITH_ACTIVE_ORDER)
 

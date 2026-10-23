@@ -31,8 +31,13 @@ The prefetched cases invert both constraints on purpose. Their many-side rows
 arrive already in Django's prefetch cache - planned by the composed schema's
 optimizer, or prefetched by the consumer's own root resolver - and
 ``many_resolver`` must read each relation kind under the key Django stored it
-under. The reverse side of ``VenueSponsor.venues``, declared without
-``related_name``, is keyed by its query name ``venuesponsor`` rather than its
+under. A lookup that missed would still answer the same rows through the
+manager, so the planned row counts the statements the request compiles: a
+missed cache lookup re-reads through the target hook and moves that count. The
+consumer row's ``strictness="raise"`` case witnesses the N+1 probe key: a probe
+that misses the cache reports an unplanned N+1. The reverse side of
+``VenueSponsor.venues``, declared without ``related_name``, is keyed by its
+query name ``venuesponsor`` rather than its
 ``venuesponsor_set`` accessor. Its target ``VenueSponsorType`` and the
 reverse-FK ``repairticket``'s target ``RepairTicketType`` both declare
 ``get_queryset``, so their unplanned consumer prefetches cross the visibility
@@ -60,9 +65,9 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.urls import clear_url_caches, path
-from graphql_client import JSONObject, response_json
+from graphql_client import JSONObject, RecordCompiledSql, response_json
 
-from django_strawberry_framework import DjangoSchema, strawberry_config
+from django_strawberry_framework import DjangoOptimizerExtension, DjangoSchema, strawberry_config
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
@@ -234,25 +239,28 @@ async def test_async_reverse_one_to_one_lazy_loads_over_http() -> None:
 
 
 def _seed_sponsor_graph() -> None:
-    """Two venues, two sponsors over the no-``related_name`` M2M, and three tickets.
+    """Three venues, two sponsors over the no-``related_name`` M2M, and three tickets.
 
     ``VenueSponsor.venues`` declares no ``related_name``: a venue reaches its
     sponsors through the ``venuesponsor_set`` accessor while Django keys the
     prefetched rows under the query name ``venuesponsor``. ``RepairTicket.venue``
     is the reverse-FK control, whose prefetch key IS its accessor; the
     withdrawn ``VOID-`` ticket is hidden by ``RepairTicketType.get_queryset``.
+    The ``Idle`` venue has neither sponsors nor tickets, so its prefetch caches
+    hold empty querysets.
     """
     annex = models.Venue.objects.create(name="Annex")
     depot = models.Venue.objects.create(name="Depot")
     models.RepairTicket.objects.create(code="T-1", venue=annex)
     models.RepairTicket.objects.create(code="VOID-2", venue=annex)
     models.RepairTicket.objects.create(code="T-3", venue=depot)
+    models.Venue.objects.create(name="Idle")
     acme = models.VenueSponsor.objects.create(name="Acme")
     acme.venues.add(annex, depot)
     models.VenueSponsor.objects.create(name="Globex").venues.add(annex)
 
 
-_SPONSOR_GRAPH_DATA = {
+_SPONSOR_GRAPH_DATA: dict[str, object] = {
     "venues": [
         {
             "name": "Annex",
@@ -260,6 +268,7 @@ _SPONSOR_GRAPH_DATA = {
             "repairticket": [{"code": "T-1"}],
         },
         {"name": "Depot", "venuesponsor": [{"name": "Acme"}], "repairticket": [{"code": "T-3"}]},
+        {"name": "Idle", "venuesponsor": [], "repairticket": []},
     ],
     "sponsors": [
         {"name": "Acme", "venues": [{"name": "Annex"}, {"name": "Depot"}]},
@@ -269,7 +278,9 @@ _SPONSOR_GRAPH_DATA = {
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_async_planned_many_side_prefetches_resolve_over_http() -> None:
+async def test_async_planned_many_side_prefetches_resolve_over_http(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
     """Optimizer-planned prefetches of every many-side kind resolve inside the event loop.
 
     The composed fakeshop schema (``DjangoOptimizerExtension`` installed) plans
@@ -278,8 +289,14 @@ async def test_async_planned_many_side_prefetches_resolve_over_http() -> None:
     ``many_resolver`` must find each one in ``_prefetched_objects_cache`` under
     the key Django stored it under: the reverse M2M under its query name
     ``venuesponsor``, not its accessor ``venuesponsor_set``.
+
+    A lookup that missed would still answer the same rows, because every target
+    declares ``get_queryset`` and the miss re-reads them through the hook, so
+    the statement count is the witness: one per root field and one per planned
+    prefetch, the ``Idle`` venue's empty caches served from the cache as well.
     """
     await sync_to_async(_seed_sponsor_graph)()
+    selects = record_compiled_sql()
 
     def _build() -> DjangoSchema:
 
@@ -298,18 +315,23 @@ async def test_async_planned_many_side_prefetches_resolve_over_http() -> None:
 
     assert payload.get("errors") is None, payload
     assert payload["data"] == _SPONSOR_GRAPH_DATA
+    assert len(selects) == 5, selects
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_async_consumer_prefetched_many_side_resolves_over_http() -> None:
+@pytest.mark.parametrize("strictness", ["off", "raise"])
+async def test_async_consumer_prefetched_many_side_resolves_over_http(strictness: str) -> None:
     """A consumer's own ``prefetch_related`` of every many-side kind resolves in the event loop.
 
-    No optimizer: the root resolvers prefetch the relations themselves, so the
-    rows reach ``many_resolver`` in Django's prefetch cache unplanned. Every
-    target declares ``get_queryset`` (``VenueSponsorType`` for ``venuesponsor``,
-    ``VenueType`` for ``venues``, ``RepairTicketType`` for ``repairticket``), so
-    each unplanned cache is re-read through ``_visible_many_rows`` inside the
-    event loop and ``VOID-2`` stays hidden.
+    The root resolvers prefetch the relations themselves, so the rows reach
+    ``many_resolver`` in Django's prefetch cache unplanned; the ``raise`` case
+    installs the optimizer under ``strictness="raise"``, where the N+1 probe
+    has to find each cache under the key Django stored it under (the reverse
+    many-to-many's query name, the reverse FK's accessor) or report a relation
+    that is already loaded. Every target declares ``get_queryset`` (``VenueSponsorType``
+    for ``venuesponsor``, ``VenueType`` for ``venues``, ``RepairTicketType`` for
+    ``repairticket``), so each unplanned cache is re-read through
+    ``_visible_many_rows`` inside the event loop and ``VOID-2`` stays hidden.
     """
     await sync_to_async(_seed_sponsor_graph)()
 
@@ -340,7 +362,13 @@ async def test_async_consumer_prefetched_many_side_resolves_over_http() -> None:
                 graphql_type=list[library_schema.VenueSponsorType],
             )
 
-        return strawberry.Schema(query=Query, config=strawberry_config())
+        return strawberry.Schema(
+            query=Query,
+            config=strawberry_config(),
+            extensions=[lambda: DjangoOptimizerExtension(strictness="raise")]
+            if strictness == "raise"
+            else [],
+        )
 
     schema = await sync_to_async(_build)()
     payload = await _post_async(
