@@ -72,13 +72,14 @@ and the load-bearing invariants this module owns:
   envelope rolls back whatever the save wrote first. Any other exception (a
   ``ValueError`` included) propagates.
 - **The post-write re-fetch is by pk WITHOUT the visibility filter** (spec-036)
-  and routes through ``apply_connection_optimization`` so the
-  ``spec-035`` G2 gate keeps ``select_related`` / ``prefetch_related`` and applies
-  NO ``.only(...)`` deferral under the mutation operation (spec-036 Decision 9
-  comes for free). ``delete`` materializes the snapshot fully (relations loaded) BEFORE
-  the row is deleted; the deletion runs against the
-  located instance, NOT the returned snapshot, so the snapshot keeps its ``pk`` /
-  ``id`` for the delete payload's cache-eviction contract.
+  and routes through ``apply_connection_optimization``: the plan keeps
+  ``select_related`` / ``prefetch_related`` and, under the mutation operation,
+  introduces no ``.only(...)`` deferral on a queryset that carries none while it
+  widens one the target type's default manager carries to the selected columns
+  (``OptimizationPlan.introduce_projection``; spec-036 Decision 9). ``delete``
+  materializes the snapshot fully (relations loaded) BEFORE the row is deleted; the
+  deletion runs against the located instance, NOT the returned snapshot, so the
+  snapshot keeps its ``pk`` / ``id`` for the delete payload's cache-eviction contract.
 - **``SyncMisuseError`` discipline** is inherited from
   ``apply_type_visibility_sync``: a sync mutation meeting an ``async def
   get_queryset`` closes the coroutine and raises (spec-036 Decision 8).
@@ -1132,10 +1133,11 @@ def refetch_optimized(
     visibility ``get_queryset`` filter** - the one deliberate exception to the
     visibility contract: the actor just wrote the row, so round-tripping their own
     write back to them is not an existence leak. Routes through ``apply_connection_optimization`` so
-    the active optimizer plans the response selection; because the operation is a
-    ``MUTATION``, the spec-035 G2 gate keeps ``select_related`` /
-    ``prefetch_related`` and applies NO ``.only(...)`` - spec-036 Decision 9 comes
-    for free.
+    the active optimizer plans the response selection: ``select_related`` /
+    ``prefetch_related`` load the relations, and because the operation is a
+    ``MUTATION`` the plan introduces no ``.only(...)`` on a queryset that carries
+    none, while a projection the target type's default manager carries is widened
+    to every selected column (``OptimizationPlan.introduce_projection``).
 
     ``force_load=True`` (the delete path) materializes the
     snapshot fully BEFORE the row is deleted: evaluating the queryset loads
@@ -1362,7 +1364,7 @@ def _model_write_step(
     (the same two mappings). ``specs`` are the request's published specs
     (``_published_input_specs``) every error of the step is keyed through, beside
     ``mutation_cls``'s bind-time Django-field index. Returns the saved instance (the skeleton's
-    ``refetch_optimized`` re-fetches it by pk under the G2 plan) or a
+    ``refetch_optimized`` re-fetches it by pk under the optimizer plan) or a
     ``StepFailure`` on a validation / write failure. ``instance`` (the located
     update row, ``None`` for create) selects the save mode: a create INSERTs the
     ``decoded`` target (``save_new_row``: a concurrently committed row under a

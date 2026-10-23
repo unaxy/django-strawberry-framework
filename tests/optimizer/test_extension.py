@@ -1271,13 +1271,14 @@ def test_cache_key_differs_for_named_operations_in_same_document() -> None:
 
 
 def test_query_and_mutation_plans_coexist_distinct_keys() -> None:
-    """spec-035 Decision 4: a query and a byte-identical-selection mutation get distinct keys.
+    """A query and a byte-identical-selection mutation get distinct plan-cache keys.
 
     The plan-cache key's first component is the printed operation AST, and
     ``print_ast(operation)`` includes the ``query`` / ``mutation`` keyword - so the
-    ``only``-carrying query plan and the ``only``-suppressed mutation plan can
-    never collide on one cache entry even with identical selection bodies (G2
-    cache-safety; DoD item 3). Pins the key inequality directly, not a cache stat.
+    query plan (``introduce_projection`` on) and the mutation plan (off) can never
+    collide on one cache entry even with identical selection bodies, which is what
+    lets the flag be cached with the plan. Pins the key inequality directly, not a
+    cache stat.
     """
     selection = "{ category { name } }"
     info_query = make_info(field_name="allItems", selections=selection)._raw_info
@@ -1294,18 +1295,16 @@ def test_query_and_mutation_plans_coexist_distinct_keys() -> None:
 
 
 @pytest.mark.django_db
-def test_mutation_real_execution_suppresses_only_keeps_select_related() -> None:
-    """spec-035 G2: a REAL ``mutation`` execution suppresses ``only``.
+def test_mutation_real_execution_records_columns_and_introduces_no_projection() -> None:
+    """A REAL ``mutation`` execution plans the query's shape with ``introduce_projection`` off.
 
-    The walker-level tests prove the gate with synthetic ``OperationType.MUTATION``
+    The walker-level tests drive the flag with synthetic ``OperationType.MUTATION``
     info doubles; this proves the integration seam end-to-end - a Strawberry
     ``mutation`` root field returning a queryset, with the installed
     ``DjangoOptimizerExtension`` receiving the REAL ``info.operation.operation``
-    object from the graphql-core runtime (not a test double). Under the mutation
-    the published plan carries empty ``only_fields`` while ``select_related``
-    survives for the relation selection; the byte-identical selection under a
-    ``query`` still projects ``only_fields`` (non-vacuous contrast proving the
-    gate is operation-driven, not a blanket disable).
+    object from the graphql-core runtime (not a test double). The mutation's
+    published plan records the same ``only_fields`` and ``select_related`` as the
+    byte-identical ``query``; only the query's plan may introduce a projection.
     """
     services.seed_data(1)
 
@@ -1349,8 +1348,9 @@ def test_mutation_real_execution_suppresses_only_keeps_select_related() -> None:
     )
     assert mutation_result.errors is None
     mutation_plan = _stashed_plan(mutation_ctx)
-    assert mutation_plan.only_fields == ()
+    assert mutation_plan.only_fields == ("name", "category_id", "category__name")
     assert mutation_plan.select_related == ("category",)
+    assert mutation_plan.introduce_projection is False
 
     query_ctx = SimpleNamespace()
     query_result = schema.execute_sync(
@@ -1360,7 +1360,8 @@ def test_mutation_real_execution_suppresses_only_keeps_select_related() -> None:
     assert query_result.errors is None
     query_plan = _stashed_plan(query_ctx)
     assert query_plan.select_related == ("category",)
-    assert query_plan.only_fields != ()
+    assert query_plan.only_fields == ("name", "category_id", "category__name")
+    assert query_plan.introduce_projection is True
 
 
 def test_cache_eviction_removes_old_entries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5591,65 +5592,6 @@ def test_consumer_projection_widens_to_the_selection_and_keeps_the_join() -> Non
         context_value=SimpleNamespace(),
     )
     assert planned.errors is None, planned.errors
-
-
-@pytest.mark.django_db
-def test_mutation_over_a_consumer_projection_prunes_the_join_it_cannot_traverse() -> None:
-    """A non-``QUERY`` plan writes no projection, so it cannot widen the consumer's.
-
-    G2 leaves the mutation's ``only_fields`` empty, so ``select_related("category")``
-    would be applied straight over the resolver's ``.only("name")`` - a deferred
-    and traversed relation Django refuses to compile. The prune drops the path and
-    its resolver keys before the plan is published: the relation resolves per row,
-    visible to strictness, and the response is correct.
-    """
-    services.seed_data(1)
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    assert registry.get(Category) is CategoryType
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> bool:
-            return True
-
-    @strawberry.type
-    class Mutation:
-        def _touch_items(self) -> QuerySet[Item]:
-            return Item.objects.order_by("id").only("name")
-
-        touch_items = strawberry.mutation(_touch_items, graphql_type=list[ItemType])
-
-    finalize_django_types()
-    ext = DjangoOptimizerExtension()
-    schema = strawberry.Schema(query=Query, mutation=Mutation, extensions=[lambda: ext])
-
-    context = SimpleNamespace()
-    result = schema.execute_sync(
-        "mutation { touchItems { name category { name } } }",
-        context_value=context,
-    )
-
-    assert result.errors is None, result.errors
-    expected = [
-        {"name": item.name, "category": {"name": item.category.name}}
-        for item in Item.objects.select_related("category").order_by("id")
-    ]
-    assert result.data == {"touchItems": expected}
-    plan = _stashed_plan(context)
-    assert plan.only_fields == ()
-    assert plan.select_related == ()
-    assert plan.planned_resolver_keys == ()
 
 
 @pytest.mark.django_db

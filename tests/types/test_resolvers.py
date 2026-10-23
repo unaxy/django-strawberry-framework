@@ -1082,16 +1082,15 @@ def test_fk_id_elision_falls_back_when_consumer_only_defers_fk(
 ) -> None:
     """Decision 5: a deferred consumer-``.only()`` FK column falls back loudly.
 
-    A consumer ``Item.objects.only("name")`` stays as returned under a non-``QUERY``
-    operation (the plan writes no projection there) while the plan still carries
-    the ``category`` elision AND records it planned.
+    A row the plan did not project - one a consumer-owned
+    ``Prefetch(queryset=Item.objects.only("name"))`` loaded - defers ``category_id``
+    while the plan still carries the ``category`` elision AND records it planned.
     The resolver must NOT silently read the deferred ``category_id`` (the per-row
     lazy load Decision 5 forbids), and because the relation is planned it must
     NOT let ``_check_n1`` mistake the planned key for a satisfied relation - the
     fallback forces the lazy-load probe so strictness sees the access. The
     resolver is operation-agnostic, so each ``operation_arm`` builds its info under
-    that operation and both fall back the same way, per spec-035 Decision 5 / Edge
-    cases #"can defer the FK column under".
+    that operation and both fall back the same way.
     """
     ItemType = _parent_type(Item, "ItemType")
 

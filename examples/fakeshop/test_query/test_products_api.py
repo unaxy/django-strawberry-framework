@@ -1834,9 +1834,9 @@ def test_update_item_id_absurd_huge_pk_is_not_found_no_overflow() -> None:
 
 @pytest.mark.django_db(transaction=True)
 def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
-    """G2 behavioral tier: a mutation response selecting a relation has no N+1, no lazy query.
+    """A mutation response selecting a relation has no N+1 and no lazy query.
 
-    Discharges the ``spec-035`` G2 live-test handoff at the BEHAVIORAL tier: a
+    The behavioral tier of ``spec-035`` G2 (a mutation plan introduces no projection): a
     ``createItem`` response selecting ``node { name category { name } }`` is wrapped
     in ``CaptureQueriesContext``. The post-write re-fetch is one optimizer-planned
     ``products_item`` queryset that keeps ``select_related`` / ``prefetch_related``
@@ -1897,7 +1897,7 @@ def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
     # plus, where rows lock, the decode's post-lock re-read of products_category.
     sql = [query["sql"] for query in captured]
     assert len(captured) == 14 + post_lock_rereads(1), sql
-    # G2 load-bearing property: the re-fetch reads the item once and the relation
+    # The load-bearing property: the re-fetch reads the item once and the relation
     # once - a deferred-field lazy refetch or an N+1 would add EXTRA products SELECTs.
     item_selects = [
         s for s in sql if "products_item" in s.lower() and s.strip().upper().startswith("SELECT")
@@ -6265,7 +6265,7 @@ def test_create_item_via_serializer_multipart_upload_to_attachment(tmp_path: Pat
 
 @pytest.mark.django_db(transaction=True)
 def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count() -> None:
-    """G2 behavioral tier for the serializer flavor: the re-fetch keeps the relation, no `.only(...)`.
+    """Serializer flavor of `spec-035` G2: the re-fetch keeps the relation, introduces no `.only()`.
 
     A `createItemViaSerializer` selecting `node { name category { name } }` is
     wrapped in `CaptureQueriesContext`. The post-write re-fetch is one
@@ -6337,7 +6337,7 @@ def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count
     # plus, where rows lock, the decode's post-lock re-read of products_category.
     sql = [query["sql"] for query in captured]
     assert len(captured) == 17 + post_lock_rereads(1), sql
-    # G2 load-bearing property (NOT a column-exact snapshot - that is the package
+    # The load-bearing property (NOT a column-exact snapshot - that is the package
     # mirror's job): the re-fetch reads the item once (the `SELECT 1` EXISTS is the
     # unique validator, not a row read) and the relation through select_related /
     # prefetch. A deferred-field lazy refetch or an N+1 would add EXTRA products
@@ -6362,12 +6362,13 @@ def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count
     # The post-write re-fetch is the LAST real `products_item` SELECT; the other one
     # is the post-save FK attestation's single-column `values()` read above it.
     refetch_select = [s for s in item_selects if "select 1" not in s.lower()][-1]
-    # G2 NO `.only(...)` projection: the operation selects `node { name category
-    # { name } }`, so a deferred-column projection would name at most id / name /
-    # category_id. The re-fetch names every column OUTSIDE that set, which is what
-    # proves the row reads back whole - and it reads the already-captured SQL rather
-    # than issuing a fresh query. The plan-object half of this contract lives at
-    # `tests/rest_framework/test_resolvers.py::test_serializer_refetch_keeps_select_related_suppresses_only`.
+    # No `.only(...)` projection (a mutation plan introduces none): the operation
+    # selects `node { name category { name } }`, so a deferred-column projection would
+    # name at most id / name / category_id. The re-fetch names every column OUTSIDE
+    # that set, which is what proves the row reads back whole - and it reads the
+    # already-captured SQL rather than issuing a fresh query. The plan-object half of
+    # this contract lives at
+    # `tests/rest_framework/test_resolvers.py::test_serializer_refetch_introduces_no_projection`.
     undeferred = (
         "description",
         "attachment",

@@ -12,7 +12,7 @@ The module also exposes a `Mutation` type (spec-036): the
 `DjangoMutation` create / update / delete write surface over `Item` plus a
 `Category` create, each surfaced as an unannotated `DjangoMutationField`. The
 defaults apply - `DjangoModelPermission` write authorization and the post-write
-optimizer re-fetch under the `spec-035` G2 mutation gate.
+optimizer re-fetch, which under a mutation introduces no column projection.
 
 The eventual `1.0.0` shape - Relay-node types with the cookbook-shaped
 filter / order / aggregate / fields / search / permissions surface, a
@@ -512,7 +512,8 @@ class CreateItemViaSerializer(SerializerMutation):
     One explicit ``Meta.operation`` per write operation (the package keeps no
     graphene-style ``model_operations`` / ``lookup_field`` keys). Inherits the default
     ``DjangoModelPermission`` write authorization (codename ``add_item``) and the
-    post-write optimizer re-fetch under the ``spec-035`` G2 mutation gate.
+    post-write optimizer re-fetch, which under a mutation introduces no column
+    projection.
     """
 
     class Meta:

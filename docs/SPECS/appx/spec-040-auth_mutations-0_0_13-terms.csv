@@ -18,7 +18,7 @@ Meta.model,metamodel,the register rider's synthesized Meta
 Meta.fields,metafields,the register rider's narrowed safe field set
 Meta.interfaces,metainterfaces,the consumer UserType's Relay declaration
 Input type generation,input-type-generation,"the model-column generator reused unchanged (narrowed) (groups: input_field_required, build_input, input_type_name, input_module_path, materialize_generated_input_class, editable_input_fields, iter_provided_input_fields, make_input_namespace, materialize_mutation_input_class)"
-only() projection,only-projection,suppressed under the mutation G2 gate on the re-fetch
+only() projection,only-projection,not introduced under the mutation G2 gate on the re-fetch
 Definition-order independence,definition-order-independence,why the factories defer type resolution to bind
 Cross-subsystem invariants,cross-subsystem-invariants,the envelope-shared-across-flavors invariant
 DjangoGraphQLProtocolRouter,djangographqlprotocolrouter,the 0.0.14 Channels ASGI router; it owns the transport and the auth surface classifies its scopes

@@ -8,7 +8,7 @@ not GraphQL fields. Consumer-visible SQL is
 
 import inspect
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 
 import pytest
@@ -43,7 +43,6 @@ from django_strawberry_framework.optimizer.plans import (
     _projection_aliases,
     _reverse_order_by,
     _select_path_missing_connectors,
-    _select_path_traversable,
     append_prefetch_unique,
     append_unique,
     append_unique_many,
@@ -59,7 +58,6 @@ from django_strawberry_framework.optimizer.plans import (
     merged_projection,
     normalize_order_direction,
     order_entry_has_explicit_nulls,
-    prune_unsupportable_select_related,
     resolver_key,
     runtime_path_from_path,
 )
@@ -203,7 +201,6 @@ class TestOptimizationPlanMerge:
             only_fields=["name"],
             fk_id_elisions=["existing-elision"],
             planned_resolver_keys=["existing-key"],
-            select_path_resolver_keys={"category": ("existing-key",)},
             prefetch_path_resolver_keys={"items": ("existing-key",)},
         )
         source = OptimizationPlan(
@@ -212,7 +209,6 @@ class TestOptimizationPlanMerge:
             only_fields=["name", "description", "description"],
             fk_id_elisions=["existing-elision", "new-elision", "new-elision"],
             planned_resolver_keys=["existing-key", "new-key", "new-key"],
-            select_path_resolver_keys={"category": ("existing-key", "new-key", "new-key")},
             prefetch_path_resolver_keys={"items": ("existing-key", "new-key", "new-key")},
             cacheable=False,
         )
@@ -224,9 +220,6 @@ class TestOptimizationPlanMerge:
         assert target.only_fields == ["name", "description"]
         assert target.fk_id_elisions == ["existing-elision", "new-elision"]
         assert target.planned_resolver_keys == ["existing-key", "new-key"]
-        assert target.select_path_resolver_keys == {
-            "category": ("existing-key", "new-key"),
-        }
         assert target.prefetch_path_resolver_keys == {
             "items": ("existing-key", "new-key"),
         }
@@ -240,7 +233,6 @@ class TestOptimizationPlanMerge:
             only_fields=["name"],
             fk_id_elisions=["child-elision"],
             planned_resolver_keys=["child-key"],
-            select_path_resolver_keys={"category": ("child-key",)},
             cacheable=False,
         )
 
@@ -249,7 +241,6 @@ class TestOptimizationPlanMerge:
         assert target.select_related == []
         assert target.prefetch_related == []
         assert target.only_fields == []
-        assert target.select_path_resolver_keys == {}
         assert target.fk_id_elisions == ["child-elision"]
         assert target.planned_resolver_keys == ["child-key"]
         assert target.cacheable is False
@@ -271,6 +262,28 @@ class TestOptimizationPlanMerge:
         )
 
         with pytest.raises(RuntimeError, match=r"stale=\['removed_field'\]"):
+            OptimizationPlan._assert_merge_field_inventory()
+
+    def test_introduce_projection_is_a_construction_field_no_merge_carries(self) -> None:
+        """The operation flag is set when a plan is built and never merged from another plan.
+
+        Every plan of one walk is built with its parent's flag, so a merge has
+        nothing to reconcile; the inventory guard classifies it on its own.
+        """
+        assert frozenset({"introduce_projection"}) == OptimizationPlan._CONSTRUCTION_FIELDS
+        OptimizationPlan._assert_merge_field_inventory()
+        target = OptimizationPlan(introduce_projection=False)
+        target.merge_from(OptimizationPlan(only_fields=["name"]))
+        target.merge_metadata_from(OptimizationPlan())
+        assert target.introduce_projection is False
+
+    def test_merge_inventory_guard_reports_an_unclassified_construction_field(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(OptimizationPlan, "_CONSTRUCTION_FIELDS", frozenset[str]())
+
+        with pytest.raises(RuntimeError, match=r"unclassified=\['introduce_projection'\]"):
             OptimizationPlan._assert_merge_field_inventory()
 
 
@@ -1516,220 +1529,138 @@ class TestReverseOrderBy:
             _reverse_order_by([unreversible])  # pyright: ignore[reportArgumentType]
 
 
-class TestPruneUnsupportableSelectRelated:
-    """B8 relation-aware reconciliation: ``prune_unsupportable_select_related``.
+class TestApplyOverAConsumerProjection:
+    """``OptimizationPlan.apply`` over a queryset that already carries ``.only()`` / ``.defer()``.
 
     Django refuses ``select_related`` through a deferred relation field
-    ("cannot be both deferred and traversed"), so a plan reconciled against
-    a consumer-projected queryset must drop untraversable paths BEFORE
-    apply - and drop the resolver keys those paths satisfied, so strictness
-    sees the per-row fallback instead of a phantom plan. Every kept-path
-    case COMPILES the applied queryset (``str(qs.query)``): the runtime
-    behavior Django enforces, not just the plan shape.
+    ("cannot be both deferred and traversed"); the plan's projection is written as
+    the union with the consumer's, every join connector loaded, so the JOIN
+    compiles. Each case compiles the applied queryset (``str(qs.query)``): the
+    runtime behavior Django enforces, not just the plan shape.
     """
 
     @staticmethod
-    def _reconcile(
-        plan: OptimizationPlan,
-        queryset: QuerySet[Model],
-    ) -> tuple[OptimizationPlan, QuerySet[Model]]:
-        """The extension's full B8 pipeline: prune, then diff, then apply."""
-        pruned = prune_unsupportable_select_related(plan, queryset)
-        delta, queryset = diff_plan_for_queryset(pruned, queryset)
-        return pruned, delta.apply(queryset)
+    def _apply(plan: OptimizationPlan, queryset: QuerySet[Model]) -> QuerySet[Model]:
+        """The extension's reconcile-then-apply pipeline."""
+        delta, queryset = diff_plan_for_queryset(plan, queryset)
+        return delta.apply(queryset)
 
-    def test_projected_plan_keeps_the_path_and_loads_its_connector(self) -> None:
-        # A plan carrying its own projection is written as the union with the
-        # consumer's, connector included, so the JOIN stays and compiles.
+    @pytest.mark.parametrize("introduce", [True, False], ids=["introduces", "widens-only"])
+    def test_projected_plan_keeps_the_path_and_loads_its_connector(
+        self,
+        *,
+        introduce: bool,
+    ) -> None:
         plan = OptimizationPlan(
             select_related=["category"],
-            only_fields=["name", "category_id"],
-            planned_resolver_keys=["category-key"],
-            select_path_resolver_keys={"category": ("category-key",)},
+            only_fields=["name", "category_id", "category__name"],
+            introduce_projection=introduce,
         ).finalize()
-        pruned, applied = self._reconcile(plan, Item.objects.only("name"))
-        assert pruned is plan
-        assert 'JOIN "products_category"' in str(applied.query)
-        assert "category-key" in pruned.planned_resolver_keys
-
-    def test_consumer_only_drops_blocked_path_and_its_resolver_keys(self) -> None:
-        # No projection of its own (a non-``QUERY`` operation): the plan would
-        # apply ``select_related`` straight over the consumer's ``.only()``.
-        plan = OptimizationPlan(
-            select_related=["category"],
-            planned_resolver_keys=["category-key", "unrelated-key"],
-            select_path_resolver_keys={"category": ("category-key",)},
-        ).finalize()
-        pruned, applied = self._reconcile(plan, Item.objects.only("name"))
-        assert pruned is not plan
-        assert pruned.select_related == ()
-        assert pruned.planned_resolver_keys == ("unrelated-key",)
-        assert pruned.finalized_planned_resolver_keys is not None
-        assert "category-key" not in pruned.finalized_planned_resolver_keys
-        # The runtime bar: the applied queryset COMPILES (the old
-        # behavior raised FieldError at SQL generation).
-        assert 'JOIN "products_category"' not in str(applied.query)
-        # The original (cached) plan is untouched.
-        assert plan.select_related == ("category",)
-        assert plan.finalized_planned_resolver_keys is not None
-        assert "category-key" in plan.finalized_planned_resolver_keys
-
-    def test_projection_loading_the_connector_keeps_the_path(self) -> None:
-        plan = OptimizationPlan(
-            select_related=["category"],
-            planned_resolver_keys=["category-key"],
-            select_path_resolver_keys={"category": ("category-key",)},
-        ).finalize()
-        # The attname form counts as loading the connector.
-        pruned, applied = self._reconcile(plan, Item.objects.only("name", "category_id"))
-        assert pruned is plan  # same object: nothing to prune.
+        applied = self._apply(plan, Item.objects.only("description"))
+        assert applied.query.deferred_loading == (
+            frozenset(
+                {
+                    "name",
+                    "category_id",
+                    "category__name",
+                    "description",
+                },
+            ),
+            False,
+        )
         assert 'JOIN "products_category"' in str(applied.query)
 
-    def test_dotted_projection_keeps_root_and_drops_deeper_path(self) -> None:
-        plan = OptimizationPlan(
-            select_related=["shelf", "shelf__branch"],
-            planned_resolver_keys=["shelf-key", "branch-key"],
-            select_path_resolver_keys={
-                "shelf": ("shelf-key",),
-                "shelf__branch": ("branch-key",),
-            },
-        ).finalize()
-        # only("title", "shelf__code"): shelf traversable (dotted entry loads
-        # the connector), but branch is deferred AT THE SHELF LEVEL.
-        pruned, applied = self._reconcile(plan, Book.objects.only("title", "shelf__code"))
-        assert pruned.select_related == ("shelf",)
-        assert pruned.planned_resolver_keys == ("shelf-key",)
-        compiled = str(applied.query)
-        assert 'JOIN "library_shelf"' in compiled
-        assert 'JOIN "library_branch"' not in compiled
-
-    def test_projected_plan_undefers_the_connector_the_consumer_deferred(self) -> None:
+    @pytest.mark.parametrize("introduce", [True, False], ids=["introduces", "widens-only"])
+    def test_projected_plan_undefers_the_connector_the_consumer_deferred(
+        self,
+        *,
+        introduce: bool,
+    ) -> None:
         plan = OptimizationPlan(
             select_related=["shelf", "shelf__branch"],
             only_fields=["title", "shelf_id", "shelf__code"],
-            planned_resolver_keys=["shelf-key", "branch-key"],
-            select_path_resolver_keys={
-                "shelf": ("shelf-key",),
-                "shelf__branch": ("branch-key",),
-            },
+            introduce_projection=introduce,
         ).finalize()
-        pruned, applied = self._reconcile(plan, Book.objects.defer("shelf"))
-        assert pruned is plan
+        applied = self._apply(plan, Book.objects.defer("shelf"))
+        assert applied.query.deferred_loading == (frozenset(), True)
         compiled = str(applied.query)
         assert 'JOIN "library_shelf"' in compiled
         assert 'JOIN "library_branch"' in compiled
 
-    def test_consumer_defer_drops_path_keys(self) -> None:
-        plan = OptimizationPlan(
-            select_related=["shelf", "shelf__branch"],
-            planned_resolver_keys=["shelf-key", "branch-key"],
-            select_path_resolver_keys={
-                "shelf": ("shelf-key",),
-                "shelf__branch": ("branch-key",),
-            },
-        ).finalize()
-        pruned, applied = self._reconcile(plan, Book.objects.defer("shelf"))
-        assert pruned.select_related == ()
-        assert pruned.planned_resolver_keys == ()
-        assert 'JOIN "library_shelf"' not in str(applied.query)
 
-    def test_defer_of_an_unrelated_column_prunes_nothing(self) -> None:
-        plan = OptimizationPlan(
-            select_related=["shelf"],
-            select_path_resolver_keys={"shelf": ("shelf-key",)},
-            planned_resolver_keys=["shelf-key"],
-        ).finalize()
-        pruned, applied = self._reconcile(plan, Book.objects.defer("subtitle"))
-        assert pruned is plan
-        assert 'JOIN "library_shelf"' in str(applied.query)
+@pytest.mark.parametrize(
+    ("queryset_factory", "introduce", "expected"),
+    [
+        pytest.param(
+            Item.objects.all,
+            True,
+            (frozenset({"name", "category_id"}), False),
+            id="unprojected-introduces",
+        ),
+        pytest.param(
+            Item.objects.all,
+            False,
+            (frozenset[str](), True),
+            id="unprojected-left-whole",
+        ),
+        pytest.param(
+            lambda: Item.objects.only("description"),
+            False,
+            (frozenset({"name", "category_id", "description"}), False),
+            id="only-widened",
+        ),
+        pytest.param(
+            lambda: Item.objects.defer("name", "description"),
+            False,
+            (frozenset({"description"}), True),
+            id="defer-narrowed",
+        ),
+    ],
+)
+def test_apply_projection_introduces_only_when_asked(
+    queryset_factory: Callable[[], QuerySet[Item]],
+    *,
+    introduce: bool,
+    expected: tuple[frozenset[str], bool],
+) -> None:
+    """``introduce=False`` leaves an unprojected queryset whole and widens a projected one.
 
-    def test_unresolvable_path_is_dropped_conservatively(self) -> None:
-        # A path the model cannot resolve (planner drift, exotic doubles)
-        # drops rather than gambles on a FieldError at compile time.
+    A consumer ``.only()`` gains every name read; a consumer ``.defer()`` stops
+    deferring them. With nothing to widen and ``introduce=False`` the queryset
+    loads every column, Django's default ``(frozenset(), True)``.
+    """
+    applied = apply_projection(queryset_factory(), ["name", "category_id"], introduce=introduce)
 
-        plan = OptimizationPlan(select_related=["mystery"]).finalize()
-        pruned, _ = self._reconcile(plan, Book.objects.only("title"))
-        assert pruned.select_related == ()
-
-    def test_no_consumer_projection_returns_the_same_plan(self) -> None:
-        plan = OptimizationPlan(
-            select_related=["category"],
-            planned_resolver_keys=["category-key"],
-        ).finalize()
-
-        assert prune_unsupportable_select_related(plan, Item.objects.all()) is plan
-
-    def test_prune_removes_unsupported_from_select_path_resolver_keys(self) -> None:
-        plan = OptimizationPlan(
-            select_related=["shelf", "shelf__branch"],
-            planned_resolver_keys=["shelf-key", "branch-key"],
-            select_path_resolver_keys={
-                "shelf": ("shelf-key",),
-                "shelf__branch": ("branch-key",),
-            },
-        ).finalize()
-
-        pruned = prune_unsupportable_select_related(
-            plan,
-            Book.objects.only("title", "shelf__code"),
-        )
-        assert pruned.select_related == ("shelf",)
-        assert pruned.select_path_resolver_keys == {"shelf": ("shelf-key",)}
+    assert applied.query.deferred_loading == expected
 
 
-def test_consumer_projection_and_traversal_defensive_shapes() -> None:
-    """``_consumer_projection`` / ``_select_path_traversable`` defensive tails.
+def test_consumer_projection_defensive_shapes() -> None:
+    """``_consumer_projection`` reports no projection for shapes no queryset produces.
 
-    Non-queryset inputs and malformed ``deferred_loading`` shapes report no
-    projection (the prune then no-ops), and a scalar mid-path segment - no
-    related model to resolve the next segment against - is conservatively
-    untraversable. None of these shapes is producible by a real consumer
-    queryset, so the tails are pinned directly in one sweep.
+    A non-queryset input and a malformed ``deferred_loading`` shape both read as
+    "no projection", so ``apply_projection(..., introduce=False)`` leaves them alone.
     """
     assert _consumer_projection(SimpleNamespace()) is None
     malformed = SimpleNamespace(query=SimpleNamespace(deferred_loading=("only-one",)))
     assert _consumer_projection(malformed) is None
-    assert (
-        _select_path_traversable(
-            "title__upper",
-            frozenset({"title"}),
-            defer_mode=False,
-            model=Book,
-        )
-        is False
-    )
 
 
 @pytest.mark.parametrize(
-    (
-        "path",
-        "names",
-        "defer_mode",
-        "expected",
-    ),
+    ("path", "names", "expected"),
     [
-        pytest.param("item", {"value", "item_id"}, False, (), id="connector-loaded"),
-        pytest.param("bogus", {"value"}, False, None, id="unknown-segment"),
-        pytest.param("item", {"item"}, True, None, id="deferred-connector"),
+        pytest.param("item", {"value", "item_id"}, (), id="connector-loaded"),
+        pytest.param("item", {"value"}, ("item_id",), id="connector-missing"),
+        pytest.param("bogus", {"value"}, None, id="unknown-segment"),
+        pytest.param("item__name__upper", {"value"}, None, id="through-a-column"),
     ],
 )
 def test_select_path_missing_connectors(
     path: str,
     names: set[str],
-    *,
-    defer_mode: bool,
     expected: tuple[str, ...] | None,
 ) -> None:
-    """The ``.only()`` entries a joined path still needs, or ``None`` when no entry can help."""
-    assert (
-        _select_path_missing_connectors(
-            path,
-            frozenset(names),
-            defer_mode=defer_mode,
-            model=Entry,
-        )
-        == expected
-    )
+    """The ``.only()`` entries a joined path still needs, or ``None`` when it does not resolve."""
+    assert _select_path_missing_connectors(path, frozenset(names), model=Entry) == expected
 
 
 def test_apply_projection_leaves_a_filtered_relation_join_alone() -> None:

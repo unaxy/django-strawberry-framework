@@ -777,7 +777,7 @@ def _project_scalar_only_window(
     django_field: FieldMeta,
     order_by: Sequence[object],
     *,
-    enable_only: bool = True,
+    introduce_projection: bool,
 ) -> QuerySet[_M]:
     """Restrict a scalar-only connection window to pk / connector / order columns.
 
@@ -791,14 +791,10 @@ def _project_scalar_only_window(
     through ``apply_projection``, so a JOIN the child type's hook added keeps the connector
     it traverses.
 
-    The G2 gate (spec-035 Decision 4): under a non-``QUERY`` operation this
-    direct ``.only(...)`` is the projection-writer that never touches
-    ``OptimizationPlan.only_fields``, so it must consult the gate itself -
-    when closed it returns the child queryset unchanged (no column mask) and
-    the window annotations are applied afterwards in ``_plan_connection_relation``.
+    This direct projection never touches ``OptimizationPlan.only_fields``, so it
+    carries the plan's ``introduce_projection`` itself: under a non-``QUERY``
+    operation it only widens a projection the child queryset already carries.
     """
-    if not enable_only:
-        return child_queryset
     # ``plan_connection_relation`` refused a relation without a related model.
     related_model = cast("type[models.Model]", django_field.related_model)
     fields: list[str] = []
@@ -812,7 +808,7 @@ def _project_scalar_only_window(
         append_unique(fields, column)
     for column in _concrete_order_columns(order_by, related_model):
         append_unique(fields, column)
-    return apply_projection(child_queryset, fields)
+    return apply_projection(child_queryset, fields, introduce=introduce_projection)
 
 
 def _connection_node_selections(
@@ -1205,7 +1201,7 @@ def plan_connection_relation(
     runtime_prefixes: tuple[tuple[str, ...], ...],
     type_cls: type[DjangoType] | None,
     model: type[models.Model],
-    enable_only: bool = True,
+    introduce_projection: bool,
     resolve_optimizer_hints: Callable[[DjangoTypeDefinition | None], dict[str, OptimizerHint]],
     resolve_relation_target: Callable[
         [DjangoTypeDefinition | None, str, FieldMeta],
@@ -1254,7 +1250,7 @@ def plan_connection_relation(
     ``has_custom_get_queryset`` verdict that decides whether the child's
     visibility hook runs before the window is built.
     """
-    plan = OptimizationPlan()
+    plan = OptimizationPlan(introduce_projection=introduce_projection)
     django_field = field_map.get(relation_field_name)
     if django_field is None:
         return NestedConnectionPlanResult(plan=plan)
@@ -1262,14 +1258,12 @@ def plan_connection_relation(
     # link's non-pk targets). The window's attach reads them off each parent
     # row, and so does the per-parent resolution every refusal arm below - and
     # a SKIP hint - leaves the relation to, so they load before the first of
-    # those arms, under the same G2 gate as
-    # ``walker.py::_record_relation_carriers``. Only a field the map does not
-    # carry leaves them unloaded.
-    if enable_only:
-        append_unique_many(
-            plan.only_fields,
-            [f"{prefix}{attname}" for attname in django_field.source_link_attnames],
-        )
+    # those arms, as in ``walker.py::_record_relation_carriers``. Only a field
+    # the map does not carry leaves them unloaded.
+    append_unique_many(
+        plan.only_fields,
+        [f"{prefix}{attname}" for attname in django_field.source_link_attnames],
+    )
     hints_map = resolve_optimizer_hints(definition)
     if hint_is_skip(hints_map.get(relation_field_name)):
         return NestedConnectionPlanResult(plan=plan)
@@ -1421,7 +1415,7 @@ def plan_connection_relation(
     # without leaking the child's resolver keys / fk-id elisions / cacheable flip
     # into the parent (Decision 6 / DoD-4 "no planned_resolver_keys entry"). The
     # parent plan absorbs the child metadata only on the success path.
-    sub_plan = OptimizationPlan()
+    sub_plan = OptimizationPlan(introduce_projection=introduce_projection)
     if has_custom_get_queryset:
         sub_plan.cacheable = False
     child_queryset = build_prefetch_child_queryset_from_base(
@@ -1431,7 +1425,6 @@ def plan_connection_relation(
         info,
         runtime_paths,
         base_queryset=base_queryset,
-        enable_only=enable_only,
     )
     # GenericRelation morph predicate: NOT injected at plan time. The window
     # partitions by the child ``object_id`` column alone, so the parent's morph
@@ -1569,7 +1562,7 @@ def plan_connection_relation(
             child_queryset,
             django_field,
             order_by,
-            enable_only=enable_only,
+            introduce_projection=introduce_projection,
         )
     elif keyset_window_state is not None:
         # Keyset edges mint cursors from the rows' ORDERING-COLUMN VALUES

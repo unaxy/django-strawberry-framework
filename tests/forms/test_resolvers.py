@@ -26,7 +26,8 @@ field on a partial input, ``to_field_name`` reconstruction (including an M2M mem
 whose ``to_field_name`` value is ``""``), a raw-pk M2M element ``""`` decoded through a
 hiding text-keyed type (no fakeshop text-keyed type hides a row), ImageField
 reconstruction key absence, decode-helper envelopes, optimizer
-``dst_optimizer_plan`` G2, and the save-time rule for a ``blank=True, null=False``
+``dst_optimizer_plan`` re-fetch plan (spec-035 G2: no projection introduced under a
+mutation), and the save-time rule for a ``blank=True, null=False``
 column the form cleans to a value it cannot store (``None``, foreign key included, or
 ``""`` on a non-text choice column) over the shapes fakeshop has no column for: ``""``
 on a non-text choice column (omitted with no default, decimal / date, update ``null``,
@@ -1765,17 +1766,18 @@ def test_sync_create_meeting_async_get_queryset_raises_sync_misuse() -> None:
 
 
 # ---------------------------------------------------------------------------
-# G2 plan-shape (the ModelForm re-fetch rides the 036 G2 path) - load-bearing
+# Re-fetch plan shape (the ModelForm re-fetch rides the 036 re-fetch path) - load-bearing
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_modelform_refetch_keeps_select_related_and_suppresses_only() -> None:
-    """The ModelForm re-fetch plan KEEPS ``select_related`` and applies NO ``.only(...)`` (G2).
+def test_modelform_refetch_keeps_select_related_and_introduces_no_projection() -> None:
+    """The ModelForm re-fetch plan KEEPS ``select_related`` and introduces no ``.only(...)``.
 
     ``dst_optimizer_plan`` is not a wire field. Nested ``category { name }`` on
-    live ``createItemViaForm`` proves the relation came back; this pins the
-    mutation G2 gate (``only_fields == ()``).
+    live ``createItemViaForm`` proves the relation came back; this pins the plan the
+    mutation operation builds: the selection's columns recorded, the projection
+    flag off.
     """
     (
         schema,
@@ -1799,8 +1801,14 @@ def test_modelform_refetch_keeps_select_related_and_suppresses_only() -> None:
     plan = require_instance(read_attr(ctx, "dst_optimizer_plan"), OptimizationPlan)
     # The relation selection (`category { name }`) is planned via select_related.
     assert plan.select_related == ("category",)
-    # No `.only(...)` projection under a MUTATION (the G2 gate suppresses it).
-    assert plan.only_fields == ()
+    # The columns are recorded; a MUTATION plan never introduces a projection.
+    assert plan.introduce_projection is False
+    assert plan.only_fields == (
+        "id",
+        "name",
+        "category_id",
+        "category__name",
+    )
 
 
 # ---------------------------------------------------------------------------

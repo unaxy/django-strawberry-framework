@@ -28,7 +28,8 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   live setting);
 - the `SyncMisuseError` async-`get_queryset`-from-sync path; async create colour
   is live (`test_create_item_via_serializer_over_graphql_async`);
-- the G2 re-fetch PLAN OBJECT (`select_related` kept, `.only(...)` suppressed) - the
+- the re-fetch PLAN OBJECT (`select_related` kept, the selection's columns recorded,
+  no `.only(...)` introduced under the mutation operation; spec-035 G2) - the
   optimizer's stashed plan is introspection state no `/graphql` response carries, so
   only its behavioral half (the emitted SQL) is earned live.
 - hostile `__name__` labels on producer-declared classes (mutation, serializer,
@@ -38,7 +39,7 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   byte-identical (direct-called: no wire query can declare a hostile class).
 
 **No create/update happy path, envelope, reverse-map, partial-update, visibility,
-write-auth, authorize-before-decode, Upload, request-context, or G2 BEHAVIORAL test
+write-auth, authorize-before-decode, Upload, request-context, or re-fetch BEHAVIORAL test
 is duplicated here** - those are owned by the live suite.
 """
 
@@ -2164,14 +2165,14 @@ def test_agreement_guard_rejects_injected_scalar_annotation_drift() -> None:
 
 
 # ===========================================================================
-# G2 re-fetch plan shape - the plan-state half of a live-tier contract
+# Re-fetch plan shape - the plan-state half of a live-tier contract
 # ===========================================================================
 # The behavioral half (the emitted SQL names the undeferred columns) is earned
 # live in `examples/fakeshop/test_query/test_products_api.py`. The plan OBJECT
 # the optimizer stashed is not reachable from a real query, so it is pinned here.
 
 
-def _build_serializer_g2_schema() -> tuple[DjangoSchema, type[DjangoType]]:
+def _build_serializer_refetch_schema() -> tuple[DjangoSchema, type[DjangoType]]:
     """Declare Item/Category Relay primaries + a create `SerializerMutation`, optimizer on."""
 
     class CategoryT(DjangoType, relay.Node):
@@ -2221,16 +2222,16 @@ def _build_serializer_g2_schema() -> tuple[DjangoSchema, type[DjangoType]]:
 
 
 @pytest.mark.django_db
-def test_serializer_refetch_keeps_select_related_suppresses_only() -> None:
-    """The serializer re-fetch plan KEEPS `select_related` and applies NO `.only(...)`.
+def test_serializer_refetch_introduces_no_projection() -> None:
+    """The serializer re-fetch plan KEEPS `select_related` and introduces no `.only(...)`.
 
     A relation-selecting response plans the relation through `select_related`, and
-    the `.only(...)` projection is suppressed because the operation is a MUTATION -
-    the re-fetch rides the same G2 path the form flavor does. `select_related` is
+    the plan introduces no projection because the operation is a MUTATION - the
+    re-fetch rides the same path the form flavor does. `select_related` is
     load-bearing here, not decoration: `DST_OPTIMIZER_PLAN` is last-wins
     introspection data, so it is what proves the captured plan IS the re-fetch plan.
     """
-    schema, CategoryT = _build_serializer_g2_schema()
+    schema, CategoryT = _build_serializer_refetch_schema()
     category = product_models.Category.objects.create(name="G2Cat")
     request = HttpRequest()
     request.user = User(username="u")
@@ -2251,8 +2252,9 @@ def test_serializer_refetch_keeps_select_related_suppresses_only() -> None:
     plan = require_instance(read_attr(ctx, "dst_optimizer_plan"), OptimizationPlan)
     # The relation selection (`category { name }`) is planned via select_related.
     assert plan.select_related == ("category",)
-    # No `.only(...)` projection under a MUTATION (the G2 gate suppresses it).
-    assert plan.only_fields == ()
+    # The columns are recorded; a MUTATION plan never introduces a projection.
+    assert plan.introduce_projection is False
+    assert plan.only_fields == ("name", "category_id", "category__name")
 
 
 # ===========================================================================

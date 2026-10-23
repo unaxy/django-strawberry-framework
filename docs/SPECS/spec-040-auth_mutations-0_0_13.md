@@ -162,7 +162,7 @@ vocabulary used throughout the spec:
 - [`DjangoOptimizerExtension`][glossary-djangooptimizerextension] /
   [`only()` projection][glossary-only-projection] — the register payload's post-save
   re-fetch rides the same `036` optimizer path, so the [`spec-035`][spec-035] G2
-  mutation gate (keep `select_related` / `prefetch_related`, suppress `.only(...)`)
+  mutation gate (keep `select_related` / `prefetch_related`, introduce no `.only(...)`)
   comes for free.
 - [`SerializerMutation`][glossary-serializermutation] — the serializer flavor, the
   sibling on the same envelope ([`spec-039`][spec-039]).

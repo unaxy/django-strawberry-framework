@@ -313,7 +313,7 @@ Spec: [Decision 9 — Optimizer composition: the `ModelSerializer` payload re-fe
 
 The `036` re-fetch path (`mutations/resolvers.py::refetch_optimized`) and the
 [`spec-035`][spec-035] G2 gate (keep `select_related` / `prefetch_related`, no
-`.only(...)` under a mutation) exist for exactly this; reusing them gives the serializer
+optimizer-introduced `.only(...)` under a mutation) exist for exactly this; reusing them gives the serializer
 flavor optimizer-composed returns for free, identical to the form flavor.
 
 ### Alternatives considered (and rejected)

@@ -316,8 +316,9 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     mechanism under different contracts and stay separate:
     ``optimizer/plans.py::_resolve_order_path_field`` answers the terminal
     concrete column or ``None`` for cursor anchoring;
-    ``plans.py::_select_path_traversable`` answers traversability under a
-    consumer projection for prune decisions;
+    ``plans.py::_select_path_missing_connectors`` answers the connectors a
+    ``select_related`` path still needs under a ``.only()`` projection, or
+    ``None`` when the path does not resolve;
     ``utils/querysets.py::_prefetch_relation_target_or_none`` answers the
     terminal model or ``None`` (fail-open, with the default ``<model>_set``
     accessor spelling) for prefetch sealing;

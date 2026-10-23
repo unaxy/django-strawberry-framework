@@ -84,18 +84,17 @@ from django_strawberry_framework.optimizer.walker import (
     _build_child_queryset,
     _build_connection_child_queryset,
     _concrete_order_columns,
-    _enable_only_for_operation,
     _ensure_connector_only_fields,
     _field_by_graphql_name,
     _graphql_names_by_python_name,
     _has_custom_id_resolver,
+    _introduces_projection_for_operation,
     _is_fragment,
     _merge_aliased_selections,
     _merge_runtime_prefixes,
     _plan_connection_relation,
     _prefetch_hint_for_path,
     _record_prefetch_path_keys,
-    _record_select_path_keys,
     _relay_max_results_from_info,
     _resolve_selection_target,
     _response_key_arguments_conflict,
@@ -370,16 +369,6 @@ def test_record_prefetch_path_keys_ignores_an_empty_key_set() -> None:
     _record_prefetch_path_keys(plan, "items", ())
 
     assert plan.prefetch_path_resolver_keys == {}
-
-
-def test_record_select_path_keys_appends_unique_identities() -> None:
-    """Select-path B8 ledger shares the same append-unique discipline as prefetch."""
-    plan = OptimizationPlan()
-    _record_select_path_keys(plan, "category", ("a", "b"))
-    _record_select_path_keys(plan, "category", ("b", "c"))
-    _record_select_path_keys(plan, "category", ())
-
-    assert plan.select_path_resolver_keys == {"category": ("a", "b", "c")}
 
 
 def test_plan_relay_id_projects_real_pk_attname_when_not_id(
@@ -5341,7 +5330,7 @@ def test_window_subquery_wrap_preserves_only_mask_and_child_select_related() -> 
 
 
 # ---------------------------------------------------------------------------
-# G2 operation-type gating of ``.only()`` (spec-035 Decision 4)
+# Operation-scoped projection introduction (``OptimizationPlan.introduce_projection``)
 # ---------------------------------------------------------------------------
 
 # The package-tier exact-`only_fields` plan-state mirror for the DjangoMutation
@@ -5350,21 +5339,34 @@ def test_window_subquery_wrap_preserves_only_mask_and_child_select_related() -> 
 
 
 def _op_info(operation: OperationType) -> GraphQLResolveInfo:
-    """Build the root resolve info of a one-field ``operation`` for the G2 gate.
+    """Build the root resolve info of a one-field ``operation``.
 
-    ``_enable_only_for_operation`` reads ``info.operation.operation``; this factory
-    exercises the QUERY / MUTATION / SUBSCRIPTION arms. Resolver keys planned under it
-    start at the root field ``field``, as under ``_fake_info``.
+    ``_introduces_projection_for_operation`` reads ``info.operation.operation``; this
+    factory exercises the QUERY / MUTATION / SUBSCRIPTION arms. Resolver keys planned
+    under it start at the root field ``field``, as under ``_fake_info``.
     """
     return make_info(operation=operation)._raw_info
 
 
-def test_mutation_queryset_drops_only_keeps_select_prefetch() -> None:
-    """A mutation root plan drops ``only_fields`` but keeps select/prefetch.
+@pytest.mark.parametrize(
+    ("operation", "introduces"),
+    [
+        (OperationType.QUERY, True),
+        (OperationType.MUTATION, False),
+        (OperationType.SUBSCRIPTION, False),
+    ],
+    ids=["query", "mutation", "subscription"],
+)
+def test_every_operation_records_the_same_columns_and_relations(
+    operation: OperationType,
+    *,
+    introduces: bool,
+) -> None:
+    """Every operation records one plan shape; only ``QUERY`` may introduce a projection.
 
-    A to-one (``category``) and a to-many (``entries``) selection together prove
-    both relation shapes survive while the column projection is suppressed
-    (spec-035 Decision 4).
+    A to-one (``category``) and a to-many (``entries``) selection: the columns, the
+    join and the prefetch are recorded whatever the operation, so a consumer
+    projection is widened under a mutation exactly as under a query.
     """
     plan = plan_optimizations(
         [
@@ -5373,11 +5375,12 @@ def test_mutation_queryset_drops_only_keeps_select_prefetch() -> None:
             _sel("entries", selections=[_sel("name")]),
         ],
         Item,
-        info=_op_info(OperationType.MUTATION),
+        info=_op_info(operation),
     )
-    assert plan.only_fields == ()
+    assert plan.only_fields == ("name", "category_id", "category__name")
     assert plan.select_related == ("category",)
     assert plan.prefetch_related != ()
+    assert plan.introduce_projection is introduces
 
 
 def _selected_field(name: str, selections: list[Selection] | None = None) -> SelectedField:
@@ -5450,7 +5453,7 @@ def test_mutation_payload_child_selections_flattens_slot_children_only(slot: str
     assert [read_attr(child, "name") for child in _children(fields[1])] == ["name"]
 
 
-def test_mutation_refetch_plan_drops_only_keeps_relations() -> None:
+def test_mutation_refetch_plan_records_columns_and_introduces_no_projection() -> None:
     """The DjangoMutation post-write re-fetch plan-state mirror (spec-036 Decision 9).
 
     The package-tier exact-state counterpart to the live behavioral
@@ -5462,11 +5465,11 @@ def test_mutation_refetch_plan_drops_only_keeps_relations() -> None:
     a change to the flattening cannot leave this mirror passing while it claims to
     mirror something it no longer mirrors.
 
-    Under ``OperationType.MUTATION`` (spec-035 G2) the plan must carry empty
-    ``only_fields`` while ``select_related`` / ``prefetch_related`` survive, AND the
-    APPLIED queryset must carry Django's default empty defer-set
-    ``(frozenset(), True)`` - i.e. no ``.only(...)`` - so a post-write consumer
-    touching an unprojected column never deferred-refetches.
+    Under ``OperationType.MUTATION`` the plan records the selection's columns beside
+    ``select_related`` / ``prefetch_related`` and does not introduce a projection:
+    the APPLIED queryset carries Django's default empty defer-set
+    ``(frozenset(), True)``, so a post-write consumer touching an unselected column
+    never deferred-refetches.
     """
     info = _op_info(OperationType.MUTATION)
     plan = plan_optimizations(
@@ -5474,59 +5477,93 @@ def test_mutation_refetch_plan_drops_only_keeps_relations() -> None:
         Item,
         info=info,
     )
-    assert plan.only_fields == ()
+    assert plan.only_fields == ("name", "category_id", "category__name")
+    assert plan.introduce_projection is False
     assert plan.select_related == ("category",)
     assert plan.prefetch_related != ()
-    # The applied queryset carries no `.only(...)` deferral (the load-bearing G2
-    # property the live tier observes as a bounded query count with no lazy query).
     qs = plan.apply(Item.objects.all())
     assert qs.query.deferred_loading == (frozenset(), True)
     assert qs.query.select_related == {"category": {}}
 
 
-def test_mutation_to_one_relation_applies_no_only() -> None:
-    """Applied-queryset pin: a mutation to-one carries no deferred mask but keeps the join.
+@pytest.mark.parametrize(
+    ("base", "expected_loading"),
+    [
+        pytest.param(Item.objects.all, (frozenset[str](), True), id="unprojected"),
+        pytest.param(
+            lambda: Item.objects.only("description"),
+            (frozenset({"category_id", "category__name", "description"}), False),
+            id="consumer-only",
+        ),
+    ],
+)
+def test_mutation_to_one_relation_widens_only_a_consumer_projection(
+    base: Callable[[], QuerySet[Item]],
+    expected_loading: tuple[frozenset[str], bool],
+) -> None:
+    """Applied-queryset pin: a mutation to-one keeps the join and projects only a projected row.
 
-    Gates ``_record_relation_access``'s FK-connector append: the applied queryset
-    has Django's default empty defer-set ``(frozenset(), True)`` (no ``.only()``)
-    while ``select_related`` still carries the join.
+    An unprojected queryset keeps Django's default empty defer-set; a consumer
+    ``.only()`` gains the FK connector and the joined column, so the JOIN compiles
+    and nothing lazy-loads per row.
     """
     plan = plan_optimizations(
         [_sel("category", selections=[_sel("name")])],
         Item,
         info=_op_info(OperationType.MUTATION),
     )
-    qs = plan.apply(Item.objects.all())
-    assert qs.query.deferred_loading == (frozenset(), True)
+    qs = plan.apply(base())
+    assert qs.query.deferred_loading == expected_loading
     assert qs.query.select_related == {"category": {}}
 
 
-def test_mutation_to_many_prefetch_no_deferred_loading() -> None:
-    """A mutation to-many keeps the ``Prefetch`` but its child carries no deferred mask.
+@pytest.mark.parametrize(
+    ("operation", "expected_loading"),
+    [
+        (OperationType.MUTATION, (frozenset[str](), True)),
+        (OperationType.QUERY, (frozenset({"name", "category_id"}), False)),
+    ],
+    ids=["mutation", "query"],
+)
+def test_prefetch_child_plan_carries_the_operation_flag(
+    operation: OperationType,
+    expected_loading: tuple[frozenset[str], bool],
+) -> None:
+    """A generated ``Prefetch`` child plan carries its parent plan's operation flag.
 
-    Gates ``_ensure_connector_only_fields`` (the prefetch-connector writer): the
-    ``Prefetch`` is preserved while its child queryset has Django's default empty
-    defer-set.
+    Under a mutation the child queryset (no projection of its own) keeps Django's
+    default empty defer-set; under a query the same child is projected to the
+    selection plus its attach connector.
     """
     plan = plan_optimizations(
         [_sel("items", selections=[_sel("name")])],
         Category,
-        info=_op_info(OperationType.MUTATION),
+        info=_op_info(operation),
     )
     outer = _prefetch_entry(plan)
     assert outer.prefetch_to == "items"
     assert outer.queryset is not None
-    assert outer.queryset.query.deferred_loading == (frozenset(), True)
+    assert outer.queryset.query.deferred_loading == expected_loading
 
 
-def test_mutation_scalar_only_connection_window_no_only() -> None:
-    """A scalar-only connection window under a mutation applies no ``.only(...)``.
+@pytest.mark.parametrize(
+    ("operation", "projected"),
+    [(OperationType.MUTATION, False), (OperationType.QUERY, True)],
+    ids=["mutation", "query"],
+)
+def test_scalar_only_window_carries_the_operation_flag(
+    operation: OperationType,
+    *,
+    projected: bool,
+) -> None:
+    """A scalar-only connection window reads the operation flag from its parent plan.
 
-    Gates ``_project_scalar_only_window`` (the direct ``.only(...)`` writer that
-    never touches ``OptimizationPlan.only_fields``): the windowed ``Prefetch``
-    child carries Django's default empty defer-set while the window annotations
-    and the prefetch itself are still present (spec-035 Decision 4 / Edge cases
-    #"every projection writer checks the gate").
+    ``_project_scalar_only_window`` writes its projection without touching
+    ``OptimizationPlan.only_fields``, so it is handed the plan's
+    ``introduce_projection``: under a mutation the windowed ``Prefetch`` child (no
+    projection of its own) keeps Django's default empty defer-set, under a query it
+    is restricted to the pk / connector columns. The window annotations and the
+    prefetch itself are planned either way.
     """
     registry.clear()
     try:
@@ -5535,35 +5572,72 @@ def test_mutation_scalar_only_connection_window_no_only() -> None:
         plan = plan_optimizations(
             [_conn_sel("booksConnection", scalar_children=["totalCount"], arguments={"first": 3})],
             shelf_model,
-            info=_op_info(OperationType.MUTATION),
+            info=_op_info(operation),
             source_type=shelf_type,
         )
         prefetch = _prefetch_entry(plan)
         assert prefetch.queryset is not None
-        assert prefetch.queryset.query.deferred_loading == (frozenset(), True)
-        # The window itself is still planned (annotation present, prefetch kept).
-
+        assert (prefetch.queryset.query.deferred_loading != (frozenset(), True)) is projected
         assert WINDOW_ROW_NUMBER in prefetch.queryset.query.annotations
     finally:
         registry.clear()
 
 
 @pytest.mark.parametrize(
-    ("operation", "expected_only"),
-    [(OperationType.MUTATION, ()), (OperationType.QUERY, ("label", "slug"))],
-    ids=["mutation_gated", "query_projects"],
+    ("operation", "projected"),
+    [(OperationType.MUTATION, False), (OperationType.QUERY, True)],
+    ids=["mutation", "query"],
 )
-def test_connection_parent_link_columns_follow_the_projection_gate(
+def test_connection_window_child_plan_carries_the_operation_flag(
     operation: OperationType,
-    expected_only: tuple[str, ...],
+    *,
+    projected: bool,
 ) -> None:
-    """The nested-connection planner's parent link-column append sits behind the gate.
+    """A node-selecting connection window's child plan inherits ``introduce_projection``.
+
+    ``nested_planner.py::plan_connection_relation`` builds the window's child plan
+    with the parent plan's flag, so under a mutation the child rows load whole and
+    under a query they are projected to the selection.
+    """
+    registry.clear()
+    try:
+        types = _connection_relay_types()
+        shelf_model, shelf_type = types["Shelf"]
+        plan = plan_optimizations(
+            [
+                _conn_sel(
+                    "booksConnection",
+                    node_selections=[_sel("title")],
+                    arguments={"first": 3},
+                ),
+            ],
+            shelf_model,
+            info=_op_info(operation),
+            source_type=shelf_type,
+        )
+        assert plan.introduce_projection is projected
+        prefetch = _prefetch_entry(plan)
+        assert prefetch.queryset is not None
+        assert (prefetch.queryset.query.deferred_loading != (frozenset(), True)) is projected
+        assert WINDOW_ROW_NUMBER in prefetch.queryset.query.annotations
+    finally:
+        registry.clear()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [OperationType.MUTATION, OperationType.QUERY],
+    ids=["mutation", "query"],
+)
+def test_connection_parent_link_columns_record_under_every_operation(
+    operation: OperationType,
+) -> None:
+    """The nested-connection planner records the parent's link columns for every operation.
 
     A reverse ``to_field`` link needs the parent's ``slug`` loaded for its attach
     and per-parent resolution; ``nested_planner.py::plan_connection_relation``
-    appends it only while the operation projects, so a mutation's parent plan
-    keeps no ``only_fields`` (spec-035 Decision 4 / Edge cases
-    #"every projection writer checks the gate").
+    appends it whatever the operation, so a projection the parent queryset carries
+    is widened to it under a mutation too.
     """
     registry.clear()
     try:
@@ -5588,19 +5662,19 @@ def test_connection_parent_link_columns_follow_the_projection_gate(
             info=_op_info(operation),
             source_type=parent_type,
         )
-        assert tuple(plan.only_fields) == expected_only
+        assert tuple(plan.only_fields) == ("label", "slug")
         assert plan.prefetch_related != ()
     finally:
         registry.clear()
 
 
 def test_query_identical_selection_still_projects_only() -> None:
-    """The operation-scoped proof: the SAME selection under QUERY (and ``None``) projects.
+    """The SAME selection under QUERY (and ``None``) introduces a projection.
 
-    Contrasts ``test_mutation_to_one_relation_applies_no_only``: a textually
-    identical to-one selection under a ``query`` operation, and under ``info=None``,
-    both carry the expected non-empty deferred-loading set - so the gate is
-    operation-scoped, not a blanket disable (spec-035 Decision 4).
+    Contrasts ``test_mutation_to_one_relation_widens_only_a_consumer_projection``: a
+    textually identical to-one selection under a ``query`` operation, and under
+    ``info=None``, projects an unprojected queryset - so the flag is
+    operation-scoped, not a blanket disable.
     """
     for info in (_op_info(OperationType.QUERY), None):
         plan = plan_optimizations(
@@ -5614,69 +5688,39 @@ def test_query_identical_selection_still_projects_only() -> None:
         assert {"category_id", "category__name"} <= set(only_fields)
 
 
-def test_subscription_operation_gated() -> None:
-    """A subscription operation drops ``only_fields`` under the same gate.
+def test_introduce_projection_defaults_on_without_info() -> None:
+    """The defensive arms: ``None`` info and partial doubles default to introducing.
 
-    ``info.operation.operation is not OperationType.QUERY`` covers SUBSCRIPTION
-    identically to MUTATION (spec-035 Decision 4 / Edge cases
-    #"subscription operations are gated identically").
+    Covers the no-``info`` and partial-``info`` arms so the ``getattr``-defensive
+    derivation never raises ``AttributeError`` and projects by default. Also drives
+    the ``_introduces_projection_for_operation`` truth table directly.
     """
-    plan = plan_optimizations(
-        [_sel("name"), _sel("category", selections=[_sel("name")])],
-        Item,
-        info=_op_info(OperationType.SUBSCRIPTION),
-    )
-    assert plan.only_fields == ()
-    assert plan.select_related == ("category",)
-
-
-def test_enable_only_defaults_enabled_without_info() -> None:
-    """The defensive arms: ``None`` info and partial doubles default to enabled.
-
-    Covers the no-``info`` -> enabled and partial-``info`` -> enabled arms so the
-    ``getattr``-defensive derivation never raises ``AttributeError`` and projects
-    by default (spec-035 Decision 4 / Edge cases #"defaults to enabled"). Also
-    drives the ``_enable_only_for_operation`` three-arm truth table directly.
-    """
-    # No info -> enabled.
+    # No info -> introduces.
     plan = plan_optimizations([_sel("name")], Category, info=None)
+    assert plan.introduce_projection is True
     assert plan.only_fields == ("name",)
-    # Partial info whose ``operation`` is absent -> enabled, no AttributeError.
-    plan = plan_optimizations(
-        [_sel("name")],
-        Category,
-        info=_as_partial_resolve_info(SimpleNamespace()),
-    )
-    assert plan.only_fields == ("name",)
-    # Partial info whose ``operation`` is ``None`` -> enabled.
-    plan = plan_optimizations(
-        [_sel("name")],
-        Category,
-        info=_as_partial_resolve_info(SimpleNamespace(operation=None)),
-    )
-    assert plan.only_fields == ("name",)
-    # ``operation.operation`` is ``None`` -> enabled.
-    plan = plan_optimizations(
-        [_sel("name")],
-        Category,
-        info=_as_partial_resolve_info(SimpleNamespace(operation=SimpleNamespace(operation=None))),
-    )
-    assert plan.only_fields == ("name",)
+    # Partial info whose ``operation`` is absent, ``None``, or carries ``None``.
+    for partial in (
+        SimpleNamespace(),
+        SimpleNamespace(operation=None),
+        SimpleNamespace(operation=SimpleNamespace(operation=None)),
+    ):
+        plan = plan_optimizations([_sel("name")], Category, info=_as_partial_resolve_info(partial))
+        assert plan.introduce_projection is True
+        assert plan.only_fields == ("name",)
     # Truth table on the helper directly.
-    assert _enable_only_for_operation(None) is True
-    assert _enable_only_for_operation(_op_info(OperationType.QUERY)) is True
-    assert _enable_only_for_operation(_op_info(OperationType.MUTATION)) is False
-    assert _enable_only_for_operation(_op_info(OperationType.SUBSCRIPTION)) is False
+    assert _introduces_projection_for_operation(None) is True
+    assert _introduces_projection_for_operation(_op_info(OperationType.QUERY)) is True
+    assert _introduces_projection_for_operation(_op_info(OperationType.MUTATION)) is False
+    assert _introduces_projection_for_operation(_op_info(OperationType.SUBSCRIPTION)) is False
 
 
 def test_mutation_id_only_relation_still_records_elision() -> None:
     """The walker half of spec-035 Decision 5: elision stays recorded under a mutation.
 
-    A mutation ``{ category { id } }`` selection still records the FK-id elision
-    (elision stays enabled - it is operation-independent) while the
-    ``_record_relation_access`` FK-connector append is suppressed, so
-    ``only_fields`` is empty. The resolver-time loaded-check is the other half
-    (``tests/types/test_resolvers.py``).
+    A mutation ``{ category { id } }`` selection records the FK-id elision and the
+    FK connector column the elision reads, exactly as under a query. The
+    resolver-time loaded-check is the other half (``tests/types/test_resolvers.py``).
     """
     plan = plan_optimizations(
         [_sel("category", selections=[_sel("id")])],
@@ -5684,7 +5728,7 @@ def test_mutation_id_only_relation_still_records_elision() -> None:
         info=_op_info(OperationType.MUTATION),
     )
     assert plan.fk_id_elisions == ("category@field.category",)
-    assert plan.only_fields == ()
+    assert plan.only_fields == ("category_id",)
 
 
 # TODO(BACKLOG polymorphic_interface_connections - the abstract-return optimizer entry card): add
@@ -5857,7 +5901,7 @@ def _candidate_list(field: Sequence[_T]) -> list[_T]:
 
 
 def _mutate_every_plan_field(plan: OptimizationPlan, label: str) -> None:
-    """Make a strategy candidate visibly dirty across every construction field."""
+    """Make a strategy candidate visibly dirty across every merged field."""
     # The in-place extend on the unfinalized candidate's list is the dirty mutation under test;
     # the plan declares each field as a read-only Sequence.
     _candidate_list(plan.select_related).extend([f"{label}_select", f"{label}_select"])
@@ -5865,7 +5909,6 @@ def _mutate_every_plan_field(plan: OptimizationPlan, label: str) -> None:
     _candidate_list(plan.only_fields).extend([f"{label}_only", f"{label}_only"])
     _candidate_list(plan.fk_id_elisions).extend([f"{label}_elision", f"{label}_elision"])
     _candidate_list(plan.planned_resolver_keys).extend([f"{label}_planned", f"{label}_planned"])
-    plan.select_path_resolver_keys[f"{label}_select"] = (f"{label}_planned", f"{label}_planned")
     plan.cacheable = False
 
 
@@ -5905,7 +5948,6 @@ def test_refusing_nested_fetch_strategy_leaves_selection_unplanned() -> None:
         assert plan.select_related == ()
         assert plan.only_fields == ()
         assert plan.fk_id_elisions == ()
-        assert plan.select_path_resolver_keys == {}
         assert plan.cacheable is True
     finally:
         end_execution_frame(frame)
@@ -5942,9 +5984,6 @@ def test_accepting_nested_fetch_strategy_merges_candidate_exactly_once() -> None
         assert plan.only_fields.count("accepted_only") == 1
         assert plan.fk_id_elisions.count("accepted_elision") == 1
         assert plan.planned_resolver_keys.count("accepted_planned") == 1
-        assert plan.select_path_resolver_keys == {
-            "accepted_select": ("accepted_planned",),
-        }
         assert plan.cacheable is False
     finally:
         end_execution_frame(frame)
@@ -5975,7 +6014,6 @@ def test_raising_nested_fetch_strategy_leaves_parent_byte_identical() -> None:
             only_fields=["existing-only"],
             fk_id_elisions=["existing-elision"],
             planned_resolver_keys=["existing-key"],
-            select_path_resolver_keys={"existing-select": ("existing-key",)},
             cacheable=False,
         )
         before = parent.finalize()
@@ -6152,23 +6190,6 @@ def test_lateral_strategy_plans_a_lateral_queryset_through_the_walker() -> None:
     finally:
         end_execution_frame(frame)
         registry.clear()
-
-
-def test_select_related_paths_carry_their_resolver_keys() -> None:
-    """Each ``select_related`` path records the resolver keys it satisfies.
-
-    The B8 directive-to-metadata coupling
-    (``plans.py::OptimizationPlan.select_path_resolver_keys``): when
-    reconciliation drops a path a consumer projection cannot traverse, the
-    keys recorded here leave ``planned_resolver_keys`` with it. Written at
-    the single ``select_related`` append site, so hint-forced selects are
-    covered too.
-    """
-    plan = plan_optimizations([_sel("category")], Item)
-    assert plan.select_related == ("category",)
-    keys = plan.select_path_resolver_keys["category"]
-    assert keys
-    assert set(keys) <= set(plan.planned_resolver_keys)
 
 
 _UNSAFE_CHILD_SHAPES: list[tuple[Callable[[QuerySet[Model]], QuerySet[Model]], str]] = [
