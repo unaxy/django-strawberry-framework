@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 224 done, 141 to do.
+Progress: 225 done, 140 to do.
 
 ## Done
 
@@ -977,6 +977,13 @@ Progress: 224 done, 141 to do.
   next mention past a protected one, the checker counts only links outside code (`headings=False`); NEXT.md Step 7
   reads "non-code, non-link, non-heading" (protected writes 69 -> 0, the 57 archived specs check as before,
   markdown-it block oracle 0 under-masks over 1229 shapes and 210 files)
+- [x] 187. test gap closed: the C11 live rows run on Postgres only under the default windowed strategy, so
+  `tests/test_lateral_pg_parity.py::test_hook_ordered_window_pages_in_branch_with_parity` now pages hook-ordered and
+  reversed keyset and offset windows (fk and m2m; title, -id and a bare `.reverse()`) through `CROSS JOIN LATERAL` with
+  windowed parity, the exact `ROW_NUMBER` order and the seek operator; 53 of 53 pass on Postgres 17 locally, and the
+  rows fail under the pre-fix `effective_cursor_state` (8), a dropped `normalize_order_direction` reversal (12), a
+  flipped seek (10) and a flipped window direction (20); no lateral defect found; `postgres.yml`'s `package-core` shard
+  (Postgres 16) runs them
 
 ## Outside review of the fixes
 
@@ -1017,8 +1024,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 187. The C11 keyset fixes were never run on PostgreSQL's LATERAL path (The workspace / prove_failability `flock`
-  rows on Linux or NFS are not a defect: CI runs them on ubuntu.)
 - [ ] 190. Seen at `87dc1df7`, re-check: an out-of-range datetime filter value raises an uncoded error (The invalid
   regex and the regex on a UUID field are not defects: both follow django-filter's `regex` lookup, which sends a text
   pattern to the database and types a UUID column's value as a UUID.)
