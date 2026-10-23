@@ -1016,9 +1016,13 @@ def _base_table_defect(query: object, concrete: type[models.Model]) -> str | Non
     # exact value ``Query.base_table`` recomputes after ``clone`` drops its cache.
     first_alias = next(iter(alias_map))
     table = alias_map[first_alias].table_name
-    if type(table) is not str:
+    if not is_str(table):
         return truth.kind(table)
-    if table != concrete._meta.db_table:
+    # Django stores ``Meta.db_table`` as given, so a ``TextChoices`` / ``StrEnum`` member
+    # names the table it spells; both sides compare as their exact text, and canonical
+    # reconstruction rebinds the baked name as that text.
+    table = _normalized_str(table)
+    if table != _normalized_str(concrete._meta.db_table):
         return table
     return None
 
@@ -1182,8 +1186,10 @@ def _shadow_defect(node: object, label: str) -> tuple[str, str] | None:
 # ...}``; ``CombinedExpression`` interpolates ``self.connector``; ``RawSQL`` emits
 # ``self.sql`` verbatim. An EXACT genuine node whose instance ``__dict__`` overrides one
 # of these with a non-``str`` object would run that object's ``join`` / ``__str__`` at
-# compile time (spec-045 Decision 2), so each override present on the
-# instance must be exactly ``str``. Genuine Django only ever stores strings here.
+# compile time (spec-045 Decision 2), so each override present on the instance must be
+# a text term (``_is_text_term``): an exact ``str``, or a ``TextChoices`` / ``StrEnum``
+# member Django formats as the text it spells and reconstruction rebinds as that exact
+# text. Genuine Django only ever stores strings here.
 _SQL_TEMPLATE_ATTRS: tuple[str, ...] = (
     "template",
     "function",
@@ -1202,8 +1208,8 @@ _SQL_TEMPLATE_ATTRS: tuple[str, ...] = (
 # ``arg_joiner`` names, which ``Func.__init__`` routes into ``extra`` rather than onto the
 # named instance slots ``_SQL_TEMPLATE_ATTRS`` pins. ``extra`` exists only as INSTANCE
 # state (no class supplies it), so validating it needs no class-level proof. Values are
-# pinned to the exact inert scalars Django itself stores there; a consumer object under
-# any key fails closed before the seal returns.
+# pinned to the exact inert scalars Django itself stores there, or a text term; a consumer
+# object under any key fails closed before the seal returns.
 _TEMPLATE_PARAM_VALUE_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
     (
         str,
@@ -1215,14 +1221,17 @@ _TEMPLATE_PARAM_VALUE_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet
 
 
 def _template_params_defect(node_dict: Mapping[str, object], label: str) -> tuple[str, str] | None:
-    """Return a defect unless an expression's ``extra`` template mapping is inert scalars.
+    """Return a defect unless an expression's ``extra`` template mapping is inert text.
 
     Read straight from the already-validated instance ``__dict__`` so the check itself
     dispatches nothing: the mapping must be an EXACT ``dict`` (a subclass ``items`` /
     ``__iter__`` would run consumer code when ``as_sql`` unpacks it into the format
-    context), its keys exact ``str`` (they are the template's format names), and each
-    value an exact inert scalar. Genuine Django only ever stores strings and numbers here,
-    so the rule costs no legitimate query.
+    context), its keys text terms (they are the template's format names), and each
+    value an exact inert scalar or a text term. Here a ``str`` subclass that defines
+    ``resolve_expression`` is an expression, not a text term, and fails closed as key or
+    value; a lookup value's mapping key is bound data instead, which admits any ``str``.
+    Genuine Django only ever stores strings and numbers here, so the rule costs no
+    legitimate query.
     """
     if "extra" not in node_dict:
         return None
@@ -1230,10 +1239,18 @@ def _template_params_defect(node_dict: Mapping[str, object], label: str) -> tupl
     if not is_exact_dict(extra):
         return ("untrusted", f"{label} extra is a {truth.kind(extra)}")
     for key, value in extra.items():
-        if type(key) is not str:
-            return ("untrusted", f"{label} extra has a non-string key")
-        if value is not None and not truth.is_exact_one_of(value, _TEMPLATE_PARAM_VALUE_TYPES):
-            return ("untrusted", f"{label} extra[{key!r}] is a {truth.kind(value)}")
+        if type(key) is not str and not _is_text_term(key):
+            kind = "an expression" if is_str(key) else "a non-string"
+            return ("untrusted", f"{label} extra has {kind} key")
+        if (
+            value is not None
+            and not truth.is_exact_one_of(value, _TEMPLATE_PARAM_VALUE_TYPES)
+            and not _is_text_term(value)
+        ):
+            return (
+                "untrusted",
+                f"{label} extra[{_normalized_str(key)!r}] is a {truth.kind(value)}",
+            )
     return None
 
 
@@ -1243,15 +1260,17 @@ def _node_metadata_defect(node: object, label: str) -> tuple[str, str] | None:
     ``get_source_expressions`` enumerates the operand sub-expressions the compiler
     recurses, but ``Func.as_sql`` (and its cousins) ALSO interpolate formatting metadata
     no source-expression walk reaches (spec-045 Decision 2): each ``_SQL_TEMPLATE_ATTRS``
-    name present on the instance ``__dict__`` must be
-    an exact ``str``, because it is formatted straight into the SQL string (``template %
-    data``) or used as a ``.join`` separator, so a non-``str`` override would run that
-    object's ``__str__`` / ``join`` at compile time. The named slots are not the whole
-    template surface: ``Func`` / ``Case`` / ``Subquery`` keep their surplus constructor
-    keywords in an ``extra`` MAPPING that ``as_sql`` merges into the same format context,
-    so ``Func(Value("x"), function=<object>)`` stores the object under ``extra["function"]``
-    rather than on the ``function`` slot. ``_template_params_defect`` pins that mapping to
-    exact-``str`` keys and exact inert scalar values, closing the same interpolation route.
+    name present on the instance ``__dict__`` must be a text term (``_is_text_term``),
+    because it is formatted straight into the SQL string (``template % data``) or used
+    as a ``.join`` separator, so a non-text override would run that object's ``__str__``
+    / ``join`` at compile time; a ``TextChoices`` / ``StrEnum`` member is the text it
+    spells and reconstruction rebinds it as that exact text. The named slots are not the
+    whole template surface: ``Func`` / ``Case`` / ``Subquery`` keep their surplus
+    constructor keywords in an ``extra`` MAPPING that ``as_sql`` merges into the same
+    format context, so ``Func(Value("x"), function=<object>)`` stores the object under
+    ``extra["function"]`` rather than on the ``function`` slot. ``_template_params_defect``
+    pins that mapping to text-term keys and exact inert scalar or text-term values,
+    closing the same interpolation route.
 
     ``node`` is proven an EXACT genuine Django expression type before this runs, so these
     attributes are Django's own string defaults unless the instance ``__dict__`` shadows
@@ -1265,8 +1284,10 @@ def _node_metadata_defect(node: object, label: str) -> tuple[str, str] | None:
     """
     node_dict = truth.instance_state(node)
     for attr in _SQL_TEMPLATE_ATTRS:
-        if attr in node_dict and type(node_dict[attr]) is not str:
-            return ("untrusted", f"{label} {attr} is a {truth.kind(node_dict[attr])}")
+        if attr in node_dict:
+            text = node_dict[attr]
+            if type(text) is not str and not _is_text_term(text):
+                return ("untrusted", f"{label} {attr} is a {truth.kind(text)}")
     return _template_params_defect(node_dict, label)
 
 
@@ -1535,10 +1556,14 @@ def _container_defect(
 
     ``recurse`` is the caller's own ``(value, walk, label)`` walker, so the expression
     graph and the deferred-filter values share this traversal while each keeps its own
-    element rule. Dict keys must be exact ``str``; ``key_detail`` formats that rejection
-    because the two walkers word it differently. ``leave`` runs only when the whole
-    container proves clean -- a defect returns immediately with the container still on
-    the ``visiting`` stack, which the unwinding walk never consults again.
+    element rule. Dict keys must be ``str``, a ``str`` subclass included: a
+    ``TextChoices`` / ``StrEnum`` member a JSON payload is keyed by is the key it spells,
+    and canonical reconstruction (of the sealed query, and of a deferred filter's
+    arguments before the bake) rebinds it as that exact text (``_normalized_bound_value``).
+    ``key_detail`` formats the rejection because the two walkers word it differently.
+    ``leave`` runs only when the whole container proves clean -- a defect returns
+    immediately with the container still on the ``visiting`` stack, which the unwinding
+    walk never consults again.
     """
     value_id = id(value)
     state = walk.begin(value_id)
@@ -1546,7 +1571,7 @@ def _container_defect(
         return _walk_short_circuit(state, f"{label} contains a reference cycle")
     if is_exact_dict(value):
         for key, item in value.items():
-            if type(key) is not str:
+            if type(key) is not str and not is_str(key):
                 return ("untrusted", key_detail(label, key))
             defect = recurse(item, walk, label)
             if defect is not None:
@@ -1599,7 +1624,7 @@ def _static_attr_present(value: object, name: str) -> bool:
     return truth.static_attr(value, name, MISSING_ATTRIBUTE) is not MISSING_ATTRIBUTE
 
 
-def _is_text_term(item: object) -> bool:
+def _is_text_term(item: object) -> TypeGuard[str]:
     """Return whether ``item`` is a text term Django reads as a name or a SQL fragment.
 
     The slots Django fills from ``order_by(...)`` / ``distinct(...)`` names and from
@@ -2389,10 +2414,11 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
 
     Per-node SQL-template state needs no special case here, because validation already
     narrowed it to reconstructable shapes: an expression's ``extra`` mapping is an exact
-    ``dict`` of exact-``str`` keys and exact inert scalar values, so the generic dict
-    branch rebuilds it as a fresh framework-owned mapping whose every member is a bound
-    leaf the interpreter owns. Nothing the compiler interpolates into a SQL template
-    survives the seal as a consumer object.
+    ``dict`` of text-term keys and exact inert scalar or text-term values, so the generic
+    dict branch rebuilds it as a fresh framework-owned mapping whose every member is a
+    bound leaf the interpreter owns, a ``TextChoices`` / ``StrEnum`` member rebound as
+    its exact text like the same member on a named template slot. Nothing the compiler
+    interpolates into a SQL template survives the seal as a consumer object.
     """
     value_type = type(value)
     if value is None or truth.is_exact_one_of(value, _RETAINED_TYPES):
@@ -3294,10 +3320,15 @@ def _bake_deferred_filter_or_defect(
     framework-owned clone) through the UNBOUND ``sql.Query.add_q``. Every argument is
     proven inert / genuine-Django FIRST (``_deferred_value_defect``) so ``add_q``'s
     ``resolve_expression`` dispatch (spec-045 Decision 5) only ever runs
-    genuine Django code. A malformed shape Django never produces (a non-3-tuple, a
-    ``negate`` that is not an exact ``bool``, a non-dict / non-tuple args, a prohibited
-    ``_connector`` / ``_negated`` kwarg, a bad field) fails closed as a typed
-    ``untrusted`` defect, never a raw exception.
+    genuine Django code, and then canonically rebuilt (``_reconstructed_value``,
+    positional and keyword arguments alike), so ``add_q`` builds the predicate from
+    framework-owned nodes: a ``TextChoices`` / ``StrEnum`` member is rebound as its
+    exact text, Django's in-place alias relabelling never reaches a consumer-held
+    subquery, and a bound payload the admitted-bound-value rule refuses, or a graph
+    that cannot be rebuilt, fails closed. A malformed shape Django never produces (a
+    non-3-tuple, a ``negate`` that is not an exact ``bool``, a non-dict / non-tuple args,
+    a prohibited ``_connector`` / ``_negated`` kwarg, a bad field) fails closed as a
+    typed ``untrusted`` defect, never a raw exception.
     """
     # Exact-shape gate BEFORE the unpack: tuple unpacking dispatches ``__iter__``,
     # so an arbitrary object planted in the slot must be rejected without iteration.
@@ -3328,9 +3359,21 @@ def _bake_deferred_filter_or_defect(
         kwarg_defect = _deferred_value_defect(value, walk, f"{cls_name} deferred filter {key!r}")
         if kwarg_defect is not None:
             return kwarg_defect
+    # ``add_q`` builds the predicate from the arguments as they stand, so they are
+    # canonically reconstructed first: the baked predicate then holds framework-owned
+    # nodes and containers, a ``TextChoices`` / ``StrEnum`` member rebound as its exact
+    # text, and a bound payload the admitted-bound-value rule refuses fails closed here.
+    memo: dict[int, object] = {}
+    try:
+        owned_args = [_reconstructed_value(value, memo) for value in args]
+        owned_kwargs = {key: _reconstructed_value(value, memo) for key, value in kwargs.items()}
+    except _UntrustedBoundValueError as refusal:
+        return ("untrusted", f"{cls_name} deferred filter {refusal}")
+    except Exception:  # noqa: BLE001 - consumer code may raise anything
+        return ("untrusted", f"{cls_name} deferred filter state cannot be reconstructed")
     try:
         # Every kwarg key was proven an exact ``str`` by the loop above.
-        predicate = models.Q(*args, **cast("dict[str, object]", kwargs))
+        predicate = models.Q(*owned_args, **cast("dict[str, object]", owned_kwargs))
         sql.Query.add_q(rebuilt_query, ~predicate if negate else predicate)
     except Exception:  # noqa: BLE001 - consumer code may raise anything
         return ("untrusted", f"{cls_name} carries malformed deferred-filter state")
@@ -4160,9 +4203,10 @@ def _seal_or_defect(
     every site that can reach it); they are not one execution order. The checks
     run: ``type``; ``table`` on the model slot; ``untrusted`` on the outer
     exact-``sql.Query`` and the retained ``__dict__`` slots; ``routing``; then the
-    combinator table walk, reconstruction, deferred-filter bake, iterable-class,
-    prefetch and result-cache checks (``table`` / ``untrusted``); then
-    ``evaluated`` -> ``sliced`` -> ``projection`` -> ``combined`` -> ``alias``.
+    combinator table walk, reconstruction, deferred-filter bake (over reconstructed
+    arguments, then re-proved), iterable-class, prefetch and result-cache checks
+    (``table`` / ``untrusted``); then ``evaluated`` -> ``sliced`` -> ``projection`` ->
+    ``combined`` (the rewritten query reconstructed in turn) -> ``alias``.
     Routing is proven before any graph walk or clone, so no reconstructed
     queryset exists for a re-routed candidate; the outer ``sql.Query`` is proven
     before the walk because the walk reads query attributes through normal
@@ -4458,6 +4502,11 @@ def _seal_or_defect(
     # model rows. A shape whose rows that rewrite would change fails closed.
     if policy.rewrite_combined and rebuilt_query.combinator:
         rewritten, combined_defect = _pk_membership_query_or_defect(rebuilt_query, qmodel)
+        if combined_defect is None:
+            # The rewrite builds a fresh ``Query(model)``, which bakes ``Meta.db_table``
+            # as given (a ``TextChoices`` / ``StrEnum`` member included) into its alias
+            # map, so the rewritten query is canonically reconstructed in turn.
+            combined_defect = _reconstruction_defect(rewritten, cls_name)
         if combined_defect is not None:
             return None, combined_defect
         # The rewrite returns a query exactly when it returns no defect.

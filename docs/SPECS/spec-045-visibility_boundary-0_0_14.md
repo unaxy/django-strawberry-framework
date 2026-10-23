@@ -253,9 +253,11 @@ never a container). An `ExtraWhere` whose params are `None` (what
 parameters) passes; a `RawSQL` with `None` params stays refused, since Django
 cannot compile it.
 SQL-template metadata (`template` / `function` / `arg_joiner` / `connector` /
-`sql` / `base_template`) present on an instance must be exactly `str`, and an
+`sql` / `base_template`) present on an instance must be a text term (an exact `str`,
+or a `TextChoices` / `StrEnum` member Django formats as the text it spells), and an
 expression's open-ended `extra` template mapping must be an exact `dict` of
-exact-`str` keys and exact inert scalar values.
+text-term keys and exact inert scalar or text-term values; reconstruction rebinds
+every admitted member as its exact text.
 
 Three further properties the walk must hold, each of which a narrower reading of
 "prove the node genuine" does not supply:
@@ -277,10 +279,11 @@ Three further properties the walk must hold, each of which a narrower reading of
   Alias refcounts must be exact `int`, external-alias flags exact `bool`,
   `table_map` entries exact lists of `str` aliases, set members `str`, and
   `_filtered_relations` values genuine and unshadowed. A name (a mapping key, a
-  set member, an `extra` select alias, a `table_map` alias) may be a `TextChoices`
-  / `StrEnum` member, which Django stores as given for an `annotate` / `alias` /
-  `extra(select=...)` / `FilteredRelation` name: it is admitted by its real type,
-  read as its exact text wherever a defect names it, and rebound as that text by
+  set member, an `extra` select alias, a `table_map` alias, the baked base table)
+  may be a `TextChoices` / `StrEnum` member, which Django stores as given for an
+  `annotate` / `alias` / `extra(select=...)` / `FilteredRelation` name and a
+  `Meta.db_table`: it is admitted by its real type, read as its exact text wherever
+  a defect names it or the base-table proof compares it, and rebound as that text by
   reconstruction, so the sealed query holds exact-`str` names only.
 - **A reference cycle is untrusted state, not a shared diamond.** The walk is
   three-state: a node reached while still being visited closes a cycle and fails
@@ -468,6 +471,13 @@ Django 6.0 exposes those names as
 floor rejects the same names inline with no module-level constant, so the lookup
 falls back to a verbatim mirror of the frozenset and the gate behaves identically
 at the floor.
+`add_q` builds the predicate from the arguments as they stand, so the arguments
+are canonically reconstructed before the bake: a `TextChoices` / `StrEnum` member
+inside one (a mapping key, an expression's SQL text or template slot) is rebound as
+its exact text, as the same member is anywhere else in the graph, and a bound payload
+the admitted-bound-value rule refuses fails closed. A combined result's primary-key
+rewrite is reconstructed in turn, since the fresh `Query(model)` it builds bakes a
+`Meta.db_table` member as given.
 
 **Enforcing symbols.**
 [`utils/querysets.py::_combined_query_table_defect`][querysets] (unconditional
