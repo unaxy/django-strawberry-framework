@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 236 done, 158 to do.
+Progress: 236 done, 178 to do.
 
 ## Done
 
@@ -1318,12 +1318,60 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the masked uncoded error; read it through `utils/truth.py::overrides` (the class-level-override family of 388)
 - [ ] 399. A flat `RelatedFilter` leaf runs `ProjectedChildFilter.filter` twice for one value (robustness: one extra
   EXISTS build per request, same rows)
+- [ ] 400. Unprobed: a `FilterSet` declaring only `Meta.exclude` (`fields=None`) is treated as `"__all__"` upstream,
+  but the package's top-level `"__all__"` narrowing keys on `meta_fields == "__all__"`, so exclude-only may omit `id`
+  and handle many-to-many differently from `fields = "__all__"`; probe both against one model and align them
+- [ ] 401. Unprobed: the model flavor of `createItemHold` with `itemId` omitted (not sent `null`) may not answer with
+  the field-keyed `itemId` / `null` envelope the ModelForm flavor gives since `8c0aaf17`
+- [ ] 402. `mutations/inputs.py::build_mutation_input` decides requiredness with `is_m2m = getattr(field,
+  "many_to_many", False)`, so a reverse foreign key is not counted as a collection there, unlike
+  `model_column_write_kind` (`02711b23`); behaviour appears identical today: confirm or route it through the classifier
+- [ ] 403. Neither spec-027 nor the GLOSSARY `FilterSet` entry states the re-readability rule `67e23c5d` enforces: add
+  the edge-case row "`Meta.fields` / `filter_fields` / `Meta.exclude` must be re-readable collections; one-shot
+  iterators and a bare-string `Meta.exclude` raise `ConfigurationError` at class creation" (GLOSSARY through the DB)
+- [ ] 404. Fakeshop fixture gaps: no `CompositePrimaryKey` model, no `db_column=` rename, and no serializer with
+  `PrimaryKeyRelatedField(many=True)` over a reverse foreign key (a Branch serializer with `shelves` and custom
+  `create` / `update`), so `02711b23` has no live row
+- [ ] 405. `tests/test_connection.py::test_consumer_resolver_sequence_negative_cursor_raises_graphql_error` may be a
+  stand-in left behind when the row was promoted to
+  `examples/fakeshop/test_query/test_connection_pagination_api.py::test_negative_offset_cursor_on_a_sequence_resolver_is_a_cursor_error`:
+  prove it redundant and delete it, or keep it
+- [ ] 406. Performance: a root `first: N` probe row's sentinel parent also gets the nested prefetch (`... IN (1, 2) ...
+  _dst_row_number <= 3`), so the single-parent fast path never engages once two parents exist
+- [ ] 407. `utils/sessions.py` test gaps: no row for a custom client-side session store that does not subclass the
+  signed-cookie store (treated as server-side, as `docs/README.md` documents), and no row for the exact window edge of
+  `consumers.py::_actor_is_current` (strict `<`)
+- [ ] 408. `rest_framework/resolvers.py::_hook_mapping`'s exact-`str` key gate refuses `StrEnum` keys Python accepts
+  (the `str`-subclass family of 224)
+- [ ] 409. `utils/permissions.py::invoke_permission_method` rejects a non-callable `check_<field>_permission` at first
+  use, not at class creation
+- [ ] 410. `write_mixins.py::_ValidatedMutationMeta.__delattr__` still says the configuration "is immutable", which
+  `object.__setattr__` bypasses; the docstrings were narrowed in `a5e41a20`, the runtime message was left because a
+  test may pin it
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 411. Design call: should `types/base.py::_is_auto_annotation` recognize aliased `auto` spellings under
+  `from __future__ import annotations` by resolving a Name / Attribute annotation against the defining module's
+  globals? Today they fail loud with a raw Strawberry `TypeError`; the documented policy (here and for `NodeID`) is
+  spelling-match without evaluation
+- [ ] 412. Design call: generated names join `<TypeName><Pascal(field)>` with no separator, so prefix-related names
+  collide: a `Product.category_kind` choice and a `ProductCategory.kind` choice both produce `ProductCategoryKindEnum`
+  and schema build fails with `DuplicatedTypeName`; the same shape applies to `FilterInputType`, `RangeInputType` and
+  narrowed `<Model>...Input` names. It fails loud; the fix is a name-contract change
+- [ ] 413. CI: `makemigrations --check --dry-run` reports no changes at HEAD, but nothing gates it; add it to the lint
+  job
+- [ ] 414. Tooling: `.envrc` exports `DJANGO_SETTINGS_MODULE=config.settings` while `pytest.ini` names
+  `config.test_settings`, and the env var wins; drop the export or assert the module under pytest
+- [ ] 415. CI: `postgres.yml` has no Postgres x `FAKESHOP_SHARDED` cell, so `lateral_fetch`'s Postgres-only path never
+  runs sharded; add one and run the Postgres tier once per release
+- [ ] 416. CI: only the 5.2.16 / 3.10 cell pins strawberry 0.322.2; add a cell pinning it on Django 6.x
+- [ ] 417. CI: run the weekly Postgres tier with `--cov` and diff its executed lines against SQLite's
+- [ ] 418. CI: a periodic `-n0` run with randomized module order, to catch order-dependent process state
+- [ ] 419. CI: a Postgres-tier keyset round-trip over a Decimal and an aware-DateTime `cursor_field`
 - [ ] 396. CHANGELOG entry for item 313: a database router answering a `TextChoices` / `StrEnum` alias now routes an
   `orderBy` read instead of raising `ConfigurationError` ("an alias must be a string")
 - [ ] 395. CHANGELOG entry for item 312: a `TextChoices` / `StrEnum` member used as SQL text in a hook's or consumer
