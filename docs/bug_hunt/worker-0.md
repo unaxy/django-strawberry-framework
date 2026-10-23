@@ -37,7 +37,8 @@ overrides Worker-2. `docs/bug_hunt/HUNT.md` is canonical; this file is the coord
 ## Closeout
 
 Dispatch the package integration item after every file and scenario item, run the final gate
-yourself, then fill `## Outcomes` before deleting anything as `HUNT.md` "Closeout" describes. Set
+(`workspace.py gate hunt --suites lint`; every other suite runs in GitHub Actions, `HUNT.md`
+"Integration and final gate") yourself, then fill `## Outcomes` before deleting anything as `HUNT.md` "Closeout" describes. Set
 `Status: complete`, remove only this run's scratch by explicit path, run
 `uv run python scripts/workspace.py gc hunt`, and do not commit.
 

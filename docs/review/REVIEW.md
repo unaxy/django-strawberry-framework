@@ -102,7 +102,8 @@ this item like the target's), their tests, the ledger rows the item lands.
   `blocked`, defect named abstractly, evidence held in scratch.
 - **Test runs.** The entry command authorizes any `workspace.py run` or `prove` in any cell
   ("Workspace", "Database cells"), a focused permanent test w/ `--no-cov` in the shared tree, and
-  the final gate `workspace.py gate review`. Nothing else converts into a test run. A cell is
+  the final gate `workspace.py gate review` (CI's lint job; every other suite runs in GitHub Actions,
+  "Final gate and closeout"). Nothing else converts into a test run. A cell is
   `inapplicable by construction` when the target reaches no database, alias or dialect decision
   (the reviewer states the reason, the verifier judges it); a cell the environment cannot run is
   `unverified`, listed w/ the failing command.
@@ -832,21 +833,23 @@ package behavior and its tests, examples and docs. Re-inventory first. `rev-proj
 ## Final gate and closeout
 
 Every item but the gate verified or `blocked` + inventory re-reconciled → Worker-0 runs the gate:
-`uv run python scripts/workspace.py gate review`, every `## Pending execution` command from every
-artifact as listed, and the bench baseline commands w/ `<phase>` = `gate`, delta recorded. `gate`
-syncs a gate copy carrying its own git index of `HEAD` (the suite's CI-governance tests ask git for
-the committable file list) and runs CI's jobs: the `lint` job's commands in the workflow's order
-(`workspace.py`'s `LINT_COMMANDS`, held to `django.yml` by a test), then the suite four times: the
-full default suite
-(package coverage 100%); the `floor` suite, CI's floor cell (`workspace.py` docstring), w/o
-coverage; the `sharded` cell w/o coverage, since sharded-only tests skip by default
-and the default run owns the coverage floor; the `pg` cell, only the database-touching tests, on
-the gate copy's own database. It writes `gate-<run id>.json` to the evidence folder, bound to
-a snapshot commit of the gate copy at gate time, the blob ids of `pyproject.toml` and `uv.lock`,
-each suite's cell and the floor pins, and prints per suite the run id, exit, summary and coverage
-lines; a cell that cannot run is `unverified` w/ the reason.
+`uv run python scripts/workspace.py gate review` (its default `--suites lint`), every `## Pending
+execution` command from every artifact as listed, and the bench baseline commands w/ `<phase>` =
+`gate`, delta recorded. `gate` syncs a gate copy carrying its own git index of `HEAD` (the lint
+job's tracked-path check asks git for the committable file list) and runs CI's `lint` job's
+commands in the workflow's order (`workspace.py`'s `LINT_COMMANDS`, held to `django.yml` by a
+test). The full default suite (package coverage 100%), the `floor` cell, the `sharded` cell and
+the `pg` tier never run locally ([AGENTS.md][agents]); they run in GitHub Actions: the full
+`django.yml` matrix dispatched with `gh workflow run django.yml` (every Python / Django cell,
+single-DB and `FAKESHOP_SHARDED=1`, plus the lint job, incl. the `fail_under = 100` package
+coverage gate on the latest single-DB cell; the release readiness checklist in
+[KANBAN.md][kanban]), and `postgres.yml` for the Postgres tier. `gate` writes `gate-<run id>.json`
+to the evidence folder, bound to a snapshot commit of the gate copy at gate time, the blob ids of
+`pyproject.toml` and `uv.lock`, each suite's cell and the floor pins, and prints per suite the run
+id, exit, summary and coverage lines; a cell no recorded run carried is `unverified` w/ the reason.
 
-Record, per suite, failures, coverage, skips, xfails, collected/selected counts and the cell. A
+Record, per suite (the local lint job and each Actions run, named by its run id), failures,
+coverage, skips, xfails, collected/selected counts and the cell. A
 change to package source, tests, fixtures, pytest or coverage config, dependencies or mode
 invalidates it; prose does not. Failure in a path an item touched, or of a `proof:` command → that
 item back to Worker-2 and its verifiers; a failing `gate:` command reopens no item; a failure
@@ -877,6 +880,7 @@ never pulls it from under another.
 
 <!-- Root -->
 [agents]: ../../AGENTS.md
+[kanban]: ../../KANBAN.md
 [muse]: ../../MUSE.md
 [security]: ../../SECURITY.md
 [start]: ../../START.md

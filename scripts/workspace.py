@@ -74,7 +74,10 @@ Worker-0 commands
         Run the final gate suites in a gate copy that carries a git index, as
         CI's jobs do: the lint job's commands in its order, the full default
         suite (coverage floor), the floor suite, the sharded suite and the
-        Postgres database-touching suite. The floor suite is CI's floor cell:
+        Postgres database-touching suite. ``--suites`` defaults to ``lint``
+        alone: AGENTS.md runs the full suite, the coverage gate and the
+        version matrix only in GitHub Actions, so every other suite runs only
+        when named on the maintainer's word. The floor suite is CI's floor cell:
         the whole suite, without coverage, in a separate virtualenv at the
         ``requires-python`` floor with ``Django`` and ``strawberry-graphql``
         pinned to their ``pyproject.toml`` lower bounds, installed the way
@@ -404,6 +407,11 @@ GATE_SUITES: dict[str, tuple[tuple[str, ...], str]] = {
         "pg",
     ),
 }
+
+#: The one gate suite a bare ``gate`` runs: AGENTS.md keeps the full suite, the coverage gate
+#: and the version matrix in GitHub Actions (the dispatched ``django.yml`` matrix and
+#: ``postgres.yml``), so only CI's lint job runs locally unless ``--suites`` names more.
+LOCAL_GATE_SUITE = "lint"
 
 FLOW_PATTERN = re.compile(r"^[a-z][a-z0-9]{0,15}$")
 SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9_@+][A-Za-z0-9._@+-]*$")
@@ -3314,7 +3322,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     gate_parser = commands.add_parser("gate", help="run the final gate suites in a gate copy")
     _ = gate_parser.add_argument("flow")
-    _ = gate_parser.add_argument("--suites", default=",".join(GATE_SUITES))
+    _ = gate_parser.add_argument(
+        "--suites",
+        default=LOCAL_GATE_SUITE,
+        help=(
+            f"comma-separated subset of {', '.join(GATE_SUITES)} (default: {LOCAL_GATE_SUITE}; "
+            "the other suites run in GitHub Actions unless the maintainer names them)"
+        ),
+    )
     gate_parser.set_defaults(handler=_cmd_gate)
 
     status_parser = commands.add_parser("status", help="describe copies, runs and leases")

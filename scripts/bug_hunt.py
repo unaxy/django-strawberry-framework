@@ -358,14 +358,18 @@ def _integration_block() -> str:
 
 
 def _final_gate_block() -> str:
-    """Render the Worker-0 full-suite gate."""
+    """Render the Worker-0 final gate: CI's lint job locally, every other suite in Actions."""
     return (
         "- [ ] Final test gate\n"
         "    - Status: pending\n"
         "    - Owner: Worker-0\n"
         "    - Prompt:\n"
-        "        - Run `uv run pytest`; require a passing suite and 100% configured package "
-        "coverage.\n"
+        "        - Run `uv run python scripts/workspace.py gate hunt --suites lint` (CI's lint "
+        "job); the full suite, the floor cell, the 100% package coverage gate and the "
+        "`FAKESHOP_SHARDED=1` / Postgres tiers never run locally. Record the GitHub Actions runs "
+        "that carried them: the full `django.yml` matrix dispatched with "
+        '`gh workflow run django.yml` and `postgres.yml` (HUNT.md "Integration and final '
+        'gate").\n'
     )
 
 
