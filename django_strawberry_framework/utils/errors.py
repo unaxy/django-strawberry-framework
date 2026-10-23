@@ -24,6 +24,10 @@ write flavors):
   (a lone surrogate, an embedded NUL) and the record it answers, shared by the
   write decode (``utils/write_values.py::unstorable_text_error``) and the filter
   form validation (``filters/sets.py::FilterSet._validate_form_or_raise``);
+- ``unbindable_temporal`` + ``UNBINDABLE_TEMPORAL_MESSAGE`` - the one rule for a
+  temporal value (a datetime, a time, a year bound) the database a query runs on
+  cannot bind, asked of that connection's own operations, and the message it
+  answers; the filter form validation applies it;
 - ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
   for an explicit null on a non-nullable field and a validation failure
   carrying no details, each one message + code pair;
@@ -40,22 +44,35 @@ flavor depends downward on this module.
 
 from __future__ import annotations
 
+import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 import strawberry
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 from django.core.validators import ProhibitNullCharactersValidator
-from django.db import models
+from django.db import connections, models
 from django.utils.functional import Promise
 
 from . import truth
-from ._narrowing import dict_items, is_char_wise, is_dict, is_iterable, is_list, list_iter
+from ._narrowing import (
+    dict_items,
+    is_char_wise,
+    is_dict,
+    is_iterable,
+    is_list,
+    is_list_or_tuple,
+    list_iter,
+    read_attr,
+)
 from .lazy import unwrap_lazy_object
 from .relations import written_model_field
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Sequence
     from typing import TypeAlias
+
+    from django.db.backends.base.operations import BaseDatabaseOperations
 
     from .inputs import InputFieldSpec
     from .typing import ModelField
@@ -78,6 +95,7 @@ __all__ = [
     "GLOBALID_UNVALIDATABLE_ERROR_CODE",
     "NON_FIELD_ERROR_KEY",
     "PAGINATION_INVALID_ERROR_CODE",
+    "UNBINDABLE_TEMPORAL_MESSAGE",
     "FieldError",
     "UnstorableText",
     "build_error_key_map",
@@ -91,6 +109,7 @@ __all__ = [
     "rekey_error_segment",
     "relation_field_error",
     "save_time_error_key_map",
+    "unbindable_temporal",
     "unstorable_text",
     "validation_error_to_field_errors",
 ]
@@ -665,3 +684,148 @@ def _unstorable_leaf(path: str, text: str) -> UnstorableText | None:
         (message,) = exc.messages
         return UnstorableText(path, message, truth.text(exc.code))
     return None
+
+
+#: The message a temporal value the database cannot bind answers (``unbindable_temporal``).
+UNBINDABLE_TEMPORAL_MESSAGE = "Enter a value the database can represent."
+
+#: The lookups whose right-hand side the backend's adapter binds as the column's own type.
+_ADAPTER_BOUND_LOOKUPS = frozenset(
+    {
+        "exact",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "in",
+        "range",
+    },
+)
+#: The comparisons a ``year`` / ``iso_year`` transform answers with bounds computed in Python.
+_YEAR_BOUND_LOOKUPS = frozenset(
+    {
+        "exact",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+    },
+)
+#: Each year transform and whether its bounds are ISO-8601 week-numbering years.
+_YEAR_TRANSFORMS = {"year": False, "iso_year": True}
+#: The values ``int`` converts as a year transform's ``IntegerField`` output converts them.
+_YEAR_NUMBER_TYPES = (
+    int,
+    float,
+    Decimal,
+    str,
+)
+
+
+def unbindable_temporal(
+    column: object,
+    lookup_parts: Sequence[str],
+    value: object,
+    using: Callable[[], str],
+) -> bool:
+    """Return whether the database ``using()`` names refuses to bind ``value`` against ``column``.
+
+    ``column`` is the model field a predicate or a write reaches, ``lookup_parts`` the
+    transforms and lookup after it (``("year", "gt")``; empty for a plain
+    ``exact`` or a write). A value the scalar parse and the form clean accept can
+    still be one the backend's own adapter cannot bind; the driver's error would
+    then escape as an unexpected one when the queryset runs. The answer asks the
+    connection's own operations, so it refuses exactly what that backend refuses
+    (an ``OverflowError`` or ``ValueError`` from the adapter), and nothing else:
+
+    - a ``datetime`` against a ``DateTimeField``: ``adapt_datetimefield_value``.
+      SQLite, MySQL and Oracle project an aware value onto the connection's time
+      zone, which fails when the projection leaves years 1..9999 (a naive value
+      made aware under a non-UTC ``TIME_ZONE`` included), and refuse any aware
+      value when ``USE_TZ`` is false.
+    - a ``time`` against a ``TimeField`` (or a ``DateTimeField``'s ``time``
+      transform): ``adapt_timefield_value``, which refuses an aware time on
+      SQLite, MySQL and Oracle.
+    - a year against a ``year`` / ``iso_year`` transform's ``exact`` / ``gt`` /
+      ``gte`` / ``lt`` / ``lte``, whose bounds Django computes in Python
+      (``year_lookup_bounds_for_date_field`` / ``_datetime_field``) on every
+      backend: a year whose first or last instant leaves years 1..9999 (``iso_year``
+      9999 too, whose last day falls in year 10000; on SQLite, MySQL and Oracle a
+      datetime column's bounds projected onto the connection's time zone), or a
+      value ``int`` cannot convert.
+
+    Django's PostgreSQL adapters pass those datetimes and times through, so only
+    the year bounds refuse there. Only the lookups whose value the adapter binds
+    (``exact``, ``gt``, ``gte``, ``lt``, ``lte``, ``in``, ``range``) are read, and
+    a ``date`` transform's value, a date, always binds. Every scalar of a list or
+    of a range (a list or a ``slice``) is read; a ``None`` member binds. Any other
+    column (an ``ArrayField`` of datetimes included), transform or lookup answers
+    ``False`` without calling ``using`` or touching ``django.db.connections``, so
+    the alias (a queryset's ``db``, which asks the router) and its connection are
+    resolved only for a temporal leaf.
+    """
+    parts = list(lookup_parts)
+    lookup = (
+        parts.pop() if parts and parts[-1] not in {"date", "time", *_YEAR_TRANSFORMS} else "exact"
+    )
+    if isinstance(column, models.DateTimeField):
+        kind = "datetime"
+    elif isinstance(column, models.DateField):
+        kind = "date"
+    elif isinstance(column, models.TimeField):
+        kind = "time"
+    else:
+        return False
+    iso_year: bool | None = None
+    for transform in parts:
+        if iso_year is None and kind == "datetime" and transform in {"date", "time"}:
+            kind = transform
+        elif iso_year is None and kind != "time" and transform in _YEAR_TRANSFORMS:
+            iso_year = _YEAR_TRANSFORMS[transform]
+        else:
+            return False
+    if iso_year is None:
+        if kind == "date" or lookup not in _ADAPTER_BOUND_LOOKUPS:
+            return False
+    elif lookup not in _YEAR_BOUND_LOOKUPS:
+        return False
+    operations = connections[using()].ops
+    try:
+        for scalar in _bound_scalars(value):
+            if iso_year is not None:
+                # The transform's ``IntegerField`` output converts the year with ``int``,
+                # which refuses a value that is not a number (a date a ``DateFilter`` cleans
+                # to) and reaches past what a date holds for a huge one.
+                if not isinstance(scalar, _YEAR_NUMBER_TYPES):
+                    return True
+                _year_bounds(operations, kind, int(scalar), iso_year=iso_year)
+            elif kind == "time" and isinstance(scalar, datetime.time):
+                _ = operations.adapt_timefield_value(scalar)
+            elif kind == "datetime" and isinstance(scalar, datetime.datetime):
+                _ = operations.adapt_datetimefield_value(scalar)
+    except (OverflowError, ValueError):
+        return True
+    return False
+
+
+def _bound_scalars(value: object) -> list[object]:
+    """Return the scalars a cleaned value binds: a list's or range's members, else the value."""
+    if isinstance(value, slice):
+        return [read_attr(value, "start"), read_attr(value, "stop")]
+    if is_list_or_tuple(value):
+        return list(value)
+    return [value]
+
+
+def _year_bounds(
+    operations: BaseDatabaseOperations,
+    kind: str,
+    year: int,
+    *,
+    iso_year: bool,
+) -> None:
+    """Compute the bounds Django binds for a ``year`` / ``iso_year`` comparison; raise as it would."""
+    if kind == "datetime":
+        _ = operations.year_lookup_bounds_for_datetime_field(year, iso_year=iso_year)
+    else:
+        _ = operations.year_lookup_bounds_for_date_field(year, iso_year=iso_year)
