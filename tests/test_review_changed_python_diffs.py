@@ -10,6 +10,7 @@ or generated diff files, so none of these rows can move; there is no live
 sibling in ``examples/fakeshop/test_query/``.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -138,6 +139,159 @@ def test_new_side_is_head_by_default_and_working_tree_only_when_asked(
     assert worktree_diff.startswith(diffs.WORKTREE_HEADER)
     assert "+DIRTY = 2\n" in worktree_diff
     assert "+UNTRACKED = 3\n" in (tmp_path / "wt" / "diff" / "pkg__untracked.diff").read_text()
+
+
+def _snapshot(repo: Path, tmp_path: Path) -> str:
+    """Return a commit of the whole working content, untracked files included, parent ``HEAD``."""
+    env = {**os.environ, "GIT_INDEX_FILE": str(tmp_path / "snapshot-index")}
+    for args in (("read-tree", "HEAD"), ("add", "-A")):
+        _ = subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+    tree = subprocess.run(
+        ["git", "write-tree"],
+        cwd=repo,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return _git(repo, "commit-tree", tree, "-p", "HEAD", "-m", "snapshot")
+
+
+def _changes(base: str) -> list[tuple[str, str, str | None]]:
+    return [
+        (change.status, change.path, change.old_path)
+        for change in diffs._changed_python_files(base, new_rev=None)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("step", "expected"),
+    [
+        pytest.param((), [("A", "pkg/new.py", None)], id="untracked"),
+        pytest.param(("add", "pkg/new.py"), [("A", "pkg/new.py", None)], id="staged"),
+        pytest.param(("add", "-N", "pkg/new.py"), [("A", "pkg/new.py", None)], id="intent-to-add"),
+        pytest.param(
+            (
+                "rm",
+                "-q",
+                "--cached",
+                "pkg/keep.py",
+            ),
+            [("A", "pkg/new.py", None)],
+            id="rm-cached-unchanged",
+        ),
+    ],
+)
+def test_worktree_listing_is_independent_of_the_index(
+    repo: Path,
+    step: tuple[str, ...],
+    expected: list[tuple[str, str, str | None]],
+) -> None:
+    _write(repo, "pkg/keep.py", BASE_MODULE)
+    base = _commit(repo, "base")
+    _write(repo, "pkg/new.py", "NEW = 1\n")
+    if step:
+        _git(repo, *step)
+
+    assert _changes(base) == expected
+
+
+def test_worktree_listing_pairs_an_unstaged_move_as_a_rename(repo: Path) -> None:
+    _write(repo, "pkg/keep.py", BASE_MODULE)
+    base = _commit(repo, "base")
+    (repo / "pkg" / "keep.py").rename(repo / "pkg" / "moved.py")
+
+    assert _changes(base) == [("R", "pkg/moved.py", "pkg/keep.py")]
+
+
+@pytest.mark.parametrize(
+    ("after_snapshot", "expected"),
+    [
+        pytest.param(None, [], id="unchanged"),
+        pytest.param("edit", [("M", "pkg/u.py", None)], id="edited"),
+        pytest.param("move", [("R", "pkg/v.py", "pkg/u.py")], id="moved"),
+    ],
+)
+def test_worktree_listing_reads_a_baseline_holding_an_untracked_file(
+    repo: Path,
+    tmp_path: Path,
+    after_snapshot: str | None,
+    expected: list[tuple[str, str, str | None]],
+) -> None:
+    _write(repo, "pkg/keep.py", BASE_MODULE)
+    _commit(repo, "base")
+    _write(repo, "pkg/u.py", BASE_MODULE.replace('"author"', '"owner"'))
+    base = _snapshot(repo, tmp_path)
+    if after_snapshot == "edit":
+        _write(repo, "pkg/u.py", BASE_MODULE.replace('"author"', '"editor"'))
+    elif after_snapshot == "move":
+        (repo / "pkg" / "u.py").rename(repo / "pkg" / "v.py")
+
+    assert _changes(base) == expected
+
+
+def test_worktree_run_on_a_baseline_holding_an_unchanged_untracked_file_finds_nothing(
+    repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(repo, "pkg/keep.py", BASE_MODULE)
+    _commit(repo, "base")
+    _write(repo, "pkg/u.py", "UNTRACKED = 1\n")
+    base = _snapshot(repo, tmp_path)
+
+    assert (
+        diffs.main(
+            [
+                base,
+                "--against",
+                "worktree",
+                "--output-dir",
+                str(tmp_path / "out"),
+            ],
+        )
+        == 0
+    )
+    assert "No eligible changed .py files" in capsys.readouterr().err
+
+
+def test_worktree_listing_ignores_the_callers_global_ignore_file(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(repo, "pkg/keep.py", BASE_MODULE)
+    base = _commit(repo, "base")
+    _write(repo, "pkg/scratch.local.py", "LOCAL = 1\n")
+    home = tmp_path / "home"
+    _write(home, ".config/git/ignore", "*.local.py\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
+    assert _changes(base) == [("A", "pkg/scratch.local.py", None)]
+
+
+def test_worktree_run_leaves_the_shared_index_untouched(repo: Path, tmp_path: Path) -> None:
+    _write(repo, "pkg/keep.py", BASE_MODULE)
+    base = _commit(repo, "base")
+    _write(repo, "pkg/new.py", "NEW = 1\n")
+    os.utime(repo / "pkg" / "keep.py", (1, 1))
+    index = repo / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    assert (
+        diffs.main(
+            [
+                base,
+                "--against",
+                "worktree",
+                "--output-dir",
+                str(tmp_path / "out"),
+            ],
+        )
+        == 0
+    )
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
 
 
 def test_rename_reads_old_side_from_the_pre_rename_path(repo: Path, tmp_path: Path) -> None:

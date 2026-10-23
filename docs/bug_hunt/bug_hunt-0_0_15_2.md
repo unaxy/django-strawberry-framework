@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 206 done, 136 to do.
+Progress: 207 done, 135 to do.
 
 ## Done
 
@@ -849,6 +849,11 @@ Progress: 206 done, 136 to do.
   ignored package file made `sync_copy` refuse every sync; the `.claude/settings.local.json` example was already hidden
   by the repo's own `.gitignore`): fixed with 146, whose `REPOSITORY_CONFIG_ONLY` (global and system config off,
   `XDG_CONFIG_HOME` the null device, git 2.32 or later) covers every `_git` call
+- [x] 297. `scripts/review_changed_python_diffs_against_head.py --against worktree` stitched `git diff -M --name-status
+  <base>` with `ls-files --others`, so a file the baseline held but the index did not read D plus A and aborted on
+  `_check_stem_collisions`, an unstaged move read D plus A, `rm --cached` read twice, and its stat refresh rewrote the
+  shared `.git/index`: the new side is `workspace.content_tree` and one `diff-tree -r -M --name-status` over the scope,
+  every git call runs through `workspace._git`
 
 ## Outside review of the fixes
 
@@ -944,9 +949,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
-- [ ] 297. `scripts/review_changed_python_diffs_against_head.py --against worktree` has 146's stitched, index-dependent new
-  side: a package `.py` that was untracked at the baseline is listed as `A`, as if the item added it (`D` then `A` under
-  141's snapshot baseline)
 - [ ] 302. `scripts/check_spec_glossary.py::auto_link_terms` (the NEXT.md Step 7 `--auto-link` run) protects only
   fenced code and `[label](target)` links and matches a term with no boundary: a spec's first unlinked mention inside a
   code span, a double-backtick span, reference-link text, an autolink, a raw HTML attribute, a bare URL, a heading, or as
