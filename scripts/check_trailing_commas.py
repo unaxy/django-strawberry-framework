@@ -121,7 +121,13 @@ Exclusions are anchored to repo-relative paths (``EXCLUDE_PATTERNS``, built from
 artifacts of the docs/ agent flows and their scratch subtrees stay out, while
 the standing docs beside them (``REVIEW.md``, ``BUILD.md``, ``worker-*.md``,
 ...) and tracked ``.py`` under ``docs/`` are checked. A directory of the same
-name anywhere else in the tree is ordinary source.
+name anywhere else in the tree is ordinary source. A path with a segment named
+by ``[tool.ruff] extend-exclude`` is excluded as well, read from pyproject.toml
+at run time like the line length, so this gate leaves alone the trees the
+project keeps out of ruff (the ``hunt-ws/`` evidence copies). The script's own
+exclusions alone decide what it edits: its ``ruff format`` calls pass
+``--no-force-exclude``, so every file ``--fix`` edits is reflowed even where a
+ruff exclusion would skip a named path.
 
 What the fixer refuses to touch:
 
@@ -193,6 +199,11 @@ def _is_toml_table(value: object) -> TypeIs[dict[str, object]]:
     return isinstance(value, dict)
 
 
+def _is_toml_array(value: object) -> TypeIs[list[object]]:
+    """Return whether a decoded TOML value is an array."""
+    return isinstance(value, list)
+
+
 def _ruff_line_length(document: object) -> int:
     """Return ``document["tool"]["ruff"]["line-length"]`` as an int.
 
@@ -225,16 +236,83 @@ def line_length() -> int:
     """
     pyproject = REPO_ROOT / "pyproject.toml"
     try:
+        return _ruff_line_length(_read_pyproject(pyproject))
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"[tool.ruff] line-length missing from {pyproject}") from error
+
+
+def _read_pyproject(pyproject: Path) -> dict[str, object]:
+    """Return ``pyproject`` parsed as TOML.
+
+    Raises:
+        RuntimeError: The file cannot be read or is not valid TOML.
+
+    """
+    try:
         text = pyproject.read_text(encoding="utf-8")
     except OSError as error:
         raise RuntimeError(f"cannot read {pyproject}: {error}") from error
-
     # ``tomli.loads`` returns ``dict[str, Any]``; this alias hands the walk an ``object``.
     toml_loads: Callable[[str], dict[str, object]] = tomli.loads
     try:
-        return _ruff_line_length(toml_loads(text))
-    except (KeyError, TypeError, ValueError) as error:
-        raise RuntimeError(f"[tool.ruff] line-length missing from {pyproject}") from error
+        return toml_loads(text)
+    except tomli.TOMLDecodeError as error:
+        raise RuntimeError(f"cannot parse {pyproject}: {error}") from error
+
+
+def _ruff_extend_exclude(document: object) -> tuple[str, ...]:
+    """Return ``document["tool"]["ruff"]["extend-exclude"]`` (empty when the key is absent).
+
+    Raises:
+        KeyError: The ``tool`` or ``ruff`` table is missing.
+        TypeError: A value on the path is not a table, or the list holds a non-string.
+        ValueError: An entry is anchored (holds a ``/``), which a name match cannot honour.
+
+    """
+    value = document
+    for key in ("tool", "ruff"):
+        if not _is_toml_table(value):
+            raise TypeError(key)
+        value = value[key]
+    if not _is_toml_table(value):
+        raise TypeError("ruff")
+    entries = value.get("extend-exclude", [])
+    if not _is_toml_array(entries):
+        raise TypeError("extend-exclude")
+    patterns: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise TypeError("extend-exclude")
+        if "/" in entry:
+            raise ValueError(entry)
+        patterns.append(entry)
+    return tuple(patterns)
+
+
+@functools.cache
+def ruff_excluded_names() -> tuple[str, ...]:
+    """Read ``[tool.ruff] extend-exclude`` from pyproject.toml -- the single source of truth.
+
+    These are the trees the project keeps out of ruff (evidence copies of the repo,
+    kept as found); excluding the same names here keeps a named path and a directory
+    sweep from rewriting them too. Each entry is a name glob matched against every
+    repo-relative path segment, as ruff matches an unanchored pattern against each name
+    it walks; an anchored entry raises, since a name match would silently not honour it.
+    """
+    pyproject = REPO_ROOT / "pyproject.toml"
+    try:
+        return _ruff_extend_exclude(_read_pyproject(pyproject))
+    except (KeyError, TypeError) as error:
+        raise RuntimeError(f"[tool.ruff] extend-exclude unreadable in {pyproject}") from error
+    except ValueError as error:
+        raise RuntimeError(
+            f"[tool.ruff] extend-exclude entry {error} is anchored; only name globs are read",
+        ) from error
+
+
+def _is_ruff_excluded_name(name: str) -> bool:
+    """Return whether one path segment matches a ``[tool.ruff] extend-exclude`` name glob."""
+    return any(fnmatchcase(name, pattern) for pattern in ruff_excluded_names())
 
 
 DEFAULT_THRESHOLD = 4
@@ -794,10 +872,19 @@ def _apply(text: str, inserts: list[int], deletes: list[int]) -> str:
 def _run_ruff_format(files: list[Path], *, quiet: bool = False) -> None:
     """Reflow the touched files so added/removed commas take visual effect.
 
+    ``--no-force-exclude`` reflows every file this script edited, including one a
+    ruff exclusion would skip when named (ruff's built-in defaults such as
+    ``_build``): which files the script touches is decided by its own exclusions
+    alone, so an edit is never left without its reflow.
+
     ``quiet`` sends ruff's own report to stderr, keeping stdout for ``--json``.
     """
     ruff = shutil.which("ruff")
-    cmd = ([ruff] if ruff else ["uv", "run", "ruff"]) + ["format", *(str(f) for f in files)]
+    cmd = ([ruff] if ruff else ["uv", "run", "ruff"]) + [
+        "format",
+        "--no-force-exclude",
+        *(str(f) for f in files),
+    ]
     try:
         result = subprocess.run(cmd, check=False, capture_output=quiet, text=True)
     except FileNotFoundError:
@@ -1317,7 +1404,9 @@ def is_excluded(path: Path) -> bool:
     """Return whether ``path`` is outside the enforced set.
 
     ``EXCLUDE_DIRS`` always drops external/generated trees (``.venv``, caches,
-    ``node_modules``, ``build``/``dist``, ``migrations``) at any depth. Inside the
+    ``node_modules``, ``build``/``dist``, ``migrations``) at any depth. A path with a
+    segment matching ``[tool.ruff] extend-exclude`` (``ruff_excluded_names``) is
+    dropped too, so this gate and ``ruff format`` skip the same trees. Inside the
     repo, ``EXCLUDE_PATTERNS`` drops the docs/ flows' per-cycle artifacts and
     scratch subtrees by repo-relative path, and ``EXCLUDE_DOC_NAME_GLOBS`` drops the
     maintainer inputs it names under a ``docs`` part. Everything else -- the
@@ -1327,6 +1416,9 @@ def is_excluded(path: Path) -> bool:
     if any(part in EXCLUDE_DIRS for part in path.parts):
         return True
     relative = _repo_relative(path)
+    segments = path.parts if relative is None else relative.split("/")
+    if any(_is_ruff_excluded_name(segment) for segment in segments):
+        return True
     if relative is not None and matches_exclude_pattern(relative):
         return True
     return "docs" in path.parts and any(
@@ -1394,7 +1486,8 @@ def _walk(
     """Yield matching files under ``root``, pruning external directories in place.
 
     ``rglob`` would descend all of ``.venv`` and ``node_modules`` and discard the
-    results afterwards; pruning at the directory level never visits them.
+    results afterwards; pruning at the directory level never visits them. A
+    directory named by ``[tool.ruff] extend-exclude`` is pruned the same way.
 
     Git-ignored paths are pruned too. A tree-wide run used to descend ``.claude/``
     and report a layout violation against an agent-memory file no commit can
@@ -1409,7 +1502,9 @@ def _walk(
     scope = git_visible_scope()
     for dirpath, dirnames, filenames in os.walk(root):
         here = Path(dirpath)
-        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDE_DIRS)
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in EXCLUDE_DIRS and not _is_ruff_excluded_name(d)
+        )
         relative = _repo_relative(here) if scope is not None else None
         base = "" if relative in (None, ".") else f"{relative}/"
         if scope is not None and relative is not None:
@@ -1599,6 +1694,7 @@ def _ruff_format_text(text: str, path: Path) -> str | None:
     ruff = shutil.which("ruff")
     cmd = ([ruff] if ruff else ["uv", "run", "ruff"]) + [
         "format",
+        "--no-force-exclude",
         "--stdin-filename",
         str(path),
         "-",

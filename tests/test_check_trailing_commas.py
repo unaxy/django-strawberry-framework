@@ -42,8 +42,10 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setattr(ctc, "git_visible_scope", lambda: None)
     monkeypatch.chdir(tmp_path)
     ctc.line_length.cache_clear()
+    ctc.ruff_excluded_names.cache_clear()
     yield tmp_path
     ctc.line_length.cache_clear()
+    ctc.ruff_excluded_names.cache_clear()
 
 
 def _write(root: Path, relative: str, text: str) -> Path:
@@ -124,6 +126,104 @@ def test_named_excluded_file_is_reported_not_checked(
     captured = capsys.readouterr()
     assert "docs/review/review-0_0_15.md: excluded from the source-layout rules" in captured.err
     assert _summary(captured.out).startswith("source-layout: checked 0 file(s); excluded 1;")
+
+
+# Paths under a ``[tool.ruff] extend-exclude`` name, at the root and nested: ruff's
+# ``force-exclude`` skips each one even when it is named, so ``--fix`` must skip it too.
+RUFF_EXCLUDED = (
+    ("hunt-ws/copy/pkg/wide.py", "def f(a, b, c, d):\n    return a\n"),
+    ("hunt-ws/copy/docs/guide.md", "no footer\n"),
+    ("pkg/hunt-ws/wide.py", "def f(a, b, c, d):\n    return a\n"),
+)
+
+
+@pytest.fixture
+def ruff_excluding_repo(repo: Path) -> Path:
+    """``repo`` whose pyproject excludes ``hunt-ws`` from ruff, as the real one does."""
+    (repo / "pyproject.toml").write_text(
+        '[tool.ruff]\nline-length = 99\nextend-exclude = ["hunt-ws"]\nforce-exclude = true\n',
+        encoding="utf-8",
+    )
+    ctc.ruff_excluded_names.cache_clear()
+    return repo
+
+
+@pytest.mark.parametrize(("relative", "text"), RUFF_EXCLUDED, ids=[r for r, _ in RUFF_EXCLUDED])
+def test_named_ruff_excluded_file_is_left_untouched_by_fix(
+    ruff_excluding_repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    relative: str,
+    text: str,
+) -> None:
+    """A file ruff's config excludes is reported excluded by name and never edited by --fix."""
+    path = _write(ruff_excluding_repo, relative, text)
+    assert ctc.main(["--fix", relative]) == 0
+    assert path.read_text(encoding="utf-8") == text
+    captured = capsys.readouterr()
+    assert f"{relative}: excluded from the source-layout rules" in captured.err
+    assert _summary(captured.out).startswith("source-layout: checked 0 file(s); excluded 1;")
+
+
+def test_walk_prunes_ruff_excluded_trees(ruff_excluding_repo: Path) -> None:
+    """A tree walk never descends into a directory ruff's config excludes."""
+    for relative, text in RUFF_EXCLUDED:
+        _write(ruff_excluding_repo, relative, text)
+    _write(ruff_excluding_repo, "pkg/clean.py", CLEAN_PY)
+    selection = ctc.select_files(["."], ctc.SUFFIXES)
+    assert [path.as_posix() for path in selection.files] == ["pkg/clean.py"]
+    # Pruned, not walked and then dropped: a walked-and-excluded file would be counted here.
+    assert selection.excluded == []
+
+
+def test_checkout_inside_a_ruff_excluded_name_still_checks_its_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Segments are matched on the repo-relative path: a checkout under ``hunt-ws/`` is checked."""
+    root = tmp_path / "hunt-ws" / "copy"
+    _write(root, "pyproject.toml", '[tool.ruff]\nline-length = 99\nextend-exclude = ["hunt-ws"]\n')
+    _write(root, "pkg/clean.py", CLEAN_PY)
+    monkeypatch.setattr(ctc, "REPO_ROOT", root)
+    monkeypatch.setattr(ctc, "git_visible_scope", lambda: None)
+    monkeypatch.chdir(root)
+    ctc.ruff_excluded_names.cache_clear()
+    try:
+        selection = ctc.select_files(["."], ctc.SUFFIXES)
+    finally:
+        ctc.ruff_excluded_names.cache_clear()
+    assert [path.as_posix() for path in selection.files] == ["pkg/clean.py"]
+
+
+def test_fix_reflows_a_named_file_under_a_ruff_default_exclude(ruff_excluding_repo: Path) -> None:
+    """A file only ruff's built-in excludes skip (``_build``) is still reflowed after ``--fix``."""
+    path = _write(ruff_excluding_repo, "_build/wide.py", "def f(a, b, c, d):\n    return a\n")
+    assert ctc.main(["--fix", "_build/wide.py"]) == 0
+    assert path.read_text(encoding="utf-8") == (
+        "def f(\n    a,\n    b,\n    c,\n    d,\n):\n    return a\n"
+    )
+
+
+def test_diff_shows_the_reflow_of_a_named_file_under_a_ruff_default_exclude(
+    ruff_excluding_repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--diff`` on a file only ruff's built-in excludes skip (``_build``) shows the reflow."""
+    text = "def f(a, b, c, d):\n    return a\n"
+    path = _write(ruff_excluding_repo, "_build/wide.py", text)
+    assert ctc.main(["--diff", "_build/wide.py"]) == 1
+    out = capsys.readouterr().out
+    assert path.read_text(encoding="utf-8") == text
+    assert "+def f(\n+    a,\n+    b,\n+    c,\n+    d,\n+):\n" in out
+
+
+def test_anchored_ruff_exclude_entry_is_refused(repo: Path) -> None:
+    """An anchored ``extend-exclude`` entry fails loudly instead of matching nothing."""
+    (repo / "pyproject.toml").write_text(
+        '[tool.ruff]\nline-length = 99\nextend-exclude = ["docs/hunt-ws"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="is anchored"):
+        ctc.ruff_excluded_names()
 
 
 def test_summary_counts_checked_excluded_and_violations(

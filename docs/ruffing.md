@@ -1,6 +1,6 @@
 # Ruffing: to-do list
 
-ruff 0.17.0 lints and formats every tracked Python file (513, the same set `git ls-files '*.py'` lists), configured in
+ruff 0.17.0 lints and formats every tracked Python file (the set `git ls-files '*.py'` lists), configured in
 `pyproject.toml` `[tool.ruff]`. This file tracks the rules switched on, the rules still off, the config-level ignores
 and the `# noqa` comments still in the tree.
 A rule family is selected whole. Every stable code is on except the off-by-design block of `ignore`; the ratchet
@@ -173,17 +173,22 @@ Off by design (not planned):
 - `EM101`, `EM102`, `TRY003` (3097): exception-message style only
 - `FIX002` (10), `TD003` (10): a TODO is the `TODO(spec-NNN slice N): ...` anchor convention, which names a spec or
   a backlog entry, not an issue link; the rest of `TD` and `FIX` is on
-- `CPY001` (513, copyright headers)
+- `CPY001` (copyright headers)
 - `D203`, `D213`: the opposites of `D211` and `D212`, which the Google convention selects (ruff drops one of each
   pair)
 
 ## Files ruff skips
 
-None that it should check. `ruff check --show-files` lists exactly the 513 tracked Python files. The files it skips are
+None that it should check. `ruff check --show-files` lists exactly the tracked Python files plus `pyproject.toml`. The files it skips are
 git-ignored scratch trees (`docs/shadow/`, cycle temp files, `.venv/`, `.claude/worktrees/`), read through ruff's
 default `respect-gitignore`, and `hunt-ws/` (`extend-exclude`), the untracked bug-hunt evidence trees: copies of the
 repo kept as found, which a repo-wide `--fix` or format pass would otherwise rewrite. `[tool.ruff.format]` excludes
-`*.md`: fenced Python in Markdown is verbatim example content, so the formatter owns `.py` only. No file carries a
+`*.md`: fenced Python in Markdown is verbatim example content, so the formatter owns `.py` only. `force-exclude = true`
+applies every exclusion to a path named on the command line and to `--stdin-filename` as well: `ruff format <paths>`
+leaves a named `.md` or `hunt-ws/` file as it is and exits 0, so a touched-paths run may pass `.md` paths. The
+exclusion ends there: a `--check` naming only excluded paths checks nothing. `ruff check` honours `force-exclude` the
+same way. `scripts/check_trailing_commas.py` reads `extend-exclude` at run time and skips the same trees; its own
+`ruff format` calls pass `--no-force-exclude`, so every file its `--fix` edits is reflowed. No file carries a
 file-level `# ruff: noqa`.
 
 ## Config ignores

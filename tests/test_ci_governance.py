@@ -3,12 +3,13 @@
 Repo tooling: these rows pin YAML under ``.github/workflows/``, Dependabot
 ecosystems, the first-party ``DjangoOptimizerExtension`` ``extensions=`` form
 sweep, the live tier's undeclared raw ``.post(`` / ``.generic(`` sweep,
-install-floor constants against ``pyproject.toml``, and every staged
+install-floor constants against ``pyproject.toml``, ``[tool.ruff]``'s exclusions
+binding a path named to ``ruff format``, and every staged
 ``TODO(spec-NNN ...)`` anchor against the spec corpus and ``KANBAN.md``. A
 live ``/graphql/`` request has no wire shape for a workflow permission block,
 an action SHA pin, a digest-pinned container image, a Dependabot ecosystem
-list, an AST classifier over every committable ``.py``, a TOML dependency row
-or a source comment, so none of these rows can move. There is no live sibling in
+list, an AST classifier over every committable ``.py``, a TOML dependency row,
+a ruff exclusion or a source comment, so none of these rows can move. There is no live sibling in
 ``examples/fakeshop/test_query/``. Plan-cache reuse across HTTP requests on
 the shipped schema lives in
 ``examples/fakeshop/test_query/test_library_api.py``; that row cannot audit
@@ -22,7 +23,9 @@ behavior, so this module adds no package coverage surface.
 import ast
 import io
 import re
+import shutil
 import subprocess
+import sys
 import tokenize
 from collections.abc import Iterable
 from pathlib import Path
@@ -1238,6 +1241,74 @@ def test_drf_floor_constant_matches_the_pyproject_dependency_row() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     rows = re.findall(r'"djangorestframework>=([0-9][^"]*)"', text)
     assert rows == [DRF_FLOOR], (rows, DRF_FLOOR)
+
+
+#: Files the project's ruff config excludes, each holding source ``ruff format`` would change.
+RUFF_EXCLUDED_FILES = (
+    ("docs/example.md", "# Example\n\n```python\nx = [1,2 ,3]\n```\n"),
+    ("hunt-ws/copy/example.py", "x = [1,2 ,3]\n"),
+)
+
+
+def _ruff_format(
+    root: Path,
+    *args: str,
+    stdin: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``ruff format`` with ``args`` in ``root``, which holds a copy of this pyproject."""
+    shutil.copy(REPO_ROOT / "pyproject.toml", root / "pyproject.toml")
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "format",
+            *args,
+        ],
+        cwd=root,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("mode", ["check", "write", "stdin"])
+@pytest.mark.parametrize(
+    ("relative", "text"),
+    RUFF_EXCLUDED_FILES,
+    ids=[relative for relative, _ in RUFF_EXCLUDED_FILES],
+)
+def test_ruff_format_skips_an_excluded_file_named_explicitly(
+    tmp_path: Path,
+    relative: str,
+    text: str,
+    mode: str,
+) -> None:
+    """A path ruff's config excludes stays unformatted when it is named, not only when walked.
+
+    Fenced Python in a ``.md`` is verbatim example content and a ``hunt-ws/`` tree is
+    evidence kept as found. A directory run skips both through ``exclude`` /
+    ``extend-exclude``; ``force-exclude`` makes a named path (a touched-paths format
+    run) and ``--stdin-filename`` skip them too.
+    """
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    if mode == "stdin":
+        result = _ruff_format(tmp_path, "--stdin-filename", relative, "-", stdin=text)
+        assert (result.returncode, result.stdout) == (0, text), result.stderr
+        return
+    result = _ruff_format(tmp_path, *(["--check"] if mode == "check" else []), relative)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_ruff_format_still_checks_a_named_python_file(tmp_path: Path) -> None:
+    """Control: the same config and invocation report a named, non-excluded ``.py``."""
+    (tmp_path / "example.py").write_text("x = [1,2 ,3]\n", encoding="utf-8")
+    result = _ruff_format(tmp_path, "--check", "example.py")
+    assert result.returncode == 1, result.stdout + result.stderr
 
 
 #: The live tier the raw-post sweep reads: every ``.py`` directly under it.
