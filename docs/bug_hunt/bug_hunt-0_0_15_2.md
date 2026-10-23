@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 203 done, 138 to do.
+Progress: 204 done, 138 to do.
 
 ## Done
 
@@ -832,6 +832,12 @@ Progress: 203 done, 138 to do.
   bootstrap, a syntax error no longer writes per-cell rows or failure JSON, `_bench_common.read_text_input` and
   `report_destination` give the same exit-2 refusal to every bench script that reads `--query` or writes `--json`, and a
   `--compare` baseline that measured no cell is refused
+- [x] 306. `scripts/build_kanban_md.py::_link_tail_end` was quadratic on repeated unterminated inline-link tails
+  (`[a](` x 5000 about 3.4 s per lex, `[a](` plus 31 `(` 30.9 s; each `](` rescanned the same whitespace-free run, a
+  loop older than 147). Robustness row, not a defect under rule 37 (maintainer-authored card text, no contract bounds
+  the render's time): fixed anyway, a destination nested past `LINK_DESTINATION_MAX_NESTING` (32, the limit cmark and
+  markdown-it apply) fails the link, so every tail lexes in linear time; nesting up to 32 is unchanged (fuzz 0 diffs,
+  0 disagreements with markdown-it past the cap) and KANBAN.md renders byte-identical
 
 ## Outside review of the fixes
 

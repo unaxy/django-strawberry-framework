@@ -131,6 +131,9 @@ GFM_AUTOLINK_RE = re.compile(
 LINK_LABEL_RE = re.compile(r"\[[^\[\]]*\]")
 LINK_ANGLE_DESTINATION_RE = re.compile(r"<[^<>\n]*>")
 LINK_TITLE_RE = re.compile(r"\"[^\"]*\"|'[^']*'|\([^()]*\)")
+# Deepest paren nesting a whitespace-free link destination may carry, as cmark and
+# markdown-it do (both fail the link past 32 levels).
+LINK_DESTINATION_MAX_NESTING = 32
 
 
 # --------------------------------------------------------------------------------------
@@ -433,8 +436,11 @@ def _link_tail_end(raw: str, i: int) -> int | None:
     """End of the ``[label]`` or ``(destination "title")`` link tail at ``raw[i]``, else None.
 
     ``raw`` has only its backslash escapes masked. A destination is ``<...>`` or a
-    whitespace-free run with balanced parens (possibly empty); a title is ``"..."``,
-    ``'...'`` or ``(...)`` after whitespace.
+    whitespace-free run with balanced parens (possibly empty) nested at most
+    ``LINK_DESTINATION_MAX_NESTING`` deep, the limit cmark and markdown-it apply; a title
+    is ``"..."``, ``'...'`` or ``(...)`` after whitespace. The limit also cuts short the
+    scan of an unclosed destination, which each later ``](`` in the same run starts
+    again, so many unclosed tails lex in linear time.
     """
     if raw.startswith("[", i):
         label = LINK_LABEL_RE.match(raw, i)
@@ -451,6 +457,8 @@ def _link_tail_end(raw: str, i: int) -> int | None:
         depth = 0
         while j < len(raw) and not raw[j].isspace() and (depth or raw[j] != ")"):
             depth += (raw[j] == "(") - (raw[j] == ")")
+            if depth > LINK_DESTINATION_MAX_NESTING:
+                return None
             j += 1
         if depth:
             return None
