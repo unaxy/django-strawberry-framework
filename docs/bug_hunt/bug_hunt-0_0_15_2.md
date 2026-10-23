@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 223 done, 139 to do.
+Progress: 224 done, 141 to do.
 
 ## Done
 
@@ -965,6 +965,18 @@ Progress: 223 done, 139 to do.
   the keying a wire format no test can see; it still owes its `CAMELCASE_ERRORS` disposition row) and `CardReference`
   23-25 (copies of `CardItem` 142 that still said a model field name); a sweep of every kanban text column finds no
   stale sentence of the family left
+- [x] 302. `scripts/check_spec_glossary.py::auto_link_terms` (NEXT.md Step 7 `--auto-link`) protected only column-0
+  backtick fences and inline links, matched with no term boundary and never retried past a protected mention, so it
+  wrote `[term][glossary-x]` into code spans, headings, reference text, autolinks, raw HTML, URLs and longer
+  identifiers (39 of 63 probe rows; replaying every spec's CSV over link-stripped specs put 69 of 1216 writes in a
+  protected shape), and `spec_link_anchors` counted a link inside code as a use: fixed, the KANBAN inliner's lexer
+  moved verbatim to the stdlib-only `scripts/_markdown_lex.py` (KANBAN.md byte-identical), which adds a CommonMark
+  block scanner (`block_regions` / `mask_blocks`: ATX and setext headings, link-reference definitions, backtick and
+  tilde fences and HTML blocks inside list items and block quotes, ending with their container, indented code, tabs
+  counted from their real column); the writer masks blocks, matches with `PROSE_TERM_BOUNDARY_AFTER` and moves to the
+  next mention past a protected one, the checker counts only links outside code (`headings=False`); NEXT.md Step 7
+  reads "non-code, non-link, non-heading" (protected writes 69 -> 0, the 57 archived specs check as before,
+  markdown-it block oracle 0 under-masks over 1229 shapes and 210 files)
 
 ## Outside review of the fixes
 
@@ -1015,13 +1027,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
-- [ ] 302. `scripts/check_spec_glossary.py::auto_link_terms` (the NEXT.md Step 7 `--auto-link` run) protects only
-  fenced code and `[label](target)` links and matches a term with no boundary: a spec's first unlinked mention inside a
-  code span, a double-backtick span, reference-link text, an autolink, a raw HTML attribute, a bare URL, a heading, or as
-  the prefix of a longer identifier (`DjangoListFieldExtra`) gets `[term][glossary-x]` written into it (8 of 8 probed
-  shapes). Fix: reuse the KANBAN inliner's CommonMark lexer (`build_kanban_md.py::_protected_regions`, extracted to a
-  shared script module then), add block exclusions (headings, link-definition block, fenced and indented code) and the
-  term boundary
 - [ ] 305. A ModelForm `MultipleChoiceField` declared over a single-value column that lists no choices (`description =
   MultipleChoiceField(...)` over a `TextField`) builds as `description: String!` and every create and update fails with
   "Enter a list of values.": `forms/inputs.py::_form_choice_narrowing` returns before its list-over-single-value refusal
@@ -1166,6 +1171,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   relation; settle whether "the consumer's Prefetch wins" covers the forward case under AGENTS rule 37 before fixing
 - [ ] 380. (robustness) A consumer prefetch onto a relation whose target type has a `get_queryset` hook runs batched and
   is then discarded while every parent re-reads through the hook (one query per parent); `strictness` may not report it
+- [ ] 420. (robustness) `scripts/_markdown_lex.py::block_regions` does not mask a block quote nested inside a list
+  item (`- > ```` then `  > code`: markers are read only at the line start) nor a link-reference-definition title
+  split across two lines (`[foo]: /url "a` / `Zeta b"`), so `check_spec_glossary.py --auto-link` can write a link into
+  either; both were unmasked before 302 too, no spec or doc has either shape; found verifying 302
+- [ ] 421. `scripts/build_kanban_md.py::TERM_BOUNDARY_AFTER` refuses a term followed by `.`, `:`, `/` or `-` even at
+  the end of a sentence (`... a DjangoType.`), so the board leaves 7 first mentions unlinked (a
+  `PROSE_TERM_BOUNDARY_AFTER`-style after-boundary renders 182 glossary links against 175, 50 lines differ); 302 kept
+  KANBAN's constants verbatim so the board stayed byte-identical; settle whether the board takes the spec boundary;
+  found fact-finding 302
+- [ ] 422. (robustness) `docs/SPECS/spec-034-permissions-0_0_10.md` fails `scripts/check_spec_glossary.py --spec` at
+  HEAD (`Meta.relation_shapes` has no body link; its hand-written definition `[glossary-metarelation_shapes]` keeps
+  the `_` that `_glossary_ref_id` turns into `-`, so `--auto-link` would add a second definition beside it), and
+  `_insert_glossary_ref_def` re-sorts the whole `<!-- docs/ -->` definition group with `sorted()` on every insert,
+  reordering hand-written lines; found fact-finding 302
 
 ## To do: holes found re-checking the fixes
 
