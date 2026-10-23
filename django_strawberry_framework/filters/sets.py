@@ -3922,9 +3922,10 @@ class FilterSet(
 
         The many-side test is the shared cardinality classifier in
         ``utils/relations.py`` (``is_many_side_relation_kind(relation_kind(field))``),
-        the same call the optimizer walker, the order set family, and the
-        relation resolvers route through, so the "rendered as a GraphQL list"
-        decision cannot drift between the filter family and its siblings.
+        the same call the optimizer walker, the mutation write kind
+        (``mutations/inputs.py::model_column_write_kind``), and the relation
+        resolvers route through, so the "rendered as a GraphQL list" decision
+        cannot drift between the filter family and its siblings.
         """
         if is_many_side_relation_kind(relation_kind(field)):
             return GlobalIDMultipleChoiceFilter
