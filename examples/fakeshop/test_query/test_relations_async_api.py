@@ -362,12 +362,11 @@ async def test_async_consumer_prefetched_many_side_resolves_over_http(strictness
                 graphql_type=list[library_schema.VenueSponsorType],
             )
 
+        optimizer = DjangoOptimizerExtension(strictness="raise")
         return strawberry.Schema(
             query=Query,
             config=strawberry_config(),
-            extensions=[lambda: DjangoOptimizerExtension(strictness="raise")]
-            if strictness == "raise"
-            else [],
+            extensions=[lambda: optimizer] if strictness == "raise" else [],
         )
 
     schema = await sync_to_async(_build)()
