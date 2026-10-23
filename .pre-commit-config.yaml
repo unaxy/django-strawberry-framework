@@ -133,6 +133,20 @@ repos:
         pass_filenames: false
         require_serial: true
 
+      - id: check-spec-glossaries
+        name: every spec's terms CSV matches the glossary and its spec links
+        entry: uv run python scripts/check_all_spec_glossaries.py
+        language: system
+        # `always_run` + `pass_filenames: false` because the inputs are every spec,
+        # every terms CSV and the rendered glossary: a glossary heading rename (a
+        # regenerated `docs/GLOSSARY.md`) or a link dropped from one spec fails a
+        # DIFFERENT spec than the staged one, and a deleted spec or CSV never appears
+        # in the staged list. Runs `check_spec_glossary.py` in-process per spec and
+        # fails on a terms CSV no spec owns; writes nothing.
+        always_run: true
+        pass_filenames: false
+        require_serial: true
+
       - id: check-citations
         name: citations resolve (AGENTS.md rule 27 path::Symbol refs)
         entry: uv run python scripts/check_citations.py --substrings

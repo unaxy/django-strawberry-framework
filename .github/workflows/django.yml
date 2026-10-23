@@ -115,6 +115,13 @@ jobs:
         # change; reads the committed DB and CSVs, writes nothing.
         run: uv run python examples/fakeshop/manage.py import_spec_terms --check --skip-checks
 
+      - name: Every spec's terms CSV matches the glossary and its spec links
+        # Parity with the `check-spec-glossaries` pre-commit hook: the backstop for
+        # a glossary heading rename or a dropped spec link committed with hooks
+        # skipped. Runs `scripts/check_spec_glossary.py` over every spec and its
+        # terms CSV and fails on a terms CSV no spec owns; writes nothing.
+        run: uv run python scripts/check_all_spec_glossaries.py
+
       - name: Generated docs match their generators
         # Every one of these files is script-rendered from the fakeshop DB or
         # from module docstrings, and hand edits to them are silently discarded

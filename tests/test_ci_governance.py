@@ -1484,9 +1484,10 @@ def _misplaced_archive_files(paths: Iterable[str]) -> list[str]:
     subdirectory. Both glossary lookups (the terms importer and
     ``check_spec_glossary.py``) accept a CSV beside its spec as well as under
     ``appx/``, so a companion left beside an archived spec changes no gate result
-    and nothing else would notice it. This sweep places files only; it does not
-    ask whether a companion still has its spec. A pure function over repo-relative
-    paths, so the rows below can feed it layouts the live tree never holds.
+    and nothing else would notice it. Whether a companion still has its spec is
+    ``scripts/check_all_spec_glossaries.py``'s check, not this one. A pure function
+    over repo-relative paths, so the rows below can feed it layouts the live tree
+    never holds.
     """
     violations: list[str] = []
     for path in sorted(paths):
