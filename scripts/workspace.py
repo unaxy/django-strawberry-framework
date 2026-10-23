@@ -362,6 +362,7 @@ LINT_COMMANDS = (
     "python scripts/build_kanban_tracked_path_constants.py --check",
     "python scripts/check_kanban_anchors.py",
     "python examples/fakeshop/manage.py import_spec_terms --check --skip-checks",
+    "python scripts/check_all_spec_glossaries.py",
     "python scripts/build_kanban_md.py --check",
     "python scripts/build_kanban_html.py --check",
     "python scripts/build_glossary_md.py --check",

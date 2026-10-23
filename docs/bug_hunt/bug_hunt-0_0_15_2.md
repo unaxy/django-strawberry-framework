@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 226 done, 139 to do.
+Progress: 227 done, 138 to do.
 
 ## Done
 
@@ -988,6 +988,12 @@ Progress: 226 done, 139 to do.
   there; `tests/test_ci_governance.py::_misplaced_archive_files` now refuses any file in `docs/SPECS/` other than an
   archived spec and `NEXT.md`, and anything in `docs/SPECS/appx/` other than a spec's `-terms.csv` or `-rationale.md`
   companion, with a live-tree row that cannot pass on an empty walk
+- [x] 256. fixed: `scripts/check_all_spec_glossaries.py` runs `check_spec_glossary.py` in-process over every spec (never
+  `--auto-link`) and refuses a terms CSV no spec owns or an empty population; it runs as pre-commit hook 12
+  `check-spec-glossaries`, as a `django.yml` lint step after the `import_spec_terms` check and in
+  `scripts/workspace.py::LINT_COMMANDS`; the item's "all 57 pass" was wrong: spec-034 failed (a `Meta.relation_shapes`
+  CSV row and link definition left after its body link was dropped), so both are removed and DONE-034's glossary rows
+  re-imported; START and CONTRIBUTING list the hook
 
 ## Outside review of the fixes
 
@@ -1031,8 +1037,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 190. Seen at `87dc1df7`, re-check: an out-of-range datetime filter value raises an uncoded error (The invalid
   regex and the regex on a UUID field are not defects: both follow django-filter's `regex` lookup, which sends a text
   pattern to the database and types a UUID column's value as a UUID.)
-- [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
-  refusal and term / anchor checks bite only when a cycle runs it by hand
 - [ ] 305. A ModelForm `MultipleChoiceField` declared over a single-value column that lists no choices (`description =
   MultipleChoiceField(...)` over a `TextField`) builds as `description: String!` and every create and update fails with
   "Enter a list of values.": `forms/inputs.py::_form_choice_narrowing` returns before its list-over-single-value refusal
@@ -1186,11 +1190,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `PROSE_TERM_BOUNDARY_AFTER`-style after-boundary renders 182 glossary links against 175, 50 lines differ); 302 kept
   KANBAN's constants verbatim so the board stayed byte-identical; settle whether the board takes the spec boundary;
   found fact-finding 302
-- [ ] 422. (robustness) `docs/SPECS/spec-034-permissions-0_0_10.md` fails `scripts/check_spec_glossary.py --spec` at
-  HEAD (`Meta.relation_shapes` has no body link; its hand-written definition `[glossary-metarelation_shapes]` keeps
-  the `_` that `_glossary_ref_id` turns into `-`, so `--auto-link` would add a second definition beside it), and
-  `_insert_glossary_ref_def` re-sorts the whole `<!-- docs/ -->` definition group with `sorted()` on every insert,
-  reordering hand-written lines; found fact-finding 302
+- [ ] 422. (robustness) `_insert_glossary_ref_def` re-sorts the whole `<!-- docs/ -->` definition group with
+  `sorted()` on every insert, reordering hand-written lines (the spec-034 half of this row, its stale
+  `Meta.relation_shapes` row and definition, is fixed by 256); found fact-finding 302
 
 ## To do: holes found re-checking the fixes
 

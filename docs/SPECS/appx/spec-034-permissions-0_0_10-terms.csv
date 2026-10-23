@@ -29,7 +29,6 @@ DjangoNodeField,djangonodefield,cascade-hidden rows refetch as null; no existenc
 DjangoNodesField,djangonodesfield,batch holes for cascade-hidden rows
 Relay Node integration,relay-node-integration,resolve_node/resolve_nodes defaults route through get_queryset
 DjangoListField,djangolistfield,default resolver and consumer-resolver wrap both apply the hook
-Meta.relation_shapes,metarelation_shapes,SyncMisuseError-recourse precedent cited in Decision 10
 SyncMisuseError,syncmisuseerror,the cascade is one of the sync surfaces sharing the contract; both variants raise for async target hooks
 ConfigurationError,configurationerror,fields= validation raises it; SyncMisuseError multiple-inherits it
 finalize_django_types,finalize_django_types,call-time walk reads only post-finalization state; root-export precedent in Decision 4

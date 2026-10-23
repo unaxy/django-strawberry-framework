@@ -579,7 +579,6 @@ The completion contract the card is built against. Items are grouped by slice; t
 [glossary-metaoptimizer_hints]: ../GLOSSARY.md#metaoptimizer_hints
 [glossary-metaorderset_class]: ../GLOSSARY.md#metaorderset_class
 [glossary-metaprimary]: ../GLOSSARY.md#metaprimary
-[glossary-metarelation_shapes]: ../GLOSSARY.md#metarelation_shapes
 [glossary-multi-database-cooperation]: ../GLOSSARY.md#multi-database-cooperation
 [glossary-only-projection]: ../GLOSSARY.md#only-projection
 [glossary-optimizerhint]: ../GLOSSARY.md#optimizerhint

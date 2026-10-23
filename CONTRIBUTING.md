@@ -86,6 +86,7 @@ The hooks in `.pre-commit-config.yaml` run in this order, and CI's lint job runs
 - **truthful-reads** keeps identity reads of consumer objects off dunder attribute lookups and refuses a handler that swallows `BaseException`.
 - **check-kanban-anchors** refuses colliding card and glossary anchors.
 - **import-spec-terms-check** requires every done card's glossary rows to equal its spec terms CSV.
+- **check-spec-glossaries** runs `scripts/check_spec_glossary.py` over every spec: each terms CSV row must name a `docs/GLOSSARY.md` heading the spec links, and every terms CSV must belong to a spec.
 - **check-citations** runs last. Every `path::Symbol` reference in first-party source and on the board must resolve, so a rename means sweeping `::OldName` in the same change. Cite by symbol, never by line number.
 
 ## The example project and the rendered docs
