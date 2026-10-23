@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 222 done, 140 to do.
+Progress: 223 done, 139 to do.
 
 ## Done
 
@@ -959,6 +959,12 @@ Progress: 222 done, 140 to do.
   from a cursor, an unwindowable target queryset; it was unqualified); GLOSSARY `queryset-diffing` and
   `Meta.relation_shapes` match; live rows pin the async deferred-column failure and `orderBy:` under
   `strictness="raise"`
+- [x] 231. fixed in the kanban DB by `CardItem` 1479 (the FieldError keying scope bullet now states the per-flavor key
+  maps from `utils/errors.py::build_error_key_map`, the package-tier multi-word matrix in
+  `tests/utils/test_error_keys.py` and the live rows per flavor), `CardItem` 1500 (card 72's gap list no longer calls
+  the keying a wire format no test can see; it still owes its `CAMELCASE_ERRORS` disposition row) and `CardReference`
+  23-25 (copies of `CardItem` 142 that still said a model field name); a sweep of every kanban text column finds no
+  stale sentence of the family left
 
 ## Outside review of the fixes
 
@@ -1004,9 +1010,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 190. Seen at `87dc1df7`, re-check: an out-of-range datetime filter value raises an uncoded error (The invalid
   regex and the regex on a UUID field are not defects: both follow django-filter's `regex` lookup, which sends a text
   pattern to the database and types a UUID column's value as a UUID.)
-- [ ] 231. KANBAN.md's "`FieldError` keying" card (rendered from the kanban DB) still says
-  `validation_error_to_field_errors` is an identity pass-through and that no test covers a multi-word snake_case
-  field; both are stale (the key maps and `tests/utils/test_error_keys.py` landed before)
 - [ ] 255. `docs/SPECS/spec-058-graph_substrate-0_1_1-terms.csv` and
   `docs/SPECS/spec-068-structural_templates-0_1_6-terms.csv` sit beside their archived specs instead of in
   `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
