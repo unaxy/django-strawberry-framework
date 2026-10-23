@@ -13,6 +13,9 @@ from scripts.build_kanban_md import GLOSSARY_MD_PATH, GlossaryInliner
 
 LINKED = f"[`DjangoListField`]({GLOSSARY_MD_PATH}#djangolistfield)"
 BARE_LINKED = f"[DjangoListField]({GLOSSARY_MD_PATH}#djangolistfield)"
+# cmark and markdown-it keep a link destination nested 32 parens deep, not 33.
+DEEPEST = 32
+TOO_DEEP = 33
 
 
 @pytest.mark.parametrize(
@@ -327,6 +330,16 @@ BARE_LINKED = f"[DjangoListField]({GLOSSARY_MD_PATH}#djangolistfield)"
             r"See \[DjangoListField\](docs/x.md).",
             rf"See \[{BARE_LINKED}\](docs/x.md).",
             id="escaped-brackets-are-literal",
+        ),
+        pytest.param(
+            f"See [a]({'(' * DEEPEST}DjangoListField{')' * DEEPEST}) then DjangoListField now.",
+            f"See [a]({'(' * DEEPEST}DjangoListField{')' * DEEPEST}) then {BARE_LINKED} now.",
+            id="destination-at-max-nesting-stays-one-link",
+        ),
+        pytest.param(
+            f"See [a]({'(' * TOO_DEEP}DjangoListField{')' * TOO_DEEP}) then DjangoListField now.",
+            f"See [a]({'(' * TOO_DEEP}{BARE_LINKED}{')' * TOO_DEEP}) then DjangoListField now.",
+            id="destination-past-max-nesting-protects-only-label",
         ),
     ],
 )
