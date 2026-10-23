@@ -3160,6 +3160,35 @@ def _canonical(names: Iterable[str]) -> list[str]:
     return sorted(names, key=canonical_sort_key)
 
 
+def _layouts(
+    kind: Callable[[Iterable[str]], Collection[str]],
+    names: tuple[str, ...],
+) -> Iterator[Collection[str]]:
+    """``kind`` over ``names``, then (for a ``set``) the same names in ever larger hash tables.
+
+    A set iterates in hash-table slot order, and the slot is the hash modulo the
+    table size, so each table size orders the same names independently. A
+    ``discard`` never shrinks the table, so growing a copy through padding names
+    and discarding them leaves the names alone in the larger table.
+    """
+    yield kind(names)
+    if kind is not set:
+        return
+    for size in (
+        8,
+        32,
+        128,
+        512,
+        2048,
+    ):
+        padding = [f"padding_{index}" for index in range(size)]
+        grown = set(names)
+        grown.update(padding)
+        for name in padding:
+            grown.discard(name)
+        yield grown
+
+
 def _scrambled(
     kind: Callable[[Iterable[str]], Collection[str]],
     members: Sequence[str],
@@ -3171,13 +3200,15 @@ def _scrambled(
     The order is read in this process, so the row exercises the reorder under
     whatever ``PYTHONHASHSEED`` the run has; the ``drop`` names are ignored when
     judging the order, since ``Meta.exclude`` removes them before it matters.
+    A ``set`` is also tried in larger hash tables, since a few members can land
+    in canonical order in every subset of the smallest table.
     """
     for size in range(len(members), 1, -1):
         for combo in itertools.combinations(members, size):
-            declared = kind(combo + drop)
-            kept = [name for name in declared if name not in drop]
-            if kept != _canonical(kept):
-                return declared
+            for declared in _layouts(kind, combo + drop):
+                kept = [name for name in declared if name not in drop]
+                if kept != _canonical(kept):
+                    return declared
     pytest.fail(f"no {kind.__name__} over {members!r} iterates out of canonical order")
 
 
