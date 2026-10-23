@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 236 done, 155 to do.
+Progress: 236 done, 158 to do.
 
 ## Done
 
@@ -1102,7 +1102,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   runs on until `fg`; `_JobControl.suspend`'s SIGCONT to the group and the SIGCONT route overlap (only the
   sigcont-ignored row tells them apart); the D10, gate, F2 and F3 mutations are each pinned by one row; F4's optional
   `dup2` of `/dev/null` onto a dropped output sink's fd (accepted without it: `| head` ends with rc 120 and a complete
-  log). Re-verify the delta and decide each, or close them as robustness rows
+  log). Re-verify the delta and decide each, or close them as robustness rows. Fact-found at `6ea7009e`: (1) the Ctrl-Z
+  race is real (46 of 160 natural-timing trials): `scripts/_stop_signals.py::_JobControl.suspend` signals `group()`,
+  which is None until `workspace.py::_StopRelay.started`, so the wrapper stops alone and the command runs on holding its
+  leases; fix: `suspend` records a pending stop while `group()` is None, a `_JobControl.settle()` delivers it once the
+  group is known, `stream` calls it after `relay.started`; rows over SIGTSTP / SIGTTIN / SIGTTOU on a pty; (2) the
+  SIGCONT overlap is not a defect (each route has its own row; optional orphaned-wrapper row); (3) F4 is real: `| head
+  -c 1` on a 2 MB run exits 120 from the flush `BrokenPipeError` and loses the command's code; fix: on `BrokenPipeError`
+  only, `dup2` `/dev/null` onto the sink's fd, rows asserting return code 0 and empty stderr; (4) the single-row pins
+  are fine except gate's floor-suite `ensure_floor_venv(layout, holding)` wiring, which no row executes: add a
+  `gate(layout, ["floor"])` row with spies. Touches `scripts/workspace.py` and `tests/test_workspace.py` (coordinate
+  with floor work there)
 - [ ] 314. Under 272's raw-param leaf rule a model instance in `extra(where=..., params=[obj])` now passes the
   visibility seal and fails in the database adapter ("Error binding parameter") instead of the typed
   `ConfigurationError`; Django fails the same way, so decide whether the seal should keep refusing non-adaptable leaves
@@ -1111,11 +1121,29 @@ tracker number are recorded there; open remainders and new defects are filed as 
   dict]` fails under `PYTHONHASHSEED=28` ("no set over ('exact', 'icontains', 'istartswith', 'iendswith') iterates out
   of canonical order"): its `_scrambled` helper cannot build an out-of-order set for every seed, so the row flakes with
   the hash seed (seen at `feb83d59` and `144a64ee`; the code under test is not involved). Robustness row (test harness).
-  Found verifying 269
+  Found verifying 269. Fact-found at `09020e75`: the cited row and seed are already fixed by `bf370934` (padded
+  `_layouts` and `_scrambled` in `tests/filters/test_sets.py`); both observations predate it. Residual, same class: (a)
+  `_layouts` pads only `set`, so a 5-name `frozenset` row fails at `PYTHONHASHSEED=10332`; (b) the unfixed twin
+  `tests/orders/test_factories.py::_out_of_canonical_order_set` fails at seeds 4124 / 4176 / 18433; (c)
+  `tests/utils/test_inputs.py::test_read_set_meta_fields_canonicalizes_sets_without_mutating_source` and
+  `::..._sorts_a_lazy_set_as_the_set_it_stands_for` use 2-element sets and pass on about half the seeds with
+  `_sorted_meta_values` reverted. Proposed: one shared helper (`canonical_order`, `scrambled(kind, members, drop=())`,
+  padded layouts) in `tests/_idioms.py`, both old helpers deleted, `_CATEGORY_COLUMNS` plus `"id"`, the utils rows built
+  over 4-name pools; tick 318 citing `bf370934` and land the residual in the same change
 - [ ] 319. Unprobed cause: a child `GlobalIDFilter` subclass whose own `filter` binds the raw value
   (`qs.filter(title=value)`), reached through a `RelatedFilter`, answers `"plain"` with a matching parent flat
   (`books__gid`) and no row nested (`books: {gid: ...}`), before 269 and after it alike, against README's "the two
-  spellings agree on every lookup except `isNull: true` and `exclude=True`". Found verifying 269
+  spellings agree on every lookup except `isNull: true` and `exclude=True`". Found verifying 269. Fact-found at
+  `09020e75`: reproduces, but the item's cause is wrong: present values reach the child filter identically in both
+  spellings; the divergence is that the nested spelling also runs the parent's flat copy of the child leaf on ABSENCE
+  (`FilterSet.__init__` / `_absence_filters_nothing` keep every flat copy whose absence acts, `_normalize_input` strips
+  the nested branch keys, `_apply_flat_leaves` runs the copy), adding a second EXISTS with the empty value. Population:
+  an unguarded own or class-level `filter`, `CharFilter(empty_value=...)`, `BooleanFilter(widget=CheckboxInput)`,
+  `ChoiceFilter(null_value='')`, `ModelChoiceFilter(null_value=None)`; with `required=True` the nested spelling answers
+  `FILTER_INVALID`. Proposed fix in `filters/sets.py`: record the supplied branches on the stashed instance and skip, in
+  `_apply_flat_leaves`, a `<branch>__...` copy whose branch is active and whose key it does not name; document what an
+  own `filter` receives (raw wire text for a GlobalID; the cleaned empty value on absence); decide whether a nested
+  supply satisfies a `required` copy
 - [ ] 323. Inside a `get_queryset` hook, `apply_cascade_permissions(cls, queryset, info)` returns a plain `QuerySet`
   even when handed the project `QuerySet` class the hook receives (the cascade seals its source with the recomposing
   policy), so a project method chained after the cascade raises `AttributeError`; README says the cascade returns "a
@@ -1283,6 +1311,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 394. `utils/querysets.py::_base_table_defect` calls `_normalized_str` on `concrete._meta.db_table` unguarded, so a
   non-`str` `db_table` raises `TypeError` instead of returning a typed defect (the stubs type it `str`; infeasible
   unless a project assigns one)
+- [ ] 397. Unprobed: a `scripts/workspace.py` command other than `run` printing to a closed stdout (`workspace.py status
+  | head`) may exit 120 from the flush `BrokenPipeError` and lose its own return code, as `run` did (307)
+- [ ] 398. A class-level `GlobalIDFilter.filter` override skips the lone-surrogate `FILTER_INVALID` refusal, because
+  `filters/sets.py::_decodes_before_binding` reads only the instance's own filter, so a `UnicodeEncodeError` escapes as
+  the masked uncoded error; read it through `utils/truth.py::overrides` (the class-level-override family of 388)
+- [ ] 399. A flat `RelatedFilter` leaf runs `ProjectedChildFilter.filter` twice for one value (robustness: one extra
+  EXISTS build per request, same rows)
 
 ## To do: holes found re-checking the fixes
 
