@@ -7577,6 +7577,27 @@ def test_routing_intent_fails_closed_on_a_non_string_router_answer() -> None:
         _snapshot_routing_intent(Category.objects.all(), "MyOrderSet.apply_sync")
 
 
+class _MemberAliasRouter:
+    """Answers every read with ``alias``, a ``TextChoices`` / ``StrEnum`` member."""
+
+    def __init__(self, alias: str) -> None:
+        self.alias = alias
+
+    def db_for_read(self, _model: type[models.Model], **_hints: object) -> str:
+        """The member alias, for every model."""
+        return self.alias
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+def test_routing_intent_freezes_a_member_router_answer_as_its_exact_text(kind: str) -> None:
+    """Django takes any ``str`` a router answers, so a member alias is frozen as its text."""
+    with override_settings(DATABASE_ROUTERS=[_MemberAliasRouter(_term(kind, "DEFAULT"))]):
+        intent = _snapshot_routing_intent(Category.objects.all(), "MyOrderSet.apply_sync")
+    assert intent.db is None
+    assert type(intent.effective_alias) is str
+    assert intent.effective_alias == "default"
+
+
 def test_routing_intent_fails_closed_when_the_source_carries_no_model() -> None:
     """No model means no router question to ask, so the alias is undeterminable.
 

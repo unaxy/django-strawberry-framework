@@ -3650,7 +3650,11 @@ def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingInte
     and the seal pins the accepted result onto it. Django's router always
     answers with a concrete alias, falling back to ``DEFAULT_DB_ALIAS``, so an
     unrouted source resolves just as it would at execution - only earlier, while
-    the hint values still hold the state the source intended.
+    the hint values still hold the state the source intended. Django takes any
+    ``str`` a router answers as the alias it names, so a ``TextChoices`` /
+    ``StrEnum`` member is admitted by its real type (``is_str``) and frozen as its
+    exact text (``_normalized_str``), the alias the seal pins; any other answer
+    raises ``ConfigurationError``.
 
     Reads come from the instance ``__dict__`` without attribute dispatch,
     matching the seal; the model comes from that same state, because the source
@@ -3678,13 +3682,13 @@ def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingInte
         )
     resolve = router.db_for_write if for_write else router.db_for_read
     alias = resolve(model, **(hints if type(hints) is dict else {}))
-    if type(alias) is not str:
+    if not is_str(alias):
         raise ConfigurationError(
             f"{method_name} could not resolve the source QuerySet's effective database "
             f"alias: the database router answered {truth.render(alias)} for "
             f"{truth.name(model)}; an alias must be a string.",
         )
-    return _RoutingIntent(db=None, hints=hints, effective_alias=alias)
+    return _RoutingIntent(db=None, hints=hints, effective_alias=_normalized_str(alias))
 
 
 _ROUTING_SCALAR_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(

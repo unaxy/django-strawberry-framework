@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 235 done, 155 to do.
+Progress: 236 done, 155 to do.
 
 ## Done
 
@@ -1052,6 +1052,10 @@ Progress: 235 done, 155 to do.
   compiles to the exact-text twin's SQL; a pending deferred filter's arguments are rebuilt before they are baked (a
   consumer-held subquery is never relabelled; an opaque bound value or an unrebuildable graph fails closed) and a
   combinator's `pk__in` rewrite is rebuilt in turn; spec-045 and the GLOSSARY prove-then-clone entry state it
+- [x] 313. fixed: reproduced (a database router whose `db_for_read` / `db_for_write` answers a `TextChoices` / `StrEnum`
+  alias was refused with `ConfigurationError` on an `orderBy` read through the sidecar);
+  `utils/querysets.py::_snapshot_routing_intent` admits a member and keeps its exact text as the routed alias, a
+  non-string answer is still refused; spec-050 states it
 
 ## Outside review of the fixes
 
@@ -1099,9 +1103,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   sigcont-ignored row tells them apart); the D10, gate, F2 and F3 mutations are each pinned by one row; F4's optional
   `dup2` of `/dev/null` onto a dropped output sink's fd (accepted without it: `| head` ends with rc 120 and a complete
   log). Re-verify the delta and decide each, or close them as robustness rows
-- [ ] 313. Unprobed: a database router whose `db_for_read` returns a `StrEnum` alias may be refused by
-  `utils/querysets.py::_snapshot_routing_intent` (exact-type read of the routed alias) after 294 normalized
-  `using(<member>)`; probe it live and seal by `is_str` plus normalization if so. Found landing 294
 - [ ] 314. Under 272's raw-param leaf rule a model instance in `extra(where=..., params=[obj])` now passes the
   visibility seal and fails in the database adapter ("Error binding parameter") instead of the typed
   `ConfigurationError`; Django fails the same way, so decide whether the seal should keep refusing non-adaptable leaves
@@ -1288,6 +1289,8 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 396. CHANGELOG entry for item 313: a database router answering a `TextChoices` / `StrEnum` alias now routes an
+  `orderBy` read instead of raising `ConfigurationError` ("an alias must be a string")
 - [ ] 395. CHANGELOG entry for item 312: a `TextChoices` / `StrEnum` member used as SQL text in a hook's or consumer
   `Prefetch` queryset (`RawSQL(...)`, `Func(function=...)`, a combined expression's operator, a `Meta.db_table`, a JSON
   lookup's mapping key) is now served instead of refused with `ConfigurationError` ("cannot be sealed")

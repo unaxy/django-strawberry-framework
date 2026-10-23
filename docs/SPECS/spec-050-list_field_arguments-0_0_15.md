@@ -911,7 +911,8 @@ For a request carrying any non-null list argument, the color-specific queryset p
    Timing is part of the contract: at most one router call, taken at the snapshot and only for
    an unrouted source, and none during validation. A router exception propagates unchanged; a
    router answer that is not a string alias fails the ordering call closed with a
-   `ConfigurationError`. The sharded live suite
+   `ConfigurationError`; a `TextChoices` / `StrEnum` member answer is the alias it spells
+   and is frozen as that exact text. The sharded live suite
    ([`examples/fakeshop/test_query/test_multi_db.py`][fakeshop-test-multi-db]) covers the
    `.using("shard_b")` source an override re-routes
    (`test_post_orderset_routing_mismatch_rejected_on_sharded_db`), the unrouted hint-driven
@@ -2734,9 +2735,11 @@ routes through:
   (`test_routing_intent_pins_the_alias_resolved_before_a_hint_could_be_mutated`), a
   write-marked source resolves through `db_for_write`
   (`test_routing_intent_resolves_a_write_marked_source_through_the_write_router`), a router
-  that raises propagates its own error (`test_routing_intent_propagates_the_router_error`), and
+  that raises propagates its own error (`test_routing_intent_propagates_the_router_error`),
   a non-string router answer is a typed `ConfigurationError`
-  (`test_routing_intent_fails_closed_on_a_non_string_router_answer`);
+  (`test_routing_intent_fails_closed_on_a_non_string_router_answer`), and a member answer is
+  frozen as its exact text
+  (`test_routing_intent_freezes_a_member_router_answer_as_its_exact_text`);
 - deferred-filter state: a subclass carrying a well-formed pending `_deferred_filter` seals
   with that predicate baked into the compiled SQL
   (`test_a_subclass_result_with_a_pending_deferred_filter_seals_with_it_baked`), and a
