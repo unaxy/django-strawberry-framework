@@ -248,8 +248,8 @@ def test_install_hint_floor_matches_the_pyproject_dev_group_row(toolbar_leaf: Mo
     suite's floor governance rows, so the floor pins cannot diverge in method.
 
     It gates the literal, the hint and the dependency row. Documentation that
-    restates the floor is behind no gate at all, and this row says nothing
-    about it: a floor bump sweeps the tree for the package name and reads each
+    restates the floor is behind no gate this row owns, and this row says
+    nothing about it: a floor bump sweeps the tree for the package name and reads each
     hit, rather than trusting any enumeration of where the floor is written or
     sweeping for the ``django-debug-toolbar>=`` specifier, which a restatement
     separating the name from the constraint with a backtick or a space does not

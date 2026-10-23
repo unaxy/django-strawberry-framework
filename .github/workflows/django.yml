@@ -177,7 +177,10 @@ jobs:
         # floor (the first release that bounds a `first` + `before` connection
         # page at its cursor, and past spec-044 Decision 6's per-operation
         # extension isolation) is durably exercised on every push/PR,
-        # coverage-free (the latest node keeps the coverage gate).
+        # coverage-free (the latest node keeps the coverage gate). They then
+        # install every soft dependency at its floor (the step after it).
+        # tests/test_ci_governance.py holds each floor literal in this file to
+        # its pyproject.toml lower bound.
         include: >-
           ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && fromJSON('[
             {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1"},
@@ -266,6 +269,19 @@ jobs:
         run: |
           uv pip install "strawberry-graphql==${{ matrix.strawberry }}"
           uv run --no-sync python -c "import importlib.metadata as m; print('strawberry-graphql', m.version('strawberry-graphql'))"
+
+      - name: Install the soft dependencies at their floors (minimum supported floor)
+        # channels[daphne], cryptography, django-debug-toolbar and
+        # djangorestframework are never in [project].dependencies; the floor each
+        # one supports is the `>=` bound of its [dependency-groups].dev row in
+        # pyproject.toml, and `uv sync` resolves the newer release uv.lock
+        # carries. The minimum-support nodes replace each with that exact floor,
+        # so the whole suite runs every soft-dependency path at it; the other
+        # nodes run the locked releases. The second line records the versions.
+        if: matrix.compatibility_only == '1'
+        run: |
+          uv pip install "channels[daphne]==4.3.2" "cryptography==44.0.0" "django-debug-toolbar==7.0.0" "djangorestframework==3.17.0"
+          uv pip show channels cryptography django-debug-toolbar djangorestframework
 
       - name: Run Tests (${{ matrix.database }})
         # The latest single-DB node owns the fail_under=100 coverage gate and

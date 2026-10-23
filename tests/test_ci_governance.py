@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
+import tomli
 import yaml
 
 from django_strawberry_framework.utils.imports import (
@@ -55,7 +56,7 @@ from django_strawberry_framework.utils.typing import object_result
 # construction, so the gate cannot pass in a clean CI checkout and fail on a
 # developer machine.
 from scripts.check_citations import SOURCE_TREES, iter_python_sources, spec_files
-from tests._idioms import json_at, json_list
+from tests._idioms import json_at, json_list, json_loads, json_object
 
 if TYPE_CHECKING:
     from typing_extensions import TypeIs
@@ -1243,6 +1244,84 @@ def test_drf_floor_constant_matches_the_pyproject_dependency_row() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     rows = re.findall(r'"djangorestframework>=([0-9][^"]*)"', text)
     assert rows == [DRF_FLOOR], (rows, DRF_FLOOR)
+
+
+#: The soft dependencies (START.md "Support matrix"), spelled as their dev-group rows are.
+SOFT_DEPENDENCIES = (
+    "channels[daphne]",
+    "cryptography",
+    "django-debug-toolbar",
+    "djangorestframework",
+)
+_REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][\w.-]*(?:\[[^\]]*\])?)\s*(.*)")
+_LOWER_BOUND = re.compile(r">=\s*([^,;\s]+)")
+
+
+def _pyproject_lower_bounds() -> dict[str, str]:
+    """Each ``>=`` bound ``pyproject.toml`` states, keyed by requirement name with its extras.
+
+    ``python`` is ``requires-python``'s; every other key is a ``[project].dependencies``
+    or ``[dependency-groups].dev`` row's.
+    """
+    document = object_result(tomli.loads, (REPO_ROOT / "pyproject.toml").read_text("utf-8"))
+    rows = [
+        *json_list(document, "project", "dependencies"),
+        *json_list(document, "dependency-groups", "dev"),
+    ]
+    requires_python = _LOWER_BOUND.search(str(json_at(document, "project", "requires-python")))
+    assert requires_python is not None
+    bounds = {"python": requires_python.group(1)}
+    for row in map(str, rows):
+        requirement = _REQUIREMENT.match(row)
+        bound = _LOWER_BOUND.search(requirement.group(2)) if requirement else None
+        if requirement and bound:
+            bounds[requirement.group(1)] = bound.group(1)
+    return bounds
+
+
+def test_every_floor_literal_in_the_django_workflow_is_its_pyproject_lower_bound() -> None:
+    """The CI floor cell installs exactly the floors ``pyproject.toml`` states.
+
+    ``django.yml`` cannot read ``pyproject.toml``, so the floor cell carries
+    each floor as a literal: the ``python`` / ``django`` / ``strawberry`` keys
+    of every ``compatibility_only`` matrix node (the push/PR list and the full
+    matrix alike) and each ``name==version`` pin of the soft-dependency install
+    step those nodes run. Each must equal the ``>=`` bound of its pyproject row,
+    extras included, and every soft dependency must be pinned, so a floor
+    raised on either side alone fails here instead of the cell silently
+    running a point the project no longer declares.
+    """
+    bounds = _pyproject_lower_bounds()
+    job = json_object(_workflow(WORKFLOW_DIR / "django.yml"), "jobs", "test")
+    include = str(json_at(job, "strategy", "matrix", "include"))
+    node_lists: list[str] = re.findall(r"fromJSON\('(\[.*?\])'\)", include, re.DOTALL)
+    floor_nodes = [
+        [
+            node
+            for node in map(json_object, json_list(json_loads(text)))
+            if node.get("compatibility_only") == "1"
+        ]
+        for text in node_lists
+    ]
+    soft_steps = [
+        line.strip()
+        for step in map(json_object, json_list(job, "steps"))
+        if step.get("if") == "matrix.compatibility_only == '1'"
+        for line in str(step.get("run", "")).splitlines()
+        if line.strip().startswith("uv pip install ")
+    ]
+
+    assert len(node_lists) == 2, include
+    assert all(floor_nodes), floor_nodes
+    for node in (node for nodes in floor_nodes for node in nodes):
+        assert (node["python"], node["django"], node["strawberry"]) == (
+            bounds["python"],
+            bounds["Django"],
+            bounds["strawberry-graphql"],
+        ), node
+    assert len(soft_steps) == 1, soft_steps
+    pinned = re.findall(r'"([^"=]+)==([^"]+)"', soft_steps[0])
+    assert pinned == [(name, bounds[name]) for name in SOFT_DEPENDENCIES], soft_steps[0]
 
 
 #: Files the project's ruff config excludes, each holding source ``ruff format`` would change.

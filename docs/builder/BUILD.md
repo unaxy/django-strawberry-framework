@@ -355,7 +355,7 @@ A different obligation from `### Query-shape tests must pin the load-bearing pro
 
 - the **ownership partition** — the cohort-to-files mapping that licenses concurrent dispatch, or `none; sequential slices` (`### Parallel cohorts under a declared ownership partition`)
 - the **hot-path declaration** — which slices touch a hot path and therefore owe a before/after number (`## Hot-path budget`)
-- the **floor-verification scope** — which slices touch a Django / Strawberry / channels integration seam, the focused tests they re-run at the floor, and the pass that owns each run (`## Floor verification`)
+- the **floor-verification scope** — which slices touch a Django / Strawberry / channels integration seam or a soft dependency's seam (channels, cryptography, django-debug-toolbar, djangorestframework), the focused tests they re-run at the floor, and the pass that owns each run (`## Floor verification`)
 
 Then a slice-level checklist. Every slice and every integration/final pass carries a checkbox (only Worker-0 marks `- [x]`, and only after Worker-1's final verification accepts it), the spec slice it implements, and the exact artifact file to create.
 
@@ -518,7 +518,7 @@ A record that names its in-scope commits by content and calls the one containing
 
 ## Floor verification
 
-Every command in the gate above runs in the shared `.venv`. **The shared `.venv` is not the supported floor** — it tracks the newest supported versions, so a green sweep in it proves only that the build works on a version many consumers are not running. The supported floor is Django **5.2.16** on Python **3.10** with strawberry-graphql **0.322.2**.
+Every command in the gate above runs in the shared `.venv`. **The shared `.venv` is not the supported floor** — it tracks the newest supported versions, so a green sweep in it proves only that the build works on a version many consumers are not running. The supported floor is Django **5.2.16** on Python **3.10** with strawberry-graphql **0.322.2**, and the soft dependencies at channels[daphne] **4.3.2**, cryptography **44.0.0**, django-debug-toolbar **7.0.0** and djangorestframework **3.17.0** (each the `>=` bound of its `[dependency-groups].dev` row).
 
 **Never state `.venv`'s own versions from memory or from a number written down in a document.** They move on every dependency bump; a floor number does not. When a pass needs to know what the shared environment carries, read it — `uv pip list` — and cite the reading.
 
@@ -528,7 +528,7 @@ Every command in the gate above runs in the shared `.venv`. **The shared `.venv`
 
 ### When it is required
 
-Any slice touching a **Django / Strawberry / channels integration seam** re-runs its **focused** tests at the floor: request/response handling, view or ASGI plumbing, upload or body parsing, the session/auth surface, queryset or expression compilation, schema and type construction against Strawberry internals, consumer or middleware wiring. Not the full sweep — the focused scope for the seam the slice touched.
+Any slice touching a **Django / Strawberry / channels integration seam** or a **soft dependency's seam** (channels, cryptography, django-debug-toolbar, djangorestframework) re-runs its **focused** tests at the floor: request/response handling, view or ASGI plumbing, upload or body parsing, the session/auth surface, queryset or expression compilation, schema and type construction against Strawberry internals, consumer or middleware wiring. Not the full sweep — the focused scope for the seam the slice touched.
 
 **Worker-1 declares the scope in the plan preamble and the declaration names the owning pass** — the builder pass for that slice, or Worker-1 itself. The `## Final test-run gate` is the **backstop that confirms it happened**, not a second owner: a planned floor verification no pass ran is grounds for `revision-needed`.
 
@@ -542,6 +542,7 @@ Build it under a scratch path outside the repo, and install with an explicit `--
 uv venv <scratch>/dsf-floor --python 3.10
 uv pip install --python <scratch>/dsf-floor/bin/python -e . --group dev
 uv pip install --python <scratch>/dsf-floor/bin/python 'django==5.2.16' 'strawberry-graphql==0.322.2'
+uv pip install --python <scratch>/dsf-floor/bin/python 'channels[daphne]==4.3.2' 'cryptography==44.0.0' 'django-debug-toolbar==7.0.0' 'djangorestframework==3.17.0'
 <scratch>/dsf-floor/bin/python -m pytest <focused scope> --no-cov
 ```
 

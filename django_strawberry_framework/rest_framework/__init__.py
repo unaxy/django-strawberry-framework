@@ -14,7 +14,9 @@ that must agree: that constant, the ``[dependency-groups].dev`` row in
 ``pyproject.toml``, and the ``_HINT_SUBSTRING`` literal re-typed in
 ``tests/rest_framework/test_soft_dependency.py``. ``tests/test_ci_governance.py``
 compares the constant to the dependency row and the soft-dependency tests
-compare the hint to the literal, so none of the three can move alone.
+compare the hint to the literal, so none of the three can move alone. The CI
+floor cell and BUILD.md "Floor verification" install the dependency row's
+bound, each gated against that row.
 spec-039 Decision 12 records why the floor is where it is; it is the
 rationale, not a gated site, and like any other restatement it is gated by
 nothing, so a floor bump sweeps the tree for the package name and reads each

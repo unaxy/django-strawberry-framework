@@ -2380,6 +2380,21 @@ def _ci_floor_node() -> tuple[dict[object, object], list[str]]:
     return floor[0], _run_lines(job)
 
 
+#: A ``[dependency-groups].dev`` table naming every soft dependency at its floor.
+SOFT_DEV_GROUP = (
+    "[dependency-groups]\n"
+    'dev = ["channels[daphne]>=4.3.2", "cryptography>=44.0.0", '
+    '"django-debug-toolbar>=7.0.0", "djangorestframework>=3.17.0", "pytest>=9.0.2"]\n'
+)
+#: The soft-dependency pins ``SOFT_DEV_GROUP`` yields, in the order the floor installs them.
+SOFT_PINS = {
+    "channels[daphne]": "4.3.2",
+    "cryptography": "44.0.0",
+    "django-debug-toolbar": "7.0.0",
+    "djangorestframework": "3.17.0",
+}
+
+
 def test_floor_pins_are_the_pyproject_lower_bounds(tmp_path: Path) -> None:
     pyproject = _write(
         tmp_path / "pyproject.toml",
@@ -2389,31 +2404,60 @@ def test_floor_pins_are_the_pyproject_lower_bounds(tmp_path: Path) -> None:
         '    "django>=5.2.16",\n'
         "    \"Strawberry_Graphql[debug] >= 0.322.2, <1 ; python_version >= '3.10'\",\n"
         '    "graphql-core>=3.2.0,<3.3",\n'
+        "]\n"
+        "[dependency-groups]\n"
+        "dev = [\n"
+        '    "Django_Debug_Toolbar >= 7.0.0, <9",\n'
+        '    "channels[ Daphne ]>=4.3.2",\n'
+        '    "djangorestframework-stubs>=3.18.0",\n'
+        "    \"cryptography>=44.0.0 ; python_version >= '3.10'\",\n"
+        '    "djangorestframework>=3.17.0",\n'
         "]\n",
     )
 
-    assert workspace.floor_pins(pyproject) == {
+    pins = workspace.floor_pins(pyproject)
+
+    assert pins == {
         "python": "3.10",
         "Django": "5.2.16",
         "strawberry-graphql": "0.322.2",
+        **SOFT_PINS,
     }
+    assert list(pins)[3:] == list(workspace.SOFT_FLOOR_PACKAGES) == list(SOFT_PINS)
 
 
 @pytest.mark.parametrize(
-    ("dependencies", "match"),
+    ("dependencies", "dev_group", "match"),
     [
-        ('"Django>=5.2.16"', "lists no strawberry-graphql"),
-        ('"Django==5.2.16", "strawberry-graphql>=0.322.2"', "states no >= floor"),
+        ('"Django>=5.2.16"', SOFT_DEV_GROUP, "lists no strawberry-graphql"),
+        ('"Django==5.2.16", "strawberry-graphql>=0.322.2"', SOFT_DEV_GROUP, "states no >= floor"),
+        ('"Django>=5.2.16", "strawberry-graphql>=0.322.2"', "", "dependency-groups"),
+        (
+            '"Django>=5.2.16", "strawberry-graphql>=0.322.2"',
+            SOFT_DEV_GROUP.replace("channels[daphne]", "channels"),
+            r"\[dependency-groups\]\.dev in .* lists no channels\[daphne\]$",
+        ),
+        (
+            '"Django>=5.2.16", "strawberry-graphql>=0.322.2"',
+            SOFT_DEV_GROUP.replace('"djangorestframework>=3.17.0", ', ""),
+            "lists no djangorestframework$",
+        ),
+        (
+            '"Django>=5.2.16", "strawberry-graphql>=0.322.2"',
+            SOFT_DEV_GROUP.replace("cryptography>=44.0.0", "cryptography==44.0.0"),
+            "states no >= floor",
+        ),
     ],
 )
 def test_floor_pins_refuse_a_pyproject_without_a_floor(
     tmp_path: Path,
     dependencies: str,
+    dev_group: str,
     match: str,
 ) -> None:
     pyproject = _write(
         tmp_path / "pyproject.toml",
-        f'[project]\nrequires-python = ">=3.10"\ndependencies = [{dependencies}]\n',
+        f'[project]\nrequires-python = ">=3.10"\ndependencies = [{dependencies}]\n{dev_group}',
     )
 
     with pytest.raises(workspace.WorkspaceError, match=match):
@@ -2432,13 +2476,26 @@ def test_the_floor_pins_are_the_points_build_md_and_the_ci_floor_cell_state() ->
     build = (workspace.REPO_ROOT / "docs" / "builder" / "BUILD.md").read_text(encoding="utf-8")
     stated = re.search(
         r"The supported floor is Django \*\*([^*]+)\*\* on Python \*\*([^*]+)\*\* "
-        r"with strawberry-graphql \*\*([^*]+)\*\*",
+        r"with strawberry-graphql \*\*([^*]+)\*\*, and the soft dependencies at "
+        r"(\S+) \*\*([^*]+)\*\*, (\S+) \*\*([^*]+)\*\*, (\S+) \*\*([^*]+)\*\* "
+        r"and (\S+) \*\*([^*]+)\*\*",
         build,
     )
+    recipe = re.findall(
+        r"^uv pip install --python <scratch>/dsf-floor/bin/python ('.*')$",
+        build,
+        re.MULTILINE,
+    )
+    soft = [(name, pins[name]) for name in workspace.SOFT_FLOOR_PACKAGES]
     node, _lines = _ci_floor_node()
 
     assert stated is not None
-    assert stated.groups() == (pins["Django"], pins["python"], pins["strawberry-graphql"])
+    assert stated.groups()[:3] == (pins["Django"], pins["python"], pins["strawberry-graphql"])
+    assert list(zip(stated.groups()[3::2], stated.groups()[4::2], strict=True)) == soft
+    assert recipe == [
+        f"'django=={pins['Django']}' 'strawberry-graphql=={pins['strawberry-graphql']}'",
+        " ".join(f"'{name}=={version}'" for name, version in soft),
+    ]
     assert (node["django"], node["python"], node["strawberry"]) == (
         pins["Django"],
         pins["python"],
@@ -2452,13 +2509,20 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
     """The floor suite is the ``test`` job's floor node: its install and its coverage-free run.
 
     That job syncs the lock at the floor Python, installs Django over it with
-    ``--upgrade-package Django``, then strawberry-graphql, and runs pytest with
-    ``addopts`` that drop ``--cov``; the suite does each of those against its
-    own virtualenv and only adds ``-p no:cacheprovider``.
+    ``--upgrade-package Django``, then strawberry-graphql, then every soft
+    dependency in one install, and runs pytest with ``addopts`` that drop
+    ``--cov``; the suite does each of those against its own virtualenv and only
+    adds ``-p no:cacheprovider``.
     """
     _node, lines = _ci_floor_node()
     ci_addopts: list[str] = re.findall(r'addopts="(-[^"]*)"', "\n".join(lines))
-    pins = {"python": "3.10", "Django": "5.2.16", "strawberry-graphql": "0.322.2"}
+    pins = {
+        "python": "3.10",
+        "Django": "5.2.16",
+        "strawberry-graphql": "0.322.2",
+        **SOFT_PINS,
+    }
+    soft = [f"{name}=={version}" for name, version in SOFT_PINS.items()]
     venv = tmp_path / "gate-floor"
     python = str(venv / "bin" / "python")
 
@@ -2467,6 +2531,7 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
     assert "uv sync --python ${{ matrix.python }}" in lines
     assert 'uv pip install --upgrade-package Django "Django==${{ matrix.django }}"' in lines
     assert 'uv pip install "strawberry-graphql==${{ matrix.strawberry }}"' in lines
+    assert "uv pip install " + " ".join(f'"{pin}"' for pin in soft) in lines
     pip = [
         "uv",
         "pip",
@@ -2495,6 +2560,7 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
             "Django==5.2.16",
         ],
         [*pip, "strawberry-graphql==0.322.2"],
+        [*pip, *soft],
     ]
     arguments, cell = workspace.GATE_SUITES[workspace.FLOOR_SUITE]
     no_cov = [opts for opts in ci_addopts if "--cov" not in opts]
@@ -2591,7 +2657,7 @@ def _gate_copy_inputs(layout: workspace.Layout, lock: str = "lock v1\n") -> None
     _write(
         layout.gate_dir / "pyproject.toml",
         '[project]\nrequires-python = ">=3.10"\n'
-        'dependencies = ["Django>=5.2.16", "strawberry-graphql>=0.322.2"]\n',
+        'dependencies = ["Django>=5.2.16", "strawberry-graphql>=0.322.2"]\n' + SOFT_DEV_GROUP,
     )
     _write(layout.gate_dir / "uv.lock", lock)
 
@@ -2628,23 +2694,29 @@ def test_the_floor_venv_is_built_once_and_rebuilt_when_its_inputs_move(
     reused = workspace.ensure_floor_venv(layout)
 
     assert built["reused"] is False
-    assert built["pins"] == {"python": "3.10", "Django": "5.2.16", "strawberry-graphql": "0.322.2"}
+    assert built["pins"] == {
+        "python": "3.10",
+        "Django": "5.2.16",
+        "strawberry-graphql": "0.322.2",
+        **SOFT_PINS,
+    }
     assert built["python"] == str(layout.floor_venv / "bin" / "python")
     assert [command[:3] for command, _env in calls] == [
         ["uv", "sync", "--directory"],
         ["uv", "pip", "install"],
         ["uv", "pip", "install"],
+        ["uv", "pip", "install"],
     ]
     assert all(env["UV_PROJECT_ENVIRONMENT"] == str(layout.floor_venv) for _c, env in calls)
     assert reused == {**built, "reused": True}
-    assert len(calls) == 3
+    assert len(calls) == 4
 
     _gate_copy_inputs(layout, lock="lock v2\n")
     rebuilt = workspace.ensure_floor_venv(layout)
 
     assert rebuilt["reused"] is False
     assert rebuilt["key"] != built["key"]
-    assert len(calls) == 6
+    assert len(calls) == 8
     assert not (layout.floor_venv / "lib" / "leftover.py").exists()
 
 
@@ -2658,13 +2730,33 @@ def test_a_floor_pin_move_rebuilds_the_floor_venv(
     _write(
         layout.gate_dir / "pyproject.toml",
         '[project]\nrequires-python = ">=3.10"\n'
-        'dependencies = ["Django>=5.2.17", "strawberry-graphql>=0.322.2"]\n',
+        'dependencies = ["Django>=5.2.17", "strawberry-graphql>=0.322.2"]\n' + SOFT_DEV_GROUP,
     )
 
     rebuilt = workspace.ensure_floor_venv(layout)
 
     assert rebuilt["key"] != built["key"]
-    assert calls[-2][0][-1] == "Django==5.2.17"
+    assert calls[-3][0][-1] == "Django==5.2.17"
+
+
+def test_a_soft_dependency_floor_move_rebuilds_the_floor_venv(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _gate_copy_inputs(layout)
+    calls = _record_installs(monkeypatch, layout)
+    built = workspace.ensure_floor_venv(layout)
+    _write(
+        layout.gate_dir / "pyproject.toml",
+        '[project]\nrequires-python = ">=3.10"\n'
+        'dependencies = ["Django>=5.2.16", "strawberry-graphql>=0.322.2"]\n'
+        + SOFT_DEV_GROUP.replace("djangorestframework>=3.17.0", "djangorestframework>=3.18.0"),
+    )
+
+    rebuilt = workspace.ensure_floor_venv(layout)
+
+    assert rebuilt["key"] != built["key"]
+    assert calls[-1][0][-1] == "djangorestframework==3.18.0"
 
 
 def test_a_failed_floor_build_writes_no_key_so_the_next_gate_rebuilds(
@@ -2683,7 +2775,7 @@ def test_a_failed_floor_build_writes_no_key_so_the_next_gate_rebuilds(
     again = workspace.ensure_floor_venv(layout)
 
     assert again["reused"] is False
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_summarize_suite_reads_summary_collected_and_coverage() -> None:
@@ -4612,7 +4704,7 @@ def test_each_floor_install_holds_the_locks_the_gate_holds(
 
     _ = workspace.ensure_floor_venv(layout, (7, 8))
 
-    assert held == [(7, 8)] * 3
+    assert held == [(7, 8)] * 4
 
 
 def test_a_stopped_gate_runs_no_later_suite_and_ends_by_the_signal(

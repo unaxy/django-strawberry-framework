@@ -88,8 +88,11 @@ Worker-0 commands
         when named on the maintainer's word. The floor suite is CI's floor cell:
         the whole suite, without coverage, in a separate virtualenv at the
         ``requires-python`` floor with ``Django`` and ``strawberry-graphql``
-        pinned to their ``pyproject.toml`` lower bounds, installed the way
-        that cell installs them. Only executing at the floor catches what the
+        pinned to their ``[project].dependencies`` lower bounds and every soft
+        dependency (``channels[daphne]``, ``cryptography``,
+        ``django-debug-toolbar``, ``djangorestframework``) to its
+        ``[dependency-groups].dev`` lower bound, installed the way that cell
+        installs them. Only executing at the floor catches what the
         floor type check cannot see, such as an annotation a 3.10 import
         evaluates. That virtualenv is reused while its key (the install
         commands and the copy's ``pyproject.toml`` and ``uv.lock``) matches,
@@ -403,9 +406,20 @@ FLOOR_SUITE = "floor"
 #: The ``[project].dependencies`` CI's floor cell pins to their ``>=`` lower bound, in the
 #: order that cell installs them; BUILD.md "Floor verification" states the same points.
 FLOOR_PACKAGES = ("Django", "strawberry-graphql")
+#: The soft dependencies (``[dependency-groups].dev`` rows, never in ``[project].dependencies``)
+#: CI's floor cell pins to their ``>=`` lower bound in one install after ``FLOOR_PACKAGES``,
+#: each spelled with the extras its dev row declares, in the order that install names them.
+SOFT_FLOOR_PACKAGES = (
+    "channels[daphne]",
+    "cryptography",
+    "django-debug-toolbar",
+    "djangorestframework",
+)
 #: Written into the floor virtualenv once its build succeeds; a mismatch rebuilds it.
 FLOOR_KEY_NAME = "dsf-floor-key"
-REQUIREMENT_PATTERN = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*([^;]*)")
+REQUIREMENT_PATTERN = re.compile(
+    r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[(?P<extras>[^\]]*)\])?\s*(?P<specifier>[^;]*)",
+)
 
 #: Each gate suite: the command after ``uv run`` (after ``python -m`` in the floor
 #: virtualenv for ``floor``) and the cell it runs in (REVIEW.md "Final gate"). ``sh -ex``
@@ -1459,18 +1473,29 @@ def _normalized(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _project_declarations(
+def _requirement_key(name: str, extras: str | None, *, with_extras: bool) -> str:
+    """Return a requirement's normalized name, with its sorted extras when ``with_extras``."""
+    key = _normalized(name)
+    if with_extras and extras and extras.strip():
+        key += (
+            "[" + ",".join(sorted(_normalized(extra.strip()) for extra in extras.split(","))) + "]"
+        )
+    return key
+
+
+def _floor_declarations(
     loads: Callable[[str], Mapping[str, object]],
     text: str,
-) -> tuple[str, list[str]]:
-    """Return ``[project]``'s ``requires-python`` and ``dependencies`` from ``pyproject`` text.
+) -> tuple[str, list[str], list[str]]:
+    """Return ``requires-python``, ``[project].dependencies`` and the dev group from ``pyproject``.
 
     Raises:
         KeyError: a key is missing.
-        TypeError: ``[project]`` is not a table or ``dependencies`` is not an array.
+        TypeError: a table is not a table or a dependency list is not an array.
 
     """
-    project = loads(text)["project"]
+    document = loads(text)
+    project = document["project"]
     if not _is_json_object(project):
         msg = f"[project] is a {type(project).__name__}, not a table"
         raise TypeError(msg)
@@ -1478,19 +1503,77 @@ def _project_declarations(
     if not _is_json_array(dependencies):
         msg = f"[project].dependencies is a {type(dependencies).__name__}, not an array"
         raise TypeError(msg)
-    return str(project["requires-python"]), [str(requirement) for requirement in dependencies]
+    groups = document["dependency-groups"]
+    if not _is_json_object(groups):
+        msg = f"[dependency-groups] is a {type(groups).__name__}, not a table"
+        raise TypeError(msg)
+    dev = groups["dev"]
+    if not _is_json_array(dev):
+        msg = f"[dependency-groups].dev is a {type(dev).__name__}, not an array"
+        raise TypeError(msg)
+    return (
+        str(project["requires-python"]),
+        [str(requirement) for requirement in dependencies],
+        [str(requirement) for requirement in dev],
+    )
+
+
+def _requirement_parts(name: str) -> tuple[str, str | None]:
+    """Split one of the floor package spellings into its name and extras."""
+    match = REQUIREMENT_PATTERN.match(name)
+    if match is None:
+        msg = f"not a requirement name: {name!r}"
+        raise WorkspaceError(msg)
+    return match["name"], match["extras"]
+
+
+def _lower_bounds(
+    requirements: Sequence[str],
+    names: Sequence[str],
+    *,
+    with_extras: bool,
+    where: str,
+) -> dict[str, str]:
+    """Return each of ``names``' ``>=`` lower bound in ``requirements``, keyed and ordered by ``names``.
+
+    A name matches a requirement by its normalized name, and by its extras too
+    when ``with_extras``, so a dev row that drops an extra the floor install
+    names matches nothing rather than installing without it.
+
+    Raises:
+        WorkspaceError: a name matches no requirement, or one with no ``>=`` bound.
+
+    """
+    wanted = {
+        _requirement_key(*_requirement_parts(name), with_extras=with_extras): name
+        for name in names
+    }
+    found: dict[str, str] = {}
+    for requirement in requirements:
+        match = REQUIREMENT_PATTERN.match(requirement)
+        if match is None:
+            continue
+        key = _requirement_key(match["name"], match["extras"], with_extras=with_extras)
+        if key in wanted:
+            found[wanted[key]] = _lower_bound(match["specifier"], requirement)
+    missing = [name for name in names if name not in found]
+    if missing:
+        msg = f"{where} lists no {', '.join(missing)}"
+        raise WorkspaceError(msg)
+    return {name: found[name] for name in names}
 
 
 def floor_pins(pyproject: Path) -> dict[str, str]:
-    """Return the floor ``python`` and each of ``FLOOR_PACKAGES`` read from ``pyproject``.
+    """Return the floor ``python`` and each floor package's pin, read from ``pyproject``.
 
     ``pyproject.toml`` is the source of the dependency floor (BUILD.md "Floor
-    verification"): ``requires-python``'s ``>=`` bound is the interpreter and
-    each package's ``>=`` bound in ``[project].dependencies`` is the exact
-    point the floor run installs, the same points that section states.
+    verification"): ``requires-python``'s ``>=`` bound is the interpreter,
+    each of ``FLOOR_PACKAGES``' ``>=`` bound in ``[project].dependencies`` and
+    each of ``SOFT_FLOOR_PACKAGES``' in ``[dependency-groups].dev`` is the
+    exact point the floor run installs, the same points that section states.
     """
     try:
-        requires_python, dependencies = _project_declarations(
+        requires_python, dependencies, dev = _floor_declarations(
             tomli.loads,
             pyproject.read_text(encoding="utf-8"),
         )
@@ -1500,19 +1583,26 @@ def floor_pins(pyproject: Path) -> dict[str, str]:
         TypeError,
         tomli.TOMLDecodeError,
     ) as error:
-        msg = f"[project] requires-python / dependencies unreadable from {pyproject}: {error!r}"
+        msg = (
+            "[project] requires-python / dependencies or [dependency-groups].dev "
+            f"unreadable from {pyproject}: {error!r}"
+        )
         raise WorkspaceError(msg) from error
-    pins = {"python": _lower_bound(requires_python, "requires-python")}
-    wanted = {_normalized(name): name for name in FLOOR_PACKAGES}
-    for requirement in dependencies:
-        match = REQUIREMENT_PATTERN.match(requirement)
-        if match and _normalized(match.group(1)) in wanted:
-            pins[wanted[_normalized(match.group(1))]] = _lower_bound(match.group(2), requirement)
-    missing = [name for name in FLOOR_PACKAGES if name not in pins]
-    if missing:
-        msg = f"[project].dependencies in {pyproject} lists no {', '.join(missing)}"
-        raise WorkspaceError(msg)
-    return pins
+    return {
+        "python": _lower_bound(requires_python, "requires-python"),
+        **_lower_bounds(
+            dependencies,
+            FLOOR_PACKAGES,
+            with_extras=False,
+            where=f"[project].dependencies in {pyproject}",
+        ),
+        **_lower_bounds(
+            dev,
+            SOFT_FLOOR_PACKAGES,
+            with_extras=True,
+            where=f"[dependency-groups].dev in {pyproject}",
+        ),
+    }
 
 
 def floor_install_commands(copy: Path, venv: Path, pins: Mapping[str, str]) -> list[list[str]]:
@@ -1520,8 +1610,9 @@ def floor_install_commands(copy: Path, venv: Path, pins: Mapping[str, str]) -> l
 
     The ``test`` job of ``.github/workflows/django.yml`` syncs the lock at the
     floor Python, then replaces Django and strawberry-graphql with the exact
-    floor points; the lock resolves newer releases of both for that Python, so
-    they are installed over the sync rather than beside it.
+    floor points, then every soft dependency in one install; the lock resolves
+    newer releases of each for that Python, so they are installed over the
+    sync rather than beside it.
     """
     python = str(venv / "bin" / "python")
     pip = [
@@ -1553,6 +1644,7 @@ def floor_install_commands(copy: Path, venv: Path, pins: Mapping[str, str]) -> l
             f"{django}=={pins[django]}",
         ],
         [*pip, f"{strawberry}=={pins[strawberry]}"],
+        [*pip, *(f"{name}=={pins[name]}" for name in SOFT_FLOOR_PACKAGES)],
     ]
 
 
