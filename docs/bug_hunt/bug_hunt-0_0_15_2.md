@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 218 done, 142 to do.
+Progress: 219 done, 141 to do.
 
 ## Done
 
@@ -929,6 +929,14 @@ Progress: 218 done, 142 to do.
   relative and `~` manifests resolved, the command's exit code returned and logged, cell / fresh forwarded, a missing or
   directory manifest refused before a copy binds) and through the actor harness (gc refuses while a prove waits for its
   copy; a second prove waits for the first)
+- [x] 166. no defect: the async many-side rows answered the same rows whether `many_resolver` found the prefetch cache
+  or missed it (a miss falls through to the manager), so they pinned neither the lookup key nor the `_check_n1` probe
+  key; the async planned row now asserts its exact SELECT count over a childless venue (a missed lookup re-reads through
+  the target hook), the async consumer-prefetch row also runs under `strictness="raise"`, the sync strictness row also
+  prefetches the reverse FK `repairticket_set`, and one `test_query/conftest.py::record_compiled_sql` recorder serves
+  the async suites; gaps (b)-(d) need no rows: an unhooked reverse M2M miss is an equivalent mutant, the window
+  resolver-key collision needs a second shipped keyset type and is pinned by the async twin plus package key rows, and
+  the C11 hook-order rows are live on a holder mount
 
 ## Outside review of the fixes
 
@@ -969,10 +977,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 166. Fixture gap: the async many-side tests miss a broken prefetch-cache lookup in
-  `types/resolvers.py::many_resolver` (gaps (b)-(d) are optional fixture work, not defects: the
-  reverse many-to-many without `related_name`, the window resolver-key collision (pinned by a two-root-field row) and
-  the C11 hook-order rows (on a test-local schema))
 - [ ] 183. `ruff format` on an explicit `.md` path rewrites its fenced blocks: pyproject's `exclude` does not stop explicit
   paths
 - [ ] 185. WebSocket residual after `1b6a09b1`: the Postgres steady-ping lost-write test has never run (Not defects: a

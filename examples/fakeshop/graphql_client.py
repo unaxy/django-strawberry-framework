@@ -145,6 +145,18 @@ class DeleteAfterAuthorization(Protocol):
         ...
 
 
+class RecordCompiledSql(Protocol):
+    """Record the read statements compiled from now on, optionally only those naming ``table``.
+
+    The ``test_query/conftest.py::record_compiled_sql`` fixture's type: the returned list
+    grows by one statement each time the plain SELECT compiler runs one, in any thread.
+    """
+
+    def __call__(self, table: str = "", /) -> list[str]:
+        """Start recording; every statement when ``table`` is empty."""
+        ...
+
+
 def statement_shapes(sqls: Sequence[str]) -> list[str]:
     """Return each statement's verb, with the table an ``INSERT`` / ``UPDATE`` writes.
 
