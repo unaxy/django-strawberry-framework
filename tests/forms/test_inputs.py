@@ -91,9 +91,10 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import Upload, strawberry_config
 from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.converters import convert_choices_to_enum
-from django_strawberry_framework.utils._narrowing import enum_value
+from django_strawberry_framework.utils._narrowing import enum_value, require
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import InputFieldSpec
+from django_strawberry_framework.utils.relations import is_model_class
 from tests._idioms import ClassReadRaises, module_binding
 from tests._postgres_fields import FakeArrayField
 
@@ -2168,6 +2169,22 @@ class _KeyedRow(models.Model):
         )
 
 
+def _keyed_row_subclass(name: str, **meta: object) -> type[models.Model]:
+    """A subclass of ``_KeyedRow`` declaring only ``meta``.
+
+    The parent's uniqueness declarations stay on ``_KeyedRow._meta``.
+    """
+    meta_class = type("Meta", (), {"app_label": "test_forms_choice_keys", **meta})
+    return require(
+        type(name, (_KeyedRow,), {"__module__": __name__, "Meta": meta_class}),
+        is_model_class,
+    )
+
+
+_KeyedRowProxy = _keyed_row_subclass("_KeyedRowProxy", proxy=True)
+_KeyedRowChild = _keyed_row_subclass("_KeyedRowChild", managed=False)
+
+
 def _loan_form(
     to_field_name: str | None,
     queryset: models.QuerySet[Book] | None = None,
@@ -2231,13 +2248,32 @@ def test_require_readable_choice_keys_admits_every_spelling_of_the_primary_key(
         ),
         pytest.param(_KeyedRow.objects.all(), "together_code", id="unique-together-alone"),
         pytest.param(_KeyedRow.objects.all(), "constraint_code", id="unique-constraint-alone"),
+        pytest.param(
+            _KeyedRowProxy.objects.all(),
+            "together_code",
+            id="proxy-parent-unique-together-alone",
+        ),
+        pytest.param(
+            _KeyedRowProxy.objects.all(),
+            "constraint_code",
+            id="proxy-parent-unique-constraint-alone",
+        ),
+        pytest.param(
+            _KeyedRowChild.objects.all(),
+            "constraint_code",
+            id="multi-table-parent-unique-constraint-alone",
+        ),
     ],
 )
 def test_require_readable_choice_keys_admits_a_column_unique_on_its_own(
     queryset: models.QuerySet[models.Model],
     to_field_name: str,
 ) -> None:
-    """A concrete column of the target, by name or attname, that is unique alone is readable."""
+    """A concrete column of the target, by name or attname, that is unique alone is readable.
+
+    A proxy or multi-table child target is unique through its parent's declarations, which
+    Django keeps on the parent's ``_meta``.
+    """
     require_readable_choice_keys(_plain_choice_form(queryset, to_field_name))
 
 
@@ -2310,13 +2346,19 @@ def test_require_readable_choice_keys_refuses_a_non_unique_key_on_a_text_keyed_m
         require_readable_choice_keys(PrintingForm)
 
 
+@pytest.mark.parametrize("target", [_KeyedRow, _KeyedRowProxy], ids=["concrete", "proxy"])
 @pytest.mark.parametrize("to_field_name", ["pair_left", "partial_code"])
 def test_require_readable_choice_keys_refuses_a_column_unique_only_with_others(
+    target: type[models.Model],
     to_field_name: str,
 ) -> None:
-    """A column unique only beside another, or only where a condition holds, is refused."""
+    """A column unique only beside another, or only where a condition holds, is refused.
+
+    Through a proxy too: the parent's declarations are read, and they do not make either
+    column unique alone.
+    """
     with pytest.raises(ConfigurationError, match="which is not a unique concrete field"):
-        require_readable_choice_keys(_plain_choice_form(_KeyedRow.objects.all(), to_field_name))
+        require_readable_choice_keys(_plain_choice_form(target.objects.all(), to_field_name))
 
 
 def test_require_readable_choice_keys_reads_a_column_less_field_target_from_its_queryset() -> None:

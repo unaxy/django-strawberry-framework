@@ -585,17 +585,24 @@ def choice_key_field(model: type[models.Model], key: str | None) -> ConcreteFiel
 
 
 def _names_one_row(model: type[models.Model], field: ConcreteField) -> bool:
-    """Return whether ``field`` alone is unique on ``model``, as Django's fields.E311 asks.
+    """Return whether ``field`` alone is unique on ``model``: Django's fields.E311 test, extended.
 
     ``unique=True`` (a primary key included), a one-field ``unique_together`` entry, or a
     ``UniqueConstraint`` over that field alone with no condition and no expression
-    (``Options.total_unique_constraints``).
+    (``Options.total_unique_constraints``). E311 reads only the target's own declarations;
+    this extends it to the declarations the target inherits, which Django keeps on the
+    declaring class, so a proxy or multi-table child is unique through its parent's.
     """
     if field.unique:
         return True
     alone = ({field.name}, {field.attname})
-    return any(set(group) in alone for group in model._meta.unique_together) or any(
-        set(constraint.fields) in alone for constraint in model._meta.total_unique_constraints
+    return any(
+        any(set(group) in alone for group in declarer._meta.unique_together)
+        or any(
+            set(constraint.fields) in alone
+            for constraint in declarer._meta.total_unique_constraints
+        )
+        for declarer in (model, *model._meta.all_parents)
     )
 
 
@@ -664,7 +671,8 @@ def require_readable_choice_keys(
     admitted. ``to_field_name`` must be unset, ``""``, ``"pk"``, or a concrete field of the
     target, by name or attname, that is unique on its own: ``unique=True``, a one-field
     ``unique_together`` entry, or a ``UniqueConstraint`` over that field alone with no
-    condition (Django's fields.E311 test for a ``ForeignKey.to_field``). A lookup path, an
+    condition (Django's fields.E311 test for a ``ForeignKey.to_field``, extended to the
+    declarations the target inherits; E311 reads only the target's own). A lookup path, an
     annotation, a property, a relation that is not a column, an unknown name, or a column
     two rows may share is a ``ConfigurationError``: the single field's lookup would raise
     ``MultipleObjectsReturned`` or resolve another row, and the multiple field would link

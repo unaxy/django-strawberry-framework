@@ -43,15 +43,16 @@ and the load-bearing invariants this module owns:
   an exception at the GraphQL boundary, each error keyed to the GraphQL input
   field the client sent (the model field name re-keyed through
   ``utils/errors.py::build_error_key_map``; a field the input does not expose
-  keeps its model field name); on update, ``exclude`` is the unprovided
-  field set MINUS any unprovided field co-participating in a constraint with a
-  provided field. ``full_clean()`` runs ``validate_constraints``,
-  so a ``UniqueConstraint`` duplicate is caught here as a ``ValidationError``
-  before ``save()``; a multi-field constraint keys to the ``"__all__"``
-  sentinel. A concurrent-race ``IntegrityError`` at ``save()``
-  maps to the same envelope as a documented best-effort fallback: a create
-  INSERTs (``save_new_row``), so a row committed under a client-assigned key
-  between the check and the save is that envelope, never overwritten.
+  keeps its model field name); ``clean_fields()`` / ``clean()`` exclude every
+  unprovided field, while ``validate_unique()`` / ``validate_constraints()``
+  exclude the unprovided field set MINUS any unprovided field co-participating in
+  a check with a provided field (``CleanExcludes``), so a ``UniqueConstraint``
+  duplicate or a failed ``CheckConstraint`` is caught here as a ``ValidationError``
+  before ``save()``; a multi-field constraint keys to the ``"__all__"`` sentinel. A
+  concurrent-race ``IntegrityError`` at ``save()`` maps to the same envelope as a
+  documented best-effort fallback: a create INSERTs (``save_new_row``), so a row
+  committed under a client-assigned key between the check and the save is that
+  envelope, never overwritten.
 - **An update UPDATEs** (``save_located_row`` inside
   ``forced_save_or_field_errors``, shared by the model and ``ModelForm``
   flavors): a located row a concurrent transaction deleted after the locate is
@@ -94,9 +95,18 @@ import datetime
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
-from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Model, ProtectedError, RestrictedError
+from django.db.models import (
+    BaseConstraint,
+    F,
+    GeneratedField,
+    Model,
+    ProtectedError,
+    Q,
+    RestrictedError,
+)
+from django.db.models.constants import LOOKUP_SEP
 from django.utils import timezone
 from graphql import GraphQLError, GraphQLInputObjectType
 
@@ -113,9 +123,11 @@ from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_exact_dict,
     is_exact_pair,
+    is_str,
     list_of,
     pk_of,
     read_attr,
+    require,
     require_instance,
 )
 from django_strawberry_framework.utils.errors import (
@@ -183,7 +195,7 @@ from .operations import operation_takes_id
 from .permissions import _require_sync_bool_auth_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
     from typing import Protocol, TypeAlias, TypeVar
 
     from django.db import models
@@ -220,11 +232,11 @@ if TYPE_CHECKING:
     _M2MAssignments: TypeAlias = list[tuple[str, object]]
     # The model ``decode_step`` product: ``(target, m2m_assignments, exclude)``, plus the
     # captured ``excluded_values`` when the bind stashed an ``EXCLUDED`` spec.
-    _ModelDecoded: TypeAlias = tuple[models.Model, _M2MAssignments, list[str]]
+    _ModelDecoded: TypeAlias = tuple[models.Model, _M2MAssignments, "CleanExcludes"]
     _ModelDecodedWithExcluded: TypeAlias = tuple[
         models.Model,
         _M2MAssignments,
-        list[str],
+        "CleanExcludes",
         dict[str, object],
     ]
 
@@ -269,6 +281,22 @@ if TYPE_CHECKING:
 # recourse is to make the target hook sync. The sentence is single-sourced across
 # the three write flavors via ``sync_pipeline_recourse`` (spec-039).
 _MUTATION_ASYNC_RECOURSE = sync_pipeline_recourse("DjangoMutation")
+
+
+@dataclass(frozen=True)
+class CleanExcludes:
+    """The two ``exclude`` sets the model write validates a decoded row with (spec-036 step 4).
+
+    ``fields`` (every model field the input did not provide) is what ``clean_fields()``
+    and ``clean()`` skip: an unprovided column keeps its stored value or its model
+    default and is not validated. ``checks`` is ``fields`` minus every unprovided
+    member of a check a provided field joins (``_unprovided_exclude``), what
+    ``validate_unique()`` and ``validate_constraints()`` skip, so those checks still
+    run against the row.
+    """
+
+    fields: list[str]
+    checks: list[str]
 
 
 @dataclass(frozen=True)
@@ -888,7 +916,7 @@ def _provided_attr_names(
     for a scalar literally named ``<x>_id``. A blind string-suffix strip
     (``attr[:-3] if attr.endswith("_id")``) would mangle
     ``library.TaggedItem.object_id`` to ``object``, so the real scalar field would
-    read as unprovided, be added to the ``full_clean(exclude=...)`` set, and skip
+    read as unprovided, be added to both ``CleanExcludes`` sets, and skip
     validation - surfacing later as a mis-labeled ``IntegrityError``. Scalar attrs
     (including any ending in ``_id``) therefore stay under their real name.
     """
@@ -900,51 +928,71 @@ def _provided_attr_names(
     return names
 
 
+def _clean_excludes(model: type[models.Model], provided_attrs: set[str]) -> CleanExcludes:
+    """Return the ``clean_fields`` and the uniqueness / constraint excludes for ``provided_attrs``."""
+    return CleanExcludes(
+        fields=sorted(_column_field_names(model) - provided_attrs),
+        checks=_unprovided_exclude(model, provided_attrs),
+    )
+
+
+def _column_field_names(model: type[models.Model]) -> set[str]:
+    """Return the name of every field of ``model`` that carries a column."""
+    return {field.name for field in model._meta.get_fields() if hasattr(field, "column")}
+
+
 def _unprovided_exclude(model: type[models.Model], provided_attrs: set[str]) -> list[str]:
-    """Compute the ``full_clean(exclude=...)`` set for a partial update.
+    """Compute the ``validate_unique`` / ``validate_constraints`` exclude for a decoded row.
 
     The set of model fields the ``PartialInput`` did NOT provide, **minus any
-    unprovided field co-participating in a ``UniqueConstraint`` /
-    ``unique_together`` / ``unique`` check with a *provided* field**. So a
-    ``name``-only update still validates ``unique_item_per_category`` (the
-    unprovided ``category`` is co-constrained with the provided ``name``, so it is
-    NOT excluded), while a genuinely-unrelated unprovided field stays excluded
-    (DRF ``partial=True`` parity - an unsent, unconstrained field never raises a
-    spurious ``FieldError``).
+    unprovided field co-participating in a constraint, a ``unique_together`` entry
+    or a ``unique`` check with a *provided* field**. So a ``name``-only update still
+    validates ``unique_item_per_category`` (the unprovided ``category`` is
+    co-constrained with the provided ``name``, so it is NOT excluded), while a
+    genuinely-unrelated unprovided field stays excluded (DRF ``partial=True`` parity -
+    an unsent, unconstrained field never raises a spurious ``FieldError``).
 
-    Reads ``model._meta.constraints`` (``UniqueConstraint`` only),
-    ``model._meta.unique_together``, and per-field ``field.unique`` to find the
-    constraint groups; a group with a provided member pins its other members out
-    of the exclude set.
+    The groups come from ``_constraint_groups``: every constraint and
+    ``unique_together`` entry declared on the model or a parent, and per-field
+    ``field.unique``; a group with a provided member pins its other members out of
+    the exclude set.
     """
-    all_field_names = {
-        field.name for field in model._meta.get_fields() if hasattr(field, "column")
-    }
-    unprovided = all_field_names - provided_attrs
+    unprovided = _column_field_names(model) - provided_attrs
 
     keep_validating: set[str] = set()
-    for group in _unique_constraint_groups(model):
+    for group in _constraint_groups(model):
         if group & provided_attrs:
             keep_validating |= group
 
     return sorted(unprovided - keep_validating)
 
 
-def _unique_constraint_groups(model: type[models.Model]) -> list[set[str]]:
-    """Return every uniqueness group's field-name set (spec-036).
+def _constraint_groups(model: type[models.Model]) -> list[set[str]]:
+    """Return the field-name set of every check ``full_clean`` runs for a row (spec-036).
 
-    A group is the set of fields that participate in one uniqueness check: each
-    ``UniqueConstraint`` in ``Meta.constraints``, each ``Meta.unique_together``
-    tuple, and each single-field ``field.unique`` column (a 1-element group). The
-    exclude carve-out keeps any unprovided member of a group whose other members
+    A group is the set of fields that participate in one check: each constraint
+    (``UniqueConstraint``, ``CheckConstraint``, or any ``BaseConstraint`` reading the
+    same attributes) and each ``unique_together`` tuple declared on ``model`` or any of
+    its parents (Django keeps a concrete model's declarations on that model's ``_meta``
+    and ``Model.get_constraints`` / ``_get_unique_checks`` read them from every parent,
+    so a proxy and a multi-table child are validated against them), each field's
+    ``unique_for_date`` / ``unique_for_month`` / ``unique_for_year`` pair (the field
+    and the date field it names, skipped by ``_get_unique_checks`` when either is
+    excluded), and each single-field ``field.unique`` column (a 1-element group). A
+    constraint's group is
+    every field its ``validate`` tests against ``exclude`` (``_constraint_members``).
+    The exclude carve-out keeps any unprovided member of a group whose other members
     were provided.
     """
     groups: list[set[str]] = []
-    for constraint in model._meta.constraints:
-        fields = read_attr(constraint, "fields", None)
-        if fields:
-            groups.append({str(name) for name in list_of(fields)})
-    groups.extend(set(together) for together in model._meta.unique_together)
+    for declarer in (model, *model._meta.all_parents):
+        groups.extend(
+            _constraint_members(declarer, constraint) for constraint in declarer._meta.constraints
+        )
+        groups.extend(
+            _member_field_names(declarer, together) for together in declarer._meta.unique_together
+        )
+        groups.extend(_date_check_groups(declarer))
     groups.extend(
         {field.name}
         for field in model._meta.get_fields()
@@ -954,6 +1002,99 @@ def _unique_constraint_groups(model: type[models.Model]) -> list[set[str]]:
         and not cast("ConcreteField", field).primary_key
     )
     return groups
+
+
+def _date_check_groups(declarer: type[models.Model]) -> list[set[str]]:
+    """Return ``{field, date field}`` for each ``unique_for_date`` / ``_month`` / ``_year`` declaration.
+
+    Read from ``declarer``'s own local fields, as ``Model._get_unique_checks`` reads them
+    per class; it skips the date check when ``exclude`` names either field.
+    """
+    groups: list[set[str]] = []
+    for field in declarer._meta.local_fields:
+        for option in ("unique_for_date", "unique_for_month", "unique_for_year"):
+            date_field = read_attr(field, option, None)
+            if is_str(date_field) and date_field:
+                groups.append({field.name, date_field})
+    return groups
+
+
+def _constraint_members(declarer: type[models.Model], constraint: BaseConstraint) -> set[str]:
+    """Return the field names ``constraint.validate`` skips the constraint over when excluded.
+
+    Django's constraints return from ``validate`` without checking when ``exclude``
+    names any of their ``fields`` (``UniqueConstraint``), any column their
+    ``expressions`` reference (``UniqueConstraint``; postgres ``ExclusionConstraint``,
+    whose entries are ``(expression, operator)`` pairs and whose expression may be a
+    field name), or any column their ``condition`` references (``UniqueConstraint``,
+    ``CheckConstraint``, ``ExclusionConstraint``; on Django 5.2 a condition over an
+    excluded column raises ``FieldError``, which ``validate`` swallows the same way); a
+    generated member counts every column its expression references. Each name is the
+    field's ``name`` (an attname or ``pk`` resolves to its field), the spelling
+    ``exclude`` carries.
+    """
+    references: list[str] = [
+        str(name) for name in list_of(read_attr(constraint, "fields", None) or ())
+    ]
+    for entry in list_of(read_attr(constraint, "expressions", None) or ()):
+        expression = entry[0] if truth.is_instance(entry, tuple) else entry
+        if is_str(expression):
+            references.append(expression.split(LOOKUP_SEP, 1)[0])
+        else:
+            references.extend(_expression_references(expression))
+    condition = read_attr(constraint, "condition", None)
+    if condition is not None:
+        references.extend(_expression_references(condition))
+    return _member_field_names(declarer, references)
+
+
+def _expression_references(expression: object) -> list[str]:
+    """Return the first path segment of every column ``expression`` references.
+
+    The public-API walk of ``Model._get_expr_references``: a ``Q`` contributes each
+    lookup's leading name and walks each lookup value and nested ``Q``; an ``F``
+    contributes its leading name; any other expression walks its source expressions.
+    """
+    references: list[str] = []
+    pending: list[object] = [expression]
+    while pending:
+        node = pending.pop()
+        if truth.is_instance(node, Q):
+            for child in node.children:
+                if truth.is_instance(child, tuple):
+                    lookup, value = child
+                    references.append(str(lookup).split(LOOKUP_SEP, 1)[0])
+                    pending.append(value)
+                else:
+                    pending.append(child)
+        elif truth.is_instance(node, F):
+            name = require(read_attr(node, "name"), is_str)
+            references.append(name.split(LOOKUP_SEP, 1)[0])
+        else:
+            source = read_attr(node, "get_source_expressions", None)
+            if callable(source):
+                pending.extend(list_of(source()))
+    return references
+
+
+def _member_field_names(declarer: type[models.Model], names: Iterable[str]) -> set[str]:
+    """Resolve constraint member ``names`` on ``declarer`` to field names, generated inputs added.
+
+    ``pk`` names ``declarer``'s primary key and an attname its field (``Options.get_field``
+    answers both); a ``GeneratedField`` member adds every column its expression
+    references, as ``validate`` recurses into it.
+    """
+    members: set[str] = set()
+    pending = list(names)
+    while pending:
+        name = pending.pop()
+        field = declarer._meta.pk if name == "pk" else declarer._meta.get_field(name)
+        if field.name in members:
+            continue
+        members.add(field.name)
+        if truth.is_instance(field, GeneratedField):
+            pending.extend(_expression_references(read_attr(field, "expression")))
+    return members
 
 
 def _assign_m2m(instance: models.Model, m2m_assignments: _M2MAssignments) -> None:
@@ -1152,12 +1293,11 @@ def _model_decode_step(
     None``) or sets the provided attrs on the located row (update). Returns
     ``(constructed_instance, m2m_assignments, exclude)`` for the write step, or a
     ``StepFailure`` on a decode failure (the skeleton maps it to a
-    null-object payload). ``exclude`` is the exclude-aware unprovided-field list
-    for BOTH create and update - create excludes unprovided fields so their model
-    defaults are not validated (mirroring ``Model.objects.create()``), update
-    excludes unprovided fields so an unsent column keeps its stored value, both
-    keep validating any unprovided field co-participating in a unique constraint
-    with a provided one.
+    null-object payload). ``exclude`` is the ``CleanExcludes`` pair for BOTH create
+    and update - create excludes unprovided fields so their model defaults are not
+    validated (mirroring ``Model.objects.create()``), update excludes unprovided fields
+    so an unsent column keeps its stored value, both keep running every uniqueness and
+    constraint check an unprovided field joins with a provided one.
 
     Specs with kind ``EXCLUDED`` are the spec-040 D6 exclusion seam (the register
     flavor's ``password``): those provided attrs are captured OUT of the model
@@ -1193,7 +1333,7 @@ def _model_decode_step(
     # The exclusion seam preserves the provided-marker: an excluded
     # input WAS provided, so it still counts for the exclude calculation.
     provided |= {model_fields[attr].name for attr in excluded_values}
-    exclude = _unprovided_exclude(model, provided)
+    exclude = _clean_excludes(model, provided)
     if any(spec.kind == EXCLUDED for spec in specs):
         return target, m2m_assignments, exclude, excluded_values
     return target, m2m_assignments, exclude
@@ -1209,7 +1349,7 @@ def _model_write_step(
     """Run the model ``write_step``: ``full_clean`` -> ``save`` -> M2M.
 
     From validation onward create and update run an IDENTICAL tail (the prior
-    ``_validate_save_assign_refetch_payload``): ``full_clean(exclude=...)`` mapped to
+    ``_validate_save_assign_refetch_payload``): the two-exclude ``full_clean`` sequence mapped to
     the envelope, ``save()`` (a race ``IntegrityError`` or a consumer save-time
     ``ValidationError`` into the envelope), then the M2M ``.set(...)`` assignment
     (the same two mappings). ``specs`` are the request's published specs
@@ -1639,30 +1779,48 @@ def authorize_or_raise(
 def _full_clean_or_field_errors(
     instance: models.Model,
     *,
-    exclude: list[str] | None,
+    exclude: CleanExcludes,
     error_key_map: Callable[[], ErrorKeyMap],
 ) -> list[FieldError] | None:
-    """Run ``full_clean(exclude=...)``; return the mapped ``FieldError``s on failure else ``None``.
+    """Run ``Model.full_clean``'s sequence with two excludes; return the mapped errors or ``None``.
 
-    ``full_clean()`` runs ``validate_constraints()``, so a ``UniqueConstraint``
-    duplicate is caught here as a ``ValidationError`` BEFORE ``save()``;
-    its field-keyed messages populate the envelope (multi-field constraint ->
-    ``"__all__"`` sentinel), each model field name re-keyed to the GraphQL input
-    field the client sent through ``error_key_map()`` (``_model_error_key_map``:
-    ``category`` or ``category_id`` -> ``categoryId``; a field the input does not expose
-    keeps its model field name). The key map is built only on this failure path. ``exclude`` is the
-    exclude-aware unprovided-field list for BOTH create and update -
-    ``_model_decode_step`` computes it either way, so the model path never passes
-    ``None``; the parameter stays optional for a caller that validates every
-    field. Returns the
-    ``list[FieldError]`` (the model ``write_step`` short-circuits to a null-object
-    payload through the shared skeleton) so the payload build stays single-sited in
-    ``run_write_pipeline_sync``.
+    ``instance.full_clean(exclude=exclude.fields, validate_unique=False,
+    validate_constraints=False)`` runs ``clean_fields()`` and ``clean()`` (a model's own
+    ``full_clean`` override included) with every unprovided field excluded, then
+    ``validate_unique()`` and ``validate_constraints()`` run with ``exclude.checks``
+    plus every field an earlier step failed, exactly as ``Model.full_clean`` adds them,
+    and the errors merge through ``ValidationError.update_error_dict`` in the order
+    ``full_clean`` merges them. So a check a provided field joins is validated against
+    the row while an unprovided co-member's own value is never field-validated (a
+    column ``save()`` fills, or a stored value outside the field's current choices).
+    A ``UniqueConstraint`` duplicate or failed ``CheckConstraint`` is therefore caught
+    here as a ``ValidationError`` BEFORE ``save()``; its field-keyed messages populate
+    the envelope (multi-field constraint -> ``"__all__"`` sentinel), each model field
+    name re-keyed to the GraphQL input field the client sent through
+    ``error_key_map()`` (``_model_error_key_map``: ``category`` or ``category_id`` ->
+    ``categoryId``; a field the input does not expose keeps its model field name). The
+    key map is built only on this failure path. Returns the ``list[FieldError]`` (the
+    model ``write_step`` short-circuits to a null-object payload through the shared
+    skeleton) so the payload build stays single-sited in ``run_write_pipeline_sync``.
     """
+    errors: dict[str, list[ValidationError]] = {}
     try:
-        instance.full_clean(exclude=exclude)
+        instance.full_clean(
+            exclude=exclude.fields,
+            validate_unique=False,
+            validate_constraints=False,
+        )
     except ValidationError as exc:
-        return validation_error_to_field_errors(exc, error_key_map())
+        errors = exc.update_error_dict(errors)
+    checks = set(exclude.checks)
+    for validate in (instance.validate_unique, instance.validate_constraints):
+        checks |= {name for name in errors if name != NON_FIELD_ERRORS}
+        try:
+            validate(exclude=checks)
+        except ValidationError as exc:
+            errors = exc.update_error_dict(errors)
+    if errors:
+        return validation_error_to_field_errors(ValidationError(errors), error_key_map())
     return None
 
 

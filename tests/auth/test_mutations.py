@@ -106,7 +106,11 @@ from django_strawberry_framework.mutations.inputs import (
     _materialized_names,
     mutation_input_field_specs,
 )
-from django_strawberry_framework.mutations.resolvers import StepFailure, _model_decode_step
+from django_strawberry_framework.mutations.resolvers import (
+    CleanExcludes,
+    StepFailure,
+    _model_decode_step,
+)
 from django_strawberry_framework.mutations.sets import _mutation_registry
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import (
@@ -1830,8 +1834,10 @@ def test_exclusion_seam_captures_password_and_preserves_the_provided_marker() ->
     assert m2m_assignments == []
     # ...while the exclude calculation still counts ``password`` as PROVIDED
     # (an unprovided column like ``email`` is excluded; ``password`` is not).
-    assert "password" not in exclude
-    assert "email" in exclude
+    assert "password" not in exclude.fields
+    assert "password" not in exclude.checks
+    assert "email" in exclude.fields
+    assert "email" in exclude.checks
 
 
 def test_model_decode_step_without_exclusion_keeps_the_historical_three_tuple() -> None:
@@ -1896,7 +1902,7 @@ def test_register_write_step_none_password_defense_in_depth() -> None:
     decoded: _RegisterDecoded = (
         user,
         [],
-        [],
+        CleanExcludes(fields=[], checks=[]),
         None,
     )
     failure = _register_write_step(DjangoMutation, None, decoded)
@@ -1958,7 +1964,7 @@ def test_register_write_step_non_str_password_defense_in_depth(bad_password: obj
     decoded: _RegisterDecoded = (
         user,
         [],
-        [],
+        CleanExcludes(fields=[], checks=[]),
         bad_password,
     )
     failure = _register_write_step(DjangoMutation, None, decoded)

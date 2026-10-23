@@ -125,8 +125,8 @@ if TYPE_CHECKING:
     )
 
     # The register decode product: the constructed (unsaved) user, the M2M
-    # replace-sets, the ``full_clean`` exclude list, and the captured raw password.
-    _RegisterDecoded: TypeAlias = tuple[_User, _M2MAssignments, list[str], object]
+    # replace-sets, the ``full_clean`` excludes, and the captured raw password.
+    _RegisterDecoded: TypeAlias = tuple[_User, _M2MAssignments, resolvers.CleanExcludes, object]
 
     class _AuthLedgerEntry(Protocol):
         """One auth-ledger declaration (a fixed-surface holder or the register rider)."""
@@ -1227,7 +1227,7 @@ def _register_decode_step(
     # The rider's model is ``get_user_model()`` and its bind stashed the ``EXCLUDED``
     # password spec, so the decode answers the user plus the captured values.
     user, m2m_assignments, exclude, excluded_values = cast(
-        "tuple[_User, _M2MAssignments, list[str], dict[str, object]]",
+        "tuple[_User, _M2MAssignments, resolvers.CleanExcludes, dict[str, object]]",
         decoded,
     )
     return user, m2m_assignments, exclude, excluded_values.get("password")

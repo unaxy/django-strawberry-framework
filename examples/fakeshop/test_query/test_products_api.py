@@ -1004,9 +1004,10 @@ def test_update_item_partial_collision_on_unique_constraint_changing_only_name()
     Two ``Item``s ``A`` / ``B`` under the SAME category; ``updateItem`` on ``A``
     changing only ``name`` -> ``B``. The unchanged (unprovided) ``category``
     co-participates in the composite constraint with the provided ``name``, so it is
-    NOT dropped from the ``full_clean(exclude=...)`` set - the collision is caught
-    before ``save()`` as a ``"__all__"``-keyed ``FieldError``, never an
-    ``IntegrityError``. ``A``'s name is unchanged in the DB.
+    NOT dropped from the ``validate_unique`` / ``validate_constraints`` exclude - the
+    collision is caught
+    before ``save()`` as Django's ``"__all__"``-keyed ``unique_together`` error, never
+    the database's generic ``constraint`` envelope. ``A``'s name is unchanged in the DB.
     """
     create_users(1)
     seed_data(1)
@@ -1025,8 +1026,13 @@ def test_update_item_partial_collision_on_unique_constraint_changing_only_name()
     assert "errors" not in payload, payload
     result = json_at(payload, "data", "updateItem")
     assert json_at(result, "node") is None
-    assert len(json_list(result, "errors")) == 1
-    assert json_at(result, "errors", 0, "field") == "__all__"
+    assert json_list(result, "errors") == [
+        {
+            "field": "__all__",
+            "messages": ["Item with this Category and Name already exists."],
+            "codes": ["unique_together"],
+        },
+    ]
     item_a.refresh_from_db()
     assert item_a.name == "A"
 
@@ -5488,7 +5494,7 @@ _SAVE_REJECTED_ROWS: dict[str, _SaveRejectedRow] = {
         ),
         "change_item",
         "update",
-        16,
+        15,
     ),
     "deleteItem": _SaveRejectedRow(
         _save_rejected_query("deleteItem", "$id: ID!", "id: $id"),
@@ -5632,7 +5638,7 @@ def test_item_save_time_validation_error_returns_the_name_keyed_envelope(mutatio
 #: the transaction implicitly, so only SQLite's reaches the wrapper.
 _ASYNC_SAVE_REJECTED_QUERIES: dict[str, int] = {
     "createItem": 8,
-    "updateItem": 12,
+    "updateItem": 11,
     "deleteItem": 8,
     "createItemViaForm": 9,
     "createItemViaSerializer": 11,
@@ -6595,7 +6601,7 @@ def _stored_item(item_pk: int | None) -> tuple[list[tuple[str, str, int]], int]:
     [
         pytest.param(
             "updateItem",
-            ["SELECT", "SELECT", *_FORCED_UPDATE_CONFLICT],
+            ["SELECT", *_FORCED_UPDATE_CONFLICT],
             id="updateItem",
         ),
         pytest.param(
@@ -6672,10 +6678,11 @@ def test_update_of_an_item_deleted_after_authorization_is_conflict_over_http(
 # A step failure on a located row is checked against the row before it is answered: the
 # ``Category`` delete below cascades to the ``Item`` being updated, so an error from the
 # decode or validation that ran after it (the form re-reading the omitted category's stored
-# key, ``full_clean`` validating it as a co-member of ``unique_item_per_category``, the
-# relation lookup of the named category, DRF's ``UniqueTogetherValidator`` reading the
-# vanished row's category) describes a row that no longer exists, and every flavor answers
-# ``conflict`` instead. A category deleted while the item survives keeps its own answer.
+# key, the relation lookup of the named category, DRF's ``UniqueTogetherValidator`` reading
+# the vanished row's category) describes a row that no longer exists, and every flavor
+# answers ``conflict`` instead. The model flavor never field-validates an omitted category,
+# so its omitting update reaches the write, whose zero-row ``UPDATE`` answers ``conflict``.
+# A category deleted while the item survives keeps its own answer.
 
 #: Every ``Item`` update mutation -> its partial input type.
 _ITEM_UPDATE_RACE_INPUTS = {
@@ -6742,7 +6749,6 @@ _ITEM_REFUSED_TAIL = ["ROLLBACK", "RELEASE", "RELEASE"]
 @pytest.mark.parametrize(
     ("mutation", "shape", "category_reads"),
     [
-        pytest.param("updateItem", "omit", 1, id="updateItem-omit"),
         pytest.param("updateItem", "names", 1, id="updateItem-names"),
         pytest.param("updateItemViaForm", "omit", 1, id="updateItemViaForm-omit"),
         pytest.param("updateItemViaForm", "names", 1, id="updateItemViaForm-names"),
@@ -6800,6 +6806,46 @@ def test_item_update_whose_category_delete_cascaded_to_the_row_is_conflict_over_
         *['"products_category"'] * category_reads,
         '"products_item"',
     ]
+    assert (_stored_item(item.pk), models.Category.objects.filter(pk=category.pk).count()) == (
+        before
+    )
+
+
+@pytest.mark.django_db
+def test_item_update_leaving_out_a_category_whose_delete_cascaded_to_the_row_is_conflict_over_http(
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """A model-flavor update leaving out ``category`` reaches the write and answers ``conflict``.
+
+    The stand-in deletes the item's category after authorization, and the ``CASCADE`` takes
+    the item with it. The input leaves ``category`` out, so ``clean_fields`` never looks the
+    deleted category up; ``unique_item_per_category``, which the provided ``name`` joins,
+    runs against the loaded row (the first ``products_item`` read), the ``UPDATE`` finds no
+    row, and the probe (the last read) answers ``conflict`` on ``id``. The transaction rolls
+    back: the item, its entries and its category are stored as before.
+    """
+    seed_data(1)
+    create_users(1)
+    item, category, other = _item_race_categories()
+    before = (_stored_item(item.pk), models.Category.objects.filter(pk=category.pk).count())
+    delete_after_authorization(
+        _item_race_mutation("updateItem"),
+        lambda: models.Category._base_manager.filter(pk=category.pk).delete(),
+    )
+
+    result, sql = _post_item_race("updateItem", item, _item_race_input("omit", category, other))
+
+    assert result == {"node": None, "errors": _CONFLICT_ERRORS}
+    assert statement_shapes_after_last_delete(sql) == [
+        "SELECT",
+        "SAVEPOINT",
+        'UPDATE "products_item"',
+        "ROLLBACK",
+        "RELEASE",
+        "SELECT",
+        *_ITEM_REFUSED_TAIL,
+    ]
+    assert select_tables_after_last_delete(sql) == ['"products_item"', '"products_item"']
     assert (_stored_item(item.pk), models.Category.objects.filter(pk=category.pk).count()) == (
         before
     )

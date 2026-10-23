@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 199 done, 138 to do.
+Progress: 200 done, 138 to do.
 
 ## Done
 
@@ -796,6 +796,17 @@ Progress: 199 done, 138 to do.
   parent now refuse: a `FileField` over text or a `CharField` over a file column left out of an update-only input
   (inert there), and a custom widget that reads `files` without subclassing `forms.FileInput` (remedy: subclass it).
   Mutations M1-M7 red
+- [x] 303. A partial update or create over a `DjangoMutation` skipped Django's uniqueness and constraint checks a
+  provided field joined when the declaration sat on a parent (a proxy, a proxy of a proxy, a multi-table child, a proxy
+  of one), when a `UniqueConstraint`'s condition or expressions named the unprovided column, for every
+  `CheckConstraint` reading one, and for `unique_for_date` / `_month` / `_year`; the duplicate reached the database and
+  answered the generic `constraint` envelope (not a raw `IntegrityError`), or was saved silently for `unique_for_*`:
+  fixed, `mutations/resolvers.py::_constraint_groups` (was `_unique_constraint_groups`) walks the model and
+  `_meta.all_parents` and takes every column each constraint's `validate()` tests against `exclude`, and
+  `::_full_clean_or_field_errors` runs `full_clean` with two excludes (`CleanExcludes`: `clean_fields` / `clean` skip
+  every unprovided column, `validate_unique` / `validate_constraints` keep the co-members), as Django's
+  `ModelForm._post_clean` splits them; `forms/inputs.py::_names_one_row` reads the `to_field_name` target's inherited
+  declarations too. The `updateItem` rejected-save paths run one query fewer (no co-member field validation).
 
 ## Outside review of the fixes
 
@@ -928,13 +939,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   shapes). Fix: reuse the KANBAN inliner's CommonMark lexer (`build_kanban_md.py::_protected_regions`, extracted to a
   shared script module then), add block exclusions (headings, link-definition block, fenced and indented code) and the
   term boundary
-- [ ] 303. A partial update over a `DjangoMutation` whose `Meta.model` is a proxy of a model declaring a
-  `UniqueConstraint` (or `unique_together`) skips the uniqueness check: `mutations/resolvers.py::_unique_constraint_groups`
-  reads the proxy's own `Meta.constraints` / `unique_together`, which Django keeps only on the declaring class, so
-  `_unprovided_exclude` excludes the co-constrained unprovided field, `full_clean` passes and the duplicate reaches the
-  database as `IntegrityError` ("UNIQUE constraint failed: products_item.category_id, products_item.name") instead of the
-  `FieldError` envelope the concrete model gets (spec-036 partial-update carve-out). Fix: walk `_meta.all_parents` as
-  Django's `Model._get_unique_checks` does; check a multi-table-inheritance child whose parent declares the constraint
 - [ ] 304. An evaluated project `QuerySet` subclass carrying an aggregate annotation is refused by the visibility seal on
   every policy, raw-list included (whose `carry_result_cache` exists to carry evaluated sources): a manager or hook
   returning `LoanQuerySet.annotate(n=Count("pk"))` after iterating it raises "binds a function bound value", because
@@ -1038,6 +1042,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 342. CHANGELOG entry for item 303: a `DjangoMutation` write validates every uniqueness and constraint check a
+  provided field joins, including declarations inherited by a proxy or multi-table child, conditional / expression
+  `UniqueConstraint`s, `CheckConstraint`s and `unique_for_date` / `_month` / `_year`, answering Django's own error in
+  the `FieldError` envelope instead of the generic `constraint` error (or a silent `unique_for_*` duplicate); an
+  unprovided column is no longer field-validated; a `ModelForm` `to_field_name` unique through the target's parent
+  builds.
 - [ ] 341. CHANGELOG entry for item 295: a `ModelForm` field named after a model column but of another kind (a
   `ModelChoiceField` / `ModelMultipleChoiceField` over a non-relation column or a relation of the other cardinality, a
   file field over a non-file column, a scalar field over a file column) is refused at schema build with
