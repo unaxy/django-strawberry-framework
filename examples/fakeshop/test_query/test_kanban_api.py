@@ -18,6 +18,9 @@ directly (not via the importer, so assertions stay independent of how the real
 * reverse-FK from a lookup (``status { cards }``);
 * the nested ``decisionsConnection`` window, whose target is the one example
   model ordered by a single non-pk column (``Decision.decided_at``).
+* the same connection under the async ``node`` root (a module-local
+  ``/graphql-async/`` mount), whose filter refuses a ``decidedAt`` bound the
+  database cannot bind as ``FILTER_INVALID``.
 """
 
 from datetime import timedelta
@@ -28,9 +31,13 @@ from apps.glossary import models as glossary_models
 from apps.kanban import factories as kf
 from apps.kanban import models, services
 from apps.kanban.filters import MilestoneFilter
+from asgiref.sync import sync_to_async
+from config import schema as config_schema
 from django.db import connection
+from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
+from django.urls import path
 from django.utils import timezone
 from graphql import GraphQLError
 from graphql_client import assert_graphql_data as _assert_graphql_data
@@ -46,6 +53,9 @@ from graphql_client import (
 )
 from strawberry import relay
 from typing_extensions import TypedDict
+
+from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 #: Settings that open the spec-048 error policy's pass-through gate for ONE live
 #: request. ``settings.DEBUG`` is the gate, and on this tier it is the only
@@ -1328,6 +1338,78 @@ def test_nested_decisions_connection_window_orders_by_decided_at_then_pk() -> No
     pk_at = window_order.find('"ID"')
     assert decided_at_at != -1, sql
     assert pk_at > decided_at_at, sql
+
+
+async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
+
+    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
+
+
+urlpatterns = [path("graphql-async/", _async_shipped_graphql_view)]
+
+_CARD_DECISIONS_AFTER = """
+query ($id: ID!, $after: DateTime!) {
+  node(id: $id) {
+    ... on CardType {
+      decisionsConnection(filter: { decidedAt: { gt: $after } }) {
+        edges { node { question } }
+      }
+    }
+  }
+}
+"""
+
+
+def _card_with_a_decision() -> str:
+    """Seed one card with one decision and return the card's ``GlobalID``."""
+    card = kf.make_card()
+    kf.make_decision(card=card, question="Ship now?", decided_at=timezone.now())
+    return str(relay.GlobalID(type_name=models.Card._meta.label_lower, node_id=str(card.pk)))
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_decisions_connection_refuses_an_unbindable_temporal_filter() -> None:
+    """``decisionsConnection`` under the async ``node`` root holds its filter to the database.
+
+    The async view runs the nested connection's ``apply_async``: a ``decidedAt``
+    bound whose UTC projection falls in year 0 is ``FILTER_INVALID`` keyed to its
+    form field on SQLite, never the driver's error, and a bound the database binds
+    returns the card's decision. Django's PostgreSQL adapters pass the bound
+    through, so there it filters.
+    """
+    card_id = await sync_to_async(_card_with_a_decision)()
+    with override_settings(ROOT_URLCONF=__name__):
+        client = AsyncTestClient()
+        control = await client.query(
+            _CARD_DECISIONS_AFTER,
+            variables={"id": card_id, "after": "2000-01-01T00:00:00+00:00"},
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+        refused = await client.query(
+            _CARD_DECISIONS_AFTER,
+            variables={"id": card_id, "after": "0001-01-01T00:00:00+09:00"},
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+
+    page = {"node": {"decisionsConnection": {"edges": [{"node": {"question": "Ship now?"}}]}}}
+    assert response_json(control.response) == {"data": page}
+    payload = response_json(refused.response)
+    if connection.vendor == "postgresql":
+        assert payload == {"data": page}
+        return
+    assert payload["data"] == {"node": None}, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "path") == ["node", "decisionsConnection"]
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {
+            "decided_at__gt": [
+                {"message": "Enter a value the database can represent.", "code": "invalid"},
+            ],
+        },
+    }
 
 
 def test_kanban_card_order_input_type_exposes_only_column_backed_all_fields() -> None:

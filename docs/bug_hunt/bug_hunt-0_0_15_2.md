@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 232 done, 141 to do.
+Progress: 233 done, 151 to do.
 
 ## Done
 
@@ -1026,6 +1026,16 @@ Progress: 232 done, 141 to do.
   `utils/errors.py::save_time_error_key_map` resolves the spec's source through it; the docstring and the spec-039
   citation say so (the 4 wrong grid rows flip, the 7 correct rows stay; live under
   `FAKESHOP_TEST_PK_SOURCE_SERIALIZERS`)
+- [x] 190. fixed: a temporal filter value the database the queryset runs on cannot bind answers `FILTER_INVALID` keyed
+  to its form field (`"Enter a value the database can represent."` / `"invalid"`) instead of the masked uncoded error:
+  `FilterSet._validate_form_or_raise` asks that connection's own operations through
+  `utils/errors.py::unbindable_temporal`, resolving the alias lazily and only for a temporal leaf; refused on SQLite,
+  MySQL and Oracle are an aware datetime outside years 1..9999 once projected (a naive one made aware under a non-UTC
+  `TIME_ZONE` included), any aware datetime when `USE_TZ` is false and an aware time, and on every backend a `year` /
+  `iso_year` comparison bound outside 1..9999; Django's PostgreSQL adapters pass those datetimes and times through;
+  generated leaves, `not` / `or` / `and`, relation paths, declared filters, list and range members, sync and async
+  (`node` -> `decisionsConnection`) all answer it; spec-027, docs/README.md and the GLOSSARY FilterSet entry state the
+  rule
 
 ## Outside review of the fixes
 
@@ -1066,9 +1076,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 190. Seen at `87dc1df7`, re-check: an out-of-range datetime filter value raises an uncoded error (The invalid
-  regex and the regex on a UUID field are not defects: both follow django-filter's `regex` lookup, which sends a text
-  pattern to the database and types a UUID column's value as a UUID.)
 - [ ] 307. Leftovers from 284 / 142 (`ca9273d3`, landed on the implementer's evidence: the FIX-round delta for F1 job
   control, F2 the late stop, F3 gate's sync holding and F5 the docs had no second verifier pass, by the maintainer's
   call): a Ctrl-Z landing between `Popen` returning and `_StopRelay.started` stops only the wrapper, and the command
@@ -1215,12 +1222,46 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 424. `forms/resolvers.py::_coerced_null_fields` reads `form.data` by the unprefixed field name, so a form built
   with a `prefix` (`get_form` / `get_form_kwargs`) never reaches its explicit-null check and an explicit `null` on
   such a form is not coerced the way it is on an unprefixed one. Found implementing 305
+- [ ] 381. The write path does not hold a temporal input to the database: a mutation / serializer / form input datetime
+  or time the target connection cannot bind (the populations `utils/errors.py::unbindable_temporal` refuses on reads)
+  raises at save as the masked uncoded error; probe each write family and reuse the read helper if it reproduces
+- [ ] 382. PostgreSQL refuses a datetime or time whose UTC offset is +-16:00..+-23:59 (`time zone displacement out of
+  range`), which Python and the Strawberry `DateTime` / `Time` scalars accept: a filter bound or write value with such
+  an offset raises the masked uncoded error on PostgreSQL only
+- [ ] 383. A pattern lookup on a temporal column (`iExact` / `regex` / `iRegex` on PostgreSQL; `time` `regex` / `iRegex`
+  on SQLite) still answers the masked uncoded error for a value the backend cannot use; the generated temporal pattern
+  leaves on SQLite answer `[]`; decide refuse vs serve per backend
+- [ ] 384. A declared django-filter whose scalar kind differs from its column escapes the unbindable-temporal refusal: a
+  `date` value on a `DateTimeField` (`date(1, 1, 1)` under a `TIME_ZONE` east of UTC) and a `datetime` through a
+  `DateField` or a `__date` transform (`0001-01-01T00:00+05:00`, `9999-12-31T23:59-05:00`) overflow at evaluation as the
+  masked uncoded error
+- [ ] 385. A `year` / `iso_year` `in` / `range` filter value at or above 2**63, or a non-numeric string / inf / nan,
+  raises the masked `OverflowError` / `ValueError` at SQLite bind (generic integer binding, not a temporal bound);
+  `int(Decimal("1E+300000"))` also costs seconds on the same path
+- [ ] 386. A consumer-registered `DurationField` scalar: a `timedelta` of 106751992 days or more overflows at SQLite
+  bind (`adapt_durationfield_value` returns an int) as the masked uncoded error
+- [ ] 387. Generated opt-in `year` / `iso_year` filter leaves are typed as the column's scalar (`Date` / `DateTime`), so
+  every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
+  `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
+  seam
+- [ ] 388. A filter whose class (not instance) overrides `Filter.filter()` is still read by the unbindable-temporal
+  refusal, because `filters/sets.py::_own_filter` reads only the instance `__dict__`; decide whether a class-level
+  override owns its value like `method=` and document it
+- [ ] 389. Unprobed: a PostgreSQL `ArrayField` of datetimes or times as a filter leaf; the unbindable-temporal refusal
+  does not read its elements; probe whether PostgreSQL refuses any element value the scalar accepts
+- [ ] 390. Under `AsyncDjangoGraphQLView` over the fakeshop schema, a plain `def` root that calls `apply_sync`
+  (`allScalarSpecimens`, `allCards`) answers a valid query with `SynchronousOnlyOperation` ("An unexpected error
+  occurred."); decide whether sync roots under the async view are supported, and document or fix
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 391. CHANGELOG entry for item 190: a temporal filter value the queryset's database cannot bind (on SQLite, MySQL
+  and Oracle an aware datetime outside years 1..9999 once projected, any aware datetime when `USE_TZ` is false, an aware
+  time; on every backend a `year` / `iso_year` bound outside 1..9999) now answers `FILTER_INVALID` keyed to its filter
+  instead of the uncoded "An unexpected error occurred."
 - [ ] 426. CHANGELOG entry for item 326: a Django `ValidationError` raised at save time on the primary key behind a
   serializer field with `source="pk"` (or a field named `pk`, or a multi-table child's parent link) is now keyed to
   that input's wire name instead of the model's primary-key name

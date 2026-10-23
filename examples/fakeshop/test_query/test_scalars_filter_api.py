@@ -17,7 +17,11 @@ per owning filterset and the ``range`` lookup applies over the wire; a lone
 ``start`` / ``end`` applies as ``gte`` / ``lte`` and a range with no bound filters nothing;
 each bound is cleaned as ``price: { gte }`` cleans its value, so a bound the column cannot
 hold is ``FILTER_INVALID``. ``price_among`` is a declared ``ListFilter`` (``in``) on the
-same column whose elements are cleaned the same way. django-filter's own range filters
+same column whose elements are cleaned the same way. A temporal value the database the
+query runs on cannot bind (on SQLite an aware datetime whose UTC projection leaves years
+1..9999, an aware time) is ``FILTER_INVALID`` keyed to its form field on each adapter-bound
+leaf, member and bound, under ``not`` and through ``partner``; Django's PostgreSQL
+adapters pass it through, so there the same input filters. django-filter's own range filters
 (``priceBetween``, ``occurredBetween`` over ``DateRangeWidget``, ``occurredInBoxes`` over a
 plain ``MultiWidget`` and ``priceInUnderscoredBoxes`` over a consumer widget reading ``__``
 keys) apply every bound they are sent, under the keys each widget reads.
@@ -32,6 +36,7 @@ from decimal import Decimal
 
 import pytest
 from apps.scalars import models
+from django.db import connection
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _assert_graphql_success
 from graphql_client import json_at, json_list, json_object, post_graphql, response_json
@@ -513,6 +518,156 @@ def test_price_among_element_the_column_cannot_hold_is_filter_invalid(
     assert json_at(error, "extensions") == {
         "code": "FILTER_INVALID",
         "errors": {form_key: [refusal]},
+    }
+
+
+_UNBINDABLE = {"message": "Enter a value the database can represent.", "code": "invalid"}
+# Aware values the scalar parse and the form clean accept: a datetime whose UTC projection
+# falls in year 0, one whose projection falls in year 10000, and an aware time. SQLite
+# projects an aware datetime onto UTC and refuses an aware time; Django's PostgreSQL adapters
+# pass all three through.
+_BEFORE_YEAR_ONE = "0001-01-01T00:00:00+05:00"
+_PAST_YEAR_9999 = "9999-12-31T23:00:00-05:00"
+_AWARE_TIME = "09:30:00+00:00"
+_BINDABLE_DATETIME = _DATETIME.isoformat()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "query",
+        "unbindable",
+        "form_key",
+        "postgresql_labels",
+        "bindable",
+        "labels",
+    ),
+    [
+        pytest.param(
+            _BY_FILTER,
+            {"occurredAt": {"exact": _BEFORE_YEAR_ONE}},
+            "occurred_at",
+            [],
+            {"occurredAt": {"exact": _BINDABLE_DATETIME}},
+            ["alpha"],
+            id="exact-before-year-one",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredAt": {"gt": _PAST_YEAR_9999}},
+            "occurred_at__gt",
+            [],
+            {"occurredAt": {"lt": "9999-12-31T23:00:00+00:00"}},
+            ["alpha"],
+            id="gt-past-year-9999",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredAt": {"in": [_BINDABLE_DATETIME, _BEFORE_YEAR_ONE]}},
+            "occurred_at__in",
+            ["alpha"],
+            {"occurredAt": {"in": [_BINDABLE_DATETIME]}},
+            ["alpha"],
+            id="in-member",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredAt": {"range": [_BEFORE_YEAR_ONE, _BINDABLE_DATETIME]}},
+            "occurred_at__range",
+            ["alpha"],
+            {"occurredAt": {"range": ["0001-01-01T00:00:00+00:00", _BINDABLE_DATETIME]}},
+            ["alpha"],
+            id="range-bound",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredTime": {"exact": _AWARE_TIME}},
+            "occurred_time",
+            ["alpha"],
+            {"occurredTime": {"exact": "09:30:00"}},
+            ["alpha"],
+            id="aware-time",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredTime": {"in": ["09:30:00", _AWARE_TIME]}},
+            "occurred_time__in",
+            ["alpha"],
+            {"occurredTime": {"in": ["09:30:00"]}},
+            ["alpha"],
+            id="aware-time-in-member",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"not": {"occurredAt": {"exact": _BEFORE_YEAR_ONE}}},
+            "occurred_at",
+            ["alpha"],
+            {"not": {"occurredAt": {"exact": _BINDABLE_DATETIME}}},
+            [],
+            id="not",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partner": {"occurredAt": {"lte": _PAST_YEAR_9999}}},
+            "occurred_at__lte",
+            ["of-alpha"],
+            {"partner": {"occurredAt": {"lte": _BINDABLE_DATETIME}}},
+            ["of-alpha"],
+            id="nested-partner",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partnerOccurredAt": {"gte": _BEFORE_YEAR_ONE}},
+            "partner__occurred_at__gte",
+            ["of-alpha"],
+            {"partnerOccurredAt": {"gte": _BINDABLE_DATETIME}},
+            ["of-alpha"],
+            id="flat-partner",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partnerOccurredTime": {"exact": _AWARE_TIME}},
+            "partner__occurred_time",
+            ["of-alpha"],
+            {"partnerOccurredTime": {"exact": "09:30:00"}},
+            ["of-alpha"],
+            id="flat-partner-aware-time",
+        ),
+    ],
+)
+def test_temporal_value_the_database_cannot_bind_is_filter_invalid(
+    query: str,
+    unbindable: dict[str, object],
+    form_key: str,
+    postgresql_labels: list[str],
+    bindable: dict[str, object],
+    labels: list[str],
+) -> None:
+    """A temporal value the database cannot bind is ``FILTER_INVALID`` keyed to its form field.
+
+    The value is held to the database the queryset runs on: on SQLite an aware
+    datetime whose UTC projection leaves years 1..9999 and an aware time are each
+    refused with the package's fixed message, for every member of an ``in`` list and
+    every ``range`` bound, flat, under ``not`` and through the ``partner`` relation,
+    nested and flat, never the driver's error. Django's PostgreSQL adapters pass them
+    through, so there the same input filters (``postgresql_labels``). A value the
+    database binds filters on both.
+    """
+    alpha = _seed_specimen("alpha")
+    models.NullableScalarSpecimen.objects.create(label="of-alpha", partner=alpha)
+    root = "allScalarSpecimens" if query == _BY_FILTER else "allNullableScalarSpecimens"
+    control = response_json(post_graphql(query, variables={"filter": bindable}))
+    payload = response_json(post_graphql(query, variables={"filter": unbindable}))
+
+    assert control == {"data": {root: [{"label": label} for label in labels]}}
+    if connection.vendor == "postgresql":
+        assert payload == {"data": {root: [{"label": label} for label in postgresql_labels]}}
+        return
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: [_UNBINDABLE]},
     }
 
 

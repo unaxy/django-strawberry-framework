@@ -55,9 +55,10 @@ from django.apps import apps
 from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import FieldError
-from django.db import connection, models, transaction
+from django.db import DEFAULT_DB_ALIAS, connection, connections, models, transaction
 from django.db import models as dj_models
 from django.db import models as django_models
+from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.models import Lookup, Q, QuerySet
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
@@ -7818,6 +7819,404 @@ def test_required_upstream_range_filter_is_satisfied_by_the_keys_its_widget_read
     with pytest.raises(GraphQLError) as excinfo:
         PatronFilter._validate_form_or_raise(filterset)
     assert excinfo.value.extensions == {"code": "FILTER_INVALID", "errors": refusal}
+
+
+#: The refusal a temporal value the queryset's database cannot bind answers.
+_UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
+_PLUS_FIVE = datetime.timezone(datetime.timedelta(hours=5))
+_MINUS_FIVE = datetime.timezone(datetime.timedelta(hours=-5))
+#: An aware datetime whose UTC projection falls in year 0, one whose projection falls in
+#: year 10000, a bindable one, and an aware time.
+_BEFORE_YEAR_ONE = datetime.datetime(1, 1, 1, tzinfo=_PLUS_FIVE)
+_PAST_YEAR_9999 = datetime.datetime(9999, 12, 31, 23, tzinfo=_MINUS_FIVE)
+_BINDABLE_DATETIME = datetime.datetime(2021, 6, 15, 9, 30, tzinfo=datetime.timezone.utc)
+_AWARE_TIME = datetime.time(9, 30, tzinfo=datetime.timezone.utc)
+
+
+def _temporal_filter_class() -> type[FilterSet]:
+    """A specimen filterset reaching the temporal columns through every filter family.
+
+    django-filter's declared filters (a ``DateTimeFilter``, its datetime and time range
+    filters, a ``TimeFilter`` and a ``NumberFilter`` whose ``field_name`` carries the
+    ``time`` / ``year`` transform or a ``month`` one, a ``DateFilter`` on the datetime
+    column and a ``DateTimeFilter`` on the time column), the package's ``ListFilter`` /
+    ``RangeFilter``, opted-in ``Meta.fields`` year leaves, a filter with its own
+    ``method``, ones over a datetime and a time annotation the queryset adds (the
+    datetime one through ``year`` too), one over an annotation whose output field
+    Django cannot resolve, and one over ``pk``, a name that is neither a model field nor
+    an annotation.
+    """
+
+    class SpecimenFilter(FilterSet):
+        taken_before = django_filters.DateTimeFilter(field_name="occurred_at", lookup_expr="lt")
+        taken_between = django_filters.DateTimeFromToRangeFilter(field_name="occurred_at")
+        timed_between = django_filters.TimeRangeFilter(field_name="occurred_time")
+        clock_time = django_filters.TimeFilter(field_name="occurred_at__time")
+        year_from = django_filters.NumberFilter(field_name="occurred_at__year", lookup_expr="gte")
+        year_of_day = django_filters.DateFilter(field_name="occurred_on", lookup_expr="year")
+        month_after = django_filters.NumberFilter(
+            field_name="occurred_at__month",
+            lookup_expr="gt",
+        )
+        taken_on = django_filters.DateFilter(field_name="occurred_at")
+        timed_at = django_filters.DateTimeFilter(field_name="occurred_time")
+        taken_among = ListFilter(field_name="occurred_at", lookup_expr="in")
+        taken_span = RangeFilter(field_name="occurred_at", lookup_expr="range")
+        own_before = django_filters.DateTimeFilter(field_name="occurred_at", method="own_filter")
+        stamped_before = django_filters.DateTimeFilter(field_name="stamped_at", lookup_expr="lt")
+        stamped_year_after = django_filters.NumberFilter(
+            field_name="stamped_at__year",
+            lookup_expr="gt",
+        )
+        clocked = django_filters.TimeFilter(field_name="clocked_at")
+        mixed_below = django_filters.NumberFilter(field_name="mixed", lookup_expr="lt")
+        by_pk = django_filters.NumberFilter(field_name="pk")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {
+                "occurred_at": [
+                    "exact",
+                    "year__gt",
+                    "year__lt",
+                    "iso_year",
+                ],
+                "occurred_on": ["year", "iso_year__lte", "year__in"],
+            }
+
+        def own_filter(
+            self,
+            queryset: QuerySet[scalar_models.ScalarSpecimen],
+            _name: str,
+            _value: object,
+        ) -> QuerySet[scalar_models.ScalarSpecimen]:
+            return queryset
+
+    return SpecimenFilter
+
+
+def _specimens_stamped() -> QuerySet[scalar_models.ScalarSpecimen]:
+    """Every specimen, annotated with two copies of its temporal columns and a mixed sum.
+
+    ``stamped_at`` is its ``occurred_at`` and ``clocked_at`` its ``occurred_time``;
+    ``mixed`` adds a decimal to a float column, an expression whose output field Django
+    cannot resolve until it is given one.
+    """
+    return scalar_models.ScalarSpecimen.objects.annotate(
+        stamped_at=models.F("occurred_at"),
+        clocked_at=models.F("occurred_time"),
+        mixed=models.F("price") + models.F("score"),
+    )
+
+
+#: Each refused value, by the form field it is keyed to, and whether it passes on PostgreSQL.
+_UNBINDABLE_FORM_DATA = [
+    pytest.param({"taken_before": _BEFORE_YEAR_ONE}, "taken_before", True, id="declared"),
+    pytest.param(
+        {"taken_between_after": _PAST_YEAR_9999},
+        "taken_between",
+        True,
+        id="declared-range-lone-bound",
+    ),
+    pytest.param(
+        {"timed_between_after": datetime.time(1), "timed_between_before": _AWARE_TIME},
+        "timed_between",
+        True,
+        id="declared-time-range",
+    ),
+    pytest.param({"clock_time": _AWARE_TIME}, "clock_time", True, id="time-transform"),
+    pytest.param({"stamped_before": _BEFORE_YEAR_ONE}, "stamped_before", True, id="annotation"),
+    pytest.param(
+        {"stamped_year_after": 10000},
+        "stamped_year_after",
+        False,
+        id="annotation-year",
+    ),
+    pytest.param({"clocked": _AWARE_TIME}, "clocked", True, id="time-annotation"),
+    pytest.param(
+        {"taken_among": [_BINDABLE_DATETIME, _BEFORE_YEAR_ONE]},
+        "taken_among",
+        True,
+        id="list-element",
+    ),
+    pytest.param(
+        {"taken_span_0": _BINDABLE_DATETIME, "taken_span_1": _PAST_YEAR_9999},
+        "taken_span",
+        True,
+        id="range-bound",
+    ),
+    pytest.param({"year_from": 10000}, "year_from", False, id="year-in-field-name"),
+    pytest.param({"occurred_at__year__gt": 0}, "occurred_at__year__gt", False, id="year-gt-0"),
+    pytest.param(
+        {"occurred_at__year__lt": 10000},
+        "occurred_at__year__lt",
+        False,
+        id="year-lt-10000",
+    ),
+    pytest.param(
+        {"year_of_day": datetime.date(2021, 1, 1)},
+        "year_of_day",
+        False,
+        id="year-of-a-date",
+    ),
+    pytest.param(
+        {"occurred_at__year__gt": "1e40"},
+        "occurred_at__year__gt",
+        False,
+        id="year-past-int-reach-of-a-date",
+    ),
+    pytest.param({"occurred_at__iso_year": 9999}, "occurred_at__iso_year", False, id="iso-9999"),
+    pytest.param({"occurred_on__year": 10000}, "occurred_on__year", False, id="date-year"),
+    pytest.param(
+        {"occurred_on__iso_year__lte": 9999},
+        "occurred_on__iso_year__lte",
+        False,
+        id="date-iso-year",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("data", "form_key", "passes_on_postgresql"), _UNBINDABLE_FORM_DATA)
+def test_temporal_value_the_database_cannot_bind_is_refused_for_every_filter_family(
+    data: dict[str, object],
+    form_key: str,
+    passes_on_postgresql: bool,  # noqa: FBT001
+) -> None:
+    """A temporal value the queryset's database cannot bind is refused keyed to its form field.
+
+    Each filter family reaches the one rule: a declared filter, a declared range's lone
+    bound and a time range's bound, a ``time`` / ``year`` transform carried in
+    ``field_name``, a ``ListFilter`` element, a ``RangeFilter`` bound, and opted-in
+    ``year`` / ``iso_year`` leaves on a datetime and a date column (a year outside
+    1..9999, ``iso_year`` 9999 whose last day falls in year 10000, a number past what a
+    date can hold, a value that is not a number). Django's PostgreSQL adapters pass the
+    aware datetimes and times through, so they pass there; the year bounds fail on every
+    backend. Package-only:
+    no fakeshop filterset declares these filters or opts into a year leaf.
+    """
+    specimen_filter = _temporal_filter_class()
+    filterset = specimen_filter(data=data, queryset=_specimens_stamped())
+    if passes_on_postgresql and connection.vendor == "postgresql":
+        specimen_filter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param({"taken_before": _BINDABLE_DATETIME}, id="declared"),
+        pytest.param({"taken_between_before": _BINDABLE_DATETIME}, id="declared-range"),
+        pytest.param({"timed_between_before": datetime.time(9, 30)}, id="declared-time-range"),
+        pytest.param({"clock_time": datetime.time(9, 30)}, id="time-transform"),
+        pytest.param({"taken_on": datetime.date(2021, 6, 15)}, id="date-on-a-datetime-column"),
+        pytest.param({"timed_at": _BINDABLE_DATETIME}, id="datetime-on-a-time-column"),
+        pytest.param({"month_after": 5}, id="unknown-transform"),
+        pytest.param({"taken_among": [_BINDABLE_DATETIME]}, id="list-element"),
+        pytest.param({"taken_span_1": _BINDABLE_DATETIME}, id="range-bound"),
+        pytest.param({"year_from": 9999}, id="year-in-field-name"),
+        pytest.param({"occurred_at__year__gt": 1}, id="year-gt"),
+        pytest.param({"occurred_at__iso_year": 9998}, id="iso-year"),
+        pytest.param({"occurred_on__year__in": "0,10000"}, id="year-in-binds-integers"),
+        pytest.param({"own_before": _BEFORE_YEAR_ONE}, id="own-method"),
+        pytest.param({"stamped_before": _BINDABLE_DATETIME}, id="annotation"),
+        pytest.param({"stamped_year_after": 2020}, id="annotation-year"),
+        pytest.param({"clocked": datetime.time(9, 30)}, id="time-annotation"),
+        pytest.param({"mixed_below": 5}, id="annotation-without-output-field"),
+        pytest.param({"by_pk": 5}, id="neither-field-nor-annotation"),
+    ],
+)
+def test_temporal_value_the_database_binds_passes(data: dict[str, object]) -> None:
+    """A value the database binds passes, and so does every leaf the rule does not read.
+
+    A date on a datetime column and a datetime on a time column are not read against
+    the other type's adapter (the field converts them before binding); a transform the
+    rule does not know (``month``) binds an integer; a year ``in`` compares integers,
+    binding no computed bound; a filter with its own ``method`` owns what its value
+    means; an annotation whose output field Django cannot resolve, or a name that is
+    neither a model field nor an annotation, has no column to ask.
+    """
+    specimen_filter = _temporal_filter_class()
+    filterset = specimen_filter(data=data, queryset=_specimens_stamped())
+
+    specimen_filter._validate_form_or_raise(filterset)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "form_key"),
+    [
+        pytest.param({"occurred_at": "0001-01-01T00:00:00"}, "occurred_at", id="naive-datetime"),
+        pytest.param({"occurred_at__year__gt": 1}, "occurred_at__year__gt", id="year-1"),
+    ],
+)
+def test_naive_value_made_aware_east_of_utc_is_held_to_the_projection(
+    data: dict[str, object],
+    form_key: str,
+) -> None:
+    """A naive value is made aware in ``TIME_ZONE`` first, so its UTC projection is what binds.
+
+    Under ``Asia/Tokyo`` (UTC+9) the first instant of year 1, sent naive or computed as a
+    ``year`` bound, projects onto year 0 in UTC: SQLite refuses it, while Django's
+    PostgreSQL adapters pass it through.
+    """
+    specimen_filter = _temporal_filter_class()
+    with override_settings(TIME_ZONE="Asia/Tokyo"):
+        filterset = specimen_filter(data=data, queryset=_specimens_stamped())
+        if connection.vendor == "postgresql":
+            specimen_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+def test_aware_datetime_without_time_zone_support_is_refused() -> None:
+    """With ``USE_TZ`` false the SQLite, MySQL and Oracle adapters refuse any aware datetime.
+
+    The form clean keeps the aware value as sent, so even an instant well inside years
+    1..9999 is refused on the generated leaf; Django's PostgreSQL adapters pass it
+    through, so it passes there.
+    """
+    specimen_filter = _temporal_filter_class()
+    with override_settings(USE_TZ=False):
+        filterset = specimen_filter(
+            data={"occurred_at": _BINDABLE_DATETIME},
+            queryset=_specimens_stamped(),
+        )
+        if connection.vendor == "postgresql":
+            specimen_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"occurred_at": _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+def test_date_column_year_bound_is_not_projected_onto_a_time_zone() -> None:
+    """A date column's ``year`` bounds are dates, so ``TIME_ZONE`` never moves them.
+
+    Under ``Asia/Tokyo`` year 1 on ``occurred_on`` binds on every backend, where the same
+    year on a datetime column projects onto year 0 in UTC.
+    """
+    specimen_filter = _temporal_filter_class()
+    with override_settings(TIME_ZONE="Asia/Tokyo"):
+        filterset = specimen_filter(data={"occurred_on__year": 1}, queryset=_specimens_stamped())
+
+        specimen_filter._validate_form_or_raise(filterset)
+
+
+class _RefusingOperations(BaseDatabaseOperations):
+    """Operations whose datetime adapter refuses every value, as a backend's own refusal does."""
+
+    @override
+    def adapt_datetimefield_value(self, value: datetime.datetime | None) -> str | None:
+        raise ValueError(value)
+
+
+class _BindingOperations(BaseDatabaseOperations):
+    """Operations whose datetime adapter binds every value it is handed."""
+
+    @override
+    def adapt_datetimefield_value(self, value: datetime.datetime | None) -> str | None:
+        return None if value is None else value.isoformat()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("operations", "value", "refused"),
+    [
+        pytest.param(_RefusingOperations, _BINDABLE_DATETIME, True, id="refusing-database"),
+        pytest.param(_BindingOperations, _BEFORE_YEAR_ONE, False, id="binding-database"),
+    ],
+)
+def test_temporal_value_is_held_to_the_database_the_queryset_runs_on(
+    operations: type[BaseDatabaseOperations],
+    value: datetime.datetime,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """The rule asks the connection of the queryset's own alias, not ``default``'s.
+
+    On a stand-in alias whose adapter refuses every datetime, one ``default`` binds is
+    refused; on one whose adapter binds every datetime, one the SQLite, MySQL and Oracle
+    adapters refuse passes.
+    """
+    alias = "temporal_stand_in"
+    wrapper = connections.create_connection(DEFAULT_DB_ALIAS)
+    wrapper.ops = operations(wrapper)
+    connections[alias] = wrapper
+    specimen_filter = _temporal_filter_class()
+    try:
+        filterset = specimen_filter(
+            data={"taken_before": value},
+            queryset=_specimens_stamped().using(alias),
+        )
+        if not refused:
+            specimen_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            specimen_filter._validate_form_or_raise(filterset)
+    finally:
+        del connections[alias]
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"taken_before": _UNBINDABLE},
+    }
+
+
+class _RecordingRouter:
+    """A database router recording each model it is asked to route a read for."""
+
+    def __init__(self) -> None:
+        self.asked: list[type[models.Model]] = []
+
+    def db_for_read(self, model: type[models.Model], **_hints: object) -> None:
+        self.asked.append(model)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "asked"),
+    [
+        pytest.param({"label": "alpha"}, [], id="non-temporal"),
+        pytest.param(
+            {"occurred_at": _BINDABLE_DATETIME},
+            [scalar_models.ScalarSpecimen],
+            id="temporal",
+        ),
+    ],
+)
+def test_queryset_alias_is_resolved_only_for_a_temporal_leaf(
+    data: dict[str, object],
+    asked: list[type[models.Model]],
+) -> None:
+    """The queryset's alias, which asks the router, is read only when a leaf is temporal."""
+
+    class SpecimenFilter(FilterSet):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"label": ["exact"], "occurred_at": ["exact"]}
+
+    router = _RecordingRouter()
+    with override_settings(DATABASE_ROUTERS=[router]):
+        filterset = SpecimenFilter(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
+
+        SpecimenFilter._validate_form_or_raise(filterset)
+    assert router.asked == asked
 
 
 def test_operator_bag_items_walks_lookup_attr_dict() -> None:

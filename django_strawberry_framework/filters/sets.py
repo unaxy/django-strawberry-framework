@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal, NoReturn, SupportsIndex, Ty
 
 import django_filters
 from django import forms
-from django.core.exceptions import FieldError
+from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import models
 from django.db.models import Exists, Q
 from django.db.models.constants import LOOKUP_SEP
@@ -83,6 +83,7 @@ from django_strawberry_framework.sets_mixins import (
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
+    dict_get,
     dict_items,
     is_dict,
     is_list_or_tuple,
@@ -92,8 +93,11 @@ from django_strawberry_framework.utils._narrowing import (
     require,
 )
 from django_strawberry_framework.utils.errors import (
+    FIELD_ERROR_CODE_INVALID,
     FILTER_INVALID_ERROR_CODE,
+    UNBINDABLE_TEMPORAL_MESSAGE,
     coded_error_extensions,
+    unbindable_temporal,
     unstorable_text,
 )
 from django_strawberry_framework.utils.input_values import (
@@ -2308,6 +2312,77 @@ def _non_transform_lookups(lookups: Mapping[str, object]) -> list[str]:
 def _cleaned_items(form: forms.BaseForm) -> ItemsView[str, object]:
     """Return the bound filter form's ``cleaned_data`` items; django-stubs types the values ``Any``."""
     return form.cleaned_data.items()
+
+
+def _leaf_column(
+    model: type[models.Model],
+    annotations: dict[object, object],
+    filter_instance: Filter,
+) -> tuple[object, list[str]] | None:
+    """Return the column a filter's predicate reaches on ``model`` and the lookup parts after it.
+
+    The filter's ``field_name`` is walked as an ORM path: each relation hop moves
+    to its target model, and the first segment naming a field that is not a
+    relation is the column; the segments after it and the ``lookup_expr`` are
+    the transforms and lookup applied to it (``occurred_at__year`` + ``gt`` is
+    ``occurred_at`` with ``["year", "gt"]``). A first segment naming one of the
+    queryset's ``annotations`` instead (Django refuses an annotation named like a
+    field) is that expression's ``output_field``, read without compiling SQL; an
+    expression whose output field Django cannot resolve has none (``None``).
+    ``None`` too for a path that ends on a relation or names nothing.
+    """
+    path = _bound_field_name(filter_instance).split(LOOKUP_SEP)
+    lookup_parts = filter_instance.lookup_expr.split(LOOKUP_SEP)
+    current = model
+    for index, segment in enumerate(path):
+        try:
+            field = current._meta.get_field(segment)
+        except FieldDoesNotExist:
+            expression = dict_get(annotations, segment) if index == 0 else None
+            if expression is None:
+                return None
+            try:
+                return read_attr(expression, "output_field"), [*path[1:], *lookup_parts]
+            except FieldError:
+                return None
+        related_model = field.related_model if field.is_relation else None
+        if not is_model_class(related_model):
+            return field, [*path[index + 1 :], *lookup_parts]
+        current = related_model
+    return None
+
+
+def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, object]:
+    """Return the refusal of each cleaned filter value the queryset's database cannot bind.
+
+    Each cleaned value is held against the column its filter's predicate reaches
+    (``_leaf_column``, a queryset annotation's output field included) through
+    ``utils/errors.py::unbindable_temporal``, asked of the database the
+    filterset's queryset runs on (``queryset.db``, resolved only for a temporal
+    leaf). A filter with a ``filter`` of its own (a ``method=`` included,
+    ``_own_filter``) owns what its value means and is not read.
+    """
+    # django-filter's ``BaseFilterSet.__init__`` stores the model's default queryset when
+    # handed none; its stub types the attribute ``QuerySet[Any] | None``.
+    queryset = filterset_instance.queryset
+    model = require(read_attr(queryset, "model"), is_model_class)
+    annotations = require(read_attr(read_attr(queryset, "query"), "annotations"), is_dict)
+    copies = filterset_instance._copied_filters
+    errors: dict[str, object] = {}
+    for name, value in _cleaned_items(filterset_instance.form):
+        filter_instance = copies.get(name)
+        if value is None or filter_instance is None or _own_filter(filter_instance) is not None:
+            continue
+        leaf = _leaf_column(model, annotations, filter_instance)
+        if leaf is not None and unbindable_temporal(
+            *leaf,
+            value,
+            lambda: require(read_attr(queryset, "db"), is_str),
+        ):
+            errors[name] = [
+                {"message": UNBINDABLE_TEMPORAL_MESSAGE, "code": FIELD_ERROR_CODE_INVALID},
+            ]
+    return errors
 
 
 def _own_related_filters(filterset: type[object]) -> Mapping[str, RelatedFilter]:
@@ -4805,6 +4880,19 @@ class FilterSet(
         unless a ``filter`` of its own (a ``method=`` included) replaces its decode
         (``_decodes_before_binding``): the decode refuses text it cannot read as the
         ``GLOBALID_INVALID`` the node-refetch path answers for the same id.
+
+        A form that cleans is then held to the database its queryset runs on
+        (``_unbindable_temporal_errors``): a temporal value the scalar parse and the
+        form accept but that database cannot bind is refused keyed to its form field,
+        ``invalid`` with a fixed message, never the driver's text, for every scalar of
+        a list or range. On SQLite, MySQL and Oracle that is an aware time, an aware
+        datetime whose projection onto the connection's time zone leaves years
+        1..9999 (a naive one made aware under a non-UTC ``TIME_ZONE`` included) and
+        any aware datetime when ``USE_TZ`` is false; on every backend a ``year`` /
+        ``iso_year`` comparison bound whose first or last instant leaves years
+        1..9999 (a datetime column's bounds projected the same way on those three; a
+        date column's bounds are dates, never projected). Django's PostgreSQL adapters
+        pass those datetimes and times through, so they pass there.
         """
         form = filterset_instance.form
         copies = filterset_instance._copied_filters
@@ -4816,9 +4904,12 @@ class FilterSet(
             if refusal is not None:
                 errors[bound.name] = [{"message": refusal.message, "code": refusal.code}]
         if not errors:
-            if form.is_valid():
-                return
-            errors = form.errors.get_json_data()
+            if not form.is_valid():
+                errors = form.errors.get_json_data()
+            else:
+                errors = _unbindable_temporal_errors(filterset_instance)
+                if not errors:
+                    return
         raise GraphQLError(
             "Invalid filter input",
             extensions=coded_error_extensions(FILTER_INVALID_ERROR_CODE, errors=errors),
