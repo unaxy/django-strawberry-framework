@@ -656,6 +656,80 @@ def require_column_kind_agreement(
         )
 
 
+def form_binds_class_fields(form_class: FormClass) -> bool:
+    """Return whether constructing ``form_class`` binds a copy of each class-level field.
+
+    Django's ``BaseForm.__init__`` deep-copies ``base_fields`` into ``form.fields`` and
+    then calls ``order_fields``; ``BaseModelForm.__init__`` adds only its
+    ``limit_choices_to`` filter, a queryset over the same model. A form that resolves
+    ``__init__`` and ``order_fields`` to Django's own therefore binds every field over the
+    queryset model its class declares; an override of either may rebuild a field.
+    """
+    construction_base = (
+        forms.BaseModelForm
+        if truth.is_subclass(form_class, forms.BaseModelForm)
+        else forms.BaseForm
+    )
+    return not truth.overrides(form_class, construction_base, "__init__") and not truth.overrides(
+        form_class,
+        forms.BaseForm,
+        "order_fields",
+    )
+
+
+def require_class_choice_models(
+    form_class: FormClass,
+    form_fields: Mapping[str, forms.Field] | None = None,
+    *,
+    required_only: bool = False,
+) -> None:
+    """Refuse a class-level model-choice field over a model its relation column never names.
+
+    The input decodes a column-backed relation field's ids against the column's related
+    model (``relation_target_model``), and the request refuses a bound model-choice field
+    whose queryset is over a model that is neither that target nor a subclass of it
+    (``forms/resolvers.py::_assert_bound_choice_agreement``). For a form that binds its
+    class-level fields as declared (``form_binds_class_fields``) built by the default
+    ``get_form``, the bound field is the class-level one, so such a field fails every
+    request that binds it and is a ``ConfigurationError`` at schema build instead. The
+    caller decides that the form is bound as declared; this reads the class-level field
+    (``base_fields``) the form binds, for each name of ``form_fields`` whose field is a
+    model-choice field, as the request does. A proxy or multi-table child of the target
+    agrees; a multi-table parent, a sibling proxy and a proxy target's concrete model do
+    not. A queryset-less class-level field is left to the form, and a model-choice field
+    over a column that is no relation to ``require_column_kind_agreement``.
+    ``form_fields`` is the set the operation binds: every declared field for an update, whose
+    reconstruction rebinds them all, and the input's own fields for a create, which pass
+    ``required_only`` so that only a field the input makes required
+    (``converter.form_field_required``, the rule that makes its argument non-null) is
+    refused. A create may omit an optional field, and then never binds it: such a field fails
+    only the create that sends it, at request time.
+    """
+    class_fields = get_form_fields(form_class)
+    for name, field in _form_field_basis(form_class, form_fields).items():
+        class_field = class_fields.get(name)
+        column = _model_column_for(form_class, name)
+        if (
+            not truth.is_instance(field, _MODEL_CHOICE_FIELD)
+            or not truth.is_instance(class_field, _MODEL_CHOICE_FIELD)
+            or column is None
+            or (required_only and not form_field_required(field, column=column))
+        ):
+            continue
+        target = relation_target_model(form_class, name, field)
+        queryset = class_field.queryset
+        if target is None or queryset is None or truth.is_subclass(queryset.model, target):
+            continue
+        raise ConfigurationError(
+            f"Form {truth.name(form_class)} field {name!r} looks its choice up among "
+            f"{truth.name(queryset.model)} rows, but the input decodes {name!r} ids against "
+            f"{truth.name(target)}, the model its column relates to, so every write that binds "
+            f"{name!r} would be refused. Declare the field's queryset over {truth.name(target)} "
+            "or a subclass of it, or assign it in the form's __init__ or the mutation's "
+            "get_form.",
+        )
+
+
 def require_readable_choice_keys(
     form_class: FormClass,
     form_fields: Mapping[str, forms.Field] | None = None,

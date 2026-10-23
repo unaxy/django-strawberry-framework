@@ -90,12 +90,14 @@ from .inputs import (
     FORM,
     _form_basis_content_identity,
     build_form_input_class,
+    form_binds_class_fields,
     form_input_type_name,
     get_form_fields,
     guard_create_required_fields,
     guard_partial_required_column_less_fields,
     materialize_form_input_class,
     normalize_form_field_basis,
+    require_class_choice_models,
     resolve_effective_form_fields,
 )
 from .inputs import (
@@ -280,6 +282,7 @@ def _cached_build_form_input(
     fields: tuple[str, ...] | None,
     exclude: tuple[str, ...] | None,
     guard_required: bool,
+    binds_class_fields: bool,
     form_fields: Mapping[str, forms.Field] | None = None,
 ) -> tuple[type[object], list[InputFieldSpec]]:
     """Build the operation's form input once per shape; return ``(input_cls, field_specs)``.
@@ -299,7 +302,14 @@ def _cached_build_form_input(
     (``guard_create_required_fields``) runs PER declaration, BEFORE the cache
     lookup, so a waiving mutation that materializes a narrowed shape first cannot
     suppress the guard for a later non-waiving mutation reusing the cached shape
-    (the cache key excludes ``guard_required`` - spec-038 Decision 7).
+    (the cache key excludes ``guard_required`` - spec-038 Decision 7). The class-level
+    model-choice refusal (``require_class_choice_models``) runs per declaration for the
+    same reason: ``binds_class_fields`` (the form binds its class-level fields and the
+    mutation keeps the default ``get_form``) is a fact of the declaration the cache key
+    excludes, so a mutation whose ``get_form`` rebuilds the field cannot cache a shape that
+    lets a later default-``get_form`` mutation skip the refusal. It reads every declared
+    field for an update, whose reconstruction binds them all, and for a create only the
+    input's own fields the input makes required, which every create sends.
     Every kind then builds its own input through ``build_form_input_class`` (the
     guard already ran); ``PARTIAL`` is never create-required guarded - it widens
     model-backed fields optional.
@@ -308,13 +318,14 @@ def _cached_build_form_input(
     survive the per-shape dedupe and reach the bind's ``_input_field_specs`` stash
     (spec-038 Decision 7 - the decode reverse map).
     """
-    effective = _resolve_effective_form_field_names(
+    effective_fields = resolve_effective_form_fields(
         form_class,
         fields=fields,
         exclude=exclude,
         form_fields=form_fields,
         operation_kind=operation_kind,
     )
+    effective = tuple(effective_fields)
 
     # Run the create-required-narrowing guard PER declaration, BEFORE the per-shape
     # cache lookup (the load-bearing ordering ``cached_build_input`` enforces): the
@@ -329,6 +340,11 @@ def _cached_build_form_input(
     # column-less extra cannot be reconstructed, so dropping it finalizes a form that
     # can never validate.
     def _guard() -> None:
+        if binds_class_fields:
+            if operation_kind == PARTIAL:
+                require_class_choice_models(form_class, form_fields)
+            else:
+                require_class_choice_models(form_class, effective_fields, required_only=True)
         if not guard_required:
             return
         if operation_kind == PARTIAL:
@@ -493,7 +509,11 @@ def _default_get_form(
     look a relation key up as the class-level fields ``get_form_fields`` returns do: the
     same model (or a subclass) and the same key column, or the request is a
     ``ConfigurationError`` before ``is_valid()``
-    (``forms/resolvers.py::_assert_bound_choice_agreement``).
+    (``forms/resolvers.py::_assert_bound_choice_agreement``). Under this default, a form
+    that binds its class-level fields as declared (no ``__init__`` or ``order_fields``
+    override) is checked at schema build instead: a class-level field over a model its
+    relation column never names is a ``ConfigurationError`` there
+    (``forms/inputs.py::require_class_choice_models``).
     """
     # Both flavors' ``_validate_meta`` store a ``require_subclass``-checked form class. It is
     # called with the hook's kwargs mapping, which no static signature can check.
@@ -535,6 +555,9 @@ def _build_and_stash_form_input(
             fields=meta.fields,
             exclude=meta.exclude,
             guard_required=not _form_kwargs_overridden(cls, base),
+            binds_class_fields=(
+                not truth.overrides(cls, base, "get_form") and form_binds_class_fields(form_class)
+            ),
             form_fields=form_fields,
         ),
         materialize=materialize_form_input_class,

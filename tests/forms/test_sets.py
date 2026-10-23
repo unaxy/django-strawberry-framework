@@ -699,6 +699,7 @@ def test_cached_build_form_input_runs_required_guard_per_declaration() -> None:
         fields=("name", "category"),
         exclude=None,
         guard_required=False,
+        binds_class_fields=True,
     )
     assert waived_cls is not None  # the waiver built + cached the narrowed shape
 
@@ -712,6 +713,7 @@ def test_cached_build_form_input_runs_required_guard_per_declaration() -> None:
             fields=("name", "category"),
             exclude=None,
             guard_required=True,
+            binds_class_fields=True,
         )
 
 
@@ -1541,6 +1543,7 @@ def test_cached_build_form_input_partial_column_less_guard() -> None:
             fields=("name", "category"),
             exclude=None,
             guard_required=True,
+            binds_class_fields=True,
         )
 
     input_cls, field_specs = _cached_build_form_input(
@@ -1549,6 +1552,7 @@ def test_cached_build_form_input_partial_column_less_guard() -> None:
         fields=("name", "category"),
         exclude=None,
         guard_required=True,
+        binds_class_fields=True,
     )
     assert input_cls is not None
     assert len(field_specs) == 2

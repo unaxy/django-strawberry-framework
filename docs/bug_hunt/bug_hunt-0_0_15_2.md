@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 209 done, 137 to do.
+Progress: 210 done, 138 to do.
 
 ## Done
 
@@ -867,6 +867,14 @@ Progress: 209 done, 137 to do.
   runs CI's lint job only (`LOCAL_GATE_SUITE`; a maintainer still names other suites), and every agentflow gate reads
   "lint locally, every other suite in the dispatched `django.yml` matrix" in BoardDoc 11's words; closed per-cycle
   hunt and review docs left as written
+- [x] 340. A `ModelForm` relation field whose class-level queryset is over another model than its column's target
+  (neither the target nor a subclass) built and failed every request that bound it with the request-time
+  `ConfigurationError`: fixed, `forms/inputs.py::require_class_choice_models` refuses it at `finalize_django_types()`
+  with the same subclass rule and target, only where the refusal is certain: the form keeps Django's `__init__` and
+  `order_fields` (`form_binds_class_fields`), the mutation keeps the default `get_form`, and the field is bound by every
+  write (any update; a create whose input requires it). A queryset assigned in `__init__` / `order_fields` /
+  `get_form`, an optional create field (omitted works, sent is refused at request time) and a class-level `None` are
+  unchanged
 
 ## Outside review of the fixes
 
@@ -1040,13 +1048,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
   rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script
   writes there): refuse with a `WorkspaceError` naming the contents, or remove them
-- [ ] 340. A `ModelForm` relation field whose class-level queryset is over another model than its relation column's
-  target (`category = ModelChoiceField(queryset=Genre.objects.all())` over `Item.category`) builds `categoryId: ID!`,
-  and every create / update is a request-time `ConfigurationError` from
-  `forms/resolvers.py::_assert_bound_choice_agreement`; both models are known at build, so
-  `forms/inputs.py::require_column_kind_agreement`'s bound-basis walk could refuse it at `finalize_django_types()`
-  (GOAL "Configuration is validated at construction"), the request-time check staying for `__init__` / `get_form`
-  rebuilds. Found landing 295
 - [ ] 343. The visibility seal drops Django 6.1's `QuerySet._fetch_mode`: a `get_queryset` hook returning
   `.fetch_mode(FETCH_PEERS)` (or `RAISE`) is sealed to `FetchOne`, so the project's fetch mode is lost (N+1 lazy
   loads, or no `RAISE`) on every sealed surface, while `utils/querysets.py::_seal_or_defect`'s comment says it
@@ -1081,6 +1082,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 351. A column-backed `ModelChoiceField` / `ModelMultipleChoiceField` declared with a class-level `queryset=None`
+  that no `__init__` or `get_form` assigns builds, and every request binding it fails with Django's raw
+  `AttributeError` (`'NoneType' object has no attribute 'model'` / `'filter'`) inside `is_valid()`, because
+  `forms/resolvers.py::_assert_bound_choice_agreement` leaves a queryset-less bound field to the form (the documented
+  row; Django's own form fails the same way). Found landing 340. Decide: keep it Django's error, or refuse a bound
+  queryset-less field with a `ConfigurationError` at request time
+- [ ] 350. CHANGELOG entry for item 340: a `DjangoModelFormMutation` whose `ModelForm` declares a relation field with a
+  class-level queryset over another model than its column's (neither the target nor a subclass) is refused at schema
+  build with `ConfigurationError`, when the form keeps Django's `__init__` / `order_fields`, the mutation keeps the
+  default `get_form`, and every write binds the field (any update, a create whose input requires it), instead of
+  failing every such request
 - [ ] 344. CHANGELOG entry for item 304: a queryset carrying a selected annotation (`Count`, `Sum`, `F() + 1`,
   `Value`, `Case`, `Subquery`, ...) whose query already fetched rows, itself or through a clone, is served by every
   visibility seal instead of being refused as "binds a function bound value" (a consumer `Prefetch` with an
