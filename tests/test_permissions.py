@@ -125,7 +125,13 @@ from django_strawberry_framework.utils._queryset_private import (
 )
 from django_strawberry_framework.utils.typing import object_result
 from tests._django_private import has_values_method
-from tests._idioms import comparing_metaclass, is_object_dict, saved_pk
+from tests._idioms import (
+    FETCH_MODES,
+    comparing_metaclass,
+    is_object_dict,
+    requires_fetch_modes,
+    saved_pk,
+)
 from tests.optimizer import _link_models
 
 #: A ``get_queryset`` hook as ``_make_type`` installs it (``classmethod``-wrapped).
@@ -1884,6 +1890,58 @@ def test_combined_root_is_narrowed_as_its_primary_key_set() -> None:
 
         result = apply_cascade_permissions(parent_type, root, _INFO)
         assert sorted(result.values_list("name", flat=True)) == ["keeps"]
+
+
+@requires_fetch_modes
+def test_a_root_with_a_project_fetch_mode_fails_closed_with_cascade_prose() -> None:
+    """A root whose fetch mode is not one of Django's own fails closed, attributed to the cascade."""
+    parent_type = _register_ct_pair(None)
+    hostile_root = _CtParent.objects.all().fetch_mode(FETCH_MODES["project"])
+    with pytest.raises(ConfigurationError) as excinfo:
+        apply_cascade_permissions(parent_type, hostile_root, _INFO)
+    assert str(excinfo.value) == (
+        "apply_cascade_permissions for CtParentType got a root queryset that "
+        "cannot be sealed into a framework-owned execution queryset (QuerySet._fetch_mode "
+        "is a _ProjectFetchPeers); the cascade narrows a rebuilt queryset rather than the "
+        "caller's object, and the seal rebuilds only state made of Django's own objects, so "
+        "it refuses a Query subclass; a consumer-defined expression, lookup, where-node or "
+        "join class; a method assigned onto a query or node instance; a non-builtin value "
+        "where Django stores a builtin; a foreign row iterable; a fetch mode other than "
+        "Django's FETCH_ONE, FETCH_PEERS or FETCH_RAISE; a Prefetch it cannot rebuild; or "
+        "deferred-filter state Django never writes. Build the queryset with Django's own "
+        "query, expression and lookup classes, and do not assign to its internals."
+    )
+    assert _cascade_state.get() is None
+
+
+@requires_fetch_modes
+def test_a_hook_with_a_project_fetch_mode_fails_closed_with_edge_prose() -> None:
+    """A target hook returning a project fetch mode fails the cascade edge closed."""
+
+    def _hostile_hook(
+        _cls: type[DjangoType],
+        qs: models.QuerySet[models.Model],
+        _info: object,
+    ) -> models.QuerySet[_CtTarget]:
+        return _CtTarget.objects.using(qs.db).fetch_mode(FETCH_MODES["project"])
+
+    parent_type = _register_ct_pair(_hostile_hook)
+    with pytest.raises(ConfigurationError) as excinfo:
+        apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
+    assert str(excinfo.value) == (
+        "CtTargetType.get_queryset returned a queryset that cannot be sealed "
+        "into a framework-owned execution queryset (QuerySet._fetch_mode is a "
+        "_ProjectFetchPeers) for the cascade subquery on _CtParent.target; the cascade "
+        "re-projects the sealed queryset to the edge's target column, and the seal rebuilds "
+        "only state made of Django's own objects, so it refuses a Query subclass; a "
+        "consumer-defined expression, lookup, where-node or join class; a method assigned "
+        "onto a query or node instance; a non-builtin value where Django stores a builtin; "
+        "a foreign row iterable; a fetch mode other than Django's FETCH_ONE, FETCH_PEERS or "
+        "FETCH_RAISE; a Prefetch it cannot rebuild; or deferred-filter state Django never "
+        "writes. Build the queryset with Django's own query, expression and lookup classes, "
+        "and do not assign to its internals."
+    )
+    assert _cascade_state.get() is None
 
 
 def test_unsealable_root_query_class_fails_closed_with_cascade_prose() -> None:

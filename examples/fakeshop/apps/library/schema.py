@@ -1,6 +1,7 @@
 """Library GraphQL relation, optimizer, Relay/keyset, and model/form/serializer mutation surface."""
 
 from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING
 
 import strawberry
 from django.conf import settings
@@ -61,6 +62,9 @@ from django_strawberry_framework.orders import OrderInput
 # reachable only over ``AsyncDjangoGraphQLView``, where
 # ``examples/fakeshop/test_query/test_list_field_async_api.py::test_async_manager_that_degrades_to_a_list_is_rejected``  # noqa: E501 - citation path cannot wrap
 # drives an ``async def`` resolver's ``Manager`` through it.
+
+if TYPE_CHECKING:
+    from django.db.models.fetch_modes import FetchMode
 
 
 def _branches_manager_resolver(_root: object, _info: Info) -> Manager[models.Branch]:
@@ -159,6 +163,29 @@ _LOAN_PREFETCH_ANNOTATIONS: Mapping[str, Callable[[], Expression]] = {
 }
 
 
+#: The fetch modes ``FAKESHOP_TEST_LOAN_FETCH_MODE`` names: two of Django 6.1's own and a
+#: project ``FetchPeers`` subclass. Empty below 6.1, which has no fetch modes (the flag is
+#: set only where they exist).
+_loan_fetch_modes: "Mapping[str, FetchMode]"
+try:
+    from django.db.models import FETCH_PEERS, FETCH_RAISE
+    from django.db.models.fetch_modes import FetchPeers
+except ImportError:
+    _loan_fetch_modes = {}
+else:
+
+    class ProjectFetchPeers(FetchPeers):
+        """A project's own ``FetchPeers`` subclass, a fetch mode Django never builds."""
+
+        __slots__ = ()
+
+    _loan_fetch_modes = {
+        "FETCH_PEERS": FETCH_PEERS,
+        "FETCH_RAISE": FETCH_RAISE,
+        "PROJECT_FETCH_PEERS": ProjectFetchPeers(),
+    }
+
+
 # The DjangoType declaration order is intentionally awkward. Several
 # relation targets are declared after their consumers so the example schema
 # keeps exercising pending-relation resolution through the real app import
@@ -192,6 +219,13 @@ class LoanType(DjangoType):
       returning the annotated queryset, so live requests can pin that a hook result
       whose annotation a sibling clone already fetched is served. Ignored while
       ``FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK`` is set.
+    - ``FAKESHOP_TEST_LOAN_FETCH_MODE``: name a fetch mode (``"FETCH_PEERS"`` /
+      ``"FETCH_RAISE"``, Django 6.1's own, or ``"PROJECT_FETCH_PEERS"``, a project
+      ``FetchPeers`` subclass) for a ``get_queryset`` that returns
+      ``queryset.fetch_mode(<mode>)``, so live requests can pin that the sealed loan
+      rows load their unplanned ``patron`` (hinted ``skip``) under the project's fetch
+      mode, and that a mode Django never builds is refused. Ignored while either hook
+      flag above is set.
     """
 
     if getattr(settings, "FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK", False):
@@ -223,6 +257,19 @@ class LoanType(DjangoType):
             # ``first()`` fetches through a clone that shares the annotation node.
             _ = annotated.first()
             return annotated
+
+    elif getattr(settings, "FAKESHOP_TEST_LOAN_FETCH_MODE", None) is not None:
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Loan],
+            info: Info,
+        ) -> QuerySet[models.Loan]:
+            """Load the loan rows under the fetch mode the flag names."""
+            name: object = getattr(settings, "FAKESHOP_TEST_LOAN_FETCH_MODE", None)
+            return queryset.fetch_mode(_loan_fetch_modes[str(name)])
 
     class Meta:
         model = models.Loan

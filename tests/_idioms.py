@@ -124,6 +124,10 @@ annotation in the globals of the module its class names, so a PEP 563 consumer n
 module that exists, not a bare ``exec`` namespace. The program compiles with
 ``dont_inherit=True``, so its future features are exactly the ones its own source declares.
 ``consumer_query`` reads the program's ``Query`` class out of that namespace as a ``type``.
+
+``FETCH_MODES`` holds Django 6.1's three fetch modes by name, plus ``"project"``: an instance
+of a project ``FetchPeers`` subclass, a fetch mode Django never builds. Below 6.1, which has
+no fetch modes, it is empty, so a row that reads it carries ``requires_fetch_modes``.
 """
 
 import enum
@@ -132,7 +136,7 @@ import json
 import pickle
 import sys
 from collections.abc import Callable, Generator, Iterable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from types import FunctionType, ModuleType
 from typing import (
     TYPE_CHECKING,
@@ -147,6 +151,8 @@ from typing import (
     overload,
 )
 
+import django
+import pytest
 from django.db.models import Model, QuerySet
 from django.test.testcases import SimpleTestCase
 from rest_framework import serializers
@@ -166,10 +172,32 @@ from django_strawberry_framework.utils.typing import object_result
 if TYPE_CHECKING:
     from asgiref.typing import WebSocketScope
     from channels.testing import WebsocketCommunicator
+    from django.db.models.fetch_modes import FetchMode
     from strawberry.types.field import StrawberryField
     from typing_extensions import TypeIs
 
     from django_strawberry_framework.rest_framework.serializer_converter import DRFField
+
+FETCH_MODES: "dict[str, FetchMode]" = {}
+with suppress(ImportError):
+    from django.db.models.fetch_modes import FETCH_ONE, FETCH_PEERS, FETCH_RAISE, FetchPeers
+
+    class _ProjectFetchPeers(FetchPeers):
+        """A project's own ``FetchPeers`` subclass."""
+
+        __slots__ = ()
+
+    FETCH_MODES.update(
+        FETCH_ONE=FETCH_ONE,
+        FETCH_PEERS=FETCH_PEERS,
+        FETCH_RAISE=FETCH_RAISE,
+        project=_ProjectFetchPeers(),
+    )
+
+requires_fetch_modes = pytest.mark.skipif(
+    django.VERSION < (6, 1),
+    reason="QuerySet.fetch_mode() arrived in Django 6.1",
+)
 
 _ClassT = TypeVar("_ClassT", bound=type)
 _MetaT = TypeVar("_MetaT", bound=type)

@@ -879,7 +879,7 @@ For a request carrying any non-null list argument, the color-specific queryset p
    unactionable message, so every code a site can reach owes that site an arm. The
    retained-state helper `_queryset_state_defect` is not the home of `evaluated`: that helper
    pins the `QuerySet.__dict__` fields every seal carries forward (`_db`, `_hints`, `_fields`,
-   `_sticky_filter`, `_for_write`) and emits only `untrusted`, and `_result_cache` is not among
+   `_sticky_filter`, `_for_write`, `_fetch_mode`) and emits only `untrusted`, and `_result_cache` is not among
    them - the one policy that carries it pins its exact `list` shape in the seal itself
    (Decision 8).
 
