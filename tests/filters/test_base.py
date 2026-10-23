@@ -27,6 +27,7 @@ import strawberry
 from apps.library import models
 from apps.scalars import models as scalar_models
 from django.core.exceptions import ValidationError
+from django.db import models as db_models
 from django.db.models import Model, QuerySet
 from django.forms import DecimalField, Form
 from django.http import HttpRequest, QueryDict
@@ -65,6 +66,7 @@ from django_strawberry_framework.filters.base import (
     _bound_field_name,
     _coerce_int_in_members,
     _decode_and_validate_global_id,
+    _ElementField,
     _filter_schema,
     _filterset_model_field,
     _globalid_target,
@@ -77,6 +79,7 @@ from django_strawberry_framework.filters.base import (
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -86,6 +89,7 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import saved_pk
+from tests._postgres_fields import FakeArrayField
 from tests.filters.fixtures.filtersets import (
     BranchFilter,
     BranchFilterByPath,
@@ -536,6 +540,79 @@ def test_list_filter_passes_through_none() -> None:
     sentinel = _RecordingQs()
     f = ListFilter(field_name="ids")
     assert f.filter(sentinel, None) is sentinel
+
+
+@pytest.mark.parametrize(
+    ("element_field", "value", "cleaned"),
+    [
+        pytest.param(DecimalField(), ["1.5", None], [Decimal("1.5"), None], id="none-kept"),
+        pytest.param(DecimalField(), "1.5", "1.5", id="not-a-list-passes-through"),
+        pytest.param(None, ["NaN"], ["NaN"], id="no-element-field-passes-through"),
+    ],
+)
+def test_list_filter_field_cleans_each_element_with_its_element_field(
+    element_field: DecimalField | None,
+    value: object,
+    cleaned: object,
+) -> None:
+    """A ``None`` element stays ``None``; a non-list, or a field with no column, passes through.
+
+    A non-list reaches ``ListFilter.filter``, whose list-shape gate refuses it. Live refusal
+    of an element the column cannot hold:
+    ``test_scalars_filter_api.py::test_price_among_element_the_column_cannot_hold_is_filter_invalid``.
+    """
+    assert ListFilter.field_class is ArrayFilter.field_class is _ElementField
+    assert _ElementField(required=False, element_field=element_field).clean(value) == cleaned
+
+
+@pytest.mark.parametrize(
+    ("field_name", "lookup_expr"),
+    [
+        pytest.param("prices", "contains", id="array-column-element-is-its-base-field"),
+        pytest.param("price", "in", id="scalar-column"),
+    ],
+)
+def test_array_filter_element_the_column_cannot_hold_is_filter_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    lookup_expr: str,
+) -> None:
+    """Each ``ArrayFilter`` element is cleaned as one value of its column's elements.
+
+    An ``ArrayField`` column's element is a value of its ``base_field``, so a non-finite
+    decimal is ``FILTER_INVALID`` before ``django.contrib.postgres``'s array lookup hands it
+    to ``base_field.get_prep_value``. Package-only: fakeshop declares no ``ArrayField``.
+    """
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+
+    class PricedShelf(db_models.Model):
+        price: db_models.DecimalField[Decimal, Decimal] = db_models.DecimalField(
+            max_digits=8,
+            decimal_places=2,
+        )
+        prices = FakeArrayField(db_models.DecimalField(max_digits=8, decimal_places=2))
+
+        class Meta:
+            managed = False
+            app_label = "test_array_filter_elements"
+
+    class PricedShelfFilter(FilterSet):
+        priced = ArrayFilter(field_name=field_name, lookup_expr=lookup_expr)
+
+        class Meta:
+            model = PricedShelf
+            fields = ("price",)
+
+    filterset = PricedShelfFilter(
+        data={"priced": ["1.5", "NaN"]},
+        queryset=PricedShelf.objects.none(),
+    )
+    with pytest.raises(GraphQLError) as excinfo:
+        PricedShelfFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"priced": [{"message": "Enter a number.", "code": "invalid"}]},
+    }
 
 
 # ---------------------------------------------------------------------------

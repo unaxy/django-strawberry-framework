@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 212 done, 143 to do.
+Progress: 213 done, 142 to do.
 
 ## Done
 
@@ -890,6 +890,10 @@ Progress: 212 done, 143 to do.
   `FILTER_INVALID`, a naive datetime is made aware and text is stripped; relation bounds pass through as sent (an
   existence oracle otherwise), and a class-level declaration's `.field` is built by `unkept_form_field` without writing
   to it
+- [x] 370. `ListFilter` / `ArrayFilter` elements are cleaned by the same column `gte` form field through `_ElementField`
+  (an ArrayField column's `base_field`), so a non-finite or past-1e50 element is `FILTER_INVALID` as on the generated
+  `in`; relation elements, a non-list value and an unbound filter pass through; `_ElementField` joins
+  `sets.py::_NONE_CLEANING_FIELDS` so a deferred flat copy stays deferred
 
 ## Outside review of the fixes
 
@@ -1093,9 +1097,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 353. Relay `nodes(ids:)` loses `FETCH_PEERS` batching after 343: `relay.py::_stamp_node_type` `copy.copy`s each
   resolved node and Django's `ModelState.__getstate__` drops `peers`, so a lazy FK across 3 loans costs 3 queries
   instead of 1 (`FETCH_RAISE` is carried). Found landing 343
-- [ ] 370. A declared `ListFilter` / `ArrayFilter` never cleans its elements (its `field_class` is a bare
-  `forms.Field`), so `ListFilter(field_name="price", lookup_expr="in")` with `in: ["NaN"]` answers a masked
-  `ValidationError` instead of `FILTER_INVALID`; same owner as 162
 - [ ] 372. A declared package `RangeFilter` with both bounds on an integer column passes an out-of-int64 bound to
   `BETWEEN` and the backend raises a masked `OverflowError` (`range: {start: "0", end: "18446744073709551616"}` on a
   BigInt column); `filters/base.py::IntegerRangeFilter` decomposes into `gte` + `lte`, the declared primitive does not
