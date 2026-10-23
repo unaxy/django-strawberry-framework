@@ -55,6 +55,7 @@ from .nested_planner import (
 )
 from .plans import (
     OptimizationPlan,
+    PrefetchSeal,
     _consumer_projection,
     append_prefetch_unique,
     append_unique,
@@ -1043,6 +1044,9 @@ def _plan_select_relation(
         prefix,
         resolver_identities,
     )
+    # Both outcomes below serve the relation without a prefetch, so a consumer
+    # ``Prefetch`` that takes this path over withdraws these keys with them.
+    _record_path_resolver_keys(plan.select_path_resolver_keys, full_path, resolver_identities)
     target_pk_name = django_field.target_pk_name
     if (
         django_field.fk_id_elision_eligible
@@ -1139,9 +1143,59 @@ def _plan_prefetch_relation(
     )
     nested_keys = tuple(k for k in plan.planned_resolver_keys if k not in prior_planned)
     _record_prefetch_path_keys(plan, lookup_path, (*resolver_identities, *nested_keys))
+    if has_custom_get_queryset:
+        _record_prefetch_seal(
+            plan,
+            lookup_path,
+            django_field,
+            target_type,
+            target_definition,
+            resolver_identities,
+        )
     append_prefetch_unique(
         plan.prefetch_related,
         Prefetch(lookup_path, queryset=child_queryset),
+    )
+
+
+def _record_prefetch_seal(
+    plan: OptimizationPlan,
+    lookup_path: str,
+    django_field: FieldMeta,
+    target_type: type[DjangoType] | None,
+    target_definition: DjangoTypeDefinition | None,
+    resolver_identities: tuple[str, ...],
+) -> None:
+    """Record how a consumer queryset on ``lookup_path`` is scoped by the target's hook.
+
+    The seal is ``_build_child_queryset`` seeded with the consumer's queryset, the
+    move ``_scoped_hint_prefetch`` makes for a hinted ``Prefetch``: the consumer
+    chooses how the relation is fetched, the hook which rows the target type
+    admits. It binds only the relation's static field and target metadata; the
+    reconciliation hands it the request's resolve info
+    (``plans.py::diff_plan_for_queryset``).
+    """
+
+    def seal(
+        seed: QuerySet[models.Model] | None,
+        info: GraphQLResolveInfo | None,
+    ) -> QuerySet[models.Model]:
+        return _build_child_queryset(
+            django_field,
+            target_type,
+            info,
+            has_custom_qs=True,
+            target_definition=target_definition,
+            seed=seed,
+        )
+
+    _ = plan.prefetch_path_seals.setdefault(
+        lookup_path,
+        PrefetchSeal(
+            own_keys=resolver_identities,
+            model=django_field.related_model,
+            seal=seal,
+        ),
     )
 
 
@@ -1260,10 +1314,12 @@ def _build_prefetch_child_queryset_from_base(
     # manager), reconciled exactly as the root reconciles the resolver's: a
     # generated ``Prefetch`` never collides with a lookup the hook added
     # (Django's "lookup was already seen with a different queryset"), a
-    # consumer-wins drop strips its resolver keys before the parent absorbs
-    # them, and ``apply`` writes the union of the hook's projection and the
-    # child selection's.
-    child_plan, base_queryset = diff_plan_for_queryset(child_plan, base_queryset)
+    # ``Prefetch(queryset=...)`` the hook added keeps the rows of its path over
+    # a planned JOIN or elision, or is sealed through its own target type's
+    # hook, a consumer-wins drop strips its resolver keys before the parent
+    # absorbs them, and ``apply`` writes the union of the hook's projection and
+    # the child selection's.
+    child_plan, base_queryset = diff_plan_for_queryset(child_plan, base_queryset, info=info)
     _absorb_child_plan(parent_plan, child_plan)
     return child_plan.apply(base_queryset)
 
@@ -1384,6 +1440,23 @@ def _apply_hint(
             ),
         )
         _record_prefetch_path_keys(plan, hinted_lookup, resolver_identities)
+        # A consumer ``Prefetch`` that wins on this path is sealed through the
+        # target's hook only when the generated resolver reads the relation
+        # itself: a consumer-assigned resolver owns its rows (and may read a
+        # ``to_attr`` or a deeper lookup), so its winner stays as written.
+        if (
+            _target_has_custom_get_queryset(target_type, target_definition)
+            and not consumer_assigned
+            and hinted_lookup == f"{prefix}{instance_accessor(django_field)}"
+        ):
+            _record_prefetch_seal(
+                plan,
+                hinted_lookup,
+                django_field,
+                target_type,
+                target_definition,
+                resolver_identities,
+            )
         append_prefetch_unique(
             plan.prefetch_related,
             rebased_prefetch,

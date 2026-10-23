@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 228 done, 137 to do.
+Progress: 230 done, 139 to do.
 
 ## Done
 
@@ -1001,6 +1001,15 @@ Progress: 228 done, 137 to do.
   `--workspace` / `--scratch-root` / `--json` is refused; `uv`, `git` or `docker` missing from PATH is a refusal
   before the header (it was a raw traceback, raised before the header, not after), and the prover refuses a missing
   scope executable before writing anything
+- [x] 379. A consumer `Prefetch(queryset=...)` owns its path's rows on a forward relation too: the planned JOIN, the
+  FK-id elision and the `only()` columns at that path are withdrawn with their resolver keys, JOINs beneath it become
+  prefetch lookups over the consumer's rows, and the consumer queryset is not widened, so a row it hides stays hidden
+  and an annotation it adds is served (the same answer as without the optimizer); a plain string, a queryset-less or
+  `to_attr` Prefetch, or a path the consumer's own `select_related` joins keeps the JOIN
+- [x] 380. A consumer `Prefetch(queryset=...)` onto a planned relation whose target type has a `get_queryset` hook is
+  sealed through the hook as the seed in one batched query (two statements at any parent count, sync and async) and
+  the relation's key stays planned; a seed over another model is still re-read per parent, a sliced one fails as it
+  does without the optimizer; a hint seal is recorded only for a generated resolver at the relation's own accessor
 
 ## Outside review of the fixes
 
@@ -1178,12 +1187,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   field's awaitable un-awaited when a later sync field raises on a non-null position, so Python warns "coroutine never
   awaited" (`filterwarnings = error` turns it into a session error in a failing run); upstream behaviour, but an async
   many-side resolver could avoid building a coroutine that may never run
-- [ ] 379. A consumer `Prefetch(queryset=...)` on a forward relation the optimizer joins goes unused (the JOIN serves
-  the row: a hook `prefetch_related(Prefetch("patron", queryset=Patron.objects.only("id")))` with `loans { note patron {
-  name } }` runs one JOIN statement), so a consumer Prefetch queryset that filters rows is silently ignored on that
-  relation; settle whether "the consumer's Prefetch wins" covers the forward case under AGENTS rule 37 before fixing
-- [ ] 380. (robustness) A consumer prefetch onto a relation whose target type has a `get_queryset` hook runs batched and
-  is then discarded while every parent re-reads through the hook (one query per parent); `strictness` may not report it
 - [ ] 420. (robustness) `scripts/_markdown_lex.py::block_regions` does not mask a block quote nested inside a list
   item (`- > ```` then `  > code`: markers are read only at the line start) nor a link-reference-definition title
   split across two lines (`[foo]: /url "a` / `Zeta b"`), so `check_spec_glossary.py --auto-link` can write a link into
@@ -1196,12 +1199,29 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 422. (robustness) `_insert_glossary_ref_def` re-sorts the whole `<!-- docs/ -->` definition group with
   `sorted()` on every insert, reordering hand-written lines (the spec-034 half of this row, its stale
   `Meta.relation_shapes` row and definition, is fixed by 256); found fact-finding 302
+- [ ] 460. `optimizer/walker.py::_scoped_hint_prefetch` accepts an `OptimizerHint.prefetch(Prefetch("branch",
+  queryset=Branch.objects.all()))` seed over a proxy target's concrete model and serves `Branch` rows to
+  `ProxyBranchType` ("Expected value of type 'ProxyBranchType'"; `BranchNote.branch` onto a hooked proxy type); the
+  consumer seal (379/380) seals only a seed whose model is the target model. Found landing 379/380
+- [ ] 462. A reverse one-to-one whose `related_query_name` differs from its `related_name` escapes 379's ownership:
+  consumer Prefetch paths are accessor names while `select_related` and the key ledgers use query names, so
+  `plans.py::_consumer_owned_paths` (and `_release_select_related_to_prefetches`) never match it and the JOIN still
+  serves the row; no fakeshop or `tests/` model has the shape (a library `PatronBadge(patron=OneToOneField(Patron,
+  related_name="badge", related_query_name="badges"))` would). Found landing 379/380
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 463. CHANGELOG entry for items 379 and 380: a consumer `Prefetch(queryset=...)` (from a `get_queryset` hook or a
+  resolver) now owns its path on a forward relation (the optimizer no longer joins over it, so its filter and
+  annotations apply) and onto a target type with its own `get_queryset` hook (sealed through that hook in one query
+  instead of one query per parent)
+- [ ] 461. Decide whether `strictness` reports the per-parent re-reads that remain after 380 (a consumer `Prefetch`
+  seed over another model, a consumer lookup deeper than the planned path or on a `SKIP`-hinted relation onto a hooked
+  target): each answers correctly but costs one query per parent and `types/resolvers.py::_check_n1` stays silent
+  (it asks only the instance cache); reporting them under `strictness="raise"` would error queries that answer today
 - [ ] 352. CHANGELOG entry for item 343: on Django 6.1, a `get_queryset` hook or default manager returning
   `.fetch_mode(FETCH_PEERS)` or `.fetch_mode(FETCH_RAISE)` keeps that mode through the visibility seal (root lists,
   connections, nested relations, prefetch children, `node(id:)`, the mutation locate), so lazy loads batch or raise as

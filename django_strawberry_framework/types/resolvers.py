@@ -445,12 +445,13 @@ def _custom_visibility_type(field_meta: FieldMeta) -> "type[DjangoType] | None":
     """Return a registered target type whose custom visibility hook must run here.
 
     Optimizer prefetch planning applies a custom target ``get_queryset`` to the
-    child querysets of relations it PLANS. Everything else reaching a generated
+    child querysets of relations it PLANS, and to a consumer ``Prefetch``
+    queryset it seals on such a path. Everything else reaching a generated
     relation resolver - a schema with no optimizer, a relation the walker never
-    planned, a cache the consumer prefetched itself - has not passed through
-    that hook, so the resolver applies it (``_optimizer_scoped_relation`` draws
-    that line). Default identity hooks stay on the existing fast path and
-    preserve prefetched-cache behavior.
+    planned, a cache the consumer prefetched itself that no seal reached - has
+    not passed through that hook, so the resolver applies it
+    (``_optimizer_scoped_relation`` draws that line). Default identity hooks
+    stay on the existing fast path and preserve prefetched-cache behavior.
     """
     if field_meta.related_model is None:
         return None
@@ -532,10 +533,14 @@ def _optimizer_scoped_relation(
     target's traversal to a ``Prefetch`` and applies the hook to that child
     queryset (``optimizer/walker.py::plan_relation``), so a relation the walker
     planned arrives already scoped and re-filtering it would only repeat the
-    query. Nothing else in the request carries that guarantee: a relation the
+    query. A consumer ``Prefetch`` carrying a queryset on such a planned path is
+    sealed through the same hook in place of the planned one
+    (``optimizer/plans.py::diff_plan_for_queryset``), so the relation stays
+    planned. Nothing else in the request carries that guarantee: a relation the
     walker never planned still lazy-loads unscoped, and a cache the CONSUMER
-    populated with its own ``prefetch_related`` was never offered to the hook at
-    all.
+    populated with its own ``prefetch_related`` that no seal reached (a seed over
+    another model than the relation's target, a path the walker did not plan)
+    was never offered to the hook at all.
 
     Answered from the optimizer's per-execution scoped-relation set
     (``optimizer/_context.py::relation_is_optimizer_scoped``). None of the

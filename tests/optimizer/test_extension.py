@@ -117,7 +117,7 @@ from django_strawberry_framework.optimizer.extension import (
     clear_document_key_cache,
 )
 from django_strawberry_framework.optimizer.hints import hint_is_skip
-from django_strawberry_framework.optimizer.plans import OptimizationPlan
+from django_strawberry_framework.optimizer.plans import OptimizationPlan, PrefetchSeal
 from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import iter_subsystem_clears, registry
 from django_strawberry_framework.types.resolvers import (
@@ -723,6 +723,11 @@ def test_apply_to_returns_a_combined_queryset_unplanned(caplog: pytest.LogCaptur
     assert any("combined (union) queryset" in r.message for r in caplog.records)
 
 
+def _seal_items(seed: QuerySet[Model] | None, _info: object) -> QuerySet[Model]:
+    """An item hook admitting every row of the seed (the default manager without one)."""
+    return seed if seed is not None else Item.objects.all()
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
@@ -730,6 +735,8 @@ def test_apply_to_returns_a_combined_queryset_unplanned(caplog: pytest.LogCaptur
         pytest.param("cold-in-execution", True, id="memo-miss-builds"),
         pytest.param("cached", False, id="cache-hit-reuses"),
         pytest.param("memoized", False, id="memo-hit-reuses"),
+        pytest.param("memoized-sealed", True, id="memo-hit-seals-the-consumer-prefetch"),
+        pytest.param("memoized-sealed-elsewhere", False, id="memo-hit-seals-nothing"),
         pytest.param("combined", False, id="combined-plans-nothing"),
         pytest.param("no-field-nodes", False, id="no-field-nodes-plans-nothing"),
     ],
@@ -744,7 +751,9 @@ def test_builds_plan_is_true_only_when_apply_to_would_run_the_walker(
     ``apply_to``'s two pass-throughs (no root field nodes, a combined queryset)
     and ``_get_or_build_plan``'s two lookups (the cross-request cache, the
     execution memo): only the remaining case runs the walker, and so consumer
-    hooks.
+    hooks. A reused plan that seals a path the queryset's own ``Prefetch`` takes
+    over runs the target type's hook in the reconciliation, so it hops too; a
+    consumer ``Prefetch`` on any other path does not.
     """
     ext = DjangoOptimizerExtension()
     info = make_info(field_name="allCategories")._raw_info
@@ -756,15 +765,29 @@ def test_builds_plan_is_true_only_when_apply_to_would_run_the_walker(
         queryset = Category.objects.filter(pk__lt=0).union(Category.objects.all())
     elif state == "no-field-nodes":
         info = info._replace(field_nodes=[])
+    elif state == "memoized-sealed":
+        queryset = Category.objects.prefetch_related(
+            Prefetch("items", queryset=Item.objects.all()),
+        )
+    elif state == "memoized-sealed-elsewhere":
+        queryset = Category.objects.prefetch_related(
+            Prefetch("properties", queryset=Property.objects.all()),
+        )
     frame = (
         begin_execution_frame({}, nested=False)
-        if state in {"memoized", "cold-in-execution"}
+        if state.startswith("memoized") or state == "cold-in-execution"
         else None
     )
     try:
         memo = execution_plan_memo()
         if memo is not None and state == "memoized":
             memo[key] = OptimizationPlan()
+        elif memo is not None and state.startswith("memoized-sealed"):
+            memo[key] = OptimizationPlan(
+                prefetch_path_seals={
+                    "items": PrefetchSeal(own_keys=(), model=Item, seal=_seal_items),
+                },
+            ).finalize()
         assert ext._builds_plan(info, Category, None, queryset) is expected
     finally:
         if frame is not None:
