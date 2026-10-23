@@ -2520,7 +2520,7 @@ def _range_split() -> tuple[_ClashSide, _ClashSide]:
     """``A`` over ``b_c`` and ``AB`` over ``c`` spell one range name, of two axis types."""
 
     class _IntRangeRow(Model):
-        b_c: IntegerField[int | Combinable, int] = IntegerField()
+        b_c: IntegerField[float | int | str | Combinable, int] = IntegerField()
 
         class Meta:
             app_label = "library"

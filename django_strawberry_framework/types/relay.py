@@ -815,14 +815,14 @@ def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     overrides, since Strawberry reads ``resolve_typename`` off the class and
     calls it with ``(root, info)``. A method inherited unchanged from
     ``relay.Node`` (or a re-export of it, such as
-    ``resolve_typename = relay.Node.resolve_typename``), or an absent one, is
-    NOT an override - and neither is a framework closure installed on a
-    concrete Relay PARENT and inherited through the MRO (discriminated by
-    ``_FRAMEWORK_CLOSURE_MARKER``; the step-0 re-entrancy guard protects the
-    same definition across finalize re-runs, but only the marker protects a
-    DIFFERENT definition inheriting the installed closure). A consumer override
-    inherited from an abstract base lacks the marker, so it still classifies
-    ``custom``.
+    ``resolve_typename = relay.Node.resolve_typename``), or a
+    ``resolve_typename = None`` declaration, is NOT an override - and neither
+    is a framework closure installed on a concrete Relay PARENT and inherited
+    through the MRO (discriminated by ``_FRAMEWORK_CLOSURE_MARKER``; the
+    step-0 re-entrancy guard protects the same definition across finalize
+    re-runs, but only the marker protects a DIFFERENT definition inheriting the
+    installed closure). A consumer override inherited from an abstract base
+    lacks the marker, so it still classifies ``custom``.
     """
     existing_func = truth.stored_function(truth.static_attr(type_cls, "resolve_typename"))
     if existing_func is None:

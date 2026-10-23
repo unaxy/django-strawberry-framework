@@ -549,7 +549,7 @@ def _range_field_paths() -> type[FilterSet]:
             on_delete=CASCADE,
             related_name="+",
         )
-        shelf_code: IntegerField[int | Combinable, int] = IntegerField()
+        shelf_code: IntegerField[float | int | str | Combinable, int] = IntegerField()
 
         class Meta:
             app_label = "library"

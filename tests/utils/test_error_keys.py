@@ -803,16 +803,13 @@ def test_rename_onto_an_unexposed_model_name_shares_one_key(
             permission_classes = [_AllowAll]
 
     def clean(_self: product_models.Item) -> None:
-        raise DjangoValidationError({"name": "on name"})
+        raise DjangoValidationError({"name": "on name", "category": "on category"})
 
     monkeypatch.setattr(product_models.Item, "clean", clean)
     errors = _execute(
         DjangoMutationField(CreateItem),
         lambda: 'category: "keyed"',
     )
-    # ``full_clean()`` still validates the unexposed FK (it shares
-    # ``unique_item_per_category`` with the provided ``name``), so its null error
-    # rides beside the renamed field's ``clean()`` error.
     assert errors == [("category", ["category"]), ("category", ["category"])]
 
 
