@@ -17,7 +17,10 @@ per owning filterset and the ``range`` lookup applies over the wire; a lone
 ``start`` / ``end`` applies as ``gte`` / ``lte`` and a range with no bound filters nothing;
 each bound is cleaned as ``price: { gte }`` cleans its value, so a bound the column cannot
 hold is ``FILTER_INVALID``. ``price_among`` is a declared ``ListFilter`` (``in``) on the
-same column whose elements are cleaned the same way.
+same column whose elements are cleaned the same way. django-filter's own range filters
+(``priceBetween``, ``occurredBetween`` over ``DateRangeWidget``, ``occurredInBoxes`` over a
+plain ``MultiWidget`` and ``priceInUnderscoredBoxes`` over a consumer widget reading ``__``
+keys) apply every bound they are sent, under the keys each widget reads.
 The per-field ``"__all__"`` leaves never publish a ``django.contrib.postgres``
 lookup Django registers onto a core field (``containedBy`` on the numeric and
 temporal leaves), whether or not a PostgreSQL driver is installed.
@@ -510,6 +513,132 @@ def test_price_among_element_the_column_cannot_hold_is_filter_invalid(
     assert json_at(error, "extensions") == {
         "code": "FILTER_INVALID",
         "errors": {form_key: [refusal]},
+    }
+
+
+# django-filter's own range filters, each declared on ``ScalarSpecimenFilter`` with its
+# low / high bound: ``priceBetween`` (``RangeWidget``: ``_min`` / ``_max``),
+# ``occurredBetween`` (``DateRangeWidget``: ``_after`` / ``_before``),
+# ``occurredInBoxes`` (the same filter over a plain ``MultiWidget``: ``_0`` / ``_1``) and
+# ``priceInUnderscoredBoxes`` (a consumer ``SuffixedMultiWidget``: ``__low`` / ``__high``,
+# keys the flat-copy scan reads as a relation path).
+_UPSTREAM_RANGES = {
+    "priceBetween": ("10.0000", "100.0000"),
+    "occurredBetween": ("2021-03-01", "2021-12-31"),
+    "occurredInBoxes": ("2021-03-01", "2021-12-31"),
+    "priceInUnderscoredBoxes": ("10.0000", "100.0000"),
+}
+# Each range shape and the specimens it keeps (the seed puts ``mid`` alone inside both bounds).
+_RANGE_SHAPES = {
+    "both": (True, True, ["mid"]),
+    "start": (True, False, ["mid", "dear"]),
+    "end": (False, True, ["cheap", "mid"]),
+    "empty": (False, False, ["cheap", "mid", "dear"]),
+    "both-null": (False, False, ["cheap", "mid", "dear"]),
+}
+_EVERY_SPECIMEN = ["cheap", "mid", "dear"]
+
+
+def _upstream_range(name: str, shape: str) -> dict[str, str | None]:
+    """The ``{start, end}`` input of ``shape`` for the upstream range filter ``name``."""
+    low, high = _UPSTREAM_RANGES[name]
+    with_start, with_end, _ = _RANGE_SHAPES[shape]
+    if shape == "both-null":
+        return {"start": None, "end": None}
+    return {**({"start": low} if with_start else {}), **({"end": high} if with_end else {})}
+
+
+def _seed_dated_price_tiers() -> None:
+    """``cheap`` / ``mid`` / ``dear`` at rising prices and dates, each with an ``of-`` partner row."""
+    tiers = [
+        ("cheap", Decimal("1.0000"), datetime.date(2021, 1, 1)),
+        ("mid", Decimal("50.0000"), datetime.date(2021, 6, 15)),
+        ("dear", Decimal("50000.0000"), datetime.date(2022, 12, 31)),
+    ]
+    for label, price, occurred_on in tiers:
+        partner = _seed_specimen(label, price=price, occurred_on=occurred_on)
+        models.NullableScalarSpecimen.objects.create(label=f"of-{label}", partner=partner)
+
+
+def _upstream_range_case(
+    name: str,
+    shape: str,
+    context: str,
+) -> tuple[str, dict[str, object], dict[str, object]]:
+    """The query, filter input and expected data of ``name`` in ``shape`` under ``context``."""
+    bag = {"exact": _upstream_range(name, shape)}
+    kept = _RANGE_SHAPES[shape][2]
+    if context == "not":
+        labels = [label for label in _EVERY_SPECIMEN if label not in kept] or _EVERY_SPECIMEN
+        return _BY_FILTER, {"not": {name: bag}}, {"allScalarSpecimens": labels}
+    if context in {"nested-partner", "flat-partner"}:
+        filter_input: dict[str, object] = (
+            {"partner": {name: bag}}
+            if context == "nested-partner"
+            else {f"partner{name[0].upper()}{name[1:]}": bag}
+        )
+        return (
+            _BY_NULLABLE_FILTER,
+            filter_input,
+            {"allNullableScalarSpecimens": [f"of-{label}" for label in kept]},
+        )
+    filter_input = {"and": [{name: bag}]} if context == "and" else {name: bag}
+    return _BY_FILTER, filter_input, {"allScalarSpecimens": kept}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "context",
+    [
+        "top",
+        "and",
+        "not",
+        "nested-partner",
+        "flat-partner",
+    ],
+)
+@pytest.mark.parametrize("shape", list(_RANGE_SHAPES))
+@pytest.mark.parametrize("name", list(_UPSTREAM_RANGES))
+def test_upstream_range_filter_reads_the_keys_its_widget_reads(
+    name: str,
+    shape: str,
+    context: str,
+) -> None:
+    """A declared django-filter range filter applies each bound it is sent.
+
+    The range input is sent under the keys the filter's own widget reads
+    (``_min`` / ``_max``, ``_after`` / ``_before``, or a plain ``MultiWidget``'s
+    ``_0`` / ``_1``), so a lone ``start`` keeps the rows at or after it, a lone ``end``
+    the rows at or before it, and a range with no bound filters nothing, flat, inside
+    ``and`` / ``not`` and through the ``partner`` relation, nested and flat. ``not`` of
+    a range that constrains nothing keeps every row. The flat ``partner`` copy of a widget
+    reading a ``__`` key (``priceInUnderscoredBoxes``) is copied by every request, so its
+    bounds apply too.
+    """
+    _seed_dated_price_tiers()
+    query, filter_input, expected = _upstream_range_case(name, shape, context)
+    ((root, labels),) = expected.items()
+    payload = response_json(post_graphql(query, variables={"filter": filter_input}))
+
+    assert payload == {"data": {root: [{"label": label} for label in json_list(labels)]}}
+
+
+@pytest.mark.django_db
+def test_upstream_range_filter_nan_bound_is_filter_invalid() -> None:
+    """A ``NaN`` bound on django-filter's ``RangeFilter`` is its ``DecimalField``'s refusal."""
+    _seed_dated_price_tiers()
+    payload = response_json(
+        post_graphql(
+            _BY_FILTER,
+            variables={"filter": {"priceBetween": {"exact": {"start": "NaN", "end": "100"}}}},
+        ),
+    )
+
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {"price_between": [_NOT_A_NUMBER]},
     }
 
 

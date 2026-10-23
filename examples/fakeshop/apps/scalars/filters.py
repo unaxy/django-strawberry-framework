@@ -39,13 +39,37 @@ declared primitive is a separate ``priceSpan: { range: { start, end } }`` field.
 ``price_among`` on ``ScalarSpecimenFilter`` is a declared ``ListFilter`` over the same
 column with the ``in`` lookup (``priceAmong: { in: [...] }``): the acceptance surface for
 a declared list filter, each element cleaned as ``price: { in }`` cleans its members.
+
+``price_between``, ``occurred_between`` and ``occurred_in_boxes`` on ``ScalarSpecimenFilter``
+are django-filter's own range filters (``RangeFilter`` over ``price``,
+``DateFromToRangeFilter`` over ``occurred_on``, and the same date filter over a plain
+two-box ``MultiWidget``), each taking ``{ exact: { start, end } }``: the acceptance surface
+for a range input sent under the keys the filter's widget reads (``_min`` / ``_max``,
+``_after`` / ``_before``, ``_0`` / ``_1``). ``price_in_underscored_boxes`` is django-filter's
+``RangeFilter`` over a consumer ``SuffixedMultiWidget`` whose suffixes open with ``_``, so
+it reads ``<name>__low`` / ``<name>__high``: keys the flat-copy scan would read as a
+relation path, so its flat ``partner`` copy is copied by every request.
 """
 
 from __future__ import annotations
 
+import django_filters
+from django import forms
+from django_filters.widgets import SuffixedMultiWidget
+
 from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
 
 from . import models
+
+
+class UnderscoredRangeWidget(SuffixedMultiWidget):
+    """A two-box range widget whose suffixes open with ``_``: it reads ``<name>__low`` / ``<name>__high``."""
+
+    suffixes = ["_low", "_high"]
+
+    def __init__(self, attrs: dict[str, object] | None = None) -> None:
+        """Two text boxes, one per suffix."""
+        super().__init__((forms.TextInput, forms.TextInput), attrs)
 
 
 class ScalarSpecimenTagFilter(FilterSet):
@@ -62,6 +86,16 @@ class ScalarSpecimenFilter(FilterSet):
     tag = RelatedFilter(ScalarSpecimenTagFilter, field_name="tag")
     price_span = RangeFilter(field_name="price", lookup_expr="range")
     price_among = ListFilter(field_name="price", lookup_expr="in")
+    price_between = django_filters.RangeFilter(field_name="price")
+    occurred_between = django_filters.DateFromToRangeFilter(field_name="occurred_on")
+    occurred_in_boxes = django_filters.DateFromToRangeFilter(
+        field_name="occurred_on",
+        widget=forms.MultiWidget(widgets=(forms.TextInput, forms.TextInput)),
+    )
+    price_in_underscored_boxes = django_filters.RangeFilter(
+        field_name="price",
+        widget=UnderscoredRangeWidget,
+    )
 
     class Meta:
         model = models.ScalarSpecimen
@@ -107,4 +141,9 @@ class NullableScalarSpecimenFilter(FilterSet):
         }
 
 
-__all__ = ("NullableScalarSpecimenFilter", "ScalarSpecimenFilter", "ScalarSpecimenTagFilter")
+__all__ = (
+    "NullableScalarSpecimenFilter",
+    "ScalarSpecimenFilter",
+    "ScalarSpecimenTagFilter",
+    "UnderscoredRangeWidget",
+)

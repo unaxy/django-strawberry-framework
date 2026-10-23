@@ -82,6 +82,7 @@ from django_filters.filters import FilterMethod
 from django_filters.filterset import FILTER_FOR_DBFIELD_DEFAULTS as UPSTREAM
 from django_filters.filterset import BaseFilterSet, UnknownFieldBehavior
 from django_filters.filterset import FilterSetMetaclass as DjangoFilterMetaclass
+from django_filters.widgets import RangeWidget, SuffixedMultiWidget
 from graphql import GraphQLError
 from strawberry.types.base import StrawberryOptional, get_object_definition
 from typing_extensions import override
@@ -2414,6 +2415,41 @@ def test_a_widget_that_reads_data_its_own_way_keeps_its_copy_up_front(
         {},
     )
     assert deferred is omitted
+
+
+class _DunderSuffixedRangeWidget(SuffixedMultiWidget):
+    """A django-filter suffixed widget whose ``_end`` suffix reads the key ``<name>__end``."""
+
+    suffixes = ["start", "_end"]
+
+    def __init__(self) -> None:
+        super().__init__((forms.TextInput, forms.TextInput))
+
+
+@pytest.mark.parametrize(
+    ("widget", "absent"),
+    [
+        pytest.param(RangeWidget, [None, None], id="range-widget"),
+        pytest.param(_DunderSuffixedRangeWidget, None, id="suffix-reading-a-dunder-key"),
+        pytest.param(_DunderSuffixWidget, None, id="multi-widget-reading-a-dunder-key"),
+    ],
+)
+def test_a_multi_widget_reading_a_dunder_key_proves_no_absent_value(
+    widget: type[forms.Widget],
+    absent: list[None] | None,
+) -> None:
+    """A multi-widget is asked for the keys it reads; one past the name opening ``__`` is unproven.
+
+    django-filter's ``SuffixedMultiWidget`` reads ``<name>_<suffix>``, whatever its
+    ``widgets_names``, so a suffix opening with ``_`` reads a key the named-key scan
+    takes for a relation path, as a plain ``MultiWidget``'s ``__`` sub-key does.
+    """
+    proven = sets_module._absent_widget_value(widget, "title")
+
+    if absent is None:
+        assert proven is sets_module._UNPROVEN
+        return
+    assert proven == absent
 
 
 @pytest.mark.parametrize(
@@ -7652,7 +7688,7 @@ def test_normalize_input_rejects_dict_value_on_scalar_filter() -> None:
     django-filter's form silently ignores as unknown -- an explicit filter
     input applying NO filtering (``{"name": {"nope": "x"}}`` would filter
     nothing). Only a
-    range-kind filter may return the positional dict patch.
+    range-kind filter may return its dict patch of the keys its widget reads.
     """
 
     class CategoryFilter(FilterSet):
@@ -7698,12 +7734,13 @@ def test_apply_sync_dict_valued_scalar_filter_fails_loud() -> None:
     assert "single scalar form key" in str(excinfo.value)
 
 
-def test_range_patch_dict_values_still_merge_positional_keys() -> None:
+def test_range_patch_dict_values_still_merge_their_widget_keys() -> None:
     """The dict-value rejection exempts the two range primitives.
 
     ``FilterSet._reject_dict_form_value`` must never fire for the framework
-    ``RangeFilter`` (and django-filter's own ``RangeFilter``): their dict
-    return IS the documented positional ``{<field>_0, <field>_1}`` patch.
+    ``RangeFilter`` or django-filter's own ``RangeFilter``: their dict return IS the
+    patch of the two keys each one's widget reads, ``{<field>_0, <field>_1}`` for the
+    package's and ``{<field>_min, <field>_max}`` for django-filter's ``RangeWidget``.
     """
 
     @dataclasses.dataclass
@@ -7712,6 +7749,7 @@ def test_range_patch_dict_values_still_merge_positional_keys() -> None:
 
     class PatronFilter(FilterSet):
         fines = RangeFilter(field_name="lifetime_fines_cents")
+        upstream_fines = django_filters.RangeFilter(field_name="lifetime_fines_cents")
         lifetime_fines_cents__range = RangeFilter(
             field_name="lifetime_fines_cents",
             lookup_expr="range",
@@ -7721,16 +7759,65 @@ def test_range_patch_dict_values_still_merge_positional_keys() -> None:
             model = library_models.Patron
             fields = []
 
-    # Top-level scalar branch: the {start, end} patch still merges positionally.
+    # Top-level scalar branch: the {start, end} patch merges under the widget's keys.
     assert PatronFilter._normalize_input({"fines": {"start": 1, "end": 5}}) == {
         "fines_0": 1,
         "fines_1": 5,
+    }
+    assert PatronFilter._normalize_input({"upstream_fines": {"start": 1, "end": 5}}) == {
+        "upstream_fines_min": 1,
+        "upstream_fines_max": 5,
     }
     # The operator-bag branch merges the same patch through the guard.
     data = PatronFilter._normalize_input(
         {"lifetime_fines_cents_range": _NameBag(range={"start": 1, "end": 5})},
     )
     assert data == {"lifetime_fines_cents__range_0": 1, "lifetime_fines_cents__range_1": 5}
+
+
+_REQUIRED_FINES: dict[str, object] = {
+    "fines": [{"message": "This field is required.", "code": "required"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("value", "refusal"),
+    [
+        pytest.param({"start": 1, "end": 5}, None, id="both-bounds"),
+        pytest.param({"end": 5}, _REQUIRED_FINES, id="end-only"),
+        pytest.param({}, _REQUIRED_FINES, id="no-bound"),
+    ],
+)
+def test_required_upstream_range_filter_is_satisfied_by_the_keys_its_widget_reads(
+    value: dict[str, int],
+    refusal: dict[str, object] | None,
+) -> None:
+    """A ``required=True`` django-filter ``RangeFilter`` reads the bounds it is sent.
+
+    The patch lands under ``_min`` / ``_max``, the keys its ``RangeWidget`` reads, so
+    both bounds satisfy ``required``; django-filter's ``RangeField`` requires both, so a
+    range missing one is the form's ``required`` refusal. Package-only: a required filter
+    makes its input field required on every query of its set, which no fakeshop filterset
+    can carry.
+    """
+
+    class PatronFilter(FilterSet):
+        fines = django_filters.RangeFilter(field_name="lifetime_fines_cents", required=True)
+
+        class Meta:
+            model = library_models.Patron
+            fields = []
+
+    filterset = PatronFilter(
+        data=PatronFilter._normalize_input({"fines": value}),
+        queryset=library_models.Patron.objects.none(),
+    )
+    if refusal is None:
+        PatronFilter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        PatronFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {"code": "FILTER_INVALID", "errors": refusal}
 
 
 def test_operator_bag_items_walks_lookup_attr_dict() -> None:
@@ -7757,7 +7844,7 @@ def test_operator_bag_items_returns_none_for_non_lookup_key_dict() -> None:
 
     ``start`` / ``end`` are not lookup attrs, so the dict must fall
     through to the scalar branch where ``normalize_input_value`` produces
-    the positional ``{<field>_0, <field>_1}`` range patch. Treating it as
+    the range patch under the keys the filter's widget reads. Treating it as
     a bag would emit bogus ``<field>__start`` / ``<field>__end`` keys.
     """
 
@@ -8557,7 +8644,7 @@ def test_apply_sync_permission_denial_precedes_form_validation() -> None:
 
 @pytest.mark.django_db
 def test_normalize_input_top_level_range_filter_merges_positional_keys() -> None:
-    """A top-level ``RangeFilter`` attribute expands to positional keys."""
+    """A top-level ``RangeFilter`` attribute expands to the ``_0`` / ``_1`` keys its widget reads."""
 
     class FinesRangeFilter(FilterSet):
         fines = RangeFilter(field_name="lifetime_fines_cents")
