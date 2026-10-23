@@ -6,8 +6,8 @@ One matrix over the flavors that run a validator ({model ``DjangoMutation``,
 ``ValidationError`` out of a model ``save()``, ``perform_mutate`` or a serializer
 ``create()``; the model flavor's update save too, which runs a forced update) x the
 key shapes a validator name can take against its input
-({multi-word, forward-key suffix, forward-key column name, rename, unexposed field,
-non-field}). Each cell
+({multi-word, forward-key suffix, forward-key column name, rename, primary key written
+through the ``pk`` alias, unexposed field, non-field}). Each cell
 raises one error from the flavor's own validator seam under the validator-side
 name and asserts the envelope key and ``path``: the GraphQL input name for an
 exposed field, the validator-side name verbatim for a field the input does not
@@ -389,10 +389,16 @@ def _run_serializer(
 
         class KeyedItemSerializer(ModelSerializerBase[product_models.Item]):
             full_name = serializers.CharField(source="name")
+            key = serializers.IntegerField(source="pk", required=False)
 
             class Meta:
                 model = product_models.Item
-                fields = ("full_name", "category", "is_private")
+                fields = (
+                    "full_name",
+                    "key",
+                    "category",
+                    "is_private",
+                )
 
             @override
             def validate(self, attrs: dict[str, object]) -> dict[str, object]:
@@ -598,6 +604,12 @@ _CELLS: list[tuple[str, str, str | None, str]] = [
         "rename",
         "name",
         "fullName",
+    ),
+    (
+        "serializer_save",
+        "pk_alias",
+        "id",
+        "key",
     ),
     (
         "serializer_save",

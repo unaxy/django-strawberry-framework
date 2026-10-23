@@ -43,7 +43,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 import strawberry
-from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 from django.core.validators import ProhibitNullCharactersValidator
 from django.db import models
 from django.utils.functional import Promise
@@ -51,6 +51,7 @@ from django.utils.functional import Promise
 from . import truth
 from ._narrowing import dict_items, is_char_wise, is_dict, is_iterable, is_list, list_iter
 from .lazy import unwrap_lazy_object
+from .relations import written_model_field
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -418,7 +419,10 @@ def save_time_error_key_map(
     serializer (the declared field, or its ``source`` when it declares one:
     ``full_name = CharField(source="name")``) - the keys are
     ``model_field_error_names`` of the backing model field named ``spec.source or
-    spec.target_name`` (``category`` and ``category_id`` for a forward relation); a
+    spec.target_name`` (``category`` and ``category_id`` for a forward relation),
+    read through ``utils/relations.py::written_model_field``, so the ``pk`` alias
+    names the primary key (``key = IntegerField(source="pk")`` keys ``pk`` and ``id``
+    to ``key``; the parent link and its ``attname`` under multi-table inheritance); a
     name with no concrete model field behind it (a form-only or serializer-only
     field) keys by itself. No two serializer specs share a model field (the ownership
     check keys writable sources by the attribute they resolve to, so ``category``
@@ -440,15 +444,13 @@ def save_time_error_key_map(
     {"code": [...]}]}``), which the serializer flattener keys to the item's path
     (``shelves.1.code``).
     """
-    model_meta = model._meta
 
     def model_names(spec: InputFieldSpec) -> tuple[str, ...]:
         name = spec.source or spec.target_name
-        try:
-            field = model_meta.get_field(name)
-        except FieldDoesNotExist:
+        field = written_model_field(model, name)
+        if field is None:
             return (name,)
-        names = model_field_error_names(field) if isinstance(field, models.Field) else ()
+        names = model_field_error_names(field)
         # The spec's own source leads (its primary name); the field's other names follow.
         return (name, *(other for other in names if other != name))
 

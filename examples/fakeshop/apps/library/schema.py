@@ -2828,6 +2828,24 @@ class UpdateEditionViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class CreateEditionByKeyViaSerializer(SerializerMutation):
+    """Create an ``Edition`` via ``KeyedEditionSerializer``; the ISBN key is the renamed ``key``."""
+
+    class Meta:
+        serializer_class = serializers.KeyedEditionSerializer
+        operation = "create"
+        permission_classes = []
+
+
+class CreatePatronByKeyViaSerializer(SerializerMutation):
+    """Create a ``Patron`` via ``KeyedPatronSerializer``; the integer key is the renamed ``key``."""
+
+    class Meta:
+        serializer_class = serializers.KeyedPatronSerializer
+        operation = "create"
+        permission_classes = []
+
+
 class UpdateLendingDesk(DjangoMutation):
     """Update a ``LendingDesk`` via the model pipeline; the ``id`` is the raw pk.
 
@@ -3102,6 +3120,14 @@ class Mutation:
     ``createInterlibraryLoan`` / ``updateInterlibraryLoan`` and their ``ViaForm`` /
     ``ViaSerializer`` siblings write the ``to_field`` key ``lender`` into ``Branch.isil``:
     ``lenderId`` names a branch by raw id, and a branch with no ISIL is the relation error.
+
+    Default-OFF acceptance flag ``FAKESHOP_TEST_PK_SOURCE_SERIALIZERS`` (read in the class
+    body so a project-schema reload under ``override_settings`` re-executes it): when set,
+    ``createEditionByKeyViaSerializer`` / ``createPatronByKeyViaSerializer`` create an
+    ``Edition`` (text key) and a ``Patron`` (integer key) through a serializer field renamed
+    onto Django's ``pk`` alias, whose ``create()`` runs ``full_clean()``, so a taken key's
+    save-time ``unique`` error is observable under the renamed input. Absent the flag (the
+    default) neither field is defined.
     """
 
     create_shelf_via_form = DjangoMutationField(CreateShelfViaForm)
@@ -3241,6 +3267,11 @@ class Mutation:
     update_interlibrary_loan_via_serializer = DjangoMutationField(
         UpdateInterlibraryLoanViaSerializer,
     )
+    if getattr(settings, "FAKESHOP_TEST_PK_SOURCE_SERIALIZERS", False):
+        create_edition_by_key_via_serializer = DjangoMutationField(
+            CreateEditionByKeyViaSerializer,
+        )
+        create_patron_by_key_via_serializer = DjangoMutationField(CreatePatronByKeyViaSerializer)
 
 
 __all__ = ("Mutation", "Query")

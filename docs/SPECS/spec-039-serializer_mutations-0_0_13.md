@@ -1468,7 +1468,7 @@ supported `source` scope:
   DRF's own auto-built `pk` field there, or one over `LendingDesk`'s parent link) has no
   backing column, yet DRF hands `pk=<Patron>` to the create and Django's `pk` setter assigns
   it to `patron_id`. It is refused by the same guard, which resolves the source through
-  [`rest_framework/serializer_converter.py`][rf-converter]`::written_model_field` (the field
+  [`utils/relations.py`][utils-relations]`::written_model_field` (the field
   a source writes, `pk` included); the remedy is `source="patron"`. A scalar over `pk` keeps
   the model-less scalar path; a relation over the `pk` alias of a scalar primary key
   (`ref = PrimaryKeyRelatedField(source="pk")` over `Item.id`) writes a scalar column, so it
@@ -3941,6 +3941,7 @@ re-keying / opt-in-gated-fingerprint branches are package-tested.
 [utils-inputs]: ../../django_strawberry_framework/utils/inputs.py
 [utils-permissions]: ../../django_strawberry_framework/utils/permissions.py
 [utils-querysets]: ../../django_strawberry_framework/utils/querysets.py
+[utils-relations]: ../../django_strawberry_framework/utils/relations.py
 [utils-write-transaction]: ../../django_strawberry_framework/utils/write_transaction.py
 
 <!-- tests/ -->

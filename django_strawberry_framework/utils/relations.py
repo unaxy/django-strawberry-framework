@@ -61,6 +61,7 @@ __all__ = [
     "relation_name",
     "stored_value_column",
     "validate_lookup_expr",
+    "written_model_field",
 ]
 
 
@@ -1031,3 +1032,24 @@ def has_composite_pk(model: type[models.Model]) -> bool:
       rejects a Relay-declared type over a composite-pk model.
     """
     return model._meta.is_composite_pk
+
+
+def written_model_field(model: type[models.Model], source: str) -> ConcreteField | None:
+    """Return the concrete model field a one-segment ``source`` writes, or ``None``.
+
+    DRF assigns ``validated_data[source]`` onto the instance by ``setattr`` (update) or as a
+    constructor kwarg (create), so every spelling Django accepts there names the field written:
+    the field's name, a forward relation's ``attname`` (``Options.get_field`` answers to both),
+    and ``pk``, the primary-key alias every model answers to (``Model.pk`` reads and writes
+    ``_meta.pk``, the parent link under multi-table inheritance). A source naming no concrete
+    field (a serializer-only key a custom ``create()`` reads, a reverse accessor) writes
+    nothing on the model and yields ``None``.
+    """
+    if source == "pk":
+        return model._meta.pk
+    try:
+        field = model._meta.get_field(source)
+    except FieldDoesNotExist:
+        return None
+    # A reverse relation (``ForeignObjectRel``) is no attribute DRF writes.
+    return field if isinstance(field, models.Field) else None

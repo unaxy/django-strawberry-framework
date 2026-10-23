@@ -81,6 +81,7 @@ from django_strawberry_framework.utils.inputs import (
     pascalize_token,
     resolve_effective_fields,
 )
+from django_strawberry_framework.utils.relations import written_model_field
 from django_strawberry_framework.utils.strings import graphql_camel_name
 from django_strawberry_framework.utils.typing import object_result
 
@@ -95,7 +96,6 @@ from .serializer_converter import (
     resolve_serializer_field,
     serializer_choice_source,
     serializer_field_description,
-    written_model_field,
 )
 
 if TYPE_CHECKING:

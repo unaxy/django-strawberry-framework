@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 231 done, 141 to do.
+Progress: 232 done, 141 to do.
 
 ## Done
 
@@ -496,7 +496,7 @@ Progress: 231 done, 141 to do.
   `utils/querysets.py::selected_order` is the one reading of the compiler's order precedence
 - [x] 109. `PrimaryKeyRelatedField(source="pk")` over a relation primary key (`PatronProfile.patron`, the MTI parent
   link `LendingDesk.venue_ptr`, DRF's auto-built `pk` field) built a create input every create failed with a masked
-  `TypeError` (Django's `pk` writes the key's column, as plain DRF also fails); `serializer_converter.py::written_model_field`
+  `TypeError` (Django's `pk` writes the key's column, as plain DRF also fails); `utils/relations.py::written_model_field`
   is now the one source-to-written-field reading (`write_source_key`, `_writes_primary_key`, the column guard), and
   `_reject_relation_column_source` refuses the `pk` alias at schema build like the `attname` (remedy `source="patron"`);
   scalar `source="pk"` fields build and write as before
@@ -1019,6 +1019,13 @@ Progress: 231 done, 141 to do.
   refused "Enter a list of values." with nothing written; a `JSONField` column keeps `JSON`, the serializer twin is
   unchanged (spec-039); spec-038 Decision 7 and 8 and the `DjangoModelFormMutation` glossary entry say so (create 0/3
   and update 0/4 before, all green after, live under `FAKESHOP_TEST_BRANCH_CITY_PICKS`)
+- [x] 326. A Django `ValidationError` raised at save time on the primary key of a serializer field written through
+  `source="pk"` (integer or text key), declared as `pk`, or on a multi-table child (the parent link and its attname)
+  arrives under the renamed input instead of the model's pk name (`id`, `isbn_13`, `venue_ptr`):
+  `rest_framework/serializer_converter.py::written_model_field` moved verbatim to `utils/relations.py` (no shim) and
+  `utils/errors.py::save_time_error_key_map` resolves the spec's source through it; the docstring and the spec-039
+  citation say so (the 4 wrong grid rows flip, the 7 correct rows stay; live under
+  `FAKESHOP_TEST_PK_SOURCE_SERIALIZERS`)
 
 ## Outside review of the fixes
 
@@ -1095,17 +1102,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   docs say it does not
 - [ ] 324. `tests/utils/test_querysets.py::test_additive_only_subclass_result_is_sealed_to_plain_queryset`'s docstring
   carries process provenance ("now", "The old contract"); restate it as behaviour
-- [ ] 326. A Django `ValidationError` raised at save time about the primary key of a serializer field written through
-  `source="pk"` (`key = IntegerField(source="pk")` over `Item`, a model `save()` calling `full_clean()` and raising
-  `{"id": [...]}`) is keyed `id`, a name no input exposes, instead of the renamed `key` input:
-  `utils/errors.py::save_time_error_key_map` reads the spec's source through `model._meta.get_field`, which rejects
-  `"pk"` (`FieldDoesNotExist` keeps the spelling), while `rest_framework/serializer_converter.py::written_model_field`
-  and `rest_framework/inputs.py::write_source_key` already resolve `"pk"` to the key column. Probed: a create answers
-  `("id", [...])`; `source="category"` answers the wire name. Contract row: the `save_time_error_key_map` docstring and
-  docs/README (an error raised on the model field behind a `source=` arrives under the renamed input). Fix: resolve the
-  spec source through `written_model_field` in `model_names`, with a package row beside
-  `test_save_time_django_validation_error_uses_source_aware_wire_name`; a scalar `source="pk"` on a text key
-  (`Edition.isbn_13`) takes the same row
 - [ ] 327. Relay refetch plans nothing: `types/relay.py::_resolve_nodes_default` / `_resolve_node_default` return model
   instances, `optimizer/extension.py::DjangoOptimizerExtension._optimize` passes a non-`QuerySet` through unchanged and
   `relay.py::DjangoNodesField` / `DjangoNodeField` never call `DjangoOptimizerExtension.apply_to`, so every nested
@@ -1225,6 +1221,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 426. CHANGELOG entry for item 326: a Django `ValidationError` raised at save time on the primary key behind a
+  serializer field with `source="pk"` (or a field named `pk`, or a multi-table child's parent link) is now keyed to
+  that input's wire name instead of the model's primary-key name
 - [ ] 425. CHANGELOG entry for item 305: a ModelForm `MultipleChoiceField` / `TypedMultipleChoiceField` over a
   single-value column that lists no choices now types as a list (`String` -> `[String!]`), so an input that sent a
   comma string (e.g. a `django_filters.widgets.CSVWidget` field) must send a list; an update build warns that an
