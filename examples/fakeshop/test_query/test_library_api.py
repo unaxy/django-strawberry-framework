@@ -29,6 +29,7 @@ from config import schema as config_schema
 from django import forms
 from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connection, transaction
 from django.db.models import Model, Prefetch, QuerySet, Value
 from django.db.models.signals import post_init, pre_save
@@ -11071,7 +11072,7 @@ def _plain_books_under_window_attr(queryset: QuerySet[models.Genre]) -> QuerySet
 #: attribute that the ``booksConnection`` resolver refuses to serve: the hook,
 #: the ``booksConnection`` arguments, and whether ``BookType.get_queryset``
 #: adds ``.distinct()`` so the walker leaves the relation unplanned (the
-#: sidecar ``filter:`` leaves it unplanned by itself).
+#: sidecar ``filter:`` or ``orderBy:`` leaves it unplanned by itself).
 _REFUSED_WINDOW_SHAPES: dict[str, tuple[_GenreQuerysetHook, str, bool]] = {
     "rows-without-row-number": (_plain_books_under_window_attr, "first: 2", True),
     "not-a-list": (
@@ -11082,6 +11083,11 @@ _REFUSED_WINDOW_SHAPES: dict[str, tuple[_GenreQuerysetHook, str, bool]] = {
     "sidecar-filter": (
         _plain_books_under_window_attr,
         'first: 2, filter: { title: { exact: "a" } }',
+        False,
+    ),
+    "sidecar-order": (
+        _plain_books_under_window_attr,
+        "first: 2, orderBy: [{ title: DESC }]",
         False,
     ),
 }
@@ -11148,7 +11154,7 @@ def test_strictness_raise_reports_a_refused_window_attribute_as_unplanned(
 
     The walker leaves the relation unplanned, and the hook's value under
     ``_dst_books_connection`` is not a window the resolver serves (rows without
-    ``_dst_row_number``, not a list, or a ``filter:`` the window cannot carry),
+    ``_dst_row_number``, not a list, or a ``filter:`` / ``orderBy:`` the window cannot carry),
     so the per-parent pipeline runs and ``strictness="raise"`` reports it: the
     attribute's presence alone does not make the access served.
     """
@@ -19277,6 +19283,95 @@ def test_library_consumer_prefetch_deferring_a_key_falls_back_loudly(
     assert len(patrons) == 4, payload
     warnings = [record for record in caplog.records if "Potential N+1 on patron" in record.message]
     assert len(warnings) == 4, [record.message for record in caplog.records]
+
+
+def _books_prefetching_loans_without_their_note() -> strawberry.Schema:
+    """Holder schema whose book hook prefetches each book's loans with only their book key."""
+    return _hooked_holder_schema(
+        books=lambda queryset: queryset.prefetch_related(
+            Prefetch("loans", queryset=models.Loan.objects.order_by("pk").only("book")),
+        ),
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("loan_selection", "refused"),
+    [
+        pytest.param("id", False, id="loaded-column"),
+        pytest.param("note", True, id="deferred-column"),
+    ],
+)
+async def test_library_consumer_prefetch_deferring_a_selected_column_fails_on_async(
+    caplog: pytest.LogCaptureFixture,
+    loan_selection: str,
+    *,
+    refused: bool,
+) -> None:
+    """A consumer-owned ``Prefetch`` queryset is not widened, so the async transport refuses it.
+
+    The book hook's own ``Prefetch("loans", queryset=Loan.objects.only("book"))``
+    stays in place of the planned one. The loan type has its own
+    ``get_queryset``, so each book's loans are re-read through that hook from
+    the consumer's queryset, still projected to ``id`` and ``book``. Reading the
+    loaded ``id`` serves every loan; reading ``note``, which that queryset
+    deferred, loads it per loan after the re-read with a sync query on the event
+    loop, which Django refuses (``SynchronousOnlyOperation``): the field answers
+    the masked error at the ``note`` path, and the policy logs the original.
+    """
+    await sync_to_async(_seed_subtitled_books)()
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    registry.clear()
+    try:
+        _CURRENT["schema"] = _books_prefetching_loans_without_their_note()
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await AsyncTestClient().query(
+                f"{{ shelves {{ code books {{ title loans {{ {loan_selection} }} }} }} }}",
+                assert_no_errors=False,
+                url="/graphql-async-test/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+        registry.clear()
+
+    payload = response_json(result.response)
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.levelno == logging.ERROR
+    ]
+    if not refused:
+        assert payload.get("errors") is None, payload
+        loan_ids = await sync_to_async(
+            lambda: list(models.Loan.objects.order_by("pk").values_list("pk", flat=True)),
+        )()
+        assert (
+            sorted(
+                json_int(loan, "id")
+                for shelf in json_list(payload, "data", "shelves")
+                for book in json_list(shelf, "books")
+                for loan in json_list(book, "loans")
+            )
+            == loan_ids
+        ), payload
+        assert records == [], records
+        return
+    assert payload["data"] is None, payload
+    [error] = json_list(payload, "errors")
+    assert json_at(error, "path") == [
+        "shelves",
+        0,
+        "books",
+        0,
+        "loans",
+        0,
+        "note",
+    ]
+    assert json_at(error, "message") == "An unexpected error occurred."
+    assert "SynchronousOnlyOperation" not in json.dumps(payload), payload
+    [record] = records
+    assert record.exc_info is not None, record
+    assert type(record.exc_info[1]) is SynchronousOnlyOperation, record.exc_info
 
 
 _UPDATE_HOLDER_SHELF = (

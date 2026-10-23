@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 221 done, 139 to do.
+Progress: 222 done, 140 to do.
 
 ## Done
 
@@ -951,6 +951,14 @@ Progress: 221 done, 139 to do.
   so docs/README.md, GLOSSARY `DjangoSchema`, the KANBAN card item and the spec-044 rationale now carry that exception
   instead of an unconditional private window; the async window has no owning spec, card 079 owns the surrounding
   transaction
+- [x] 186. docs/README.md now states how the optimizer cooperates with a consumer queryset (kept `select_related` /
+  `prefetch_related`, a consumer `Prefetch` in place of the planned one and unused on a joined forward relation, a
+  prefetch onto a hooked target re-read per parent, a consumer `.only()` / `.defer()` widened under every operation, a
+  consumer `Prefetch(queryset=...)` never widened and its deferred column failing on async), the identity arm ("Five
+  empty-value rules"), and the nested-connection shapes that resolve per parent (`filter:` / `orderBy:`, a backward page
+  from a cursor, an unwindowable target queryset; it was unqualified); GLOSSARY `queryset-diffing` and
+  `Meta.relation_shapes` match; live rows pin the async deferred-column failure and `orderBy:` under
+  `strictness="raise"`
 
 ## Outside review of the fixes
 
@@ -991,8 +999,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 186. docs/README.md has no consumer-`Prefetch` / `.only()` cooperation sentence and no inert-arm sentence (GLOSSARY has
-  both: "`only()` cooperation", from item 83's `548059b3`, and "Membership leaves")
 - [ ] 187. The C11 keyset fixes were never run on PostgreSQL's LATERAL path (The workspace / prove_failability `flock`
   rows on Linux or NFS are not a defect: CI runs them on ubuntu.)
 - [ ] 190. Seen at `87dc1df7`, re-check: an out-of-range datetime filter value raises an uncoded error (The invalid
@@ -1151,6 +1157,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `~/.local/state/prove_failability/tree-<digest>/ACTIVE-MUTATION.json`, which `release` / `gc` / `--fresh` never clear,
   so the next prove on that slot refuses; arguments after `--` override `--workspace` / `--scratch-root` / `--json`;
   `uv` missing from PATH raises `FileNotFoundError` after the header with no run-log entry
+- [ ] 379. A consumer `Prefetch(queryset=...)` on a forward relation the optimizer joins goes unused (the JOIN serves
+  the row: a hook `prefetch_related(Prefetch("patron", queryset=Patron.objects.only("id")))` with `loans { note patron {
+  name } }` runs one JOIN statement), so a consumer Prefetch queryset that filters rows is silently ignored on that
+  relation; settle whether "the consumer's Prefetch wins" covers the forward case under AGENTS rule 37 before fixing
+- [ ] 380. (robustness) A consumer prefetch onto a relation whose target type has a `get_queryset` hook runs batched and
+  is then discarded while every parent re-reads through the hook (one query per parent); `strictness` may not report it
 
 ## To do: holes found re-checking the fixes
 
