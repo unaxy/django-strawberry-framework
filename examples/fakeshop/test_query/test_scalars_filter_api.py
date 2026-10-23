@@ -16,7 +16,8 @@ one, with the README membership rules on every list. ``price_span`` is a declare
 per owning filterset and the ``range`` lookup applies over the wire; a lone
 ``start`` / ``end`` applies as ``gte`` / ``lte`` and a range with no bound filters nothing;
 each bound is cleaned as ``price: { gte }`` cleans its value, so a bound the column cannot
-hold is ``FILTER_INVALID``.
+hold is ``FILTER_INVALID``. ``price_among`` is a declared ``ListFilter`` (``in``) on the
+same column whose elements are cleaned the same way.
 The per-field ``"__all__"`` leaves never publish a ``django.contrib.postgres``
 lookup Django registers onto a core field (``containedBy`` on the numeric and
 temporal leaves), whether or not a PostgreSQL driver is installed.
@@ -395,6 +396,120 @@ def test_price_span_nan_bound_is_filter_invalid_in_every_branch(
     assert json_at(error, "extensions") == {
         "code": "FILTER_INVALID",
         "errors": {form_key: [_NOT_A_NUMBER]},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("prices", "labels"),
+    [
+        pytest.param(["50.0000", "1"], ["cheap", "mid"], id="members"),
+        pytest.param(["1.0"], ["cheap"], id="cleaned-member"),
+        pytest.param([], [], id="empty"),
+    ],
+)
+def test_scalars_filter_price_among_keeps_the_listed_prices(
+    prices: list[str],
+    labels: list[str],
+) -> None:
+    """Declared ``priceAmong: { in }`` keeps the rows whose price is listed; ``[]`` keeps none."""
+    _seed_price_tiers()
+    _assert_graphql_data(
+        _BY_FILTER,
+        {"allScalarSpecimens": [{"label": label} for label in labels]},
+        variables={"filter": {"priceAmong": {"in": prices}}},
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "query",
+        "filter_input",
+        "form_key",
+        "refusal",
+    ),
+    [
+        pytest.param(
+            _BY_FILTER,
+            {"priceAmong": {"in": ["NaN"]}},
+            "price_among",
+            _NOT_A_NUMBER,
+            id="nan",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"priceAmong": {"in": ["1", "sNaN"]}},
+            "price_among",
+            _NOT_A_NUMBER,
+            id="snan-beside-a-number",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"priceAmong": {"in": ["Infinity"]}},
+            "price_among",
+            _NOT_A_NUMBER,
+            id="infinity",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"priceAmong": {"in": ["-Infinity"]}},
+            "price_among",
+            _NOT_A_NUMBER,
+            id="minus-infinity",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"priceAmong": {"in": ["1e999999"]}},
+            "price_among",
+            _PAST_THE_CAP,
+            id="past-the-cap",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"not": {"priceAmong": {"in": ["NaN"]}}},
+            "price_among",
+            _NOT_A_NUMBER,
+            id="not",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partner": {"priceAmong": {"in": ["NaN"]}}},
+            "price_among",
+            _NOT_A_NUMBER,
+            id="nested-partner",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partnerPriceAmong": {"in": ["NaN"]}},
+            "partner__price_among",
+            _NOT_A_NUMBER,
+            id="flat-partner",
+        ),
+    ],
+)
+def test_price_among_element_the_column_cannot_hold_is_filter_invalid(
+    query: str,
+    filter_input: dict[str, object],
+    form_key: str,
+    refusal: dict[str, str],
+) -> None:
+    """Each ``priceAmong`` element is cleaned as ``price: { in }`` cleans its members.
+
+    A non-finite decimal is the ``DecimalField``'s ``Enter a number.`` and a value past
+    django-filter's ``1e50`` number cap its ``max_value`` refusal, keyed to the list's form
+    field, flat, under ``not`` and through the ``partner`` relation, never a value handed
+    to the ORM.
+    """
+    for partner in _seed_price_tiers():
+        models.NullableScalarSpecimen.objects.create(label=f"of-{partner.label}", partner=partner)
+    payload = response_json(post_graphql(query, variables={"filter": filter_input}))
+
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: [refusal]},
     }
 
 

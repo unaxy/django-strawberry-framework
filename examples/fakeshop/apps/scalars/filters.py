@@ -35,11 +35,15 @@ over the ``price`` column (the acceptance surface for per-filterset
 scoped range input names). ``Meta.fields`` ``price: "__all__"`` still
 expands the CSV ``range`` lookup on the ``price`` operator bag; the
 declared primitive is a separate ``priceSpan: { range: { start, end } }`` field.
+
+``price_among`` on ``ScalarSpecimenFilter`` is a declared ``ListFilter`` over the same
+column with the ``in`` lookup (``priceAmong: { in: [...] }``): the acceptance surface for
+a declared list filter, each element cleaned as ``price: { in }`` cleans its members.
 """
 
 from __future__ import annotations
 
-from django_strawberry_framework.filters import FilterSet, RangeFilter, RelatedFilter
+from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
 
 from . import models
 
@@ -57,6 +61,7 @@ class ScalarSpecimenFilter(FilterSet):
 
     tag = RelatedFilter(ScalarSpecimenTagFilter, field_name="tag")
     price_span = RangeFilter(field_name="price", lookup_expr="range")
+    price_among = ListFilter(field_name="price", lookup_expr="in")
 
     class Meta:
         model = models.ScalarSpecimen

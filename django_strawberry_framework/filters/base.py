@@ -72,6 +72,7 @@ from django_strawberry_framework.sets_mixins import (
     LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
 )  # re-exported via filters.__init__
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
+from django_strawberry_framework.types.converters import array_element_field
 from django_strawberry_framework.types.definition import DjangoTypeDefinition, _resolves_id_off_pk
 
 # ``filters -> types`` is the documented safe (acyclic) import direction:
@@ -452,7 +453,7 @@ def _filterset_model_field(
     return get_model_field(model, _bound_field_name(filter_instance))
 
 
-def _column_form_field(filter_instance: Filter) -> Field | None:
+def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Field | None:
     """Return the form field that cleans one value of a bound filter's column for a comparison.
 
     The field is the one django-filter's own ``gte`` filter for the column builds
@@ -471,13 +472,19 @@ def _column_form_field(filter_instance: Filter) -> Field | None:
     key no row holds would answer "Select a valid choice" where one the target's
     ``get_queryset`` hides answers rows, an existence oracle the package's own relation
     keys refuse (``_RelationIdentityListField``), so a relation's values reach the ORM as
-    sent.
+    sent. ``element`` reads one element of a list value: an ``ArrayField`` column's element
+    is a value of its ``base_field`` (``types/converters.py::array_element_field``), any
+    other column's a value of the column itself.
     """
     parent = read_attr(filter_instance, "parent", None)
     if not isinstance(parent, _filter_set_class()):
         return None
     model_field = _bound_model_field(filter_instance)
-    if model_field is None or model_field.is_relation:
+    if model_field is None:
+        return None
+    if element:
+        model_field = array_element_field(model_field) or model_field
+    if model_field.is_relation:
         return None
     filter_class, params = type(parent)._upstream_filter_for_lookup(model_field, "gte")
     if filter_class is None:
@@ -516,11 +523,82 @@ def _built_filter(
     return filter_class(field_name=field_name, **params)
 
 
+class _ColumnCleanedFilter(TypedFilter):
+    """A typed filter whose form field cleans its values as the column's ``gte`` cleans one.
+
+    The form field reads its column's comparison form field (``_column_form_field``) only
+    once the filter is bound to a ``FilterSet``: the per-request copy django-filter binds
+    builds its field once and hands it that field (``_hand_column_field``). A class-level
+    declaration has no column to read, so its field is built on each read and nothing is
+    written to the filter (``unkept_form_field``): the declaration is shared by every
+    request, and a field kept on it would ride every per-request deep copy and clean no
+    value.
+    """
+
+    def _hand_column_field(self, _field: Field, /) -> None:
+        """Give the form field this bound filter just built its column's comparison field."""
+        raise NotImplementedError
+
+    @property
+    @override
+    def field(self) -> Field:
+        """The form field, holding the column's comparison form field once the filter is bound."""
+        if read_attr(self, "parent", None) is None:
+            return unkept_form_field(self)
+        state = truth.instance_state(self)
+        if "_field" in state:
+            return super().field
+        built = super().field
+        self._hand_column_field(built)
+        return built
+
+
+class _ElementField(Field):
+    """Form field of ``ListFilter`` / ``ArrayFilter``: each element is cleaned by ``element_field``.
+
+    ``element_field`` is the form field of the column's ``gte`` filter (an
+    ``ArrayField``'s ``base_field``'s for an array column), so an element the column cannot
+    hold is a form error rather than a value handed to the ORM, a text element is stripped
+    and a naive datetime element made aware. A ``None`` element stays
+    ``None``, and a value that is not a list or tuple, or a field with no
+    ``element_field``, passes through as sent for the filter to judge.
+    """
+
+    def __init__(
+        self,
+        *,
+        element_field: Field | None = None,
+        **kwargs: Unpack[_FieldOptions],
+    ) -> None:
+        super().__init__(**kwargs)
+        self.element_field: Field | None = element_field
+
+    @override
+    def to_python(self, value: object) -> object:
+        """Clean each element with ``element_field``; anything else passes through."""
+        element_field = self.element_field
+        if element_field is None or not is_list_or_tuple(value):
+            return value
+        return [None if element is None else element_field.clean(element) for element in value]
+
+
+class _ElementCleanedFilter(_ColumnCleanedFilter):
+    """``ListFilter`` / ``ArrayFilter`` half: each element is cleaned as ``gte`` cleans one."""
+
+    field_class: type[Field] = _ElementField
+
+    @override
+    def _hand_column_field(self, field: Field, /) -> None:
+        """Hand an ``_ElementField`` the comparison form field of one element of the column."""
+        if isinstance(field, _ElementField):
+            field.element_field = _column_form_field(self, element=True)
+
+
 class ArrayFilterMethod(_EmptyListAwareFilterMethod):
     """Empty-list-aware `FilterMethod` for `ArrayFilter` (see the shared base)."""
 
 
-class ArrayFilter(TypedFilter):
+class ArrayFilter(_ElementCleanedFilter):
     """Filter shaped for PostgreSQL `ArrayField` columns.
 
     Port of `graphene_django/filter/filters/array_filter.py::ArrayFilter`.
@@ -546,6 +624,11 @@ class ArrayFilter(TypedFilter):
         who want "no constraint" semantics should not send the filter
         at all (or send `None`, which short-circuits to the unfiltered
         queryset).
+
+    Each element is cleaned by the form field of the column's own ``gte`` filter, an
+    ``ArrayField`` column's ``base_field``'s (``_ElementField``), so an element the column
+    cannot hold is a form error rather than a value handed to the ORM, a text element is
+    stripped and a naive datetime element made aware.
     """
 
     # basedpyright: typeshed declares ``Filter.method`` a plain attribute, not the property it is,
@@ -771,7 +854,7 @@ class RangeField(Field):
         return [None if bound is None else bound_field.clean(bound) for bound in value]
 
 
-class RangeFilter(TypedFilter):
+class RangeFilter(_ColumnCleanedFilter):
     """Filter that consumes a two-element list via `RangeField`.
 
     Both bounds apply the declared lookup (``lookup_expr="range"`` compiles to ``BETWEEN``). A
@@ -788,26 +871,11 @@ class RangeFilter(TypedFilter):
 
     field_class: type[RangeField] = RangeField
 
-    @property
     @override
-    def field(self) -> Field:
-        """The range form field, whose bounds the column's comparison form field cleans.
-
-        A filter bound to a ``FilterSet`` (the per-request copy django-filter binds) builds
-        its field once, handing it ``_column_form_field``. A class-level declaration has no
-        column to read, so its field is built on each read and nothing is written to the
-        filter (``unkept_form_field``): the declaration is shared by every request, and a
-        field kept on it would ride every per-request deep copy and clean no bound.
-        """
-        if read_attr(self, "parent", None) is None:
-            return unkept_form_field(self)
-        state = truth.instance_state(self)
-        if "_field" in state:
-            return super().field
-        built = super().field
-        if isinstance(built, RangeField):
-            built.bound_field = _column_form_field(self)
-        return built
+    def _hand_column_field(self, field: Field, /) -> None:
+        """Hand a ``RangeField`` the column's comparison form field as its ``bound_field``."""
+        if isinstance(field, RangeField):
+            field.bound_field = _column_form_field(self)
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
@@ -834,13 +902,17 @@ class ListFilterMethod(_EmptyListAwareFilterMethod):
     """Empty-list-aware `FilterMethod` for `ListFilter` (see the shared base)."""
 
 
-class ListFilter(TypedFilter):
+class ListFilter(_ElementCleanedFilter):
     """Filter that accepts a list-shaped input (e.g. `__in` lookups).
 
     Port of `graphene_django/filter/filters/list_filter.py::ListFilter`:
     an empty list short-circuits to `qs.none()` (or a new queryset over every
     row when `exclude=True`) instead of being normalized into a "no value
-    supplied" pass-through.
+    supplied" pass-through. Each element is cleaned by the form field of the
+    column's own ``gte`` filter (``_ElementField``), as the generated ``in`` cleans
+    its members, so an element the column cannot hold is a form error rather than a
+    value handed to the ORM, a text element is stripped and a naive datetime element
+    made aware; an element off a choice column's choices is a value like any other.
     """
 
     # basedpyright: typeshed declares ``Filter.method`` a plain attribute, not the property it is,

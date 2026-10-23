@@ -19712,18 +19712,31 @@ query ($filter: ShelfFilterInputType) {
             ["R-blank", "R-worn"],
             id="not-text-bounds-off-the-choices",
         ),
+        pytest.param(
+            {"conditionAmong": {"in": ["good", "BLANK"]}},
+            ["R-blank", "R-good"],
+            id="text-list",
+        ),
+        pytest.param({"tierAmong": {"in": ["MEMBER_2"]}}, ["R-good"], id="integer-list"),
+        pytest.param(
+            {"not": {"tierAmong": {"in": ["MEMBER_1"]}}},
+            ["R-good", "R-worn"],
+            id="not-integer-list",
+        ),
     ],
 )
 def test_shelf_range_over_a_choice_column_compares_bounds_off_its_choices(
     filter_input: dict[str, object],
     codes: list[str],
 ) -> None:
-    """A declared range over a choice column compares its bounds; neither need be a choice.
+    """A declared range over a choice column compares bounds off its choices; a list keeps members.
 
     ``conditionSpan`` (text choices) and ``tierSpan`` (integer choices) clean each bound
     with the column's comparison form field (``CharField`` / ``DecimalField``), never the
     ``ChoiceField`` that would refuse ``a`` or ``0``, so the range keeps the rows whose
-    stored value lies between the bounds, flat and under ``not``.
+    stored value lies between the bounds. ``conditionAmong`` / ``tierAmong`` publish the
+    column's enum, so every element is a member (``BLANK`` included) and matches its
+    rows. Flat and under ``not``.
     """
     branch = models.Branch.objects.create(name="RangeChoiceBranch", city="Boston")
     for code, condition, tier in (

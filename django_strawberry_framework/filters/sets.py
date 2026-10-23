@@ -158,6 +158,7 @@ from .base import (
     RelationPkFilter,
     RelationPkMultipleFilter,
     _bound_field_name,
+    _ElementField,
     _EnumMemberFilterMixin,
     _relation_uses_non_pk_to_field,
     _RelationIdentityListField,
@@ -1453,6 +1454,7 @@ _NONE_CLEANING_FIELDS: tuple[type[forms.Field], ...] = (
     forms.NullBooleanField,
     forms.ModelChoiceField,
     RangeField,
+    _ElementField,
     _RelationIdentityListField,
 )
 

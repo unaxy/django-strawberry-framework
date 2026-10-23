@@ -25,7 +25,7 @@ from django_filters import CharFilter, ModelChoiceFilter, ModelMultipleChoiceFil
 from django_filters.filters import BaseInFilter
 
 from apps.library import models
-from django_strawberry_framework.filters import FilterSet, RangeFilter, RelatedFilter
+from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
 
 
 def _validate_email_must_have_at_sign(value: str) -> None:
@@ -97,7 +97,9 @@ class ShelfFilter(FilterSet):
 
     ``condition_span`` and ``tier_span`` are declared ``RangeFilter`` filters over the text and
     integer choice columns: each bound is compared with the stored values, so a bound off
-    the column's choices (``a``, ``0``) is a value like any other.
+    the column's choices (``a``, ``0``) is a value like any other. ``condition_among`` and
+    ``tier_among`` are the declared ``ListFilter`` (``in``) counterparts, which publish the
+    column's enum.
     """
 
     branch = RelatedFilter("BranchFilter", field_name="branch")
@@ -126,6 +128,8 @@ class ShelfFilter(FilterSet):
     )
     condition_span = RangeFilter(field_name="condition", lookup_expr="range")
     tier_span = RangeFilter(field_name="tier", lookup_expr="range")
+    condition_among = ListFilter(field_name="condition", lookup_expr="in")
+    tier_among = ListFilter(field_name="tier", lookup_expr="in")
 
     class Meta:
         model = models.Shelf
