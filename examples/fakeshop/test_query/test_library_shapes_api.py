@@ -54,7 +54,10 @@ One shape per planner rule, each read off the wire and off the SQL the request e
 - A hook spelling a name, a SQL fragment or a bound value as a ``TextChoices`` /
   ``StrEnum`` member where Django takes any ``str``: an ``extra(where=...)``
   fragment (also with no ``params=`` and ``params=None``), an ``extra`` table
-  and parameter, an ``order_by`` name, a ``RawSQL`` parameter, an ``annotate`` /
+  and parameter, an ``order_by`` name, a ``RawSQL`` text (aliased and filtered on,
+  ordered by, annotated, inside a lookup, in a consumer ``Prefetch`` queryset) and
+  parameter, a ``Func`` function, template, argument joiner and keyword name, and a
+  combined expression's operator, an ``annotate`` /
   ``alias`` / ``extra(select=...)`` name, a ``FilteredRelation`` alias and a
   prefetch lookup, path or ``to_attr``. Each genre's page under every window
   is the page the same hook spelled with text serves, from the same SQL, and
@@ -90,6 +93,8 @@ from django.db.models import (
     F,
     FilteredRelation,
     FloatField,
+    Func,
+    IntegerField,
     Model,
     Prefetch,
     Q,
@@ -98,8 +103,9 @@ from django.db.models import (
     Value,
     When,
 )
-from django.db.models.expressions import RawSQL
+from django.db.models.expressions import CombinedExpression, RawSQL
 from django.db.models.functions import Abs, Lower, Random
+from django.db.models.lookups import Exact
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import override_settings
@@ -1201,6 +1207,13 @@ class _BookTermChoices(TextChoices):
     DEFAULT = "default"
     GENRES = "genres"
     CODE = "code"
+    TITLE_COLUMN = "library_book.title"
+    GENRE_NAME_COLUMN = "library_genre.name"
+    UPPER = "UPPER"
+    FUNC_TEMPLATE = "%(function)s(%(expressions)s)"
+    JOINER = ", "
+    PRECISION = "precision"
+    PLUS = "+"
 
 
 class _BookTermEnum(str, enum.Enum):
@@ -1219,6 +1232,13 @@ class _BookTermEnum(str, enum.Enum):
     DEFAULT = "default"
     GENRES = "genres"
     CODE = "code"
+    TITLE_COLUMN = "library_book.title"
+    GENRE_NAME_COLUMN = "library_genre.name"
+    UPPER = "UPPER"
+    FUNC_TEMPLATE = "%(function)s(%(expressions)s)"
+    JOINER = ", "
+    PRECISION = "precision"
+    PLUS = "+"
 
 
 #: A hook term by its member name: the exact text, a ``TextChoices`` member, or a
@@ -1731,7 +1751,11 @@ _BookTermHook = Callable[[QuerySet[models.Book], Callable[[str], str]], QuerySet
 #: A hook spelling a raw-SQL term or bound value through ``term``, each ordered totally
 #: by title: an ``extra(where=...)`` fragment with no ``params=`` (Django's documented
 #: spelling) and with ``params=None``, an ``order_by`` name, an ``extra`` fragment, an
-#: ``extra`` table, an ``extra`` parameter and a ``RawSQL`` parameter.
+#: ``extra`` table, an ``extra`` parameter, a ``RawSQL`` parameter, the SQL text an
+#: expression formats into its SQL (a ``RawSQL`` aliased and filtered on, ordered by,
+#: annotated, inside a lookup and in a consumer ``Prefetch`` queryset; a ``Func``
+#: function, template, argument joiner and keyword name; a combined expression's
+#: operator).
 _BOOK_TEXT_TERM_HOOKS: dict[str, _BookTermHook] = {
     "where-without-params": lambda books, term: books.extra(  # noqa: S610 - the member term is the input under test
         where=[term("LATER_TITLES")],
@@ -1760,6 +1784,52 @@ _BOOK_TEXT_TERM_HOOKS: dict[str, _BookTermHook] = {
             BooleanField(),
         ),
     ).filter(later=True),
+    "raw-sql-text": lambda books, term: books.alias(
+        later=RawSQL(  # noqa: S611 - the member term is the input under test
+            term("LATER_TITLE_PARAMETER"),
+            [term("BOOK_3")],
+            BooleanField(),
+        ),
+    ).filter(later=True),
+    "raw-sql-order-by": lambda books, term: books.order_by(
+        RawSQL(term("TITLE_COLUMN"), []).desc(),  # noqa: S611 - the member term is the input under test
+    ),
+    "raw-sql-annotate": lambda books, term: books.annotate(
+        shout=RawSQL(term("TITLE_COLUMN"), []),  # noqa: S611 - the member term is the input under test
+    ),
+    "raw-sql-lookup": lambda books, term: books.filter(
+        Exact(
+            RawSQL(  # noqa: S611 - the member term is the input under test
+                term("LATER_TITLE_PARAMETER"),
+                [term("BOOK_3")],
+                BooleanField(),
+            ),
+            True,  # noqa: FBT003 - the lookup's right-hand side
+        ),
+    ),
+    "raw-sql-prefetch": lambda books, term: books.prefetch_related(
+        Prefetch(
+            "genres",
+            queryset=models.Genre.objects.annotate(
+                shout=RawSQL(term("GENRE_NAME_COLUMN"), []),  # noqa: S611 - the member term is the input under test
+            ),
+        ),
+    ),
+    "func-function": lambda books, term: books.annotate(
+        shout=Func(F("title"), function=term("UPPER")),
+    ),
+    "func-template": lambda books, term: books.annotate(
+        shout=Func(F("title"), function="UPPER", template=term("FUNC_TEMPLATE")),
+    ),
+    "func-arg-joiner": lambda books, term: books.annotate(
+        joined=Func(F("title"), F("title"), function="COALESCE", arg_joiner=term("JOINER")),
+    ),
+    "func-keyword-name": lambda books, term: books.annotate(
+        shout=Func(F("title"), function="UPPER", **{term("PRECISION"): None}),
+    ),
+    "combined-connector": lambda books, term: books.annotate(
+        n=CombinedExpression(Value(1), term("PLUS"), Value(2), output_field=IntegerField()),
+    ),
 }
 
 #: A hook naming a query slot through ``term``: an ``annotate`` / ``alias`` /
@@ -1804,7 +1874,7 @@ def _book_term_order(source: str, kind: str) -> _BookShuffle:
     """The ``source`` hook body with its terms spelled as ``kind``, ordered by title if unordered."""
     hook = {**_BOOK_TERM_HOOKS, **_ROOT_BOOK_TERM_HOOKS}[source]
     term = _BOOK_TERMS[kind]
-    if source in ("order-by", "where-fragment"):
+    if source in ("order-by", "where-fragment", "raw-sql-order-by"):
         return lambda books: hook(books, term)
     return lambda books: hook(books, term).order_by("-title")
 

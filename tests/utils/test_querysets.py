@@ -17,6 +17,7 @@ import asyncio
 import copy
 import datetime
 import enum
+import sys
 import threading
 import uuid
 import zoneinfo
@@ -46,7 +47,7 @@ from apps.library.models import (
 )
 from apps.products.models import Category, Entry, Item, Property
 from apps.products.services import seed_data
-from apps.scalars.models import NullableScalarSpecimen
+from apps.scalars.models import NullableScalarSpecimen, ScalarSpecimen
 from django.apps import apps
 from django.apps.registry import Apps
 from django.contrib.admin.models import LogEntry
@@ -59,15 +60,16 @@ from django.db.models import (
     F,
     FilteredRelation,
     ForeignObjectRel,
+    Func,
     Prefetch,
     Q,
     Subquery,
     Value,
     sql,
 )
-from django.db.models.expressions import RawSQL
+from django.db.models.expressions import CombinedExpression, RawSQL
 from django.db.models.functions import Cast, Coalesce, Concat, Lower, RowNumber, Trunc, Upper
-from django.db.models.lookups import In, Lookup
+from django.db.models.lookups import Exact, In, Lookup
 from django.db.models.sql import Query as SqlQuery
 from django.db.models.sql import query as sql_query_module
 from django.db.models.sql.compiler import SQLCompiler
@@ -1539,6 +1541,51 @@ class _ProjectInt(int):
     """A project's own ``int`` subclass with no overrides: not the exact builtin."""
 
     __slots__ = ()
+
+
+class _ExpressionStr(str):
+    """A ``str`` subclass defining ``resolve_expression``: an expression, not a text term."""
+
+    __slots__ = ()
+
+    def resolve_expression(self, *_args: object, **_kwargs: object) -> Value:  # must never run
+        return Value(1)
+
+
+class _TermChoices(models.TextChoices):
+    """Names and SQL a hook spells through ``TextChoices`` members."""
+
+    TITLE = "title"
+    DESCENDING_TITLE = "-title"
+    LATER_TITLES = "library_book.title >= 'B'"
+    TITLE_PARAMETER = "B"
+    BRANCH_TABLE = "library_branch"
+    HEADLINE = "headline"
+    SHELVED = "shelved"
+    DEFAULT = "default"
+    GENRES = "genres"
+    TITLE_COLUMN = "library_book.title"
+    UPPER = "UPPER"
+    TEMPLATE = "%(function)s(%(expressions)s)"
+    JOINER = ", "
+    PLUS = "+"
+    PRECISION = "precision"
+    CATEGORY_TABLE = "products_category"
+    OTHER_TABLE = "products_item"
+
+
+#: The same terms as ``enum.StrEnum`` members.
+_TermEnum = STR_ENUM(
+    "_TermEnum",
+    {name: str(member) for name, member in _TermChoices.__members__.items()},
+)
+
+
+def _term(kind: str, name: str) -> str:
+    """``name``'s term as a ``TextChoices`` or a ``StrEnum`` member, or as exact ``text``."""
+    member = read_attr(_TermChoices if kind == "text-choices" else _TermEnum, name)
+    assert is_str(member)
+    return str.__str__(member) if kind == "text" else member
 
 
 @pytest.mark.parametrize(
@@ -3726,7 +3773,7 @@ def test_func_arg_joiner_metadata_non_string_fails_closed() -> None:
     ``Func.as_sql`` runs ``self.arg_joiner.join(...)`` and formats ``self.template``; these
     are never reached via ``get_source_expressions``. An instance override with a non-string
     ``arg_joiner`` would dispatch that object's ``join`` at compile time, so the metadata
-    walk requires each SQL-template attribute to be exactly ``str``.
+    walk requires each SQL-template attribute to be a text term.
     """
 
     class _EvilJoiner:
@@ -3744,6 +3791,32 @@ def test_func_arg_joiner_metadata_non_string_fails_closed() -> None:
     assert defect == ("untrusted", "annotation 'c' arg_joiner is a _EvilJoiner")
 
 
+@pytest.mark.parametrize(
+    "slot",
+    [
+        "function",
+        "template",
+        "arg_joiner",
+        "base_template",
+    ],
+)
+def test_func_named_template_slot_int_subclass_fails_closed(slot: str) -> None:
+    """An ``int`` subclass on a named SQL-template slot is not a text term and fails closed.
+
+    The slot is formatted into the SQL through the object's own protocol, and only a
+    ``str`` (a ``TextChoices`` / ``StrEnum`` member included) is text Django formats as
+    itself.
+    """
+    source = Category.objects.all()
+    text_field: models.TextField[str | Combinable, str] = models.TextField()
+    ann = models.Func(models.Value("x"), function="UPPER", output_field=text_field)
+    ann.__dict__[slot] = _ProjectInt(1)
+    source.query.annotations = {"c": ann}
+    sealed, defect = _seal_or_defect(source, Category, None)
+    assert sealed is None
+    assert defect == ("untrusted", f"annotation 'c' {slot} is a _ProjectInt")
+
+
 def test_func_extra_template_parameter_object_fails_closed() -> None:
     """A ``Func`` carrying a dispatchable object under ``extra`` never reaches the compiler.
 
@@ -3752,7 +3825,8 @@ def test_func_extra_template_parameter_object_fails_closed() -> None:
     template-attribute rule pins -- and ``Func.as_sql`` formats ``self.template %
     {**self.extra, **extra_context}``, which invokes each interpolated value's ``__str__``
     while the compiler assembles SQL, after the seal returned. The template-parameter rule
-    admits only exact inert scalars there, so the seal fails closed and nothing dispatches.
+    admits only exact inert scalars and text terms there, so the seal fails closed and
+    nothing dispatches.
     """
     fired: list[str] = []
 
@@ -3774,6 +3848,24 @@ def test_func_extra_template_parameter_object_fails_closed() -> None:
     assert sealed is None
     assert defect == ("untrusted", "annotation 'c' extra['function'] is a _HostileTemplateParam")
     assert fired == []
+
+
+def test_func_extra_text_term_template_parameter_seals_as_its_exact_text() -> None:
+    """A project ``str`` subclass under ``function=`` is a text term and seals as its text.
+
+    Django formats the subclass into the SQL as the text it spells; the sealed query
+    holds that exact text and compiles the SQL the exact-``str`` keyword compiles.
+    """
+    source = Category.objects.annotate(
+        c=models.Func(models.Value("x"), function=_ProjectStr("UPPER")),
+    )
+    twin = Category.objects.annotate(c=models.Func(models.Value("x"), function="UPPER"))
+    sealed, defect = _seal_or_defect(source, Category, None)
+    assert defect is None
+    assert sealed is not None
+    assert _str_subclass_leaves(dict(source.__dict__), set())
+    assert _str_subclass_leaves({**sealed.__dict__, "model": None}, set()) == []
+    assert str(sealed.query) == str(twin.query)
 
 
 def test_func_extra_string_template_parameter_seals() -> None:
@@ -3812,17 +3904,22 @@ def test_func_extra_string_template_parameter_seals() -> None:
     [
         (SimpleNamespace(), "annotation 'c' extra is a SimpleNamespace"),
         ({5: "UPPER"}, "annotation 'c' extra has a non-string key"),
+        ({_ExpressionStr("function"): "UPPER"}, "annotation 'c' extra has an expression key"),
         ({"function": b"UPPER"}, "annotation 'c' extra['function'] is a bytes"),
-        ({"function": _ProjectStr("UPPER")}, "annotation 'c' extra['function'] is a _ProjectStr"),
         ({"precision": _ProjectInt(1)}, "annotation 'c' extra['precision'] is a _ProjectInt"),
+        (
+            {_term("text-choices", "PRECISION"): _ProjectInt(1)},
+            "annotation 'c' extra['precision'] is a _ProjectInt",
+        ),
     ],
 )
 def test_func_extra_non_inert_template_state_fails_closed(extra: object, detail: str) -> None:
     """The ``extra`` mapping itself, its keys, and its values are each pinned exactly.
 
     A ``dict`` SUBCLASS would run its own ``items`` when ``as_sql`` unpacks the format
-    context, a non-string key is not a template format name, and a value outside the exact
-    inert scalars is state the ``%`` interpolation would render through its own protocol.
+    context, a key that is not a text term is not a template format name, and a value
+    outside the exact inert scalars and text terms is state the ``%`` interpolation would
+    render through its own protocol. A defect names a member key by the text it spells.
     """
     source = Category.objects.all()
     text_field: models.TextField[str | Combinable, str] = models.TextField()
@@ -5621,6 +5718,19 @@ def test_deferred_value_dict_non_string_key_fails_closed() -> None:
     )
 
 
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+def test_deferred_value_dict_member_key_is_admitted(kind: str) -> None:
+    """A member key inside a deferred-value dict is admitted as the key it spells.
+
+    The baked predicate is canonically reconstructed with the rest of the sealed query,
+    which rebinds the key as its exact text.
+    """
+    assert (
+        _deferred_value_defect({_term(kind, "HEADLINE"): "v"}, _GraphWalk(), "deferred arg")
+        is None
+    )
+
+
 def test_deferred_value_dict_member_defect_propagates() -> None:
     """A hostile value inside a deferred-value dict fails closed."""
     assert _deferred_value_defect({"k": _HostileLeaf()}, _GraphWalk(), "deferred arg") == (
@@ -5716,6 +5826,19 @@ def test_base_table_defect_labels_a_non_string_table_name() -> None:
     )
 
     assert _base_table_defect(query, Category) == "object"
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+def test_base_table_defect_names_a_member_spelled_other_table_as_its_text(kind: str) -> None:
+    """A member-spelled base table naming a DIFFERENT table is refused, named as its text."""
+    query = SimpleNamespace(
+        alias_map={"base": SimpleNamespace(table_name=_term(kind, "OTHER_TABLE"))},
+    )
+
+    defect = _base_table_defect(query, Category)
+
+    assert defect == "products_item"
+    assert type(defect) is str
 
 
 def test_concrete_model_probe_never_runs_a_metaclass_meta_hook(
@@ -7499,36 +7622,18 @@ def test_snapshot_routing_intent_keeps_a_non_dict_hints_slot_by_reference() -> N
 # ---------------------------------------------------------------------------
 
 
-class _TermChoices(models.TextChoices):
-    """Names and SQL a hook spells through ``TextChoices`` members."""
-
-    TITLE = "title"
-    DESCENDING_TITLE = "-title"
-    LATER_TITLES = "library_book.title >= 'B'"
-    TITLE_PARAMETER = "B"
-    BRANCH_TABLE = "library_branch"
-    HEADLINE = "headline"
-    SHELVED = "shelved"
-    DEFAULT = "default"
-    GENRES = "genres"
-
-
-#: The same terms as ``enum.StrEnum`` members.
-_TermEnum = STR_ENUM(
-    "_TermEnum",
-    {name: str(member) for name, member in _TermChoices.__members__.items()},
-)
-
-
-def _term(kind: str, name: str) -> str:
-    """``name``'s term as a ``TextChoices`` or a ``StrEnum`` member."""
-    member = read_attr(_TermChoices if kind == "text-choices" else _TermEnum, name)
-    assert is_str(member)
-    return member
+def _func_with_slot(slot: str, text: str) -> Func:
+    """A ``Func`` over ``title`` whose instance ``__dict__`` holds ``text`` on ``slot``."""
+    func = Func(F("title"), F("title"), function="COALESCE")
+    func.__dict__[slot] = text
+    return func
 
 
 #: Every member-term shape the seal admits: the raw-SQL and order slots, the bound raw
-#: parameters, and the name slots of the query and the queryset.
+#: parameters, the SQL text and template slots an expression formats into its SQL
+#: (``RawSQL`` text, a ``Func`` function / template / joiner / keyword name in its
+#: ``extra`` mapping or on its own instance slot, a combined expression's operator), and
+#: the name slots of the query and the queryset.
 _MEMBER_TERM_SHAPES: dict[str, Callable[[str], models.QuerySet[Book, object]]] = {
     "order-by": lambda kind: Book.objects.order_by(_term(kind, "DESCENDING_TITLE")),
     "distinct": lambda kind: Book.objects.order_by("title").distinct(_term(kind, "TITLE")),
@@ -7545,6 +7650,46 @@ _MEMBER_TERM_SHAPES: dict[str, Callable[[str], models.QuerySet[Book, object]]] =
     ),
     "raw-sql-parameter": lambda kind: Book.objects.annotate(
         later=RawSQL("library_book.title >= %s", [_term(kind, "TITLE_PARAMETER")]),
+    ),
+    "raw-sql-text": lambda kind: Book.objects.annotate(
+        later=RawSQL(_term(kind, "LATER_TITLES"), []),  # noqa: S611 - the member term is the input under test
+    ),
+    "raw-sql-text-order-by": lambda kind: Book.objects.order_by(
+        RawSQL(_term(kind, "TITLE_COLUMN"), []).desc(),  # noqa: S611 - the member term is the input under test
+    ),
+    "raw-sql-text-filter": lambda kind: Book.objects.filter(
+        Exact(RawSQL(_term(kind, "TITLE_COLUMN"), [], models.TextField()), "x"),  # noqa: S611 - the member term is the input under test
+    ),
+    "func-function": lambda kind: Book.objects.annotate(
+        shout=Func(F("title"), function=_term(kind, "UPPER")),
+    ),
+    "func-template": lambda kind: Book.objects.annotate(
+        shout=Func(F("title"), function="UPPER", template=_term(kind, "TEMPLATE")),
+    ),
+    "func-arg-joiner": lambda kind: Book.objects.annotate(
+        joined=Func(F("title"), F("title"), function="COALESCE", arg_joiner=_term(kind, "JOINER")),
+    ),
+    "func-keyword-name": lambda kind: Book.objects.annotate(
+        shout=Func(
+            F("title"),
+            function="UPPER",
+            **{_term(kind, "PRECISION"): None},
+        ),
+    ),
+    "func-function-slot": lambda kind: Book.objects.annotate(
+        shout=_func_with_slot("function", _term(kind, "UPPER")),
+    ),
+    "func-template-slot": lambda kind: Book.objects.annotate(
+        shout=_func_with_slot("template", _term(kind, "TEMPLATE")),
+    ),
+    "func-arg-joiner-slot": lambda kind: Book.objects.annotate(
+        shout=_func_with_slot("arg_joiner", _term(kind, "JOINER")),
+    ),
+    "func-base-template-slot": lambda kind: Book.objects.annotate(
+        shout=_func_with_slot("base_template", _term(kind, "TEMPLATE")),
+    ),
+    "combined-connector": lambda kind: Book.objects.annotate(
+        total=CombinedExpression(Value(1), _term(kind, "PLUS"), Value(2), models.IntegerField()),
     ),
     "annotate": lambda kind: Book.objects.annotate(**{_term(kind, "HEADLINE"): F("title")}),
     "alias": lambda kind: Book.objects.alias(**{_term(kind, "HEADLINE"): F("title")}),
@@ -7594,7 +7739,8 @@ def test_member_term_seals_to_the_exact_text_of_every_slot(shape: str, kind: str
 
     The candidate holds the member itself; the sealed queryset (its query, its
     ``_db`` / ``_fields`` and its prefetch lookups) holds no ``str`` subclass
-    anywhere, and compiles to the SQL Django compiles for the candidate.
+    anywhere, and compiles to the SQL Django compiles for the candidate and for the
+    same shape spelled with exact text.
     """
     candidate = _MEMBER_TERM_SHAPES[shape](kind)
     sealed, defect = _seal_or_defect(candidate, Book, None, _CASCADE_SEAL_POLICY)
@@ -7605,6 +7751,373 @@ def test_member_term_seals_to_the_exact_text_of_every_slot(shape: str, kind: str
     assert _str_subclass_leaves({**sealed.__dict__, "model": None}, set()) == []
     if shape != "distinct":
         assert str(sealed.query) == str(candidate.query)
+        assert str(sealed.query) == str(_MEMBER_TERM_SHAPES[shape]("text").query)
+
+
+_member_table_apps = Apps([])
+
+
+class _TextTableCategory(models.Model):
+    """``Category``'s table under an unmanaged model whose ``Meta.db_table`` is exact text."""
+
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _member_table_apps
+        db_table = "products_category"
+
+
+class _ChoicesTableCategory(models.Model):
+    """``Category``'s table named by a ``TextChoices`` member in ``Meta.db_table``."""
+
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _member_table_apps
+        db_table = _TermChoices.CATEGORY_TABLE
+
+
+class _EnumTableCategory(models.Model):
+    """``Category``'s table named by a ``StrEnum`` member in ``Meta.db_table``."""
+
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _member_table_apps
+        db_table = _term("str-enum", "CATEGORY_TABLE")
+
+
+#: The member-named table models by member kind.
+_MEMBER_TABLE_MODELS: dict[str, type[models.Model]] = {
+    "text-choices": _ChoicesTableCategory,
+    "str-enum": _EnumTableCategory,
+}
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.django_db
+def test_member_db_table_seals_to_the_exact_text_it_names(kind: str) -> None:
+    """A model whose ``Meta.db_table`` is a member reads the table it spells, sealed as text.
+
+    Django keeps the member as the table name and bakes it into the query's alias
+    map, so the base-table proof compares the text it spells; the sealed query holds
+    no ``str`` subclass, compiles the SQL the exact-text model compiles, and serves
+    the same rows.
+    """
+    seed_data(2)
+    model = _MEMBER_TABLE_MODELS[kind]
+    candidate = model.objects.filter(name__gte="").order_by("name")
+    candidate.query.get_initial_alias()
+    twin = _TextTableCategory.objects.filter(name__gte="").order_by("name")
+
+    sealed, defect = _seal_or_defect(candidate, model, None)
+
+    assert defect is None
+    assert sealed is not None
+    assert _str_subclass_leaves(dict(candidate.__dict__), set())
+    assert _str_subclass_leaves({**sealed.__dict__, "model": None}, set()) == []
+    assert str(sealed.query) == str(twin.query)
+    names = list(sealed.values_list("name", flat=True))
+    assert names == list(twin.values_list("name", flat=True))
+    assert names == list(Category.objects.order_by("name").values_list("name", flat=True))
+    assert names
+
+
+@pytest.mark.parametrize("combinator", ["union", "difference"])
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.django_db
+def test_member_db_table_combination_seals_to_the_exact_text_it_names(
+    kind: str,
+    combinator: str,
+) -> None:
+    """A combination over a member-named table is rewritten and sealed as exact text.
+
+    The primary-key rewrite builds a fresh query over the model, which bakes the
+    member ``Meta.db_table`` into its alias map; the sealed query holds no ``str``
+    subclass, compiles the SQL the exact-text model's sealed combination compiles, and
+    serves the same rows.
+    """
+    seed_data(2)
+
+    def combination(model: type[models.Model]) -> models.QuerySet[models.Model, object]:
+        first = model.objects.filter(name__gte="")
+        second = model.objects.filter(name__lte="")
+        return first.union(second) if combinator == "union" else first.difference(second)
+
+    candidate = combination(_MEMBER_TABLE_MODELS[kind])
+    twin, twin_defect = _seal_or_defect(combination(_TextTableCategory), _TextTableCategory, None)
+
+    sealed, defect = _seal_or_defect(candidate, _MEMBER_TABLE_MODELS[kind], None)
+
+    assert defect is None
+    assert twin_defect is None
+    assert sealed is not None
+    assert twin is not None
+    assert _str_subclass_leaves({**sealed.__dict__, "model": None}, set()) == []
+    assert str(sealed.query) == str(twin.query)
+    names = sorted(sealed.values_list("name", flat=True))
+    assert names == sorted(twin.values_list("name", flat=True))
+    assert names == sorted(Category.objects.values_list("name", flat=True))
+    assert names
+
+
+def _scalar_specimen(label: str, payload: dict[str, object]) -> ScalarSpecimen:
+    """Create a ``ScalarSpecimen`` carrying ``payload``, every required column set."""
+    return ScalarSpecimen.objects.create(
+        label=label,
+        occurred_on=datetime.date(2020, 1, 1),
+        occurred_at=datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+        occurred_time=datetime.time(1, 2, 3),
+        external_id=uuid.uuid4(),
+        payload=payload,
+    )
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.django_db
+def test_member_json_key_seals_to_the_exact_text_it_spells(kind: str) -> None:
+    """A JSON payload keyed by a member is matched as the key it spells, sealed as text.
+
+    Django serializes the member key as its text, so the lookup's mapping is admitted;
+    the sealed query holds no ``str`` subclass, compiles the SQL the exact-text key
+    compiles, and serves the same row.
+    """
+    keyed = _scalar_specimen("keyed", {"headline": 1})
+    _scalar_specimen("other", {"headline": 2})
+    candidate = ScalarSpecimen.objects.filter(payload={_term(kind, "HEADLINE"): 1})
+    twin = ScalarSpecimen.objects.filter(payload={_term("text", "HEADLINE"): 1})
+
+    sealed, defect = _seal_or_defect(candidate, ScalarSpecimen, None)
+
+    assert defect is None
+    assert sealed is not None
+    assert _str_subclass_leaves(dict(candidate.__dict__), set())
+    assert _str_subclass_leaves({**sealed.__dict__, "model": None}, set()) == []
+    assert str(sealed.query) == str(twin.query)
+    assert list(sealed) == list(twin) == [keyed]
+
+
+def _pending(
+    queryset: models.QuerySet[models.Model, object],
+    kwargs: dict[str, object],
+    args: tuple[object, ...] = (),
+) -> models.QuerySet[models.Model, object]:
+    """``queryset`` carrying ``args`` / ``kwargs`` as the pending filter a manager leaves."""
+    set_queryset_deferred_filter(queryset, (False, args, kwargs))
+    return queryset
+
+
+#: A pending filter whose arguments carry a member in each slot family the expression
+#: walk admits one in: SQL text, an ``extra`` template value / keyword name, a named
+#: template slot, a combined operator, an inner query's annotation name, a mapping key.
+_DEFERRED_MEMBER_TERM_SHAPES: dict[str, Callable[[str], models.QuerySet[models.Model, object]]] = {
+    "raw-sql-text": lambda kind: _pending(
+        Book.objects.all(),
+        {"title__gte": RawSQL(_term(kind, "TITLE_COLUMN"), [], models.TextField())},  # noqa: S611 - the member term is the input under test
+    ),
+    "func-function": lambda kind: _pending(
+        Book.objects.all(),
+        {
+            "title": Func(
+                F("title"),
+                function=_term(kind, "UPPER"),
+            ),
+        },
+    ),
+    "func-template": lambda kind: _pending(
+        Book.objects.all(),
+        {
+            "title": Func(
+                F("title"),
+                function="UPPER",
+                template=_term(kind, "TEMPLATE"),
+            ),
+        },
+    ),
+    "func-keyword-name": lambda kind: _pending(
+        Book.objects.all(),
+        {
+            "title": Func(
+                F("title"),
+                function="UPPER",
+                **{_term(kind, "PRECISION"): None},
+            ),
+        },
+    ),
+    "func-arg-joiner-slot": lambda kind: _pending(
+        Book.objects.all(),
+        {"title": _func_with_slot("arg_joiner", _term(kind, "JOINER"))},
+    ),
+    "combined-connector": lambda kind: _pending(
+        Book.objects.all(),
+        {"pk": CombinedExpression(Value(1), _term(kind, "PLUS"), Value(2), models.IntegerField())},
+    ),
+    "subquery-annotation-name": lambda kind: _pending(
+        Book.objects.all(),
+        {
+            "title__in": Subquery(
+                Book.objects.annotate(**{_term(kind, "HEADLINE"): F("title")}).values("headline"),
+            ),
+        },
+    ),
+    "mapping-key": lambda kind: _pending(
+        ScalarSpecimen.objects.all(),
+        {"payload": {_term(kind, "HEADLINE"): 1}},
+    ),
+    "positional-q": lambda kind: _pending(
+        Book.objects.all(),
+        {},
+        (Q(title=Func(F("title"), function=_term(kind, "UPPER"))),),
+    ),
+    "positional-exists": lambda kind: _pending(
+        Book.objects.all(),
+        {},
+        (
+            models.Exists(
+                Book.objects.filter(
+                    pk=models.OuterRef("pk"),
+                    title=Func(F("title"), function=_term(kind, "UPPER")),
+                ),
+            ),
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.parametrize("shape", list(_DEFERRED_MEMBER_TERM_SHAPES))
+def test_deferred_member_term_seals_to_the_exact_text_it_spells(shape: str, kind: str) -> None:
+    """A member inside a pending filter's arguments is sealed as its exact text.
+
+    The arguments are canonically reconstructed before ``add_q`` bakes them: the sealed
+    queryset holds no ``str`` subclass and compiles the SQL Django bakes for the
+    candidate and for the same arguments spelled with exact text.
+    """
+    candidate = _DEFERRED_MEMBER_TERM_SHAPES[shape](kind)
+    sealed, defect = _seal_or_defect(candidate, candidate.model, None)
+
+    assert defect is None
+    assert sealed is not None
+    assert _str_subclass_leaves(dict(candidate.__dict__), set())
+    assert _str_subclass_leaves({**sealed.__dict__, "model": None}, set()) == []
+    assert str(sealed.query) == str(_DEFERRED_MEMBER_TERM_SHAPES[shape]("text").query)
+    assert str(sealed.query) == str(candidate.query)
+
+
+class _OpaqueBoundPayload:
+    """A payload with no framework-owned representation, bound through ``Value``."""
+
+
+def test_deferred_value_binding_an_opaque_payload_fails_closed() -> None:
+    """A pending filter argument binding an opaque payload is refused before the bake.
+
+    ``Value`` is genuine Django, but its payload is not a value the admitted-bound-value
+    rule can rebuild, so reconstructing the arguments refuses it rather than baking the
+    consumer object into the sealed query by reference.
+    """
+    candidate = _pending(Book.objects.all(), {"title": Value(_OpaqueBoundPayload())})
+
+    sealed, defect = _seal_or_defect(candidate, Book, None)
+
+    assert sealed is None
+    assert defect == (
+        "untrusted",
+        "QuerySet deferred filter binds a _OpaqueBoundPayload bound value",
+    )
+
+
+def test_deferred_filter_too_deep_to_rebuild_fails_closed() -> None:
+    """A pending filter nested deeper than reconstruction can rebuild fails closed.
+
+    The argument graph is canonically rebuilt before the bake, so a ``Q`` tree whose
+    rebuild exhausts the interpreter's recursion limit is a typed defect rather than a
+    raw ``RecursionError``.
+    """
+    nested = Q(title="x")
+    for _ in range(sys.getrecursionlimit() * 3 // 5):
+        nested = Q(nested, pk__gte=0)
+    candidate = _pending(Book.objects.all(), {}, (nested,))
+
+    sealed, defect = _seal_or_defect(candidate, Book, None)
+
+    assert sealed is None
+    assert defect == ("untrusted", "QuerySet deferred filter state cannot be reconstructed")
+
+
+@pytest.mark.parametrize("position", ["keyword", "positional"])
+def test_sealing_leaves_a_deferred_subquery_argument_unchanged(position: str) -> None:
+    """A subquery the consumer still holds keeps its alias bookkeeping after the seal.
+
+    ``add_q`` relabels a subquery's aliases in place, and the clone it resolves shares
+    the ``table_map`` alias lists, so the bake runs over the rebuilt argument instead,
+    whether the subquery is a keyword argument or inside a positional ``Q``.
+    """
+    inner = Subquery(Book.objects.filter(title__gte="a").values("pk"))
+    held = inner.query
+    assert type(held) is sql.Query
+    before = _alias_state(held)
+    candidate = (
+        _pending(Book.objects.all(), {"pk__in": inner})
+        if position == "keyword"
+        else _pending(Book.objects.all(), {}, (Q(pk__in=inner),))
+    )
+
+    sealed, defect = _seal_or_defect(candidate, Book, None)
+
+    assert defect is None
+    assert sealed is not None
+    assert str(sealed.query)
+    assert _alias_state(held) == before
+
+
+def _alias_state(query: sql.Query) -> list[object]:
+    """``query``'s ``table_map`` and ``alias_map``, and every combined branch's, as copies."""
+    branches: tuple[sql.Query, ...] = query.combined_queries
+    return [
+        {table: list(aliases) for table, aliases in query.table_map.items()},
+        dict(query.alias_map),
+        [_alias_state(branch) for branch in branches],
+    ]
+
+
+#: Candidates whose sealing runs Django's own query machinery on the detached clone: a
+#: combination's primary-key rewrite, and a pending filter that joins a table again.
+_UNMUTATED_CANDIDATES: dict[str, Callable[[], models.QuerySet[models.Model, object]]] = {
+    "union": lambda: Category.objects.filter(name__gte="a").union(
+        Category.objects.filter(items__name__lte="z"),
+    ),
+    "deferred-join": lambda: _pending(
+        Category.objects.filter(items__name="a"),
+        {"items__category__name": "b"},
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", list(_UNMUTATED_CANDIDATES))
+def test_sealing_leaves_the_candidate_query_state_unchanged(shape: str) -> None:
+    """The seal never writes the candidate: its alias bookkeeping is the same afterwards.
+
+    ``sql.Query.clone`` shares the ``table_map`` alias lists, which Django's own join
+    and relabel machinery edits in place, so the clone is reconstructed before any of
+    that machinery runs on it.
+    """
+    candidate = _UNMUTATED_CANDIDATES[shape]()
+    query = read_attr(candidate, "_query")
+    assert type(query) is sql.Query
+    before = _alias_state(query)
+
+    sealed, defect = _seal_or_defect(candidate, Category, None)
+
+    assert defect is None
+    assert sealed is not None
+    assert str(sealed.query)
+    assert _alias_state(query) == before
 
 
 def test_extra_where_without_params_seals_with_none_params() -> None:

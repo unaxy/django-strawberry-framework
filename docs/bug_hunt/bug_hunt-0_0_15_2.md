@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 234 done, 152 to do.
+Progress: 235 done, 155 to do.
 
 ## Done
 
@@ -1045,6 +1045,13 @@ Progress: 234 done, 152 to do.
   strawberry ones included) against pyproject, and BUILD.md "Floor verification" (recipe, supported floor, and a soft
   dependency's seam in "When it is required") and START.md say so (each soft dependency probed green at its floor on
   Python 3.10)
+- [x] 312. fixed: the visibility seal accepts a `TextChoices` / `StrEnum` / plain `str`-subclass member wherever Django
+  serves one as SQL text (a `RawSQL` text, a `Func` function / template / argument joiner / base template and its
+  `extra` keys and values, a combined expression's operator, a `Meta.db_table` the base table is baked from, a lookup
+  value's mapping key) and seals it to the exact text it spells, so the sealed query holds no `str` subclass and
+  compiles to the exact-text twin's SQL; a pending deferred filter's arguments are rebuilt before they are baked (a
+  consumer-held subquery is never relabelled; an opaque bound value or an unrebuildable graph fails closed) and a
+  combinator's `pk__in` rewrite is rebuilt in turn; spec-045 and the GLOSSARY prove-then-clone entry state it
 
 ## Outside review of the fixes
 
@@ -1092,9 +1099,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   sigcont-ignored row tells them apart); the D10, gate, F2 and F3 mutations are each pinned by one row; F4's optional
   `dup2` of `/dev/null` onto a dropped output sink's fd (accepted without it: `| head` ends with rc 120 and a complete
   log). Re-verify the delta and decide each, or close them as robustness rows
-- [ ] 312. `utils/querysets.py::_node_metadata_defect` still refuses `RawSQL(<TextChoices member>, params)` (the SQL
-  text slot read by exact type), which Django serves; the 272 text-term predicate covers order / extra / where slots but
-  not `RawSQL.sql`. Found landing 294
 - [ ] 313. Unprobed: a database router whose `db_for_read` returns a `StrEnum` alias may be refused by
   `utils/querysets.py::_snapshot_routing_intent` (exact-type read of the routed alias) after 294 normalized
   `using(<member>)`; probe it live and seal by `is_str` plus normalization if so. Found landing 294
@@ -1269,12 +1273,24 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `test_a_stop_before_the_command_is_recorded_reaches_it_once_it_is[started]` and siblings) time their signals with
   fixed sleeps around `workspace.STOP_REPEAT_GRACE` and wait on `_poll`'s 20 s default, so they fail under machine
   load (4 failed at load ~95, all green alone, 1 reproduced on main under 40 busy loops). Found verifying 328
+- [ ] 392. `utils/querysets.py::_where_tree_defect` still refuses a `Q(_connector=<TextChoices / StrEnum member>)`
+  where-node connector (a private keyword); decide whether the connector joins the text-term slots or stays exact `str`
+- [ ] 393. A plain `QuerySet` as a pending deferred-filter value (`{"pk__in": qs.values("pk")}`) is refused by the seal
+  on Django 6.1 with a misleading message ("binds a FetchOne bound value", from `QuerySet._fetch_mode`) and accepted on
+  5.2; and a deferred filter nested about 1000 levels deep raises a raw `RecursionError` on Python 3.14 instead of a
+  typed defect; both reachable only through the private deferred seam: make the refusal version-independent and typed
+- [ ] 394. `utils/querysets.py::_base_table_defect` calls `_normalized_str` on `concrete._meta.db_table` unguarded, so a
+  non-`str` `db_table` raises `TypeError` instead of returning a typed defect (the stubs type it `str`; infeasible
+  unless a project assigns one)
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 395. CHANGELOG entry for item 312: a `TextChoices` / `StrEnum` member used as SQL text in a hook's or consumer
+  `Prefetch` queryset (`RawSQL(...)`, `Func(function=...)`, a combined expression's operator, a `Meta.db_table`, a JSON
+  lookup's mapping key) is now served instead of refused with `ConfigurationError` ("cannot be sealed")
 - [ ] 391. CHANGELOG entry for item 190: a temporal filter value the queryset's database cannot bind (on SQLite, MySQL
   and Oracle an aware datetime outside years 1..9999 once projected, any aware datetime when `USE_TZ` is false, an aware
   time; on every backend a `year` / `iso_year` bound outside 1..9999) now answers `FILTER_INVALID` keyed to its filter
