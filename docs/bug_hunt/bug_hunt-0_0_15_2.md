@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 202 done, 139 to do.
+Progress: 203 done, 138 to do.
 
 ## Done
 
@@ -826,6 +826,12 @@ Progress: 202 done, 139 to do.
   directory (`workspace.py::file_lock` through `_lock_directory`, as the flow lease and 143's marker), and a lock file
   an older version left is replaced by its directory under that file's own lock (`_replace_lock_file`), so an older
   opener fails loudly instead of holding another inode (0 of 12 after; mutations red)
+- [x] 149. `scripts/count_queries.py` exited 1 (its "scales with cardinality" code) by traceback on a missing or
+  unmatched operation, an empty or fragment-only document, and an unreadable `--query`, `--compare` or `--json` path:
+  `select_operation` (Strawberry's rule) and `load_baseline` refuse up front through `parser.error` (exit 2) before
+  bootstrap, a syntax error no longer writes per-cell rows or failure JSON, `_bench_common.read_text_input` and
+  `report_destination` give the same exit-2 refusal to every bench script that reads `--query` or writes `--json`, and a
+  `--compare` baseline that measured no cell is refused
 
 ## Outside review of the fixes
 
@@ -884,16 +890,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `pass-<n>.diff` holding an untracked file, an unstaged move or an `rm --cached`. Its landing rewords the module
   docstring sentence item 298 quotes ("the caller's global git config is ignored" becomes "global and system"); update
   298's quote in the same commit
-- [ ] 149. `scripts/count_queries.py` checks only `result.errors`, while Strawberry's `execute_sync` raises
-  `MissingQueryError`, `CannotGetOperationTypeError` and `InvalidOperationTypeError`: an anonymous document with
-  `--operation-name`, a name the document lacks, a fragment-only document and an empty file exit 1 ("scales with
-  cardinality") by traceback, as do an unreadable `--query` and a missing or non-JSON `--compare`. Fix: one up-front
-  `select_operation` (Strawberry's rule: a given name must match, none means the first operation; not graphql-core's
-  `get_operation_ast`, which refuses a shape C53 pinned) replacing `effective_operation_name`, refusing through
-  `parser.error` (exit 2) before bootstrap; parse errors move up front too (no failure JSON for a syntax error);
-  validation errors stay per-cell rows. Open for you: whether a syntax error may stop writing the per-cell ERROR rows
-  and the failure JSON (it still exits 2), and whether the unreadable `--query` / `--compare` refusals (exit 2 through
-  `parser.error`) land in the same change
 - [ ] 158. The optimizer's operation gate (`walker.py::_enable_only_for_operation`) is decided per plan-cache key, so under
   a mutation no writer records columns and a consumer `.only()` / `.defer()` (hook, manager, resolver) is never widened:
   a hook `.only("name")` under a mutation runs 77 statements where the QUERY runs 2 (152 with one more column; a nested

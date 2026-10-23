@@ -2,7 +2,8 @@
 
 Keeps the database-free half of ``scripts/_bench_common.py`` (provenance
 refusals, the package content digest and instrument blob ids, round summaries,
-the ``--json`` document shape, the plan-cache reset guard, root-row counting)
+the ``--json`` document shape and destination check, the ``--query`` file
+reader, the plan-cache reset guard, root-row counting)
 and the ``-X importtime`` parser in
 ``scripts/importtime_report.py``. None of it has a wire shape: it is tooling
 that measures the package, so there is no live sibling in
@@ -10,8 +11,12 @@ that measures the package, so there is no live sibling in
 ``bootstrap_fakeshop_django`` past its mode check.
 """
 
+import argparse
 import json
+import os
+import re
 import subprocess
+import sys
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -134,6 +139,225 @@ def test_report_status_is_ok_without_failures() -> None:
     report = _bench_common.build_report(tool="t", provenance={}, params={}, rows=[], failures=[])
 
     assert report["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("destination", "reason"),
+    [
+        ("missing/report.json", "missing is not a directory"),
+        ("taken.txt/report.json", "taken.txt is not a directory"),
+        ("existing", "it is a directory"),
+    ],
+)
+def test_report_destination_refuses_a_path_write_report_cannot_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination: str,
+    reason: str,
+) -> None:
+    """A ``--json`` path in a missing directory, or a directory, is refused at argument parsing."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "existing").mkdir()
+    _ = (tmp_path / "taken.txt").write_text("", encoding="utf-8")
+
+    with pytest.raises(
+        argparse.ArgumentTypeError,
+        match=f"cannot write {destination}: .*{reason}",
+    ):
+        _bench_common.report_destination(destination)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="permission bits bind only a non-root POSIX process",
+)
+@pytest.mark.parametrize(
+    (
+        "locked",
+        "mode",
+        "destination",
+        "reason",
+    ),
+    [
+        (
+            "locked-dir",
+            0o500,
+            "locked-dir/report.json",
+            "locked-dir is not writable",
+        ),
+        (
+            "locked.json",
+            0o400,
+            "locked.json",
+            "it is not writable",
+        ),
+    ],
+)
+def test_report_destination_refuses_a_path_without_write_permission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    locked: str,
+    mode: int,
+    destination: str,
+    reason: str,
+) -> None:
+    """A read-only parent directory or a read-only existing file cannot take the report."""
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / locked
+    if locked.endswith(".json"):
+        _ = target.write_text("{}", encoding="utf-8")
+    else:
+        target.mkdir()
+    target.chmod(mode)
+    try:
+        with pytest.raises(
+            argparse.ArgumentTypeError,
+            match=f"cannot write {destination}: .*{reason}",
+        ):
+            _bench_common.report_destination(destination)
+    finally:
+        target.chmod(0o700)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="permission bits bind only a non-root POSIX process",
+)
+@pytest.mark.parametrize(
+    ("destination", "written"),
+    [
+        ("read-only/link.json", "writable/report.json"),
+        ("read-only/taken.json", "read-only/taken.json"),
+    ],
+)
+def test_report_destination_accepts_a_writable_target_in_a_read_only_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination: str,
+    written: str,
+) -> None:
+    """A dangling link into a writable directory, or a writable file, needs no parent write bit.
+
+    The write follows the link, so the check reads the resolved path.
+    """
+    monkeypatch.chdir(tmp_path)
+    read_only = tmp_path / "read-only"
+    read_only.mkdir()
+    (tmp_path / "writable").mkdir()
+    (read_only / "link.json").symlink_to(tmp_path / "writable" / "report.json")
+    _ = (read_only / "taken.json").write_text("{}", encoding="utf-8")
+    read_only.chmod(0o500)
+    try:
+        assert _bench_common.report_destination(destination) == destination
+        _bench_common.write_report(destination, {"status": "ok"})
+    finally:
+        read_only.chmod(0o700)
+
+    assert json_loads((tmp_path / written).read_text(encoding="utf-8")) == {"status": "ok"}
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["report.json", "existing/report.json", "existing/taken.json"],
+)
+def test_report_destination_accepts_a_new_or_existing_file_in_a_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination: str,
+) -> None:
+    """The path comes back unchanged and ``write_report`` then writes it."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "existing").mkdir()
+    _ = (tmp_path / "existing" / "taken.json").write_text("{}", encoding="utf-8")
+
+    assert _bench_common.report_destination(destination) == destination
+    _bench_common.write_report(destination, {"status": "ok"})
+    assert json_loads((tmp_path / destination).read_text(encoding="utf-8")) == {"status": "ok"}
+
+
+def test_report_destination_passes_an_empty_path_through() -> None:
+    """``--json ""`` is falsy, so the scripts write no report; the check leaves it alone."""
+    assert _bench_common.report_destination("") == ""
+
+
+@runtime_checkable
+class _ScriptMain(Protocol):
+    """A measurement script's entry point."""
+
+    def main(self) -> int: ...
+
+
+class _FirstStepReachedError(Exception):
+    """Raised by the stand-in for a script's first real step: every argument passed."""
+
+
+def _reach_first_step(*_args: object) -> None:
+    raise _FirstStepReachedError
+
+
+@pytest.mark.parametrize(
+    ("script", "first_step", "argv"),
+    [
+        ("bench_plan_cache", "bootstrap_fakeshop_django", ["--json", "missing/x.json"]),
+        ("bench_optimizer_walk", "_bootstrap_django", ["--json", "missing/x.json"]),
+        ("bench_nested_fetch", "bootstrap_fakeshop_django", ["--json", "missing/x.json"]),
+        ("importtime_report", "_run_child", ["--json", "missing/x.json"]),
+        ("bench_plan_cache", "bootstrap_fakeshop_django", ["--query", "missing.graphql"]),
+        ("bench_optimizer_walk", "_bootstrap_django", ["--query", "missing.graphql"]),
+    ],
+)
+def test_sibling_scripts_refuse_an_unusable_path_before_their_first_step(
+    scripts_module: Callable[[str], ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    script: str,
+    first_step: str,
+    argv: list[str],
+) -> None:
+    """A ``--json`` path in a missing directory or an unreadable ``--query`` exits 2 up front."""
+    module = scripts_module(script)
+    assert isinstance(module, _ScriptMain)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module, first_step, _reach_first_step)
+    monkeypatch.setattr("sys.argv", [script, *argv])
+
+    with pytest.raises(SystemExit) as raised:
+        _ = module.main()
+
+    assert raised.value.code == 2
+    assert f"{argv[0]}: cannot " in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [
+        ("missing.graphql", "cannot read missing.graphql: No such file or directory"),
+        ("folder", "cannot read folder: Is a directory"),
+        ("latin1.graphql", "cannot read latin1.graphql: not UTF-8 text (invalid start byte)"),
+    ],
+)
+def test_load_graphql_document_refuses_a_file_it_cannot_read_as_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    reason: str,
+) -> None:
+    """A ``--query`` file that is missing, a directory or not UTF-8 is a ``ValueError`` naming it."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "folder").mkdir()
+    _ = (tmp_path / "latin1.graphql").write_bytes(b"\xff\xfe{ a }")
+
+    with pytest.raises(ValueError, match=re.escape(reason)):
+        _bench_common.load_graphql_document(name)
+
+
+def test_load_graphql_document_returns_the_file_text(tmp_path: Path) -> None:
+    """A UTF-8 file comes back verbatim, non-ASCII included."""
+    path = tmp_path / "op.graphql"
+    _ = path.write_text('query Caf\u00e9 { a(s: "\u00e9") }\n', encoding="utf-8")
+
+    assert _bench_common.load_graphql_document(path) == 'query Caf\u00e9 { a(s: "\u00e9") }\n'
 
 
 def test_memory_db_name_is_a_shared_cache_uri_per_alias(tmp_path: Path) -> None:

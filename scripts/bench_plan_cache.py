@@ -42,7 +42,8 @@ walk figure narrower than its spread is noise. The glossary candidates run on
 ``--glossary-terms`` seeded terms and the products candidates on
 ``seed_data(--seed)``; the root row count each query returned is printed
 beside its timings. Any query that errors fails the run (exit 1) after the
-table prints.
+table prints. An unreadable ``--query`` file or a ``--json`` path that cannot
+be written is a usage error (exit 2) before Django bootstraps.
 
 Runs entirely in-process against an in-memory SQLite database; it never touches
 the tracked ``examples/fakeshop/db.sqlite3``.
@@ -70,6 +71,7 @@ from _bench_common import (
     capture_queries,
     load_graphql_document,
     parse_variables,
+    report_destination,
     reset_plan_cache,
     root_row_count,
     seed_glossary_terms,
@@ -341,7 +343,12 @@ def main() -> int:
     )
     _ = parser.add_argument("--query", help="GraphQL file to bench instead of the built-in set")
     _ = parser.add_argument("--variables", help="JSON object of variables for --query")
-    _ = parser.add_argument("--json", dest="json_path", help="also write the report as JSON here")
+    _ = parser.add_argument(
+        "--json",
+        dest="json_path",
+        type=report_destination,
+        help="also write the report as JSON here",
+    )
     args = parser.parse_args(namespace=_Args())
     if args.rounds < 1 or args.iterations < 1:
         parser.error("--rounds and --iterations must be at least 1")
@@ -352,6 +359,15 @@ def main() -> int:
     if variables is not None and args.query is None:
         parser.error("--variables needs --query")
 
+    try:
+        candidates = (
+            {Path(args.query).name: load_graphql_document(args.query)}
+            if args.query
+            else CANDIDATES
+        )
+    except ValueError as exc:
+        parser.error(f"--query: {exc}")
+
     provenance = bootstrap_fakeshop_django("sqlite-memory")
 
     from apps.products.models import Item
@@ -361,10 +377,6 @@ def main() -> int:
     _ = seed_data(args.seed)
     glossary_rows = seed_glossary_terms(args.glossary_terms)
     item_rows = Item.objects.count()
-
-    candidates = (
-        {Path(args.query).name: load_graphql_document(args.query)} if args.query else CANDIDATES
-    )
 
     print(
         f"\nplan-cache benchmark - {args.iterations} iterations/mode "

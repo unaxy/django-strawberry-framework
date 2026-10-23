@@ -33,7 +33,8 @@ The script migrates and RESEEDS the library tables in the target database
 Every mode must return the same ``data`` for a shape, a ``lateral`` cell must
 have executed ``CROSS JOIN LATERAL`` SQL and no other cell may have; any
 violation fails the run (exit 1) after the table prints, because the lateral
-strategy falls back to the windowed body silently.
+strategy falls back to the windowed body silently. A ``--json`` path that
+cannot be written is a usage error (exit 2) before Django bootstraps.
 
 ``--sqlite-smoke`` runs windowed against per-parent on the in-memory SQLite
 database instead (no Postgres, no ``FAKESHOP_PG_DSN``): it covers
@@ -61,6 +62,7 @@ from _bench_common import (
     capture_queries,
     database_name,
     is_memory_db_name,
+    report_destination,
     write_report,
 )
 from django.db import connection
@@ -253,7 +255,12 @@ def main() -> int:
         action="store_true",
         help="windowed vs per-parent on in-memory SQLite; lateral reported unavailable",
     )
-    _ = parser.add_argument("--json", dest="json_path", help="also write the report as JSON here")
+    _ = parser.add_argument(
+        "--json",
+        dest="json_path",
+        type=report_destination,
+        help="also write the report as JSON here",
+    )
     args = parser.parse_args(namespace=_Args())
 
     provenance = bootstrap_fakeshop_django("sqlite-memory" if args.sqlite_smoke else "pg")
