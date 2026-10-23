@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 225 done, 140 to do.
+Progress: 226 done, 139 to do.
 
 ## Done
 
@@ -984,6 +984,10 @@ Progress: 225 done, 140 to do.
   rows fail under the pre-fix `effective_cursor_state` (8), a dropped `normalize_order_direction` reversal (12), a
   flipped seek (10) and a flipped window direction (20); no lateral defect found; `postgres.yml`'s `package-core` shard
   (Postgres 16) runs them
+- [x] 255. fixed: both terms CSVs moved to `docs/SPECS/appx/` and spec-068's `[templates-terms]` definition points
+  there; `tests/test_ci_governance.py::_misplaced_archive_files` now refuses any file in `docs/SPECS/` other than an
+  archived spec and `NEXT.md`, and anything in `docs/SPECS/appx/` other than a spec's `-terms.csv` or `-rationale.md`
+  companion, with a live-tree row that cannot pass on an empty walk
 
 ## Outside review of the fixes
 
@@ -1027,9 +1031,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 190. Seen at `87dc1df7`, re-check: an out-of-range datetime filter value raises an uncoded error (The invalid
   regex and the regex on a UUID field are not defects: both follow django-filter's `regex` lookup, which sends a text
   pattern to the database and types a UUID column's value as a UUID.)
-- [ ] 255. `docs/SPECS/spec-058-graph_substrate-0_1_1-terms.csv` and
-  `docs/SPECS/spec-068-structural_templates-0_1_6-terms.csv` sit beside their archived specs instead of in
-  `docs/SPECS/appx/` (the importer and `check_spec_glossary.py` still find them through the sibling lookup)
 - [ ] 256. Nothing runs `scripts/check_spec_glossary.py` over every terms CSV (all 57 pass today); its repeated-anchor
   refusal and term / anchor checks bite only when a cycle runs it by hand
 - [ ] 305. A ModelForm `MultipleChoiceField` declared over a single-value column that lists no choices (`description =

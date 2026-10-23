@@ -617,7 +617,7 @@ unchanged.
 
 <!-- docs/SPECS/ -->
 [spec-058]: spec-058-graph_substrate-0_1_1.md
-[templates-terms]: spec-068-structural_templates-0_1_6-terms.csv
+[templates-terms]: appx/spec-068-structural_templates-0_1_6-terms.csv
 
 <!-- docs/builder/ -->
 
