@@ -956,16 +956,6 @@ _EMPTY_BODY_DYNAMIC_CSV_ATTRS: frozenset[str] = frozenset(
 )
 
 
-def _inherits_unchanged(cls: type[FilterSet], attr: str) -> bool:
-    """Whether ``cls`` resolves ``attr`` to the very object ``FilterSet`` resolves it to.
-
-    Read from the real namespaces, so a consumer override (a redefined
-    classmethod, ``__init__`` or ``FILTER_DEFAULTS``) is detected without
-    binding the attribute through the consumer's metaclass.
-    """
-    return truth.static_attr(cls, attr) is truth.static_attr(FilterSet, attr)
-
-
 def _dynamic_csv_profile_for(klass: type[object]) -> _FilterFamilyProfile | None:
     """Return the sequence profile IFF ``klass`` is a genuine dynamic ``in``/``range`` CSV class.
 
@@ -3230,10 +3220,11 @@ class FilterSet(
         # ``distinct=False`` choice. The framework's row-preserving to-many
         # policy is applied only to a proven ``framework_default`` leaf.
         default_origin = cls._generation_origin_for_field(field, lookup_expr)
-        generation_shape_capable = _inherits_unchanged(
+        generation_shape_capable = not truth.overrides(
             cls,
-            "filter_for_field",
-        ) and _inherits_unchanged(cls, "filter_for_lookup")
+            FilterSet,
+            *FilterSet._GENERATION_SEAMS,
+        )
         effective_origin = default_origin
         # A consumer ``filter_for_lookup`` override owns the wire shape when
         # this package would otherwise apply its identity conversion (the
@@ -3241,7 +3232,7 @@ class FilterSet(
         # Scalar overrides intentionally retain the framework-origin stamp: the
         # class capability gate still refuses optimization, while the candidate
         # row remains available for the fail-closed metadata contract.
-        lookup_seam_overridden = not _inherits_unchanged(cls, "filter_for_lookup")
+        lookup_seam_overridden = truth.overrides(cls, FilterSet, "filter_for_lookup")
         identity_policy_field = cls._is_own_pk_under_relay_owner(field) or getattr(
             field,
             "is_relation",
@@ -3541,7 +3532,7 @@ class FilterSet(
         * ``filter_for_field`` override -- the ``super()``-and-mutate seam: a
           consumer subclass that calls ``super().filter_for_field(...)`` and then
           mutates the framework-stamped instance would keep the stamp; comparing
-          the underlying function identity against ``FilterSet.filter_for_field``
+          the stored function with ``FilterSet``'s (``utils/truth.py::overrides``)
           rejects any such subclass wholesale.
         * ``filter_for_lookup`` override -- the custom-generated-class seam: a
           consumer returning its OWN generated filter class from
@@ -3571,8 +3562,7 @@ class FilterSet(
         bound. ``filterset`` is the imported ``django_filters.filterset``.
         """
         return (
-            _inherits_unchanged(cls, "filter_for_field")
-            and _inherits_unchanged(cls, "filter_for_lookup")
+            not truth.overrides(cls, FilterSet, *FilterSet._GENERATION_SEAMS)
             and truth.static_attr(cls, "FILTER_DEFAULTS") is _PUBLIC_PACKAGE_FILTER_DEFAULTS
             and not cls._customizes_instances()
         )
@@ -3611,6 +3601,9 @@ class FilterSet(
             children[filterset_cls] = child
         return child
 
+    # The generation seams a consumer may override to change the filters a class generates.
+    _GENERATION_SEAMS: ClassVar[tuple[str, ...]] = ("filter_for_field", "filter_for_lookup")
+
     # The request seams a consumer may override to read ``self.form`` /
     # ``cleaned_data`` / ``self.filters`` by key (``_reads_its_form_its_own_way``).
     _FORM_READING_SEAMS: ClassVar[tuple[str, ...]] = (
@@ -3627,14 +3620,15 @@ class FilterSet(
         """Whether this class may read a flat copy's cleaned value a request did not name.
 
         True when it declares its own ``Meta.form`` (whose ``clean`` may read any
-        key) or overrides one of ``_FORM_READING_SEAMS`` (compared by identity with
-        ``FilterSet``'s). Such a class defers no flat copy, so every key its code
-        reads is present as django-filter would make it.
+        key) or overrides one of ``_FORM_READING_SEAMS``
+        (``utils/truth.py::overrides`` against ``FilterSet``). Such a class defers
+        no flat copy, so every key its code reads is present as django-filter
+        would make it.
         """
-        if cls._meta.form is not forms.Form:
-            return True
-        return any(
-            getattr(cls, seam) is not getattr(FilterSet, seam) for seam in cls._FORM_READING_SEAMS
+        return cls._meta.form is not forms.Form or truth.overrides(
+            cls,
+            FilterSet,
+            *cls._FORM_READING_SEAMS,
         )
 
     @classmethod
@@ -3649,11 +3643,10 @@ class FilterSet(
         to route its leaves (``_is_generation_capable``) and why
         ``_expand_related_filter`` projects them through a child instance rather
         than rebinding a copy (``_owner_bound_child``). ``__init__`` is compared
-        by identity, read from the real namespaces: an unmodified subclass
-        inherits ``FilterSet.__init__`` (``FilterSet`` defines none, so this is
-        ``filterset.BaseFilterSet.__init__``).
+        with ``FilterSet``'s by ``utils/truth.py::overrides``, so an unmodified
+        subclass, which inherits it, customizes nothing.
         """
-        return not _inherits_unchanged(cls, "__init__")
+        return truth.overrides(cls, FilterSet, "__init__")
 
     @classmethod
     def _upstream_filter_for_lookup(
@@ -5892,7 +5885,7 @@ class FilterSet(
         )
         child_set._logic_depth = _depth
         cls._validate_form_or_raise(child_set)
-        if type(child_set).qs is not filterset.BaseFilterSet.qs:
+        if truth.overrides(type(child_set), filterset.BaseFilterSet, "qs"):
             # A consumer ``qs`` override (django-filter's seam) runs inside the arm as it
             # does at the top level; its rows compose as ``pk__in`` like any other arm.
             return models.Q(pk__in=child_set.qs.values("pk"))

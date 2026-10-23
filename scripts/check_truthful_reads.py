@@ -72,6 +72,13 @@ Tier 1 -- fails the gate:
   compares the class through its metaclass; ``truth.is_exact_one_of`` against a
   ``truth.IdentitySet`` (or ``truth.is_among`` for a sequence) decides it by
   identity.
+* **TR010** an ``is`` / ``is not`` comparing two reads of a class's attribute
+  (``truth.static_attr`` / ``truth.mro_attr`` / ``getattr``, each possibly inside
+  ``truth.stored_function``): the hand-spelled "does the subclass override the
+  base's hook" test, which compares the stored wrappers rather than the
+  functions they hold. ``truth.overrides(cls, base, *names)`` decides it. An
+  attribute-syntax compare (``type(x).hook is Base.hook``) is outside the gate:
+  it is syntactically indistinguishable from an enum member or type compare.
 * **TR900** a ``# truth: ok`` marker with no reason text. It suppresses
   nothing.
 
@@ -205,6 +212,7 @@ TIER_1 = frozenset(
         "TR007",
         "TR008",
         "TR009",
+        "TR010",
         "TR900",
     },
 )
@@ -663,6 +671,8 @@ def _scan_node(node: ast.AST, names: _Names, emit: Emit) -> None:
                 emit(exit_node.lineno, exit_node.col_offset, "TR005", message)
     elif type(node) is ast.Call:
         _scan_call(node, names, emit)
+    elif type(node) is ast.Compare:
+        _scan_hook_comparison(node, names, emit)
     if type(node) is ast.Module or isinstance(node, _NESTED_SCOPES):
         _scan_class_membership(node, names, emit)
 
@@ -712,6 +722,30 @@ def _is_class_read(
             for value in local.get(node.id, ())
         )
     return False
+
+
+def _scan_hook_comparison(node: ast.Compare, names: _Names, emit: Emit) -> None:
+    """Emit TR010 for every ``is`` / ``is not`` between two class-attribute reads."""
+    left = node.left
+    for op, right in zip(node.ops, node.comparators, strict=True):
+        identity = type(op) is ast.Is or type(op) is ast.IsNot
+        if identity and _is_attribute_read(left, names) and _is_attribute_read(right, names):
+            message = "`is` between two attribute reads of a class; use truth.overrides"
+            emit(left.lineno, left.col_offset, "TR010", message)
+        left = right
+
+
+def _is_attribute_read(node: ast.expr, names: _Names) -> bool:
+    """Return whether ``node`` reads a class attribute, directly or inside ``truth.stored_function``."""
+    if type(node) is not ast.Call:
+        return False
+    targets = names.targets(node.func)
+    if any(target.split(".")[-2:] == [TRUTH_MODULE, "stored_function"] for target in targets):
+        return len(node.args) == 1 and _is_attribute_read(node.args[0], names)
+    return "builtins.getattr" in targets or any(
+        target.split(".")[-2:] in ([TRUTH_MODULE, "static_attr"], [TRUTH_MODULE, "mro_attr"])
+        for target in targets
+    )
 
 
 def _is_truth_call(targets: set[str]) -> bool:
@@ -849,6 +883,7 @@ TIER_1_CODES = (
     "TR007",
     "TR008",
     "TR009",
+    "TR010",
     "TR900",
 )
 

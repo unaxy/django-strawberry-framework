@@ -900,6 +900,20 @@ def test_overrides_a_rewrap_of_the_base_function_is_not_an_override() -> None:
     assert truth.overrides(reassigned, _HookBase, "hook") is False
 
 
+def test_overrides_asks_about_any_of_the_named_hooks() -> None:
+    class TwoHooks(_HookBase):
+        other = classmethod(_base_hook)
+
+    first_only = type("FirstOnly", (TwoHooks,), {"hook": classmethod(_own_hook)})
+    second_only = type("SecondOnly", (TwoHooks,), {"other": classmethod(_own_hook)})
+    neither = type("Neither", (TwoHooks,), {})
+
+    assert truth.overrides(first_only, TwoHooks, "other", "hook") is True
+    assert truth.overrides(second_only, TwoHooks, "hook", "other") is True
+    assert truth.overrides(neither, TwoHooks, "hook", "other") is False
+    assert truth.overrides(second_only, TwoHooks, "hook") is False
+
+
 def test_overrides_a_non_subclass_or_non_class_is_false() -> None:
     class Unrelated:
         @classmethod

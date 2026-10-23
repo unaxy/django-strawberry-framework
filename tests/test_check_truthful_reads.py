@@ -552,6 +552,50 @@ def test_tr009_ignores_identity_tests_and_names_bound_elsewhere(source: str) -> 
     assert _codes(source) == []
 
 
+# --------------------------------------------------------------------------- TR010
+
+
+@pytest.mark.parametrize(
+    ("source", "line"),
+    [
+        (
+            "from . import truth\nsame = truth.static_attr(cls, name) is truth.static_attr(Base, name)\n",
+            2,
+        ),
+        ("from . import truth\nsame = truth.mro_attr(cls, n) is not truth.mro_attr(Base, n)\n", 2),
+        ("same = getattr(cls, seam) is not getattr(Base, seam)\n", 1),
+        (
+            (
+                "from . import truth\n"
+                "same = truth.stored_function(truth.static_attr(cls, n)) is truth.stored_function(\n"
+                "    truth.mro_attr(Base, n)\n"
+                ")\n"
+            ),
+            2,
+        ),
+        ("from . import truth\nsame = truth.static_attr(cls, n) is getattr(Base, n)\n", 2),
+    ],
+)
+def test_tr010_flags_an_identity_test_between_two_attribute_reads(source: str, line: int) -> None:
+    assert _codes(source) == [(line, "TR010")]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from . import truth\nsame = truth.overrides(cls, Base, name)\n",
+        "from . import truth\nsame = truth.static_attr(cls, name) is DEFAULTS\n",
+        "from . import truth\nsame = truth.static_attr(cls, name, ABSENT) is not ABSENT\n",
+        "from . import truth\nsame = truth.static_attr(cls, name) == truth.static_attr(Base, name)\n",
+        "from . import truth\nsame = truth.class_dict(cls).get(n) is truth.class_dict(Base).get(n)\n",
+        "same = getattr(cls, name) is value\n",
+        "from . import truth\nsame = truth.stored_function(value) is truth.stored_function(other)\n",
+    ],
+)
+def test_tr010_ignores_a_compare_against_a_value_and_non_identity_tests(source: str) -> None:
+    assert _codes(source) == []
+
+
 # --------------------------------------------------------------------------- promoted rules
 
 
@@ -565,6 +609,7 @@ PROMOTED = [
     ("state = vars(self){m}\n", "TR007"),
     ("order = cls.mro(){m}\n", "TR008"),
     ("found = type(value) in TYPES{m}\n", "TR009"),
+    ("same = getattr(cls, n) is getattr(Base, n){m}\n", "TR010"),
 ]
 
 
@@ -771,7 +816,7 @@ def test_default_scan_uses_configured_paths_and_skips_exempt(
     assert _summary(out) == (
         "truthful-reads: checked 2 file(s); exempt 2; "
         "tier-1 1 (TR001 1, TR002 0, TR003 0, TR004 0, TR005 0, TR006 0, TR007 0, TR008 0, "
-        "TR009 0, TR900 0); tier-2 1; markers 0; errors 0"
+        "TR009 0, TR010 0, TR900 0); tier-2 1; markers 0; errors 0"
     )
 
 

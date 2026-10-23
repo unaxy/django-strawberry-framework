@@ -689,19 +689,25 @@ def stored_function(value: object) -> object:
     return value
 
 
-def overrides(cls: object, base: type[object], name: str) -> bool:
-    """Whether the class ``cls`` resolves ``name`` to a different stored function than ``base``.
+def overrides(cls: object, base: type[object], *names: str) -> bool:
+    """Whether ``cls`` resolves any of ``names`` to a different stored function than ``base``.
 
     ``False`` when ``cls`` is not a real subclass of ``base``. Otherwise both
     sides are read by ``mro_attr`` (the real MRO only, never the metaclass)
     and compared by the identity of the stored function, so a
     ``classmethod`` / ``staticmethod`` re-wrap of the same function, or a
     re-assignment of ``base``'s own function on a subclass, is not an
-    override. Nothing consumer-defined runs.
+    override; neither is a bound method stored on the subclass
+    (``hook = Base.hook`` for a ``classmethod``), which holds ``base``'s
+    function whatever it is bound to, as the ``__func__`` identity checks of
+    Django, DRF and strawberry-django read it. Nothing consumer-defined runs.
     """
     if not is_subclass(cls, base):
         return False
-    return stored_function(mro_attr(cls, name)) is not stored_function(mro_attr(base, name))
+    return any(
+        stored_function(mro_attr(cls, name)) is not stored_function(mro_attr(base, name))
+        for name in names
+    )
 
 
 def _class_repr(cls: type) -> str:
