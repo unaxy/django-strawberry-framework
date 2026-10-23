@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 217 done, 141 to do.
+Progress: 218 done, 142 to do.
 
 ## Done
 
@@ -923,6 +923,12 @@ Progress: 217 done, 141 to do.
   hop that tell the head `check_deadline` from one inside the `_resolve_async` body, and
   `tests/test_resource_policy.py::test_a_budget_spent_between_frames_fails_every_later_frames_relation_hop`; the
   GLOSSARY `check_deadline` entry states both
+- [x] 170. no defect: `workspace.py prove` was pinned only through `run`'s shared `execute`, so its own routing (flow,
+  layout, cell, fresh, manifest refusal, exit code) had no row; 13 rows in `tests/test_workspace.py` drive
+  `main(["prove", ...])` in-process (the proof command on the flow's copy under the flow lease and the copy lock,
+  relative and `~` manifests resolved, the command's exit code returned and logged, cell / fresh forwarded, a missing or
+  directory manifest refused before a copy binds) and through the actor harness (gc refuses while a prove waits for its
+  copy; a second prove waits for the first)
 
 ## Outside review of the fixes
 
@@ -967,8 +973,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `types/resolvers.py::many_resolver` (gaps (b)-(d) are optional fixture work, not defects: the
   reverse many-to-many without `related_name`, the window resolver-key collision (pinned by a two-root-field row) and
   the C11 hook-order rows (on a test-local schema))
-- [ ] 170. No test runs `workspace.py prove` (`scripts/workspace.py::_cmd_prove`); its flow lease and copy lock are pinned only
-  through `execute`; add a `main(["prove", ...])` row and a two-run contention row
 - [ ] 183. `ruff format` on an explicit `.md` path rewrites its fenced blocks: pyproject's `exclude` does not stop explicit
   paths
 - [ ] 185. WebSocket residual after `1b6a09b1`: the Postgres steady-ping lost-write test has never run (Not defects: a
@@ -1126,6 +1130,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   a defect
 - [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the
   value (all rows answered). Robustness row: PostgreSQL range columns are unsupported
+- [ ] 377. (robustness) graphql-core 3.2 `ExecutionContext.execute_fields` leaves an already-created async sibling
+  field's awaitable un-awaited when a later sync field raises on a non-null position, so Python warns "coroutine never
+  awaited" (`filterwarnings = error` turns it into a session error in a failing run); upstream behaviour, but an async
+  many-side resolver could avoid building a coroutine that may never run
+- [ ] 378. (robustness) `workspace.py prove`: a SIGKILLed prove leaves
+  `~/.local/state/prove_failability/tree-<digest>/ACTIVE-MUTATION.json`, which `release` / `gc` / `--fresh` never clear,
+  so the next prove on that slot refuses; arguments after `--` override `--workspace` / `--scratch-root` / `--json`;
+  `uv` missing from PATH raises `FileNotFoundError` after the header with no run-log entry
 
 ## To do: holes found re-checking the fixes
 
