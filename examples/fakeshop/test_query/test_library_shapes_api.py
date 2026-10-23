@@ -66,6 +66,9 @@ One shape per planner rule, each read off the wire and off the SQL the request e
   ``allLibraryCirculationDesks`` as its text does. A ``RawSQL`` with ``None``
   params, an order term defining ``resolve_expression`` and a member-named
   ``Prefetch`` over an unrelated table are refused with the boundary's error.
+- A database router answering a ``TextChoices`` / ``StrEnum`` member alias for a
+  ``library`` read: an ``orderBy:`` root list, root connection and nested
+  connection each serve what the router's text alias serves.
 - Mixed-case Django names, whose published spelling reverses to a name the model
   lacks: ``Distributor.displayName`` projects its own column, the forward key
   ``Consignment.distributorRef`` plans one ``JOIN``, and its reverse
@@ -2028,6 +2031,66 @@ def test_enum_member_projection_in_a_cascaded_hook_hides_the_desks_its_text_hide
 
     assert names == _cascaded_desk_names(monkeypatch, source, "str")
     assert names == ["Desk A", "Desk C"]
+
+
+class _LibraryReadRouter:
+    """Routes every ``library`` read to ``alias``, spelled as text or as a member."""
+
+    def __init__(self, alias: str) -> None:
+        self.alias = alias
+
+    def db_for_read(self, model: type[Model], **_hints: object) -> str | None:
+        """The alias for a ``library`` model; Django's default for anything else."""
+        return self.alias if model._meta.app_label == "library" else None
+
+
+#: A sidecar-ordered read the seal resolves an unrouted source's alias for: a root
+#: list over the shelf-cascaded desks, a root connection, and a connection nested
+#: under each genre.
+_ROUTED_ORDER_QUERIES: dict[str, str] = {
+    "root-list": "{ allLibraryCirculationDesks(orderBy: [{ name: DESC }]) { name } }",
+    "root-connection": (
+        "{ allLibraryGenresConnection(orderBy: [{ name: DESC }]) { edges { node { name } } } }"
+    ),
+    "nested-connection": (
+        "{ allLibraryGenresConnection { edges { node { name"
+        " booksConnection(orderBy: [{ title: DESC }], first: 2) { edges { node { title } } }"
+        " } } } }"
+    ),
+}
+
+
+def _routed_order_payload(query: str, alias: str) -> JSONObject:
+    """``query``'s envelope with every ``library`` read routed to ``alias``."""
+    with override_settings(DATABASE_ROUTERS=[_LibraryReadRouter(alias)]):
+        payload = _post(query)
+    assert "errors" not in payload, payload
+    return payload
+
+
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+@pytest.mark.parametrize("source", list(_ROUTED_ORDER_QUERIES))
+@pytest.mark.django_db
+def test_enum_member_router_alias_serves_an_ordered_read_like_its_text(
+    source: str,
+    kind: str,
+) -> None:
+    """A router answering a member alias serves the ordered read its text alias serves.
+
+    Django takes any ``str`` a router answers as the alias it names, so the seal
+    freezes the member as that alias's exact text before the ``OrderSet`` runs and
+    pins the ordered result to it.
+    """
+    _seed_shelved_genres()
+    branch = models.Branch.objects.create(name="Central")
+    for code in ("A", "C"):
+        shelf = models.Shelf.objects.create(code=f"R{code}", topic="Fiction", branch=branch)
+        models.CirculationDesk.objects.create(name=f"Desk {code}", branch=branch, shelf=shelf)
+    query = _ROUTED_ORDER_QUERIES[source]
+
+    payload = _routed_order_payload(query, _BOOK_TERMS[kind]("DEFAULT"))
+
+    assert payload == _routed_order_payload(query, "default")
 
 
 def _raw_sql_with_none_params() -> RawSQL:
