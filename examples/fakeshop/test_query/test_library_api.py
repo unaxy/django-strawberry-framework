@@ -19154,6 +19154,43 @@ def test_library_consumer_projection_runs_the_same_statements_under_either_opera
     assert read_column in sql[-1], sql[-1]
 
 
+_TYPENAME_ONLY_BOOKS = (
+    "{ shelves { code books { __typename } } }",
+    "{ shelves { code booksConnection(first: 10) { edges { node { __typename } } } } }",
+)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["query", "mutation"])
+@pytest.mark.parametrize("document", _TYPENAME_ONLY_BOOKS, ids=["list", "connection"])
+@pytest.mark.parametrize(
+    ("build", "whole_row"),
+    [(_books_only_title, False), (_hooked_holder_schema, True)],
+    ids=["hooked", "plain"],
+)
+def test_library_child_reading_no_column_keeps_the_attach_connector(
+    build: Callable[[], strawberry.Schema],
+    document: str,
+    operation: str,
+    *,
+    whole_row: bool,
+) -> None:
+    """A planned child that selects no column still loads the key its rows attach by.
+
+    ``books { __typename }`` reads no book column. Over the hook's ``.only("title")``
+    the child statement adds ``shelf_id``, the connector Django's attach reads on
+    every book, so no book loads it again: two statements under either operation.
+    With no hook the child rows load whole, as they always have.
+    """
+    _seed_subtitled_books()
+
+    _payload, sql = _post_hooked_holder(f"{operation} {document}", build)
+
+    assert len(sql) == 2, sql
+    assert '"library_book"."shelf_id"' in sql[-1], sql[-1]
+    assert ('"library_book"."subtitle"' in sql[-1]) is whole_row, sql[-1]
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("operation", "full_row"),

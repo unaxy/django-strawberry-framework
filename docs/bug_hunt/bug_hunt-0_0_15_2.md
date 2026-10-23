@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 215 done, 143 to do.
+Progress: 216 done, 142 to do.
 
 ## Done
 
@@ -910,6 +910,11 @@ Progress: 215 done, 143 to do.
   `_select_path_traversable`, `select_path_resolver_keys`, `_record_select_path_keys`) is deleted;
   `types/resolvers.py::_FK_ELISION_UNSAFE` stays for a row the plan did not project (a consumer-owned `Prefetch`),
   pinned live; specs 002, 004, 033, 035, 036, 038, 039, 040 and GLOSSARY / KANBAN restated
+- [x] 371. `walker.py::_ensure_connector_only_fields(base_queryset=...)` records the attach columns whenever the child
+  plan reads a column or the child base queryset carries a consumer projection, so a typename-only child over a
+  projecting hook loads its connector with the hook's columns (27 statements -> 2, query and mutation); the hook-free
+  child SQL is unchanged; live row `test_library_child_reading_no_column_keeps_the_attach_connector` (sync; the async
+  per-row load runs inside the sync evaluation thread and never raised)
 
 ## Outside review of the fixes
 
@@ -1116,10 +1121,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   a defect
 - [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the
   value (all rows answered). Robustness row: PostgreSQL range columns are unsupported
-- [ ] 371. A child hook's `.only()` / `.defer()` strands the prefetch connector when the child selects no column (`{
-  items { __typename } }` over a hook `.only("name")` ran 27 statements under a query and a mutation):
-  `walker.py::_ensure_connector_only_fields` returned early on empty `only_fields`, so Django's attach loaded the
-  connector once per row; breaks spec-004's hook-union row
 
 ## To do: holes found re-checking the fixes
 
