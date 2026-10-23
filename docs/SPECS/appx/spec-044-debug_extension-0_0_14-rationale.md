@@ -220,7 +220,9 @@ asgiref's *fallback*. Django's ASGI handler wraps each HTTP request in a
 bracketing **may be viable** for normal ASGI HTTP inside the inherited request context. It is
 still not universal — direct `schema.execute()`, batching, a generated mutation's transaction
 window (which runs on a private thread of its own,
-`django_strawberry_framework/schema.py::DjangoMutationExecutionContext`), and work escaping that
+`django_strawberry_framework/schema.py::DjangoMutationExecutionContext`, except under a sync
+caller blocked in `async_to_sync`, where it runs on that caller's thread and nests in whatever
+transaction the caller holds), and work escaping that
 context lack the per-request executor. The shipped "async SQL is typically empty" limitation
 stands either way.
 

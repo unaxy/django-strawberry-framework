@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 220 done, 140 to do.
+Progress: 221 done, 139 to do.
 
 ## Done
 
@@ -944,6 +944,13 @@ Progress: 220 done, 140 to do.
   anchored entry refused) and its own `ruff format` calls pass `--no-force-exclude`, so every file `--fix` edits is
   reflowed; rows in `tests/test_ci_governance.py` and `tests/test_check_trailing_commas.py`; START and docs/ruffing.md
   state it
+- [x] 185. no defect:
+  `tests/mutations/test_write_transaction.py::test_every_success_payload_under_steady_pings_is_a_committed_row` is
+  selected by `postgres.yml`'s `package-core` shard and passed in every Postgres run since `1b6a09b1` (11 of 11), and
+  fails 3 of 3 against the pre-fix `schema.py`; the blocked-sync-caller nesting is documented in `schema.py` and pinned,
+  so docs/README.md, GLOSSARY `DjangoSchema`, the KANBAN card item and the spec-044 rationale now carry that exception
+  instead of an unconditional private window; the async window has no owning spec, card 079 owns the surrounding
+  transaction
 
 ## Outside review of the fixes
 
@@ -984,9 +991,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 185. WebSocket residual after `1b6a09b1`: the Postgres steady-ping lost-write test has never run (Not defects: a
-  sync caller blocked in `async_to_sync` keeping the shared connection is documented behaviour, and the async mutation
-  window having no owning spec or card breaks no contract row.)
 - [ ] 186. docs/README.md has no consumer-`Prefetch` / `.only()` cooperation sentence and no inert-arm sentence (GLOSSARY has
   both: "`only()` cooperation", from item 83's `548059b3`, and "Membership leaves")
 - [ ] 187. The C11 keyset fixes were never run on PostgreSQL's LATERAL path (The workspace / prove_failability `flock`
