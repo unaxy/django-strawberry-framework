@@ -182,7 +182,7 @@ CI `lint` job (`django.yml` is authoritative for the order): `ruff check` / `ruf
 | `check_truthful_reads.py` | hook 9; `--check` CI; `--report` = full inventory (tier-2 heuristics, every `# truth: ok` marker, per-code/per-file counts), exit 0. Reads `paths`/`exempt` from `[tool.truthful_reads]` |
 | `check_citations.py` | hook 12; `--check --substrings` CI |
 | `check_kanban_anchors.py` | hook 10 |
-| `check_spec_glossary.py --spec <path>` | spec's `-terms.csv` → real glossary anchors; `--auto-link` rewrites inline mentions (NEXT.md) |
+| `check_spec_glossary.py --spec <path>` | spec's `-terms.csv` → real glossary anchors (a link counts only where it renders); `--auto-link` links each term's first open prose mention (NEXT.md) |
 | `check_alpha_parity.py` | every non-internal Alpha card carries parity link + justification |
 | `prove_failability.py <manifest.json>` | mutate boundary, run, restore, prove by byte compare. THE way to prove a test can fail. Scope each entry to the tests that exercise the mutated boundary (every entry reruns its scope; four test trees per entry costs minutes each); one blocking command, no polling waiters |
 | `workspace.py run <flow>/<item>/<role> [--cell] -- <cmd>` | agentflow workspace copies (REVIEW, HUNT, DRY): reusable per-flow pool outside the tree, exact mirror of the shared tree + own `.venv` + own databases (per-copy Postgres DB), clean env, observed provenance header + run id; `prove`, `path`, `diff <ITEM_BASELINE> [--output F | --check F] -- <paths>` (the item diff: the working content vs the baseline tree, new files included, independent of the index for every file git does not ignore (only a force-added ignored file counts), sha256-sealed; `--check` re-verifies), read-only `audit`; Worker-0's `baseline`/`release`/`gate` (CI's lint job by default; the default, floor, sharded and pg suites only when `--suites` names them, since they run in GitHub Actions)/`gc`. A stop signal (INT/TERM/HUP/QUIT) to the wrapper alone stops the command first (relayed to its whole process group; the run then ends by that signal); Ctrl-Z suspends the command with the wrapper and `fg` resumes both; the run's leases last while the command runs, even past a SIGKILLed wrapper, and a process it leaves running (`cmd &`) keeps them until it ends. Never copy the tree by hand |
@@ -198,7 +198,7 @@ CI `lint` job (`django.yml` is authoritative for the order): `ruff check` / `ruf
 | `review_plan.py` `plan`, `resume`, `scope`, `reconcile` | REVIEW plan generator (`--changed` = the release's own committed changes) + inventory reconciler |
 | `census_test_models.py` | counts Django model classes declared under `tests/`, closing over MTI/proxy bases |
 | `capture_pg_predicate_explain.py` | row-preserving-predicate `EXPLAIN` artifact from actually emitted SQL |
-| `_kanban_lib.py`, `_bench_common.py`, `_plan_common.py` | shared plumbing, not entry points |
+| `_kanban_lib.py`, `_bench_common.py`, `_plan_common.py`, `_markdown_lex.py` | shared plumbing, not entry points; `_markdown_lex.py` = the stdlib-only CommonMark lexer both glossary-link writers share (`build_kanban_md.py`, `check_spec_glossary.py`) |
 
 ## Rendered docs — fix the source
 

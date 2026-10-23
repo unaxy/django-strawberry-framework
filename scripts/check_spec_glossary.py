@@ -19,6 +19,12 @@ Two checks per term in the spec's companion ``*-terms.csv``:
      the body whose matching ``[ref-id]: ...GLOSSARY.md#<anchor>`` def
      lives in the unified link-definitions block at the bottom.
 
+   A use counts only where it renders as a link: the ``scripts/_markdown_lex.py``
+   lexer must pair it as a ``[...]`` group with its link tail, so one inside
+   fenced or indented code, a code span, an HTML block, raw HTML or an
+   autolink is no link to the anchor. A link in a heading renders, so it
+   counts, although ``--auto-link`` never writes one there.
+
 Exits 0 when every term passes both checks and no anchor repeats, 1 when
 any term fails or an anchor repeats, and 2 on a CLI / file-not-found error.
 
@@ -42,18 +48,26 @@ sibling is preferred when it exists and ``appx/`` is the fallback.
 for testing or for validating against a fork's renamed glossary.
 
 Pass ``--auto-link`` to also rewrite the spec in place: for every term
-listed as missing a link, the script finds the first prose mention
-outside fenced code blocks and existing links, wraps it as a
-**reference-style** ``[term][glossary-<anchor>]`` link, and inserts the
-matching ``[glossary-<anchor>]: <path>/GLOSSARY.md#<anchor>`` def under
-the ``<!-- docs/ -->`` group in the spec's link-definitions block
-(alphabetically sorted within the group). The backtick-wrapped form is
-preferred when the spec already says e.g. ``Meta.fields`` in inline
-code - the rewrite becomes ``[`Meta.fields`][glossary-metafields]``
-with the inline-code backticks preserved inside the link label. The
-run is idempotent. ``--auto-link`` requires the spec to already carry a
-``<!-- docs/ -->`` group in its link-definitions block; if the block
-is missing, the term is skipped and reported.
+listed as missing a link, the script finds the first non-code,
+non-link, non-heading mention, wraps it as a **reference-style**
+``[term][glossary-<anchor>]`` link, and inserts the matching
+``[glossary-<anchor>]: <path>/GLOSSARY.md#<anchor>`` def under the
+``<!-- docs/ -->`` group in the spec's link-definitions block
+(alphabetically sorted within the group). A mention is one the
+``scripts/_markdown_lex.py`` lexer leaves open: outside a heading, a
+link reference definition, fenced or indented code and an HTML block;
+not overlapping an existing link of any shape, an autolink, raw HTML, a
+bare URL or a ``#"..."`` pinpoint; not cutting a code span, a backtick
+run or an escape; and a standalone token (no identifier, ``.``, ``:``,
+``/`` or ``-`` character before it, no identifier character after it,
+nor a ``.``, ``:``, ``/`` or ``-`` run leading into one). A mention that
+fails any of these is passed over for the next one. The backtick-wrapped
+form is preferred when the spec already says e.g. ``Meta.fields`` in
+inline code - the rewrite becomes ``[`Meta.fields`][glossary-metafields]``
+with the inline-code backticks preserved inside the link label. The run
+is idempotent. ``--auto-link`` requires the spec to already carry a
+``<!-- docs/ -->`` group in its link-definitions block; if the block is
+missing, the term is skipped and reported.
 
 The CSV is the source of truth: trim it when a term does not warrant a
 glossary entry, extend it when a new term needs one.
@@ -68,10 +82,25 @@ import re
 import sys
 from pathlib import Path
 
+try:
+    from _markdown_lex import (
+        PROSE_TERM_BOUNDARY_AFTER,
+        TERM_BOUNDARY_BEFORE,
+        _protected_regions,
+        first_open_match,
+        mask_blocks,
+    )
+except ModuleNotFoundError:  # imported as ``scripts.check_spec_glossary`` (repo root on path)
+    from scripts._markdown_lex import (
+        PROSE_TERM_BOUNDARY_AFTER,
+        TERM_BOUNDARY_BEFORE,
+        _protected_regions,
+        first_open_match,
+        mask_blocks,
+    )
+
 HEADING_PATTERN = re.compile(r"^##\s+(.+?)\s*$")
 LINK_PATTERN = re.compile(r"\]\([^)]*GLOSSARY\.md#([^)]+)\)")
-FENCE_PATTERN = re.compile(r"^```", re.MULTILINE)
-EXISTING_LINK_PATTERN = re.compile(r"\[[^\]]*\]\([^)]*\)")
 # Reference-style link defs at the bottom of a spec: `[ref-id]: target`
 REF_DEF_PATTERN = re.compile(r"^\[([^\[\]]+)\]:\s+(.+)$", re.MULTILINE)
 # Reference-style link uses in the body: `[text][ref-id]`
@@ -149,22 +178,46 @@ def spec_link_anchors(spec_path: Path) -> set[str]:
       ``[ref-id]: ...GLOSSARY.md#<anchor>`` def at the bottom of the
       file resolves to a GLOSSARY anchor. This is the current convention
       (see ``START.md``'s "Markdown link convention" section).
+
+    Either use counts only inside a link ``_link_groups`` finds.
     """
     text = spec_path.read_text(encoding="utf-8")
+    body = mask_blocks(text, headings=False)
+    groups = _link_groups(body)
     anchors: set[str] = set()
     # Inline form.
-    anchors.update(match.group(1) for match in LINK_PATTERN.finditer(text))
+    anchors.update(
+        match.group(1) for match in LINK_PATTERN.finditer(body) if _in_link(match, groups)
+    )
     # Reference-style form: build the ref-id -> target map from the
     # link-definitions block, then resolve every `[text][ref-id]` body
     # use whose target is a GLOSSARY anchor.
     defs = {match.group(1): match.group(2).strip() for match in REF_DEF_PATTERN.finditer(text)}
     if defs:
-        for match in REF_USE_PATTERN.finditer(text):
+        for match in REF_USE_PATTERN.finditer(body):
+            if not _in_link(match, groups):
+                continue
             target = defs.get(match.group(1), "")
             anchor_match = REF_TARGET_GLOSSARY_ANCHOR.search(target)
             if anchor_match:
                 anchors.add(anchor_match.group(1))
     return anchors
+
+
+def _link_groups(body: str) -> list[tuple[int, int]]:
+    """Spans of the ``[...]`` groups ``_protected_regions`` pairs in block-masked ``body``.
+
+    Every other opaque region starts with ``<`` (an autolink or raw HTML), ``#`` (a
+    pinpoint) or a URL or email character, and the lexer pairs no bracket inside a code
+    span, an autolink or raw HTML; a masked block holds no bracket at all.
+    """
+    return [(lo, hi) for lo, hi in _protected_regions(body).opaque if body.startswith("[", lo)]
+
+
+def _in_link(match: re.Match[str], groups: list[tuple[int, int]]) -> bool:
+    """Whether the ``]...`` link-tail ``match`` closes inside one bracket group."""
+    lo, hi = match.span()
+    return any(start < lo and hi <= end for start, end in groups)
 
 
 def duplicate_anchor_rows(terms: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -194,52 +247,22 @@ def check_terms(
     return missing_glossary, missing_links
 
 
-def _fenced_code_ranges(text: str) -> list[tuple[int, int]]:
-    """Return ``(start, end)`` byte ranges covering every fenced code block.
+def first_mention(text: str, term: str) -> tuple[int, int] | None:
+    r"""Span of the mention of ``term`` the auto-linker wraps, else None.
 
-    Toggles on each ``^```` line - odd matches open a block, even matches
-    close it. An unterminated fence at end-of-file extends to the end of
-    the document, which is the safe default (we would rather skip than
-    rewrite into a malformed block).
+    The backtick-wrapped form ``\`term\``` first, then the plain form; for each form the
+    first match in the block-masked text that ``first_open_match`` leaves open, bounded
+    by ``TERM_BOUNDARY_BEFORE`` and ``PROSE_TERM_BOUNDARY_AFTER``. A plain mention inside
+    a code span cuts it, so the plain form never lands in code.
     """
-    ranges: list[tuple[int, int]] = []
-    in_block = False
-    start = 0
-    for match in FENCE_PATTERN.finditer(text):
-        if not in_block:
-            start = match.start()
-            in_block = True
-        else:
-            ranges.append((start, match.end()))
-            in_block = False
-    if in_block:
-        ranges.append((start, len(text)))
-    return ranges
-
-
-def _existing_link_ranges(text: str) -> list[tuple[int, int]]:
-    """Return ``(start, end)`` ranges for every existing ``[label](target)`` link."""
-    return [(m.start(), m.end()) for m in EXISTING_LINK_PATTERN.finditer(text)]
-
-
-def _is_inside(position: int, ranges: list[tuple[int, int]]) -> bool:
-    return any(start <= position < end for start, end in ranges)
-
-
-def _find_first_outside(
-    text: str,
-    needle: str,
-    *exclusion_ranges: list[tuple[int, int]],
-) -> int | None:
-    """Find the first occurrence of ``needle`` outside every excluded range."""
-    cursor = 0
-    while True:
-        position = text.find(needle, cursor)
-        if position < 0:
-            return None
-        if not any(_is_inside(position, ranges) for ranges in exclusion_ranges):
-            return position
-        cursor = position + 1
+    body = mask_blocks(text)
+    regions = _protected_regions(body)
+    for form in (f"`{term}`", term):
+        pattern = re.compile(TERM_BOUNDARY_BEFORE + re.escape(form) + PROSE_TERM_BOUNDARY_AFTER)
+        match = first_open_match(pattern, body, regions)
+        if match is not None:
+            return match.span()
+    return None
 
 
 def _glossary_ref_id(anchor: str) -> str:
@@ -294,23 +317,21 @@ def auto_link_terms(
 
     1. Compute ``ref_id = glossary-<anchor with _ -> ->`` and
        ``ref_target = <relpath to GLOSSARY.md>#<anchor>``.
-    2. Locate the first backtick-wrapped occurrence of the term outside
-       fenced code blocks and existing links, and wrap it as
-       ``[`term`][ref_id]`` so the inline-code formatting survives
-       inside the link label.
-    3. If the backtick-wrapped form is absent, look for the plain prose
-       form under the same exclusion rules and wrap it as
-       ``[term][ref_id]``.
+    2. Locate the mention ``first_mention`` picks (the backtick-wrapped
+       form first, then the plain form) and wrap it as ``[`term`][ref_id]``
+       or ``[term][ref_id]``, so inline-code formatting survives inside
+       the link label.
+    3. A term with no open mention in either form is skipped.
     4. Insert ``[ref_id]: ref_target`` under the ``<!-- docs/ -->``
        group in the spec's link-definitions block (alphabetically
        sorted within the group). If the def already exists, no-op.
 
     The spec file is re-read between terms so each replacement sees a
-    fresh code-block / link map (cheap for spec-sized files, avoids the
+    freshly lexed text (cheap for spec-sized files, avoids the
     range-shifting bookkeeping after an edit).
 
     Returns ``(linked, skipped)`` - both lists of term names. A term is
-    skipped when no valid prose occurrence exists OR the spec has no
+    skipped when no open mention exists OR the spec has no
     ``<!-- docs/ -->`` group to insert the def into.
     """
     linked: list[str] = []
@@ -319,21 +340,12 @@ def auto_link_terms(
         ref_id = _glossary_ref_id(anchor)
         ref_target = f"{os.path.relpath(glossary_path, spec_path.parent)}#{anchor}"
         text = spec_path.read_text(encoding="utf-8")
-        code_ranges = _fenced_code_ranges(text)
-        link_ranges = _existing_link_ranges(text)
-
-        backtick = f"`{term}`"
-        position = _find_first_outside(text, backtick, code_ranges, link_ranges)
-        if position is not None:
-            replacement = f"[`{term}`][{ref_id}]"
-            new_text = text[:position] + replacement + text[position + len(backtick) :]
-        else:
-            position = _find_first_outside(text, term, code_ranges, link_ranges)
-            if position is None:
-                skipped.append(term)
-                continue
-            replacement = f"[{term}][{ref_id}]"
-            new_text = text[:position] + replacement + text[position + len(term) :]
+        span = first_mention(text, term)
+        if span is None:
+            skipped.append(term)
+            continue
+        lo, hi = span
+        new_text = f"{text[:lo]}[{text[lo:hi]}][{ref_id}]{text[hi:]}"
 
         with_def = _insert_glossary_ref_def(new_text, ref_id, ref_target)
         if with_def is None:
@@ -393,7 +405,7 @@ def _parse_args(argv: list[str] | None) -> _Args:
         action="store_true",
         help=(
             "Rewrite the spec in place: for each term in the missing-link list, "
-            "wrap the first non-code, non-link occurrence as the reference-style "
+            "wrap the first non-code, non-link, non-heading mention as the reference-style "
             "[term][glossary-anchor] and insert the matching "
             "[glossary-anchor]: GLOSSARY.md#anchor definition. Idempotent."
         ),
@@ -443,8 +455,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  + {term}")
         if skipped:
             print(
-                f"auto-link: {len(skipped)} term(s) had no plain prose mention "
-                "outside code blocks / existing links:",
+                f"auto-link: {len(skipped)} term(s) had no non-code, non-link, "
+                "non-heading mention:",
             )
             for term in skipped:
                 print(f"  - {term}")
