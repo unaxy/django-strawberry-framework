@@ -44,7 +44,9 @@ __all__ = [
 # The verified Channels floor, interpolated into every install hint that names
 # it, so no hint carries a bare literal nothing compares against. The
 # ``channels[daphne]`` row in ``pyproject.toml`` is the second place the floor
-# is written and must be bumped with this one; there is no third.
+# is written and must be bumped with this one. The CI floor cell's install in
+# ``.github/workflows/django.yml`` and BUILD.md "Floor verification" are
+# test-gated restatements of that row; any other restatement is gated by nothing.
 CHANNELS_FLOOR = "4.3.2"
 
 # The verified Strawberry floor, interpolated into the one install hint that
@@ -52,7 +54,8 @@ CHANNELS_FLOOR = "4.3.2"
 # beside ``CHANNELS_FLOOR`` for the same reason: a hard literal in a hint string
 # is compared against nothing, so it drifts silently away from the
 # ``strawberry-graphql`` row in ``pyproject.toml``. That row is the only other
-# place the floor is written and must be bumped with this one.
+# source of the floor and must be bumped with this one; the CI floor cell and
+# BUILD.md "Floor verification" restate it, each gated against that row.
 STRAWBERRY_FLOOR = "0.322.2"
 
 # The verified django-debug-toolbar floor, interpolated into the toolbar
@@ -61,7 +64,8 @@ STRAWBERRY_FLOOR = "0.322.2"
 # row in ``pyproject.toml`` and the ``_HINT_SUBSTRING`` literal in
 # ``tests/middleware/test_debug_toolbar.py``; that module's comment names all
 # three and the gates. A governance row compares this constant to the dev row,
-# as it does for the Channels and Strawberry floors above.
+# as it does for the Channels and Strawberry floors above; the CI floor cell and
+# BUILD.md "Floor verification" install the dev row's bound, each gated against it.
 DEBUG_TOOLBAR_FLOOR = "7.0.0"
 
 # The verified ``djangorestframework`` floor, interpolated into the
@@ -70,7 +74,8 @@ DEBUG_TOOLBAR_FLOOR = "7.0.0"
 # ``djangorestframework`` dev-group row in ``pyproject.toml`` and the
 # ``_HINT_SUBSTRING`` literal in ``tests/rest_framework/test_soft_dependency.py``;
 # that package's docstring names all three and the gates. A governance row
-# compares this constant to the dev row.
+# compares this constant to the dev row; the CI floor cell and BUILD.md "Floor
+# verification" install the dev row's bound, each gated against it.
 DRF_FLOOR = "3.17.0"
 
 _T = TypeVar("_T")

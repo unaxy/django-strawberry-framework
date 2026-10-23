@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 233 done, 151 to do.
+Progress: 234 done, 152 to do.
 
 ## Done
 
@@ -1036,6 +1036,15 @@ Progress: 233 done, 151 to do.
   generated leaves, `not` / `or` / `and`, relation paths, declared filters, list and range members, sync and async
   (`node` -> `decisionsConnection`) all answer it; spec-027, docs/README.md and the GLOSSARY FilterSet entry state the
   rule
+- [x] 328. Every floor run installs each soft dependency at its pinned lower bound, not only Django and
+  strawberry-graphql: the CI floor cell (`django.yml`, every `compatibility_only` node) gains a step installing
+  `channels[daphne]==4.3.2`, `cryptography==44.0.0`, `django-debug-toolbar==7.0.0` and `djangorestframework==3.17.0`
+  after `uv sync`, `scripts/workspace.py::floor_pins` reads them from pyproject `[dependency-groups].dev`
+  (`SOFT_FLOOR_PACKAGES`, `_floor_declarations`; a pin that is not `>=`, a dropped extra or a missing soft dependency
+  is a `WorkspaceError`), a `tests/test_ci_governance.py` row gates every floor literal in `django.yml` (the
+  strawberry ones included) against pyproject, and BUILD.md "Floor verification" (recipe, supported floor, and a soft
+  dependency's seam in "When it is required") and START.md say so (each soft dependency probed green at its floor on
+  Python 3.10)
 
 ## Outside review of the fixes
 
@@ -1121,12 +1130,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   with `DjangoNodeField` roots) cannot run as written and no board card owns it. Fix shape if taken: plan the per-type
   queryset before `list()` through the connection field's plan application, re-order over it, and rewrite spec-015
   Decision 3, the glossary sentence and the pinned statement counts (card candidate)
-- [ ] 328. The serializer floor is never run: `pyproject.toml` pins `djangorestframework>=3.17.0`
-  (`utils/imports.py::DRF_FLOOR`, spec-039 Decision 12) but `docs/builder/BUILD.md` "Floor verification" and the CI
-  floor cell (`django.yml`, `compatibility_only`) install only Django and strawberry-graphql at the floor, so every
-  floor run resolves the locked DRF. Probed with `djangorestframework==3.17.0`, Python 3.10.19, Django 5.2.16,
-  strawberry-graphql 0.322.2: `tests/rest_framework` 782 passed, so nothing is broken today. Check: add the DRF floor
-  point to the BUILD.md recipe and the floor cell, or state in both that the soft dependency's floor is unexercised
 - [ ] 329. `scripts/prove_failability.py` forwards the first stop signal to the scope's whole process group, which holds
   `uv` as well as pytest, so `uv run` hands pytest the Ctrl-C a second time and a `-n 0` scope whose teardown takes
   longer than about 0.2 s loses it, while the module docstring says the forwarded signal "lets pytest tear down".
@@ -1252,6 +1255,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 390. Under `AsyncDjangoGraphQLView` over the fakeshop schema, a plain `def` root that calls `apply_sync`
   (`allScalarSpecimens`, `allCards`) answers a valid query with `SynchronousOnlyOperation` ("An unexpected error
   occurred."); decide whether sync roots under the async view are supported, and document or fix
+- [ ] 427. (robustness)
+  `tests/test_ci_governance.py::test_every_floor_literal_in_the_django_workflow_is_its_pyproject_lower_bound` checks
+  the floor literals and the step's `if` but not the step's position: moving the soft-floor step (or the strawberry
+  step) above the test job's "Install dependencies" lets `uv sync` revert the pins and the cell silently runs the
+  lock; nor does it check that every floor node carries `compatibility_only` (dropping it from one dispatch node stays
+  green). And `scripts/workspace.py::_lower_bounds` takes the last of two dev rows for one soft dependency (a
+  marker-split `cryptography>=44.0.0; python_version<'3.12'` / `cryptography>=45.0.0; ...`) silently; the
+  `[dependency-groups]`-not-a-table and `dev`-not-an-array refusals have no row. Found verifying 328
+- [ ] 428. (robustness) `tests/test_workspace.py`'s stop-relay rows
+  (`test_a_repeat_stop_inside_the_grace_is_dropped_and_a_later_one_is_relayed`,
+  `test_a_stopped_run_keeps_its_leases_until_its_command_ends_then_records_the_stop`,
+  `test_a_stop_before_the_command_is_recorded_reaches_it_once_it_is[started]` and siblings) time their signals with
+  fixed sleeps around `workspace.STOP_REPEAT_GRACE` and wait on `_poll`'s 20 s default, so they fail under machine
+  load (4 failed at load ~95, all green alone, 1 reproduced on main under 40 busy loops). Found verifying 328
 
 ## To do: holes found re-checking the fixes
 

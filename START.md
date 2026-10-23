@@ -96,7 +96,7 @@ Exact point a floor run installs = policy in [docs/builder/BUILD.md][build] "Flo
 
 Django range spanning a Python-floor boundary → `uv.lock` carries TWO Django resolutions behind `python_full_version` markers. Check which one a given Python gets before claiming "latest Django".
 
-Soft deps (never in `[project].dependencies`; tests cover present AND absent): `cryptography` (`Meta.cursor_field` keyset only), `channels[daphne]` (ASGI router), `django-debug-toolbar` (toolbar middleware), `djangorestframework` (`SerializerMutation`). Absence = `sys.modules[name] = None` sentinel via `tests/_soft_dependency.py`.
+Soft deps (never in `[project].dependencies`; tests cover present AND absent): `cryptography` (`Meta.cursor_field` keyset only), `channels[daphne]` (ASGI router), `django-debug-toolbar` (toolbar middleware), `djangorestframework` (`SerializerMutation`). Floor = `>=` bound of its `[dependency-groups].dev` row; every floor run installs it exactly. Absence = `sys.modules[name] = None` sentinel via `tests/_soft_dependency.py`.
 
 CI: exact-floor cell + latest cell every push/PR; latest owns coverage gate. Full matrix + sharded-DB variant = manual dispatch + weekly schedule (Mon 05:41 UTC). Floor cell = API-compat probe, never a deployment recommendation.
 
@@ -106,6 +106,7 @@ CI: exact-floor cell + latest cell every push/PR; latest owns coverage gate. Ful
 uv venv <scratch>/dsf-floor --python <floor python>
 uv pip install --python <scratch>/dsf-floor/bin/python -e . --group dev
 uv pip install --python <scratch>/dsf-floor/bin/python 'django==<floor>' 'strawberry-graphql==<floor>'
+uv pip install --python <scratch>/dsf-floor/bin/python '<each soft dep>==<floor>'
 <scratch>/dsf-floor/bin/python -m pytest <focused scope> --no-cov
 ```
 
