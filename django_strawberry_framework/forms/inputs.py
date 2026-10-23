@@ -27,7 +27,9 @@ The shape is the ``036`` discipline adapted to forms (spec-038 Decision 7):
   column's (``require_column_kind_agreement``); a choice field whose static choices
   admit fewer of a choice column's values than the column lists publishes a generated
   enum of the admitted values instead (``_form_choice_narrowing``). A plain ``Form``
-  field with no column uses ``converter.convert_form_field`` (the model-less table).
+  field with no column, and a ``MultipleChoiceField`` over a single-value column that
+  lists no choices (``_writes_list_over_single_value``), use
+  ``converter.convert_form_field`` (the model-less table).
   The two key spaces (``forms.Field`` / ``models.Field``) stay strictly separate: the column is
   resolved first, then handed to the ``models.Field``-keyed converters.
 - Shape identity is ``(form_class, operation_kind, frozenset(effective field
@@ -53,6 +55,7 @@ from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from django.utils.choices import CallableChoiceIterator
 
+from django_strawberry_framework import logger
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import (
     CREATE,
@@ -845,6 +848,76 @@ def _form_admits_choice_value(
     return bool(field.valid_value(value))
 
 
+def _writes_list_over_single_value(field: forms.Field, column: ConcreteField) -> bool:
+    """Return whether ``field`` writes a list over a single-value column listing no choices.
+
+    A ``MultipleChoiceField`` (``TypedMultipleChoiceField`` included) cleans to a list and
+    reads only a list or tuple, while a scalar column that is neither an ``ArrayField`` nor a
+    ``JSONField`` stores one value: the form itself turns the list into that value (a
+    ``clean_<field>`` joining it). The input types such a field as the form field reads it
+    (``convert_form_field``), and an update binds its omitted value from the form's initial
+    (``forms/resolvers.py::_bind_omitted_list_initials``). Over a column listing choices
+    the field is refused instead (``_form_choice_narrowing``); a relation or file column
+    keeps its own kind.
+    """
+    return (
+        truth.is_instance(field, forms.MultipleChoiceField)
+        and model_column_write_kind(column) == SCALAR
+        and array_element_field(column) is None
+        and not truth.is_instance(column, models.JSONField)
+        and not column.choices
+    )
+
+
+def list_over_single_value_column(
+    form_class: FormClass,
+    name: str,
+    field: forms.Field,
+) -> ConcreteField | None:
+    """Return the single-value column a list-writing form field ``name`` is declared over, or ``None``.
+
+    The backing column (``_model_column_for``) when ``_writes_list_over_single_value``
+    holds for it, else ``None``.
+    """
+    column = _model_column_for(form_class, name)
+    if column is None or not _writes_list_over_single_value(field, column):
+        return None
+    return column
+
+
+def _advise_list_over_single_value(
+    form_class: FormClass,
+    form_fields: Mapping[str, forms.Field] | None,
+) -> None:
+    """Log one warning per list-writing field over a single-value column an update binds.
+
+    An update binds every declared field and an omitted one from the form's initial
+    (``forms/resolvers.py::_bind_omitted_list_initials``), which a ``ModelForm`` reads off
+    the row: the stored single value, which the field refuses unless the form presents it
+    as a list. The build cannot see a bound form's initial, so it advises instead of
+    refusing.
+    """
+    for name, field in _form_field_basis(form_class, form_fields).items():
+        column = list_over_single_value_column(form_class, name, field)
+        if column is None:
+            continue
+        logger.warning(
+            "Form %s field %r is a %s over the single-value column %s.%s, which lists no "
+            "choices: its input is a list, which the form must turn into the stored value "
+            "(e.g. joined in clean_%s). An update omitting the field binds the field's "
+            "initial value, so the form must present the stored value as a list (e.g. split "
+            "into self.initial[%r] in __init__), or that update fails with "
+            '"Enter a list of values.".',
+            truth.name(form_class),
+            name,
+            truth.kind(field),
+            truth.name(column.model),
+            column.name,
+            name,
+            name,
+        )
+
+
 def _form_choice_narrowing(
     name: str,
     field: forms.Field,
@@ -876,7 +949,10 @@ def _form_choice_narrowing(
     is refused: its input could carry at most the empty value (where the column lists ``""``
     and the form admits it), and every other value fails validation. A column without choices, a
     relation or file column (even one declaring choices), a non-choice form field and a
-    single-value ``ChoiceField`` over an ``ArrayField`` keep the column's type. A
+    single-value ``ChoiceField`` over an ``ArrayField`` answer ``None``: the column's type is
+    published, except for a ``MultipleChoiceField`` over a single-value column without choices,
+    which ``_field_triple_and_spec`` types as the form field reads it, a list
+    (``_writes_list_over_single_value``). A
     ``ModelChoiceField`` never narrows: its choices are its queryset's rows, read per request,
     and the shape identity (``_choice_narrowing_identity``) reaches this for every basis field,
     one over a scalar choice column that ``require_column_kind_agreement`` has not refused yet,
@@ -1010,8 +1086,10 @@ def _field_triple_and_spec(
     except a choice field admitting fewer of a choice column's values than it
     lists, which publishes the generated enum of the admitted values
     (``_form_choice_narrowing``).
-    A column-less field (a plain ``Form`` field or a ``ModelForm`` extra field)
-    uses ``converter.convert_form_field`` (the model-less table) for the kind,
+    A column-less field (a plain ``Form`` field or a ``ModelForm`` extra field), and a
+    list-writing field over a single-value column without choices
+    (``_writes_list_over_single_value``: the form field, not the column, is what reads the
+    value), use ``converter.convert_form_field`` (the model-less table) for the kind,
     and the relation / file annotations are finalized here (where ``Upload`` and
     the model-less relation id-type are known).
 
@@ -1034,7 +1112,14 @@ def _field_triple_and_spec(
     # (so a NullBooleanField backed by a nullable model column is forced optional
     # too, not just the model-less one) - see ``converter.form_field_required``.
     field_required = form_field_required(field, column=column)
-    narrowing = None if column is None else _form_choice_narrowing(name, field, column, form_class)
+    typed_column = (
+        None if column is None or _writes_list_over_single_value(field, column) else column
+    )
+    narrowing = (
+        None
+        if typed_column is None
+        else _form_choice_narrowing(name, field, typed_column, form_class)
+    )
     if narrowing is not None:
         pairs, writes_list = narrowing
         python_attr, graphql_name, annotation, kind = _simple_triple(
@@ -1048,25 +1133,26 @@ def _field_triple_and_spec(
             ),
             SCALAR,
         )
-    elif column is not None:
+    elif typed_column is not None:
         # ModelForm field with a backing model column: the shared column mapper
         # types the GraphQL id / Upload / scalar; kind comes from
         # ``model_column_write_kind``; related_model stays here for the reverse map.
         python_attr, graphql_name, annotation = model_column_input_annotation(
-            column,
+            typed_column,
             type_name,
             primary_of=registry.get,
         )
-        kind = model_column_write_kind(column)
+        kind = model_column_write_kind(typed_column)
         if kind in (RELATION_SINGLE, RELATION_MULTI):
             # The decode resolves ids against the SAME model the id type derived
             # from (the backing column's related model), not the form field's
             # (possibly ``None``) ``queryset.model``.
-            related_model = column.related_model
+            related_model = typed_column.related_model
     else:
-        # Column-less form field: the model-less ``convert_form_field`` table owns
-        # the kind; relation / file annotations are finalized here. Requiredness
-        # was already decided above via ``form_field_required``.
+        # Column-less form field, or a list-writing field over a single-value column:
+        # the model-less ``convert_form_field`` table owns the kind; relation / file
+        # annotations are finalized here. Requiredness was already decided above via
+        # ``form_field_required``, so the partial input still widens a column-backed one.
         conversion = convert_form_field(field)
         if conversion.kind == FILE:
             python_attr, graphql_name, annotation, kind = _simple_triple(name, Upload, FILE)
@@ -1159,7 +1245,8 @@ def build_form_input_class(
     Before any field is built, every field the operation binds (every declared field for
     an update, the input's own for a create) must agree with its backing column's kind
     (``require_column_kind_agreement``) and read a relation key that names one row
-    (``require_readable_choice_keys``).
+    (``require_readable_choice_keys``). An update's build also logs a warning for each
+    list-writing field over a single-value column it binds (``_advise_list_over_single_value``).
     """
     if operation_kind not in CREATE_SHAPED_KINDS | {PARTIAL}:
         raise ConfigurationError(
@@ -1178,6 +1265,8 @@ def build_form_input_class(
     bound_fields = form_fields if operation_kind == PARTIAL else effective
     require_column_kind_agreement(form_class, bound_fields)
     require_readable_choice_keys(form_class, bound_fields)
+    if operation_kind == PARTIAL:
+        _advise_list_over_single_value(form_class, bound_fields)
     # The un-narrowed shape of the same operation: the canonical-name comparison basis,
     # so an update input that drops only the row identity keeps the canonical name.
     full_field_names = tuple(

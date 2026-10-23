@@ -74,7 +74,9 @@ and the form-specific invariants this module owns:
   related object that resolves to no row is the same error: the stored key is never read
   under the form's lookup field and never replaced by an empty value. An
   omitted file is preserved via the bound ``form_class(instance=...)``'s ``initial``
-  (never re-supplied, never cleared). A required non-model extra field stays
+  (never re-supplied, never cleared). An omitted ``MultipleChoiceField`` over a
+  single-value column without choices binds the bound form's own initial for the field
+  (``_bind_omitted_list_initials``), never the stored single value. A required non-model extra field stays
   required in the partial input, so it is always present in
   ``provided_data``. This is a partial-input transport, not partial validation:
   the reconstructed bound ``ModelForm`` revalidates every declared field. An
@@ -163,6 +165,7 @@ from django import forms
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError
 from django.forms.models import model_to_dict
+from django.utils.datastructures import MultiValueDict
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.resolvers import (
@@ -202,7 +205,7 @@ from django_strawberry_framework.utils.write_values import (
 )
 from django_strawberry_framework.write_mixins import backing_model_of
 
-from .inputs import choice_key_field, relation_target_model
+from .inputs import choice_key_field, list_over_single_value_column, relation_target_model
 from .sets import _is_form_class
 
 if TYPE_CHECKING:
@@ -630,6 +633,15 @@ def _reconstruct_partial_data(
     by the stored value alone, with no query. A provided relation passes the same check in
     ``_decode_form_relation_single``.
 
+    - **A list-writing field over a single-value column** (a ``MultipleChoiceField`` over a
+      column that is neither an ``ArrayField`` nor a ``JSONField`` and lists no choices,
+      ``forms/inputs.py::list_over_single_value_column``) is left out here: its stored
+      value is the single value the form made of a list, which the field refuses
+      ("Enter a list of values."). ``_bind_omitted_list_initials`` binds it from the
+      constructed form's own initial instead, so a form presenting the stored value as a
+      list (an ``__init__`` splitting it into ``self.initial``) validates an omitted field
+      unchanged, and one that does not fails it under the full-form validation above.
+
     Reconstruction reads the form's FULL declared field set (``get_form_fields``),
     NOT the (possibly narrowed) generated input: a ``Meta.fields`` / ``Meta.exclude``
     narrowing drops excluded model-backed fields from the GraphQL input, but the
@@ -648,6 +660,7 @@ def _reconstruct_partial_data(
     """
     # Only a ``ModelForm`` update locates a row to reconstruct from.
     model = backing_model_of(mutation_cls._mutation_meta)
+    form_class = require(mutation_cls._mutation_meta.form_class, _is_form_class)
     form_fields = dict(mutation_cls.get_form_fields())
     m2m_field_names = {field.name for field in model._meta.many_to_many}
     links = {
@@ -662,6 +675,9 @@ def _reconstruct_partial_data(
     scalar_names: list[str] = []
     for name, form_field in form_fields.items():
         if name in provided_data or isinstance(form_field, forms.FileField):
+            continue
+        if list_over_single_value_column(form_class, name, form_field) is not None:
+            # Bound from the constructed form's initial (``_bind_omitted_list_initials``).
             continue
         if _is_model_multiple_choice_field(form_field) and name in m2m_field_names:
             try:
@@ -852,6 +868,50 @@ def _assert_bound_choice_agreement(
             )
 
 
+def _bind_omitted_list_initials(
+    mutation_cls: _FormMutationClass,
+    form: forms.BaseForm,
+    form_data: Mapping[str, object],
+) -> None:
+    """Bind an update's omitted list-writing fields over single-value columns from the form's initial.
+
+    ``_reconstruct_partial_data`` leaves such a field (``list_over_single_value_column``)
+    out of ``form_data`` when the input omits it. The form ``get_form`` built reads the
+    field's initial (``form.get_initial_for_field``: the ``initial`` a ``ModelForm`` builds
+    from the row and the ``initial=`` kwarg, after any ``__init__`` adjustment), which is
+    bound under the field's prefixed name (``form.add_prefix``) before ``is_valid()``: the
+    value the form itself presents for the unchanged field. A name the bound form no longer
+    declares is left out. The bound data is replaced, never mutated: a ``MultiValueDict``
+    (a ``QueryDict`` a ``get_form`` override binds, immutable or not) is copied and each
+    initial set as its list of values (``setlist``), since unpacking it into a ``dict``
+    would bind every other field's raw value list; any other mapping is merged into a
+    ``dict``.
+    """
+    form_class = require(mutation_cls._mutation_meta.form_class, _is_form_class)
+    initials: dict[str, object] = {}
+    for name, basis_field in mutation_cls.get_form_fields().items():
+        if (
+            name in form_data
+            or list_over_single_value_column(form_class, name, basis_field) is None
+        ):
+            continue
+        bound_field = form.fields.get(name)
+        if bound_field is not None:
+            initials[name] = form.get_initial_for_field(bound_field, name)
+    if not initials:
+        return
+    bound = form.data
+    if isinstance(bound, MultiValueDict):
+        merged = bound.copy()
+        for name, value in initials.items():
+            listed = truth.is_instance(value, list) or truth.is_instance(value, tuple)
+            values = list_of(value) if listed else [value]
+            merged.setlist(form.add_prefix(name), values)
+        form.data = merged
+    else:
+        form.data = {**bound, **{form.add_prefix(name): value for name, value in initials.items()}}
+
+
 def _bound_form_or_field_errors(
     mutation_cls: _FormMutationClass,
     holder: _FormBuilder[_FormT],
@@ -871,6 +931,8 @@ def _bound_form_or_field_errors(
     """
     form_data, provided_files = decoded
     form = holder.get_form(info, data=form_data, files=provided_files, instance=instance)
+    if instance is not None:
+        _bind_omitted_list_initials(mutation_cls, form, form_data)
     _assert_bound_choice_agreement(mutation_cls, form, form_data)
     if not form.is_valid():
         return None, _form_errors_to_field_errors(form.errors.as_data(), mutation_cls)

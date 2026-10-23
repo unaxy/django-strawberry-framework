@@ -36,6 +36,7 @@ fail-loud, shape identity, and throwaway-type id mapping.
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 from collections.abc import Callable, Iterator
@@ -1238,6 +1239,105 @@ def test_multiple_choice_field_over_single_value_choice_column_is_refused() -> N
     form_class = _book_status_form(forms.MultipleChoiceField(choices=_DESK_CHOICES))
     with pytest.raises(ConfigurationError, match="over the single-value choice column"):
         build_form_input_class(form_class, operation_kind=CREATE)
+
+
+_CITY_PICKS = [("north", "North"), ("south", "South")]
+
+
+@pytest.mark.parametrize(("operation_kind", "optional"), [(CREATE, False), (PARTIAL, True)])
+def test_typed_multiple_choice_field_over_text_column_without_choices_is_typed_as_a_list(
+    operation_kind: str,
+    *,
+    optional: bool,
+) -> None:
+    """A ``TypedMultipleChoiceField`` over ``Branch.city`` publishes ``[String!]``, not ``String``.
+
+    The column lists no choices and stores one text value; the field reads a list, so the
+    input types it as the same field off-column (``convert_form_field``): required on
+    create, widened optional on update like every column-backed field.
+    """
+    form_class = _column_form(Branch, "city", forms.TypedMultipleChoiceField(choices=_CITY_PICKS))
+    built, specs = build_form_input_class(form_class, operation_kind=operation_kind)
+    city = _field_map(built)["city"]
+    assert _is_optional(city) is optional
+    inner = _inner_type(city)
+    assert isinstance(inner, StrawberryList)
+    assert inner.of_type is str
+    assert [spec.kind for spec in specs] == [SCALAR]
+
+
+def test_multiple_choice_field_over_json_column_keeps_the_column_type() -> None:
+    """A ``MultipleChoiceField`` over a ``JSONField`` keeps the column's ``JSON`` type.
+
+    A ``JSONField`` stores the list itself, so the field is no list over a single value.
+    """
+    picks = forms.MultipleChoiceField(choices=_CITY_PICKS, required=False)
+    model = scalar_models.NullableScalarSpecimen
+    built, _ = build_form_input_class(_column_form(model, "payload", picks), operation_kind=CREATE)
+    json_built, _ = build_form_input_class(
+        _column_form(model, "payload", forms.JSONField(required=False)),
+        operation_kind=CREATE,
+    )
+    assert _field_map(built)["payload"].type == _field_map(json_built)["payload"].type
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "name",
+        "operation_kind",
+        "fields",
+        "warned",
+    ),
+    [
+        pytest.param(Branch, "city", PARTIAL, None, True, id="update"),
+        pytest.param(Branch, "city", PARTIAL, ("name",), True, id="update-excluding-it"),
+        pytest.param(Branch, "city", CREATE, None, False, id="create"),
+        pytest.param(
+            scalar_models.NullableScalarSpecimen,
+            "payload",
+            PARTIAL,
+            None,
+            False,
+            id="json-column",
+        ),
+    ],
+)
+def test_update_build_warns_of_a_list_field_over_a_single_value_column(
+    caplog: pytest.LogCaptureFixture,
+    model: type[models.Model],
+    name: str,
+    operation_kind: str,
+    fields: tuple[str, ...] | None,
+    *,
+    warned: bool,
+) -> None:
+    """An update's build logs one warning per list-writing field over a single-value column.
+
+    The update binds every declared field, one its input leaves out included, and binds an
+    omitted one from the form's initial, which the field refuses unless the form presents
+    the stored value as a list. A create binds only what its input carries, and a
+    ``JSONField`` stores the list itself, so neither warns.
+    """
+    extra = ("name",) if model is Branch else ()
+    picks = forms.MultipleChoiceField(choices=_CITY_PICKS, required=False)
+    form_class = _column_form(model, name, picks, fields=extra)
+    with caplog.at_level(logging.WARNING, logger="django_strawberry_framework"):
+        build_form_input_class(form_class, operation_kind=operation_kind, fields=fields)
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "django_strawberry_framework"
+    ]
+    expected = (
+        "Form KindForm field 'city' is a MultipleChoiceField over the single-value column "
+        "Branch.city, which lists no choices: its input is a list, which the form must turn "
+        "into the stored value (e.g. joined in clean_city). An update omitting the field binds "
+        "the field's initial value, so the form must present the stored value as a list (e.g. "
+        "split into self.initial['city'] in __init__), or that update fails with "
+        '"Enter a list of values.".'
+    )
+    assert messages == ([expected] if warned else [])
 
 
 def test_choice_field_whose_valid_value_raises_propagates_its_exception() -> None:

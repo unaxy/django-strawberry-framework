@@ -22451,3 +22451,211 @@ def test_loan_lender_null_stores_no_lender(operation: str, flavor: str) -> None:
 
     assert result == {"result": {"title": "Atlas", "lender": None}, "errors": []}
     assert _loans() == [(None, "Atlas")]
+
+
+# ---------------------------------------------------------------------------
+# A MultipleChoiceField over a single-value text column (Branch.city)
+# ---------------------------------------------------------------------------
+
+_BRANCH_CITY_PICKS_MUTATIONS = {
+    "createBranchCityPicksViaForm",
+    "updateBranchCityPicksViaForm",
+    "updateBranchCityPicksSplitViaForm",
+    "updateBranchCityPicksQueryDictViaForm",
+    "updateBranchCityPicksPrefixedViaForm",
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("flag", [False, True])
+def test_branch_city_picks_mutations_join_the_schema_only_under_their_flag(
+    project_schema_override: Callable[[], None],
+    *,
+    flag: bool,
+) -> None:
+    """The ``Branch.city`` picks mutations are absent from the default schema."""
+    with override_settings(FAKESHOP_TEST_BRANCH_CITY_PICKS=flag):
+        project_schema_override()
+        data = _assert_graphql_success('query { __type(name: "Mutation") { fields { name } } }')
+    names = {json_str(field, "name") for field in json_list(data, "__type", "fields")}
+    assert names & _BRANCH_CITY_PICKS_MUTATIONS == (
+        _BRANCH_CITY_PICKS_MUTATIONS if flag else set()
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("type_name", "city_type"),
+    [
+        ("BranchCityPicksFormInput", "[String!]!"),
+        ("BranchCityPicksFormPartialInput", "[String!]"),
+        ("BranchCityPicksSplitFormPartialInput", "[String!]"),
+    ],
+)
+def test_branch_city_picks_input_types_city_as_the_form_reads_it(
+    project_schema_override: Callable[[], None],
+    type_name: str,
+    city_type: str,
+) -> None:
+    """A ``MultipleChoiceField`` over the text ``Branch.city`` publishes a list, not ``String``.
+
+    The column lists no choices and stores one text value, while the form field reads a
+    list and ``clean_city`` joins it, so the input types ``city`` as the form field reads
+    it off-column: a required list on create, an optional one on update.
+    """
+    with override_settings(FAKESHOP_TEST_BRANCH_CITY_PICKS=True):
+        project_schema_override()
+        fields = {name: rendered for name, rendered, _ in _input_fields_sdl(type_name)}
+    name_type = "String!" if type_name.endswith("FormInput") else "String"
+    assert fields == {"name": name_type, "city": city_type}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("city", "stored"),
+    [(["north", "east"], "north,east"), (["south"], "south")],
+)
+def test_branch_city_picks_create_stores_the_joined_picks_over_http(
+    project_schema_override: Callable[[], None],
+    city: list[str],
+    stored: str,
+) -> None:
+    """A create sends the picks as a list and ``clean_city`` stores them joined."""
+    with override_settings(FAKESHOP_TEST_BRANCH_CITY_PICKS=True):
+        project_schema_override()
+        response = _post_graphql(
+            "mutation($d: BranchCityPicksFormInput!){ createBranchCityPicksViaForm(data: $d)"
+            "{ result { name city } errors { field messages } } }",
+            variables={"d": {"name": "Picks", "city": city}},
+        )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "createBranchCityPicksViaForm") == {
+        "result": {"name": "Picks", "city": stored},
+        "errors": [],
+    }
+    assert list(models.Branch.objects.values_list("name", "city")) == [("Picks", stored)]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "mutation",
+        "data",
+        "expected",
+        "stored",
+        "statements",
+    ),
+    [
+        pytest.param(
+            "updateBranchCityPicksViaForm",
+            {"city": ["south", "east"]},
+            {"result": {"name": "Picks", "city": "south,east"}, "errors": []},
+            ("Picks", "south,east"),
+            10,
+            id="unsplit-provided",
+        ),
+        pytest.param(
+            "updateBranchCityPicksSplitViaForm",
+            {"city": ["south", "east"]},
+            {"result": {"name": "Picks", "city": "south,east"}, "errors": []},
+            ("Picks", "south,east"),
+            10,
+            id="split-provided",
+        ),
+        pytest.param(
+            "updateBranchCityPicksSplitViaForm",
+            {"name": "Renamed"},
+            {"result": {"name": "Renamed", "city": "north,east"}, "errors": []},
+            ("Renamed", "north,east"),
+            10,
+            id="split-omitted",
+        ),
+        pytest.param(
+            "updateBranchCityPicksViaForm",
+            {"name": "Renamed"},
+            {
+                "result": None,
+                "errors": [{"field": "city", "messages": ["Enter a list of values."]}],
+            },
+            ("Picks", "north,east"),
+            8,
+            id="unsplit-omitted",
+        ),
+        pytest.param(
+            "updateBranchCityPicksQueryDictViaForm",
+            {"city": ["south", "east"]},
+            {"result": {"name": "Picks", "city": "south,east"}, "errors": []},
+            ("Picks", "south,east"),
+            10,
+            id="query-dict-provided",
+        ),
+        pytest.param(
+            "updateBranchCityPicksQueryDictViaForm",
+            {"name": "Renamed"},
+            {"result": {"name": "Renamed", "city": "north,east"}, "errors": []},
+            ("Renamed", "north,east"),
+            10,
+            id="query-dict-omitted",
+        ),
+        pytest.param(
+            "updateBranchCityPicksPrefixedViaForm",
+            {"city": ["south", "east"]},
+            {"result": {"name": "Picks", "city": "south,east"}, "errors": []},
+            ("Picks", "south,east"),
+            10,
+            id="prefixed-provided",
+        ),
+        pytest.param(
+            "updateBranchCityPicksPrefixedViaForm",
+            {"name": "Renamed"},
+            {"result": {"name": "Renamed", "city": "north,east"}, "errors": []},
+            ("Renamed", "north,east"),
+            10,
+            id="prefixed-omitted",
+        ),
+    ],
+)
+def test_branch_city_picks_update_binds_an_omitted_city_from_the_form_initial_over_http(
+    project_schema_override: Callable[[], None],
+    mutation: str,
+    data: dict[str, object],
+    expected: JSONObject,
+    stored: tuple[str, str],
+    statements: int,
+) -> None:
+    """An omitted ``city`` binds the form's initial: kept when the form splits it, else refused.
+
+    A provided list replaces the stored text through either form. An omitted ``city`` binds
+    the field's initial value from the form the update constructs: ``BranchCityPicksSplitForm``
+    splits the stored text into its initial picks, so the update keeps them; the unsplit
+    ``BranchCityPicksForm`` presents the stored text, which the field refuses, so nothing
+    is written. The split form keeps its picks bound to the immutable ``QueryDict`` an HTML
+    form post arrives as, every other field keeping its own value, and bound under a form
+    prefix. Binding the initial reads nothing: a write runs the same statements whether
+    ``city`` is omitted or provided, and the refusal runs no write statement.
+    """
+    branch = models.Branch.objects.create(name="Picks", city="north,east")
+    with override_settings(FAKESHOP_TEST_BRANCH_CITY_PICKS=True):
+        project_schema_override()
+        input_name = (
+            "BranchCityPicksFormPartialInput"
+            if mutation == "updateBranchCityPicksViaForm"
+            else "BranchCityPicksSplitFormPartialInput"
+        )
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql(
+                f"mutation($id: ID!, $d: {input_name}!){{ {mutation}(id: $id, data: $d)"
+                "{ result { name city } errors { field messages } } }",
+                variables={"id": branch.pk, "d": data},
+            )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", mutation) == expected
+    assert list(models.Branch.objects.values_list("name", "city")) == [stored]
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert len(sql) == statements + post_lock_rereads(1), sql
+    updates = [statement for statement in sql if statement.lstrip().upper().startswith("UPDATE")]
+    assert len(updates) == (expected["result"] is not None)
