@@ -1214,6 +1214,159 @@ async def test_async_library_loan_get_queryset_calls_a_project_queryset_method(
     assert payload == {"data": expected_with_hook}
 
 
+#: Every framework path that hands ``LoanType.get_queryset`` its source, as (extra
+#: settings, document, response, loan statements without the hook, hook calls, statements
+#: without the hook): the four paths of ``_LOAN_QUERYSET_METHOD_HOOK_CASES`` (the default
+#: seal), plus a plain-list relation and a nested connection planned under
+#: ``allLibraryBooks`` (the list-relation-child and prefetch-child seals). Under
+#: ``FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK`` each hook
+#: call reads one annotated row before returning, one loan statement per call.
+_LOAN_FETCHED_ANNOTATION_HOOK_CASES = [
+    pytest.param(*case.values[:3], case.values[4], hook_calls, queries, id=case.id)
+    for case, (hook_calls, queries) in zip(
+        _LOAN_QUERYSET_METHOD_HOOK_CASES,
+        (
+            (1, 1),
+            (2, 3),
+            (2, 3),
+            (2, 2),
+        ),
+        strict=True,
+    )
+] + [
+    pytest.param(
+        {},
+        "query { allLibraryBooks { title loans { note } } }",
+        {
+            "allLibraryBooks": [
+                {"title": "Kindred", "loans": [{"note": "first checkout"}]},
+                {"title": "Dune", "loans": [{"note": ""}]},
+            ],
+        },
+        1,
+        1,
+        2,
+        id="list-relation-child",
+    ),
+    pytest.param(
+        {"FAKESHOP_TEST_LOAN_CONNECTION": True},
+        "query { allLibraryBooks { title loansConnection { edges { node { note } } } } }",
+        {
+            "allLibraryBooks": [
+                {
+                    "title": "Kindred",
+                    "loansConnection": {"edges": [{"node": {"note": "first checkout"}}]},
+                },
+                {"title": "Dune", "loansConnection": {"edges": [{"node": {"note": ""}}]}},
+            ],
+        },
+        1,
+        1,
+        2,
+        id="prefetch-child",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "flags",
+        "document",
+        "expected",
+        "loan_statements",
+        "hook_calls",
+        "statements",
+    ),
+    _LOAN_FETCHED_ANNOTATION_HOOK_CASES,
+)
+def test_library_loan_get_queryset_returning_an_annotation_a_clone_fetched_is_served(
+    project_schema_override: Callable[[], None],
+    flags: dict[str, bool],
+    document: str,
+    expected: JSONObject,
+    loan_statements: int,
+    hook_calls: int,
+    statements: int,
+) -> None:
+    """A hook result whose annotation node a sibling clone already fetched is served.
+
+    Under ``FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK`` the hook annotates every loan
+    with ``Count("pk")`` and calls ``first()`` before returning the annotated queryset.
+    Django's clones share annotation nodes, so the returned queryset is unevaluated
+    while its ``Count`` already ran a row fetch. The root connection, the per-parent
+    nested list and connection, the node refetch, and the planned plain-list relation
+    and nested connection under ``allLibraryBooks`` answer the rows the same document
+    answers without the hook, each loan statement selecting the count, at the case's
+    fixed no-hook statement count plus the hook's own reads.
+    """
+    pks = _seed_loan_note_graph()
+
+    def _post(*, hook: bool) -> tuple[JSONObject, int, list[str]]:
+        with override_settings(**flags, FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK=hook):
+            project_schema_override()
+            filled = _loan_note_document(document, pks)
+            with CaptureQueriesContext(connection) as captured:
+                response = _post_graphql(filled)
+        assert response.status_code == 200
+        return response_json(response), len(captured), _sql_from_table(captured, "library_loan")
+
+    payload, queries, loan_sql = _post(hook=False)
+    hooked_payload, hooked_queries, hooked_loan_sql = _post(hook=True)
+
+    assert payload == {"data": expected}
+    assert hooked_payload == {"data": expected}
+    assert len(loan_sql) == loan_statements, loan_sql
+    assert len(hooked_loan_sql) == loan_statements + hook_calls, hooked_loan_sql
+    assert all("COUNT(" in sql for sql in hooked_loan_sql), hooked_loan_sql
+    assert queries == statements
+    assert hooked_queries == statements + hook_calls
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("annotation", ["aggregate", "combined"])
+def test_library_consumer_loans_prefetch_carrying_an_annotation_is_served(
+    project_schema_override: Callable[[], None],
+    annotation: str,
+) -> None:
+    """A consumer ``Prefetch`` whose queryset selects an annotation serves its rows.
+
+    ``allLibraryAnnotatedLoanBooks`` (``FAKESHOP_TEST_LOAN_PREFETCH_ANNOTATION``) prefetches
+    ``loans`` through ``Loan.objects.annotate(weight=...)``, an aggregate or a
+    non-aggregate expression. Django executes that queryset itself, so the relation
+    reads a prefetch cache whose annotation already ran a row fetch; the loans are
+    served from it in one book statement plus one loan statement, the loan statement
+    selecting the annotation.
+    """
+    _seed_loan_note_graph()
+    with override_settings(FAKESHOP_TEST_LOAN_PREFETCH_ANNOTATION=annotation):
+        project_schema_override()
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql("{ allLibraryAnnotatedLoanBooks { title loans { note } } }")
+
+    assert response.status_code == 200
+    assert response_json(response) == {
+        "data": {
+            "allLibraryAnnotatedLoanBooks": [
+                {"title": "Kindred", "loans": [{"note": "first checkout"}]},
+                {"title": "Dune", "loans": [{"note": ""}]},
+            ],
+        },
+    }
+    assert len(captured) == 2
+    loan_sql = _sql_from_table(captured, "library_loan")
+    assert len(loan_sql) == 1, loan_sql
+    assert '"weight"' in loan_sql[0], loan_sql
+
+
+def test_library_annotated_loan_books_field_is_absent_by_default() -> None:
+    """``allLibraryAnnotatedLoanBooks`` exists only under its acceptance flag."""
+    response = _post_graphql("{ allLibraryAnnotatedLoanBooks { title } }")
+    assert response.status_code == 200
+    message = json_str(response_json(response), "errors", 0, "message")
+    assert "Cannot query field 'allLibraryAnnotatedLoanBooks'" in message
+
+
 #: One document posted twice by the plan-cache row, so the two requests differ
 #: in nothing but their ordinal. Neither ``MembershipCardType`` nor its
 #: ``patron`` target declares a ``get_queryset`` hook, so the plan this document

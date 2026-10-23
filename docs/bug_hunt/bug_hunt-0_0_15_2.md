@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 200 done, 138 to do.
+Progress: 201 done, 139 to do.
 
 ## Done
 
@@ -807,6 +807,17 @@ Progress: 200 done, 138 to do.
   every unprovided column, `validate_unique` / `validate_constraints` keep the co-members), as Django's
   `ModelForm._post_clean` splits them; `forms/inputs.py::_names_one_row` reads the `to_field_name` target's inherited
   declarations too. The `updateItem` rejected-save paths run one query fewer (no co-member field validation).
+- [x] 304. A selected annotation whose node had run a row fetch was refused by the visibility seal on every policy
+  ("binds a function bound value"): Django caches the row converter `BaseExpression.convert_value` (a function) in the
+  node's `__dict__` at row fetch, and canonical reconstruction carried it to
+  `utils/querysets.py::_normalized_bound_value`. Wider than filed: any selected non-`Col` expression, a plain
+  `QuerySet` and a project subclass alike, evaluated or fetched only through a clone sharing the node (Django clones
+  share annotation nodes); plainest reach a consumer `Prefetch("loans", queryset=Loan.objects.annotate(...))` with no
+  hook: fixed, `utils/querysets.py::_reconstructed_value` leaves out of a rebuilt node exactly the caches Django's own
+  copy leaves out (`_EXPRESSION_COPY_DROPPED`, `BaseExpression.__getstate__`; `_QUERY_CLONE_DROPPED`, plus
+  `sql.Query.clone`'s `base_table`), pinned against the running Django, so the rebuilt node recomputes them and a
+  value planted under those names is never carried or called; the outer query still refuses one. A sidecar result that
+  was evaluated now answers `evaluated` instead of `untrusted`. Mutations M1-M3 red
 
 ## Outside review of the fixes
 
@@ -939,11 +950,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   shapes). Fix: reuse the KANBAN inliner's CommonMark lexer (`build_kanban_md.py::_protected_regions`, extracted to a
   shared script module then), add block exclusions (headings, link-definition block, fenced and indented code) and the
   term boundary
-- [ ] 304. An evaluated project `QuerySet` subclass carrying an aggregate annotation is refused by the visibility seal on
-  every policy, raw-list included (whose `carry_result_cache` exists to carry evaluated sources): a manager or hook
-  returning `LoanQuerySet.annotate(n=Count("pk"))` after iterating it raises "binds a function bound value", because
-  Django's `BaseExpression.convert_value` is a `cached_property` that stores a function in the node's `__dict__` on first
-  compile and `utils/querysets.py::_normalized_bound_value` refuses it
 - [ ] 305. A ModelForm `MultipleChoiceField` declared over a single-value column that lists no choices (`description =
   MultipleChoiceField(...)` over a `TextField`) builds as `description: String!` and every create and update fails with
   "Enter a list of values.": `forms/inputs.py::_form_choice_narrowing` returns before its list-over-single-value refusal
@@ -1036,12 +1042,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `forms/inputs.py::require_column_kind_agreement`'s bound-basis walk could refuse it at `finalize_django_types()`
   (GOAL "Configuration is validated at construction"), the request-time check staying for `__init__` / `get_form`
   rebuilds. Found landing 295
+- [ ] 343. The visibility seal drops Django 6.1's `QuerySet._fetch_mode`: a `get_queryset` hook returning
+  `.fetch_mode(FETCH_PEERS)` (or `RAISE`) is sealed to `FetchOne`, so the project's fetch mode is lost (N+1 lazy
+  loads, or no `RAISE`) on every sealed surface, while `utils/querysets.py::_seal_or_defect`'s comment says it
+  reproduces what `QuerySet._clone` copies forward minus `_known_related_objects`; carry the mode (validated as a
+  genuine Django fetch mode) or state the exception. Found landing 304
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 344. CHANGELOG entry for item 304: a queryset carrying a selected annotation (`Count`, `Sum`, `F() + 1`,
+  `Value`, `Case`, `Subquery`, ...) whose query already fetched rows, itself or through a clone, is served by every
+  visibility seal instead of being refused as "binds a function bound value" (a consumer `Prefetch` with an
+  annotation, an evaluated project queryset class, a `get_queryset` hook that fetched before returning); an evaluated
+  `FilterSet` / `OrderSet` `apply_*` result is refused as evaluated
 - [ ] 342. CHANGELOG entry for item 303: a `DjangoMutation` write validates every uniqueness and constraint check a
   provided field joins, including declarations inherited by a proxy or multi-table child, conditional / expression
   `UniqueConstraint`s, `CheckConstraint`s and `unique_for_date` / `_month` / `_year`, answering Django's own error in

@@ -2072,6 +2072,22 @@ _RETAINED_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(_RETAINED_L
 # classes.
 _RECONSTRUCTABLE_NODE_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet()
 
+# Instance attributes a rebuilt node leaves behind because Django's own copy of that node
+# leaves them behind, so the rebuilt node recomputes each on first use exactly as the copy
+# does and whatever the candidate holds under the name is never transferred, retained or
+# called. ``convert_value`` is the row converter the ``BaseExpression.convert_value``
+# ``cached_property`` stores on an expression the compiler selected
+# (``SQLCompiler.get_converters`` at row fetch, through any clone sharing the node), which
+# ``BaseExpression.__getstate__`` -- the state ``copy()`` / ``deepcopy`` / pickle read --
+# drops (Django ticket #29330); ``sql.Query`` inherits that declaration and adds
+# ``base_table``, the first-alias cache ``sql.Query.clone`` drops. The two sets restate
+# Django's declarations and are pinned against the Django release under test
+# (``tests/utils/test_querysets.py``), so a cache a later release adds to either fails the
+# pin, and until it is listed here the rebuilt node takes it like any other slot (a
+# function-valued one refused by the bound-value rule).
+_EXPRESSION_COPY_DROPPED: frozenset[str] = frozenset({"convert_value"})
+_QUERY_CLONE_DROPPED: frozenset[str] = _EXPRESSION_COPY_DROPPED | {"base_table"}
+
 
 def _is_reconstructable_node(node_type: type[object]) -> bool:
     """Return whether canonical reconstruction rebuilds an object of ``node_type``.
@@ -2331,19 +2347,21 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     rebuilt member-wise; every genuine Django AST node (``_is_reconstructable_node``) is
     re-instantiated as a fresh object of its OWN proven-genuine class via
     ``object.__new__`` and refilled slot-by-slot from the source instance ``__dict__``,
-    each slot itself reconstructed. Schema objects and bound model instances are retained
+    each slot itself reconstructed, minus the derived caches Django's own copy of the node
+    drops (``_EXPRESSION_COPY_DROPPED`` / ``_QUERY_CLONE_DROPPED``), which the rebuilt node
+    recomputes on first use. Schema objects and bound model instances are retained
     by reference; every other bound value is an exact inert leaf, a plain-data subclass
     normalized to one, or refused closed (``_normalized_bound_value`` -- the one home of
     the admitted-bound-value rule). Mapping keys take the same rule as values.
 
-    ``object.__new__`` + raw ``__dict__`` transfer rather than the node's own ``clone()``
+    ``object.__new__`` + instance-``__dict__`` transfer rather than the node's own ``clone()``
     / ``copy()``: Django's expression ``copy()`` is a SHALLOW ``copy.copy`` (it would keep
     sharing the child graph, which is the whole point of the exercise) and ``deepcopy``
     is refused outright -- a direct lookup RHS is consumer plain data whose
     ``__deepcopy__`` / ``__reduce__`` would DISPATCH consumer code while the seal is
     still assembling the sealed query. The base allocator runs no ``__new__`` override, no
-    ``__init__``, and no descriptor, and the transferred state is exactly the state the
-    graph proofs validated.
+    ``__init__``, and no descriptor, and the transferred state is the state the graph
+    proofs validated, less the dropped caches.
 
     ``memo`` maps a source object ``id`` to its reconstruction, so a node reached twice
     (Django reuses one ``Col`` / ``Value`` across ``where``, ``select`` and
@@ -2473,20 +2491,16 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     # its validated state is transferred.
     rebuilt = object.__new__(value_type)
     memo[value_id] = rebuilt
-    rebuilt_state = truth.instance_state(rebuilt)
-    rebuilt_state.update(
+    dropped = _QUERY_CLONE_DROPPED if value_type is sql.Query else _EXPRESSION_COPY_DROPPED
+    truth.instance_state(rebuilt).update(
         {
             key: item
             if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
             else _reconstructed_value(item, memo)
             for key, item in source_state.items()
+            if key not in dropped
         },
     )
-    if value_type is sql.Query:
-        # ``base_table`` is a ``cached_property``; ``sql.Query.clone`` drops it so the
-        # copy recomputes the first ``alias_map`` alias, and a reconstructed embedded
-        # query must recompute it the same way.
-        _ = rebuilt_state.pop("base_table", None)
     return rebuilt
 
 

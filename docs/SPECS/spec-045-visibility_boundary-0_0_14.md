@@ -579,6 +579,14 @@ identity memo so a node reached twice rebuilds once and the sealed graph keeps t
 candidate's sharing topology. Reconstruction never calls a node's own `clone()` /
 `copy()` (shallow — it would keep sharing the children) and never `deepcopy`
 (it would dispatch a consumer value's `__deepcopy__` / `__reduce__` mid-seal).
+The refill leaves out exactly the derived caches Django's own copy of the node
+leaves out, which the rebuilt node recomputes on first use: the row converter
+`convert_value` that `BaseExpression.__getstate__` drops (stored on a selected
+expression at row fetch, through any clone sharing the node), and on an embedded
+`sql.Query` also the `base_table` cache `sql.Query.clone` drops. Whatever the
+candidate holds under those names is never transferred, retained or called; the
+outer query is a `sql.Query.clone`, not a rebuilt node, so the rule does not reach
+its own slots.
 
 **What the sealed query still shares with the candidate, exhaustively.** The
 sealed query holds no consumer-owned AST node and no consumer-owned mutable
@@ -616,6 +624,8 @@ the params staying refused.
 (the reconstruction pass over the clone's state);
 [`::_reconstructed_value`][querysets] and
 [`::_is_reconstructable_node`][querysets] (the rebuild-versus-retain policy);
+`::_EXPRESSION_COPY_DROPPED` and `::_QUERY_CLONE_DROPPED` (the derived caches a
+rebuilt node leaves out, restating Django's copy and clone);
 [`::_reconstruction_defect`][querysets] (keeps reconstruction inside the typed
 fail-closed contract); [`::_normalized_bound_value`][querysets] and
 `::_BOUND_VALUE_NORMALIZERS` (the admitted-bound-value rule and its exact-value
@@ -635,8 +645,24 @@ annotation / filtered-relation / raw-SQL-parameter / `bytearray` siblings,
 `test_lookup_direct_rhs_date_subclass_normalizes_to_exact_date`,
 `test_lookup_direct_rhs_attribute_hook_never_dispatches`,
 `test_value_payload_opaque_object_fails_closed`,
-`test_value_payload_plain_data_subclass_normalizes_to_exact_value`, and
-`test_func_extra_template_parameter_object_fails_closed`.
+`test_value_payload_plain_data_subclass_normalizes_to_exact_value`,
+`test_func_extra_template_parameter_object_fails_closed`,
+`test_reconstruction_drops_exactly_the_caches_a_django_copy_drops` (both drop sets
+against the running Django's `copy.copy` and `sql.Query.clone`, per selected
+expression kind), `test_a_converter_planted_on_a_candidate_node_is_never_carried`
+and `test_a_converter_planted_on_the_candidate_query_itself_is_refused`;
+[`examples/fakeshop/test_query/test_library_api.py`][library-api-tests]:
+`test_library_consumer_loans_prefetch_carrying_an_annotation_is_served` (the raw-list
+seal over a `Prefetch` cache Django filled) and
+`test_library_loan_get_queryset_returning_an_annotation_a_clone_fetched_is_served`
+(the default seal on the root connection, the per-parent nested rows and the node
+refetch, and the list-relation-child and prefetch-child seals under `allLibraryBooks`),
+an annotation whose node already ran a row fetch served on the default,
+list-relation-child, prefetch-child and raw-list seal policies, while the root
+connection's `orderBy` sidecar seal composes over the rebuilt node;
+[`examples/fakeshop/test_query/test_list_field_api.py`][list-field-api-tests]
+`test_holder_branches_a_malformed_apply_sync_result_names_its_own_defect[evaluated-annotated]`
+(an evaluated annotated sidecar result answers the `evaluated` defect).
 
 **Deliberation.** The rejected per-finding walk expansion, the rejected option of
 dropping canonical reconstruction, the rejected `clone()` / `copy()` / `deepcopy`
@@ -673,7 +699,8 @@ The seal / row-survival matrix (maintainer-invoked gates only, per `AGENTS.md`):
 - [`tests/utils/test_querysets.py`][queryset-tests] — the shared seal / rebuild
   suite: provenance, callable-shadow, expression-graph, container, shape-defect,
   deferred-filter, prefetch alias-threading and relation-target, bound-value
-  reconstruction, per-code error-message, and sync + async cache-removal cases.
+  reconstruction, derived-cache drop (both drop sets against the running Django's
+  copy and clone), per-code error-message, and sync + async cache-removal cases.
 - [`tests/test_relay_node_field.py`][relay-tests],
   [`tests/test_connection.py`][connection-tests],
   [`tests/test_list_field.py`][list-tests] — evaluation-level row-survival
@@ -783,6 +810,7 @@ These are deliberate constraints of the contract above, not defects:
 <!-- examples/ -->
 
 [library-api-tests]: ../../examples/fakeshop/test_query/test_library_api.py
+[list-field-api-tests]: ../../examples/fakeshop/test_query/test_list_field_api.py
 
 <!-- scripts/ -->
 
