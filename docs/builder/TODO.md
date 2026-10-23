@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 21 to do.
+Progress: 20 to do.
 
 Every item below was re-verified at HEAD on 2026-10-22 by one research agent per item; each "Research" sub-bullet is
 that pass's finding and recommended landing.
@@ -133,15 +133,10 @@ From the full entries, 2026-10-21. Item numbers are that file's.
     the composite pk in `"__all__"` or document it. Coverage: a `CompositeStamp` library model (composite pk plus a
     `db_column=` text column), migration 0017, a list field and a live test in `test_library_shapes_api.py`. Size S
     (M with the `"__all__"` fix)
-- [ ] 28. The sharded fakeshop test is unverified until a `FAKESHOP_SHARDED=1` row of `django.yml` runs on the current
-  head
-  - Research: the three sharded paths pass locally at `feb83d59` (113 passed). The last green dispatch with the multi-DB
-    rows is `f0885b9e` (2026-10-19), 94 commits behind. Closes on the next green dispatch or weekly run
-  - Same run as `bug_hunt-0_0_15_2.md` item 29 (the hunt's final gate, Postgres and sharded runs included); one green
-    dispatch on the current head closes both
 - [ ] 31. Nothing signals a red `django.yml` run on main: the 3.14 job failed the 100% coverage gate from 2026-10-19
   (`django_strawberry_framework/types/relay.py::_consumer_overrode_resolve_typename`) and every push from `d72fb5a1` to
-  `b28c3f3f` failed tests, all unnoticed until fixed in `3432a4f5`
+  `b28c3f3f` failed tests, all unnoticed until fixed in `3432a4f5`; it recurred from `9bb9a42f` (a stale field
+  annotation) until `47edeac0`
   - Cause: a commit runs only its targeted tests with `--no-cov`, so a stale test in another tree or a branch its change
     left unreached surfaces only in CI. Decide the enforcer: workers check `gh run list` for the run on their push; the
     targeted run adds `--cov=<touched modules> --cov-report=term-missing`; or a pre-commit hook runs a touched module's
