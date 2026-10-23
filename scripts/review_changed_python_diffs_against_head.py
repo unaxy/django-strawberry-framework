@@ -8,9 +8,15 @@ passes the inclusion rule (see below), the script
    the pre-rename path, so a move reads as an edit instead of "+entire file".
 2. Renders the NEW revision into ``new/``. By default (``--against head``) the
    new side is read from ``HEAD:<path>`` so both sides are what they claim;
-   ``--against worktree`` reads the working copy instead (uncommitted and
+   ``--against worktree`` reads the working content instead (uncommitted and
    untracked files included) and every diff it writes opens with a header line
-   saying so.
+   saying so. The working content is read into a private index over ``HEAD``
+   (``workspace.content_tree``) and compared tree to tree, so for every file
+   git does not ignore the result is independent of the index: staging,
+   unstaging or ``git rm --cached`` never changes it (only whether an ignored
+   file is force-added counts), an unstaged move pairs as a rename, a file the
+   base already holds is never listed as added, and the shared ``.git/index``
+   is never written.
 3. Writes a unified diff of the two stripped files to ``diff/``.
 
 Output location: with ``--output-dir PATH`` the three folders are written
@@ -22,10 +28,12 @@ touch each other. Nothing else under ``PATH`` is touched. Without
 ``--output-dir`` the script clears and rewrites ``docs/shadow/{old,new,diff}/``
 at the repo root, the folders this script owns under ``docs/shadow/``.
 
-The shared git / ``review_inspect`` plumbing -- ``_run_git``,
-``_validate_commit``, ``_stem_for``, ``_file_at_commit``, ``_inspect_quiet``,
-the temp-tree ``_materialize_and_inspect`` primitive and
-``_publish_staged_snapshot`` -- lives in
+Every git call this module makes itself runs through ``workspace._git`` in the
+current directory, so the caller's global and system git config and the XDG
+global ignore and attributes files never reach a listing or a tree. The shared
+git / ``review_inspect`` plumbing, which only reads committed objects --
+``_validate_commit``, ``_stem_for``, ``_file_at_commit``, the temp-tree
+``_materialize_and_inspect`` primitive and ``_publish_staged_snapshot`` -- lives in
 ``review_historical_package_snapshot_at_commit`` (the canonical home for the
 shared review machinery) and is imported here. This module adds the changed-file
 enumeration, the new-side selection, the diff writers and the list mode. Added
@@ -101,7 +109,6 @@ import ast
 import difflib
 import json
 import shutil
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -112,13 +119,12 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 if __package__:
+    from scripts import workspace
     from scripts.review_historical_package_snapshot_at_commit import (
         _clear_shadow_output,
         _file_at_commit,
-        _inspect_quiet,
         _materialize_and_inspect,
         _publish_staged_snapshot,
-        _run_git,
         _stem_for,
         _validate_commit,
     )
@@ -129,13 +135,12 @@ if __package__:
         _strip_comments,
     )
 else:
+    import workspace
     from review_historical_package_snapshot_at_commit import (
         _clear_shadow_output,
         _file_at_commit,
-        _inspect_quiet,
         _materialize_and_inspect,
         _publish_staged_snapshot,
-        _run_git,
         _stem_for,
         _validate_commit,
     )
@@ -177,6 +182,20 @@ class _SideDirs:
     label_base: Path
 
 
+def _run_git(args: Sequence[str]) -> str:
+    """Run ``git <args>`` in the current directory under ``workspace``'s repository-only config.
+
+    The current directory, not the top level, keeps a ``--path`` pathspec relative to where
+    the script runs.
+    """
+    return workspace._git(Path.cwd(), *args)
+
+
+def _worktree_tree(scope: Sequence[str]) -> str:
+    """Return the tree id of ``HEAD`` overlaid with the working content under ``scope``."""
+    return workspace.content_tree(Path.cwd(), "HEAD", scope)
+
+
 def _eligible(path: str, *, include_tests: bool, include_init: bool) -> bool:
     """Return whether ``path`` passes the inclusion rule described in the module docstring."""
     if not path.endswith(".py"):
@@ -212,40 +231,29 @@ def _changed_python_files(
 ) -> list[_Change]:
     """Return the eligible ``.py`` changes between ``commit`` and ``new_rev``.
 
-    ``new_rev=None`` compares against the working tree and adds untracked
-    files as ``A``. ``pathspecs`` scopes the diff to one or more git pathspecs;
-    when omitted the scope is the whole repository (the ``*.py`` pathspec). A
-    directory pathspec also matches non-Python files, so the inclusion rule is
-    applied in Python rather than relying on the git pathspec. Renames are
-    detected (``-M``) so the old side can be read from the pre-rename path.
+    ``new_rev`` is any tree-ish; ``None`` compares against :func:`_worktree_tree`, the working
+    content under the scope, untracked files included. ``pathspecs`` scopes the diff to one or
+    more git pathspecs; when omitted the scope is the whole repository (the ``*.py``
+    pathspec). A directory pathspec also matches non-Python files, so the inclusion rule is
+    applied in Python rather than relying on the git pathspec. Renames are detected (``-M``)
+    so the old side can be read from the pre-rename path.
     """
     scope = list(pathspecs) if pathspecs else ["*.py"]
-    revs = [commit] if new_rev is None else [commit, new_rev]
+    new_side = _worktree_tree(scope) if new_rev is None else new_rev
     output = _run_git(
         [
-            "diff",
+            "diff-tree",
+            "-r",
             "-M",
             "--name-status",
             "-z",
-            *revs,
+            commit,
+            new_side,
             "--",
             *scope,
         ],
     )
     changes = _parse_name_status(output)
-    if new_rev is None:
-        untracked = _run_git(
-            [
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "--full-name",
-                "-z",
-                "--",
-                *scope,
-            ],
-        )
-        changes.extend(_Change("A", path) for path in untracked.split("\0") if path)
     return [
         change
         for change in changes
@@ -338,7 +346,7 @@ def _latest_tag() -> str | None:
             ).strip()
             or None
         )
-    except subprocess.CalledProcessError:
+    except workspace.WorkspaceError:
         return None
 
 
@@ -366,24 +374,6 @@ def _prose_view(source: str, tree: ast.AST) -> list[str]:
         for index in range(line_range.start - 1, min(line_range.end, len(prose))):
             prose[index] = lines[index].strip()
     return prose
-
-
-def _source(rev: str | None, path: str, repo_root: Path) -> str | None:
-    """Return ``path`` at ``rev`` (``None`` = working tree), or ``None`` when absent."""
-    if rev is None:
-        target = repo_root / path
-        return target.read_text(encoding="utf-8") if target.is_file() else None
-    return _file_at_commit(rev, path)
-
-
-def _write_new_side(path: str, repo_root: Path, out_dir: Path | None = None) -> None:
-    """Inspect the working-tree copy of ``path``; emit a placeholder if missing."""
-    out_dir = repo_root / OUTPUT_NEW if out_dir is None else out_dir
-    new_file = repo_root / path
-    if new_file.is_file():
-        _inspect_quiet(new_file, out_dir, repo_root)
-    else:
-        _ = (out_dir / f"{_stem_for(path)}.stripped.py").write_text("")
 
 
 def _symbol_spans(tree: ast.AST) -> list[tuple[int, int, str]]:
@@ -498,22 +488,18 @@ def _write_diff(
 def _render_change(
     change: _Change,
     commit: str,
-    new_rev: str | None,
-    repo_root: Path,
+    new_rev: str,
     dirs: _SideDirs,
     args: _Args,
 ) -> None:
-    """Render both sides of ``change`` into ``dirs`` and write its diff(s)."""
+    """Render both sides of ``change`` (``commit`` and the ``new_rev`` tree-ish) into ``dirs``."""
     old_path = change.old_side_path
     _materialize_and_inspect(commit, old_path, dirs.old)
-    if new_rev is None:
-        _write_new_side(change.path, repo_root, dirs.new)
-    else:
-        _materialize_and_inspect(new_rev, change.path, dirs.new)
+    _materialize_and_inspect(new_rev, change.path, dirs.new)
     old_src = new_src = None
     if args.keep_literals or args.prose:
         old_src = _file_at_commit(commit, old_path)
-        new_src = _source(new_rev, change.path, repo_root)
+        new_src = _file_at_commit(new_rev, change.path)
     if args.keep_literals:
         for src, side_path, side_dir in (
             (old_src, old_path, dirs.old),
@@ -521,7 +507,7 @@ def _render_change(
         ):
             view = "" if src is None else _code_view(src)
             _ = (side_dir / f"{_stem_for(side_path)}.stripped.py").write_text(view)
-    header = WORKTREE_HEADER if new_rev is None else ""
+    header = WORKTREE_HEADER if args.against == "worktree" else ""
     _write_diff(change, dirs, collapse_blank=args.collapse_blank, header=header)
     if args.prose:
         prose = _prose_diff(old_src, new_src, old_path, change.path)
@@ -767,7 +753,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.list:
         return _run_list(args, base, head, repo_root)
 
-    new_rev = None if args.against == "worktree" else head
+    # The working content is read once, so the listing and both rendered sides agree.
+    new_rev = _worktree_tree(args.paths or ["*.py"]) if args.against == "worktree" else head
     changed = _changed_python_files(
         base,
         args.paths,
@@ -792,7 +779,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repo_root,
         )
         for change in changed:
-            _render_change(change, base, new_rev, repo_root, dirs, args)
+            _render_change(change, base, new_rev, dirs, args)
         diff_display = OUTPUT_DIFF.as_posix()
     else:
         output_dir = args.output_dir.resolve()
@@ -803,14 +790,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             for side in (dirs.old, dirs.new, dirs.diff):
                 side.mkdir()
             for change in changed:
-                _render_change(change, base, new_rev, repo_root, dirs, args)
+                _render_change(change, base, new_rev, dirs, args)
             for name in ("old", "new", "diff"):
                 _publish_staged_snapshot(staging / name, output_dir / name)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         diff_display = (output_dir / "diff").as_posix()
 
-    if new_rev is None:
+    if args.against == "worktree":
         print(WORKTREE_HEADER.removeprefix("# ").strip())
     if not changed:
         scope_note = f" under {args.paths}" if args.paths else ""
