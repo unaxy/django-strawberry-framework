@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 211 done, 139 to do.
+Progress: 211 done, 140 to do.
 
 ## Done
 
@@ -622,12 +622,6 @@ Progress: 211 done, 139 to do.
 - [x] 296. `tests/test_workspace.py::test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order` failed on main:
   `9a97127c` made CI's lint job run `scripts/check_citations.py --check --substrings` while the `gate` lint suite still
   ran `--check`: fixed in `8e191ea3`, `scripts/workspace.py #"LINT_COMMANDS"` runs `--check --substrings` as CI does
-- [x] 234. The index advisory on a proxy target (or a proxy of a proxy) read the proxy's own empty `Meta.indexes` /
-  `Meta.constraints` / `unique_together`, recommended an index the concrete model already declares, named the proxy
-  (where `models.E016` forbids declaring it) and deduplicated under the proxy's label: fixed,
-  `optimizer/nested_planner.py::_advise_composite_index` reads the table-owning `_meta.concrete_model` once and feeds it
-  to the window columns, the order terms, the coverage check, the dedup key and the message, so a covered proxy is
-  silent and an uncovered one warns once naming the concrete model; a non-proxy model is unchanged
 - [x] 249. A set-shaped `FilterSet` `Meta.fields` (or `filter_fields`, or a set of lookups in a dict declaration)
   expanded in hash order, so `base_filters`, the generated filter input and each lookup sub-input moved with
   `PYTHONHASHSEED`: fixed, `filters/sets.py::FilterSet.get_fields` reorders django-filter's field map by
@@ -635,6 +629,12 @@ Progress: 211 done, 139 to do.
   `canonical_sort_key` order; a set of lookups as a sorted list); the declaration is never rewritten as a `list`, so
   django-filter's declared-filter allowance still refuses a set, and a list / tuple / dict of lists keeps its order. The
   OrderSet twin's pin now fails without canonicalization in every process
+- [x] 234. The index advisory on a proxy target (or a proxy of a proxy) read the proxy's own empty `Meta.indexes` /
+  `Meta.constraints` / `unique_together`, recommended an index the concrete model already declares, named the proxy
+  (where `models.E016` forbids declaring it) and deduplicated under the proxy's label: fixed,
+  `optimizer/nested_planner.py::_advise_composite_index` reads the table-owning `_meta.concrete_model` once and feeds it
+  to the window columns, the order terms, the coverage check, the dedup key and the message, so a covered proxy is
+  silent and an uncovered one warns once naming the concrete model; a non-proxy model is unchanged
 - [x] 241. Duplicate input-object field names escaped the value budget: `charge_arguments` charged
   `value_from_ast_untyped`'s dict, which dropped an earlier same-named field's subtree uncharged at every spread
   expansion: fixed, `extensions/resource_policy.py::_DocumentWalk` charges each argument as its AST (`_popped_value`
@@ -980,6 +980,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "Enter a list of values.": `forms/inputs.py::_form_choice_narrowing` returns before its list-over-single-value refusal
   when the column lists no choices; the serializer twin is unchecked on purpose (spec-039), so say whether the form
   flavor refuses at build or types the field as a list
+- [ ] 307. Leftovers from 284 / 142 (`ca9273d3`, landed on the implementer's evidence: the FIX-round delta for F1 job
+  control, F2 the late stop, F3 gate's sync holding and F5 the docs had no second verifier pass, by the maintainer's
+  call): a Ctrl-Z landing between `Popen` returning and `_StopRelay.started` stops only the wrapper, and the command
+  runs on until `fg`; `_JobControl.suspend`'s SIGCONT to the group and the SIGCONT route overlap (only the
+  sigcont-ignored row tells them apart); the D10, gate, F2 and F3 mutations are each pinned by one row; F4's optional
+  `dup2` of `/dev/null` onto a dropped output sink's fd (accepted without it: `| head` ends with rc 120 and a complete
+  log). Re-verify the delta and decide each, or close them as robustness rows
 - [ ] 312. `utils/querysets.py::_node_metadata_defect` still refuses `RawSQL(<TextChoices member>, params)` (the SQL
   text slot read by exact type), which Django serves; the 272 text-term predicate covers order / extra / where slots but
   not `RawSQL.sql`. Found landing 294
