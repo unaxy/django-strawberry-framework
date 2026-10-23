@@ -140,6 +140,7 @@ from django_strawberry_framework.utils._narrowing import (
     require,
     require_instance,
 )
+from django_strawberry_framework.utils.context import stash_on_context
 from django_strawberry_framework.utils.operation_lease import OperationLease
 from django_strawberry_framework.utils.querysets import materialized_rows, normalized_row_source
 from django_strawberry_framework.utils.typing import object_result
@@ -3744,6 +3745,90 @@ async def test_the_streaming_path_carries_the_same_admission_verdict(
         assert frames[0].errors is None
         assert frames[0].data == {"a": 1}
         assert _StreamWitness.entered == [query]
+
+
+@pytest.mark.parametrize(
+    ("deadline", "spend_before_frame", "rejected"),
+    [
+        (60, 1, [False, True, True]),
+        (60, None, [False, False, False]),
+        (None, None, [False, False, False]),
+    ],
+    ids=["deadline-spent", "deadline-unspent", "no-deadline"],
+)
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.django_db(transaction=True)
+async def test_a_budget_spent_between_frames_fails_every_later_frames_relation_hop(
+    deadline: int | None,
+    spend_before_frame: int | None,
+    rejected: list[bool],
+) -> None:
+    """Every frame's relation hop checks the budget, so once it is spent every later hop rejects.
+
+    The first frame is delivered whole. The resolver then writes the one thing a
+    resolver may write to the budget, an earlier instant, and every later frame
+    answers its forward FK hop with the typed rejection, even though the category
+    row was loaded with the item. A stream whose deadline is not narrowed, and a
+    stream whose policy configures no deadline at all, deliver every frame whole.
+    """
+    from django_strawberry_framework import DjangoType, finalize_django_types  # noqa: PLC0415
+
+    class CategoryT(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    class ItemT(DjangoType):
+        class Meta:
+            model = Item
+            fields = ("id", "name", "category")
+
+    finalize_django_types()
+    del CategoryT
+
+    async def _items(info: Info[object, object]) -> AsyncGenerator[Item, None]:
+        for index in range(3):
+            if index == spend_before_frame:
+                stash_on_context(info.context, DST_RESOURCE_DEADLINE, time.monotonic() - 1.0)
+            yield await sync_to_async(
+                lambda: Item.objects.select_related("category").order_by("id")[0],
+            )()
+
+    @strawberry.type
+    class _Frames:
+        items: AsyncGenerator[Item, None] = strawberry.subscription(
+            resolver=_items,
+            graphql_type=ItemT,
+        )
+
+    await sync_to_async(seed_data)(1)
+    item = await sync_to_async(
+        lambda: Item.objects.select_related("category").order_by("id")[0],
+    )()
+    whole = {"items": {"name": item.name, "category": {"name": item.category.name}}}
+    schema = DjangoSchema(
+        query=_StreamedQuery,
+        subscription=_Frames,
+        resource_policy=ResourcePolicy(execution_deadline_seconds=deadline),
+    )
+    frames = [
+        frame
+        async for frame in await schema.subscribe(
+            "subscription { items { name category { name } } }",
+            context_value={},
+        )
+    ]
+    assert [frame.errors is not None for frame in frames] == rejected
+    for frame, was_rejected in zip(frames, rejected, strict=True):
+        if was_rejected:
+            assert frame.data is None
+            assert frame.errors is not None
+            assert len(frame.errors) == 1
+            assert frame.errors[0].path == ["items", "category"]
+            assert frame.errors[0].extensions is not None
+            assert frame.errors[0].extensions["bound"] == "execution_deadline_seconds"
+        else:
+            assert frame.data == whole
 
 
 @pytest.mark.parametrize(
