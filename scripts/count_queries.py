@@ -37,8 +37,12 @@ never opened. ``--no-optimizer`` runs the same schema without
 report ``scales with cardinality``.
 
 Exit codes: 0 ``batched``; 1 ``scales with cardinality`` or ``mixed``; 2 not
-measured (an operation error, root rows that did not grow, fewer than two
-cardinalities, or a ``--compare`` baseline for a different operation).
+measured (an argument, ``--query`` file, ``--json`` path or ``--compare``
+baseline refused before anything runs, a baseline from a run that measured
+no cell included; a document that does not parse or holds no operation under
+the requested name; a validation or execution error in a cell; root rows that
+did not grow; fewer than two cardinalities; or a ``--compare`` baseline for a
+different operation).
 
 Usage::
 
@@ -56,7 +60,6 @@ import json
 import sys
 from dataclasses import dataclass
 from itertools import pairwise
-from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 from _bench_common import (
@@ -65,6 +68,8 @@ from _bench_common import (
     capture_queries,
     load_graphql_document,
     parse_variables,
+    read_text_input,
+    report_destination,
     root_row_count,
     seed_glossary_terms,
     write_report,
@@ -176,23 +181,39 @@ def operation_sha1(document: str) -> str:
     return hashlib.sha1(document.strip().encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
-def effective_operation_name(document: str, operation_name: str | None) -> str | None:
-    """Return the name of the operation ``document`` runs under ``operation_name``.
+def select_operation(document: str, operation_name: str | None) -> OperationDefinitionNode:
+    """Return the operation definition ``document`` runs under ``operation_name``.
 
-    Without a name Strawberry runs the document's first operation definition
-    (``strawberry.types.execution::ExecutionContext.operation_name``), so its
-    name is the one recorded; an unparseable document runs no operation.
+    Strawberry's rule (``strawberry.utils.operation::get_operation_type``): a
+    given name must match a named operation, and no name means the document's
+    first operation definition. graphql-core's ``get_operation_ast`` refuses a
+    nameless run of a document holding several operations, which Strawberry
+    executes, so it is not the rule here. ``schema.execute_sync`` raises
+    instead of returning an error when this finds nothing, and an empty
+    document is the parse failure ``graphql.parse`` reports.
+
+    Raises:
+        ValueError: the document does not parse, holds no operation, or holds
+            none named ``operation_name``.
+
     """
-    if operation_name is not None:
-        return operation_name
     try:
         definitions = parse(document).definitions
-    except GraphQLError:
-        return None
-    for definition in definitions:
-        if isinstance(definition, OperationDefinitionNode):
-            return definition.name.value if definition.name else None
-    return None
+    except GraphQLError as exc:
+        where = ", ".join(f"line {loc.line} column {loc.column}" for loc in exc.locations or ())
+        msg = f"{exc.message} ({where})" if where else exc.message
+        raise ValueError(msg) from exc
+    operations = [item for item in definitions if isinstance(item, OperationDefinitionNode)]
+    if operation_name is None:
+        if operations:
+            return operations[0]
+        msg = "the document holds no operation definition"
+        raise ValueError(msg)
+    for operation in operations:
+        if operation.name and operation.name.value == operation_name:
+            return operation
+    msg = f"the document holds no operation named {operation_name!r}"
+    raise ValueError(msg)
 
 
 class _Cell(TypedDict):
@@ -246,6 +267,34 @@ def _is_report(value: object) -> TypeIs[_Report]:
         and isinstance(row.get("queries"), int)
         for row in rows
     )
+
+
+def load_baseline(path: str) -> _Report:
+    """Read a ``--compare`` baseline: a ``count_queries`` JSON report that measured a cell.
+
+    A report with no rows (every cell failed) holds no count to compare, so its
+    delta table would print only ``-`` cells. A report with rows but no verdict
+    (a single cardinality, root rows that did not grow, some cells failed)
+    still compares cell by cell.
+
+    Raises:
+        ValueError: the file is unreadable, is not JSON, is not a report, or
+            records a run that measured no cell.
+
+    """
+    text = read_text_input(path)
+    try:
+        decoded = _loads(text)
+    except ValueError as exc:
+        msg = f"{path} is not JSON text: {exc}"
+        raise ValueError(msg) from exc
+    if not _is_report(decoded):
+        msg = f"{path} is not a count_queries JSON report"
+        raise ValueError(msg)
+    if not decoded["rows"]:
+        msg = f"{path} records a run that measured no cell, so there is nothing to compare"
+        raise ValueError(msg)
+    return decoded
 
 
 def compare_reports(baseline: _Report, current: _Report) -> list[str]:
@@ -341,8 +390,11 @@ def _resolve_operation(
 ) -> tuple[str, str, str | None]:
     """Return ``(document, seeder, graphql_operation_name)`` for the CLI flags."""
     if args.query:
-        seeder = args.seeder or "products"
-        return load_graphql_document(args.query), seeder, args.operation_name
+        try:
+            document = load_graphql_document(args.query)
+        except ValueError as exc:
+            parser.error(f"--query: {exc}")
+        return document, args.seeder or "products", args.operation_name
     if args.operation_name not in BUILTIN_OPERATIONS:
         parser.error(
             f"--operation-name {args.operation_name!r} is not built in; choose one of "
@@ -388,7 +440,12 @@ def main() -> int:
         action="store_true",
         help="print every counted statement",
     )
-    _ = parser.add_argument("--json", dest="json_path", help="also write the report as JSON here")
+    _ = parser.add_argument(
+        "--json",
+        dest="json_path",
+        type=report_destination,
+        help="also write the report as JSON here",
+    )
     _ = parser.add_argument("--compare", help="baseline JSON from an earlier run; prints deltas")
     args = parser.parse_args(namespace=_Args())
     if not args.query and not args.operation_name:
@@ -399,11 +456,16 @@ def main() -> int:
     except (TypeError, ValueError) as exc:
         parser.error(str(exc))
     document, seeder, graphql_operation_name = _resolve_operation(args, parser)
+    try:
+        selected = select_operation(document, graphql_operation_name)
+    except ValueError as exc:
+        parser.error(f"{args.query or args.operation_name}: {exc}")
     baseline = None
     if args.compare:
-        baseline = _loads(Path(args.compare).read_text(encoding="utf-8"))
-        if not _is_report(baseline):
-            parser.error(f"--compare {args.compare} is not a count_queries JSON report")
+        try:
+            baseline = load_baseline(args.compare)
+        except ValueError as exc:
+            parser.error(f"--compare: {exc}")
 
     provenance = bootstrap_fakeshop_django("sqlite-memory")
     schema = _schema(optimizer=not args.no_optimizer)
@@ -463,7 +525,7 @@ def main() -> int:
         provenance=provenance.as_dict(),
         params={
             "cardinalities": cardinalities,
-            "graphql_operation_name": effective_operation_name(document, graphql_operation_name),
+            "graphql_operation_name": selected.name.value if selected.name else None,
             "operation": args.query or args.operation_name,
             "operation_sha1": sha1,
             "optimizer": not args.no_optimizer,

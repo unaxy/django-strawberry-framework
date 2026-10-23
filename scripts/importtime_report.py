@@ -51,6 +51,7 @@ from _bench_common import (
     git_head,
     instrument_ids,
     package_digest,
+    report_destination,
     write_report,
 )
 
@@ -233,7 +234,12 @@ def main() -> int:
     _ = parser.add_argument("--top", type=int, default=20, help="rows per table (default 20)")
     _ = parser.add_argument("--rounds", type=int, default=5, help="measured children (default 5)")
     _ = parser.add_argument("--warmup", type=int, default=1, help="discarded children (default 1)")
-    _ = parser.add_argument("--json", dest="json_path", help="also write the report as JSON here")
+    _ = parser.add_argument(
+        "--json",
+        dest="json_path",
+        type=report_destination,
+        help="also write the report as JSON here",
+    )
     args = parser.parse_args(namespace=_Args())
     if args.rounds < 1 or args.top < 1 or args.warmup < 0:
         parser.error("--rounds and --top must be at least 1, --warmup at least 0")

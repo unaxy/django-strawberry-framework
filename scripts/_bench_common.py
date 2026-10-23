@@ -18,12 +18,15 @@ beside them is supplementary: a workspace copy without ``.git`` reads
 
 Also owns the pieces several scripts share after bring-up: the query-count
 capture, the plan-cache reset, the glossary seeder, per-round timing
-summaries and the ``--json`` document shape. Django imports stay
-function-local so the module imports without a configured project.
+summaries, the ``--json`` document shape and destination check, and the
+command-line file reader whose ``ValueError`` names an unreadable file.
+Django imports stay function-local so the module imports without a
+configured project.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -502,9 +505,70 @@ def write_report(path: str | Path, report: Mapping[str, object]) -> None:
     )
 
 
+def report_destination(path: str) -> str:
+    """Accept a ``--json`` path ``write_report`` can write; the flag's argparse ``type``.
+
+    A destination that is a directory, sits in a missing directory or one this
+    process cannot create files in, or exists without write permission is a
+    usage error (exit 2) at argument parsing, before Django bootstraps,
+    instead of a traceback after the run printed its verdict. The checks run
+    on the path with symlinks resolved, since the write follows them (a
+    dangling link writes its target); a parent named in a message is that
+    resolved directory. An empty path passes unchanged: the scripts treat it
+    as no ``--json`` at all.
+
+    Raises:
+        argparse.ArgumentTypeError: ``path`` is a directory, its parent is not
+            a directory this process may create files in, or it exists and
+            is not writable.
+
+    """
+    if not path:
+        return path
+    target = Path(os.path.realpath(path))
+    if target.is_dir():
+        msg = f"cannot write {path}: it is a directory"
+        raise argparse.ArgumentTypeError(msg)
+    parent = target.parent
+    if not parent.is_dir():
+        msg = f"cannot write {path}: {parent} is not a directory"
+        raise argparse.ArgumentTypeError(msg)
+    if target.exists():
+        if not os.access(target, os.W_OK):
+            msg = f"cannot write {path}: it is not writable"
+            raise argparse.ArgumentTypeError(msg)
+    elif not os.access(parent, os.W_OK | os.X_OK):
+        msg = f"cannot write {path}: {parent} is not writable"
+        raise argparse.ArgumentTypeError(msg)
+    return path
+
+
+def read_text_input(path: str | Path) -> str:
+    """Read a UTF-8 file named on the command line.
+
+    Raises:
+        ValueError: the file is missing, unreadable (a directory included), or
+            not UTF-8 text.
+
+    """
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        msg = f"cannot read {path}: {exc.strerror or exc}"
+        raise ValueError(msg) from exc
+    except UnicodeDecodeError as exc:
+        msg = f"cannot read {path}: not UTF-8 text ({exc.reason})"
+        raise ValueError(msg) from exc
+
+
 def load_graphql_document(path: str | Path) -> str:
-    """Read a GraphQL operation file for a ``--query`` flag."""
-    return Path(path).read_text(encoding="utf-8")
+    """Read a GraphQL operation file for a ``--query`` flag.
+
+    Raises:
+        ValueError: the file cannot be read as UTF-8 text (``read_text_input``).
+
+    """
+    return read_text_input(path)
 
 
 def _is_json_object(value: object) -> TypeIs[dict[str, object]]:

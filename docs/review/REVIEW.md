@@ -180,12 +180,14 @@ Instrument, every one run through `workspace.py run` ("Workspace"), before and a
 
 - query shape: [count_queries.py][count-queries] runs one operation at several parent
   cardinalities and prints the count per cell plus a verdict (`batched`, exit 0;
-  `scales with cardinality` or `mixed`, exit 1; exit 2 when nothing comparable was measured: a
-  GraphQL error, fewer than two cardinalities, root rows that did not grow at every step, or a
-  refused `--compare`); `--no-optimizer` is the positive control, `--json` the record,
-  `--compare <earlier.json>` the before/after delta. The permanent test pins the same shape w/
-  `CaptureQueriesContext` or the `django_assert_num_queries` fixture; `QuerySet.explain()` for plan
-  shape;
+  `scales with cardinality` or `mixed`, exit 1; exit 2 when nothing comparable was measured: an
+  argument, `--query` file, `--json` path or `--compare` baseline refused before anything runs, a
+  document that does not parse or holds no operation under the requested name, a validation or
+  execution error, fewer than two cardinalities, root rows that did not grow at every step, or a
+  `--compare` baseline for a different operation); `--no-optimizer` is the positive control,
+  `--json` the record, `--compare <earlier.json>` the before/after delta. The permanent test pins
+  the same shape w/ `CaptureQueriesContext` or the `django_assert_num_queries` fixture;
+  `QuerySet.explain()` for plan shape;
 - time: `timeit` median over a stated iteration count (the instrument for a pure-CPU saving
   below bench spread that no query count shows: a scratch probe, median of N repeats, the
   threshold in the Proof), or the repo benches

@@ -28,7 +28,8 @@ the glossary candidates run on ``--glossary-terms`` seeded terms. Each query
 runs ``--rounds`` timed rounds; ``min`` is the fastest walk of any round,
 ``median`` the median of per-round medians and ``+-%`` the spread of those
 medians. A query that errors or triggers no walk fails the run (exit 1) after
-the table prints.
+the table prints. An unreadable ``--query`` file or a ``--json`` path that
+cannot be written is a usage error (exit 2) before Django bootstraps.
 
 What moves the figure: ``optimizer/walker.py``, ``plans.py``, ``selections.py``,
 ``join_taxonomy.py``, ``utils/relations.py`` and the registry lookups they
@@ -63,6 +64,7 @@ from _bench_common import (
     build_report,
     load_graphql_document,
     parse_variables,
+    report_destination,
     reset_plan_cache,
     seed_glossary_terms,
     summarize_rounds,
@@ -301,7 +303,12 @@ def main() -> int:
     )
     _ = parser.add_argument("--query", help="GraphQL file to bench instead of the built-in set")
     _ = parser.add_argument("--variables", help="JSON object of variables for --query")
-    _ = parser.add_argument("--json", dest="json_path", help="also write the report as JSON here")
+    _ = parser.add_argument(
+        "--json",
+        dest="json_path",
+        type=report_destination,
+        help="also write the report as JSON here",
+    )
     args = parser.parse_args(namespace=_Args())
     if args.rounds < 1 or args.iterations < 1:
         parser.error("--rounds and --iterations must be at least 1")
@@ -312,6 +319,15 @@ def main() -> int:
     if variables is not None and args.query is None:
         parser.error("--variables needs --query")
 
+    try:
+        candidates = (
+            {Path(args.query).name: load_graphql_document(args.query)}
+            if args.query
+            else CANDIDATES
+        )
+    except ValueError as exc:
+        parser.error(f"--query: {exc}")
+
     provenance = _bootstrap_django()
 
     from apps.products.models import Item
@@ -321,10 +337,6 @@ def main() -> int:
     _ = seed_data(args.seed)
     glossary_rows = seed_glossary_terms(args.glossary_terms)
     item_rows = Item.objects.count()
-
-    candidates = (
-        {Path(args.query).name: load_graphql_document(args.query)} if args.query else CANDIDATES
-    )
 
     print(
         f"\noptimizer-walk benchmark - {args.iterations} walks/query "
