@@ -2885,6 +2885,9 @@ def _run_serializer_pipeline_sync(
             instance,
             decoded,
         ),
+        # The serializer write step checks the located row for in-memory drift
+        # against this snapshot (``assert_no_target_drift``).
+        snapshot_target=True,
     )
 
 
