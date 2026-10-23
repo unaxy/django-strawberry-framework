@@ -41,7 +41,7 @@ from django_strawberry_framework.utils.inputs import (
     make_set_input_namespace,
     set_input_type_name,
 )
-from django_strawberry_framework.utils.relations import carrier_backed_link
+from django_strawberry_framework.utils.relations import carrier_backed_link, relation_bool
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
 if TYPE_CHECKING:
@@ -167,7 +167,9 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     alone, but Django's virtual ``GenericRelation`` and
     ``GenericForeignKey`` descriptors also expose ``column = None``.
     Requiring a real database column keeps those virtual fields out
-    alongside reverse relations and many-to-many managers; the one
+    alongside reverse relations; a forward ``ManyToManyField`` needs the
+    ``many_to_many`` clause, since it reports its attname as ``column`` on
+    the Django 5.2 floor (``None`` on 6.0+) though no such column exists. The one
     column-less field kept is a forward ``ForeignObject`` that is not a
     ``ForeignKey`` (``utils/relations.py::carrier_backed_link``), whose value
     is its carrier columns and whose term orders by them
@@ -188,7 +190,7 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     return [
         require(read_attr(f, "name"), is_str)
         for f in list_of(get_fields())
-        if (read_attr(f, "column", None) is not None and not read_attr(f, "many_to_many", False))
+        if (read_attr(f, "column", None) is not None and not relation_bool(f, "many_to_many"))
         or carrier_backed_link(f) is not None
     ]
 

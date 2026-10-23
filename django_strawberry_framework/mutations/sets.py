@@ -943,7 +943,7 @@ def _validate_relation_override_types(
     id *type* is not). The expected shape is single-sourced with the generator by
     reading ``relation_input_annotation``'s emitted annotation (core via
     ``_annotation_core_is_global_id``, list depth via ``get_origin(...) is list``), so
-    "GlobalID iff Relay-Node primary" and "list iff M2M" cannot drift from what
+    "GlobalID iff Relay-Node primary" and "list iff collection-valued" cannot drift from what
     ``build_mutation_input`` produces. A raw-pk relation (a non-Relay target)
     generates a raw pk input already, so there is no ``GlobalID`` decode to defeat
     and an override there is left alone.

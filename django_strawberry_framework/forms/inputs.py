@@ -87,6 +87,7 @@ from django_strawberry_framework.utils.relations import (
     is_forward_many_to_many,
     is_model_class,
     non_pk_relation_key_attname,
+    relation_bool,
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
@@ -536,10 +537,7 @@ def _model_column_for(form_class: FormClass, name: str) -> ConcreteField | None:
     except FieldDoesNotExist:
         return None
     if getattr(column, "is_relation", False):
-        if getattr(column, "many_to_many", False):
-            if not is_forward_many_to_many(column):
-                return None
-        elif not is_forward_concrete_relation(column):
+        if not (is_forward_many_to_many(column) or is_forward_concrete_relation(column)):
             return None
     elif getattr(column, "column", None) is None:
         return None
@@ -772,7 +770,7 @@ def require_readable_choice_keys(
         if (
             target is None
             or not target.concrete
-            or target.many_to_many
+            or relation_bool(target, "many_to_many")
             or not _names_one_row(model, target)
         ):
             raise ConfigurationError(

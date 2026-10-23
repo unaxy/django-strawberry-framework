@@ -105,7 +105,6 @@ from typing import TYPE_CHECKING, NamedTuple, TypeGuard, TypeVar
 
 from django.db import models
 from django.db.models import Q
-from django.db.models.fields.reverse_related import ForeignObjectRel
 
 from .exceptions import ConfigurationError
 from .registry import registry
@@ -137,7 +136,7 @@ from .utils.querysets import (
     model_for,
     run_in_one_sync_boundary,
 )
-from .utils.relations import is_single_column_foreign_key
+from .utils.relations import is_forward_single_relation, is_single_column_foreign_key
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -241,13 +240,7 @@ def _is_unsupported_forward_edge(field: ModelField) -> bool:
     (``GenericRelation``) are outside parent-row cascade semantics entirely
     (they do not select a parent row's single target) and stay skippable.
     """
-    return (
-        field.is_relation
-        and not isinstance(field, ForeignObjectRel)
-        and not field.many_to_many
-        and not field.one_to_many
-        and not _is_cascadable_edge(field)
-    )
+    return is_forward_single_relation(field) and not _is_cascadable_edge(field)
 
 
 @lru_cache(maxsize=1024)

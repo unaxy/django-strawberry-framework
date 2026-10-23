@@ -131,7 +131,8 @@ def test_relation_kind_classifies_many_to_many_as_many() -> None:
     assert relation_kind(field) == "many"
 
 
-def test_relation_kind_classifies_one_to_many_as_many() -> None:
+def test_relation_kind_classifies_one_to_many_as_reverse_many_to_one() -> None:
+    """A ``one_to_many`` shape that is no ``GenericRelation`` is a reverse FK, ``auto_created`` or not."""
     field = SimpleNamespace(
         many_to_many=False,
         one_to_many=True,
@@ -139,15 +140,14 @@ def test_relation_kind_classifies_one_to_many_as_many() -> None:
         auto_created=False,
     )
 
-    assert relation_kind(field) == "many"
+    assert relation_kind(field) == "reverse_many_to_one"
 
 
 def test_relation_kind_classifies_generic_relation() -> None:
-    """A ``GenericRelation``-shaped field classifies as ``"generic"`` before the fallback.
+    """A ``GenericRelation``-shaped field classifies as ``"generic"`` before the ``one_to_many`` arm.
 
     Detected duck-typed by non-``None`` ``content_type_field_name`` /
-    ``object_id_field_name`` slots, BEFORE the ``one_to_many`` ``"many"``
-    fallback below.
+    ``object_id_field_name`` slots, BEFORE the ``one_to_many`` arm below.
     """
     field = SimpleNamespace(
         many_to_many=False,
@@ -161,7 +161,7 @@ def test_relation_kind_classifies_generic_relation() -> None:
     assert relation_kind(field) == "generic"
 
 
-def test_relation_kind_none_valued_generic_slots_fall_back_to_many() -> None:
+def test_relation_kind_none_valued_generic_slots_are_not_generic() -> None:
     """``None`` content-type / object-id slots (a plain ``FieldMeta``) are NOT generic.
 
     ``FieldMeta`` is a slotted dataclass that always carries the two slots
@@ -178,7 +178,7 @@ def test_relation_kind_none_valued_generic_slots_fall_back_to_many() -> None:
         object_id_field_name=None,
     )
 
-    assert relation_kind(field) == "many"
+    assert relation_kind(field) == "reverse_many_to_one"
 
 
 def test_relation_kind_generic_is_in_literal() -> None:

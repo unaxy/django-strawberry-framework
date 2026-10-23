@@ -78,7 +78,10 @@ from django_strawberry_framework.utils.relations import (
     carrier_backed_link,
     is_forward_concrete_relation,
     is_forward_many_to_many,
+    is_many_side_relation_kind,
     non_pk_relation_key_attname,
+    relation_bool,
+    relation_kind,
     stored_value_column,
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
@@ -295,7 +298,7 @@ def editable_input_fields(
     naming it in ``exclude`` is accepted),
     every ``editable=False`` column (the ``auto_now`` / ``auto_now_add``
     timestamps and any consumer ``editable=False`` column), reverse
-    relations (no ``column`` attribute and not ``many_to_many``), and a forward
+    relations (no ``column`` attribute: a reverse FK, OneToOne or M2M accessor), and a forward
     ``ForeignObject`` that is not a ``ForeignKey`` (one carrier column or
     several): its value lives in its carrier fields, so the relation has no
     column of its own to write. Each carrier is an input exactly when this
@@ -325,10 +328,10 @@ def editable_input_fields(
         if link is not None:
             carrier_links[field.name] = link
             continue
-        if getattr(field, "many_to_many", False):
-            # Forward M2M only: a forward ``ManyToManyField`` is concrete and
-            # writable; an auto-created reverse M2M accessor is not.
-            if is_forward_many_to_many(field) and getattr(field, "editable", False):
+        if is_forward_many_to_many(field):
+            # A forward ``ManyToManyField`` is writable when ``editable``; a reverse
+            # M2M accessor has no ``column`` and falls out below.
+            if getattr(field, "editable", False):
                 selected.append(field)
             continue
         # Concrete column-backed fields only (``hasattr(f, "column")`` is the
@@ -624,16 +627,17 @@ def model_column_write_kind(field: ModelField) -> str:
     -> ``file``, else ``scalar``. Naming, source, type-override, and the
     serializer's required-primary policy stay at each flavor.
 
-    A relation is ``relation_multi`` when its side is collection-valued: a
-    ``many_to_many`` relation, or a ``one_to_many`` one (a reverse FK
-    ``ManyToOneRel``, a ``GenericRelation``), whose writer assigns a list of
+    A relation is ``relation_multi`` when its side is collection-valued, the
+    kinds ``utils/relations.py::is_many_side_relation_kind`` renders as GraphQL
+    lists: a many-to-many relation from either side, a reverse FK
+    ``ManyToOneRel`` or a ``GenericRelation``, whose writer assigns a list of
     related rows. Every other relation (forward FK / OneToOne, a reverse
     ``OneToOneRel``, a ``GenericForeignKey``) points at one row and is
     ``relation_single``.
     """
     if getattr(field, "is_relation", False):
-        collection = getattr(field, "many_to_many", False) or getattr(field, "one_to_many", False)
-        return RELATION_MULTI if collection else RELATION_SINGLE
+        many = is_many_side_relation_kind(relation_kind(field))
+        return RELATION_MULTI if many else RELATION_SINGLE
     if isinstance(field, (models.FileField, models.ImageField)):
         return FILE
     return SCALAR
@@ -662,9 +666,8 @@ def _relation_field_index(
     fk_by_attr: ModelFieldIndex = {}
     m2m_by_name: ModelFieldIndex = {}
     for field in model._meta.get_fields():
-        if getattr(field, "many_to_many", False):
-            if is_forward_many_to_many(field):
-                m2m_by_name[relation_input_python_attr(field)] = field
+        if is_forward_many_to_many(field):
+            m2m_by_name[relation_input_python_attr(field)] = field
         elif is_forward_concrete_relation(field):
             fk_by_attr[relation_input_python_attr(field)] = field
     return fk_by_attr, m2m_by_name
@@ -1023,7 +1026,7 @@ def build_mutation_input(
         # rule (``input_field_required``) is meaningless for M2M (a forward M2M
         # always reports ``null=False, blank=False, has_default()=False``), so it
         # is consulted only for scalar / FK columns.
-        is_m2m = getattr(field, "many_to_many", False)
+        is_m2m = relation_bool(field, "many_to_many")
         required = is_create and not is_m2m and input_field_required(field)
         annotation, field_kwargs = optional_input_field(
             annotation,

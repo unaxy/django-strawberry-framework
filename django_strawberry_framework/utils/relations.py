@@ -45,6 +45,7 @@ __all__ = [
     "instance_accessor",
     "is_forward_concrete_relation",
     "is_forward_many_to_many",
+    "is_forward_single_relation",
     "is_many_side_relation_kind",
     "is_model_class",
     "is_single_column_foreign_key",
@@ -147,18 +148,20 @@ def relation_kind(field: object) -> RelationKind:
 
     Five shapes are distinguished:
 
-    - ``"many"`` - forward ``ManyToManyField`` (``many_to_many=True``).
+    - ``"many"`` - a many-to-many relation from either side (``many_to_many=True``:
+      a forward ``ManyToManyField`` or the reverse ``ManyToManyRel``), and no other shape.
     - ``"generic"`` - a ``contenttypes`` ``GenericRelation`` (the reverse
       side of a ``GenericForeignKey``), detected duck-typed by the presence
       of non-``None`` ``content_type_field_name`` and ``object_id_field_name``
       attributes. It is many-valued (``one_to_many=True``,
-      ``auto_created=False``) and would otherwise land in the defensive
-      ``"many"`` fallback below; the explicit kind lets the optimizer inject
+      ``auto_created=False``) and would otherwise land in ``"reverse_many_to_one"``
+      below; the explicit kind lets the optimizer inject
       the constant content-type morph predicate and partition by the child
       ``object_id`` column instead of guessing a reverse join.
     - ``"reverse_many_to_one"`` - the reverse side of a ``ForeignKey``
-      (Django's ``ManyToOneRel`` descriptor: ``one_to_many=True`` paired
-      with ``auto_created=True``). Cardinality-wise this collapses into
+      (Django's ``ManyToOneRel`` descriptor: ``one_to_many=True``; Django's
+      one other ``one_to_many`` shape is the ``GenericRelation`` classified
+      above). Cardinality-wise this collapses into
       the many-side for plan building today, but the descriptor itself
       is conceptually distinct from a forward M2M and is named so
       kind readers (``optimizer/field_meta.py::FieldMeta``) can
@@ -171,16 +174,6 @@ def relation_kind(field: object) -> RelationKind:
     - ``"forward_single"`` - every other forward single-row relation
       (``ForeignKey``, forward ``OneToOneField``, and the concrete
       auto-created MTI parent link).
-
-    Any ``one_to_many=True`` shape without ``auto_created`` that is NOT a
-    ``GenericRelation`` falls back to ``"many"`` as a defensive mapping;
-    stock Django relation descriptors
-    never produce that combination (``ManyToManyField`` sets
-    ``many_to_many=True``; reverse FK/M2M descriptors always set
-    ``auto_created=True``; forward FK and forward ``OneToOneField`` set
-    ``one_to_many=False``). The branch is test-pinned at
-    ``tests/utils/test_relations.py::test_relation_kind_classifies_one_to_many_as_many``
-    so the fallback semantics cannot drift.
 
     Examples:
         ``ManyToManyField``-like -> ``"many"``;
@@ -202,7 +195,7 @@ def relation_kind(field: object) -> RelationKind:
     if many_to_many:
         return "many"
     # A ``GenericRelation`` (and a ``FieldMeta`` snapshot of one) is detected
-    # duck-typed BEFORE the ``one_to_many`` ``"many"`` fallback below. The
+    # duck-typed BEFORE the ``one_to_many`` arm below. The
     # ``getattr(..., None) is not None`` form (not ``hasattr``) is load-bearing:
     # ``FieldMeta`` is a slotted dataclass that ALWAYS carries the two slots, so
     # ``hasattr`` would misclassify every ``FieldMeta`` as ``"generic"`` - only a
@@ -210,9 +203,7 @@ def relation_kind(field: object) -> RelationKind:
     if content_type_field_name is not None and object_id_field_name is not None:
         return "generic"
     if one_to_many:
-        if auto_created:
-            return "reverse_many_to_one"
-        return "many"
+        return "reverse_many_to_one"
     if one_to_one and auto_created and not concrete:
         return "reverse_one_to_one"
     return "forward_single"
@@ -637,15 +628,34 @@ def is_forward_many_to_many(field: object) -> bool:
     the reverse accessor is ``auto_created`` and not ``concrete``.
 
     Single-sited here so the predicate cannot drift across the write
-    surfaces that select editable / attestable M2M fields. ``getattr``
-    defaults defend against field shapes that omit a flag, matching
-    ``relation_kind``'s read contract. Over a model field, ``True`` narrows it to
+    surfaces that select editable / attestable M2M fields. Each flag is read
+    through ``relation_bool``, ``relation_kind``'s read contract: an absent or
+    ``None`` flag reads as ``False`` and a non-``bool`` one raises. Over a model field, ``True`` narrows it to
     the forward ``ManyToManyField`` (a concrete ``Field``, never a reverse rel).
     """
     many_to_many = relation_bool(field, "many_to_many")
     concrete = relation_bool(field, "concrete")
     auto_created = relation_bool(field, "auto_created")
     return many_to_many and (concrete or not auto_created)
+
+
+def is_forward_single_relation(field: object) -> bool:
+    """Return whether ``field`` is a forward relation to one row, whatever its shape.
+
+    A ``ForeignKey`` / ``OneToOneField`` (the MTI parent link included), a
+    ``ForeignObject`` of any width and a ``GenericForeignKey``. ``relation_kind``
+    reads ``"forward_single"`` for every field that is neither many-valued nor a
+    reverse one-to-one, so the answer needs more than the kind: ``is_relation``
+    (a plain column is ``"forward_single"`` too) and no ``ForeignObjectRel`` (the
+    reverse ``GenericRel`` a ``GenericRelation(related_query_name=...)`` makes
+    visible on the generic-key model reports ``many_to_one`` and no cardinality
+    flag ``relation_kind`` reads, so it classifies ``"forward_single"``).
+    """
+    return (
+        relation_bool(field, "is_relation")
+        and not isinstance(field, ForeignObjectRel)
+        and relation_kind(field) == "forward_single"
+    )
 
 
 @overload
@@ -655,9 +665,9 @@ def is_forward_concrete_relation(field: _RelationFieldLike) -> bool: ...
 def is_forward_concrete_relation(field: object) -> bool:
     """Return whether ``field`` is a forward FK / OneToOne with a real DB column.
 
-    Cardinality is decided by ``relation_kind`` - this module's single site of
-    the relation taxonomy - so the predicate is exactly "the kind is
-    ``"forward_single"``, and it is backed by a real local column". Cardinality
+    The predicate is exactly "``is_forward_single_relation``, and backed by a
+    real local column": cardinality is decided by ``relation_kind`` - this
+    module's single site of the relation taxonomy - through that owner. Cardinality
     deliberately does NOT come from ``column`` / ``concrete``: Django moves BOTH
     flags for ``ManyToManyField`` inside the supported range. On the 5.2 support
     floor a forward M2M reports ``column="genres"`` and ``concrete=True``
@@ -665,19 +675,16 @@ def is_forward_concrete_relation(field: object) -> bool:
     column exists on the source table - the pairing lives in the through table);
     6.0+ reports ``column=None`` and ``concrete=False``. A ``column``-only test
     therefore called a forward M2M a forward concrete relation on 5.2 and not on
-    6.x - one predicate answering two ways across one supported matrix. The four
-    flags ``relation_kind`` reads (``many_to_many`` / ``one_to_many`` /
+    6.x - one predicate answering two ways across one supported matrix. The
+    cardinality flags ``relation_kind`` reads (``many_to_many`` / ``one_to_many`` /
     ``one_to_one`` / ``auto_created``) are stable across that range, so routing
     the cardinality question through it makes the answer version-independent.
 
-    This helper is single-sited precisely so the predicate cannot drift across
-    the write surfaces, and the M2M guard belongs HERE rather than at the
-    callers. Both of today's callers - ``forms/inputs.py::_model_column_for``
-    and ``mutations/inputs.py::_relation_field_index`` - screen M2M into their
-    own forward-M2M arm before reaching this, which is why the promotion of
-    this predicate out of ``forms/inputs.py`` carried the narrower ``column``
-    test in unnoticed; the gate is here so the NEXT caller inherits the whole
-    contract instead of having to re-derive that half of it.
+    The M2M exclusion belongs HERE rather than at the callers, so every caller
+    inherits the whole contract: ``forms/inputs.py::_model_column_for`` and
+    ``mutations/inputs.py::_relation_field_index`` answer a forward M2M through
+    ``is_forward_many_to_many`` and every other relation through this predicate,
+    with no cardinality-flag read of their own.
 
     The ``column`` / ``related_model`` reads stay load-bearing AFTER the kind
     gate, because a forward ``GenericForeignKey`` also classifies
@@ -691,9 +698,7 @@ def is_forward_concrete_relation(field: object) -> bool:
 
     Over a model field, ``True`` narrows it to the forward FK / OneToOne ``Field``.
     """
-    if not relation_bool(field, "is_relation"):
-        return False
-    if relation_kind(field) != "forward_single":
+    if not is_forward_single_relation(field):
         return False
     return (
         getattr(field, "column", None) is not None
@@ -883,9 +888,7 @@ def carrier_backed_link(field: object) -> RelationLink | None:
     side of a ``GenericRelation`` included, whose link belongs to the field
     on the other model) included.
     """
-    if not getattr(field, "is_relation", False) or is_single_column_foreign_key(field):
-        return None
-    if isinstance(field, ForeignObjectRel) or relation_kind(field) != "forward_single":
+    if not is_forward_single_relation(field) or is_single_column_foreign_key(field):
         return None
     link = relation_link(field)
     return link if link.carriers else None
@@ -903,9 +906,7 @@ def non_pk_forward_link(field: object) -> RelationLink | None:
     the related pk (Django trims ``<relation>__pk`` to the carrier column, no
     join) and for every field that is not a forward single-valued relation.
     """
-    if not getattr(field, "is_relation", False) or isinstance(field, ForeignObjectRel):
-        return None
-    if relation_kind(field) != "forward_single":
+    if not is_forward_single_relation(field):
         return None
     link = relation_link(field)
     if not link.carriers:

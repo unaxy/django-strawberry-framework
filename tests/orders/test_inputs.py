@@ -1265,6 +1265,17 @@ def test_get_concrete_field_names_for_order_direct() -> None:
         _get_concrete_field_names_for_order(None)
 
 
+@pytest.mark.parametrize("name", ["genres", "archive_genres", "loans"])
+def test_get_concrete_field_names_for_order_excludes_many_valued_relations(name: str) -> None:
+    """A forward M2M and a reverse FK publish no ``"__all__"`` order leaf on every supported Django.
+
+    On the Django 5.2 floor a forward ``ManyToManyField`` reports its attname as ``column``,
+    so only the ``many_to_many`` clause keeps ``genres`` / ``archive_genres`` out; a reverse
+    FK accessor has no ``column`` at all.
+    """
+    assert name not in _get_concrete_field_names_for_order(Book)
+
+
 def test_normalize_input_value_handles_3_tier_deep_related_order_chain() -> None:
     """Normalize walks deeply nested (3 tiers) RelatedOrder hierarchies."""
 

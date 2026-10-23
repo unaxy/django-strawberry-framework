@@ -106,11 +106,6 @@ def _attr(value: object, name: str, default: object = None) -> object:
     return read_attr(value, name, default)
 
 
-def _flag(value: object, name: str) -> bool:
-    """Return the truth of one relation flag; an omitted flag is ``False``."""
-    return bool(read_attr(value, name, False))
-
-
 def _first_truthy(*values: object) -> object:
     """Return the first value that tests true, or ``None``."""
     return next((value for value in values if value), None)
@@ -296,7 +291,7 @@ def classify_relation_join(field: ModelField | FieldMeta) -> RelationJoinDescrip
     unwindowable relation unplanned for per-parent resolution).
     """
     kind = relation_kind(field)
-    is_m2m = _flag(field, "many_to_many")
+    is_m2m = kind == "many"
     windowable = kind in WINDOWABLE_RELATION_KINDS
     parent_link_field = None
     through_child_field = None
