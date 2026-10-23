@@ -56,6 +56,7 @@ from django_filters import (
     NumberFilter,
 )
 from django_filters import constants as _filter_constants
+from django_filters.conf import settings as _df_settings
 from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
 from django_filters.filterset import FilterSetOptions
@@ -63,7 +64,7 @@ from django_filters.utils import get_model_field
 from django_filters.widgets import BaseCSVWidget
 from graphql import GraphQLError
 from strawberry import relay
-from typing_extensions import override
+from typing_extensions import TypedDict, Unpack, override
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.relay import _coerce_pk_or_none, _node_id_slot
@@ -93,6 +94,7 @@ from django_strawberry_framework.utils._narrowing import (
     optional_instance,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
@@ -135,12 +137,14 @@ FRAMEWORK_GLOBALID_STRATEGIES = MODEL_LABEL_STRATEGIES | TYPE_NAME_STRATEGIES
 ENCODE_ONLY_GLOBALID_STRATEGIES = frozenset({"callable", "custom"})
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from typing import TypeAlias
 
     from django.core.files.uploadedfile import UploadedFile
+    from django.forms.boundfield import BoundField
     from django.utils.datastructures import MultiValueDict
     from django_filters.filterset import BaseFilterSet
+    from django_stubs_ext import StrPromise
     from strawberry.schema import Schema
 
     from django_strawberry_framework.types.relay import _RelayDjangoType
@@ -150,6 +154,24 @@ if TYPE_CHECKING:
 
     # A form-field validator (``validate_range`` checks any value's shape).
     _Validator: TypeAlias = Callable[[object], None]
+
+    class _FieldOptions(TypedDict, total=False):
+        """The keyword options ``forms.Field.__init__`` takes, forwarded unchanged."""
+
+        required: bool
+        widget: Widget | type[Widget] | None
+        label: str | StrPromise | None
+        initial: object
+        help_text: str | StrPromise
+        error_messages: Mapping[str, str | StrPromise] | None
+        show_hidden_initial: bool
+        validators: Iterable[_Validator]
+        localize: bool
+        disabled: bool
+        label_suffix: str | None
+        template_name: str | None
+        bound_field_class: type[BoundField] | None
+
     # Every target shape the constructor and setter store; resolution happens on read.
     _FilterSetTarget: TypeAlias = (
         str | type[FilterSet] | Callable[[], type[FilterSet] | None] | None
@@ -430,6 +452,70 @@ def _filterset_model_field(
     return get_model_field(model, _bound_field_name(filter_instance))
 
 
+def _column_form_field(filter_instance: Filter) -> Field | None:
+    """Return the form field that cleans one value of a bound filter's column for a comparison.
+
+    The field is the one django-filter's own ``gte`` filter for the column builds
+    (``FilterSet._upstream_filter_for_lookup``: a ``NumberFilter``'s ``DecimalField`` for a
+    decimal or integer column, a ``DateTimeFilter``'s ``DateTimeField`` for a datetime one,
+    a ``CharFilter``'s ``CharField`` for text, ...), the owner of what one scalar value of
+    that column may be, so a value a declared filter hands the ORM is held to the rule
+    ``FilterSet._validate_form_or_raise`` already applies to ``gte`` / ``lte``. A
+    comparison and not ``exact``: django-filter builds ``exact`` on a choice column as a
+    ``ChoiceFilter``, whose ``ChoiceField`` refuses any value off the column's choices,
+    while a range bound or a list member compares against the stored values whatever they
+    are. ``None`` for a filter bound to no package ``FilterSet`` (a class-level
+    declaration, a standalone filter), a path naming no model field, a relation, or a
+    column django-filter builds no filter for. A relation's form field is django-filter's
+    ``ModelChoiceField``, which looks every value up in the target's default manager: a
+    key no row holds would answer "Select a valid choice" where one the target's
+    ``get_queryset`` hides answers rows, an existence oracle the package's own relation
+    keys refuse (``_RelationIdentityListField``), so a relation's values reach the ORM as
+    sent.
+    """
+    parent = read_attr(filter_instance, "parent", None)
+    if not isinstance(parent, _filter_set_class()):
+        return None
+    model_field = _bound_model_field(filter_instance)
+    if model_field is None or model_field.is_relation:
+        return None
+    filter_class, params = type(parent)._upstream_filter_for_lookup(model_field, "gte")
+    if filter_class is None:
+        return None
+    return _built_filter(filter_class, filter_instance.field_name, params).field
+
+
+def unkept_form_field(filter_instance: Filter) -> Field:
+    """Build the form field ``Filter.field`` builds for ``filter_instance``, keeping nothing.
+
+    ``Filter.field`` caches the field in the filter's ``_field``; a class-level declaration
+    is shared by every request and deep-copied into each one, so a read of it must not
+    write to it. The construction is ``Filter.field``'s: the filter's ``field_class`` over
+    its ``label`` and ``extra``, without ``help_text`` under django-filter's
+    ``DISABLE_HELP_TEXT``.
+    """
+    field_kwargs: dict[str, object] = dict(filter_instance.extra)
+    if read_attr(_df_settings, "DISABLE_HELP_TEXT", False):
+        _ = field_kwargs.pop("help_text", None)
+    field_class = require(read_attr(filter_instance, "field_class"), callable)
+    return require_instance(field_class(label=filter_instance.label, **field_kwargs), Field)
+
+
+def _built_filter(
+    filter_class: Callable[..., Filter],
+    field_name: str | None,
+    params: Mapping[str, object],
+) -> Filter:
+    """Build ``filter_class`` on ``field_name`` with django-filter's own ``params`` for it.
+
+    ``params`` are the constructor options ``filter_for_lookup`` pairs with the class
+    (``choices`` for a choice column, ``queryset`` for a relation), forwarded as
+    ``filter_for_field`` forwards them; their values are typed by the class they belong
+    to, which only the call can check.
+    """
+    return filter_class(field_name=field_name, **params)
+
+
 class ArrayFilterMethod(_EmptyListAwareFilterMethod):
     """Empty-list-aware `FilterMethod` for `ArrayFilter` (see the shared base)."""
 
@@ -630,6 +716,11 @@ class RangeField(Field):
     range normalizer emits. A missing pair arrives as ``[None, None]`` and
     ``to_python`` collapses it to ``None`` so django-filter skips the
     constraint instead of compiling ``col BETWEEN NULL AND NULL``.
+
+    ``bound_field`` cleans each bound that is not ``None`` (``RangeFilter`` passes the
+    form field of its column's ``gte`` filter), so a bound the column cannot hold is a
+    form error rather than a value handed to the ORM. Without one the bounds pass
+    through as sent.
     """
 
     # Class-level defaults ``forms.Field`` reads through the instance and never
@@ -648,12 +739,36 @@ class RangeField(Field):
     # A widget class here; ``Field.__init__`` replaces it with an instance of that class.
     widget: type[Widget] | Widget = _RangeWidget
 
+    def __init__(
+        self,
+        *,
+        bound_field: Field | None = None,
+        **kwargs: Unpack[_FieldOptions],
+    ) -> None:
+        """Build the field; ``bound_field`` cleans each bound, ``None`` passes them through.
+
+        Args:
+            bound_field: The form field that cleans one bound (``RangeFilter`` passes the
+                one its column's ``gte`` filter builds), or ``None``.
+            **kwargs: The options ``forms.Field`` takes.
+
+        """
+        super().__init__(**kwargs)
+        self.bound_field: Field | None = bound_field
+
     @override
     def to_python(self, value: object) -> object:
-        """Collapse a missing widget pair to ``None`` so the filter is skipped."""
+        """Collapse a missing widget pair to ``None``, else clean each bound with ``bound_field``.
+
+        A ``None`` bound stays ``None`` (a range left open on that side), and a value
+        that is not a pair is returned as it is for ``validate_range`` to refuse.
+        """
         if value in self.empty_values:
             return None
-        return value
+        bound_field = self.bound_field
+        if bound_field is None or not (is_list_or_tuple(value) and len(value) == _RANGE_BOUNDS):
+            return value
+        return [None if bound is None else bound_field.clean(bound) for bound in value]
 
 
 class RangeFilter(TypedFilter):
@@ -663,9 +778,36 @@ class RangeFilter(TypedFilter):
     range with one bound left out or ``null`` applies that lone bound: a start alone as
     ``<field>__gte``, an end alone as ``<field>__lte`` (django-filter's ``RangeFilter`` reads a
     one-sided range the same way). A range with neither bound constrains nothing.
+
+    Each bound is cleaned by the form field of the column's own ``gte`` filter
+    (``_column_form_field``), so a bound the column cannot hold (a non-finite decimal, a
+    number past django-filter's ``1e50`` cap) is a form error as it is on ``gte``, a
+    naive datetime bound is made aware and a text bound stripped; a bound off a choice
+    column's choices is compared like any other value.
     """
 
     field_class: type[RangeField] = RangeField
+
+    @property
+    @override
+    def field(self) -> Field:
+        """The range form field, whose bounds the column's comparison form field cleans.
+
+        A filter bound to a ``FilterSet`` (the per-request copy django-filter binds) builds
+        its field once, handing it ``_column_form_field``. A class-level declaration has no
+        column to read, so its field is built on each read and nothing is written to the
+        filter (``unkept_form_field``): the declaration is shared by every request, and a
+        field kept on it would ride every per-request deep copy and clean no bound.
+        """
+        if read_attr(self, "parent", None) is None:
+            return unkept_form_field(self)
+        state = truth.instance_state(self)
+        if "_field" in state:
+            return super().field
+        built = super().field
+        if isinstance(built, RangeField):
+            built.bound_field = _column_form_field(self)
+        return built
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:

@@ -14,7 +14,9 @@ not a Relay node): one pk or a list for the forward key, a list for the reverse
 one, with the README membership rules on every list. ``price_span`` is a declared
 ``RangeFilter`` on both specimen filtersets: its nested input type is scoped
 per owning filterset and the ``range`` lookup applies over the wire; a lone
-``start`` / ``end`` applies as ``gte`` / ``lte`` and a range with no bound filters nothing.
+``start`` / ``end`` applies as ``gte`` / ``lte`` and a range with no bound filters nothing;
+each bound is cleaned as ``price: { gte }`` cleans its value, so a bound the column cannot
+hold is ``FILTER_INVALID``.
 The per-field ``"__all__"`` leaves never publish a ``django.contrib.postgres``
 lookup Django registers onto a core field (``containedBy`` on the numeric and
 temporal leaves), whether or not a PostgreSQL driver is installed.
@@ -293,6 +295,107 @@ def test_nullable_scalars_filter_partner_price_span_one_sided_bounds(
         {"allNullableScalarSpecimens": [{"label": label} for label in labels]},
         variables={"filter": {"partner": {"priceSpan": {"range": price_range}}}},
     )
+
+
+_NOT_A_NUMBER = {"message": "Enter a number.", "code": "invalid"}
+_PAST_THE_CAP = {
+    "message": "Ensure this value is less than or equal to 1e+50.",
+    "code": "max_value",
+}
+
+_BY_NULLABLE_FILTER = """
+query ($filter: NullableScalarSpecimenFilterInputType) {
+  allNullableScalarSpecimens(filter: $filter) {
+    label
+  }
+}
+"""
+
+
+def _bounds(side: str, bound: str) -> dict[str, str]:
+    """A range holding ``bound`` on ``side`` (``start``, ``end`` or ``both``)."""
+    return {"start": bound, "end": bound} if side == "both" else {side: bound}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("side", ["start", "end", "both"])
+@pytest.mark.parametrize(
+    ("bound", "refusal"),
+    [
+        pytest.param("NaN", _NOT_A_NUMBER, id="nan"),
+        pytest.param("sNaN", _NOT_A_NUMBER, id="snan"),
+        pytest.param("Infinity", _NOT_A_NUMBER, id="infinity"),
+        pytest.param("-Infinity", _NOT_A_NUMBER, id="minus-infinity"),
+        pytest.param("1e999999", _PAST_THE_CAP, id="past-the-cap"),
+    ],
+)
+def test_scalars_filter_price_span_bound_the_column_cannot_hold_is_filter_invalid(
+    side: str,
+    bound: str,
+    refusal: dict[str, str],
+) -> None:
+    """Each ``priceSpan`` bound is cleaned as ``price: { gte }`` cleans its value.
+
+    A non-finite decimal is the ``DecimalField``'s ``Enter a number.`` and a value
+    past django-filter's ``1e50`` number cap its ``max_value`` refusal, keyed to the
+    range's form field, never a value handed to the ORM.
+    """
+    _seed_price_tiers()
+    payload = response_json(
+        post_graphql(
+            _BY_FILTER,
+            variables={"filter": {"priceSpan": {"range": _bounds(side, bound)}}},
+        ),
+    )
+
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {"price_span": [refusal]},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "filter_input", "form_key"),
+    [
+        pytest.param(
+            _BY_FILTER,
+            {"not": {"priceSpan": {"range": {"start": "NaN"}}}},
+            "price_span",
+            id="not",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partner": {"priceSpan": {"range": {"end": "NaN"}}}},
+            "price_span",
+            id="nested-partner",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partnerPriceSpan": {"range": {"start": "NaN", "end": "100.0000"}}},
+            "partner__price_span",
+            id="flat-partner",
+        ),
+    ],
+)
+def test_price_span_nan_bound_is_filter_invalid_in_every_branch(
+    query: str,
+    filter_input: dict[str, object],
+    form_key: str,
+) -> None:
+    """A ``NaN`` bound is ``FILTER_INVALID`` under ``not`` and through the ``partner`` relation."""
+    for partner in _seed_price_tiers():
+        models.NullableScalarSpecimen.objects.create(label=f"of-{partner.label}", partner=partner)
+    payload = response_json(post_graphql(query, variables={"filter": filter_input}))
+
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: [_NOT_A_NUMBER]},
+    }
 
 
 _ALL_INPUT_FIELDS_QUERY = """
