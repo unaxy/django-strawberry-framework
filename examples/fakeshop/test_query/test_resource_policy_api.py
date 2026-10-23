@@ -2775,6 +2775,25 @@ def test_a_default_substituted_at_its_use_one_node_over_the_bound_is_rejected() 
     _assert_over_nodes(_post("/rp-values/", query))
 
 
+@pytest.mark.django_db
+def test_defaults_substituted_inside_a_list_literal_are_charged_once_at_the_node_bound() -> None:
+    """A default read from inside a list literal is charged at that use, not again.
+
+    Six three-node row defaults spliced into one ``or`` list are ``2 + 6 * 3``
+    nodes, exactly ``MAX_INPUT_NODES``.
+    """
+    names = "abcdef"
+    definitions = ", ".join(
+        '$%s: GenreFilterInputType = { name: { exact: "x" } }' % name for name in names
+    )
+    reads = ", ".join("$%s" % name for name in names)
+    query = "query Q(%s) { allLibraryGenres(filter: { or: [%s] }) { name } }" % (
+        definitions,
+        reads,
+    )
+    _no_rejection(_post("/rp-values/", query))
+
+
 def test_an_unselected_operation_repeating_a_charged_argument_is_charged_again() -> None:
     """Two byte-identical arguments are two values; each one's nodes are charged."""
     argument = "filter: %s" % _genre_or_filter(3)

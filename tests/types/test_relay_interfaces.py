@@ -2578,6 +2578,29 @@ def test_plain_or_static_resolve_typename_is_classified_override(shape: str) -> 
     assert _emitted_typename(CategoryNode) == "ConsumerOwned"
 
 
+def test_resolve_typename_declared_none_is_not_an_override() -> None:
+    """A ``resolve_typename = None`` declaration holds no resolver, so it overrides nothing.
+
+    The type keeps its resolved strategy (``model``, not ``custom``) and the framework
+    installs its closure over the ``None``, the same reading the installer gives a
+    ``None``-valued ``resolve_*`` default.
+    """
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+        resolve_typename = None
+
+    finalize_django_types()
+    assert _definition_of(CategoryNode).effective_globalid_strategy == "model"
+    installed = truth.stored_function(class_dict(CategoryNode)["resolve_typename"])
+    assert truth.static_attr(installed, types_relay._FRAMEWORK_CLOSURE_MARKER) is True
+    assert _emitted_typename(CategoryNode) == "products.category"
+
+
 @pytest.mark.parametrize("shape", _NON_CLASSMETHOD_OVERRIDES)
 def test_plain_or_static_resolve_typename_plus_meta_strategy_raises(shape: str) -> None:
     """A plain-function or ``staticmethod`` override plus ``Meta.globalid_strategy`` is both-declared."""
