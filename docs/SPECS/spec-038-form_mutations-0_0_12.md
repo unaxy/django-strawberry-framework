@@ -354,7 +354,7 @@ package-internal; Slice 4 is the live consumer surface.
     `<Name>Payload` (`node` / `result` for the `ModelForm`, the pinned `ok` + `errors`
     for the plain form). The whole pipeline runs inside one `transaction.atomic()`
     pinned to one write alias, behind a pre-transaction deadline check and over an
-    immutable post-locate `authorized_pk` / `target_state` snapshot, and
+    immutable post-locate `authorized_pk` snapshot, and
     the async path runs the sync body in one `sync_to_async(thread_sensitive=True)`
     call — the same boundary `036` set.
   - [ ] [`mutations/fields.py`][mutations-fields]:
@@ -1687,7 +1687,7 @@ pipeline's own transaction opens, so an operation already past its budget never 
 transaction is opened and pinned to one write alias
 (`open_write_pipeline` / `pipeline_alias_guard` / `check_instance_write_alias`), so a
 step cannot silently write through a second connection; and an immutable
-`authorized_pk` / `target_state` snapshot is captured right after the locate, so a
+`authorized_pk` snapshot is captured right after the locate, so a
 later step cannot retarget the write to a row the caller was not authorized for. A
 step returning a `StepFailure` (its `errors: list[FieldError]`) marks the block for rollback, so a partial write
 followed by a validation failure never commits; on an update whose located row the

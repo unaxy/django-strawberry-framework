@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import dataclasses
 import itertools
 import sqlite3
 import threading
@@ -22,6 +24,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, SupportsIndex, TypeAlias
 from unittest import mock
@@ -91,10 +94,13 @@ from django_strawberry_framework.utils.querysets import (
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.write_transaction import (
     _SNAPSHOT_NODE_BUDGET,
+    _CopiedValueSnapshot,
     _enforce_read_only_barrier,
     _field_fingerprint,
     _FieldFingerprint,
     _FileNameSnapshot,
+    _ReferenceSnapshot,
+    _ValueSnapshot,
     assert_no_target_drift,
     check_instance_write_alias,
     conflict_error,
@@ -2149,6 +2155,275 @@ def test_snapshot_fingerprint_is_iterative_and_budgeted() -> None:
     # A value exceeding the node budget is rejected loudly, never walked unbounded.
     with pytest.raises(ConfigurationError, match="too large to fingerprint"):
         _field_fingerprint(list(range(_SNAPSHOT_NODE_BUDGET + 2)))
+
+
+class _Geometry:
+    """A ``GEOSGeometry`` stand-in: value equality, an in-place ``transform``, a cloning copy."""
+
+    def __init__(self, x: float, srid: int = 4326) -> None:
+        self.x: float = x
+        self.srid: int = srid
+
+    def transform(self, srid: int) -> None:
+        """Re-project IN PLACE, as ``GEOSGeometry.transform(clone=False)`` does."""
+        self.srid = srid
+        self.x += 1
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Geometry) and (self.x, self.srid) == (other.x, other.srid)
+
+    @override
+    def __hash__(self) -> int:
+        return hash((self.x, self.srid))
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _Geometry:
+        del memo
+        return _Geometry(self.x, self.srid)
+
+
+@dataclasses.dataclass
+class _Point:
+    """A custom ``to_python`` value: dataclass value equality over a mutable member."""
+
+    x: int
+    tags: list[str]
+
+
+def _transform_geometry(value: object) -> None:
+    assert isinstance(value, _Geometry)
+    value.transform(3857)
+
+
+def _tag_point(value: object) -> None:
+    assert isinstance(value, _Point)
+    value.tags.append("b")
+
+
+def _make_geometry() -> object:
+    return _Geometry(1.0)
+
+
+def _make_point() -> object:
+    return _Point(1, ["a"])
+
+
+_VALUE_EQUALITY_ROWS = (
+    pytest.param(_make_geometry, _transform_geometry, id="geometry"),
+    pytest.param(_make_point, _tag_point, id="dataclass"),
+)
+
+
+def _planted(item: Model) -> object:
+    """The value planted on ``item.description`` past the field's declared type."""
+    return read_attr(item, "description")
+
+
+@pytest.mark.parametrize(("make", "mutate"), _VALUE_EQUALITY_ROWS)
+def test_snapshot_copies_a_value_equality_object_so_in_place_mutation_is_drift(
+    make: Callable[[], object],
+    mutate: Callable[[object], None],
+) -> None:
+    """An opaque value with value equality is captured by a deep copy, never aliased.
+
+    A geometry ``transform`` or a dataclass member edit mutates the SAME object the
+    instance holds; the copy is independent of it, so the drift check sees the
+    change. An equal replacement is the same value and passes.
+    """
+    item = product_models.Item(name="GuardCopy")
+    original = make()
+    vars(item)["description"] = original
+    with write_pipeline("default", lock=False):
+        pipeline = require_write_pipeline()
+        pipeline.target_state = snapshot_target_state(item)
+        assert isinstance(pipeline.target_state["description"], _CopiedValueSnapshot)
+        assert_no_target_drift("CopyCleanMut", item)  # unmutated: no raise
+        vars(item)["description"] = make()  # an equal replacement: no raise
+        assert_no_target_drift("CopyEqualMut", item)
+        vars(item)["description"] = original
+        mutate(original)  # the SAME object the capture read, mutated in place
+        assert _planted(item) is original
+        with pytest.raises(ConfigurationError, match="mutated in memory"):
+            assert_no_target_drift("CopyDriftMut", item)
+
+
+@pytest.mark.parametrize(("make", "mutate"), _VALUE_EQUALITY_ROWS)
+def test_snapshot_copied_value_rejects_a_different_replacement(
+    make: Callable[[], object],
+    mutate: Callable[[object], None],
+) -> None:
+    """A replacement comparing unequal to the captured copy is drift."""
+    item = product_models.Item(name="GuardCopyReplace")
+    vars(item)["description"] = make()
+    with write_pipeline("default", lock=False):
+        require_write_pipeline().target_state = snapshot_target_state(item)
+        replacement = make()
+        mutate(replacement)
+        vars(item)["description"] = replacement
+        with pytest.raises(ConfigurationError, match="mutated in memory"):
+            assert_no_target_drift("CopyReplaceMut", item)
+
+
+def test_snapshot_fingerprints_a_writable_memoryview_so_in_place_writes_are_drift() -> None:
+    """A writable ``memoryview`` is fingerprinted by content: a write through it is drift."""
+    view = memoryview(bytearray(b"abcd"))
+    item = product_models.Item(name="GuardView")
+    vars(item)["description"] = view
+    with write_pipeline("default", lock=False):
+        pipeline = require_write_pipeline()
+        pipeline.target_state = snapshot_target_state(item)
+        assert isinstance(pipeline.target_state["description"], _FieldFingerprint)
+        assert_no_target_drift("ViewCleanMut", item)  # unmutated: no raise
+        view[0] = ord("x")
+        with pytest.raises(ConfigurationError, match="mutated in memory"):
+            assert_no_target_drift("ViewDriftMut", item)
+
+
+def test_snapshot_read_only_memoryview_and_equal_content_pass() -> None:
+    """A read-only view re-fingerprints identically; the same content as ``bytes`` is one value."""
+    item = product_models.Item(name="GuardReadOnlyView")
+    vars(item)["description"] = memoryview(b"abcd")
+    with write_pipeline("default", lock=False):
+        require_write_pipeline().target_state = snapshot_target_state(item)
+        assert_no_target_drift("ReadOnlyViewMut", item)
+        vars(item)["description"] = b"abcd"
+        assert_no_target_drift("ViewAsBytesMut", item)
+
+
+def test_snapshot_released_memoryview_is_typed_drift() -> None:
+    """A view released after the capture has no content left: typed drift, never a raw error."""
+    view = memoryview(bytearray(b"abcd"))
+    item = product_models.Item(name="GuardReleasedView")
+    vars(item)["description"] = view
+    with write_pipeline("default", lock=False):
+        require_write_pipeline().target_state = snapshot_target_state(item)
+        view.release()
+        with pytest.raises(ConfigurationError, match="mutated in memory"):
+            assert_no_target_drift("ReleasedViewMut", item)
+
+
+def test_snapshot_of_an_already_released_memoryview_is_stable() -> None:
+    """A view captured already released is captured without raising and matches while released."""
+    view = memoryview(b"abcd")
+    view.release()
+    item = product_models.Item(name="GuardStillReleasedView")
+    vars(item)["description"] = view
+    with write_pipeline("default", lock=False):
+        require_write_pipeline().target_state = snapshot_target_state(item)
+        assert_no_target_drift("StillReleasedViewMut", item)
+
+
+class _IdentityEq:
+    """No ``__eq__`` of its own: equality is identity, so a copy never equals the original."""
+
+    def __init__(self) -> None:
+        self.value: int = 1
+
+
+class _NeverEqual:
+    """A non-reflexive ``__eq__`` (a NaN-like value): its copy never equals the original."""
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    @override
+    def __hash__(self) -> int:
+        return 0
+
+
+class _AmbiguousEq:
+    """An ``__eq__`` that raises ``ValueError`` (an array-like ambiguous comparison)."""
+
+    @override
+    def __eq__(self, other: object) -> NoReturn:
+        raise ValueError("ambiguous comparison")
+
+    @override
+    def __hash__(self) -> int:
+        return 0
+
+
+class _Uncopyable:
+    """Value equality, but its copy protocol raises ``TypeError``."""
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Uncopyable)
+
+    @override
+    def __hash__(self) -> int:
+        return 0
+
+    def __deepcopy__(self, memo: dict[int, object]) -> NoReturn:
+        raise TypeError("cannot copy")
+
+
+class _CopyRefused:
+    """A copy protocol that raises ``copy.Error``."""
+
+    def __deepcopy__(self, memo: dict[int, object]) -> NoReturn:
+        raise copy.Error("un-deep-copyable")
+
+
+class _Node:
+    """One link of a chain deeper than the recursion limit a deep copy walks with."""
+
+    def __init__(self, child: _Node | None) -> None:
+        self.child: _Node | None = child
+
+
+def _deep_chain() -> object:
+    node: _Node | None = None
+    for _ in range(5000):
+        node = _Node(node)
+    return node
+
+
+@pytest.mark.parametrize(
+    ("make", "replacement_error"),
+    [
+        pytest.param(_IdentityEq, ConfigurationError, id="identity-eq"),
+        pytest.param(_NeverEqual, ConfigurationError, id="non-reflexive-eq"),
+        pytest.param(_AmbiguousEq, ValueError, id="ambiguous-eq"),
+        pytest.param(lambda: Decimal("sNaN"), ConfigurationError, id="signalling-nan"),
+        pytest.param(_Uncopyable, ConfigurationError, id="uncopyable"),
+        pytest.param(_CopyRefused, ConfigurationError, id="copy-error"),
+        pytest.param(_deep_chain, ConfigurationError, id="too-deep"),
+    ],
+)
+def test_snapshot_residual_value_is_checked_for_replacement(
+    make: Callable[[], object],
+    replacement_error: type[Exception],
+) -> None:
+    """A value with neither value equality nor a working copy protocol is kept by reference.
+
+    The capture never raises: the copy's failure (or its unequal result) selects the
+    reference snapshot. The same object passes; a replacement fails closed, either
+    as drift or, when the comparison runs the captured value's raising ``__eq__``,
+    with what that consumer code raises.
+    """
+    item = product_models.Item(name="GuardResidual")
+    vars(item)["description"] = make()
+    with write_pipeline("default", lock=False):
+        pipeline = require_write_pipeline()
+        pipeline.target_state = snapshot_target_state(item)  # no raise
+        assert isinstance(pipeline.target_state["description"], _ReferenceSnapshot)
+        assert_no_target_drift("ResidualCleanMut", item)  # the same object: no raise
+        vars(item)["description"] = _IdentityEq()
+        with pytest.raises(replacement_error):
+            assert_no_target_drift("ResidualReplaceMut", item)
+
+
+def test_snapshot_target_state_wraps_every_value() -> None:
+    """Every captured value is a ``_ValueSnapshot``: the drift check asks each one, uniformly."""
+    for instance in (
+        product_models.Item(name="GuardEveryValue", attachment="a.png"),
+        ScalarSpecimen(payload={"k": [1]}, external_id=uuid.uuid4()),
+    ):
+        snapshot = snapshot_target_state(instance)
+        assert snapshot
+        assert all(isinstance(value, _ValueSnapshot) for value in snapshot.values())
 
 
 def test_field_fingerprint_covers_container_kinds_and_is_deterministic() -> None:

@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 21 to do.
+Progress: 20 to do.
 
 Every item below was re-verified at HEAD on 2026-10-22 by one research agent per item; each "Research" sub-bullet is
 that pass's finding and recommended landing.
@@ -28,14 +28,6 @@ From the full entries, 2026-10-21. Item numbers are that file's.
 
 ## To do: document for beta
 
-- [ ] 9. `django_strawberry_framework/utils/write_transaction.py::assert_no_target_drift` compares mutable custom values
-  by reference (`current is not value and current != value`), so an in-place mutation of a GeoDjango geometry,
-  `memoryview` or custom `to_python` object by a hostile hook is not detected (serializer flavor only)
-  - Research: reproduced. The
-    `django_strawberry_framework/utils/write_transaction.py::snapshot_target_state` docstring ("Immutable scalars are
-    kept by reference") overstates it: only the container types and `FieldFile` are compared by value. Fix that
-    docstring, add a comment at the `else` arm, and add one sentence to the glossary drift paragraph. Failing closed
-    on opaque values would reject every GIS model. Size S
 - [ ] 10. `django_strawberry_framework/utils/write_values.py::raw_choice_value` unwraps choice enums one level only, so a
   nested `ArrayField(ArrayField(choices))` keeps enum members in the inner lists (Postgres only)
   - Research: narrower than stated. The generated input never produces it (a nested `ArrayField` is a schema-build

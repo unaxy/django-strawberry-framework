@@ -3849,6 +3849,66 @@ def test_pipeline_publishes_authorized_pk_on_write_context(
     assert seen["authorized_pk"] == 7
 
 
+@pytest.mark.parametrize(
+    ("flag", "captured"),
+    [
+        pytest.param({}, False, id="default"),
+        pytest.param({"snapshot_target": False}, False, id="not_asked"),
+        pytest.param({"snapshot_target": True}, True, id="snapshot_target"),
+    ],
+)
+def test_pipeline_captures_target_state_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch,
+    flag: dict[str, bool],
+    *,
+    captured: bool,
+) -> None:
+    """Only a pipeline run with ``snapshot_target`` captures the located row's field values.
+
+    The serializer flavor is the one that checks the row for in-memory drift, so it
+    alone asks for the capture; every other flavor runs no value type's copy code
+    at the locate and publishes no ``target_state``.
+    """
+    located = SimpleNamespace(
+        pk=7,
+        get_deferred_fields=set,
+        _meta=SimpleNamespace(concrete_fields=[]),
+    )
+    snapshot = {"name": object()}
+    calls: list[object] = []
+    seen: dict[str, object] = {}
+
+    def recording_snapshot(instance: object) -> dict[str, object]:
+        calls.append(instance)
+        return snapshot
+
+    def probe_write(instance: Model | None, _decoded: object) -> Model | None:
+        seen["target_state"] = require_write_pipeline().target_state
+        return instance
+
+    mutation_cls = _pipeline_harness(monkeypatch)
+    monkeypatch.setattr(mutation_resolvers, "locate_instance", _returning(located))
+    monkeypatch.setattr(mutation_resolvers, "snapshot_target_state", recording_snapshot)
+
+    with (
+        patch.object(transaction, "atomic"),
+        managed_write_transaction("default"),
+    ):
+        result = object_result(
+            mutation_resolvers.run_write_pipeline_sync,
+            mutation_cls,
+            info=None,
+            data=None,
+            id_="ignored",
+            decode_step=_decode_marker,
+            write_step=probe_write,
+            **flag,
+        )
+    assert result == "ok"
+    assert calls == ([located] if captured else [])
+    assert seen["target_state"] is (snapshot if captured else None)
+
+
 def test_delete_pipeline_rejects_pk_drift_during_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

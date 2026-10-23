@@ -319,6 +319,7 @@ def run_write_pipeline_sync(
     decode_step: Callable[[models.Model | None], _DecodedT | StepFailure],
     write_step: Callable[[models.Model | None, _DecodedT], _SavedT | StepFailure],
     tail_step: Callable[[_SavedT], object] | None = None,
+    snapshot_target: bool = False,
 ) -> object:
     """Run the shared write orchestration every mutation flavor rides.
 
@@ -371,6 +372,12 @@ def run_write_pipeline_sync(
     A step that already answered ``conflict`` is not probed again, a create has no
     located row (its ``DoesNotExist`` propagates unprobed), and a success runs no
     probe.
+
+    ``snapshot_target`` captures the located row's ``target_state``
+    (``snapshot_target_state``) right after the locate. Only the serializer flavor
+    passes it: it is the one flavor whose write step checks the row for in-memory
+    drift, and the capture deep-copies field values, which runs a value type's own
+    ``__deepcopy__`` / ``__eq__``.
     """
     # The cooperative deadline (spec-047) BEFORE the pipeline's own transaction
     # opens: a write pipeline locates, locks, and writes rows, so an operation
@@ -431,13 +438,13 @@ def run_write_pipeline_sync(
         # claims "the authorized row" compares against THIS value, never against
         # the live ``instance.pk`` a hook could have re-pointed. The companion
         # ``target_state`` snapshot (the loaded concrete field values) backs the
-        # serializer flavor's pre-save in-memory drift rejection.
+        # serializer flavor's pre-save in-memory drift rejection, so only that
+        # flavor (``snapshot_target``) captures it.
         authorized_pk = None if instance is None else pk_of(instance)
         pipeline_context = require_write_pipeline()
         pipeline_context.authorized_pk = authorized_pk
-        pipeline_context.target_state = (
-            None if instance is None else snapshot_target_state(instance)
-        )
+        if snapshot_target and instance is not None:
+            pipeline_context.target_state = snapshot_target_state(instance)
 
         # The auth machinery (lazy user, permission set) may legitimately read a
         # DIFFERENT alias than the write alias under a divergent read/write

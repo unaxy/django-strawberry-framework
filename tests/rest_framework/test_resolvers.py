@@ -6040,6 +6040,59 @@ def test_hook_mutating_the_located_target_is_rejected_before_save() -> None:
 
 
 @pytest.mark.django_db
+def test_serializer_pipeline_captures_the_target_and_rejects_permission_drift() -> None:
+    """The serializer pipeline captures the located row, so a permission method's edit is caught.
+
+    Driven through ``resolve_serializer_sync``: the skeleton captures the target
+    snapshot only for a flavor that asks for it, and the serializer flavor does, so
+    a ``check_permission`` that ``setattr``-s the located row it was handed fails
+    closed before ``serializer.save()``.
+    """
+
+    class DriftSerializer(ModelSerializerBase[product_models.Item]):
+        class Meta:
+            model = product_models.Item
+            fields = ("name", "category")
+
+    mutation_cls = _bind_item_serializer_mutation(DriftSerializer, operation="update")
+    category = product_models.Category.objects.create(name="PipelineDriftCat")
+    item = product_models.Item.objects.create(name="PipelineDriftItem", category=category)
+
+    def drifting_permission(
+        self: SerializerMutation,
+        info: object,
+        operation: str,
+        data: object,
+        instance: object = None,
+    ) -> bool:
+        del self, info, operation, data  # the typed hook fixes these names
+        assert isinstance(instance, product_models.Item)
+        instance.name = "smuggled-by-permission"  # setattr the located row
+        return True
+
+    mutation_cls.check_permission = drifting_permission
+    request = HttpRequest()
+    request.user = User(username="u")
+    info = make_info(context=SimpleNamespace(request=request))
+    input_cls = mutation_cls._input_class
+    assert input_cls is not None
+    primary_type = mutation_cls._primary_type
+    assert primary_type is not None
+    with (
+        managed_write_transaction("default"),
+        pytest.raises(ConfigurationError, match="mutated in memory"),
+    ):
+        serializer_resolvers.resolve_serializer_sync(
+            mutation_cls,
+            info,
+            data=_keyword_constructor(input_cls)(name="LegitName"),
+            id=global_id_for(primary_type, saved_pk(item)),
+        )
+    item.refresh_from_db()
+    assert item.name == "PipelineDriftItem"
+
+
+@pytest.mark.django_db
 def test_save_kwargs_naming_a_model_field_is_rejected() -> None:
     """A save kwarg naming ANY model field is rejected (injection goes through injected_fields)."""
 
