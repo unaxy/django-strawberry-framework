@@ -21,6 +21,7 @@ from apps.library.models import (
     Branch,
     Edition,
     Genre,
+    MembershipCard,
     Patron,
     PatronProfile,
     Printing,
@@ -2418,7 +2419,7 @@ def test_ensure_connector_only_fields_adds_m2m_target_pk() -> None:
     plan = OptimizationPlan(only_fields=["name"])
     parent_field = FieldMeta.from_django_field(Book._meta.get_field("genres"))
 
-    _ensure_connector_only_fields(plan, parent_field)
+    _ensure_connector_only_fields(plan, parent_field, base_queryset=Genre.objects.all())
 
     assert plan.only_fields == ["name", "id"]
 
@@ -2431,7 +2432,7 @@ def test_ensure_connector_only_fields_logs_when_connector_unknown(
     parent_field = FieldMeta(name="generic", is_relation=True, one_to_many=True)
 
     caplog.set_level("DEBUG", logger=logger.name)
-    _ensure_connector_only_fields(plan, parent_field)
+    _ensure_connector_only_fields(plan, parent_field, base_queryset=Category.objects.all())
 
     assert plan.only_fields == ("name",)
     assert any("could not resolve connector column" in r.message for r in caplog.records)
@@ -2705,7 +2706,7 @@ def test_ensure_connector_only_fields_adds_reverse_o2o_connector() -> None:
     """
     plan = OptimizationPlan(only_fields=["id"])
     parent_field = FieldMeta.from_django_field(Patron._meta.get_field("card"))
-    _ensure_connector_only_fields(plan, parent_field)
+    _ensure_connector_only_fields(plan, parent_field, base_queryset=MembershipCard.objects.all())
 
     assert "patron_id" in plan.only_fields
 
@@ -2720,7 +2721,7 @@ def test_ensure_connector_only_fields_adds_generic_content_type() -> None:
     """
     plan = OptimizationPlan(only_fields=["tag"])
     parent_field = FieldMeta.from_django_field(Branch._meta.get_field("tags"))
-    _ensure_connector_only_fields(plan, parent_field)
+    _ensure_connector_only_fields(plan, parent_field, base_queryset=TaggedItem.objects.all())
 
     object_id = _attname(TaggedItem, "object_id")
     content_type_id = _attname(TaggedItem, "content_type")

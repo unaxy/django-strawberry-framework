@@ -55,6 +55,7 @@ from .nested_planner import (
 )
 from .plans import (
     OptimizationPlan,
+    _consumer_projection,
     append_prefetch_unique,
     append_unique,
     append_unique_many,
@@ -1254,7 +1255,7 @@ def _build_prefetch_child_queryset_from_base(
         info=info,
         runtime_prefixes=runtime_paths,
     )
-    _ensure_connector_only_fields(child_plan, django_field)
+    _ensure_connector_only_fields(child_plan, django_field, base_queryset=base_queryset)
     # The base is a consumer queryset too (the target type's hook, its default
     # manager), reconciled exactly as the root reconciles the resolver's: a
     # generated ``Prefetch`` never collides with a lookup the hook added
@@ -1639,7 +1640,12 @@ def _has_custom_id_resolver(
     return origin_has_custom_id_resolver(target_type, target_pk_name)
 
 
-def _ensure_connector_only_fields(plan: OptimizationPlan, parent_field: FieldMeta) -> None:
+def _ensure_connector_only_fields(
+    plan: OptimizationPlan,
+    parent_field: FieldMeta,
+    *,
+    base_queryset: QuerySet[models.Model],
+) -> None:
     """Inject columns Django needs to attach prefetched rows to parents.
 
     Uses ``RelationJoinDescriptor.prefetch_attach_columns`` so a
@@ -1647,8 +1653,16 @@ def _ensure_connector_only_fields(plan: OptimizationPlan, parent_field: FieldMet
     that shares this writer) loads both the ``object_id`` connector and the
     ``content_type_id`` morph half of Django's attach key - the same completeness
     ``_project_scalar_only_window`` already applied for scalar-only windows.
+
+    The columns are recorded whenever the child rows will be projected: the child
+    plan reads a column of its own, or ``base_queryset`` (the target type's hook
+    or default manager) already carries an ``.only()`` / ``.defer()``, which a
+    selection reading no column (``{ items { __typename } }``) would otherwise
+    leave deferring the connector, so the attach would load it once per row. A
+    plan reading no column over an unprojected base records nothing and the child
+    rows load whole.
     """
-    if not plan.only_fields:
+    if not plan.only_fields and _consumer_projection(base_queryset) is None:
         return
     columns = classify_relation_join(parent_field).prefetch_attach_columns
     if not columns:
