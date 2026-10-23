@@ -30,15 +30,21 @@ Worker commands
         worker can read or edit files there. A copy whose sync has not
         finished is synced first, after any command running in it.
     ``diff <ITEM_BASELINE> [--output FILE | --check FILE] -- <paths...>``
-        The item diff: ``git diff --binary <ITEM_BASELINE> -- <paths>``
-        (tracked and staged changes, deletions, renames), then each
-        untracked, non-ignored file under ``<paths>`` once, in sorted order,
-        as ``git diff --binary --no-index /dev/null <file>``. Paths are
-        repository-relative and the caller's global git config is ignored,
-        so two copies of one change give the same bytes. The last line is
-        ``sha256 <hex>`` of the bytes before it. ``--output`` writes it to a
-        file; ``--check`` recomputes it and exits 1 unless the file holds
-        exactly those bytes.
+        The item diff: one ``git diff-tree -p --binary`` of the
+        ``<ITEM_BASELINE>`` tree (any tree-ish) against the working content
+        under ``<paths>``, new files included, in path order. The content is
+        read into a private index, so for every file git does not ignore the
+        diff is independent of the index: staging, unstaging or ``git rm
+        --cached`` never changes a byte (of the index, only whether an ignored
+        file is force-added counts), and the shared ``.git/index`` is never
+        rewritten. A new file is one the baseline lacks that git tracks or
+        does not ignore; a moved file is found as a rename. Paths are
+        repository-relative. The caller's global and system git config and the
+        XDG global ignore and attributes files are ignored (git 2.32 or later,
+        which reads ``GIT_CONFIG_GLOBAL``) and the repository's own config is
+        honoured, so two copies of one change give the same bytes. The last line is ``sha256 <hex>``
+        of the bytes before it. ``--output`` writes it to a file; ``--check``
+        recomputes it and exits 1 unless the file holds exactly those bytes.
 
 Worker-0 commands
     ``baseline <flow>/<item>``
@@ -115,13 +121,15 @@ from a command that holds it.
 Guarantees, each one a hand-run failure this encodes away:
 
 * **Exact copies.** The copy is the shared tree's ``git ls-files -co
-  --exclude-standard`` listing plus ``.python-version``. Cycle scratch is left
-  out: ``output/``, ``docs/shadow/``, ``temp-tests/``, ``worker-memory/`` and
-  any ``*-ws`` folder a harness parked in the tree. A resync mirrors that set
-  byte for byte, deletes every other file except ``.venv`` (caches included),
-  runs ``uv sync --frozen --group pg`` and asserts the copy's package digest
-  equals the shared tree's. A shared file that changes mid-copy restarts the
-  sync.
+  --exclude-standard`` listing plus ``.python-version``; like every git call
+  here, the listing reads only the repository's own config and ignore rules,
+  never the caller's global or system config or XDG ignore file. Cycle
+  scratch is left out: ``output/``, ``docs/shadow/``, ``temp-tests/``,
+  ``worker-memory/`` and any ``*-ws`` folder a harness parked in the tree. A
+  resync mirrors that set byte for byte, deletes every other file except
+  ``.venv`` (caches included), runs ``uv sync --frozen --group pg`` and
+  asserts the copy's package digest equals the shared tree's. A shared file
+  that changes mid-copy restarts the sync.
 * **Copies are reset in place, never cloned.** A virtualenv's entry scripts
   name their own interpreter by absolute path. A cloned ``.venv/bin/pytest``
   would therefore import the other copy's package. Reuse keeps each copy at
@@ -237,6 +245,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, BinaryIO, NoReturn, TypedDict, cast, overload
 
 import tomli
@@ -506,7 +515,33 @@ def clean_env(base: dict[str, str] | None = None, **extra: str) -> dict[str, str
     return env
 
 
-def _git(repo_root: Path, *args: str) -> str:
+# The caller's global and system git config, and the XDG config directory (global ignore and
+# attributes files), never reach a result: only the repository's own config does.
+REPOSITORY_CONFIG_ONLY: Mapping[str, str] = MappingProxyType(
+    {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "XDG_CONFIG_HOME": os.devnull},
+)
+# ``stash create`` and ``commit-tree`` need an identity the isolated config no longer supplies.
+SCRATCH_IDENTITY: Mapping[str, str] = MappingProxyType(
+    {
+        "GIT_AUTHOR_NAME": "workspace",
+        "GIT_AUTHOR_EMAIL": "workspace@localhost",
+        "GIT_COMMITTER_NAME": "workspace",
+        "GIT_COMMITTER_EMAIL": "workspace@localhost",
+    },
+)
+
+
+def _git(
+    repo_root: Path,
+    *args: str,
+    env: Mapping[str, str] | None = None,
+    stdin: bytes | None = None,
+) -> str:
+    """Run ``git -C repo_root args`` under :data:`REPOSITORY_CONFIG_ONLY` and return its stdout.
+
+    ``env`` adds variables on top (a private ``GIT_INDEX_FILE``, an identity); ``stdin`` feeds
+    the command (``update-index -z --stdin``).
+    """
     completed = subprocess.run(
         [
             "git",
@@ -515,7 +550,8 @@ def _git(repo_root: Path, *args: str) -> str:
             *args,
         ],
         capture_output=True,
-        env=clean_env(),
+        input=stdin,
+        env={**clean_env(), **REPOSITORY_CONFIG_ONLY, **(env or {})},
         check=False,
     )
     if completed.returncode != 0:
@@ -528,63 +564,148 @@ def _git(repo_root: Path, *args: str) -> str:
 def baseline_sha(repo_root: Path) -> str:
     """Return ``git stash create``, or the ``HEAD`` sha when the tree has no tracked change."""
     return (
-        _git(repo_root, "stash", "create").strip() or _git(repo_root, "rev-parse", "HEAD").strip()
+        _git(repo_root, "stash", "create", env=SCRATCH_IDENTITY).strip()
+        or _git(repo_root, "rev-parse", "HEAD").strip()
     )
 
 
-def _git_diff(repo_root: Path, *args: str, success: frozenset[int]) -> bytes:
-    # Only the repository's own config: a caller's global or system diff settings never
-    # reach the bytes, and the flags pin what the repository config could still vary.
-    completed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo_root),
-            "diff",
-            "--binary",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--find-renames",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            *args,
-        ],
-        capture_output=True,
-        env=clean_env(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"),
-        check=False,
-    )
-    if completed.returncode not in success:
-        detail = completed.stderr.decode("utf-8", "replace").strip()
-        msg = f"git diff {' '.join(args)} failed ({completed.returncode}): {detail}"
-        raise WorkspaceError(msg)
-    return completed.stdout
+def _null_separated(listing: str) -> list[str]:
+    return [name for name in listing.split("\0") if name]
+
+
+def _stdin_names(names: Iterable[str]) -> bytes:
+    return "".join(f"{name}\0" for name in names).encode("utf-8", "surrogateescape")
+
+
+@contextlib.contextmanager
+def content_index(
+    repo_root: Path,
+    base: str,
+    pathspecs: Sequence[str] = (),
+    *,
+    names: Iterable[str] | None = None,
+    work_tree: Path | None = None,
+) -> Generator[dict[str, str], None, None]:
+    """Yield the environment of a private index: ``base`` overlaid with the working content.
+
+    The index lives in a temporary directory, so the shared ``.git/index`` is neither used for
+    its stat data nor rewritten, and what the private one holds is a function of ``base`` and
+    the files on disk. ``base`` is any tree-ish. ``names`` (default: every ``base`` entry under
+    ``pathspecs``, every path when empty, plus every file there that the shared index tracks or
+    git does not ignore, a read-only listing that keeps a force-added ignored file) are
+    refreshed from ``work_tree`` (default ``repo_root``); one that is no longer a file or link
+    there is dropped. A file ``base`` holds that is now a directory, and the reverse, both
+    resolve; a link to a directory stays a link, and a nested repository the shared index
+    tracks stays a gitlink at its checked-out commit. By default, a file a sparse checkout
+    leaves out of the work tree keeps its ``base`` entry.
+    """
+    with tempfile.TemporaryDirectory(prefix="dsf-index-") as scratch:
+        env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        if work_tree is not None:
+            env["GIT_WORK_TREE"] = str(work_tree)
+        _ = _git(repo_root, "read-tree", base, env=env)
+        root = repo_root if work_tree is None else work_tree
+        if names is None:
+            held = _git(repo_root, "ls-files", "-z", "-c", "--", *pathspecs, env=env)
+            live = _git(
+                repo_root,
+                "ls-files",
+                "-z",
+                "-c",
+                "-o",
+                "--exclude-standard",
+                "--",
+                *pathspecs,
+            )
+            # ``-o`` lists an untracked nested repository as ``name/``: it stays out, as git
+            # leaves it out of ``git add -A``.
+            names = {
+                *_null_separated(held),
+                *(name for name in _null_separated(live) if not name.endswith("/")),
+            }
+            # A sparse checkout's skip-worktree entries are absent by design, never deleted.
+            tagged = _git(repo_root, "ls-files", "-z", "-t", "--", *pathspecs)
+            names -= {
+                entry[2:]
+                for entry in _null_separated(tagged)
+                if entry.startswith("S ") and not os.path.lexists(root / entry[2:])
+            }
+        present: list[str] = []
+        gone: list[str] = []
+        for name in sorted(names):
+            path = root / name
+            # A link is a file to git, and a directory holding ``.git`` is a gitlink.
+            is_entry = os.path.lexists(path) and (
+                path.is_symlink() or not path.is_dir() or (path / ".git").exists()
+            )
+            (present if is_entry else gone).append(name)
+        for flags, group in (("--force-remove", gone), ("--add", present)):
+            if group:
+                _ = _git(
+                    repo_root,
+                    "update-index",
+                    "-z",
+                    flags,
+                    "--replace",
+                    "--stdin",
+                    env=env,
+                    stdin=_stdin_names(group),
+                )
+        yield env
+
+
+def content_tree(
+    repo_root: Path,
+    base: str,
+    pathspecs: Sequence[str] = (),
+    *,
+    names: Iterable[str] | None = None,
+    work_tree: Path | None = None,
+) -> str:
+    """Return the tree id of ``base`` overlaid with the working content (see :func:`content_index`).
+
+    The tree is written to the repository's object store, so it outlives the private index.
+    """
+    with content_index(repo_root, base, pathspecs, names=names, work_tree=work_tree) as env:
+        return _git(repo_root, "write-tree", env=env).strip()
 
 
 def item_diff(repo_root: Path, baseline: str, paths: Sequence[str]) -> bytes:
     """Return an item's diff since ``baseline`` under ``paths``, ending ``sha256 <hex>``.
 
-    ``git diff <baseline>`` carries every tracked and staged change, deletions and renames
-    included; each untracked, non-ignored file under ``paths`` follows once, in sorted order, as
-    its ``git diff --no-index /dev/null <file>``. Paths are repository-relative, so two copies
-    of one change give the same bytes.
+    One ``git diff-tree -p --binary`` of the ``baseline`` tree against :func:`content_tree`'s
+    tree of the working content under ``paths``, new files included, in path order. Renames and
+    deletions are found by content, and for every file git does not ignore the diff is
+    independent of the index: neither staging, unstaging nor ``git rm --cached`` moves a byte
+    (only whether an ignored file is force-added counts), and the shared ``.git/index`` is never
+    written. Paths are repository-relative, :func:`_git` keeps the caller's global and system
+    config out, and the flags fix colour, prefixes, rename detection and the external diff and
+    textconv drivers whatever the repository's config says, so two copies of one change give the
+    same bytes.
     """
     if not paths:
         msg = "diff needs at least one path after --"
         raise WorkspaceError(msg)
-    body = bytearray(_git_diff(repo_root, baseline, "--", *paths, success=frozenset({0})))
-    untracked = _git(repo_root, "ls-files", "-z", "--others", "--exclude-standard", "--", *paths)
-    for relative in sorted(name for name in untracked.split("\0") if name):
-        # ``--no-index`` exits 1 when the files differ, which an addition always does.
-        body += _git_diff(
-            repo_root,
-            "--no-index",
-            "--",
-            os.devnull,
-            relative,
-            success=frozenset({0, 1}),
-        )
-    return bytes(body) + f"sha256 {hashlib.sha256(body).hexdigest()}\n".encode("ascii")
+    tree = content_tree(repo_root, baseline, paths)
+    text = _git(
+        repo_root,
+        "diff-tree",
+        "-r",
+        "-p",
+        "--binary",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--find-renames",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        baseline,
+        tree,
+        "--",
+        *paths,
+    )
+    body = text.encode("utf-8", "surrogateescape")
+    return body + f"sha256 {hashlib.sha256(body).hexdigest()}\n".encode("ascii")
 
 
 def _still_names(path: Path, descriptor: int) -> bool:
