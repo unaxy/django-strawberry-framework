@@ -117,10 +117,11 @@ _PLAN_UNREAD: Final = _PlanUnread.UNREAD
 
 # Sentinel returned by ``_build_fk_id_stub`` when the FK ``attname`` is deferred
 # on ``root`` (spec-035 Decision 5). FK-id elision reads the FK column off the
-# parent row; G2 guarantees the row loads for OPTIMIZER-owned projections, but
-# under a non-``QUERY`` operation the plan writes no projection, so a
-# consumer-returned ``.only(...)`` stays as returned and can defer the FK
-# column while the plan still carries the elision. Reading the
+# parent row. A plan applied to a queryset loads that column whatever the
+# operation (the plan records it and widens any consumer projection), but a row
+# the plan never projected can still defer it: a consumer-owned
+# ``Prefetch(queryset=...only(...))`` loads its rows as the consumer wrote them
+# while the plan carries the elision for the relation below. Reading the
 # deferred column here would silently lazy-load per row - and because the
 # relation is recorded as planned, strictness would never see it. The stub
 # signals "elision unsafe" instead of reading the column; ``forward_resolver``
@@ -166,14 +167,13 @@ def _build_fk_id_stub(root: object, field_meta: FieldMeta) -> object:
     """Build a target-model stub from ``root.<attname>`` for B2 id-only selections.
 
     Returns ``_FK_ELISION_UNSAFE`` when ``field_meta.attname`` is deferred on
-    ``root`` (spec-035 Decision 5 - a consumer ``.only(...)`` that dropped the FK
-    column stays as returned under a non-``QUERY`` operation, whose plan writes no
-    projection, while the plan still carries the elision). In that case the
-    column is NOT read (which would be the silent per-row lazy load Decision 5
-    forbids); the caller falls back loudly so
-    strictness sees the access. A fully-loaded column (the
-    optimizer-owned-projection norm and the consumer-``.only()``-that-includes-
-    the-FK case) builds the stub as before.
+    ``root`` (spec-035 Decision 5): a row the plan did not project, such as one a
+    consumer-owned ``Prefetch(queryset=...only(...))`` loaded without the FK
+    column, while the plan still carries the elision. In that case the column is
+    NOT read (which would be the silent per-row lazy load Decision 5 forbids);
+    the caller falls back loudly so strictness sees the access. A loaded column
+    (every row of a queryset the plan was applied to, and a consumer projection
+    that includes the FK) builds the stub.
 
     The stub is the framework's own speculative instance: a pk-only row the
     consumer never asked for, handed to a target model whose ``__init__`` or

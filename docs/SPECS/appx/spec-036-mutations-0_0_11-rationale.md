@@ -125,7 +125,7 @@ Spec: [Decision 9 — Optimizer composition and the `spec-035` G2 live-test hand
 ### Alternatives considered (and rejected)
 
 - **Return the written instance without re-fetching.** Rejected: a freshly `save()`d instance has no related rows loaded, so any relation in the response selection N+1s; the re-fetch is what makes the response selection planable.
-- **Disable the optimizer for mutation returns entirely.** Rejected: the response selection still needs `select_related` / `prefetch_related`; only `.only(...)` is unsafe under a mutation, which is exactly what G2 gates, so a coarser disable would regress the join / prefetch planning.
+- **Disable the optimizer for mutation returns entirely.** Rejected: the response selection still needs `select_related` / `prefetch_related`; only a `.only(...)` the optimizer introduces is unsafe under a mutation, which is exactly what G2 gates, so a coarser disable would regress the join / prefetch planning.
 - **Re-fetch through the visibility `get_queryset` (Medium-1).** Rejected: write authorization is model permission, not visibility, so an authorized caller can write a row the visibility hook hides, and a filtered re-fetch would return a null object after a successful write.
 
 ## Decision 10 — Permission composition: `update` / `delete` lookups run through the target `get_queryset`

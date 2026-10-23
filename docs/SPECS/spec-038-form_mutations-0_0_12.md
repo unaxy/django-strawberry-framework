@@ -97,7 +97,7 @@ vocabulary used throughout the spec:
   cooperation. The `ModelForm` payload's object is re-fetched and optimizer-planned
   for the response selection through the **same** `036` re-fetch path, so the
   [`spec-035`][spec-035] **G2** mutation gate (keep `select_related` /
-  `prefetch_related`, suppress `.only(...)`) comes for free
+  `prefetch_related`, introduce no `.only(...)`) comes for free
   ([Decision 9](#decision-9--optimizer-composition-the-modelform-payload-re-fetch-rides-the-spec-036-g2-path)).
 - [`Meta.primary`][glossary-metaprimary] / [`Meta.model`][glossary-metamodel] /
   [`DjangoType`][glossary-djangotype] — the return-payload type resolves the form
@@ -373,7 +373,8 @@ package-internal; Slice 4 is the live consumer surface.
     one-field change), the **plain-form `ok` + `errors` payload + `perform_mutate`
     default/override**, the visibility-scoped `update` locate (hidden row →
     not-found), write-auth denial vs success, sync + async, and the G2 plan-shape (the
-    `ModelForm` re-fetch keeps `select_related` / `prefetch_related`, no `.only(...)`).
+    `ModelForm` re-fetch keeps `select_related` / `prefetch_related` and introduces no
+    `.only(...)`).
 - [ ] Slice 4: the products live form surface (per
   [Decision 12](#decision-12--live-coverage-products-grows-a-modelform-and-a-plain-form-mutation))
   - [ ] [`examples/fakeshop/apps/products/forms.py`][products-forms]: the
@@ -1714,9 +1715,10 @@ The `ModelForm` payload's object (pipeline step 6) is re-fetched by pk and route
 through the **same** `036` `refetch_optimized` /
 [`DjangoOptimizerExtension`][glossary-djangooptimizerextension] path the model-driven
 mutation uses. Because the operation is a mutation, the [`spec-035`][spec-035] **G2**
-gate keeps `select_related` / `prefetch_related` but suppresses
-[`.only(...)`][glossary-only-projection] — so the re-fetched instance carries no
-selection-shaped deferred-field set. The re-fetch is **by pk without the visibility
+gate keeps `select_related` / `prefetch_related` and introduces no
+[`.only(...)`][glossary-only-projection] on a queryset that carries none (a projection
+the target type's default manager carries is widened to the selection) — so the
+re-fetched instance carries no deferred-field set of the optimizer's making. The re-fetch is **by pk without the visibility
 filter** (the `036` re-fetch exception: the actor just wrote the row, so round-tripping
 their own write is not an existence leak).
 
@@ -2334,7 +2336,8 @@ behavior reachable through `/graphql/`, package tests own internals.
     denial vs success; sync + async (the async path runs the body in one
     `sync_to_async(thread_sensitive=True)` call); the
     [`SyncMisuseError`][glossary-syncmisuseerror] async-hook-from-sync path; the G2
-    re-fetch plan-shape (`select_related` / `prefetch_related` kept, no `.only(...)`).
+    re-fetch plan-shape (`select_related` / `prefetch_related` kept, no `.only(...)`
+    introduced): `tests/forms/test_resolvers.py::test_modelform_refetch_keeps_select_related_and_introduces_no_projection`.
   - [`tests/mutations/test_fields.py`][test-mutations] — the
     [`DjangoMutationField`][glossary-djangomutationfield] target check accepts a
     `DjangoModelFormMutation` and the plain-form flavor
@@ -2512,7 +2515,7 @@ The completion contract.
    field cleaned to a value such a `null=False` column stores (`False`, `""`);
    the `ModelForm` payload object is re-fetched through the
    `036` optimizer path (G2: `select_related` / `prefetch_related` kept, no
-   [`.only(...)`][glossary-only-projection]); the **plain `DjangoFormMutation`
+   [`.only(...)`][glossary-only-projection] introduced); the **plain `DjangoFormMutation`
    returns the pinned `ok: Boolean!` + `errors: [FieldError!]!` payload** with
    `perform_mutate(self, form, info)` (default `form.save()`-if-present else no-op);
    [`mutations/fields.py`][mutations-fields]'s

@@ -10,7 +10,7 @@ DjangoModelPermission,djangomodelpermission,Default write-auth inherited by the 
 get_queryset visibility hook,get_queryset-visibility-hook,The visibility seam the update locate composes with.
 apply_cascade_permissions,apply_cascade_permissions,Cascade visibility rides inside a consumer's get_queryset, which the update locate composes with (the form pipeline does not call the cascade directly).
 DjangoOptimizerExtension,djangooptimizerextension,Post-save re-fetch optimizer the ModelForm payload rides (036 path).
-only() projection,only-projection,The G2 mutation gate suppresses .only() on the re-fetch.
+only() projection,only-projection,The G2 mutation gate introduces no .only() on the re-fetch.
 Meta.primary,metaprimary,Return-payload type resolves the form model's primary DjangoType.
 Meta.model,metamodel,The model flavor's _resolve_model source; the form flavor resolves the model from form_class._meta.model.
 Meta.fields,metafields,Narrows which FORM fields become input fields.

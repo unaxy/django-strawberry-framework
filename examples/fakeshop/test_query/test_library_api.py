@@ -69,6 +69,7 @@ from django_strawberry_framework import (
     DjangoConnectionField,
     DjangoListField,
     DjangoMutation,
+    DjangoMutationField,
     DjangoNodesField,
     DjangoOptimizerExtension,
     DjangoSchema,
@@ -18733,19 +18734,45 @@ def test_library_card_deferred_projection_survives_select_related() -> None:
     assert "library_patron" in captured[0]["sql"]
 
 
+def _only_genres() -> QuerySet[models.Genre]:
+    """A root resolver whose queryset loads only the genre pk."""
+    return models.Genre.objects.order_by("pk").only("id")
+
+
+def _deferred_genres() -> QuerySet[models.Genre]:
+    """A root resolver whose queryset defers the genre name."""
+    return models.Genre.objects.order_by("pk").defer("name")
+
+
+def _projected_loans() -> QuerySet[models.Loan]:
+    """A root resolver whose queryset loads only the loan note, its book key deferred."""
+    return models.Loan.objects.order_by("pk").only("note")
+
+
+def _consumer_prefetched_books() -> QuerySet[models.Book]:
+    """A root resolver whose own ``Prefetch`` loads each loan with only its note."""
+    return models.Book.objects.order_by("pk").prefetch_related(
+        Prefetch("loans", queryset=models.Loan.objects.order_by("pk").only("note")),
+    )
+
+
 def _hooked_holder_schema(
     *,
     genres: Callable[[QuerySet[models.Genre]], QuerySet[models.Genre]] | None = None,
     books: Callable[[QuerySet[models.Book]], QuerySet[models.Book]] | None = None,
     loans: Callable[[QuerySet[models.Loan]], QuerySet[models.Loan]] | None = None,
     tags: Callable[[QuerySet[models.TaggedItem]], QuerySet[models.TaggedItem]] | None = None,
+    strictness: str = "off",
 ) -> strawberry.Schema:
     """Holder types whose ``get_queryset`` hooks shape the querysets the optimizer receives.
 
     Each hook is the consumer's own ``get_queryset``: a root list field applies
     it to the root queryset, and a planned ``Prefetch`` child applies it to the
     child's base queryset, so whatever ``.only()`` / ``.defer()`` /
-    ``prefetch_related`` it adds meets the plan's projection in one writer.
+    ``prefetch_related`` it adds meets the plan's projection in one writer. The
+    ``Mutation`` type repeats the ``Query`` fields, so one selection runs under
+    either operation, and adds ``updateShelf``, whose post-write re-fetch plans
+    its ``result`` selection through the same hooks.
     """
 
     class HolderHookedGenreType(DjangoType):
@@ -18775,8 +18802,21 @@ def _hooked_holder_schema(
 
         class Meta:
             model = models.Loan
-            fields = ("id", "note")
+            fields = (
+                "id",
+                "note",
+                "book",
+                "patron",
+            )
             name = "HolderHookedLoanType"
+
+    class HolderHookedPatronType(DjangoType):
+        class Meta:
+            model = models.Patron
+            fields = ("id", "name")
+            name = "HolderHookedPatronType"
+
+    assert registry.get(models.Patron) is HolderHookedPatronType
 
     class HolderHookedBookType(DjangoType):
         @classmethod
@@ -18796,6 +18836,7 @@ def _hooked_holder_schema(
                 "subtitle",
                 "loans",
             )
+            interfaces = (relay.Node,)
             name = "HolderHookedBookType"
 
     assert registry.get(models.Book) is HolderHookedBookType
@@ -18804,7 +18845,11 @@ def _hooked_holder_schema(
         class Meta:
             model = models.Shelf
             fields = ("id", "code", "books")
+            interfaces = (relay.Node,)
+            relation_shapes = {"books": "both"}
             name = "HolderHookedShelfType"
+
+    assert registry.get(models.Shelf) is HolderHookedShelfType
 
     class HolderHookedTagType(DjangoType):
         @classmethod
@@ -18821,16 +18866,67 @@ def _hooked_holder_schema(
             fields = ("id", "tag")
             name = "HolderHookedTagType"
 
+    class HolderUpdateShelf(DjangoMutation):
+        class Meta:
+            model = models.Shelf
+            operation = "update"
+            fields = ("code",)
+            permission_classes = []
+
     @strawberry.type
     class Query:
         genres: list[HolderHookedGenreType] = DjangoListField(HolderHookedGenreType)
         shelves: list[HolderHookedShelfType] = DjangoListField(HolderHookedShelfType)
         loans: list[HolderHookedLoanType] = DjangoListField(HolderHookedLoanType)
         tags: list[HolderHookedTagType] = DjangoListField(HolderHookedTagType)
+        only_genres: QuerySet[models.Genre] = strawberry.field(
+            resolver=_only_genres,
+            graphql_type=list[HolderHookedGenreType],
+        )
+        deferred_genres: QuerySet[models.Genre] = strawberry.field(
+            resolver=_deferred_genres,
+            graphql_type=list[HolderHookedGenreType],
+        )
+        projected_loans: QuerySet[models.Loan] = strawberry.field(
+            resolver=_projected_loans,
+            graphql_type=list[HolderHookedLoanType],
+        )
+        consumer_prefetched_books: QuerySet[models.Book] = strawberry.field(
+            resolver=_consumer_prefetched_books,
+            graphql_type=list[HolderHookedBookType],
+        )
+
+    @strawberry.type
+    class Mutation:
+        genres: list[HolderHookedGenreType] = DjangoListField(HolderHookedGenreType)
+        shelves: list[HolderHookedShelfType] = DjangoListField(HolderHookedShelfType)
+        loans: list[HolderHookedLoanType] = DjangoListField(HolderHookedLoanType)
+        only_genres: QuerySet[models.Genre] = strawberry.mutation(
+            resolver=_only_genres,
+            graphql_type=list[HolderHookedGenreType],
+        )
+        deferred_genres: QuerySet[models.Genre] = strawberry.mutation(
+            resolver=_deferred_genres,
+            graphql_type=list[HolderHookedGenreType],
+        )
+        projected_loans: QuerySet[models.Loan] = strawberry.mutation(
+            resolver=_projected_loans,
+            graphql_type=list[HolderHookedLoanType],
+        )
+        consumer_prefetched_books: QuerySet[models.Book] = strawberry.mutation(
+            resolver=_consumer_prefetched_books,
+            graphql_type=list[HolderHookedBookType],
+        )
+        update_shelf = DjangoMutationField(HolderUpdateShelf)
 
     finalize_django_types()
-    optimizer = DjangoOptimizerExtension()
-    return strawberry.Schema(query=Query, extensions=[lambda: optimizer])
+    optimizer = DjangoOptimizerExtension(strictness=strictness)
+    return DjangoSchema(
+        query=Query,
+        mutation=Mutation,
+        config=strawberry_config(),
+        extensions=[lambda: optimizer],
+    )
 
 
 def _post_hooked_holder(
@@ -18972,6 +19068,280 @@ def test_library_child_hook_prefetch_meets_the_planned_prefetch() -> None:
         {"title": "Volume 2", "loans": [{"note": "loan 2"}]},
     ]
     assert len(statements) == 3, statements
+
+
+def _seed_hooked_holder_graph() -> None:
+    """The subtitled books plus two more genres, so each root list holds several rows."""
+    _seed_subtitled_books()
+    models.Genre.objects.create(name="Mystery")
+    models.Genre.objects.create(name="History")
+
+
+def _books_only_title() -> strawberry.Schema:
+    """The holder schema whose book hook keeps only ``title``."""
+    return _hooked_holder_schema(books=lambda queryset: queryset.only("title"))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["query", "mutation"])
+@pytest.mark.parametrize(
+    (
+        "document",
+        "build",
+        "statements",
+        "read_column",
+    ),
+    [
+        pytest.param(
+            "{ onlyGenres { name } }",
+            _hooked_holder_schema,
+            1,
+            '"library_genre"."name"',
+            id="root-resolver-only",
+        ),
+        pytest.param(
+            "{ deferredGenres { name } }",
+            _hooked_holder_schema,
+            1,
+            '"library_genre"."name"',
+            id="root-resolver-defer",
+        ),
+        pytest.param(
+            "{ shelves { code books { subtitle } } }",
+            _books_only_title,
+            2,
+            '"library_book"."subtitle"',
+            id="child-hook",
+        ),
+        pytest.param(
+            "{ shelves { code booksConnection(first: 10) { edges { node { subtitle } } } } }",
+            _books_only_title,
+            2,
+            '"library_book"."subtitle"',
+            id="nested-connection",
+        ),
+        pytest.param(
+            "{ shelves { code booksConnection(first: 10) { pageInfo { hasNextPage } } } }",
+            _books_only_title,
+            2,
+            '"library_book"."shelf_id"',
+            id="scalar-only-window",
+        ),
+    ],
+)
+def test_library_consumer_projection_runs_the_same_statements_under_either_operation(
+    operation: str,
+    document: str,
+    build: Callable[[], strawberry.Schema],
+    statements: int,
+    read_column: str,
+) -> None:
+    """A consumer ``.only()`` / ``.defer()`` is widened to the selection under a mutation too.
+
+    A root resolver's projection, a child hook's ``.only("title")`` under a planned
+    ``Prefetch``, a nested connection window and a scalar-only window: the
+    ``Mutation`` type serves the same selection as the ``Query`` type, and both
+    operations load every selected column (and every attach connector) with the
+    consumer's in the planned statements. A column left deferred would load once
+    per row, so the statement count is the proof.
+    """
+    _seed_hooked_holder_graph()
+
+    payload, sql = _post_hooked_holder(f"{operation} {document}", build)
+
+    assert payload.get("data"), payload
+    assert len(sql) == statements, sql
+    assert read_column in sql[-1], sql[-1]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("operation", "full_row"),
+    [("query", False), ("mutation", True)],
+    ids=["query-projects", "mutation-loads-whole"],
+)
+def test_library_unprojected_queryset_projects_only_under_a_query(
+    operation: str,
+    *,
+    full_row: bool,
+) -> None:
+    """A queryset with no projection of its own is projected only by a query.
+
+    ``loans { note patron { name } }`` plans a JOIN under both operations. The query
+    narrows both rows to the selected columns; the mutation loads both rows whole,
+    so a resolver that later saves the returned row never meets a deferred-field
+    set the optimizer introduced. One statement either way.
+    """
+    _seed_subtitled_books()
+
+    _payload, sql = _post_hooked_holder(
+        f"{operation} {{ loans {{ note patron {{ name }} }} }}",
+        _hooked_holder_schema,
+    )
+
+    assert len(sql) == 1, sql
+    assert 'JOIN "library_patron"' in sql[0], sql[0]
+    for column in ('"library_loan"."book_id"', '"library_patron"."email"'):
+        assert (column in sql[0]) is full_row, sql[0]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["query", "mutation"])
+def test_library_root_projection_keeps_the_planned_join_under_raise(operation: str) -> None:
+    """A root ``.only("note")`` meets a planned forward-FK JOIN under ``strictness="raise"``.
+
+    The loan's ``patron_id`` is deferred by the resolver while the selection reads
+    ``patron { name }``: the plan writes the key and the joined column with the
+    resolver's ``note``, so the JOIN stands, the relation is planned (no
+    ``Unplanned N+1``) and the page is one statement under either operation.
+    """
+    _seed_subtitled_books()
+
+    payload, sql = _post_hooked_holder(
+        f"{operation} {{ projectedLoans {{ note patron {{ name }} }} }}",
+        lambda: _hooked_holder_schema(strictness="raise"),
+    )
+
+    assert [
+        json_str(loan, "patron", "name") for loan in json_list(payload, "data", "projectedLoans")
+    ] == ["Ada"] * 4
+    assert len(sql) == 1, sql
+    assert 'JOIN "library_patron"' in sql[0], sql[0]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["query", "mutation"])
+def test_library_consumer_prefetch_deferring_a_key_falls_back_loudly(
+    operation: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A consumer-owned ``Prefetch`` row that defers an elided FK key is not read silently.
+
+    The resolver's own ``Prefetch("loans", queryset=Loan.objects.only("note"))``
+    wins over the planned one, so its loans arrive as the consumer wrote them,
+    ``patron_id`` deferred, while ``patron { id }`` is planned as an FK-id elision.
+    The elision refuses to read the deferred key, and the relation access it falls
+    back to is strictness-visible: ``strictness="warn"`` reports it once per loan
+    under either operation, and every patron still resolves.
+    """
+    _seed_subtitled_books()
+    caplog.set_level(logging.WARNING, logger="django_strawberry_framework")
+
+    payload, _sql = _post_hooked_holder(
+        f"{operation} {{ consumerPrefetchedBooks {{ title loans {{ note patron {{ id }} }} }} }}",
+        lambda: _hooked_holder_schema(strictness="warn"),
+    )
+
+    patrons = [
+        json_at(loan, "patron", "id")
+        for book in json_list(payload, "data", "consumerPrefetchedBooks")
+        for loan in json_list(book, "loans")
+    ]
+    assert len(patrons) == 4, payload
+    warnings = [record for record in caplog.records if "Potential N+1 on patron" in record.message]
+    assert len(warnings) == 4, [record.message for record in caplog.records]
+
+
+_UPDATE_HOLDER_SHELF = (
+    "mutation($id: ID!, $d: ShelfCodePartialInput!) { updateShelf(id: $id, data: $d) { "
+    "node { code books { subtitle } } errors { field } } }"
+)
+
+
+def _update_holder_shelf_variables() -> dict[str, object]:
+    """Rename the seeded shelf through the built holder schema's ``updateShelf``."""
+    shelf_type = registry.get(models.Shelf)
+    assert shelf_type is not None
+    return {
+        "id": global_id_for(shelf_type, models.Shelf.objects.get(code="A-1").pk),
+        "d": {"code": "A-2"},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "build",
+    [_hooked_holder_schema, _books_only_title],
+    ids=["plain", "hooked"],
+)
+def test_library_mutation_refetch_widens_the_child_hook_projection(
+    build: Callable[[], strawberry.Schema],
+) -> None:
+    """A ``DjangoMutation`` re-fetch whose child hook keeps only ``title``.
+
+    The post-write re-fetch plans ``node { code books { subtitle } }`` through the
+    book hook's ``.only("title")``: the planned ``Prefetch`` loads ``subtitle`` and
+    the attach connector with it, so the hooked re-fetch runs the same statements
+    as the hook-free one instead of one more per book.
+    """
+    _seed_subtitled_books()
+
+    registry.clear()
+    try:
+        schema = build()
+        variables = _update_holder_shelf_variables()
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_holder(schema, _UPDATE_HOLDER_SHELF, variables=variables)
+    finally:
+        registry.clear()
+
+    payload = response_json(response)
+    assert payload.get("errors") is None, payload
+    result = json_object(payload, "data", "updateShelf")
+    assert result["errors"] == []
+    assert json_at(result, "node", "code") == "A-2"
+    assert sorted(
+        str(json_at(book, "subtitle")) for book in json_list(result, "node", "books")
+    ) == [
+        "None",
+        "Part 0",
+        "Part 1",
+        "Part 2",
+    ]
+    sql = [entry["sql"] for entry in captured.captured_queries]
+    # Savepoints + locate + uniqueness check + UPDATE + the re-fetch's shelf and book
+    # statements: the same eleven with or without the hook.
+    assert len(sql) == 11, sql
+    [book_sql] = [statement for statement in sql if 'FROM "library_book"' in statement]
+    assert '"library_book"."subtitle"' in book_sql, book_sql
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_library_mutation_refetch_loads_the_child_hook_projection_on_async() -> None:
+    """The hooked ``DjangoMutation`` re-fetch on the async transport.
+
+    A column the child hook deferred would load on first read, which the async
+    transport refuses (``SynchronousOnlyOperation``); an error-free payload with
+    every subtitle is the proof the planned ``Prefetch`` loaded it.
+    """
+    await sync_to_async(_seed_subtitled_books)()
+    registry.clear()
+    try:
+        _CURRENT["schema"] = _books_only_title()
+        variables = await sync_to_async(_update_holder_shelf_variables)()
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await AsyncTestClient().query(
+                _UPDATE_HOLDER_SHELF,
+                variables=variables,
+                assert_no_errors=False,
+                url="/graphql-async-test/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+        registry.clear()
+
+    payload = response_json(result.response)
+    assert payload.get("errors") is None, payload
+    result_payload = json_object(payload, "data", "updateShelf")
+    assert result_payload["errors"] == []
+    assert sorted(
+        str(json_at(book, "subtitle")) for book in json_list(result_payload, "node", "books")
+    ) == [
+        "None",
+        "Part 0",
+        "Part 1",
+        "Part 2",
+    ]
 
 
 def _seed_branch_tags() -> None:

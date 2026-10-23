@@ -131,7 +131,6 @@ from .nested_fetch import NestedConnectionStrategy, StrategySelection, resolve_s
 from .plans import (
     diff_plan_for_queryset,
     lookup_paths,
-    prune_unsupportable_select_related,
     runtime_path_from_info,
 )
 from .selections import (
@@ -1316,15 +1315,13 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         1. Build (or fetch from cache) an ``OptimizationPlan`` via
            ``_get_or_build_plan`` (passing ``target_type`` as ``origin`` so
            plans cache-separate by node type exactly as middleware plans do).
-        2. Prune the ``select_related`` paths a consumer projection makes
-           Django-invalid (``prune_unsupportable_select_related``).
-        3. Reconcile a non-empty plan against the consumer's existing queryset
+        2. Reconcile a non-empty plan against the consumer's existing queryset
            optimizations (``diff_plan_for_queryset``), which strips the resolver
            keys of every planned prefetch the consumer's own ``Prefetch`` wins.
-        4. Publish the reconciled plan + strictness sentinels via
+        3. Publish the reconciled plan + strictness sentinels via
            ``_publish_plan_to_context``, so a relation the plan no longer loads
            is never published as optimizer-scoped.
-        5. Apply the plan to ``queryset``.
+        4. Apply the plan to ``queryset``.
 
         Returns ``queryset`` unchanged when there are no root field nodes, when
         ``queryset`` is combined (``union`` / ``intersection`` / ``difference``),
@@ -1370,16 +1367,6 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             info,
             target_type,
         )
-        # B8 pre-publish prune: a consumer projection - an ``.only`` or
-        # ``.defer`` call on the returned queryset - can make a planned
-        # ``select_related`` path Django-invalid (a field cannot be both
-        # deferred and traversed) when the plan writes no projection of its
-        # own (a non-``QUERY`` operation; a projected plan is written as the
-        # union and loads every connector). The prune drops those paths AND
-        # their resolver keys so strictness accounts for the relation as the
-        # per-row fallback it now is. Same-object return on the common
-        # shapes; the cached plan is never mutated.
-        plan = prune_unsupportable_select_related(plan, queryset)
         # B8: reconcile against consumer queryset optimizations BEFORE
         # publishing sentinels. Consumer-wins prefetch drops must strip
         # coupled ``planned_resolver_keys`` / FK-id elisions (via

@@ -142,7 +142,7 @@ vocabulary used throughout the spec:
   cooperation. The payload's object is re-fetched and optimizer-planned for the
   response selection through the **same** `036` re-fetch path, so the
   [`spec-035`][spec-035] **G2** mutation gate (keep `select_related` /
-  `prefetch_related`, suppress `.only(...)`) comes for free
+  `prefetch_related`, introduce no `.only(...)`) comes for free
   ([Decision 9](#decision-9--optimizer-composition-the-modelserializer-payload-re-fetch-rides-the-spec-036-g2-path)).
 - [`Meta.primary`][glossary-metaprimary] / [`Meta.model`][glossary-metamodel] /
   [`DjangoType`][glossary-djangotype] — the return-payload type resolves the
@@ -656,8 +656,8 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     [`test_products_api.py`][test-products-api]`::test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count`
     (the response keeps the relation, at a bounded absolute query count), while the
     **plan-object** half — that the optimizer's stash carries `select_related` /
-    `prefetch_related` and suppresses `.only(...)` — is package-internal at
-    [`tests/rest_framework/test_resolvers.py`][test-rest-framework]`::test_serializer_refetch_keeps_select_related_suppresses_only`,
+    `prefetch_related` and introduces no `.only(...)` — is package-internal at
+    [`tests/rest_framework/test_resolvers.py`][test-rest-framework]`::test_serializer_refetch_introduces_no_projection`,
     because the stash is introspection state no `/graphql/` response carries.
   - [ ] **Package-internal, genuinely-unreachable internals only**
     ([`tests/rest_framework/test_resolvers.py`][test-rest-framework]): the residue a live
@@ -1227,7 +1227,7 @@ reuses the base value: the primary [`DjangoType`][glossary-djangotype] payload i
 uniform `node` / `result` slot, the [`DjangoModelPermission`][glossary-djangomodelpermission]
 default (authorized for free through the model override), the visibility-scoped
 `update` locate, and the optimizer re-fetch (the G2 gate keeps `select_related` /
-`prefetch_related` but suppresses `.only(...)`). Its input is serializer-derived rather
+`prefetch_related` and introduces no `.only(...)`). Its input is serializer-derived rather
 than model-column derived, and `Meta.operation` is restricted to `"create"` /
 `"update"` (no serializer `delete`,
 [Decision 10](#decision-10--operations-create--update-no-serializer-delete)).
@@ -2247,9 +2247,10 @@ The payload's object is re-fetched by pk and routed through
 [`DjangoOptimizerExtension`][glossary-djangooptimizerextension] for the response
 selection through the **same** `036` re-fetch path (`refetch_optimized`) the
 model-driven and form mutations use. Because the operation is a **mutation**, the
-[`spec-035`][spec-035] **G2** gate keeps `select_related` / `prefetch_related` but
-suppresses all `.only(...)` column deferral — so the re-fetched instance carries no
-selection-shaped deferred-field set. The re-fetch is **by pk, without the visibility
+[`spec-035`][spec-035] **G2** gate keeps `select_related` / `prefetch_related` and
+introduces no `.only(...)` column deferral on a queryset that carries none (a projection
+the target type's default manager carries is widened to the selection) — so the
+re-fetched instance carries no deferred-field set of the optimizer's making. The re-fetch is **by pk, without the visibility
 `get_queryset` filter** (the actor just wrote the row — the `036` re-fetch exception to
 [`GOAL.md`][goal] crit-4). There is no serializer-specific optimizer code.
 
@@ -2987,7 +2988,7 @@ same transport, different app.
   `context={"request": …}` reaches the serializer); and **the G2 optimizer re-fetch query
   shape** — asserting the payload re-fetch keeps the relation at a bounded absolute query
   count (`CaptureQueriesContext`). The plan-object half of G2 — `select_related` /
-  `prefetch_related` retained and `.only(...)` suppressed on the stashed optimizer plan —
+  `prefetch_related` retained and no `.only(...)` introduced by the stashed optimizer plan —
   is package-internal below, because no `/graphql/` response carries the stash. An
   `updateItemViaSerializer` whose located row is deleted after authorization
   (`::test_update_of_an_item_deleted_after_authorization_is_conflict_over_http`) returns
@@ -3335,11 +3336,11 @@ The completion contract.
    through the flat `036` `validation_error_to_field_errors` (`error_dict` / `messages`, not
    `.detail`) and an `IntegrityError` through `integrity_error_field_errors`, both inside
    `save_or_field_errors` — never a top-level `GraphQLError`; the payload object is re-fetched through the `036` optimizer path (G2:
-   `select_related` / `prefetch_related` kept, no [`.only(...)`][glossary-only-projection]),
+   `select_related` / `prefetch_related` kept, no [`.only(...)`][glossary-only-projection] introduced),
    pinned across two tiers — the behavioral half live at
    [`test_products_api.py`][test-products-api]`::test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count`,
    the plan-object half package-internal at
-   [`tests/rest_framework/test_resolvers.py`][test-rest-framework]`::test_serializer_refetch_keeps_select_related_suppresses_only`,
+   [`tests/rest_framework/test_resolvers.py`][test-rest-framework]`::test_serializer_refetch_introduces_no_projection`,
    since the optimizer's stash is introspection state no `/graphql/` response carries.
    [`mutations/fields.py`][mutations-fields]'s generic
    [`DjangoMutationField`][glossary-djangomutationfield] exposes the serializer flavor,

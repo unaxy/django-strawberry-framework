@@ -12,7 +12,7 @@ Meta.exclude,metaexclude,the mutation's own Meta.exclude removes editable column
 get_queryset,get_queryset-visibility-hook,update/delete lookups run through the target get_queryset
 apply_cascade_permissions,apply_cascade_permissions,permission composition seam (DONE-034 dep)
 DjangoOptimizerExtension,djangooptimizerextension,post-write re-fetch is optimizer-planned
-only() projection,only-projection,G2 mutation gate suppresses .only() on the re-fetch
+only() projection,only-projection,G2 mutation gate introduces no .only() on the re-fetch
 FK-id elision,fk-id-elision,stays enabled on the mutation re-fetch under the G2 loaded-check
 Queryset diffing,queryset-diffing,the optimizer reconciles its plan against the re-fetch queryset's existing state
 DjangoConnectionField,djangoconnectionfield,the read-side field-factory sibling of DjangoMutationField

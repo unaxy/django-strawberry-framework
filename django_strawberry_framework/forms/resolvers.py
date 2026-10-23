@@ -132,11 +132,11 @@ and the form-specific invariants this module owns:
   (``mutations/resolvers.py::run_write_pipeline_sync``). Every other create is one
   ``form.save()``.
 
-- **The ``ModelForm`` re-fetch rides the ``036`` ``refetch_optimized`` G2 path**
+- **The ``ModelForm`` re-fetch rides the ``036`` ``refetch_optimized`` path**
   (Decision 9): by pk WITHOUT the visibility filter, routed through
-  ``apply_connection_optimization`` so the spec-035 G2 gate keeps
-  ``select_related`` / ``prefetch_related`` and applies NO ``.only(...)`` under the
-  mutation operation - it comes for free, no new optimizer code.
+  ``apply_connection_optimization`` so the plan keeps ``select_related`` /
+  ``prefetch_related`` and, under the mutation operation, introduces no
+  ``.only(...)`` on a queryset that carries none - no new optimizer code.
 
 - **One ``transaction.atomic()`` boundary; the async path runs the sync body in
   one ``sync_to_async(thread_sensitive=True)`` call** (Decision 8) - both form
@@ -1129,7 +1129,7 @@ def _modelform_write_step(
     ``commit=False`` on an update and a client-assigned-key create; the reused
     ``IntegrityError`` / ``ValidationError`` mappers, the update's ``conflict``, plus
     the unstorable ``blank=True, null=False`` column ``null`` mapping). Returns the saved instance
-    (the skeleton's ``refetch_optimized`` re-fetches it by pk under the G2 plan) or a
+    (the skeleton's ``refetch_optimized`` re-fetches it by pk under the optimizer plan) or a
     ``StepFailure`` on a validation / write failure.
     """
     if instance is not None:

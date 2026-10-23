@@ -103,11 +103,11 @@ The serializer-specific invariants this module owns:
   row's relation) is the same envelope: the shared skeleton probes the located row
   on a step failure (``mutations/resolvers.py::run_write_pipeline_sync``).
 
-- **The re-fetch rides the ``036`` ``refetch_optimized`` G2 path** (spec-039 Decision 9 /
-  G2): the shared skeleton re-fetches the saved object by pk WITHOUT the visibility
-  filter, routed through the optimizer so the spec-035 G2 gate keeps
-  ``select_related`` / ``prefetch_related`` and applies NO ``.only(...)`` under the
-  mutation operation - it comes for free, no new optimizer code.
+- **The re-fetch rides the ``036`` ``refetch_optimized`` path** (spec-039 Decision 9):
+  the shared skeleton re-fetches the saved object by pk WITHOUT the visibility
+  filter, routed through the optimizer so the plan keeps ``select_related`` /
+  ``prefetch_related`` and, under the mutation operation, introduces no
+  ``.only(...)`` on a queryset that carries none - no new optimizer code.
 
 - **One ``transaction.atomic()`` boundary; the async path runs the sync body in
   one ``sync_to_async(thread_sensitive=True)`` call** - the shared
@@ -2586,7 +2586,7 @@ def _serializer_write_step(
     value-preserving ``serializer.save()`` closure inside a nested-``atomic``
     savepoint and the pinned-alias write phase (``save()`` called EXACTLY ONCE,
     captured via ``nonlocal``). Returns the saved object (the skeleton re-fetches
-    it by pk under the G2 plan) or a ``StepFailure`` on a validation / write
+    it by pk under the optimizer plan) or a ``StepFailure`` on a validation / write
     failure - with the savepoint rolled back first, so a failed save leaves no
     partial write.
 

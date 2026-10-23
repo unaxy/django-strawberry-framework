@@ -20,7 +20,7 @@ get_queryset,get_queryset-visibility-hook,the visibility hook the update locate 
 Input type generation,input-type-generation,the 036 model-column generator (serializer generator is separate)
 Auth mutations,auth-mutations,the sibling write flavor (spec-040) on the same envelope; shipped in the same 0.0.13 release
 TestClient,testclient,the ergonomic test client (multipart files= included); out of scope for this flavor
-only() projection,only-projection,suppressed under the mutation operation (G2)
+only() projection,only-projection,not introduced under the mutation operation (G2)
 Scalar field conversion,scalar-field-conversion,read-side converters reused where the serializer field overlaps a column
 Choice enum generation,choice-enum-generation,a ModelSerializer choices column routes through the read-side enum
 Per-field permission hooks,per-field-permission-hooks,planned 0.1.1 read gates; distinct from write authorization

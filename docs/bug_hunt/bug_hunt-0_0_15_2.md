@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 214 done, 143 to do.
+Progress: 215 done, 143 to do.
 
 ## Done
 
@@ -900,6 +900,16 @@ Progress: 214 done, 143 to do.
   per `suffixes`, else `widgets_names`; audited django-filter 21.1-26.2, Django 5.2.16-6.1.2),
   `inputs.py::range_form_keys` refuses a widget not reading exactly two keys at schema build, and
   `sets.py::_absent_widget_value` reads the same keys
+- [x] 158. the operation gate (`walker.py::_enable_only_for_operation`) stopped every projection writer under a
+  mutation, so a hook / manager / resolver `.only()` or `.defer()` was never widened (a hook `.only("name")` ran 77
+  statements where the query ran 2; the async `DjangoMutation` re-fetch raised `SynchronousOnlyOperation`): writers
+  record columns under every operation and the plan carries a cached `introduce_projection`
+  (`walker.py::_introduces_projection_for_operation`), so `plans.py::apply_projection(..., introduce=False)` leaves an
+  unprojected queryset whole and widens a consumer projection; mutation counts now equal the query's, the hook-free
+  mutation stays one full-row statement, QUERY SQL is byte-identical; the prune (`prune_unsupportable_select_related`,
+  `_select_path_traversable`, `select_path_resolver_keys`, `_record_select_path_keys`) is deleted;
+  `types/resolvers.py::_FK_ELISION_UNSAFE` stays for a row the plan did not project (a consumer-owned `Prefetch`),
+  pinned live; specs 002, 004, 033, 035, 036, 038, 039, 040 and GLOSSARY / KANBAN restated
 
 ## Outside review of the fixes
 
@@ -940,16 +950,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 158. The optimizer's operation gate (`walker.py::_enable_only_for_operation`) is decided per plan-cache key, so under
-  a mutation no writer records columns and a consumer `.only()` / `.defer()` (hook, manager, resolver) is never widened:
-  a hook `.only("name")` under a mutation runs 77 statements where the QUERY runs 2 (152 with one more column; a nested
-  connection 102), `strictness="raise"` stays silent, and a `DjangoMutation` re-fetch selecting a deferred column fails
-  on async with `SynchronousOnlyOperation`. Breaks spec-004's hook-union row and spec-035 Decision 5. Subscriptions are
-  not reachable (fail without a hook). Fix: writers record columns unconditionally; the plan carries a cached
-  `introduce_projection` and applies a projection only when it is set or the queryset already carries a consumer one
-  (non-QUERY never introduces, always widens); `plans.py::prune_unsupportable_select_related` then has no live caller and
-  goes; live rows beside `test_query/test_library_api.py::_hooked_holder_schema`. Open for you: retracting the prune
-  design in specs 004 and 035, and whether `types/resolvers.py::_FK_ELISION_UNSAFE` stays as a defensive check
 - [ ] 165. Item 12's deadline checks fail forward-FK and one-to-one hops inside a mutation payload (rolling back a write that
   used to commit) and error subscription frames past the budget; spec-047 Decision 9 states both (`8d4f66bd`) but no test
   pins either; the async deadline rows also cannot tell a head check from a check inside the `sync_to_async` closure
@@ -1116,6 +1116,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   a defect
 - [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the
   value (all rows answered). Robustness row: PostgreSQL range columns are unsupported
+- [ ] 371. A child hook's `.only()` / `.defer()` strands the prefetch connector when the child selects no column (`{
+  items { __typename } }` over a hook `.only("name")` ran 27 statements under a query and a mutation):
+  `walker.py::_ensure_connector_only_fields` returned early on empty `only_fields`, so Django's attach loaded the
+  connector once per row; breaks spec-004's hook-union row
 
 ## To do: holes found re-checking the fixes
 

@@ -22,6 +22,9 @@ The plan is a simple data class carrying optimization directives and metadata:
   rebuilding sets or lookup paths.
 - ``cacheable``: whether this plan can be reused from the extension's plan
   cache.
+- ``introduce_projection``: whether applying the plan may turn a queryset that
+  carries no ``.only()`` / ``.defer()`` into a projected one (``QUERY`` only; any
+  other operation only widens a projection the queryset already carries).
 
 The plan starts with mutable sequence fields while the walker descends the
 selection tree, then ``finalize()`` publishes tuple-backed fields for cache and
@@ -244,20 +247,6 @@ class OptimizationPlan:
     """Resolver keys elided because the source row already carries the target id."""
     planned_resolver_keys: Sequence[str] = field(default_factory=_indexed_list)
     """Resolver keys for relations covered by this plan, used by B3 strictness."""
-    select_path_resolver_keys: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    """Resolver keys satisfied by each ``select_related`` path (directive coupling).
-
-    Written by ``walker.py::_plan_select_relation`` at the single site that
-    appends to ``select_related``. This is the explicit directive-to-metadata
-    coupling B8 reconciliation needs: when a consumer projection makes a
-    ``select_related`` path Django-invalid
-    (``prune_unsupportable_select_related``), the keys recorded for that path
-    (and its nested sub-paths) must leave ``planned_resolver_keys`` with it -
-    otherwise strictness would treat the relation as planned while the
-    generated resolver lazy-loads. Excluded from ``is_empty`` (pure
-    metadata); mutated only during walker construction, matching the
-    ``cacheable`` single-writer convention.
-    """
     prefetch_path_resolver_keys: dict[str, tuple[str, ...]] = field(default_factory=dict)
     """Resolver keys satisfied by each ``prefetch_related`` lookup (directive coupling).
 
@@ -292,7 +281,6 @@ class OptimizationPlan:
             "select_related",
             "prefetch_related",
             "only_fields",
-            "select_path_resolver_keys",
             "prefetch_path_resolver_keys",
         },
     )
@@ -307,12 +295,23 @@ class OptimizationPlan:
     _DERIVED_FINALIZED_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {"finalized_fk_id_elisions", "finalized_planned_resolver_keys", "finalized_lookup_paths"},
     )
+    _CONSTRUCTION_FIELDS: ClassVar[frozenset[str]] = frozenset({"introduce_projection"})
     finalized_fk_id_elisions: frozenset[str] | None = None
     """Frozen membership set for ``fk_id_elisions`` after ``finalize()``."""
     finalized_planned_resolver_keys: frozenset[str] | None = None
     """Frozen membership set for ``planned_resolver_keys`` after ``finalize()``."""
     finalized_lookup_paths: frozenset[str] | None = None
     """Frozen Django lookup paths covered by this plan after ``finalize()``."""
+    introduce_projection: bool = True
+    """Whether ``apply`` may project a queryset that carries no projection of its own.
+
+    Set from the operation when the walker builds the plan (``QUERY`` introduces;
+    ``MUTATION`` and ``SUBSCRIPTION`` do not) and cached with it, under a key that
+    already names the operation. A plan that does not introduce still widens a
+    consumer's ``.only()`` / ``.defer()`` to the columns the selection reads, so
+    a hook, manager or resolver projection never leaves a selected column to
+    lazy-load per row, whatever the operation.
+    """
     cacheable: bool = True
     """Whether this plan can be reused from the extension's plan cache.
 
@@ -396,12 +395,18 @@ class OptimizationPlan:
         its ``.only()`` / ``.defer()`` and the plan's ``only_fields``, plus the
         connector each of its joins traverses and the link column each of its
         prefetches attaches by, on the queryset alone, so the cached plan's
-        ``only_fields`` stay exactly what the selection reads.
+        ``only_fields`` stay exactly what the selection reads. A plan whose
+        ``introduce_projection`` is off leaves a queryset that carries no
+        projection loading every column, and widens one that does.
         """
         if self.prefetch_related:
             queryset = _release_select_related_to_prefetches(queryset, self.prefetch_related)
         if self.only_fields:
-            queryset = apply_projection(queryset, self.only_fields)
+            queryset = apply_projection(
+                queryset,
+                self.only_fields,
+                introduce=self.introduce_projection,
+            )
         if self.select_related:
             queryset = queryset.select_related(*self.select_related)
         if self.prefetch_related:
@@ -425,10 +430,6 @@ class OptimizationPlan:
             append_prefetch_unique(self.prefetch_related, prefetch)
         append_unique_many(self.only_fields, other.only_fields)
         self.merge_metadata_from(other)
-        for path, resolver_keys in other.select_path_resolver_keys.items():
-            merged = list(self.select_path_resolver_keys.get(path, ()))
-            append_unique_many(merged, resolver_keys)
-            self.select_path_resolver_keys[path] = tuple(merged)
         for path, resolver_keys in other.prefetch_path_resolver_keys.items():
             merged = list(self.prefetch_path_resolver_keys.get(path, ()))
             append_unique_many(merged, resolver_keys)
@@ -468,7 +469,10 @@ class OptimizationPlan:
         """Require every dataclass field to have explicit merge ownership."""
         actual = frozenset(item.name for item in fields(cls))
         classified = (
-            cls._FULL_MERGE_FIELDS | cls._METADATA_MERGE_FIELDS | cls._DERIVED_FINALIZED_FIELDS
+            cls._FULL_MERGE_FIELDS
+            | cls._METADATA_MERGE_FIELDS
+            | cls._DERIVED_FINALIZED_FIELDS
+            | cls._CONSTRUCTION_FIELDS
         )
         if actual != classified:
             missing = sorted(actual - classified)
@@ -815,71 +819,6 @@ def merged_projection(queryset: object, names: Sequence[str]) -> tuple[list[str]
     ], True
 
 
-def prune_unsupportable_select_related(
-    plan: OptimizationPlan,
-    queryset: QuerySet[models.Model],
-) -> OptimizationPlan:
-    """Drop ``select_related`` paths a consumer projection cannot traverse.
-
-    Django refuses to traverse a deferred relation field: applying planned
-    ``select_related("category")`` on a consumer queryset carrying
-    ``.only("name")`` (or ``.defer("category")``) compiles to ``FieldError:
-    Field ... cannot be both deferred and traversed using select_related at
-    the same time``. The B8 root fix is relation-aware: keep a path only
-    when every connector it traverses is loaded by the consumer projection
-    (``_select_path_traversable``); drop the rest BEFORE the plan is
-    published or applied.
-
-    A dropped path also surrenders its resolver metadata: the keys recorded
-    for it (``select_path_resolver_keys`` - including every nested sub-path,
-    which can never outlive its prefix here because traversability fails at
-    the same segment) leave ``planned_resolver_keys``, so strictness sees
-    the relation's per-row lazy loads instead of trusting a directive that
-    was never applied.
-
-    Only a plan with no projection of its own reaches the prune (a non-``QUERY``
-    operation, whose G2 gate leaves ``only_fields`` empty): it applies
-    ``select_related`` straight over the consumer's ``.only()`` / ``.defer()``.
-    A projected plan is written as the union with the consumer's projection,
-    every join connector loaded (``apply_projection``), so its paths always
-    traverse.
-
-    Returns ``plan`` unchanged (same object) when the plan is projected, the
-    consumer has no projection, or every path survives - the overwhelmingly
-    common shape.
-    Never mutates: the pruned plan is a finalized ``replace`` copy, so B1's
-    cached plan stays intact.
-    """
-    if not plan.select_related or plan.only_fields:
-        return plan
-    projection = _consumer_projection(queryset)
-    if projection is None:
-        return plan
-    names, defer_mode = projection
-    model = getattr(queryset, "model", None)
-    unsupported = [
-        path
-        for path in plan.select_related
-        if not _select_path_traversable(path, names, defer_mode=defer_mode, model=model)
-    ]
-    if not unsupported:
-        return plan
-    dropped_keys: set[str] = set()
-    for path in unsupported:
-        dropped_keys.update(plan.select_path_resolver_keys.get(path, ()))
-    new_select_path_keys = {
-        path: keys
-        for path, keys in plan.select_path_resolver_keys.items()
-        if path not in unsupported
-    }
-    return replace(
-        plan,
-        select_related=[p for p in plan.select_related if p not in unsupported],
-        planned_resolver_keys=[k for k in plan.planned_resolver_keys if k not in dropped_keys],
-        select_path_resolver_keys=new_select_path_keys,
-    ).finalize()
-
-
 def _consumer_projection(queryset: object) -> tuple[frozenset[str], bool] | None:
     """Return the consumer's deferred-loading projection as ``(names, defer_mode)``.
 
@@ -898,54 +837,29 @@ def _consumer_projection(queryset: object) -> tuple[frozenset[str], bool] | None
     return names, defer_flag
 
 
-def _select_path_traversable(
-    path: str,
-    names: frozenset[str],
-    *,
-    defer_mode: bool,
-    model: type[models.Model] | None,
-) -> bool:
-    """Whether ``select_related(path)`` is Django-valid under the projection.
-
-    ``True`` exactly when ``_select_path_missing_connectors`` finds nothing to
-    add: the path is resolvable and every connector it traverses is loaded.
-    Unresolvable segments (no model, unknown field) read as not traversable -
-    conservatively dropping the path costs a fallback query, never a
-    ``FieldError``.
-    """
-    return _select_path_missing_connectors(path, names, defer_mode=defer_mode, model=model) == ()
-
-
 def _select_path_missing_connectors(
     path: str,
     names: frozenset[str],
     *,
-    defer_mode: bool,
     model: type[models.Model] | None,
 ) -> tuple[str, ...] | None:
-    """Return the projection entries ``select_related(path)`` still needs, or ``None``.
+    """Return the ``.only()`` entries ``select_related(path)`` still needs, or ``None``.
 
     Walks the path one relation segment at a time, mirroring Django's
     deferred-loading rule at each level (pinned empirically; the error is
     ``Field X cannot be both deferred and traversed using select_related``):
-
-    - ``defer()`` mode: a segment is blocked when the projection defers it
-      at that level (by field name or attname). A blocked segment cannot be
-      repaired by adding a name, so the result is ``None``.
-    - ``.only()`` mode: a level is RESTRICTED when the projection names any
-      column at it; a restricted level loads a segment only when some entry
-      leads with the segment's name or attname (a dotted entry like
-      ``"category__code"`` loads its connector). An unrestricted deeper
-      level (no entries under the prefix) loads every column. A restricted
-      level missing its connector contributes the connector's ``.only()``
-      entry: the FK column (attname) for a forward relation, which Django's
-      select mask reads as the relation itself and so loads the whole
-      related row - what the JOIN's author asked for - or the relation name
-      for a reverse one-to-one, which has no column.
+    a level is RESTRICTED when ``names`` holds any column at it; a restricted
+    level loads a segment only when some entry leads with the segment's name or
+    attname (a dotted entry like ``"category__code"`` loads its connector). An
+    unrestricted deeper level (no entries under the prefix) loads every column.
+    A restricted level missing its connector contributes the connector's
+    ``.only()`` entry: the FK column (attname) for a forward relation, which
+    Django's select mask reads as the relation itself and so loads the whole
+    related row - what the JOIN's author asked for - or the relation name for a
+    reverse one-to-one, which has no column.
 
     ``()`` means the path is traversable as-is. ``None`` means unresolvable
-    (no model, unknown field - a ``FilteredRelation`` alias, say) or blocked
-    by a ``defer()``.
+    (no model, unknown field - a ``FilteredRelation`` alias, say).
     """
     current_model = model
     prefix = ""
@@ -966,19 +880,19 @@ def _select_path_missing_connectors(
             if prefix
             else set(names)
         )
-        if defer_mode:
-            # A dotted defer entry ("shelf__branch") defers a column at a
-            # DEEPER level; only an exact entry at this level blocks it.
-            if aliases & {entry for entry in scoped if "__" not in entry}:
-                return None
-        elif scoped and not (aliases & {entry.split("__", 1)[0] for entry in scoped}):
+        if scoped and not (aliases & {entry.split("__", 1)[0] for entry in scoped}):
             missing.append(f"{prefix}{attname or segment}")
         prefix = f"{prefix}{segment}__"
         current_model = getattr(field_obj, "related_model", None)
     return tuple(missing)
 
 
-def apply_projection(queryset: QuerySet[_M], names: Sequence[str]) -> QuerySet[_M]:
+def apply_projection(
+    queryset: QuerySet[_M],
+    names: Sequence[str],
+    *,
+    introduce: bool = True,
+) -> QuerySet[_M]:
     """Project ``names`` onto ``queryset`` without shrinking what it already loads or traverses.
 
     The one projection writer for a plan (``OptimizationPlan.apply``, root and
@@ -1005,7 +919,13 @@ def apply_projection(queryset: QuerySet[_M], names: Sequence[str]) -> QuerySet[_
     ``FilteredRelation`` alias is never a deferred field (its select mask is
     keyed by alias), and an unknown name fails Django's own ``select_related``
     validation.
+
+    ``introduce=False`` returns a queryset that carries no ``.only()`` /
+    ``.defer()`` unchanged, every column loaded; a queryset that carries one is
+    widened exactly as under ``introduce=True``.
     """
+    if not introduce and _consumer_projection(queryset) is None:
+        return queryset
     entries, defer_mode = merged_projection(queryset, names)
     if defer_mode:
         cleared = queryset.defer(None)
@@ -1014,12 +934,7 @@ def apply_projection(queryset: QuerySet[_M], names: Sequence[str]) -> QuerySet[_
     projection = frozenset(entries)
     extras: list[str] = []
     for path in sorted(_flatten_select_related(queryset.query.select_related)):
-        missing = _select_path_missing_connectors(
-            path,
-            projection,
-            defer_mode=False,
-            model=model,
-        )
+        missing = _select_path_missing_connectors(path, projection, model=model)
         if missing is not None:
             append_unique_many(extras, missing)
     for attname in _prefetch_carrier_attnames(queryset):
