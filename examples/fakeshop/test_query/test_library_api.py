@@ -19671,6 +19671,76 @@ def test_shelf_condition_blank_member_reads_stored_empty_string_over_http() -> N
     )
 
 
+_SHELF_CODES = """
+query ($filter: ShelfFilterInputType) {
+  allLibraryShelves(filter: $filter) { code }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "codes"),
+    [
+        pytest.param(
+            {"conditionSpan": {"range": {"start": "a", "end": "h"}}},
+            ["R-damaged", "R-good"],
+            id="text-bounds-off-the-choices",
+        ),
+        pytest.param(
+            {"conditionSpan": {"range": {"start": "damaged", "end": "good"}}},
+            ["R-damaged", "R-good"],
+            id="text-bounds-on-the-choices",
+        ),
+        pytest.param(
+            {"tierSpan": {"range": {"start": 0, "end": 2}}},
+            ["R-damaged", "R-blank", "R-good"],
+            id="integer-bounds-off-the-choices",
+        ),
+        pytest.param(
+            {"tierSpan": {"range": {"start": 2}}},
+            ["R-good", "R-worn"],
+            id="integer-start-only",
+        ),
+        pytest.param(
+            {"not": {"tierSpan": {"range": {"start": 0, "end": 2}}}},
+            ["R-worn"],
+            id="not-integer-bounds-off-the-choices",
+        ),
+        pytest.param(
+            {"not": {"conditionSpan": {"range": {"start": "a", "end": "h"}}}},
+            ["R-blank", "R-worn"],
+            id="not-text-bounds-off-the-choices",
+        ),
+    ],
+)
+def test_shelf_range_over_a_choice_column_compares_bounds_off_its_choices(
+    filter_input: dict[str, object],
+    codes: list[str],
+) -> None:
+    """A declared range over a choice column compares its bounds; neither need be a choice.
+
+    ``conditionSpan`` (text choices) and ``tierSpan`` (integer choices) clean each bound
+    with the column's comparison form field (``CharField`` / ``DecimalField``), never the
+    ``ChoiceField`` that would refuse ``a`` or ``0``, so the range keeps the rows whose
+    stored value lies between the bounds, flat and under ``not``.
+    """
+    branch = models.Branch.objects.create(name="RangeChoiceBranch", city="Boston")
+    for code, condition, tier in (
+        ("R-blank", "", 1),
+        ("R-good", "good", 2),
+        ("R-worn", "worn", 3),
+        ("R-damaged", "damaged", 1),
+    ):
+        models.Shelf.objects.create(code=code, branch=branch, condition=condition, tier=tier)
+
+    payload = response_json(_post_graphql(_SHELF_CODES, variables={"filter": filter_input}))
+
+    assert "errors" not in payload, payload
+    shelves = json_list(payload, "data", "allLibraryShelves")
+    assert sorted(json_str(shelf, "code") for shelf in shelves) == sorted(codes)
+
+
 @pytest.mark.django_db
 def test_shelf_condition_exact_blank_matches_only_blank_shelves_over_http() -> None:
     """The generated choice ``exact`` treats ``BLANK`` as a value, never as "no filter".

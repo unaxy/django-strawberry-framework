@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 211 done, 140 to do.
+Progress: 212 done, 143 to do.
 
 ## Done
 
@@ -883,6 +883,13 @@ Progress: 211 done, 140 to do.
   `untrusted` defect), so the source seed, hook, sidecar, prefetch-child and subclass seals all keep it, and
   `utils/write_transaction.py::base_visible_queryset` carries the validated mode onto the locked locate; Django 5.2
   (no fetch modes) is unchanged
+- [x] 162. a declared `RangeFilter` handed its raw bounds to the ORM (`RangeField.to_python` cleaned nothing), so a
+  Decimal "NaN" / "Infinity" bound answered a masked `ValidationError`: `RangeField(bound_field=...)` cleans each
+  non-None bound with the form field of the column's django-filter `gte` filter (`filters/base.py::_column_form_field`;
+  `gte`, not `exact`, so a choice column's off-choice bound still compares), so a non-finite or past-1e50 bound is
+  `FILTER_INVALID`, a naive datetime is made aware and text is stripped; relation bounds pass through as sent (an
+  existence oracle otherwise), and a class-level declaration's `.field` is built by `unkept_form_field` without writing
+  to it
 
 ## Outside review of the fixes
 
@@ -936,9 +943,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 161. A declared `django_filters.RangeFilter` writes `_0` / `_1` keys while the installed django-filter widget may read
   `_min` / `_max`, so its bounds are ignored (`filters/inputs.py` documents the positional keys on purpose); check the
   installed django-filter's key names before fixing
-- [ ] 162. A NaN bound on a declared range reaches the model field and raises a raw `ValidationError` instead of
-  `FILTER_INVALID`: `filters/base.py::RangeField` overrides only `to_python` and never cleans its bounds with the column's
-  form field
 - [ ] 165. Item 12's deadline checks fail forward-FK and one-to-one hops inside a mutation payload (rolling back a write that
   used to commit) and error subscription frames past the budget; spec-047 Decision 9 states both (`8d4f66bd`) but no test
   pins either; the async deadline rows also cannot tell a head check from a check inside the `sync_to_async` closure
@@ -1089,6 +1093,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 353. Relay `nodes(ids:)` loses `FETCH_PEERS` batching after 343: `relay.py::_stamp_node_type` `copy.copy`s each
   resolved node and Django's `ModelState.__getstate__` drops `peers`, so a lazy FK across 3 loans costs 3 queries
   instead of 1 (`FETCH_RAISE` is carried). Found landing 343
+- [ ] 370. A declared `ListFilter` / `ArrayFilter` never cleans its elements (its `field_class` is a bare
+  `forms.Field`), so `ListFilter(field_name="price", lookup_expr="in")` with `in: ["NaN"]` answers a masked
+  `ValidationError` instead of `FILTER_INVALID`; same owner as 162
+- [ ] 372. A declared package `RangeFilter` with both bounds on an integer column passes an out-of-int64 bound to
+  `BETWEEN` and the backend raises a masked `OverflowError` (`range: {start: "0", end: "18446744073709551616"}` on a
+  BigInt column); `filters/base.py::IntegerRangeFilter` decomposes into `gte` + `lte`, the declared primitive does not
+- [ ] 375. A package `RangeFilter` / `ListFilter` over a relation column passes its bounds / elements to the ORM
+  uncleaned (django-filter's `exact` for a relation is a `ModelChoiceFilter`, whose clean would be an existence oracle
+  past the target's `get_queryset`), so a NaN bound on a Decimal-pk target still raises a masked error; candidate owner:
+  the relation identity column's form field with the matches-nothing semantics of `_coerce_relation_identity`. A range
+  on an FK column fails the schema build (`scalar_for_field`), so the reach is form data / `apply_sync` only: check it
+  under AGENTS rule 37 first
+- [ ] 376. A package `RangeFilter` / `ListFilter` under a plain `django_filters.FilterSet` (no package FilterSet parent,
+  e.g. the DRF backend path) cleans nothing; check the reach under AGENTS rule 37 first
 
 ## To do: holes found re-checking the fixes
 

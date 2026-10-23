@@ -14,18 +14,23 @@ delivers a non-list container to ``GlobalIDMultipleChoiceFilter``.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Iterable, Iterator
+from decimal import Decimal
 from functools import partial
 from types import SimpleNamespace
 from typing import TypeVar
 
+import django_filters
 import pytest
 import strawberry
 from apps.library import models
+from apps.scalars import models as scalar_models
 from django.core.exceptions import ValidationError
 from django.db.models import Model, QuerySet
-from django.forms import Form
+from django.forms import DecimalField, Form
 from django.http import HttpRequest, QueryDict
+from django.test import override_settings
 from django_filters import BaseInFilter, CharFilter
 from graphql import GraphQLError
 from strawberry import relay
@@ -247,6 +252,116 @@ def test_range_field_missing_pair_cleans_to_none() -> None:
     ) == ["10", "100"]
     assert _widget_decompress(field, ("10", "100")) == ["10", "100"]
     assert _widget_decompress(field, None) == [None, None]
+
+
+@pytest.mark.parametrize(
+    ("bound_field", "value", "cleaned"),
+    [
+        pytest.param(DecimalField(), ["1.5", None], [Decimal("1.5"), None], id="end-left-open"),
+        pytest.param(None, ["NaN", "1.5"], ["NaN", "1.5"], id="no-bound-field-passes-through"),
+    ],
+)
+def test_range_field_cleans_each_bound_with_its_bound_field(
+    bound_field: DecimalField | None,
+    value: list[str | None],
+    cleaned: list[object],
+) -> None:
+    """A ``None`` bound stays open; without a ``bound_field`` the bounds pass through.
+
+    Live refusal of a bound the column cannot hold:
+    ``test_scalars_filter_api.py::test_scalars_filter_price_span_bound_the_column_cannot_hold_is_filter_invalid``.
+    """
+    assert RangeField(required=False, bound_field=bound_field).clean(value) == cleaned
+
+
+def test_range_field_leaves_a_pair_of_the_wrong_length_to_validate_range() -> None:
+    """A value that is not a pair is never cleaned bound by bound; ``validate_range`` refuses it."""
+    with pytest.raises(ValidationError) as excinfo:
+        RangeField(bound_field=DecimalField()).clean(["NaN"])
+    assert excinfo.value.messages == ["Invalid range specified: it needs to contain 2 values."]
+
+
+class _ScalarRangeSet(FilterSet):
+    price_span = RangeFilter(field_name="price", lookup_expr="range")
+    payload_span = RangeFilter(field_name="payload", lookup_expr="range")
+    nowhere_span = RangeFilter(field_name="nowhere", lookup_expr="range")
+    parent_span = RangeFilter(field_name="parent", lookup_expr="range")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+class _PlainScalarRangeSet(django_filters.FilterSet):
+    price_span = RangeFilter(field_name="price", lookup_expr="range")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+def _range_field(filter_instance: Filter) -> RangeField:
+    return require_instance(filter_instance.field, RangeField)
+
+
+def test_range_filter_field_cleans_bounds_once_bound_to_a_filterset() -> None:
+    """A per-request copy keeps one field whose ``bound_field`` is the column's comparison field.
+
+    A deep copy of the bound filter keeps it. Reading the class-level declaration's field
+    builds a fresh one each time and writes nothing to the declaration, which every request
+    shares and deep-copies: its ``__dict__`` never gains a ``_field``, so a per-request copy
+    made after such reads carries no field and builds its own, cleaning bounds.
+    """
+    declared = _ScalarRangeSet.base_filters["price_span"]
+    before = dict(vars(declared))
+    assert _range_field(declared) is not _range_field(declared)
+    assert _range_field(declared).bound_field is None
+    assert vars(declared) == before
+    assert "_field" not in vars(copy.deepcopy(declared))
+
+    filterset = _ScalarRangeSet(data={}, queryset=scalar_models.ScalarSpecimen.objects.none())
+    bound = filterset.filters["price_span"]
+
+    assert _range_field(bound) is _range_field(bound)
+    assert isinstance(_range_field(bound).bound_field, DecimalField)
+    assert isinstance(_range_field(copy.deepcopy(bound)).bound_field, DecimalField)
+
+
+@pytest.mark.parametrize(("disabled", "help_text"), [(True, ""), (False, "Price span")])
+def test_range_filter_class_level_field_is_built_as_django_filter_builds_it(
+    disabled: bool,  # noqa: FBT001
+    help_text: str,
+) -> None:
+    """The class-level field is ``Filter.field``'s: label and ``extra``, ``help_text`` per setting."""
+    declared = RangeFilter(field_name="price", label="Price", help_text="Price span")
+
+    with override_settings(FILTERS_DISABLE_HELP_TEXT=disabled):
+        field = _range_field(declared)
+
+    assert (field.label, field.help_text, field.required) == ("Price", help_text, False)
+
+
+@pytest.mark.parametrize(
+    ("filterset_class", "name"),
+    [
+        pytest.param(_ScalarRangeSet, "payload_span", id="column-without-a-default-filter"),
+        pytest.param(_ScalarRangeSet, "nowhere_span", id="path-naming-no-field"),
+        pytest.param(_ScalarRangeSet, "parent_span", id="relation"),
+        pytest.param(_PlainScalarRangeSet, "price_span", id="django-filter-filterset"),
+    ],
+)
+def test_range_filter_without_a_column_form_field_passes_bounds_through(
+    filterset_class: type[django_filters.FilterSet],
+    name: str,
+) -> None:
+    """No column comparison field to read leaves the range field cleaning no bound.
+
+    A relation's would be django-filter's ``ModelChoiceField``, whose lookup of every key
+    would tell a key no row holds from one the target's ``get_queryset`` hides.
+    """
+    filterset = filterset_class(data={}, queryset=scalar_models.ScalarSpecimen.objects.none())
+
+    assert _range_field(filterset.filters[name]).bound_field is None
 
 
 _ONE_SIDED_RANGES = [

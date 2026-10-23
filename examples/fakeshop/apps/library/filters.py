@@ -25,7 +25,7 @@ from django_filters import CharFilter, ModelChoiceFilter, ModelMultipleChoiceFil
 from django_filters.filters import BaseInFilter
 
 from apps.library import models
-from django_strawberry_framework.filters import FilterSet, RelatedFilter
+from django_strawberry_framework.filters import FilterSet, RangeFilter, RelatedFilter
 
 
 def _validate_email_must_have_at_sign(value: str) -> None:
@@ -94,6 +94,10 @@ class ShelfFilter(FilterSet):
     ``home_branches_named`` a list of branch names, and
     ``home_branch_for_request`` one branch pk typed from the ``branch`` relation,
     since its callable queryset has no model until a request arrives.
+
+    ``condition_span`` and ``tier_span`` are declared ``RangeFilter`` filters over the text and
+    integer choice columns: each bound is compared with the stored values, so a bound off
+    the column's choices (``a``, ``0``) is a value like any other.
     """
 
     branch = RelatedFilter("BranchFilter", field_name="branch")
@@ -120,6 +124,8 @@ class ShelfFilter(FilterSet):
         # ``QuerySetRequestMixin.get_queryset`` calls a callable one with the request
         queryset=_unrestricted_branches,  # pyright: ignore[reportArgumentType]
     )
+    condition_span = RangeFilter(field_name="condition", lookup_expr="range")
+    tier_span = RangeFilter(field_name="tier", lookup_expr="range")
 
     class Meta:
         model = models.Shelf
