@@ -20071,21 +20071,6 @@ _STEP_FAILURE_TAIL = ["ROLLBACK", "RELEASE", "RELEASE"]
             id="updateBookViaCustomInput-full-shelf",
         ),
         pytest.param(
-            lambda: _book_race("updateBookViaCustomInput", "genres", "shelf"),
-            [
-                '"library_genre"',
-                *_rereads('"library_genre"'),
-                '"library_shelf"',
-                '"library_book"',
-            ],
-            id="updateBookViaCustomInput-genres-shelf",
-        ),
-        pytest.param(
-            lambda: _book_race("updateBookViaCustomInput", "omit", "shelf"),
-            ['"library_shelf"', '"library_book"'],
-            id="updateBookViaCustomInput-omit-shelf",
-        ),
-        pytest.param(
             lambda: _book_race("updateBookViaForm", "omit", "row"),
             ['"library_genre"', '"library_genre"', '"library_book"'],
             id="updateBookViaForm-omit-row",
@@ -20178,6 +20163,62 @@ def test_update_whose_row_vanished_before_validation_failed_is_conflict_over_htt
     sql = [query["sql"] for query in captured.captured_queries]
     assert statement_shapes_after_last_delete(sql) == [
         *["SELECT"] * len(reads),
+        *_STEP_FAILURE_TAIL,
+    ]
+    assert select_tables_after_last_delete(sql) == reads
+    assert case.stored() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("shape", "reads"),
+    [
+        pytest.param(
+            "genres",
+            [
+                '"library_genre"',
+                *_rereads('"library_genre"'),
+                '"library_book"',
+                '"library_book"',
+            ],
+            id="genres",
+        ),
+        pytest.param("omit", ['"library_book"', '"library_book"'], id="omit"),
+    ],
+)
+def test_update_leaving_out_a_relation_whose_row_vanished_is_conflict_at_the_write_over_http(
+    shape: str,
+    reads: list[str],
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """An update leaving out ``shelf`` never field-validates it; the vanished row is ``conflict``.
+
+    The stand-in deletes the book's shelf, and the book with it, after authorization. The
+    input leaves ``shelf`` out, so ``clean_fields`` does not look the deleted shelf up; the
+    ``(title, shelf)`` constraint the provided ``title`` joins runs against the loaded row
+    (the first ``library_book`` read), the ``UPDATE`` finds no row, and the probe (the last
+    read) answers ``conflict`` on ``id``. The transaction rolls back: every row the stand-in
+    deleted is stored as before.
+    """
+    case = _book_race("updateBookViaCustomInput", shape, "shelf")
+    before = case.stored()
+    delete_after_authorization(case.mutation, case.delete)
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = response_json(_post_graphql(case.query, variables=case.variables))
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "updateBookViaCustomInput", "errors") == (
+        _FORM_UPDATE_CONFLICT_ERRORS
+    )
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert statement_shapes_after_last_delete(sql) == [
+        *["SELECT"] * (len(reads) - 1),
+        "SAVEPOINT",
+        'UPDATE "library_book"',
+        "ROLLBACK",
+        "RELEASE",
+        "SELECT",
         *_STEP_FAILURE_TAIL,
     ]
     assert select_tables_after_last_delete(sql) == reads

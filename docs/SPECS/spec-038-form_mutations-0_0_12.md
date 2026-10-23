@@ -1159,7 +1159,8 @@ GraphQL id fail form validation. So after the visibility query yields the visibl
 one row the decoded row carries: unset, `""`, `"pk"`, or a concrete field of the target,
 by name or attname, that is unique on its own (`unique=True`, a one-field
 `unique_together` entry, or a `UniqueConstraint` over it alone with no condition:
-Django's fields.E311 test for a `ForeignKey.to_field`)
+Django's fields.E311 test for a `ForeignKey.to_field`, extended to the declarations the
+target inherits, as E311 reads only the target's own)
 (`django_strawberry_framework/forms/inputs.py::require_readable_choice_keys`, run over
 the fields the operation binds: the full declared field set for an update, whose
 reconstruction rebinds every declared field, and the input's own fields for a create).

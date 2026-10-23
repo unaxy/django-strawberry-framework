@@ -41,11 +41,13 @@ replace / explicit null live in ``examples/fakeshop/test_query/test_uploads_api.
 from __future__ import annotations
 
 import contextlib
+import datetime
 import inspect
 import itertools
+import json
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeAlias, TypeVar
@@ -64,6 +66,7 @@ from django.core.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, OperationalError, connection, models, transaction
 from django.db.models import Model, QuerySet
+from django.db.models.functions import Lower
 from django.db.models.signals import m2m_changed, post_save, pre_save
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -102,11 +105,13 @@ from django_strawberry_framework.utils._narrowing import (
     call_method,
     pk_of,
     read_attr,
+    require,
     require_instance,
 )
 from django_strawberry_framework.utils.errors import validation_error_to_field_errors
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import SyncMisuseError, visible_related_object
+from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.typing import (
     call_forwarded,
     graphql_input_fields,
@@ -1014,6 +1019,776 @@ def test_update_of_a_columnless_child_table_deleted_after_the_locate_is_conflict
         if query["sql"].startswith(("UPDATE", "INSERT"))
     ]
     assert stored == [(desk.pk, "Bare")]
+
+
+# ---------------------------------------------------------------------------
+# Partial-update uniqueness groups: inherited declarations and referenced columns
+# ---------------------------------------------------------------------------
+
+
+class _UqColumns(models.Model):
+    """Abstract base: ``a`` and ``b`` carry the uniqueness, ``c`` the condition or nothing."""
+
+    a: _Text = models.TextField()
+    b: _Text = models.TextField()
+    c: _Text = models.TextField(blank=True, default="")
+
+    class Meta:
+        abstract = True
+        app_label = "products"
+        managed = False
+
+
+class UqPair(_UqColumns):
+    """Unique on ``(a, b)`` through a ``UniqueConstraint``."""
+
+    class Meta(_UqColumns.Meta):
+        constraints = [models.UniqueConstraint(fields=["a", "b"], name="tests_uq_pair")]
+
+
+class UqTogether(_UqColumns):
+    """Unique on ``(a, b)`` through ``unique_together``."""
+
+    class Meta(_UqColumns.Meta):
+        unique_together = [("a", "b")]
+
+
+class _UqAbstractPair(_UqColumns):
+    """An abstract base declaring the ``(a, b)`` constraint its concrete child inherits."""
+
+    class Meta(_UqColumns.Meta):
+        abstract = True
+        constraints = [
+            models.UniqueConstraint(fields=["a", "b"], name="tests_%(class)s_pair"),
+        ]
+
+
+class UqAbstractPair(_UqAbstractPair):
+    """A concrete model unique on ``(a, b)`` through its abstract base."""
+
+
+class UqParentPair(_UnmanagedProductsModel):
+    """A multi-table parent unique on ``(a, b)`` through a ``UniqueConstraint``."""
+
+    a: _Text = models.TextField()
+    b: _Text = models.TextField()
+
+    class Meta(_UnmanagedProductsModel.Meta):
+        constraints = [models.UniqueConstraint(fields=["a", "b"], name="tests_uq_parent_pair")]
+
+
+class UqChildOfPair(UqParentPair):
+    """A multi-table child of ``UqParentPair`` adding the unconstrained ``c``."""
+
+    c: _Text = models.TextField(blank=True, default="")
+
+
+class UqParentTogether(_UnmanagedProductsModel):
+    """A multi-table parent unique on ``(a, b)`` through ``unique_together``."""
+
+    a: _Text = models.TextField()
+    b: _Text = models.TextField()
+
+    class Meta(_UnmanagedProductsModel.Meta):
+        unique_together = [("a", "b")]
+
+
+class UqChildOfTogether(UqParentTogether):
+    """A multi-table child of ``UqParentTogether`` adding the unconstrained ``c``."""
+
+    c: _Text = models.TextField(blank=True, default="")
+
+
+class UqConditional(_UqColumns):
+    """Unique on ``(a, b)`` among rows whose ``b`` is not empty and ``c`` is not ``draft``.
+
+    The condition reads ``b`` again beside ``fields`` and reads ``c`` only inside a nested
+    ``Q``.
+    """
+
+    class Meta(_UqColumns.Meta):
+        constraints = [
+            models.UniqueConstraint(
+                fields=["a", "b"],
+                condition=models.Q(b__gt="") & ~models.Q(c="draft"),
+                name="tests_uq_conditional",
+                violation_error_code="duplicate_live",
+            ),
+        ]
+
+
+class UqExpression(_UqColumns):
+    """Unique on ``(Lower(a), b)``: an expression constraint with no ``fields``."""
+
+    class Meta(_UqColumns.Meta):
+        constraints = [models.UniqueConstraint(Lower("a"), "b", name="tests_uq_expression")]
+
+
+class UqGenerated(_UqColumns):
+    """Unique on ``(folded, b)``, where ``folded`` is generated from ``a``."""
+
+    # Unannotated: django-stubs declares ``GeneratedField`` without type parameters.
+    folded = models.GeneratedField(
+        expression=Lower("a"),
+        output_field=models.TextField(),
+        db_persist=True,
+    )
+
+    class Meta(_UqColumns.Meta):
+        constraints = [models.UniqueConstraint(fields=["folded", "b"], name="tests_uq_generated")]
+
+
+class UqSingle(_UqColumns):
+    """``a`` alone is ``unique=True``."""
+
+    a: _Text = models.TextField(unique=True)
+
+
+class UqRootPerA(_UqColumns):
+    """Unique on ``a`` among root rows, its condition reading ``parent`` and the row by ``pk``.
+
+    ``pk`` resolves to ``id``, the name the ``validate_constraints`` exclude carries.
+    """
+
+    parent: models.ForeignKey[UqRootPerA | Combinable | None, UqRootPerA | None] = (
+        models.ForeignKey("self", null=True, blank=True, on_delete=models.CASCADE)
+    )
+
+    class Meta(_UqColumns.Meta):
+        constraints = [
+            models.UniqueConstraint(
+                fields=["a"],
+                condition=models.Q(parent__isnull=True, pk__isnull=False),
+                name="tests_uq_root_per_a",
+            ),
+        ]
+
+
+class UqChecked(_UqColumns):
+    """``a`` must differ from ``b``, through a ``CheckConstraint``."""
+
+    class Meta(_UqColumns.Meta):
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(a=models.F("b")),
+                name="tests_uq_checked",
+                violation_error_code="a_is_b",
+            ),
+        ]
+
+
+class UqCheckedParent(_UnmanagedProductsModel):
+    """A multi-table parent whose ``a`` must differ from ``b``, through a ``CheckConstraint``."""
+
+    a: _Text = models.TextField()
+    b: _Text = models.TextField()
+
+    class Meta(_UnmanagedProductsModel.Meta):
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(a=models.F("b")),
+                name="tests_uq_checked_parent",
+                violation_error_code="a_is_b",
+            ),
+        ]
+
+
+class UqCheckedChild(UqCheckedParent):
+    """A multi-table child of ``UqCheckedParent`` adding the unconstrained ``c``."""
+
+    c: _Text = models.TextField(blank=True, default="")
+
+
+class _PairedExpressionsConstraint(models.BaseConstraint):
+    """A constraint shaped as postgres ``ExclusionConstraint`` keeps its columns.
+
+    ``expressions`` holds ``(expression, operator)`` pairs, an expression possibly a
+    bare field name, beside a ``condition``; its ``validate`` (never run here) would skip
+    when ``exclude`` names any column either references, as ``ExclusionConstraint``'s does.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        expressions: list[tuple[str | Lower, str]],
+        condition: models.Q,
+    ) -> None:
+        super().__init__(name=name)
+        self.expressions = expressions
+        self.condition = condition
+
+    @override
+    def deconstruct(self) -> tuple[str, Sequence[object], dict[str, object]]:
+        """Carry the pairs and the condition through Django's ``clone``."""
+        path, args, kwargs = super().deconstruct()
+        return path, args, {**kwargs, "expressions": self.expressions, "condition": self.condition}
+
+
+class UqExcluded(_UqColumns):
+    """Declares a ``_PairedExpressionsConstraint`` over ``a``, ``Lower(b)``, conditioned on ``c``.
+
+    Declared only for its groups; no table is created for it.
+    """
+
+    class Meta(_UqColumns.Meta):
+        constraints = [
+            _PairedExpressionsConstraint(
+                name="tests_uq_excluded",
+                expressions=[("a", "="), (Lower("b"), "=")],
+                condition=models.Q(c="live"),
+            ),
+        ]
+
+
+def _proxy_of(model: type[Model], name: str) -> type[Model]:
+    """A proxy model over ``model``, sharing its table.
+
+    Django keeps ``Meta.constraints`` / ``unique_together`` only on the declaring class,
+    and ``models.E016`` refuses a proxy declaring any, so a proxy's own metadata is empty.
+    """
+    meta = type("Meta", (), {"app_label": "products", "proxy": True})
+    return require(type(name, (model,), {"__module__": __name__, "Meta": meta}), is_model_class)
+
+
+UqPairProxy = _proxy_of(UqPair, "UqPairProxy")
+UqPairProxyProxy = _proxy_of(UqPairProxy, "UqPairProxyProxy")
+UqTogetherProxy = _proxy_of(UqTogether, "UqTogetherProxy")
+UqAbstractPairProxy = _proxy_of(UqAbstractPair, "UqAbstractPairProxy")
+UqChildOfPairProxy = _proxy_of(UqChildOfPair, "UqChildOfPairProxy")
+UqConditionalProxy = _proxy_of(UqConditional, "UqConditionalProxy")
+UqExpressionProxy = _proxy_of(UqExpression, "UqExpressionProxy")
+UqSingleProxy = _proxy_of(UqSingle, "UqSingleProxy")
+UqCheckedProxy = _proxy_of(UqChecked, "UqCheckedProxy")
+
+
+class UqSlugged(_UnmanagedProductsModel):
+    """``slug`` is unique among published rows and filled from ``name`` by ``save()``."""
+
+    name: _Text = models.TextField()
+    slug: _Text = models.TextField()
+    published: _Bool = models.BooleanField(default=False)
+
+    class Meta(_UnmanagedProductsModel.Meta):
+        constraints = [
+            models.UniqueConstraint(
+                fields=["slug"],
+                condition=models.Q(published=True),
+                name="tests_uq_slugged_live",
+            ),
+        ]
+
+    @override
+    def save(self, *args: object, **kwargs: object) -> None:
+        if not self.slug:
+            self.slug = self.name.lower()
+        call_forwarded(super().save, args, kwargs)
+
+
+class UqStatus(_UnmanagedProductsModel):
+    """``n`` may be negative only while ``status`` is ``draft``; ``status`` has choices."""
+
+    a: _Text = models.TextField(blank=True, default="")
+    n: _Int = models.IntegerField(default=0)
+    status: _Text = models.TextField(
+        choices=[("draft", "Draft"), ("live", "Live")],
+        default="draft",
+    )
+
+    class Meta(_UnmanagedProductsModel.Meta):
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(n__gte=0) | models.Q(status="draft"),
+                name="tests_uq_status_n",
+            ),
+        ]
+
+
+class UqDated(_UnmanagedProductsModel):
+    """``slug`` is unique per ``pub`` date (``unique_for_date``)."""
+
+    a: _Text = models.TextField(blank=True, default="")
+    slug: _Text = models.TextField(unique_for_date="pub")
+    pub: models.DateField[str | datetime.date | Combinable, datetime.date] = models.DateField()
+
+
+def _write_row(
+    model: type[Model],
+    data: dict[str, object],
+    *,
+    pk: object = None,
+    fields: tuple[str, ...] = ("a", "b", "c"),
+) -> object:
+    """Run one model-flavor ``writeRow`` of ``fields``; answer its payload.
+
+    An update (``pk`` set, partial input) or a create (``pk`` unset). ``data`` is written
+    inline, so the query need not spell the generated input's name.
+    """
+    type(
+        f"{model.__name__}T",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": model, "fields": ("id", *fields), "primary": True})},
+    )
+    meta: dict[str, object] = {
+        "model": model,
+        "fields": fields,
+        "operation": "create" if pk is None else "update",
+        "permission_classes": [_AllowAll],
+    }
+    if pk is not None:
+        meta["select_for_update"] = False
+    write = type("WriteRow", (DjangoMutation,), {"Meta": type("Meta", (), meta)})
+
+    @strawberry.type
+    class Mutation:
+        write_row = DjangoMutationField(write)
+
+    finalize_django_types()
+    literal = ", ".join(f"{name}: {json.dumps(value)}" for name, value in data.items())
+    selection = "{ result { id } errors{ field messages codes } }"
+    if pk is None:
+        query = f"mutation {{ writeRow(data: {{ {literal} }}) {selection} }}"
+        variables = None
+    else:
+        query = f"mutation($id: ID!) {{ writeRow(id: $id, data: {{ {literal} }}) {selection} }}"
+        variables = {"id": str(pk)}
+    res = _schema(Mutation).execute_sync(query, variable_values=variables)
+    assert res.errors is None, res.errors
+    return _json_at(res.data, "writeRow")
+
+
+def _unique_together_errors(label: str) -> list[dict[str, object]]:
+    """The envelope Django's own ``(a, b)`` uniqueness check answers for ``label``."""
+    return [
+        {
+            "field": NON_FIELD_ERROR_KEY,
+            "messages": [f"{label} with this A and B already exists."],
+            "codes": ["unique_together"],
+        },
+    ]
+
+
+def _violated_errors(name: str, codes: list[str]) -> list[dict[str, object]]:
+    """The envelope a conditional or expression ``UniqueConstraint`` named ``name`` answers.
+
+    Django raises the constraint's default ``violation_error_message`` under its
+    ``violation_error_code``; an unset code answers no code.
+    """
+    return [
+        {
+            "field": NON_FIELD_ERROR_KEY,
+            "messages": [
+                str(models.UniqueConstraint.default_violation_error_message) % {"name": name},
+            ],
+            "codes": codes,
+        },
+    ]
+
+
+_UNIQUE_GROUP_CASES = [
+    pytest.param(UqPair, (UqPair,), {"a": "x"}, _unique_together_errors("Uq pair"), id="concrete"),
+    pytest.param(
+        UqPairProxy,
+        (UqPair,),
+        {"a": "x"},
+        _unique_together_errors("Uq pair"),
+        id="proxy",
+    ),
+    pytest.param(
+        UqPairProxyProxy,
+        (UqPair,),
+        {"a": "x"},
+        _unique_together_errors("Uq pair"),
+        id="proxy-of-proxy",
+    ),
+    pytest.param(
+        UqTogether,
+        (UqTogether,),
+        {"a": "x"},
+        _unique_together_errors("Uq together"),
+        id="unique-together",
+    ),
+    pytest.param(
+        UqTogetherProxy,
+        (UqTogether,),
+        {"a": "x"},
+        _unique_together_errors("Uq together"),
+        id="unique-together-proxy",
+    ),
+    pytest.param(
+        UqAbstractPairProxy,
+        (UqAbstractPair,),
+        {"a": "x"},
+        _unique_together_errors("Uq abstract pair"),
+        id="abstract-base-proxy",
+    ),
+    pytest.param(
+        UqChildOfPair,
+        (UqParentPair, UqChildOfPair),
+        {"a": "x"},
+        _unique_together_errors("Uq parent pair"),
+        id="multi-table-parent-constraint",
+    ),
+    pytest.param(
+        UqChildOfTogether,
+        (UqParentTogether, UqChildOfTogether),
+        {"a": "x"},
+        _unique_together_errors("Uq parent together"),
+        id="multi-table-parent-unique-together",
+    ),
+    pytest.param(
+        UqChildOfPairProxy,
+        (UqParentPair, UqChildOfPair),
+        {"a": "x"},
+        _unique_together_errors("Uq parent pair"),
+        id="multi-table-child-proxy",
+    ),
+    pytest.param(
+        UqConditional,
+        (UqConditional,),
+        {"a": "x"},
+        _violated_errors("tests_uq_conditional", ["duplicate_live"]),
+        id="conditional",
+    ),
+    pytest.param(
+        UqConditionalProxy,
+        (UqConditional,),
+        {"a": "x"},
+        _violated_errors("tests_uq_conditional", ["duplicate_live"]),
+        id="conditional-proxy",
+    ),
+    pytest.param(
+        UqExpression,
+        (UqExpression,),
+        {"a": "X"},
+        _violated_errors("tests_uq_expression", []),
+        id="expression",
+    ),
+    pytest.param(
+        UqExpressionProxy,
+        (UqExpression,),
+        {"a": "X"},
+        _violated_errors("tests_uq_expression", []),
+        id="expression-proxy",
+    ),
+    pytest.param(
+        UqGenerated,
+        (UqGenerated,),
+        {"a": "X"},
+        [
+            {
+                "field": NON_FIELD_ERROR_KEY,
+                "messages": ["Uq generated with this Folded and B already exists."],
+                "codes": ["unique_together"],
+            },
+        ],
+        id="generated-member",
+    ),
+    pytest.param(
+        UqRootPerA,
+        (UqRootPerA,),
+        {"a": "x"},
+        _violated_errors("tests_uq_root_per_a", []),
+        id="condition-by-relation-and-pk",
+    ),
+    pytest.param(
+        UqSingleProxy,
+        (UqSingle,),
+        {"a": "x"},
+        [
+            {
+                "field": "a",
+                "messages": ["Uq single with this A already exists."],
+                "codes": ["unique"],
+            },
+        ],
+        id="single-field-unique-proxy",
+    ),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "model",
+        "tables",
+        "data",
+        "errors",
+    ),
+    _UNIQUE_GROUP_CASES,
+)
+def test_partial_update_validates_every_unique_check_django_runs_for_the_row(
+    model: type[Model],
+    tables: tuple[type[Model], ...],
+    data: dict[str, object],
+    errors: list[dict[str, object]],
+) -> None:
+    """A partial update colliding on a unique check through an unprovided column is refused.
+
+    Each row collides with its sibling through the provided ``a`` and the unprovided
+    ``b`` (and, for the conditional constraint, the unprovided ``c`` its condition reads;
+    for the generated member, the ``folded`` column computed from ``a``). The unprovided
+    co-members stay validated whether the check is declared on the model, on a proxy's
+    concrete model, on an abstract base, or on a multi-table parent, and whether it names
+    its columns in ``fields``, in its ``condition``, in an expression or through a
+    generated column, so Django's own uniqueness error answers before the save and the
+    stored row is unchanged. No fakeshop model has any of these shapes.
+    """
+    with _tables(*tables):
+        _ = model.objects.create(a="x", b="1", c="live")
+        row = model.objects.create(a="y", b="1", c="live")
+        answered = _write_row(model, data, pk=pk_of(row))
+        stored = sorted(model._base_manager.values_list("a", flat=True))
+
+    assert answered == {"result": None, "errors": errors}
+    assert stored == ["x", "y"]
+
+
+_CHECK_CONSTRAINT_CASES = [
+    pytest.param(UqChecked, (UqChecked,), "tests_uq_checked", id="concrete"),
+    pytest.param(UqCheckedProxy, (UqChecked,), "tests_uq_checked", id="proxy"),
+    pytest.param(
+        UqCheckedChild,
+        (UqCheckedParent, UqCheckedChild),
+        "tests_uq_checked_parent",
+        id="multi-table-parent",
+    ),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("model", "tables", "name"), _CHECK_CONSTRAINT_CASES)
+def test_partial_update_violating_a_check_constraint_through_an_unprovided_column_is_refused(
+    model: type[Model],
+    tables: tuple[type[Model], ...],
+    name: str,
+) -> None:
+    """A provided ``a`` equal to the stored, unprovided ``b`` fails ``a != b`` before the save.
+
+    The unprovided ``b`` the check reads stays validated, whether the ``CheckConstraint``
+    is declared on the model, on a proxy's concrete model or on a multi-table parent, so
+    Django's own violation answers instead of the database's ``constraint`` envelope and
+    the stored row is unchanged. No fakeshop model a ``DjangoMutation`` writes declares a
+    ``CheckConstraint``.
+    """
+    with _tables(*tables):
+        _ = model.objects.create(a="x", b="1")
+        row = model.objects.create(a="y", b="1")
+        answered = _write_row(model, {"a": "1"}, pk=pk_of(row))
+        stored = sorted(model._base_manager.values_list("a", flat=True))
+
+    assert answered == {"result": None, "errors": _violated_errors(name, ["a_is_b"])}
+    assert stored == ["x", "y"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("model", "tables", "name"), _CHECK_CONSTRAINT_CASES)
+def test_partial_update_satisfying_a_check_constraint_through_an_unprovided_column_saves(
+    model: type[Model],
+    tables: tuple[type[Model], ...],
+    name: str,
+) -> None:
+    """A provided ``a`` that differs from the stored, unprovided ``b`` passes the check and saves."""
+    del name
+    with _tables(*tables):
+        row = model.objects.create(a="y", b="1")
+        answered = _write_row(model, {"a": "z"}, pk=pk_of(row))
+        stored = list(model._base_manager.values_list("a", "b"))
+
+    assert answered == {"result": {"id": pk_of(row)}, "errors": []}
+    assert stored == [("z", "1")]
+
+
+@pytest.mark.parametrize(
+    ("model", "provided", "exclude"),
+    [
+        pytest.param(UqPairProxy, {"a"}, ["c", "id"], id="proxy"),
+        pytest.param(UqPairProxy, {"c"}, ["a", "b", "id"], id="proxy-unrelated-provided"),
+        pytest.param(UqTogetherProxy, {"b"}, ["c", "id"], id="unique-together-proxy"),
+        pytest.param(
+            UqChildOfPair,
+            {"a"},
+            ["c", "id", "uqparentpair_ptr"],
+            id="multi-table-parent-constraint",
+        ),
+        pytest.param(UqConditional, {"a"}, ["id"], id="conditional"),
+        pytest.param(UqConditional, {"c"}, ["id"], id="conditional-through-condition"),
+        pytest.param(UqRootPerA, {"a"}, ["b", "c"], id="condition-by-relation-and-pk"),
+        pytest.param(UqExpressionProxy, {"a"}, ["c", "id"], id="expression-proxy"),
+        pytest.param(UqGenerated, {"a"}, ["c", "id"], id="generated-member"),
+        pytest.param(UqSingleProxy, {"b"}, ["a", "c", "id"], id="single-field-unique-unprovided"),
+        pytest.param(UqCheckedProxy, {"a"}, ["c", "id"], id="check-constraint-proxy"),
+        pytest.param(
+            UqCheckedChild,
+            {"c"},
+            [
+                "a",
+                "b",
+                "id",
+                "uqcheckedparent_ptr",
+            ],
+            id="check-constraint-unrelated-provided",
+        ),
+        pytest.param(UqExcluded, {"a"}, ["id"], id="exclusion-shaped-constraint"),
+        pytest.param(UqDated, {"slug"}, ["a", "id"], id="unique-for-date-field"),
+        pytest.param(UqDated, {"pub"}, ["a", "id"], id="unique-for-date-date"),
+        pytest.param(UqDated, {"a"}, ["id", "pub", "slug"], id="unique-for-date-unrelated"),
+    ],
+)
+def test_unprovided_exclude_keeps_every_member_of_a_group_a_provided_field_joins(
+    model: type[Model],
+    provided: set[str],
+    exclude: list[str],
+) -> None:
+    """A group with a provided member keeps its other members; every other column stays out.
+
+    The groups come from the model's and its parents' declarations and from every column a
+    constraint's condition, expressions and generated members read; an unprovided column in
+    no group with a provided one is excluded, as a ``partial=True`` update leaves it.
+    """
+    assert resolvers._unprovided_exclude(model, provided) == exclude
+
+
+def test_clean_excludes_field_validates_only_provided_columns() -> None:
+    """``clean_fields`` skips every unprovided column; the checks keep a joined co-member.
+
+    ``n`` joins the ``CheckConstraint`` over ``n`` and ``status``, so ``status`` leaves
+    the uniqueness / constraint exclude while staying in the ``clean_fields`` one.
+    """
+    assert resolvers._clean_excludes(UqStatus, {"n"}) == resolvers.CleanExcludes(
+        fields=["a", "id", "status"],
+        checks=["a", "id"],
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_validates_a_constraint_over_a_column_save_fills_without_field_validating_it() -> (
+    None
+):
+    """A create leaving out ``slug`` saves: the constraint runs, ``slug`` is not field-validated.
+
+    ``published`` joins the conditional constraint over ``slug``, so the constraint runs
+    against the row (no published row carries the empty slug), while the unprovided
+    ``slug`` is left to ``save()``, which fills it, instead of failing ``blank``.
+    """
+    with _tables(UqSlugged):
+        answered = _write_row(
+            UqSlugged,
+            {"name": "Hello", "published": True},
+            fields=("name", "published"),
+        )
+        saved = UqSlugged._base_manager.get()
+
+    assert answered == {"result": {"id": pk_of(saved)}, "errors": []}
+    assert saved.slug == "hello"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("n", "errors", "stored"),
+    [
+        pytest.param(5, [], (5, "legacy"), id="satisfied"),
+        pytest.param(
+            -1,
+            [
+                {
+                    "field": NON_FIELD_ERROR_KEY,
+                    "messages": [
+                        str(models.CheckConstraint.default_violation_error_message)
+                        % {"name": "tests_uq_status_n"},
+                    ],
+                    "codes": [],
+                },
+            ],
+            (1, "legacy"),
+            id="violated",
+        ),
+    ],
+)
+def test_update_checks_a_stored_column_outside_its_choices_without_field_validating_it(
+    n: int,
+    errors: list[dict[str, object]],
+    stored: tuple[int, str],
+) -> None:
+    """A stored ``status`` outside today's choices is checked against, never field-validated.
+
+    ``n`` joins the ``CheckConstraint`` over ``n`` and ``status``: the check runs against
+    the stored ``legacy`` status and refuses a negative ``n``, while ``status`` itself, left
+    out of the input, never answers ``invalid_choice``.
+    """
+    with _tables(UqStatus):
+        row = UqStatus.objects.create(n=1, status="live")
+        _ = UqStatus.objects.filter(pk=pk_of(row)).update(status="legacy")
+        answered = _write_row(UqStatus, {"n": n}, pk=pk_of(row), fields=("a", "n", "status"))
+        saved = list(UqStatus._base_manager.values_list("n", "status"))
+
+    result = None if errors else {"id": pk_of(row)}
+    assert answered == {"result": result, "errors": errors}
+    assert saved == [stored]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("rows", "data"),
+    [
+        pytest.param(
+            [("s", "2026-01-01"), ("t", "2026-01-01")],
+            {"slug": "s"},
+            id="provided-field",
+        ),
+        pytest.param(
+            [("s", "2026-01-01"), ("s", "2026-01-02")],
+            {"pub": "2026-01-01"},
+            id="provided-date",
+        ),
+    ],
+)
+def test_partial_update_validates_unique_for_date_through_an_unprovided_member(
+    rows: list[tuple[str, str]],
+    data: dict[str, object],
+) -> None:
+    """``unique_for_date`` runs when only one of the field and its date field is provided.
+
+    Django's ``_get_unique_checks`` skips the date check when either is excluded, so the
+    unprovided one stays in: its duplicate is Django's ``unique_for_date`` error.
+    """
+    with _tables(UqDated):
+        created = [UqDated.objects.create(slug=slug, pub=pub) for slug, pub in rows]
+        answered = _write_row(UqDated, data, pk=pk_of(created[1]), fields=("a", "slug", "pub"))
+        stored = list(UqDated._base_manager.order_by("pk").values_list("slug", "pub"))
+
+    assert answered == {
+        "result": None,
+        "errors": [
+            {
+                "field": "slug",
+                "messages": ["Slug must be unique for Pub date."],
+                "codes": ["unique_for_date"],
+            },
+        ],
+    }
+    assert stored == [(slug, datetime.date.fromisoformat(pub)) for slug, pub in rows]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_field_failing_validation_is_left_out_of_its_uniqueness_checks() -> None:
+    """A provided ``slug`` that fails ``clean_fields`` answers that error alone.
+
+    ``Model.full_clean`` leaves a field that failed validation out of ``validate_unique``
+    and ``validate_constraints``, so the blank ``slug`` is not also reported as a
+    ``unique_for_date`` duplicate of the stored blank slug on the same date.
+    """
+    with _tables(UqDated):
+        _ = UqDated.objects.create(slug="", pub="2026-01-01")
+        row = UqDated.objects.create(slug="t", pub="2026-01-01")
+        answered = _write_row(UqDated, {"slug": ""}, pk=pk_of(row), fields=("a", "slug", "pub"))
+
+    assert answered == {
+        "result": None,
+        "errors": [
+            {"field": "slug", "messages": ["This field cannot be blank."], "codes": ["blank"]},
+        ],
+    }
 
 
 @pytest.mark.django_db
@@ -3221,7 +3996,7 @@ def test_assign_m2m_integrity_error_contained_in_envelope() -> None:
         "django_strawberry_framework.mutations.resolvers._assign_m2m",
         side_effect=IntegrityError("constraint failed"),
     ):
-        decoded: _ModelDecoded = (cat, [("fake_m2m", [1, 2])], [])
+        decoded: _ModelDecoded = (cat, [("fake_m2m", [1, 2])], resolvers.CleanExcludes([], []))
         with managed_write_transaction("default"), open_write_pipeline(CreateCategoryMutation):
             failure = resolvers._model_write_step(
                 CreateCategoryMutation,
@@ -3277,7 +4052,7 @@ def test_model_write_step_full_clean_error_keys_to_wire_name() -> None:
         circulation_status="bogus-not-a-choice-value!!",
         shelf=shelf,
     )
-    decoded: _ModelDecoded = (book, [], [])
+    decoded: _ModelDecoded = (book, [], resolvers.CleanExcludes([], []))
     with managed_write_transaction("default"), open_write_pipeline(CreateBookMutation):
         failure = resolvers._model_write_step(CreateBookMutation, None, decoded, specs=specs)
     assert isinstance(failure, resolvers.StepFailure)
