@@ -31,7 +31,9 @@ only; this doc is canonical.
   concurrent work; a fix crosses files when the invariant does; unrelated cleanup stays out.
 - Invoking this flow authorizes the runs it names: a focused permanent test w/ `--no-cov` in the
   shared tree, any `workspace.py run` or `prove` ("Workspace"), and the final gate `workspace.py
-  gate hunt`. Nothing else converts into a test run. `FAKESHOP_SHARDED=1` and Postgres cells need
+  gate hunt --suites lint`. Nothing else converts into a test run; the full suite, the coverage
+  gate and the version matrix run only in GitHub Actions ("Integration and final gate").
+  `FAKESHOP_SHARDED=1` and Postgres cells need
   the maintainer's separate word; without it a cell is `unverified`, or `inapplicable by construction` when
   the target's code path reaches no database, alias or dialect decision (Worker-1 states the
   reason, Worker-2 judges it).
@@ -381,15 +383,18 @@ divergent public flavors, gaps between implementation, tests, examples, docs. Re
 `.py` added/removed/renamed since baseline (`git ls-files` + untracked) each get an item or a
 closing note; verified items whose digests moved go `stale`.
 
-Final gate (Worker-0): `uv run python scripts/workspace.py gate hunt --suites lint,default,floor`:
-CI's lint job, the full suite, then CI's floor cell (`workspace.py` docstring), in a gate copy
-carrying its own git index (`--suites lint,default,floor,sharded,pg` once the maintainer authorized those
-cells). Passes when lint, the suite and the floor suite pass + package coverage stays 100%. Record
-failures, coverage, skips, xfails, collected/selected counts, cell. The gate's result file binds it
-to a snapshot commit of the gate copy at gate time + blob ids of `pyproject.toml`, `uv.lock` + the
-floor pins. Product failure → the owning item back to Worker-1; environment/concurrent failure →
-recorded precisely, `blocked`. Sharded and Postgres cells are `unverified` unless the maintainer
-authorized them; the report lists them.
+Final gate (Worker-0): `uv run python scripts/workspace.py gate hunt --suites lint`: CI's lint job
+in a gate copy carrying its own git index. The full suite, package coverage 100%, the floor cell and
+the `FAKESHOP_SHARDED=1` / `pg` tiers never run locally ([AGENTS.md][agents]); they run in GitHub
+Actions: the full `django.yml` matrix dispatched with `gh workflow run django.yml` (every Python /
+Django cell, single-DB and `FAKESHOP_SHARDED=1`, plus the lint job, incl. the `fail_under = 100`
+package coverage gate on the latest single-DB cell; the release readiness checklist in
+[KANBAN.md][kanban]), and `postgres.yml` for the Postgres tier. Passes when lint and those runs
+pass. Record failures, coverage, skips, xfails, collected/selected counts and cell per suite, and
+the Actions runs that carried them. The gate's result file binds it to a snapshot commit of the
+gate copy at gate time + blob ids of `pyproject.toml`, `uv.lock` + the floor pins. Product failure →
+the owning item back to Worker-1; environment/concurrent failure → recorded precisely, `blocked`. A
+cell no recorded run carried is `unverified`; the report lists it.
 
 ## Closeout
 
@@ -448,6 +453,7 @@ applied at the owned seam w/ an external watchdog for real timeouts.
 <!-- Root -->
 [agents]: ../../AGENTS.md
 [goal]: ../../GOAL.md
+[kanban]: ../../KANBAN.md
 [security]: ../../SECURITY.md
 [start]: ../../START.md
 

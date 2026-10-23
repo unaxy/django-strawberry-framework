@@ -48,7 +48,8 @@ Entry: `Execute docs/dry/DRY.md (You are Worker-0)`.
 ## Closeout
 
 After every item but the gate is verified and the inventory is reconciled again, dispatch the gate
-Worker-1 (the entry command authorized `uv run pytest`); Worker-2 completes the gate row. Home
+Worker-1 (the entry command authorized `workspace.py gate dry --suites lint`; every other suite runs
+in GitHub Actions); Worker-2 completes the gate row. Home
 every `## Defects` entry on a named owning card; a defect a consolidation depends on keeps its
 family open until the maintainer decides. Fill `## Outcomes` with the per-finding evidence before
 deleting anything, set `Status: complete`, `partial (<scope>)` or `blocked`, then remove only this

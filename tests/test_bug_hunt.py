@@ -139,6 +139,14 @@ def test_generator_writes_autonomous_progress_and_preserves_existing_run(
     assert "including public exports and `__init__.py` files" in report
     assert "- [ ] Final test gate" in report
     assert "    - Owner: Worker-0" in report
+    # The gate runs only CI's lint job locally (AGENTS.md: the full suite, the coverage gate
+    # and the version matrix run only in GitHub Actions) and records the Actions runs.
+    assert (
+        "Run `uv run python scripts/workspace.py gate hunt --suites lint` (CI's lint job)"
+        in report
+    )
+    assert "the full `django.yml` matrix dispatched with `gh workflow run django.yml`" in report
+    assert "uv run pytest" not in report
     assert "## Owned changes" in report
     assert "## Outcomes" in report
     assert report.index(stripped.name) < report.index("## Scenarios")

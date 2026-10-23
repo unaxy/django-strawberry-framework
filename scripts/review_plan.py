@@ -348,9 +348,10 @@ _GATE_ITEM = Item(
     artifacts=(),
     extra=(
         (
-            "Runs: `uv run python scripts/workspace.py gate review` (CI's lint job, then default, "
-            "floor, `FAKESHOP_SHARDED=1` and Postgres suites in a gate copy that keeps a git index, "
-            'REVIEW.md "Final gate and closeout"), each w/ its own counts; every '
+            "Runs: `uv run python scripts/workspace.py gate review` (CI's lint job in a gate copy "
+            "that keeps a git index; the default, floor, `FAKESHOP_SHARDED=1` and Postgres suites "
+            "run only in GitHub Actions, the dispatched `django.yml` matrix and `postgres.yml`, "
+            'each recorded w/ its run id and counts, REVIEW.md "Final gate and closeout"); every '
             "`## Pending execution` command from every artifact; the `## Bench baseline` "
             "commands at `<phase>` `gate`, delta recorded"
         ),

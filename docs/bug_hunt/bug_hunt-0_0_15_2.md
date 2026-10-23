@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 208 done, 138 to do.
+Progress: 209 done, 137 to do.
 
 ## Done
 
@@ -860,6 +860,13 @@ Progress: 208 done, 138 to do.
   `snapshot_commit` commits the mirrored copy under its lock (parent HEAD read after the sync; for `gate`, its `head`)
   through `content_tree`, refuses a copy edited since the sync, never moves the shared index or refs, and the gate
   result's key is `snapshot`
+- [x] 339. `scripts/bug_hunt.py::_final_gate_block` rendered "Run `uv run pytest`; require a passing suite and 100%
+  configured package coverage" into every generated hunt, against AGENTS rules 15 / 16, and the same drift (missed
+  by the rule-16 rewrite) sat in HUNT.md, REVIEW.md, the DRY / hunt worker docs, `scripts/review_plan.py::_GATE_ITEM`
+  and `scripts/workspace.py`'s `gate --suites` default (every suite): fixed at the root, a bare `workspace.py gate`
+  runs CI's lint job only (`LOCAL_GATE_SUITE`; a maintainer still names other suites), and every agentflow gate reads
+  "lint locally, every other suite in the dispatched `django.yml` matrix" in BoardDoc 11's words; closed per-cycle
+  hunt and review docs left as written
 
 ## Outside review of the fixes
 
@@ -1033,10 +1040,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
   rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script
   writes there): refuse with a `WorkspaceError` naming the contents, or remove them
-- [ ] 339. `scripts/bug_hunt.py::_final_gate_block` renders "Run `uv run pytest`; require a passing suite and 100%
-  configured package coverage" into every generated hunt, against AGENTS rule 16 (the full suite and the coverage gate
-  run only in GitHub Actions); restate it as the dispatched `django.yml` matrix the release checklist (BoardDoc 11)
-  names, and regenerate nothing else
 - [ ] 340. A `ModelForm` relation field whose class-level queryset is over another model than its relation column's
   target (`category = ModelChoiceField(queryset=Genre.objects.all())` over `Item.category`) builds `categoryId: ID!`,
   and every create / update is a request-time `ConfigurationError` from

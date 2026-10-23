@@ -2328,6 +2328,83 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
     assert list(workspace.GATE_SUITES)[:3] == ["lint", "default", "floor"]
 
 
+@pytest.mark.parametrize(
+    ("options", "suites"),
+    [
+        pytest.param([], ["lint"], id="bare-gate-runs-only-lint"),
+        pytest.param(["--suites", "lint"], ["lint"], id="lint-named"),
+        pytest.param(
+            ["--suites", "lint,default,floor,sharded,pg"],
+            [
+                "lint",
+                "default",
+                "floor",
+                "sharded",
+                "pg",
+            ],
+            id="maintainer-named-suites-still-run",
+        ),
+    ],
+)
+def test_a_bare_gate_runs_only_the_lint_suite(
+    options: list[str],
+    suites: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``gate`` defaults to CI's lint job; every other suite runs only when named.
+
+    AGENTS.md runs the full suite, the coverage gate and the version matrix only
+    in GitHub Actions, so a flow doc's bare ``workspace.py gate <flow>`` must not
+    start them locally; the maintainer can still name them.
+    """
+    monkeypatch.setenv(workspace.ROOT_ENV, str(tmp_path))
+    calls: list[tuple[str, list[str]]] = []
+
+    def record_gate(layout: workspace.Layout, chosen: Sequence[str]) -> int:
+        calls.append((layout.flow, list(chosen)))
+        return 0
+
+    monkeypatch.setattr(workspace, "gate", record_gate)
+
+    assert workspace.main(["gate", "hunt", *options]) == 0
+    assert calls == [("hunt", suites)]
+
+
+def test_gate_refuses_a_suite_it_does_not_know(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unknown ``--suites`` entry is refused with the known set, before any suite runs."""
+    monkeypatch.setenv(workspace.ROOT_ENV, str(tmp_path))
+    calls: list[Sequence[str]] = []
+
+    def record_gate(_layout: workspace.Layout, chosen: Sequence[str]) -> int:
+        calls.append(chosen)
+        return 0
+
+    monkeypatch.setattr(workspace, "gate", record_gate)
+    _ = capsys.readouterr()
+
+    assert (
+        workspace.main(
+            [
+                "gate",
+                "hunt",
+                "--suites",
+                "lint,nope",
+            ],
+        )
+        == 1
+    )
+    assert calls == []
+    assert capsys.readouterr().err == (
+        "workspace: --suites takes a subset of lint, default, floor, sharded, pg; "
+        "got 'lint,nope'\n"
+    )
+
+
 def _gate_copy_inputs(layout: workspace.Layout, lock: str = "lock v1\n") -> None:
     _write(
         layout.gate_dir / "pyproject.toml",
