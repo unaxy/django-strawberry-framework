@@ -4,12 +4,14 @@ Repo tooling: these rows pin YAML under ``.github/workflows/``, Dependabot
 ecosystems, the first-party ``DjangoOptimizerExtension`` ``extensions=`` form
 sweep, the live tier's undeclared raw ``.post(`` / ``.generic(`` sweep,
 install-floor constants against ``pyproject.toml``, ``[tool.ruff]``'s exclusions
-binding a path named to ``ruff format``, and every staged
-``TODO(spec-NNN ...)`` anchor against the spec corpus and ``KANBAN.md``. A
-live ``/graphql/`` request has no wire shape for a workflow permission block,
-an action SHA pin, a digest-pinned container image, a Dependabot ecosystem
-list, an AST classifier over every committable ``.py``, a TOML dependency row,
-a ruff exclusion or a source comment, so none of these rows can move. There is no live sibling in
+binding a path named to ``ruff format``, every staged ``TODO(spec-NNN ...)``
+anchor against the spec corpus and ``KANBAN.md``, and the ``docs/SPECS/``
+archive layout (specs and ``NEXT.md``, their companions in ``appx/``). A live
+``/graphql/`` request has no wire shape for a workflow permission block, an
+action SHA pin, a digest-pinned container image, a Dependabot ecosystem list, an
+AST classifier over every committable ``.py``, a TOML dependency row, a ruff
+exclusion, a source comment or a file's place in the spec archive, so none of
+these rows can move. There is no live sibling in
 ``examples/fakeshop/test_query/``. Plan-cache reuse across HTTP requests on
 the shipped schema lives in
 ``examples/fakeshop/test_query/test_library_api.py``; that row cannot audit
@@ -1461,3 +1463,140 @@ def test_the_raw_post_sweep_accepts_a_declared_call(tmp_path: Path) -> None:
         "    return client.query('{ x }')\n",
     )
     assert _raw_posts(planted) == ([], [f"{planted}:4: client.post("])
+
+
+#: The archive the spec-authoring flow moves every completed spec into. It holds
+#: the archived specs and the process doc ``NEXT.md``; their ``-terms.csv`` and
+#: ``-rationale.md`` companions go one level down in ``appx/``.
+SPEC_ARCHIVE = "docs/SPECS"
+SPEC_APPENDIX = f"{SPEC_ARCHIVE}/appx"
+
+#: A spec's file name, and a companion's: the stem plus its companion suffix.
+SPEC_NAME = re.compile(r"spec-\d{3}-.+\.md")
+SPEC_COMPANION_NAME = re.compile(r"spec-\d{3}-.+-(?:terms\.csv|rationale\.md)")
+
+
+def _misplaced_archive_files(paths: Iterable[str]) -> list[str]:
+    """Return one formatted violation per archive path outside the archive layout.
+
+    ``docs/SPECS/`` holds archived specs and ``NEXT.md`` and ``docs/SPECS/appx/``
+    holds their companions, nothing else at either level and no other
+    subdirectory. Both glossary lookups (the terms importer and
+    ``check_spec_glossary.py``) accept a CSV beside its spec as well as under
+    ``appx/``, so a companion left beside an archived spec changes no gate result
+    and nothing else would notice it. This sweep places files only; it does not
+    ask whether a companion still has its spec. A pure function over repo-relative
+    paths, so the rows below can feed it layouts the live tree never holds.
+    """
+    violations: list[str] = []
+    for path in sorted(paths):
+        parent, _, name = path.rpartition("/")
+        if parent == SPEC_ARCHIVE:
+            if SPEC_COMPANION_NAME.fullmatch(name):
+                violations.append(f"{path}: an archived spec's companion goes to {SPEC_APPENDIX}/")
+            elif name != "NEXT.md" and not SPEC_NAME.fullmatch(name):
+                violations.append(f"{path}: {SPEC_ARCHIVE}/ holds only specs and NEXT.md")
+        elif parent == SPEC_APPENDIX:
+            if not SPEC_COMPANION_NAME.fullmatch(name):
+                violations.append(
+                    f"{path}: {SPEC_APPENDIX}/ holds only -terms.csv and -rationale.md companions",
+                )
+        else:
+            violations.append(f"{path}: {SPEC_ARCHIVE}/ has no subdirectory but appx/")
+    return violations
+
+
+def _committable_archive_files() -> list[str]:
+    """Return every committable path under ``docs/SPECS/``, repo-relative.
+
+    The same git oracle as ``_committable_python_files`` (tracked, plus untracked
+    but not ignored), so an ignored scratch file never fails the row and a
+    misplaced file fails it before it is staged.
+    """
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            SPEC_ARCHIVE,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, (
+        f"git ls-files failed ({completed.returncode}): {completed.stderr.strip()}"
+    )
+    return [name for name in completed.stdout.split("\0") if name]
+
+
+def test_the_spec_archive_holds_only_specs_and_their_appx_companions() -> None:
+    """Every file under ``docs/SPECS/`` sits where the archive layout puts it."""
+    paths = _committable_archive_files()
+    # An answer missing either level would pass the layout row on nothing.
+    assert any(path.startswith(f"{SPEC_APPENDIX}/") for path in paths), paths
+    assert f"{SPEC_ARCHIVE}/NEXT.md" in paths, paths
+    assert _misplaced_archive_files(paths) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "reason"),
+    [
+        pytest.param(
+            "docs/SPECS/spec-001-x-0_0_1-terms.csv",
+            "an archived spec's companion goes to docs/SPECS/appx/",
+            id="terms-csv-beside-an-archived-spec",
+        ),
+        pytest.param(
+            "docs/SPECS/spec-001-x-0_0_1-rationale.md",
+            "an archived spec's companion goes to docs/SPECS/appx/",
+            id="rationale-beside-an-archived-spec",
+        ),
+        pytest.param(
+            "docs/SPECS/notes.md",
+            "docs/SPECS/ holds only specs and NEXT.md",
+            id="foreign-file-in-the-archive",
+        ),
+        pytest.param(
+            "docs/SPECS/appx/spec-001-x-0_0_1.md",
+            "docs/SPECS/appx/ holds only -terms.csv and -rationale.md companions",
+            id="spec-in-appx",
+        ),
+        pytest.param(
+            "docs/SPECS/appx/spec-001-x-0_0_1-notes.md",
+            "docs/SPECS/appx/ holds only -terms.csv and -rationale.md companions",
+            id="foreign-file-in-appx",
+        ),
+        pytest.param(
+            "docs/SPECS/appx/old/spec-001-x-0_0_1-terms.csv",
+            "docs/SPECS/ has no subdirectory but appx/",
+            id="nested-directory",
+        ),
+    ],
+)
+def test_the_archive_layout_sweep_reports_a_misplaced_file(path: str, reason: str) -> None:
+    """Each misplaced file is reported once, with its path and the rule it breaks."""
+    layout = [
+        "docs/SPECS/NEXT.md",
+        "docs/SPECS/spec-001-x-0_0_1.md",
+        "docs/SPECS/appx/spec-001-x-0_0_1-terms.csv",
+        path,
+    ]
+    assert _misplaced_archive_files(layout) == [f"{path}: {reason}"]
+
+
+def test_the_archive_layout_sweep_accepts_the_archive_layout() -> None:
+    """The negative direction: an archived spec with both companions under ``appx/``."""
+    layout = [
+        "docs/SPECS/NEXT.md",
+        "docs/SPECS/spec-001-x-0_0_1.md",
+        "docs/SPECS/appx/spec-001-x-0_0_1-terms.csv",
+        "docs/SPECS/appx/spec-001-x-0_0_1-rationale.md",
+    ]
+    assert _misplaced_archive_files(layout) == []
