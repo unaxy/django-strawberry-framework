@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 219 done, 141 to do.
+Progress: 220 done, 140 to do.
 
 ## Done
 
@@ -937,6 +937,13 @@ Progress: 219 done, 141 to do.
   the async suites; gaps (b)-(d) need no rows: an unhooked reverse M2M miss is an equivalent mutant, the window
   resolver-key collision needs a second shipped keyset type and is pinned by the async twin plus package key rows, and
   the C11 hook-order rows are live on a holder mount
+- [x] 183. `[tool.ruff.format] exclude` bound only directory discovery, so `ruff format <x.md>` (the touched-paths
+  command the process docs prescribe) rewrote fenced blocks (27 tracked `.md` would change, the rendered GLOSSARY among
+  them): `force-exclude = true` under `[tool.ruff]` binds every exclude to named paths and `--stdin-filename`;
+  `scripts/check_trailing_commas.py` reads `[tool.ruff] extend-exclude` at run time (repo-relative name segments, an
+  anchored entry refused) and its own `ruff format` calls pass `--no-force-exclude`, so every file `--fix` edits is
+  reflowed; rows in `tests/test_ci_governance.py` and `tests/test_check_trailing_commas.py`; START and docs/ruffing.md
+  state it
 
 ## Outside review of the fixes
 
@@ -977,8 +984,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 183. `ruff format` on an explicit `.md` path rewrites its fenced blocks: pyproject's `exclude` does not stop explicit
-  paths
 - [ ] 185. WebSocket residual after `1b6a09b1`: the Postgres steady-ping lost-write test has never run (Not defects: a
   sync caller blocked in `async_to_sync` keeping the shared connection is documented behaviour, and the async mutation
   window having no owning spec or card breaks no contract row.)

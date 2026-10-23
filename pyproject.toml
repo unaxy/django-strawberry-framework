@@ -153,10 +153,16 @@ line-length = 99
 target-version = "py310"
 # A bug-hunt evidence tree (copies of the repo, kept as found) is untracked and not
 # git-ignored, so a repo-wide `ruff check --fix .` / `ruff format .` would rewrite it.
+# scripts/check_trailing_commas.py reads this list at run time and skips the same trees.
 extend-exclude = ["hunt-ws"]
+# Apply `exclude` / `extend-exclude` / `[tool.ruff.format] exclude` to paths named on the
+# command line and to stdin too: without it a touched-paths `ruff format <paths>` formats a
+# named `.md` or `hunt-ws/` file that a directory run skips.
+force-exclude = true
 
 [tool.ruff.format]
-# Fenced blocks in .md are verbatim example content, so the formatter owns .py only.
+# Fenced blocks in .md are verbatim example content, so the formatter owns .py only
+# (`force-exclude` keeps that true for a `.md` named on the command line).
 exclude = ["*.md"]
 
 [tool.ruff.lint]

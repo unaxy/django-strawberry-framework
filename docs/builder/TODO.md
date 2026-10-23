@@ -167,8 +167,7 @@ From the full entries, 2026-10-21. Item numbers are that file's.
     `docs/bug_hunt/HUNT.md`, the `scripts/bug_hunt.py` template, `examples/fakeshop/test_query/README.md`,
     `CONTRIBUTING.md` and `MUSE.md`. Read-only `.` checks in CI stay. Decide how far the sweep goes
   - Overlaps the KANBAN "Before a release" checklist (BoardDoc 11), whose repo-wide `ruff check --fix .` and
-    `ruff format .` lines a touched-path rule rewrites, and `bug_hunt-0_0_15_2.md` item 183 (`ruff format` on an
-    explicit `.md` path rewrites its fenced blocks, so a touched-path rule must pass Python paths only)
+    `ruff format .` lines a touched-path rule rewrites
 
 <!-- LINK DEFINITIONS -->
 
