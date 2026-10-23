@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 204 done, 138 to do.
+Progress: 206 done, 136 to do.
 
 ## Done
 
@@ -838,6 +838,17 @@ Progress: 204 done, 138 to do.
   the render's time): fixed anyway, a destination nested past `LINK_DESTINATION_MAX_NESTING` (32, the limit cmark and
   markdown-it apply) fails the link, so every tail lexes in linear time; nesting up to 32 is unchanged (fuzz 0 diffs,
   0 disagreements with markdown-it past the cap) and KANBAN.md renders byte-identical
+- [x] 146. `workspace.py::item_diff` stitched `git diff <baseline>` over the real index's tracked paths with per-file
+  `--no-index` renders of untracked files, so staging, `rm --cached`, assume-unchanged and an unstaged move changed its
+  bytes and seal, and its stat refresh rewrote the shared `.git/index`: it is now `content_tree` (a private
+  `GIT_INDEX_FILE` holding the baseline overlaid with the working content; symlinks, gitlinks, a force-added ignored
+  file and a sparse checkout kept) then one `diff-tree` against the baseline, the shared index is never written, and
+  every `_git` call runs under `REPOSITORY_CONFIG_ONLY`
+- [x] 298. Git's default XDG global ignore and attributes files still apply under `GIT_CONFIG_GLOBAL=/dev/null`, and
+  `workspace.py::_git` isolated no config at all, so `wanted_files` and `item_diff` depended on the caller (a globally
+  ignored package file made `sync_copy` refuse every sync; the `.claude/settings.local.json` example was already hidden
+  by the repo's own `.gitignore`): fixed with 146, whose `REPOSITORY_CONFIG_ONLY` (global and system config off,
+  `XDG_CONFIG_HOME` the null device, git 2.32 or later) covers every `_git` call
 
 ## Outside review of the fixes
 
@@ -888,14 +899,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   diff over the real index's `ls-files -co` keeps the index dependence), reuse `_git` with the keyword `env` / `stdin` 146
   adds instead of a second git runner, and run the snapshot under 146's `REPOSITORY_CONFIG_ONLY` (a global
   `core.autocrlf` otherwise moves the snapshot's blobs)
-- [ ] 146. `workspace.py::item_diff` stitches `git diff <baseline>` over the paths the real index tracks with per-file
-  `--no-index` renders of the untracked files, so its bytes depend on the index: staging an unchanged added file reorders
-  the diff and changes its seal (`diff --check` fails after staging alone), `rm --cached` of an unchanged file emits it
-  twice, and the `git diff` stat refresh rewrites the shared `.git/index`. The diff should be one baseline-versus-content
-  diff through a private index, with global and system git config ignored; land before 141 or with it, and re-record any
-  `pass-<n>.diff` holding an untracked file, an unstaged move or an `rm --cached`. Its landing rewords the module
-  docstring sentence item 298 quotes ("the caller's global git config is ignored" becomes "global and system"); update
-  298's quote in the same commit
 - [ ] 158. The optimizer's operation gate (`walker.py::_enable_only_for_operation`) is decided per plan-cache key, so under
   a mutation no writer records columns and a consumer `.only()` / `.defer()` (hook, manager, resolver) is never widened:
   a hook `.only("name")` under a mutation runs 77 statements where the QUERY runs 2 (152 with one more column; a nested
@@ -944,10 +947,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 297. `scripts/review_changed_python_diffs_against_head.py --against worktree` has 146's stitched, index-dependent new
   side: a package `.py` that was untracked at the baseline is listed as `A`, as if the item added it (`D` then `A` under
   141's snapshot baseline)
-- [ ] 298. Git's default global ignore file (`~/.config/git/ignore`) still applies under `GIT_CONFIG_GLOBAL=/dev/null`; only
-  `-c core.excludesFile=/dev/null` turns it off. So `workspace.py`'s untracked listings (`wanted_files`, `item_diff`)
-  depend on the caller, against `item_diff`'s "the caller's global git config is ignored" (`scripts/workspace.py:37`);
-  here it hides `.claude/settings.local.json`
 - [ ] 302. `scripts/check_spec_glossary.py::auto_link_terms` (the NEXT.md Step 7 `--auto-link` run) protects only
   fenced code and `[label](target)` links and matches a term with no boundary: a spec's first unlinked mention inside a
   code span, a double-backtick span, reference-link text, an autolink, a raw HTML attribute, a bare URL, a heading, or as

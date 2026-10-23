@@ -2478,30 +2478,267 @@ def test_item_diff_carries_a_rename(repo: Path) -> None:
     assert f"rename to {PACKAGE}/renamed.py" in diff
 
 
-def test_item_diff_orders_untracked_files_by_path_whatever_order_git_lists_them(
-    repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_item_diff_orders_every_file_by_path_whatever_its_kind_or_staging(repo: Path) -> None:
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
     for name in ("zeta", "alpha", "mid"):
         _write(repo / PACKAGE / f"{name}.py", f"{name.upper()} = 1\n")
-    expected = _item_diff(repo)
-    listed = workspace._git
+    _git(repo, "add", f"{PACKAGE}/mid.py")
+    expected = [
+        f"diff --git a/{PACKAGE}/{name}.py b/{PACKAGE}/{name}.py"
+        for name in (
+            "alpha",
+            "core",
+            "mid",
+            "zeta",
+        )
+    ]
 
-    def _reversed_listing(root: Path, *args: str) -> str:
-        output = listed(root, *args)
-        if args[:1] != ("ls-files",):
-            return output
-        return "\0".join(reversed(output.rstrip("\0").split("\0"))) + "\0"
+    assert _headers(_item_diff(repo)) == expected
 
-    monkeypatch.setattr(workspace, "_git", _reversed_listing)
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        pytest.param(("add", f"{PACKAGE}/aaa.py"), id="add-new-file"),
+        pytest.param(("add", "-N", f"{PACKAGE}/aaa.py"), id="intent-to-add"),
+        pytest.param(
+            (
+                "rm",
+                "-q",
+                "--cached",
+                f"{PACKAGE}/__init__.py",
+            ),
+            id="rm-cached-unchanged",
+        ),
+        pytest.param(
+            (
+                "rm",
+                "-q",
+                "--cached",
+                f"{PACKAGE}/core.py",
+            ),
+            id="rm-cached-edited",
+        ),
+    ],
+)
+def test_item_diff_bytes_ignore_the_index(repo: Path, step: tuple[str, ...]) -> None:
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+    _write(repo / PACKAGE / "aaa.py", "AAA = 1\n")
+    unstaged = _item_diff(repo)
+
+    _git(repo, *step)
+
+    assert _item_diff(repo) == unstaged
+
+
+def test_item_diff_takes_the_working_content_over_a_staged_edit(repo: Path) -> None:
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+    _git(repo, "add", f"{PACKAGE}/core.py")
+    _write(repo / PACKAGE / "core.py", "CORE = 4\n")
 
     diff = _item_diff(repo)
 
-    assert diff == expected
-    assert _headers(diff) == [
-        f"diff --git a/{PACKAGE}/{name}.py b/{PACKAGE}/{name}.py"
-        for name in ("alpha", "mid", "zeta")
+    assert "+CORE = 4" in diff
+    assert "CORE = 3" not in diff
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_item_diff_reads_an_edit_the_index_flags_as_unchanged(repo: Path, flag: str) -> None:
+    _git(repo, "update-index", flag, f"{PACKAGE}/core.py")
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+
+    assert "+CORE = 3" in _item_diff(repo)
+
+
+def test_item_diff_finds_an_unstaged_move_as_the_rename_staging_it_gives(repo: Path) -> None:
+    (repo / PACKAGE / "core.py").rename(repo / PACKAGE / "renamed.py")
+
+    unstaged = _item_diff(repo)
+    _git(repo, "add", "-A")
+
+    assert _headers(unstaged) == [f"diff --git a/{PACKAGE}/core.py b/{PACKAGE}/renamed.py"]
+    assert _item_diff(repo) == unstaged
+
+
+def test_item_diff_carries_a_module_turned_into_a_package_and_back(repo: Path) -> None:
+    (repo / PACKAGE / "core.py").unlink()
+    _write(repo / PACKAGE / "core.py" / "inner.py", "INNER = 1\n")
+
+    assert _headers(_item_diff(repo)) == [
+        f"diff --git a/{PACKAGE}/core.py b/{PACKAGE}/core.py",
+        f"diff --git a/{PACKAGE}/core.py/inner.py b/{PACKAGE}/core.py/inner.py",
     ]
+    shutil.rmtree(repo / PACKAGE / "core.py")
+    _write(repo / PACKAGE / "core.py", "CORE = 2\n")
+
+    assert _headers(_item_diff(repo)) == []
+
+
+def test_item_diff_keeps_a_tracked_link_to_a_directory_a_link(repo: Path) -> None:
+    _write(repo / PACKAGE / "sub" / "a.py", "A = 1\n")
+    (repo / PACKAGE / "link").symlink_to("sub")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "link")
+
+    assert _headers(_item_diff(repo)) == []
+
+
+def test_item_diff_carries_a_nested_repository_as_a_gitlink_once_staged(repo: Path) -> None:
+    nested = repo / PACKAGE / "vendored"
+    _write(nested / "lib.py", "LIB = 1\n")
+    _git(nested, "init", "-q")
+    _git(nested, "add", "-A")
+    _git(nested, "commit", "-q", "-m", "vendored")
+    assert _headers(_item_diff(repo)) == []
+    _git(repo, "add", f"{PACKAGE}/vendored")
+
+    diff = _item_diff(repo)
+
+    assert _headers(diff) == [f"diff --git a/{PACKAGE}/vendored b/{PACKAGE}/vendored"]
+    assert "+Subproject commit " in diff
+    _git(repo, "commit", "-q", "-m", "gitlink")
+    assert _headers(_item_diff(repo)) == []
+
+
+def test_item_diff_leaves_out_what_a_sparse_checkout_keeps_off_disk(repo: Path) -> None:
+    _git(repo, "sparse-checkout", "set", "--cone", PACKAGE)
+    assert not (repo / "examples").exists()
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+
+    assert _headers(_item_diff(repo, ".")) == [
+        f"diff --git a/{PACKAGE}/core.py b/{PACKAGE}/core.py",
+    ]
+
+
+def test_item_diff_keeps_a_force_added_ignored_file(repo: Path) -> None:
+    _write(repo / PACKAGE / "ignored.txt", "kept\n")
+    assert _headers(_item_diff(repo)) == []
+    _git(repo, "add", "-f", f"{PACKAGE}/ignored.txt")
+
+    assert _headers(_item_diff(repo)) == [
+        f"diff --git a/{PACKAGE}/ignored.txt b/{PACKAGE}/ignored.txt",
+    ]
+
+
+def test_item_diff_leaves_the_shared_index_and_its_stat_data_untouched(repo: Path) -> None:
+    _write(repo / PACKAGE / "new.py", "NEW = 1\n")
+    os.utime(repo / PACKAGE / "core.py", (1, 1))
+    index = repo / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    _ = _item_diff(repo)
+
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+# Each row is a file the caller's own git setup holds: under a private HOME and XDG config
+# directory, so the session running the tests never leaks in.
+CALLERS_GLOBAL_GIT_FILES = [
+    pytest.param({".config/git/ignore": "*.local.py\n"}, id="xdg-ignore"),
+    pytest.param({".config/git/attributes": "*.py -diff\n"}, id="xdg-attributes"),
+    pytest.param(
+        {".gitconfig": "[core]\n\texcludesFile = {home}/excludes\n", "excludes": "*.local.py\n"},
+        id="global-excludes-file",
+    ),
+]
+
+
+def _callers_home(home: Path, files: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, content in files.items():
+        _write(home / name, content.format(home=home))
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
+
+@pytest.mark.parametrize("files", CALLERS_GLOBAL_GIT_FILES)
+def test_item_diff_ignores_the_callers_global_git_files(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: dict[str, str],
+) -> None:
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+    _write(repo / PACKAGE / "scratch.local.py", "LOCAL = 1\n")
+    _callers_home(tmp_path / "bare-home", {}, monkeypatch)
+    expected = _item_diff(repo)
+    assert _headers(expected) == [
+        f"diff --git a/{PACKAGE}/core.py b/{PACKAGE}/core.py",
+        f"diff --git a/{PACKAGE}/scratch.local.py b/{PACKAGE}/scratch.local.py",
+    ]
+    assert "GIT binary patch" not in expected
+
+    _callers_home(tmp_path / "home", files, monkeypatch)
+
+    assert _item_diff(repo) == expected
+
+
+@pytest.mark.parametrize(
+    "files",
+    [row for row in CALLERS_GLOBAL_GIT_FILES if row.id != "xdg-attributes"],
+)
+def test_wanted_files_ignores_the_callers_global_ignore_files(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: dict[str, str],
+) -> None:
+    _write(repo / PACKAGE / "scratch.local.py", "LOCAL = 1\n")
+    _callers_home(tmp_path / "home", files, monkeypatch)
+
+    assert f"{PACKAGE}/scratch.local.py" in workspace.wanted_files(repo)
+
+
+def test_baseline_sha_stores_the_bytes_on_disk_whatever_the_callers_line_endings(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ = (repo / PACKAGE / "core.py").write_bytes(b"CORE = 3\r\n")
+    _callers_home(tmp_path / "home", {".gitconfig": "[core]\n\tautocrlf = true\n"}, monkeypatch)
+
+    baseline = workspace.baseline_sha(repo)
+
+    stored = workspace._git(repo, "cat-file", "blob", f"{baseline}:{PACKAGE}/core.py")
+    assert stored == "CORE = 3\r\n"
+
+
+def test_content_tree_is_the_baseline_overlaid_with_the_working_content(repo: Path) -> None:
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+    _write(repo / PACKAGE / "new.py", "NEW = 1\n")
+    (repo / PACKAGE / "__init__.py").unlink()
+    _write(repo / "examples" / "outside.py", "OUTSIDE = 1\n")
+
+    tree = workspace.content_tree(repo, "HEAD", (PACKAGE,))
+
+    listing = _git(repo, "ls-tree", "-r", "--name-only", tree).split()
+    assert listing == [
+        ".gitignore",
+        f"{PACKAGE}/core.py",
+        f"{PACKAGE}/new.py",
+        "examples/fakeshop/db.sqlite3",
+    ]
+    assert _git(repo, "show", f"{tree}:{PACKAGE}/core.py") == "CORE = 3\n"
+
+
+def test_content_tree_reads_exactly_the_named_files_from_another_work_tree(
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    other = tmp_path / "other"
+    _write(other / PACKAGE / "core.py", "CORE = 9\n")
+    _write(other / "unnamed.py", "UNNAMED = 1\n")
+    empty = _git(repo, "hash-object", "-t", "tree", os.devnull).strip()
+
+    tree = workspace.content_tree(
+        repo,
+        empty,
+        names=[f"{PACKAGE}/core.py", f"{PACKAGE}/missing.py"],
+        work_tree=other,
+    )
+
+    assert _git(repo, "ls-tree", "-r", "--name-only", tree).split() == [f"{PACKAGE}/core.py"]
+    assert _git(repo, "show", f"{tree}:{PACKAGE}/core.py") == "CORE = 9\n"
 
 
 def test_item_diff_gives_identical_bytes_from_two_clones_of_one_change(tmp_path: Path) -> None:
