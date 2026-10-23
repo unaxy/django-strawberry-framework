@@ -47,7 +47,11 @@ and the form-specific invariants this module owns:
   the bound form validates by the same key it was built on. The bound form's own field,
   which an ``__init__`` or ``get_form`` override may rebuild, must query the target model
   (or a subclass) by the same key column, or the request is a ``ConfigurationError``
-  before ``is_valid()`` (``_assert_bound_choice_agreement``). A single relation whose
+  before ``is_valid()`` (``_assert_bound_choice_agreement``); a class-level field over
+  another model, on a form that binds its class-level fields under the default
+  ``get_form``, is refused at schema build instead when every write binds it (any update,
+  a create whose input makes it required: ``forms/inputs.py::require_class_choice_models``).
+  A single relation whose
   form-key value the field cleans to empty is refused as that field's ``invalid_choice``
   error rather than bound as a clear. Only a whole single or list value in the field's
   ``empty_values`` is a clear; an M2M list element never is, so every element, ``""``
@@ -799,7 +803,11 @@ def _assert_bound_choice_agreement(
     column (``_choice_key_identity``). Otherwise the form would read the key under another
     column or model and link a row the decode never admitted, a row the target's visibility
     query hides included, so the request is a ``ConfigurationError`` before ``is_valid()``
-    and nothing is written. Reassigning the queryset over the same model and key (the
+    and nothing is written. On a form that binds its class-level fields under the default
+    ``get_form``, the build already refused such a column-backed field wherever every write
+    binds it (``forms/inputs.py::require_class_choice_models``), so the model refusal
+    reaches only an optional field a create sends.
+    Reassigning the queryset over the same model and key (the
     request-scoped choices idiom) agrees. A bound field that is no longer a model-choice
     field, one whose queryset is ``None``, and a name the bound form does not declare are
     left to the form's own validation. The build names a target for every model-choice field

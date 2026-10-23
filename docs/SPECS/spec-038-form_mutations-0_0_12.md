@@ -1179,7 +1179,19 @@ after `get_form` and before `is_valid()` over every bound name, an update's
 reconstructed relations included). A disagreeing field is a `ConfigurationError` on the
 request with nothing written; reassigning the queryset over the same model and key (the
 request-scoped choices idiom) agrees, and a bound field that is no longer a model-choice
-field or has no queryset is left to the form. A visible row
+field or has no queryset is left to the form. Where the bound field is certain to be the
+class-level one (a `ModelForm` that resolves `__init__` and `order_fields` to Django's own,
+under a mutation that keeps the default `get_form`), a column-backed model-choice field whose
+class-level queryset is over a model that is neither the column's related model nor a
+subclass of it would fail every request that binds it, so it is a schema-build
+`ConfigurationError` instead wherever every write binds it
+(`django_strawberry_framework/forms/inputs.py::require_class_choice_models`, run per
+declaration over every declared field for an update, whose reconstruction binds them all,
+and for a create over the input's fields the input makes required, its non-null
+arguments). A create may omit an optional field and then never binds it, so such a field
+builds and only a create that sends it is refused at request time; an
+`__init__`, `order_fields` or `get_form` override that may reassign the queryset leaves the
+field to the request-time check. A visible row
 whose stored key (the column a `ForeignKey(to_field=…)` stores) is `NULL` names no row,
 whatever column the form field is keyed by: the spine's visibility read admits only rows
 whose key is set (`django_strawberry_framework/utils/querysets.py::linkable_rows`), so it

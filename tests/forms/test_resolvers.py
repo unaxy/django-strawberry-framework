@@ -42,7 +42,10 @@ doing work only when committing, over a client-assigned key (no fakeshop form
 carries one), pins that such a create saves through ``save(commit=False)``. A bound
 form whose ``__init__`` or ``get_form`` rebuilds a relation field over another model or
 key column is refused before validation; fakeshop's one rebuilt relation field
-(``ShelfRelationsForm.branch``) keeps its model and key, so the refusals live here.
+(``ShelfRelationsForm.branch``) keeps its model and key, so the refusals live here. So
+does the schema-build refusal of a class-level relation field over another model on a
+form bound as declared, which no finalizing fakeshop schema can carry, with the shapes it
+leaves building and writing.
 """
 
 from __future__ import annotations
@@ -84,6 +87,7 @@ from django_strawberry_framework import (
     ResourcePolicy,
     finalize_django_types,
 )
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms import resolvers as form_resolvers
 from django_strawberry_framework.forms.resolvers import (
     _decode_form_relation_multi,
@@ -110,7 +114,7 @@ from tests._idioms import is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from django.db.models.expressions import Combinable
     from django.forms.utils import _FilesT
@@ -4113,3 +4117,506 @@ def test_queryset_less_bound_choice_is_left_to_the_form() -> None:
     assert res.data == {"updateLoan": {"node": None, "errors": [{"field": "patronId"}]}}
     loan.refresh_from_db()
     assert saved_pk(loan.patron) == saved_pk(visible)
+
+
+# ---------------------------------------------------------------------------
+# A class-level model-choice field over a model its relation column never names
+# ---------------------------------------------------------------------------
+
+
+def _register_primaries(*targets: type[models.Model]) -> None:
+    """Register a raw-pk primary ``DjangoType`` exposing ``id`` for each of ``targets``."""
+    for target in targets:
+        meta = type("Meta", (), {"model": target, "fields": ("id",), "primary": True})
+        _ = type(f"{target.__name__}T", (DjangoType,), {"Meta": meta})
+        assert registry.get(target) is not None
+
+
+def _relation_form(
+    model: type[models.Model],
+    name: str,
+    field: forms.Field,
+    *others: str,
+) -> type[forms.ModelForm[models.Model]]:
+    """A ``<Model>Form`` declaring the ``name`` column's field as ``field``, plus ``others``."""
+    meta = type("Meta", (), {"model": model, "fields": (*others, name)})
+    return type(f"{model.__name__}Form", (forms.ModelForm,), {name: field, "Meta": meta})
+
+
+def _declare_write(
+    form_class: type[forms.ModelForm[models.Model]],
+    *,
+    operation: str = "create",
+    fields: tuple[str, ...] | None = None,
+) -> type[DjangoModelFormMutation]:
+    """Declare a default-``get_form`` ``ModelForm`` mutation ``Write`` over ``form_class``."""
+    meta: dict[str, object] = {
+        "form_class": form_class,
+        "operation": operation,
+        "permission_classes": [_AllowAll],
+    }
+    if fields is not None:
+        meta["fields"] = fields
+
+    class Write(DjangoModelFormMutation):
+        Meta = type("Meta", (), meta)
+
+    return Write
+
+
+def _venue_choice() -> forms.ModelChoiceField[models.Model]:
+    """A ``venue`` choice field whose class-level queryset is over ``Patron``, not ``Venue``."""
+    return forms.ModelChoiceField(queryset=library_models.Patron.objects.all())
+
+
+def _class_choice_message(
+    form: str,
+    name: str,
+    queryset_model: str,
+    target: str,
+) -> str:
+    return (
+        f"Form {form} field {name!r} looks its choice up among {queryset_model} rows, but the "
+        f"input decodes {name!r} ids against {target}, the model its column relates to, so "
+        f"every write that binds {name!r} would be refused. Declare the field's queryset over "
+        f"{target} or a subclass of it, or assign it in the form's __init__ or the mutation's "
+        "get_form."
+    )
+
+
+def _refuse_unrelated_model() -> str:
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    _ = _declare_write(
+        _relation_form(library_models.RepairTicket, "venue", _venue_choice(), "code"),
+    )
+    return _class_choice_message("RepairTicketForm", "venue", "Patron", "Venue")
+
+
+def _refuse_kiosk_from(queryset: models.QuerySet[models.Model], label: str) -> Callable[[], str]:
+    def declare() -> str:
+        _register_primaries(library_models.KioskFault, library_models.SelfServeDesk)
+        field = forms.ModelChoiceField(queryset=queryset)
+        _ = _declare_write(_relation_form(library_models.KioskFault, "kiosk", field, "note"))
+        return _class_choice_message("KioskFaultForm", "kiosk", label, "SelfServeDesk")
+
+    return declare
+
+
+def _refuse_branch_note_from(
+    queryset: models.QuerySet[models.Model],
+    label: str,
+) -> Callable[[], str]:
+    def declare() -> str:
+        _register_primaries(library_models.BranchNote, library_models.ProxyBranch)
+        field = forms.ModelChoiceField(queryset=queryset)
+        _ = _declare_write(_relation_form(library_models.BranchNote, "branch", field, "body"))
+        return _class_choice_message("BranchNoteForm", "branch", label, "ProxyBranch")
+
+    return declare
+
+
+def _refuse_many_to_many() -> str:
+    _register_primaries(library_models.VenueSponsor, library_models.Venue)
+    field = forms.ModelMultipleChoiceField(queryset=library_models.Patron.objects.all())
+    _ = _declare_write(_relation_form(library_models.VenueSponsor, "venues", field, "name"))
+    return _class_choice_message("VenueSponsorForm", "venues", "Patron", "Venue")
+
+
+def _refuse_one_to_one() -> str:
+    _register_primaries(library_models.VenueBadge, library_models.Venue)
+    _ = _declare_write(_relation_form(library_models.VenueBadge, "venue", _venue_choice(), "code"))
+    return _class_choice_message("VenueBadgeForm", "venue", "Patron", "Venue")
+
+
+def _lead_ticket_form() -> type[forms.ModelForm[models.Model]]:
+    """A ``Venue`` form whose optional ``lead_ticket`` looks its choice up among patrons."""
+    field = forms.ModelChoiceField(queryset=library_models.Patron.objects.all(), required=False)
+    return _relation_form(library_models.Venue, "lead_ticket", field, "name")
+
+
+def _refuse_update_narrowed_out() -> str:
+    _register_primaries(library_models.Venue, library_models.RepairTicket)
+    _ = _declare_write(_lead_ticket_form(), operation="update", fields=("name",))
+    return _class_choice_message("VenueForm", "lead_ticket", "Patron", "RepairTicket")
+
+
+def _refuse_get_form_kwargs_override() -> str:
+    """A ``get_form_kwargs`` override keeps Django's construction, so the field is still copied."""
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    ticket_form = _relation_form(library_models.RepairTicket, "venue", _venue_choice(), "code")
+
+    class Write(DjangoModelFormMutation):
+        class Meta:
+            form_class = ticket_form
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+        @override
+        def get_form_kwargs(
+            self,
+            info: strawberry.Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: models.Model | None = None,
+        ) -> dict[str, object]:
+            kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+            return {**kwargs, "label_suffix": ""}
+
+    _ = Write
+    return _class_choice_message("RepairTicketForm", "venue", "Patron", "Venue")
+
+
+def _declare_rebuilding_write(
+    ticket_form: type[forms.ModelForm[models.Model]],
+) -> type[DjangoModelFormMutation]:
+    """Declare ``RebuildingWrite``, whose ``get_form`` assigns ``venue`` a ``Venue`` queryset."""
+
+    class RebuildingWrite(DjangoModelFormMutation):
+        class Meta:
+            form_class = ticket_form
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+        @override
+        def get_form(
+            self,
+            info: strawberry.Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: models.Model | None = None,
+        ) -> forms.ModelForm[models.Model]:
+            form = super().get_form(info, data=data, files=files, instance=instance)
+            _set_queryset("venue", library_models.Venue.objects.all())(form)
+            return form
+
+    return RebuildingWrite
+
+
+def _refuse_after_a_rebuilding_declaration() -> str:
+    """A ``get_form`` override builds the shared input shape first; the default one refuses."""
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    ticket_form = _relation_form(library_models.RepairTicket, "venue", _venue_choice(), "code")
+    _ = _declare_rebuilding_write(ticket_form)
+    _ = _declare_write(ticket_form)
+    return _class_choice_message("RepairTicketForm", "venue", "Patron", "Venue")
+
+
+def _refuse_model_choice_over_a_scalar_column() -> str:
+    """A model-choice field over a column that is no relation is the kind refusal's."""
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    field = forms.ModelChoiceField(queryset=library_models.Venue.objects.all())
+    _ = _declare_write(_relation_form(library_models.RepairTicket, "code", field, "venue"))
+    return (
+        "Form RepairTicketForm field 'code' (ModelChoiceField) is a single-relation field over "
+        "the scalar column RepairTicket.code: the input carries the column's value and the form "
+        "reads the field's. Declare a form field of the column's kind, or name the field after "
+        "no model column; an update binds every declared field, including those Meta.fields / "
+        "Meta.exclude leave out of its input."
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "declare",
+    [
+        _refuse_unrelated_model,
+        _refuse_kiosk_from(library_models.LendingDesk.objects.all(), "LendingDesk"),
+        _refuse_kiosk_from(library_models.Venue.objects.all(), "Venue"),
+        _refuse_branch_note_from(library_models.Branch.objects.all(), "Branch"),
+        _refuse_branch_note_from(library_models.VisibleBranch.objects.all(), "VisibleBranch"),
+        _refuse_many_to_many,
+        _refuse_one_to_one,
+        _refuse_update_narrowed_out,
+        _refuse_get_form_kwargs_override,
+        _refuse_after_a_rebuilding_declaration,
+        _refuse_model_choice_over_a_scalar_column,
+    ],
+    ids=[
+        "unrelated-model",
+        "multi-table-parent",
+        "multi-table-grandparent",
+        "proxy-targets-concrete-model",
+        "sibling-proxy",
+        "many-to-many",
+        "one-to-one",
+        "update-binds-a-narrowed-out-field",
+        "get-form-kwargs-override",
+        "default-declaration-after-a-rebuilding-one",
+        "scalar-column-kind-refusal",
+    ],
+)
+def test_class_choice_over_a_model_the_column_never_names_is_refused_at_build(
+    declare: Callable[[], str],
+) -> None:
+    """A class-level choice field the request would always refuse fails ``finalize_django_types()``.
+
+    The form binds its class-level fields as declared (no ``__init__`` or ``order_fields``
+    override) and the mutation keeps the default ``get_form``, so every write binding the
+    field would hit the request-time refusal: the queryset's model is neither the column's
+    related model nor a subclass of it (a multi-table parent or grandparent, a proxy
+    target's concrete model, a sibling proxy, an unrelated model, single, one-to-one or
+    many-to-many). A create refuses a field its input makes required, which every create
+    sends; an update refuses every declared field, since its reconstruction binds them all,
+    so a field its ``Meta.fields`` leaves out of the input is refused too.
+    A ``get_form_kwargs`` override keeps Django's construction; a ``get_form`` override on
+    another declaration that built the same input shape first does not exempt this one.
+    A model-choice field over a scalar column is left to the kind refusal.
+    """
+    message = declare()
+    with pytest.raises(ConfigurationError) as raised:
+        finalize_django_types()
+    assert str(raised.value) == message
+
+
+#: An admitted write: the schema, the ``write`` mutation's inline ``data`` literal, and a
+#: check that the row it wrote links the decoded target.
+_AdmittedWrite: TypeAlias = "tuple[strawberry.Schema, str, Callable[[], None]]"
+
+
+def _write_schema(mutation: type[DjangoModelFormMutation]) -> strawberry.Schema:
+    """A probe schema exposing ``mutation`` as ``write``, after ``finalize_django_types()``."""
+
+    @strawberry.type
+    class Mutation:
+        write = DjangoMutationField(mutation)
+
+    finalize_django_types()
+    return _schema(Mutation)
+
+
+def _ticket_write(write: type[DjangoModelFormMutation], target: models.Model) -> _AdmittedWrite:
+    """A ``RepairTicket`` create linking ``target``, the venue the decode admits."""
+    code = _uniq("Rt")
+
+    def linked() -> None:
+        ticket = library_models.RepairTicket.objects.get(code=code)
+        assert pk_of(ticket.venue) == pk_of(target)
+
+    return _write_schema(write), f'{{code: "{code}", venueId: {pk_of(target)}}}', linked
+
+
+def _admit_same_model() -> _AdmittedWrite:
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    field = forms.ModelChoiceField(queryset=library_models.Venue.objects.all())
+    write = _declare_write(_relation_form(library_models.RepairTicket, "venue", field, "code"))
+    return _ticket_write(write, library_models.Venue.objects.create(name=_uniq("Ve")))
+
+
+def _admit_multi_table_child() -> _AdmittedWrite:
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    field = forms.ModelChoiceField(queryset=library_models.LendingDesk.objects.all())
+    write = _declare_write(_relation_form(library_models.RepairTicket, "venue", field, "code"))
+    return _ticket_write(write, library_models.LendingDesk.objects.create(name=_uniq("Desk")))
+
+
+def _admit_proxy() -> _AdmittedWrite:
+    _register_primaries(library_models.Shelf, library_models.Branch)
+    field = forms.ModelChoiceField(queryset=library_models.ProxyBranch.objects.all())
+    write = _declare_write(_relation_form(library_models.Shelf, "branch", field, "code"))
+    branch = library_models.Branch.objects.create(name=_uniq("Br"))
+    code = _uniq("Sh")
+
+    def linked() -> None:
+        assert pk_of(library_models.Shelf.objects.get(code=code).branch) == pk_of(branch)
+
+    return _write_schema(write), f'{{code: "{code}", branchId: {pk_of(branch)}}}', linked
+
+
+def _admit_init_assigned_queryset() -> _AdmittedWrite:
+    """The class-level queryset is over ``Patron``; ``__init__`` assigns one over ``Venue``."""
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+
+    class RepairTicketForm(forms.ModelForm[models.Model]):
+        venue = _venue_choice()
+
+        class Meta:
+            model = library_models.RepairTicket
+            fields = ("code", "venue")
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            files: _FilesT | None = None,
+            instance: models.Model | None = None,
+        ) -> None:
+            super().__init__(data=data, files=files, instance=instance)
+            _set_queryset("venue", library_models.Venue.objects.all())(self)
+
+    write = _declare_write(RepairTicketForm)
+    return _ticket_write(write, library_models.Venue.objects.create(name=_uniq("Ve")))
+
+
+def _admit_order_fields_assigned_queryset() -> _AdmittedWrite:
+    """``order_fields``, which Django's ``__init__`` calls, assigns the ``Venue`` queryset."""
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+
+    class RepairTicketForm(forms.ModelForm[models.Model]):
+        venue = _venue_choice()
+
+        class Meta:
+            model = library_models.RepairTicket
+            fields = ("code", "venue")
+
+        @override
+        def order_fields(self, field_order: Iterable[str] | None) -> None:
+            super().order_fields(field_order)
+            _set_queryset("venue", library_models.Venue.objects.all())(self)
+
+    write = _declare_write(RepairTicketForm)
+    return _ticket_write(write, library_models.Venue.objects.create(name=_uniq("Ve")))
+
+
+def _admit_get_form_assigned_queryset() -> _AdmittedWrite:
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    ticket_form = _relation_form(library_models.RepairTicket, "venue", _venue_choice(), "code")
+    write = _declare_rebuilding_write(ticket_form)
+    return _ticket_write(write, library_models.Venue.objects.create(name=_uniq("Ve")))
+
+
+def _admit_hook_basis_over_another_model() -> _AdmittedWrite:
+    """``get_form_fields`` returns a ``Patron`` field; the form binds its own ``Venue`` field."""
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    venue_field = forms.ModelChoiceField(queryset=library_models.Venue.objects.all())
+    ticket_form = _relation_form(library_models.RepairTicket, "venue", venue_field, "code")
+
+    class Write(DjangoModelFormMutation):
+        class Meta:
+            form_class = ticket_form
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+        @classmethod
+        @override
+        def get_form_fields(cls) -> dict[str, forms.Field]:
+            return {"code": forms.CharField(), "venue": _venue_choice()}
+
+    return _ticket_write(Write, library_models.Venue.objects.create(name=_uniq("Ve")))
+
+
+def _admit_create_narrowing_out_the_field() -> _AdmittedWrite:
+    """A create whose ``Meta.fields`` leaves the optional field out never binds it."""
+    _register_primaries(library_models.Venue, library_models.RepairTicket)
+    write = _declare_write(_lead_ticket_form(), fields=("name",))
+    name = _uniq("Ve")
+
+    def linked() -> None:
+        assert library_models.Venue.objects.get(name=name).lead_ticket is None
+
+    return _write_schema(write), f'{{name: "{name}"}}', linked
+
+
+def _admit_create_omitting_an_optional_field() -> _AdmittedWrite:
+    """A create may omit an optional field, and then never binds it."""
+    _register_primaries(library_models.Venue, library_models.RepairTicket)
+    write = _declare_write(_lead_ticket_form())
+    name = _uniq("Ve")
+
+    def linked() -> None:
+        assert library_models.Venue.objects.get(name=name).lead_ticket is None
+
+    return _write_schema(write), f'{{name: "{name}"}}', linked
+
+
+def _admit_create_omitting_an_optional_many_to_many() -> _AdmittedWrite:
+    """An optional many-to-many field a create omits is never bound either."""
+    _register_primaries(library_models.VenueSponsor, library_models.Venue)
+    field = forms.ModelMultipleChoiceField(
+        queryset=library_models.Patron.objects.all(),
+        required=False,
+    )
+    write = _declare_write(_relation_form(library_models.VenueSponsor, "venues", field, "name"))
+    name = _uniq("Sp")
+
+    def linked() -> None:
+        assert not library_models.VenueSponsor.objects.get(name=name).venues.exists()
+
+    return _write_schema(write), f'{{name: "{name}"}}', linked
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "build",
+    [
+        _admit_same_model,
+        _admit_multi_table_child,
+        _admit_proxy,
+        _admit_init_assigned_queryset,
+        _admit_order_fields_assigned_queryset,
+        _admit_get_form_assigned_queryset,
+        _admit_hook_basis_over_another_model,
+        _admit_create_narrowing_out_the_field,
+        _admit_create_omitting_an_optional_field,
+        _admit_create_omitting_an_optional_many_to_many,
+    ],
+    ids=[
+        "same-model",
+        "multi-table-child",
+        "proxy",
+        "init-assigns-the-target-queryset",
+        "order-fields-assigns-the-target-queryset",
+        "get-form-assigns-the-target-queryset",
+        "get-form-fields-basis-over-another-model",
+        "create-narrows-the-field-out",
+        "create-omits-an-optional-field",
+        "create-omits-an-optional-many-to-many",
+    ],
+)
+def test_class_choice_the_bound_form_agrees_with_builds_and_writes(
+    build: Callable[[], _AdmittedWrite],
+) -> None:
+    """A field the bound form looks up among the target's rows builds, and the write links it.
+
+    The class-level queryset over the target, a multi-table child or a proxy of it; one over
+    another model that the form's ``__init__``, its ``order_fields`` or the mutation's
+    ``get_form`` replaces before the request reads it; a ``get_form_fields`` basis over
+    another model while the form binds its own class-level field; and a create that never
+    binds the field, because its ``Meta.fields`` leaves it out or because the field is
+    optional and the create omits it.
+    """
+    schema, data, linked = build()
+    res = schema.execute_sync(f"mutation {{ write(data: {data}) {{ errors {{ field }} }} }}")
+    assert res.errors is None, res.errors
+    assert res.data == {"write": {"errors": []}}
+    linked()
+
+
+@pytest.mark.django_db
+def test_queryset_less_class_choice_builds() -> None:
+    """A class-level choice field with no queryset names no model, so the build leaves it alone.
+
+    The form decides what a queryset assigned per request admits; the build has no model to
+    compare against the column's.
+    """
+    _register_primaries(library_models.RepairTicket, library_models.Venue)
+    field: forms.ModelChoiceField[models.Model] = forms.ModelChoiceField(queryset=None)
+    write = _declare_write(_relation_form(library_models.RepairTicket, "venue", field, "code"))
+    _ = _write_schema(write)
+    assert write._input_class is not None
+
+
+@pytest.mark.django_db
+def test_optional_class_choice_sent_by_a_create_is_refused_at_request() -> None:
+    """An optional create field over another model builds, and a create sending it is refused.
+
+    The build cannot know a create will send the optional field, so the request-time check
+    refuses the create that does, before ``is_valid()`` and with nothing written.
+    """
+    _register_primaries(library_models.Venue, library_models.RepairTicket)
+    schema = _write_schema(_declare_write(_lead_ticket_form()))
+    venue = library_models.Venue.objects.create(name=_uniq("Ve"))
+    ticket = library_models.RepairTicket.objects.create(code=_uniq("Rt"), venue=venue)
+    name = _uniq("Ve")
+    res = schema.execute_sync(
+        f'mutation {{ write(data: {{name: "{name}", leadTicketId: {pk_of(ticket)}}}) '
+        "{ errors { field } } }",
+    )
+    assert res.errors is not None
+    message = (
+        "Write: the bound form's field 'lead_ticket' looks its choice up among Patron rows, "
+        "but the input decodes 'lead_ticket' ids against RepairTicket. The queryset get_form "
+        "or the form's __init__ assigns must be over the model get_form_fields() declares."
+    )
+    assert [error.message for error in res.errors] == [message]
+    assert not library_models.Venue.objects.filter(name=name).exists()
