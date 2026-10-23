@@ -48,9 +48,12 @@ Worker commands
 
 Worker-0 commands
     ``baseline <flow>/<item>``
-        Print ``ITEM_BASELINE=<sha>`` (``git stash create``, or the
-        ``git rev-parse HEAD`` sha when the tree is clean) and bind the
-        address ``<flow>/<item>/before`` now. That is the one copy that must
+        Bind the address ``<flow>/<item>/before`` now and print
+        ``ITEM_BASELINE=<sha>``: a commit of that copy as its sync left it,
+        made under the copy's lock on the ``HEAD`` read after the sync, so it
+        holds exactly what the copy holds (untracked files and
+        ``.python-version`` included) whatever landed while the copy waited.
+        No ref and no shared index entry moves. That is the one copy that must
         predate the item's first edit.
     ``release <flow>/<item> [--role <role>]... [--keep <role>]...``
         Return the item's copies to the pool; their Postgres databases are
@@ -80,9 +83,10 @@ Worker-0 commands
         evaluates. That virtualenv is reused while its key (the install
         commands and the copy's ``pyproject.toml`` and ``uv.lock``) matches,
         and rebuilt from nothing when it does not. The result is written to
-        ``evidence/gate-<run id>.json`` and bound to the ``git stash create``
-        sha, the blob ids of ``pyproject.toml`` and ``uv.lock``, each suite's
-        cell and the floor pins.
+        ``evidence/gate-<run id>.json`` and bound to ``snapshot`` (a commit of
+        the gate copy as synced, on its ``head``), the blob ids of
+        ``pyproject.toml`` and ``uv.lock``, each suite's cell and the floor
+        pins.
     ``status [<flow>]``
         Print copies, bindings, active runs and Postgres leases.
     ``gc <flow>``
@@ -520,7 +524,7 @@ def clean_env(base: dict[str, str] | None = None, **extra: str) -> dict[str, str
 REPOSITORY_CONFIG_ONLY: Mapping[str, str] = MappingProxyType(
     {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "XDG_CONFIG_HOME": os.devnull},
 )
-# ``stash create`` and ``commit-tree`` need an identity the isolated config no longer supplies.
+# ``commit-tree`` needs an identity the isolated config no longer supplies.
 SCRATCH_IDENTITY: Mapping[str, str] = MappingProxyType(
     {
         "GIT_AUTHOR_NAME": "workspace",
@@ -561,12 +565,43 @@ def _git(
     return completed.stdout.decode("utf-8", "surrogateescape")
 
 
-def baseline_sha(repo_root: Path) -> str:
-    """Return ``git stash create``, or the ``HEAD`` sha when the tree has no tracked change."""
-    return (
-        _git(repo_root, "stash", "create", env=SCRATCH_IDENTITY).strip()
-        or _git(repo_root, "rev-parse", "HEAD").strip()
-    )
+def snapshot_commit(
+    repo_root: Path,
+    copy: Path,
+    manifest: _Manifest,
+    parent: str,
+    preserved: frozenset[str] = PRESERVED,
+) -> str:
+    """Return a commit of ``copy`` as it holds the mirrored files now, on ``parent``.
+
+    Call it with the copy's lock held and the manifest of the sync just made: the sha then names
+    the copy a command runs in, not the shared tree as it stood before the copy waited for its
+    lock. The tree is ``parent``'s with every mirrored file replaced by the copy's content and
+    every ``parent`` file the copy lacks dropped, built through a private index; no ref and no
+    shared index entry moves. A file the mirror leaves out (:func:`is_excluded`) keeps
+    ``parent``'s blob.
+
+    Raises:
+        WorkspaceError: a mirrored file changed in the copy since the sync.
+
+    """
+    listing = _git(repo_root, "ls-tree", "-r", "-z", "--name-only", parent)
+    held = [name for name in _null_separated(listing) if not is_excluded(name)]
+    names = {*manifest["entries"], *held}
+    tree = content_tree(repo_root, parent, names=names, work_tree=copy)
+    if edited := copy_edits(copy, manifest, preserved):
+        msg = f"{copy} changed while it was snapshotted: {edited[:5]}"
+        raise WorkspaceError(msg)
+    return _git(
+        repo_root,
+        "commit-tree",
+        tree,
+        "-p",
+        parent,
+        "-m",
+        f"workspace snapshot of {copy.name}",
+        env=SCRATCH_IDENTITY,
+    ).strip()
 
 
 def _null_separated(listing: str) -> list[str]:
@@ -2886,7 +2921,6 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
         if not layout.gate_dir.exists() and _free_bytes(layout.base) < MIN_FREE_BYTES:
             msg = f"under {MIN_FREE_BYTES // 1024**3} GB free at {layout.base}; no gate copy"
             raise WorkspaceError(msg)
-        bound_to = baseline_sha(repo_root)
         holding = (*flow.holding, gate_lock)
         manifest = sync_copy(
             repo_root,
@@ -2895,11 +2929,18 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
             holding=holding,
         )
         head = build_gate_git(repo_root, layout.gate_dir)
+        bound_to = snapshot_commit(
+            repo_root,
+            layout.gate_dir,
+            manifest,
+            head,
+            PRESERVED | {".git"},
+        )
         suite_results: dict[str, _GateRun | _GateUnverified] = {}
         result: dict[str, object] = {
             "flow": layout.flow,
             "at": _now(),
-            "stash_create": bound_to,
+            "snapshot": bound_to,
             "head": head,
             "blobs": {
                 name: _bench_common.git_blob_id(repo_root / name)
@@ -3119,11 +3160,12 @@ def _cmd_baseline(args: _Args) -> int:
     ref = ItemRef.parse(args.item)
     layout = Layout.for_flow(ref.flow)
     check_shared_checkout(layout.repo_root)
-    sha = baseline_sha(layout.repo_root)
     address = Address(ref.flow, ref.item, "before")
     with flow_lease(layout):
         with lease(layout, address, fresh=True) as held:
             manifest = held.manifest
+            head = _git(layout.repo_root, "rev-parse", "HEAD").strip()
+            sha = snapshot_commit(layout.repo_root, held.directory, manifest, head)
         with file_lock(layout.pool_lock):
             state = _load_state(layout)
             state["items"][ref.item] = {"item_baseline": sha, "at": _now()}

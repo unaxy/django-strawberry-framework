@@ -385,11 +385,11 @@ full suite + package coverage 100 %.
 **DRY** ([DRY.md][dry]): plan `docs/dry/dry-<release>.md` with `## Cycle baseline` (frozen),
 `## Run …` sections (one per Worker-0 lifetime), ledger rows `- [ ] File|Family|Folder
 integration`, per-item artifacts `dry-file-*.md` / `dry-rule-*.md`. W1 = trace, W2 = verify;
-`ITEM_BASELINE` is a tree hash; blob fingerprints via `git hash-object` vs
-`git rev-parse <HEAD>:<path>`. `--mode pause-after-each-item` exists in the flow: name it in the
-entry command when the maintainer wants a go/no-go per item; otherwise the run is autonomous.
-Family rows are consolidations and may be `UNAPPLIED` when the target is hunt-dirty: record, do not
-apply without a maintainer word.
+`ITEM_BASELINE` is a commit of the `before` copy (untracked files included); blob fingerprints via
+`git hash-object` vs `git rev-parse <HEAD>:<path>`. `--mode pause-after-each-item` exists in the
+flow: name it in the entry command when the maintainer wants a go/no-go per item; otherwise the run
+is autonomous. Family rows are consolidations and may be `UNAPPLIED` when the target is hunt-dirty:
+record, do not apply without a maintainer word.
 
 **REVIEW** ([REVIEW.md][review]): Worker-0 creates `docs/review/review-<release>.md` from the
 version list, coordinates but never reviews/implements/approves, captures the cycle baseline that

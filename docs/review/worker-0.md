@@ -66,7 +66,7 @@ Each open item takes the first row that matches:
 
 - **Interrupted Worker-2:** `workspace.py release review/<item> --role implement`;
   `workspace.py diff <ITEM_BASELINE> --output <root>/diff/interrupted.diff -- .` (an untracked
-  file a baseline or `Drift:` line lists is concurrent work); a fresh Worker-2, `interrupted`. A hunk serving a finding (its
+  file a `Drift:` line lists is concurrent work); a fresh Worker-2, `interrupted`. A hunk serving a finding (its
   target, owner or permanent test) is the cut-off pass's own; one in a path Worker-2 must touch
   that serves none is unattributed; the rest is concurrent work.
 - **Lost `before`** (`status` lacks `review/<item>/before`, item open): item diff empty → rerun

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 207 done, 135 to do.
+Progress: 208 done, 138 to do.
 
 ## Done
 
@@ -854,6 +854,12 @@ Progress: 207 done, 135 to do.
   `_check_stem_collisions`, an unstaged move read D plus A, `rm --cached` read twice, and its stat refresh rewrote the
   shared `.git/index`: the new side is `workspace.content_tree` and one `diff-tree -r -M --name-status` over the scope,
   every git call runs through `workspace._git`
+- [x] 141. `workspace.py baseline` and `gate` took their sha from the shared tree before the copy was mirrored (`git
+  stash create`, which never records untracked files or `.python-version`), so the sha never named the copy (17 of 17
+  probed shapes differed) and `diff` reported a pre-existing untracked file as the item's own addition:
+  `snapshot_commit` commits the mirrored copy under its lock (parent HEAD read after the sync; for `gate`, its `head`)
+  through `content_tree`, refuses a copy edited since the sync, never moves the shared index or refs, and the gate
+  result's key is `snapshot`
 
 ## Outside review of the fixes
 
@@ -894,16 +900,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 141. `workspace.py baseline` and `gate` take their sha (`baseline_sha`: `git stash create` or `HEAD`) from the
-  shared tree before the copy is mirrored, so the sha never names the copy. A commit, tracked edit, untracked add or
-  `add -f` landing while `baseline` waits on the copy's lock is in the copy only; with no concurrency the copy still holds
-  the untracked files and `.python-version` that `stash create` never records (12 of 12 probed shapes differ). `run`,
-  `audit` and `diff <sha>` never notice, and `diff` reports a pre-existing untracked file as the item's own addition.
-  Fix: snapshot the mirrored copy as a commit under the copy's lock (parent `HEAD`; for `gate`, its `head`) through one
-  helper for both; land after 146 or with it. Against 146: drop any rewrite of `item_diff` (146 owns it; a tree-vs-tree
-  diff over the real index's `ls-files -co` keeps the index dependence), reuse `_git` with the keyword `env` / `stdin` 146
-  adds instead of a second git runner, and run the snapshot under 146's `REPOSITORY_CONFIG_ONLY` (a global
-  `core.autocrlf` otherwise moves the snapshot's blobs)
 - [ ] 158. The optimizer's operation gate (`walker.py::_enable_only_for_operation`) is decided per plan-cache key, so under
   a mutation no writer records columns and a consumer `.only()` / `.defer()` (hook, manager, resolver) is never widened:
   a hook `.only("name")` under a mutation runs 77 statements where the QUERY runs 2 (152 with one more column; a nested
@@ -1058,6 +1054,24 @@ tracker number are recorded there; open remainders and new defects are filed as 
   no state write in between loses every binding of the flow while the copy's lock (a directory since 301) survives.
   Robustness row, not a defect under rule 37 (the module docstring documents the purge for idle stretches and asks for
   `gc` after one); found implementing 301
+- [ ] 346. Git calls outside `scripts/workspace.py` still read the caller's global and system config and the XDG ignore
+  and attributes files, unlike `workspace.py::_git`'s `REPOSITORY_CONFIG_ONLY`:
+  `check_trailing_commas.py::git_visible_scope`, `review_plan.py::_untracked_python` and `::_worktree_blobs`, the
+  `status --short` baselines (`_plan_common.py::git_status_short`, `bug_hunt.py`, `review_plan.py`; a global
+  `status.showUntrackedFiles=no` empties the concurrent-work baseline), `review_inspect.py::_blob_id` (`hash-object`
+  applies a global `core.autocrlf`), `check_type_suppressions.py::tracked_python_files` (`core.quotePath`) and
+  `review_historical_package_snapshot_at_commit.py::_run_git`; the review diff script's `--list` mode
+  (`_dirty_python_files`) also rewrites the shared `.git/index` through `git status`. Robustness row: no caller config
+  in this repo changes a result today. Fix shape: route them through one shared isolated runner
+- [ ] 347. `workspace.py::item_diff` applies no `is_excluded`, so a pre-existing untracked file under `temp-tests/`,
+  `worker-memory/` or a `*-ws` folder shows as the item's addition when the diff scope covers it (the `-- .`
+  interrupted-diff command in `docs/review/worker-0.md`), and a tracked file `is_excluded` drops from the copy keeps its
+  parent blob in `snapshot_commit`'s tree (0 such tracked files today). Robustness row
+- [ ] 348. Under `REPOSITORY_CONFIG_ONLY`, git reads `safe.directory` only from global or system config, so
+  `workspace.py` refuses a checkout owned by another user that the caller's global config had marked safe. Robustness
+  row (not this setup)
+- [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
+  row
 
 ## To do: holes found re-checking the fixes
 

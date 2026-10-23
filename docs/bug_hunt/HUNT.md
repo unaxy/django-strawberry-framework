@@ -152,9 +152,9 @@ names a path the block lacks, Worker-0 appends one `Drift: <date> HEAD <old>..<n
 two spaces. A drifted path is concurrent work like the rest.
 
 Per item Worker-0 runs `uv run python scripts/workspace.py baseline hunt/<item>` (prints
-`ITEM_BASELINE`, `git stash create` or the `HEAD` sha, and takes the item's `before` copy) and
-records it + `git status --short`. Item-scoped diff = `workspace.py diff <item baseline> -- <paths
-touched>`, every file the item added included.
+`ITEM_BASELINE`, a commit of the item's `before` copy as synced, on `HEAD`, untracked files
+included, and takes that copy) and records it + `git status --short`. Item-scoped diff =
+`workspace.py diff <item baseline> -- <paths touched>`, every file the item added included.
 
 Fixes accumulate uncommitted. Each verified item's tracked edits + new files go to the `## Owned
 changes` ledger (path, item, symbols). A later item may build on a ledgered path. Attribute by
@@ -386,10 +386,10 @@ CI's lint job, the full suite, then CI's floor cell (`workspace.py` docstring), 
 carrying its own git index (`--suites lint,default,floor,sharded,pg` once the maintainer authorized those
 cells). Passes when lint, the suite and the floor suite pass + package coverage stays 100%. Record
 failures, coverage, skips, xfails, collected/selected counts, cell. The gate's result file binds it
-to `git stash create` at gate time + blob ids of `pyproject.toml`, `uv.lock` + the floor pins.
-Product failure → the owning item back to Worker-1; environment/concurrent failure → recorded
-precisely, `blocked`. Sharded and Postgres cells are `unverified` unless the maintainer authorized them; the
-report lists them.
+to a snapshot commit of the gate copy at gate time + blob ids of `pyproject.toml`, `uv.lock` + the
+floor pins. Product failure → the owning item back to Worker-1; environment/concurrent failure →
+recorded precisely, `blocked`. Sharded and Postgres cells are `unverified` unless the maintainer
+authorized them; the report lists them.
 
 ## Closeout
 
