@@ -29,6 +29,7 @@ from apps.scalars import models as scalar_models
 from django.core.exceptions import ValidationError
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
+from django.db.models.expressions import Combinable
 from django.forms import DecimalField, Form
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
@@ -586,9 +587,11 @@ def test_array_filter_element_the_column_cannot_hold_is_filter_invalid(
     monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
     class PricedShelf(db_models.Model):
-        price: db_models.DecimalField[Decimal, Decimal] = db_models.DecimalField(
-            max_digits=8,
-            decimal_places=2,
+        price: db_models.DecimalField[str | float | Decimal | Combinable, Decimal] = (
+            db_models.DecimalField(
+                max_digits=8,
+                decimal_places=2,
+            )
         )
         prices = FakeArrayField(db_models.DecimalField(max_digits=8, decimal_places=2))
 
