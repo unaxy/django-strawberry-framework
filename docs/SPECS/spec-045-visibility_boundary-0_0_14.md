@@ -143,7 +143,7 @@ during extraction), validates it, then rebuilds a fresh queryset from the
 validated state. It NEVER returns the consumer object. Preserved: SQL query
 state (filters, annotations, joins, ordering, values projection; a combinator is
 rebuilt as the set of primary keys it selects, Decision 5), database routing /
-hints, and prefetch metadata. The hook's result, and every seal the framework
+hints, prefetch metadata, and (Django 6.1 and later) the fetch mode. The hook's result, and every seal the framework
 itself composes onto (the cascade's source included), is a framework-owned plain
 `django.db.models.QuerySet`: the consumer's executable override dispatch (the
 subclass identity), which is the leak vector, is dropped there. The hook's
@@ -158,11 +158,15 @@ Django's constructor arguments are not carried.
 
 Reading state without dispatch is not the same as USING it without dispatch, so
 every `QuerySet.__dict__` field the seal carries forward — `_db`, `_hints`,
-`_fields`, `_sticky_filter`, `_for_write` — is pinned to the exact shape Django
-stores before any truthiness test, comparison, or `dict` copy runs on it: `_db`
+`_fields`, `_sticky_filter`, `_for_write`, `_fetch_mode` — is pinned to the exact
+shape Django stores before any truthiness test, comparison, or `dict` copy runs on
+it, or (the fetch mode) before its `fetch` runs on a row load: `_db`
 `None` or a `str`, `_hints` `None` or an exact `dict` with exact-`str`
 keys, `_fields` `None` or an exact `tuple` of `str` names,
-`_sticky_filter` / `_for_write` `None` or an exact `bool`. The `_db` alias and
+`_sticky_filter` / `_for_write` `None` or an exact `bool`, `_fetch_mode` absent
+(Django below 6.1) or an instance of exactly one of Django's own `FetchOne` /
+`FetchPeers` / `FetchRaise` classes, so a project `FetchMode` subclass fails closed
+`untrusted`. The `_db` alias and
 the `_fields` names are what the consumer passed to `using(...)` / `values(...)`
 / `values_list(...)`, which Django stores as given, so a `TextChoices` /
 `StrEnum` member is admitted there by its real type and read as its exact text
@@ -686,7 +690,7 @@ in that order and are rendered only by the post-sidecar result seal.
 |---|---|---|
 | `type` | hook returned a non-QuerySet/Manager (list, generator, `None`) | "must return a QuerySet or Manager of `<Model>` rows" |
 | `table` | contributing table is not the registered concrete table, or `Query.model` is `None`/non-model | "composes over `<Model>`'s concrete table" |
-| `untrusted` | foreign `Query` class, foreign row iterable, unresolved deferred filter, unsealable prefetch child, a prefetch child over an unrelated model, an unreconstructable bound payload | "cannot be sealed into a framework-owned execution queryset" |
+| `untrusted` | foreign `Query` class, foreign row iterable, a fetch mode that is not one of Django's own, unresolved deferred filter, unsealable prefetch child, a prefetch child over an unrelated model, an unreconstructable bound payload | "cannot be sealed into a framework-owned execution queryset" |
 | `sliced` | sliced query on a recomposing read surface | "Django forbids refiltering or reordering a sliced query" |
 | `projection` | non-`ModelIterable` `_iterable_class` on a model-row surface | "composes over `<Model>` model rows, not a `.values()` / `.values_list()` (or custom-iterable) projection" |
 | `combined` | a combinator whose primary-key set cannot represent its rows (duplicates, branch annotations / `extra(select=...)` / `.values()` / `select_for_update`, outer `.values()` / ordering by a lookup, transform or other expression / slice) | "serves a combined queryset as the set of `<Model>` primary keys it selects ... cannot be reduced to that set without changing its rows" |

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 210 done, 138 to do.
+Progress: 211 done, 139 to do.
 
 ## Done
 
@@ -875,6 +875,14 @@ Progress: 210 done, 138 to do.
   write (any update; a create whose input requires it). A queryset assigned in `__init__` / `order_fields` /
   `get_form`, an optional create field (omitted works, sent is refused at request time) and a class-level `None` are
   unchanged
+- [x] 343. The visibility seal dropped Django 6.1's `QuerySet._fetch_mode`, so a `get_queryset` hook or manager
+  returning `.fetch_mode(FETCH_PEERS)` / `FETCH_RAISE` read `FETCH_ONE` on every sealed surface (PEERS 1+3 patron
+  loads for 3 loans, RAISE never raised), against `_seal_or_defect`'s "reproduce what `QuerySet._clone` copies"
+  comment: fixed, `utils/querysets.py::_seal_or_defect` carries the mode, admitting only an exact Django `FetchOne` /
+  `FetchPeers` / `FetchRaise` (`utils/_queryset_private.py::is_django_fetch_mode`; any other object is the
+  `untrusted` defect), so the source seed, hook, sidecar, prefetch-child and subclass seals all keep it, and
+  `utils/write_transaction.py::base_visible_queryset` carries the validated mode onto the locked locate; Django 5.2
+  (no fetch modes) is unchanged
 
 ## Outside review of the fixes
 
@@ -1048,11 +1056,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
   rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script
   writes there): refuse with a `WorkspaceError` naming the contents, or remove them
-- [ ] 343. The visibility seal drops Django 6.1's `QuerySet._fetch_mode`: a `get_queryset` hook returning
-  `.fetch_mode(FETCH_PEERS)` (or `RAISE`) is sealed to `FetchOne`, so the project's fetch mode is lost (N+1 lazy
-  loads, or no `RAISE`) on every sealed surface, while `utils/querysets.py::_seal_or_defect`'s comment says it
-  reproduces what `QuerySet._clone` copies forward minus `_known_related_objects`; carry the mode (validated as a
-  genuine Django fetch mode) or state the exception. Found landing 304
 - [ ] 345. `workspace.py`'s `state.json` is a regular file the macOS `$TMPDIR` purge removes once its birth and access
   times pass 3 days (`_write_json` replaces it, so each write renews it): a command holding its copy past 3 days with
   no state write in between loses every binding of the flow while the copy's lock (a directory since 301) survives.
@@ -1076,12 +1079,19 @@ tracker number are recorded there; open remainders and new defects are filed as 
   row (not this setup)
 - [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
   row
+- [ ] 353. Relay `nodes(ids:)` loses `FETCH_PEERS` batching after 343: `relay.py::_stamp_node_type` `copy.copy`s each
+  resolved node and Django's `ModelState.__getstate__` drops `peers`, so a lazy FK across 3 loans costs 3 queries
+  instead of 1 (`FETCH_RAISE` is carried). Found landing 343
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 352. CHANGELOG entry for item 343: on Django 6.1, a `get_queryset` hook or default manager returning
+  `.fetch_mode(FETCH_PEERS)` or `.fetch_mode(FETCH_RAISE)` keeps that mode through the visibility seal (root lists,
+  connections, nested relations, prefetch children, `node(id:)`, the mutation locate), so lazy loads batch or raise as
+  the project set; a fetch mode object other than Django's three is refused as an unsealable queryset
 - [ ] 351. A column-backed `ModelChoiceField` / `ModelMultipleChoiceField` declared with a class-level `queryset=None`
   that no `__init__` or `get_form` assigns builds, and every request binding it fails with Django's raw
   `AttributeError` (`'NoneType' object has no attribute 'model'` / `'filter'`) inside `is_valid()`, because

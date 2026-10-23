@@ -84,6 +84,7 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.orders import Ordering, OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import querysets as querysets_module
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     instance_dict,
@@ -179,11 +180,13 @@ from tests._django_private import (
     has_resolved_condition,
 )
 from tests._idioms import (
+    FETCH_MODES,
     STR_ENUM,
     ClaimsClassBase,
     ClassReadRaisesBase,
     is_object_list,
     module_binding,
+    requires_fetch_modes,
     saved_pk,
 )
 
@@ -1733,6 +1736,154 @@ def test_injected_custom_iterable_result_fails_closed() -> None:
     injected._iterable_class = list  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(ConfigurationError, match="cannot be sealed"):
         apply_type_visibility_sync(_sync_hook_type(injected), Category.objects.all(), info=None)
+
+
+@requires_fetch_modes
+@pytest.mark.parametrize("keep_class", [False, True], ids=["plain", "keep-class"])
+@pytest.mark.parametrize("mode_name", ["FETCH_ONE", "FETCH_PEERS", "FETCH_RAISE"])
+def test_the_seal_carries_each_django_fetch_mode(mode_name: str, *, keep_class: bool) -> None:
+    """The rebuilt queryset loads its rows under the candidate's own Django fetch mode."""
+    mode = FETCH_MODES[mode_name]
+    sealed, defect = _seal_or_defect(
+        Category.objects.filter(name="visible").fetch_mode(mode),
+        Category,
+        None,
+        keep_class=keep_class,
+    )
+    assert defect is None
+    assert sealed is not None
+    assert truth.instance_state(sealed)["_fetch_mode"] is mode
+
+
+@pytest.mark.parametrize(
+    ("planted", "kind"),
+    [
+        pytest.param(object(), "object", id="foreign-object"),
+        pytest.param(None, "NoneType", id="none"),
+    ],
+)
+def test_the_seal_refuses_a_planted_fetch_mode_django_never_writes(
+    planted: object,
+    kind: str,
+) -> None:
+    """A ``_fetch_mode`` slot holding anything but a Django fetch mode cannot be sealed."""
+    candidate = Category.objects.filter(name="visible")
+    vars(candidate)["_fetch_mode"] = planted
+    assert _seal_or_defect(candidate, Category, None) == (
+        None,
+        ("untrusted", f"QuerySet._fetch_mode is a {kind}"),
+    )
+
+
+@requires_fetch_modes
+def test_the_seal_refuses_a_project_fetch_mode_subclass() -> None:
+    """A ``FetchMode`` subclass is consumer code on every row load, so it cannot be sealed.
+
+    Django builds only its own three stateless modes; a subclass instance passed to
+    ``QuerySet.fetch_mode()`` would run its ``fetch`` on every deferred-field and
+    relation load of the sealed rows.
+    """
+    candidate = Category.objects.filter(name="visible").fetch_mode(FETCH_MODES["project"])
+    assert _seal_or_defect(candidate, Category, None) == (
+        None,
+        ("untrusted", "QuerySet._fetch_mode is a _ProjectFetchPeers"),
+    )
+
+
+def test_the_seal_of_a_queryset_without_a_fetch_mode_keeps_the_rebuild_default() -> None:
+    """A candidate with no ``_fetch_mode`` (every Django below 6.1) carries none.
+
+    The rebuild keeps whatever ``QuerySet.__init__`` sets: Django's default mode on
+    6.1 and later, no slot at all below it.
+    """
+    candidate = Category.objects.filter(name="visible")
+    state: dict[str, object] = vars(candidate)
+    _ = state.pop("_fetch_mode", None)
+    sealed, defect = _seal_or_defect(candidate, Category, None)
+    assert defect is None
+    assert sealed is not None
+    default = truth.instance_state(models.QuerySet[Category](model=Category)).get("_fetch_mode")
+    assert truth.instance_state(sealed).get("_fetch_mode") is default
+
+
+@pytest.mark.parametrize(
+    "mode_name",
+    [
+        pytest.param(None, id="default-mode"),
+        pytest.param("FETCH_PEERS", id="fetch-peers", marks=requires_fetch_modes),
+    ],
+)
+def test_the_seal_reproduces_what_queryset_clone_copies(mode_name: str | None) -> None:
+    """The rebuild holds exactly the state ``QuerySet._clone`` carries, but its cache.
+
+    ``QuerySet.all()`` is ``_clone``; the seal rebuilds the same ``__dict__`` slots
+    with equal values, the query compiling to the same SQL, except
+    ``_known_related_objects``, which it deliberately drops. A slot a future Django
+    release adds to ``_clone`` shows up here as a missing or unequal one.
+    """
+    candidate = Category.objects.filter(name="visible").using("default").prefetch_related("items")
+    if mode_name is not None:
+        candidate = candidate.fetch_mode(FETCH_MODES[mode_name])
+    sealed, defect = _seal_or_defect(candidate, Category, None)
+    assert defect is None
+    assert sealed is not None
+    cloned = candidate.all()
+    cloned_state = truth.instance_state(cloned)
+    sealed_state = truth.instance_state(sealed)
+    assert set(sealed_state) == set(cloned_state)
+    carried = set(cloned_state) - {"_query", "_known_related_objects"}
+    assert {name: sealed_state[name] for name in carried} == {
+        name: cloned_state[name] for name in carried
+    }
+    assert str(sealed.query) == str(cloned.query)
+
+
+@requires_fetch_modes
+def test_a_source_carrying_a_project_fetch_mode_is_refused_before_the_hook() -> None:
+    """A source whose fetch mode is not one of Django's own fails before the hook runs."""
+
+    def _boom(
+        _cls: type,
+        _queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> NoReturn:  # must never run
+        raise AssertionError("hook ran on an unsealable source")
+
+    source = Category.objects.filter(name="visible").fetch_mode(FETCH_MODES["project"])
+    with pytest.raises(ConfigurationError) as excinfo:
+        apply_type_visibility_sync(_stub_type(Category, _boom), source, info=None)
+    assert str(excinfo.value) == (
+        "apply_type_visibility for _StubType got a source queryset that cannot be sealed "
+        "into a framework-owned execution queryset (QuerySet._fetch_mode is a "
+        "_ProjectFetchPeers); the seal rebuilds only state made of Django's own objects, so "
+        "it refuses a Query subclass; a consumer-defined expression, lookup, where-node or "
+        "join class; a method assigned onto a query or node instance; a non-builtin value "
+        "where Django stores a builtin; a foreign row iterable; a fetch mode other than "
+        "Django's FETCH_ONE, FETCH_PEERS or FETCH_RAISE; a Prefetch it cannot rebuild; or "
+        "deferred-filter state Django never writes. Build the queryset with Django's own "
+        "query, expression and lookup classes, and do not assign to its internals."
+    )
+
+
+@requires_fetch_modes
+def test_a_prefetch_child_carrying_a_project_fetch_mode_names_it() -> None:
+    """A consumer ``Prefetch`` child with a project fetch mode fails the outer seal closed."""
+    child = Item.objects.all().fetch_mode(FETCH_MODES["project"])
+    assert _sealed_prefetch_related_lookups(
+        (Prefetch("items", queryset=child),),
+        "X",
+        None,
+        Category,
+    ) == (
+        None,
+        (
+            "untrusted",
+            (
+                "X prefetch 'items' queryset cannot be sealed "
+                "(untrusted: QuerySet._fetch_mode is a _ProjectFetchPeers)"
+            ),
+        ),
+    )
 
 
 def test_values_projection_source_fails_closed_on_read_surface() -> None:

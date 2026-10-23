@@ -10,12 +10,14 @@ import base64
 import contextlib
 import importlib
 import json
+import logging
 import re
 import string
 import sys
 from collections.abc import AsyncIterator, Callable, Generator, Mapping
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, cast
 
+import django
 import pytest
 import strawberry
 from apps.library import models
@@ -75,6 +77,7 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import (
     FilterInput,
     FilterSet,
@@ -1321,6 +1324,285 @@ def test_library_loan_get_queryset_returning_an_annotation_a_clone_fetched_is_se
     assert all("COUNT(" in sql for sql in hooked_loan_sql), hooked_loan_sql
     assert queries == statements
     assert hooked_queries == statements + hook_calls
+
+
+def _seed_loan_patron_graph() -> None:
+    """Seed one book with three loans, each to its own patron, in ``id`` order."""
+    branch = models.Branch.objects.create(name="Central", city="Boston")
+    shelf = models.Shelf.objects.create(code="A-1", topic="Speculative fiction", branch=branch)
+    book = models.Book.objects.create(
+        title="Kindred",
+        circulation_status=models.Book.CirculationStatus.CHECKED_OUT,
+        shelf=shelf,
+    )
+    for name in _LOAN_FETCH_MODE_PATRONS:
+        patron = models.Patron.objects.create(name=name)
+        models.Loan.objects.create(book=book, patron=patron, note=f"{name} checkout")
+
+
+#: The patrons ``_seed_loan_patron_graph`` lends to, one loan each.
+_LOAN_FETCH_MODE_PATRONS = ("Ada", "Grace", "Linus")
+#: The loans every ``_LOAN_FETCH_MODE_CASES`` document answers, as the loan objects it
+#: selects (``note`` and the unplanned ``patron``).
+_LOAN_FETCH_MODE_LOANS = [
+    {"note": f"{name} checkout", "patron": {"name": name}} for name in _LOAN_FETCH_MODE_PATRONS
+]
+
+#: The sealed surfaces ``LoanType.get_queryset`` hands its loan rows through, as (extra
+#: settings, document, response, path to the first loan's ``patron``, statements before
+#: the first ``patron`` load): the root connection, and the plain-list relation and nested
+#: connection the optimizer plans under ``allLibraryBooks`` as ``Prefetch`` children.
+#: ``patron`` is hinted ``skip``, so each loan loads it lazily through Django's fetch mode.
+#: (``allLibraryLoans`` is left out: its resolver calls the hook itself and returns the
+#: hook's queryset, which no seal rebuilds.)
+_LOAN_FETCH_MODE_CASES = [
+    pytest.param(
+        {"FAKESHOP_TEST_LOAN_CONNECTION": True},
+        """
+        query {
+          allLibraryLoansConnection(orderBy: [{ id: ASC }]) {
+            edges { node { note patron { name } } }
+          }
+        }
+        """,
+        {
+            "allLibraryLoansConnection": {
+                "edges": [{"node": loan} for loan in _LOAN_FETCH_MODE_LOANS],
+            },
+        },
+        [
+            "allLibraryLoansConnection",
+            "edges",
+            0,
+            "node",
+            "patron",
+        ],
+        1,
+        id="root-connection",
+    ),
+    pytest.param(
+        {},
+        "query { allLibraryBooks { title loans { note patron { name } } } }",
+        {"allLibraryBooks": [{"title": "Kindred", "loans": _LOAN_FETCH_MODE_LOANS}]},
+        [
+            "allLibraryBooks",
+            0,
+            "loans",
+            0,
+            "patron",
+        ],
+        2,
+        id="list-relation-child",
+    ),
+    pytest.param(
+        {"FAKESHOP_TEST_LOAN_CONNECTION": True},
+        """
+        query {
+          allLibraryBooks { title loansConnection { edges { node { note patron { name } } } } }
+        }
+        """,
+        {
+            "allLibraryBooks": [
+                {
+                    "title": "Kindred",
+                    "loansConnection": {
+                        "edges": [{"node": loan} for loan in _LOAN_FETCH_MODE_LOANS],
+                    },
+                },
+            ],
+        },
+        [
+            "allLibraryBooks",
+            0,
+            "loansConnection",
+            "edges",
+            0,
+            "node",
+            "patron",
+        ],
+        2,
+        id="prefetch-child",
+    ),
+]
+
+_REQUIRES_FETCH_MODES = pytest.mark.skipif(
+    django.VERSION < (6, 1),
+    reason="QuerySet.fetch_mode() arrived in Django 6.1",
+)
+
+
+@_REQUIRES_FETCH_MODES
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "flags",
+        "document",
+        "expected",
+        "patron_path",
+        "statements",
+    ),
+    _LOAN_FETCH_MODE_CASES,
+)
+@pytest.mark.parametrize(
+    ("fetch_mode", "patron_statements"),
+    [
+        pytest.param(None, len(_LOAN_FETCH_MODE_PATRONS), id="fetch-one"),
+        pytest.param("FETCH_PEERS", 1, id="fetch-peers"),
+    ],
+)
+def test_library_loan_get_queryset_fetch_mode_reaches_the_sealed_rows(
+    project_schema_override: Callable[[], None],
+    flags: dict[str, bool],
+    document: str,
+    expected: JSONObject,
+    patron_path: list[str | int],
+    statements: int,
+    fetch_mode: str | None,
+    patron_statements: int,
+) -> None:
+    """The fetch mode a ``get_queryset`` hook sets loads the sealed rows' lazy relations.
+
+    Under ``FAKESHOP_TEST_LOAN_FETCH_MODE="FETCH_PEERS"`` the hook returns
+    ``queryset.fetch_mode(FETCH_PEERS)``: the seal rebuilds the loan queryset from
+    its validated state, the mode included, so the first loan's lazy ``patron`` load
+    fetches every peer loan's patron in one statement. Without the hook (Django's
+    default ``FETCH_ONE``, the control) each loan loads its own patron.
+    """
+    del patron_path
+    _seed_loan_patron_graph()
+    with override_settings(**flags, FAKESHOP_TEST_LOAN_FETCH_MODE=fetch_mode):
+        project_schema_override()
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql(document)
+    assert response.status_code == 200
+    assert response_json(response) == {"data": expected}
+    patron_sql = _sql_from_table(captured, "library_patron")
+    assert len(patron_sql) == patron_statements, patron_sql
+    assert len(captured) == statements + patron_statements, captured.captured_queries
+
+
+@_REQUIRES_FETCH_MODES
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "flags",
+        "document",
+        "expected",
+        "patron_path",
+        "statements",
+    ),
+    _LOAN_FETCH_MODE_CASES,
+)
+def test_library_loan_get_queryset_fetch_raise_blocks_the_sealed_rows_lazy_load(
+    project_schema_override: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+    flags: dict[str, bool],
+    document: str,
+    expected: JSONObject,
+    patron_path: list[str | int],
+    statements: int,
+) -> None:
+    """A hook's ``FETCH_RAISE`` refuses the sealed rows' lazy relation load.
+
+    Under ``FAKESHOP_TEST_LOAN_FETCH_MODE="FETCH_RAISE"`` the first loan's unplanned
+    ``patron`` read raises Django's ``FieldFetchBlocked`` instead of querying: the
+    client gets the masked error at that field's path, the server log carries the
+    original exception, and no patron statement runs.
+    """
+    del expected
+    _seed_loan_patron_graph()
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    with override_settings(**flags, FAKESHOP_TEST_LOAN_FETCH_MODE="FETCH_RAISE"):
+        project_schema_override()
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql(document)
+    assert response.status_code == 200
+    payload = response_json(response)
+    errors = json_list(payload, "errors")
+    assert len(errors) == 1, errors
+    error = json_object(errors[0])
+    assert error["message"] == "An unexpected error occurred."
+    assert error["path"] == patron_path
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert len(records) == 1, caplog.records
+    exc_info = records[0].exc_info
+    assert exc_info is not None
+    assert type(exc_info[1]).__name__ == "FieldFetchBlocked"
+    assert str(exc_info[1]) == "Fetching of Loan.patron blocked."
+    assert _sql_from_table(captured, "library_patron") == []
+    assert len(captured) == statements, captured.captured_queries
+
+
+@_REQUIRES_FETCH_MODES
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "flags",
+        "document",
+        "expected",
+        "patron_path",
+        "statements",
+    ),
+    _LOAN_FETCH_MODE_CASES,
+)
+def test_library_loan_get_queryset_project_fetch_mode_is_refused(
+    project_schema_override: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+    flags: dict[str, bool],
+    document: str,
+    expected: JSONObject,
+    patron_path: list[str | int],
+    statements: int,
+) -> None:
+    """A hook's fetch mode that is not one of Django's own fails the seal closed.
+
+    Under ``FAKESHOP_TEST_LOAN_FETCH_MODE="PROJECT_FETCH_PEERS"`` the hook returns
+    ``queryset.fetch_mode(ProjectFetchPeers())``, a ``FetchPeers`` subclass whose
+    ``fetch`` would run on every row load. The seal refuses it with the ``untrusted``
+    defect before any loan statement: the client gets the masked error at the field
+    the sealed surface serves, and the server log names the fetch mode.
+    """
+    del expected, statements
+    _seed_loan_patron_graph()
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    with override_settings(**flags, FAKESHOP_TEST_LOAN_FETCH_MODE="PROJECT_FETCH_PEERS"):
+        project_schema_override()
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql(document)
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert json_at(payload, "data") is None
+    errors = json_list(payload, "errors")
+    assert len(errors) == 1, errors
+    error = json_object(errors[0])
+    assert error["message"] == "An unexpected error occurred."
+    assert error["path"] == patron_path[:1]
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert len(records) == 1, caplog.records
+    exc_info = records[0].exc_info
+    assert exc_info is not None
+    assert type(exc_info[1]) is ConfigurationError
+    assert str(exc_info[1]) == (
+        "LoanType.get_queryset returned a queryset that cannot be sealed into a "
+        "framework-owned execution queryset (LoanQuerySet._fetch_mode is a "
+        "ProjectFetchPeers); the seal rebuilds only state made of Django's own objects, "
+        "so it refuses a Query subclass; a consumer-defined expression, lookup, "
+        "where-node or join class; a method assigned onto a query or node instance; a "
+        "non-builtin value where Django stores a builtin; a foreign row iterable; a fetch "
+        "mode other than Django's FETCH_ONE, FETCH_PEERS or FETCH_RAISE; a Prefetch it "
+        "cannot rebuild; or deferred-filter state Django never writes. Build the queryset "
+        "with Django's own query, expression and lookup classes, and do not assign to its "
+        "internals."
+    )
+    assert _sql_from_table(captured, "library_loan") == []
 
 
 @pytest.mark.django_db

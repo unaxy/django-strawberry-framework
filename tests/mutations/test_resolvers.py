@@ -124,7 +124,13 @@ from django_strawberry_framework.utils.write_transaction import (
     require_write_pipeline,
     write_pipeline,
 )
-from tests._idioms import is_object_dict, is_object_list, saved_pk
+from tests._idioms import (
+    FETCH_MODES,
+    is_object_dict,
+    is_object_list,
+    requires_fetch_modes,
+    saved_pk,
+)
 from tests._info import make_info, unread_info
 from tests.optimizer import _link_models
 
@@ -3338,6 +3344,47 @@ def test_locate_instance_locks_through_base_manager_subquery_by_default() -> Non
             )
             is None
         )
+
+
+@requires_fetch_modes
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode_name", ["FETCH_PEERS", "FETCH_RAISE"])
+@pytest.mark.parametrize("select_for_update", [True, False], ids=["locked", "unlocked"])
+def test_locate_instance_loads_the_row_under_the_hook_fetch_mode(
+    mode_name: str,
+    *,
+    select_for_update: bool,
+) -> None:
+    """The located row carries the fetch mode the type's ``get_queryset`` set.
+
+    The locked locate reads the row through the base manager filtered by the visible
+    primary keys, a queryset the hook never touched; it carries the visible queryset's
+    mode, so the row loads its relations as a read of it does. The unlocked locate reads
+    through the sealed visible queryset itself.
+    """
+    mode = FETCH_MODES[mode_name]
+
+    def _hook(
+        _cls: type[DjangoType],
+        queryset: QuerySet[product_models.Item],
+        _info: object,
+    ) -> QuerySet[product_models.Item]:
+        return queryset.fetch_mode(mode)
+
+    ItemT = _build_item_schema(item_get_queryset=classmethod(_hook))[1][1]
+    category = product_models.Category.objects.create(name=_category_name())
+    item = product_models.Item.objects.create(name="Lockable", category=category)
+
+    with transaction.atomic():
+        located = mutation_resolvers.locate_instance(
+            ItemT,
+            saved_pk(item),
+            unread_info(),
+            alias="default",
+            select_for_update=select_for_update,
+        )
+    assert located is not None
+    assert truth.instance_state(located._state).get("fetch_mode") is mode
 
 
 @pytest.mark.django_db

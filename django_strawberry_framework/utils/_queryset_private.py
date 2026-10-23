@@ -2,9 +2,9 @@
 
 The visibility seal, the optimizer and the write pipeline read and rebuild a
 queryset's routing (``_db``, ``_hints``), its projection (``_fields``), its
-pending prefetches and its deferred filter. Django keeps all of these as private
-``QuerySet`` attributes that django-stubs does not declare, so every direct
-access is an unknown attribute to the type checker. Each one is spelled here
+pending prefetches, its deferred filter and its fetch mode. Django keeps all of
+these as private ``QuerySet`` attributes that django-stubs does not declare, so
+every direct access is an unknown attribute to the type checker. Each one is spelled here
 once, under the type Django stores, and every caller goes through these
 functions instead of the attribute.
 
@@ -13,18 +13,26 @@ built, sealed or already proved a ``QuerySet``. The seal's inspection of an
 untrusted consumer queryset must not dispatch consumer code, so it reads the
 instance namespace through ``truth.instance_state`` instead
 (``django_strawberry_framework/utils/querysets.py::_seal_or_defect``) and comes
-here only to write the validated state onto the queryset it rebuilds.
+here to write the validated state onto the queryset it rebuilds. The fetch mode
+is the one state read here too: ``queryset_fetch_mode`` reads it through
+``truth.instance_state`` and admits only Django's own modes
+(``is_django_fetch_mode``), so the write pipeline's base-manager read carries
+what the seal already validated.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeGuard, TypeVar
+
+from . import truth
+from .imports import import_attr_if_importable
 
 if TYPE_CHECKING:
     from typing import TypeAlias
 
     from django.db import models
     from django.db.models import Prefetch
+    from django.db.models.fetch_modes import FetchMode
     from django.db.models.sql import Query
 
     #: One ``prefetch_related`` lookup as Django stores it: a lookup path or a ``Prefetch``.
@@ -135,6 +143,55 @@ def set_queryset_for_write(
     """Set whether ``queryset`` routes through the router's write alias."""
     # basedpyright: django-stubs omits QuerySet._for_write, reported as an unknown attribute
     queryset._for_write = for_write  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def _django_fetch_mode_classes() -> truth.IdentitySet[type[object]]:
+    """Return Django's own fetch-mode classes, empty on a release without fetch modes.
+
+    Django 6.1 added ``QuerySet.fetch_mode`` and ``django.db.models.fetch_modes``;
+    ``FETCH_ONE`` / ``FETCH_PEERS`` / ``FETCH_RAISE`` are the one stateless instance
+    of each class (``__slots__ = ()``), so an instance of exactly one of these
+    classes behaves as that singleton. Below 6.1 the module does not exist, no
+    queryset carries ``_fetch_mode``, and the set is never consulted.
+    """
+    classes: list[type[object]] = []
+    for class_name in ("FetchOne", "FetchPeers", "FetchRaise"):
+        fetch_mode_class = import_attr_if_importable("django.db.models.fetch_modes", class_name)
+        if truth.is_type(fetch_mode_class):
+            classes.append(fetch_mode_class)
+    return truth.IdentitySet(classes)
+
+
+# The fetch modes the framework carries from one queryset onto another it builds: an
+# instance of exactly one of Django's own fetch-mode classes. ``FetchMode.fetch`` runs on
+# every deferred-field and relation load of every row the queryset yields, so anything
+# else (a ``FetchMode`` subclass, a foreign object) is consumer code at row-load time.
+_DJANGO_FETCH_MODE_CLASSES = _django_fetch_mode_classes()
+
+
+def is_django_fetch_mode(value: object) -> TypeGuard[FetchMode]:
+    """Return whether ``value`` is an instance of exactly one of Django's own fetch-mode classes."""
+    return truth.is_exact_one_of(value, _DJANGO_FETCH_MODE_CLASSES)
+
+
+def queryset_fetch_mode(queryset: models.QuerySet[models.Model, object]) -> FetchMode | None:
+    """Return ``queryset``'s fetch mode when it is one of Django's own, else ``None``.
+
+    ``None`` below Django 6.1, where no queryset carries one. The slot is read from the
+    instance namespace (``truth.instance_state``), so the read dispatches nothing.
+    """
+    fetch_mode = truth.instance_state(queryset).get("_fetch_mode")
+    return fetch_mode if is_django_fetch_mode(fetch_mode) else None
+
+
+def set_queryset_fetch_mode(
+    queryset: models.QuerySet[models.Model, object],
+    fetch_mode: FetchMode,
+) -> None:
+    """Set the fetch mode ``queryset``'s rows load their deferred fields and relations under."""
+    # django-stubs omits ``QuerySet._fetch_mode``; the base ``object.__setattr__`` writes
+    # the instance attribute the type checker cannot see, as ``QuerySet.fetch_mode`` does.
+    object.__setattr__(queryset, "_fetch_mode", fetch_mode)
 
 
 def set_queryset_query(queryset: models.QuerySet[models.Model, object], query: Query) -> None:

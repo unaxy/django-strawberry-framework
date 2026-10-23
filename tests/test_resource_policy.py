@@ -146,10 +146,12 @@ from django_strawberry_framework.utils.typing import object_result
 from tests._django_private import has_apply_rel_filters
 from tests._execution import make_execution_context
 from tests._idioms import (
+    FETCH_MODES,
     ClaimsClassBase,
     ClassReadRaises,
     is_object_list,
     pickle_roundtrip,
+    requires_fetch_modes,
     saved_pk,
 )
 
@@ -2342,6 +2344,35 @@ def test_a_sealable_queryset_subclass_keeps_the_row_bound_in_sql(
     assert type(rows) is QuerySet
     assert rows.query.high_mark == 2
     assert len(list(rows)) == 2
+
+
+@requires_fetch_modes
+@pytest.mark.django_db
+def test_a_queryset_subclass_with_a_project_fetch_mode_is_refused_not_sliced(
+    arm_resource_budget: Callable[[object, ResourcePolicy], None],
+) -> None:
+    """A row source whose fetch mode is not one of Django's own is refused, never sliced."""
+    seed_data(2)
+    context: dict[str, object] = {}
+    info = SimpleNamespace(context=context)
+    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
+    source = _UnsealableQuerySet(model=Category).fetch_mode(FETCH_MODES["project"])
+    with pytest.raises(ConfigurationError) as excinfo:
+        bounded_rows(source, info)
+    assert str(excinfo.value) == (
+        "A collection resolver returned a _UnsealableQuerySet that cannot be "
+        "sealed into a framework-owned execution queryset (_UnsealableQuerySet._fetch_mode "
+        "is a _ProjectFetchPeers), so the raw-list row bound has nothing it owns the slice "
+        "of. Slicing the subclass itself would let the object being bounded decide how many "
+        "rows the bound returns. The seal rebuilds only state made of Django's own objects, "
+        "so it refuses a Query subclass; a consumer-defined expression, lookup, where-node "
+        "or join class; a method assigned onto a query or node instance; a non-builtin "
+        "value where Django stores a builtin; a foreign row iterable; a fetch mode other "
+        "than Django's FETCH_ONE, FETCH_PEERS or FETCH_RAISE; a Prefetch it cannot rebuild; "
+        "or deferred-filter state Django never writes. Build the queryset with Django's own "
+        "query, expression and lookup classes, and do not assign to its internals. The "
+        "raw-list bound also refuses a result cache that is not an exact list."
+    )
 
 
 @pytest.mark.django_db

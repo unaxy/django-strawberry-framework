@@ -47,8 +47,10 @@ project methods of the class that supplied it (the framework seeds each read fro
 the model's default manager), and the hook's result is sealed plain again.
 
 What the seal preserves: the SQL query state (filters, annotations, joins,
-ordering, values projection), database routing / hints, and the prefetch
-metadata Django needs -- everything that determines which rows the SQL selects.
+ordering, values projection), database routing / hints, the prefetch metadata
+Django needs -- everything that determines which rows the SQL selects -- and, on
+Django 6.1 and later, the fetch mode (``QuerySet.fetch_mode``) its rows load their
+deferred fields and relations under.
 A combinator is preserved as the set of primary keys it selects, rebuilt as a
 ``pk__in`` membership test the recomposing surfaces can narrow (the raw-list row
 source keeps it as it is), and a combinator whose rows that rewrite would change
@@ -57,8 +59,8 @@ framework composes onto or returns: the consumer's executable override dispatch
 (the subclass identity itself), because that is precisely the leak vector. A
 seal rebuilds only state made of Django's own objects, so anything else in it -- a
 consumer-defined query, expression, lookup or join class, a method assigned onto a
-query instance, a foreign row iterable, deferred-filter state Django never writes --
-fails closed (``untrusted``).
+query instance, a foreign row iterable, a fetch mode that is not one of Django's own,
+deferred-filter state Django never writes -- fails closed (``untrusted``).
 
 Caller-specific tails stay with their caller: the connection field keeps its
 GraphQL non-queryset error (it calls ``normalize_query_source`` then guards),
@@ -133,7 +135,9 @@ from ._narrowing import (
     pk_of,
 )
 from ._queryset_private import (
+    is_django_fetch_mode,
     queryset_db,
+    set_queryset_fetch_mode,
     set_queryset_fields,
     set_queryset_for_write,
     set_queryset_prefetch_lookups,
@@ -3338,17 +3342,20 @@ def _queryset_state_defect(state: Mapping[str, object], cls_name: str) -> tuple[
 
     Beyond the query graph, the seal carries a handful of ``QuerySet.__dict__`` fields
     onto the rebuilt queryset (``_db`` routing, ``_hints``, ``_fields``,
-    ``_sticky_filter``, ``_for_write``). Each is later subjected to truthiness, an
-    equality / ``str`` comparison, or a ``dict`` copy; a consumer object overriding
-    ``__bool__`` / ``__eq__`` / ``__str__`` / ``__iter__`` there would dispatch mid-seal
-    even though the field was read from ``__dict__`` without dispatch
+    ``_sticky_filter``, ``_for_write``, ``_fetch_mode``). Each is later subjected to
+    truthiness, an equality / ``str`` comparison, or a ``dict`` copy, or (the fetch
+    mode) dispatched on every row load; a consumer object overriding ``__bool__`` /
+    ``__eq__`` / ``__str__`` / ``__iter__`` / ``fetch`` there would dispatch mid-seal or
+    after it even though the field was read from ``__dict__`` without dispatch
     (spec-045 Decision 1). So each is pinned to the EXACT shape Django
     stores before it is used:
 
     - ``_db``: ``None`` or a ``str`` alias;
     - ``_hints``: ``None`` or an exact ``dict`` with exact-``str`` keys;
     - ``_fields``: ``None`` or an exact ``tuple`` of ``str`` names;
-    - ``_sticky_filter`` / ``_for_write``: ``None`` or an exact ``bool``.
+    - ``_sticky_filter`` / ``_for_write``: ``None`` or an exact ``bool``;
+    - ``_fetch_mode``: absent (Django below 6.1) or an instance of exactly one of
+      Django's own fetch-mode classes (``utils/_queryset_private.py::is_django_fetch_mode``).
 
     The ``_db`` alias and the ``_fields`` names are the values a consumer passed to
     ``using(...)`` / ``values(...)`` / ``values_list(...)``, which Django stores as
@@ -3377,6 +3384,9 @@ def _queryset_state_defect(state: Mapping[str, object], cls_name: str) -> tuple[
         flag = state.get(attr)
         if flag is not None and type(flag) is not bool:
             return ("untrusted", f"{cls_name}.{attr} is a {truth.kind(flag)}")
+    fetch_mode = state.get("_fetch_mode", MISSING_ATTRIBUTE)
+    if fetch_mode is not MISSING_ATTRIBUTE and not is_django_fetch_mode(fetch_mode):
+        return ("untrusted", f"{cls_name}._fetch_mode is a {truth.kind(fetch_mode)}")
     return None
 
 
@@ -4196,7 +4206,9 @@ def _seal_or_defect(
       a foreign ``select_related`` all fail closed -- consumer-defined expressions /
       lookups are NOT supported across the visibility boundary), the
       ``_iterable_class`` is not one of Django's own row iterables (a synthetic-row
-      iterable), the ``_deferred_filter`` STATE is not the exact shape Django writes --
+      iterable), the ``_fetch_mode`` is not an instance of exactly one of Django's own
+      fetch-mode classes (a ``FetchMode`` subclass whose ``fetch`` would run on every
+      row load), the ``_deferred_filter`` STATE is not the exact shape Django writes --
       a non-3-tuple, a ``negate`` that is not an exact ``bool``, a ``kwargs`` that is
       not an exact ``dict``, an ``args`` that is neither ``tuple`` nor ``list``, a
       non-string kwarg key, a prohibited connector kwarg, a value that is neither inert
@@ -4309,7 +4321,7 @@ def _seal_or_defect(
     if type(query) is not sql.Query:
         return None, ("untrusted", f"{cls_name}.query is {truth.kind(query)}")
     # Pin every retained ``QuerySet`` state field (``_db`` / ``_hints`` / ``_fields`` /
-    # ``_sticky_filter`` / ``_for_write``) to its exact shape BEFORE any truthiness /
+    # ``_sticky_filter`` / ``_for_write`` / ``_fetch_mode``) to its exact shape BEFORE any truthiness /
     # comparison / copy runs on it, so a consumer ``__bool__`` / ``__eq__`` / ``__iter__``
     # cannot dispatch mid-seal (spec-045 Decision 1).
     state_defect = _queryset_state_defect(state, cls_name)
@@ -4485,6 +4497,11 @@ def _seal_or_defect(
     # synthetic related instances that bypass the related type's own visibility hook).
     sealed._iterable_class = iterable
     set_queryset_fields(sealed, fields)
+    # Django 6.1's fetch mode, which ``_queryset_state_defect`` proved one of Django's
+    # own when present; absent below 6.1, where the rebuilt queryset has none either.
+    fetch_mode = state.get("_fetch_mode")
+    if is_django_fetch_mode(fetch_mode):
+        set_queryset_fetch_mode(sealed, fetch_mode)
     # The prefetch seal returns lookups exactly when it returns no defect.
     set_queryset_prefetch_lookups(
         sealed,
@@ -4639,7 +4656,8 @@ _UNSEALABLE_STATE_CAUSES = (
     "the seal rebuilds only state made of Django's own objects, so it refuses a Query "
     "subclass; a consumer-defined expression, lookup, where-node or join class; a method "
     "assigned onto a query or node instance; a non-builtin value where Django stores a "
-    "builtin; a foreign row iterable; a Prefetch it cannot rebuild; or deferred-filter "
+    "builtin; a foreign row iterable; a fetch mode other than Django's FETCH_ONE, "
+    "FETCH_PEERS or FETCH_RAISE; a Prefetch it cannot rebuild; or deferred-filter "
     "state Django never writes. Build the queryset with Django's own query, expression "
     "and lookup classes, and do not assign to its internals."
 )

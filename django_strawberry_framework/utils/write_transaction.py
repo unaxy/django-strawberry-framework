@@ -101,7 +101,7 @@ from ._narrowing import (
     pk_of,
     read_attr,
 )
-from ._queryset_private import queryset_db
+from ._queryset_private import queryset_db, queryset_fetch_mode, set_queryset_fetch_mode
 from .canonical import base_container_values, canonical_sort_key
 from .typing import object_result
 
@@ -1283,9 +1283,18 @@ def base_visible_queryset(
 ) -> QuerySet[_ModelT]:
     """Build ``base_locked_queryset``'s query without the lock: the visible rows over the base manager.
 
-    The same ``pk__in`` reduction, so it carries every queryset shape the lock does.
+    The same ``pk__in`` reduction, so it carries every queryset shape the lock does. The
+    base manager's queryset starts from Django's default fetch mode, so the visible
+    queryset's own (Django 6.1's ``QuerySet.fetch_mode``, one of Django's own modes as the
+    visibility seal proved) is carried onto it: a located row loads its deferred fields and
+    relations under the mode the project's ``get_queryset`` chose, as a read of the same
+    row does. Below 6.1 there is none to carry.
     """
-    return model._base_manager.using(alias).filter(pk__in=visible_queryset.values("pk"))
+    located = model._base_manager.using(alias).filter(pk__in=visible_queryset.values("pk"))
+    fetch_mode = queryset_fetch_mode(visible_queryset)
+    if fetch_mode is not None:
+        set_queryset_fetch_mode(located, fetch_mode)
+    return located
 
 
 def locks_rows(alias: str) -> bool:
