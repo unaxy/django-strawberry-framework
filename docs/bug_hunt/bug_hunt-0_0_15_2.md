@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 201 done, 139 to do.
+Progress: 202 done, 139 to do.
 
 ## Done
 
@@ -818,6 +818,14 @@ Progress: 201 done, 139 to do.
   `sql.Query.clone`'s `base_table`), pinned against the running Django, so the rebuilt node recomputes them and a
   value planted under those names is never carried or called; the outer query still refuses one. A sidecar result that
   was evaluated now answers `evaluated` instead of `untrusted`. Mutations M1-M3 red
+- [x] 301. `workspace.py`'s locks (`pool.lock`, `slots/slot-N.lock`, `gate.lock`) were regular files, and the macOS
+  `$TMPDIR` purge (`dirhelper`, 03:35 daily: a regular file whose birth time and access time are both over 3 days old,
+  held or not; directories never) unlinked one a command held, so a later command locked a new inode beside it: two
+  holders of one copy or of `state.json`, `release` freeing a copy a command runs in, `status` reading it free, a
+  `bind` race losing a binding, two gates at once (7 of 12 probe rows at the parent): fixed, every lock is an empty
+  directory (`workspace.py::file_lock` through `_lock_directory`, as the flow lease and 143's marker), and a lock file
+  an older version left is replaced by its directory under that file's own lock (`_replace_lock_file`), so an older
+  opener fails loudly instead of holding another inode (0 of 12 after; mutations red)
 
 ## Outside review of the fixes
 
@@ -938,11 +946,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `-c core.excludesFile=/dev/null` turns it off. So `workspace.py`'s untracked listings (`wanted_files`, `item_diff`)
   depend on the caller, against `item_diff`'s "the caller's global git config is ignored" (`scripts/workspace.py:37`);
   here it hides `.claude/settings.local.json`
-- [ ] 301. `workspace.py`'s lock files (`pool.lock`, `slots/slot-N.lock`, `gate.lock`) are regular files that are only
-  opened and `flock`ed, never read, so their atime stays at creation and the macOS `$TMPDIR` purge can unlink one a
-  command holds across 03:35 on a pool older than 3 days; a later command then creates and locks a new inode while the
-  first still holds the old one (`_flock`'s `_still_names` check covers only callers already waiting), so two commands
-  hold the same copy or `state.json` lock (item 143's mechanism; the flow lease is a directory and unaffected)
 - [ ] 302. `scripts/check_spec_glossary.py::auto_link_terms` (the NEXT.md Step 7 `--auto-link` run) protects only
   fenced code and `[label](target)` links and matches a term with no boundary: a spec's first unlinked mention inside a
   code span, a double-backtick span, reference-link text, an autolink, a raw HTML attribute, a bare URL, a heading, or as
@@ -1047,6 +1050,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   loads, or no `RAISE`) on every sealed surface, while `utils/querysets.py::_seal_or_defect`'s comment says it
   reproduces what `QuerySet._clone` copies forward minus `_known_related_objects`; carry the mode (validated as a
   genuine Django fetch mode) or state the exception. Found landing 304
+- [ ] 345. `workspace.py`'s `state.json` is a regular file the macOS `$TMPDIR` purge removes once its birth and access
+  times pass 3 days (`_write_json` replaces it, so each write renews it): a command holding its copy past 3 days with
+  no state write in between loses every binding of the flow while the copy's lock (a directory since 301) survives.
+  Robustness row, not a defect under rule 37 (the module docstring documents the purge for idle stretches and asks for
+  `gc` after one); found implementing 301
 
 ## To do: holes found re-checking the fixes
 
