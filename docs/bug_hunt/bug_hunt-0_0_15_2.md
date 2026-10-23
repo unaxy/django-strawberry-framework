@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 230 done, 139 to do.
+Progress: 231 done, 141 to do.
 
 ## Done
 
@@ -1010,6 +1010,15 @@ Progress: 230 done, 139 to do.
   sealed through the hook as the seed in one batched query (two statements at any parent count, sync and async) and
   the relation's key stays planned; a seed over another model is still re-read per parent, a sliced one fails as it
   does without the optimizer; a hint seal is recorded only for a generated resolver at the relation's own accessor
+- [x] 305. A ModelForm `MultipleChoiceField` / `TypedMultipleChoiceField` over a single-value column that lists no
+  choices (neither an `ArrayField` nor a `JSONField`) is typed as the same form field off-column (`[String!]!` on
+  create, `[String!]` on update; `forms/inputs.py::_writes_list_over_single_value`), and an update build logs one
+  `logger.warning` per such field; an update omitting it binds the built form's `get_initial_for_field` under
+  `form.add_prefix` (a `QueryDict` from `get_form` is copied and given the initial with `setlist`, any other mapping
+  merged into a `dict`), so a form splitting the stored value into its initial keeps it and one that does not is
+  refused "Enter a list of values." with nothing written; a `JSONField` column keeps `JSON`, the serializer twin is
+  unchanged (spec-039); spec-038 Decision 7 and 8 and the `DjangoModelFormMutation` glossary entry say so (create 0/3
+  and update 0/4 before, all green after, live under `FAKESHOP_TEST_BRANCH_CITY_PICKS`)
 
 ## Outside review of the fixes
 
@@ -1053,11 +1062,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 190. Seen at `87dc1df7`, re-check: an out-of-range datetime filter value raises an uncoded error (The invalid
   regex and the regex on a UUID field are not defects: both follow django-filter's `regex` lookup, which sends a text
   pattern to the database and types a UUID column's value as a UUID.)
-- [ ] 305. A ModelForm `MultipleChoiceField` declared over a single-value column that lists no choices (`description =
-  MultipleChoiceField(...)` over a `TextField`) builds as `description: String!` and every create and update fails with
-  "Enter a list of values.": `forms/inputs.py::_form_choice_narrowing` returns before its list-over-single-value refusal
-  when the column lists no choices; the serializer twin is unchecked on purpose (spec-039), so say whether the form
-  flavor refuses at build or types the field as a list
 - [ ] 307. Leftovers from 284 / 142 (`ca9273d3`, landed on the implementer's evidence: the FIX-round delta for F1 job
   control, F2 the late stop, F3 gate's sync holding and F5 the docs had no second verifier pass, by the maintainer's
   call): a Ctrl-Z landing between `Popen` returning and `_StopRelay.started` stops only the wrapper, and the command
@@ -1208,12 +1212,23 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `plans.py::_consumer_owned_paths` (and `_release_select_related_to_prefetches`) never match it and the JOIN still
   serves the row; no fakeshop or `tests/` model has the shape (a library `PatronBadge(patron=OneToOneField(Patron,
   related_name="badge", related_query_name="badges"))` would). Found landing 379/380
+- [ ] 423. A single `ChoiceField` (or `TypedChoiceField`) over a choiceless `ArrayField` publishes the column's list
+  input while `ChoiceField.clean` refuses a list, so every create and update through it fails; the mirror of 305 (a
+  list-writing field over a single-value column); say whether the form flavor types it by the form field (a scalar) or
+  refuses at build. Found verifying 305
+- [ ] 424. `forms/resolvers.py::_coerced_null_fields` reads `form.data` by the unprefixed field name, so a form built
+  with a `prefix` (`get_form` / `get_form_kwargs`) never reaches its explicit-null check and an explicit `null` on
+  such a form is not coerced the way it is on an unprefixed one. Found implementing 305
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 425. CHANGELOG entry for item 305: a ModelForm `MultipleChoiceField` / `TypedMultipleChoiceField` over a
+  single-value column that lists no choices now types as a list (`String` -> `[String!]`), so an input that sent a
+  comma string (e.g. a `django_filters.widgets.CSVWidget` field) must send a list; an update build warns that an
+  omitted such field binds the form's initial, which the form must present as a list
 - [ ] 463. CHANGELOG entry for items 379 and 380: a consumer `Prefetch(queryset=...)` (from a `get_queryset` hook or a
   resolver) now owns its path on a forward relation (the optimizer no longer joins over it, so its filter and
   annotations apply) and onto a target type with its own `get_queryset` hook (sealed through that hook in one query

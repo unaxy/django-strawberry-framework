@@ -28,13 +28,27 @@ parent table and one of its own, so the update writes both tables.
 ``InterlibraryLoan.lender`` (``Branch.isil``, which may be ``NULL``).
 ``BranchWithShelfForm`` and ``BranchPairForm`` add model-less plain-form
 ``perform_mutate`` write-hook and transaction-rollback cases.
+``BranchCityPicksForm`` picks several cities into the single ``Branch.city`` text column, so
+its input types ``city`` as a list; ``BranchCityPicksSplitForm`` also presents the stored
+text as a list, so an update omitting ``city`` keeps it; ``as_query_dict`` re-encodes the
+data a mutation binds as the immutable ``QueryDict`` an HTML form post arrives as.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from django import forms
+from django.http import QueryDict
 
 from apps.library import models
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from django.core.files.uploadedfile import UploadedFile
+    from django.utils.datastructures import MultiValueDict
+    from typing_extensions import TypeIs
 
 
 class ShelfRelationsForm(forms.ModelForm[models.Shelf]):
@@ -259,3 +273,70 @@ class BranchPairForm(forms.Form):
 
     first_name = forms.CharField(max_length=200)
     second_name = forms.CharField(max_length=200)
+
+
+def _is_list(value: object) -> TypeIs[list[object]]:
+    """Whether a cleaned value is a list, its items still unvalidated."""
+    return isinstance(value, list)
+
+
+#: The cities ``BranchCityPicksForm.city`` offers.
+BRANCH_CITY_PICKS = (("north", "North"), ("south", "South"), ("east", "East"))
+
+
+class BranchCityPicksForm(forms.ModelForm[models.Branch]):
+    """A ``Branch`` form picking several cities into the single ``city`` text column.
+
+    ``city`` is a ``MultipleChoiceField`` over ``Branch.city``, a ``TextField`` listing no
+    choices: the field reads a list, which ``clean_city`` joins with ``,`` into the stored
+    text, so the generated input types ``city`` as a list. The form presents the stored
+    text as it is, so an update omitting ``city`` binds that text and the field refuses it
+    ("Enter a list of values.").
+    """
+
+    city = forms.MultipleChoiceField(choices=BRANCH_CITY_PICKS)
+
+    class Meta:
+        model = models.Branch
+        fields = ("name", "city")
+
+    def clean_city(self) -> str:
+        """Join the picked cities into the text ``Branch.city`` stores."""
+        picks: object = self.cleaned_data.get("city")
+        if not _is_list(picks):
+            # Django runs ``clean_city`` only once the ``city`` field cleaned to a list.
+            raise TypeError(f"expected the cleaned picks, got {type(picks).__name__}")
+        return ",".join(str(pick) for pick in picks)
+
+
+class BranchCityPicksSplitForm(BranchCityPicksForm):
+    """``BranchCityPicksForm`` presenting the stored ``city`` text as the list it was joined from.
+
+    ``__init__`` splits a located branch's ``city`` into ``initial["city"]``, so an update
+    omitting ``city`` binds the stored picks and keeps them.
+    """
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        files: MultiValueDict[str, UploadedFile[bytes]] | None = None,
+        *,
+        instance: models.Branch | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        """Split a located branch's stored ``city`` into the initial picks."""
+        super().__init__(data, files, instance=instance, prefix=prefix)
+        if self.instance.pk is not None:
+            self.initial["city"] = self.instance.city.split(",") if self.instance.city else []
+
+
+def as_query_dict(data: Mapping[str, object]) -> QueryDict:
+    """Re-encode form data as the immutable ``QueryDict`` an HTML form post binds.
+
+    A list value becomes the key's list of values, as a multi-select posts it.
+    """
+    query = QueryDict(mutable=True)
+    for key, value in data.items():
+        values = value if _is_list(value) else [value]
+        query.setlist(key, [str(item) for item in values])
+    return QueryDict(query.urlencode())

@@ -11,6 +11,7 @@ from django.db.models import (
     Expression,
     F,
     Manager,
+    Model,
     Prefetch,
     QuerySet,
     TextField,
@@ -2944,6 +2945,102 @@ class UpdateInterlibraryLoanViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+def _branch_city_picks_mutations() -> tuple[
+    type[DjangoModelFormMutation],
+    type[DjangoModelFormMutation],
+    type[DjangoModelFormMutation],
+    type[DjangoModelFormMutation],
+    type[DjangoModelFormMutation],
+]:
+    """Declare the ``FAKESHOP_TEST_BRANCH_CITY_PICKS`` branch-city picks mutations.
+
+    Declaring a mutation registers it for the schema build, so only the flag declares
+    these: ``createBranchCityPicksViaForm`` / ``updateBranchCityPicksViaForm`` write
+    ``Branch.city`` through ``BranchCityPicksForm``, a ``MultipleChoiceField`` over that
+    single text column (typed as a list, joined in ``clean_city``), and
+    ``updateBranchCityPicksSplitViaForm`` through ``BranchCityPicksSplitForm``, which also
+    presents the stored text as a list, so an update omitting ``city`` keeps it.
+    ``updateBranchCityPicksQueryDictViaForm`` binds that form to the ``QueryDict`` an HTML
+    form post arrives as, and ``updateBranchCityPicksPrefixedViaForm`` binds it under the
+    form prefix ``p``: an omitted ``city`` keeps its picks either way.
+    """
+
+    class CreateBranchCityPicksViaForm(DjangoModelFormMutation):
+        """Create a ``Branch`` picking its cities through ``BranchCityPicksForm``."""
+
+        class Meta:
+            form_class = forms.BranchCityPicksForm
+            operation = "create"
+            permission_classes = []
+
+    class UpdateBranchCityPicksViaForm(DjangoModelFormMutation):
+        """Update a ``Branch`` through ``BranchCityPicksForm`` (the stored text unsplit)."""
+
+        class Meta:
+            form_class = forms.BranchCityPicksForm
+            operation = "update"
+            permission_classes = []
+
+    class UpdateBranchCityPicksSplitViaForm(DjangoModelFormMutation):
+        """Update a ``Branch`` through ``BranchCityPicksSplitForm`` (the stored text split)."""
+
+        class Meta:
+            form_class = forms.BranchCityPicksSplitForm
+            operation = "update"
+            permission_classes = []
+
+    class UpdateBranchCityPicksQueryDictViaForm(DjangoModelFormMutation):
+        """Update a ``Branch`` through ``BranchCityPicksSplitForm`` bound to a ``QueryDict``."""
+
+        class Meta:
+            form_class = forms.BranchCityPicksSplitForm
+            operation = "update"
+            permission_classes = []
+
+        @override
+        def get_form(
+            self,
+            info: Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: Model | None = None,
+        ) -> forms.BranchCityPicksSplitForm:
+            """Bind the data as the immutable ``QueryDict`` an HTML form post arrives as."""
+            branch = instance if isinstance(instance, models.Branch) else None
+            return forms.BranchCityPicksSplitForm(forms.as_query_dict(data), instance=branch)
+
+    class UpdateBranchCityPicksPrefixedViaForm(DjangoModelFormMutation):
+        """Update a ``Branch`` through ``BranchCityPicksSplitForm`` under the prefix ``p``."""
+
+        class Meta:
+            form_class = forms.BranchCityPicksSplitForm
+            operation = "update"
+            permission_classes = []
+
+        @override
+        def get_form(
+            self,
+            info: Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: Model | None = None,
+        ) -> forms.BranchCityPicksSplitForm:
+            """Bind the data under the form prefix ``p``, keyed as a prefixed form posts it."""
+            branch = instance if isinstance(instance, models.Branch) else None
+            prefixed = {f"p-{name}": value for name, value in data.items()}
+            return forms.BranchCityPicksSplitForm(prefixed, instance=branch, prefix="p")
+
+    return (
+        CreateBranchCityPicksViaForm,
+        UpdateBranchCityPicksViaForm,
+        UpdateBranchCityPicksSplitViaForm,
+        UpdateBranchCityPicksQueryDictViaForm,
+        UpdateBranchCityPicksPrefixedViaForm,
+    )
+
+
 @strawberry.type
 class Mutation:
     """Library write surface (live raw-pk relation visibility + ``to_field_name``).
@@ -3009,6 +3106,16 @@ class Mutation:
 
     create_shelf_via_form = DjangoMutationField(CreateShelfViaForm)
     update_shelf_via_form = DjangoMutationField(UpdateShelfViaForm)
+    # Default-OFF acceptance flag ``FAKESHOP_TEST_BRANCH_CITY_PICKS``: when set, the
+    # branch-city picks mutations (``_branch_city_picks_mutations``) join the schema. Read in
+    # the class body so a project-schema reload under ``override_settings`` re-executes it.
+    if getattr(settings, "FAKESHOP_TEST_BRANCH_CITY_PICKS", False):
+        _city_picks = _branch_city_picks_mutations()
+        create_branch_city_picks_via_form = DjangoMutationField(_city_picks[0])
+        update_branch_city_picks_via_form = DjangoMutationField(_city_picks[1])
+        update_branch_city_picks_split_via_form = DjangoMutationField(_city_picks[2])
+        update_branch_city_picks_query_dict_via_form = DjangoMutationField(_city_picks[3])
+        update_branch_city_picks_prefixed_via_form = DjangoMutationField(_city_picks[4])
     create_shelf = DjangoMutationField(CreateShelf)
     update_shelf_condition = DjangoMutationField(UpdateShelfCondition)
     update_patron_profile = DjangoMutationField(UpdatePatronProfile)

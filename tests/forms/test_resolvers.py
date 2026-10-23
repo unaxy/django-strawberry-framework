@@ -71,6 +71,7 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, models
 from django.db.models.signals import pre_save
+from django.http import QueryDict
 from django.test.utils import CaptureQueriesContext
 from graphql_client import post_lock_rereads
 from strawberry import relay
@@ -2306,6 +2307,90 @@ def test_partial_update_reconstruct_with_extra_model_choice_field() -> None:
     assert "extra_choice" not in data
     assert data["name"] == "updated"
     assert data["category"] == saved_pk(cat)
+
+
+class _CityPicksForm(forms.ModelForm[library_models.Branch]):
+    """A ``MultipleChoiceField`` over the single text column ``Branch.city``."""
+
+    city = forms.MultipleChoiceField(choices=[("north", "North")])
+
+    class Meta:
+        model = library_models.Branch
+        fields = ("name", "city")
+
+
+def _update_city_picks() -> type[DjangoModelFormMutation]:
+    """Declare an update mutation over ``_CityPicksForm``."""
+
+    class UpdateCityPicks(DjangoModelFormMutation):
+        class Meta:
+            form_class = _CityPicksForm
+            operation = "update"
+
+    return UpdateCityPicks
+
+
+@pytest.mark.django_db
+def test_partial_reconstruction_leaves_an_omitted_list_field_over_a_single_value_column_out() -> (
+    None
+):
+    """The stored single value of a list field is never rebound; the form's initial is.
+
+    ``Branch.city`` stores the text the form joined, which the ``MultipleChoiceField``
+    refuses, so the reconstruction leaves it out for ``_bind_omitted_list_initials``.
+    """
+    branch = library_models.Branch.objects.create(name=_uniq("Br"), city="north")
+    data, unresolved = form_resolvers._reconstruct_partial_data(_update_city_picks(), branch, {})
+    assert unresolved == {}
+    assert data == {"name": branch.name}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("dropped", "bound"), [(False, {"city": "north"}), (True, {})])
+def test_omitted_list_field_binds_the_initial_of_the_field_the_bound_form_declares(
+    *,
+    dropped: bool,
+    bound: dict[str, object],
+) -> None:
+    """An omitted list field over a single-value column binds the bound form's own initial.
+
+    The initial is read off the field the built form declares, so a field the form's
+    ``__init__`` (or a ``get_form`` override) removed binds nothing and is left to the form.
+    """
+    branch = library_models.Branch.objects.create(name=_uniq("Br"), city="north")
+    form = _CityPicksForm(data={"name": "Renamed"}, instance=branch)
+    if dropped:
+        del form.fields["city"]
+    form_resolvers._bind_omitted_list_initials(_update_city_picks(), form, {"name": "Renamed"})
+    assert dict(form.data) == {"name": "Renamed", **bound}
+
+
+@pytest.mark.django_db
+def test_omitted_list_field_initial_joins_an_immutable_query_dict_as_its_values() -> None:
+    """A ``QueryDict`` bound form keeps every other field's values and gains the initial's.
+
+    The ``QueryDict`` an HTML form post binds is immutable and holds a list per key, so the
+    initial is set on a copy as its list of values; unpacking it into a ``dict`` would bind
+    ``name`` as its raw value list.
+    """
+    branch = library_models.Branch.objects.create(name=_uniq("Br"), city="north")
+    posted = QueryDict("name=Renamed")
+    form = _CityPicksForm(data=posted, instance=branch)
+    form_resolvers._bind_omitted_list_initials(_update_city_picks(), form, {"name": "Renamed"})
+    bound = form.data
+    assert isinstance(bound, QueryDict)
+    assert bound.getlist("name") == ["Renamed"]
+    assert bound.getlist("city") == ["north"]
+    assert posted.getlist("city") == []
+
+
+@pytest.mark.django_db
+def test_omitted_list_field_initial_binds_under_the_form_prefix() -> None:
+    """A prefixed form reads ``<prefix>-<name>``, so the initial is bound under that key."""
+    branch = library_models.Branch.objects.create(name=_uniq("Br"), city="north")
+    form = _CityPicksForm(data={"p-name": "Renamed"}, instance=branch, prefix="p")
+    form_resolvers._bind_omitted_list_initials(_update_city_picks(), form, {"name": "Renamed"})
+    assert dict(form.data) == {"p-name": "Renamed", "p-city": "north"}
 
 
 @pytest.mark.django_db
