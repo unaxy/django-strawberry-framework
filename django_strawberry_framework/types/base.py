@@ -115,6 +115,14 @@ ALLOWED_META_KEYS: frozenset[str] = frozenset(
         "primary",
         "relation_shapes",
         "required_overrides",
+        # Declarative visibility prototype (whitepaper section 11 steps 1-2):
+        # ``visibility`` is a sequence of ``rules.Rule``; ``cascade`` is the
+        # opt-out of the forward-FK cascade that is on by default once rules
+        # exist; ``blessed`` is the stated reason a hand-written ``get_queryset``
+        # body stays in Python, which moves it from the audit's O to its B.
+        "visibility",
+        "cascade",
+        "blessed",
     },
 )
 # ``filesystem_path_fields`` (spec-048 Decision 2),
@@ -651,6 +659,19 @@ class DjangoType:
     """Base class for Django-model-backed Strawberry GraphQL types."""
 
     _is_default_get_queryset: ClassVar[bool] = True
+    # Declarative visibility prototype: ``Meta.visibility`` rules and the
+    # ``Meta.cascade`` opt-out, stamped by ``__init_subclass__``; read by
+    # ``rules/apply.py`` and ``rules/audit.py``.
+    __visibility_rules__: ClassVar[tuple[object, ...]] = ()
+    __cascade__: ClassVar[bool | None] = None
+    __blessed__: ClassVar[str | None] = None
+    # ``True`` when the consumer wrote a ``get_queryset`` body on this type or an
+    # ancestor, whatever rules are declared beside it (the audit reads this; the
+    # ``has_custom_get_queryset`` flag below is also flipped by declared rules).
+    __overrides_get_queryset__: ClassVar[bool] = False
+    # ``True`` when any rule (type, model mixin, or cascade opt-out) reaches the
+    # type: the default hook's fast path reads this flag and nothing else.
+    __declares_visibility__: ClassVar[bool] = False
     # Set by ``__init_subclass__`` on every subclass that declares ``Meta``.
     __django_strawberry_definition__: ClassVar[DjangoTypeDefinition]
     # Installed alongside it by ``types/relay.py::install_is_type_of``.
@@ -688,6 +709,18 @@ class DjangoType:
             )
         validated = _validate_meta(cls, meta)
         model = validated.model
+        visibility_rules, cascade = _validate_visibility(cls, meta)
+        cls.__visibility_rules__ = visibility_rules
+        cls.__cascade__ = cascade
+        cls.__blessed__ = _validate_blessed(cls, meta, has_custom_get_queryset)
+        cls.__overrides_get_queryset__ = has_custom_get_queryset
+        cls.__declares_visibility__ = _declares_visibility(cls, model)
+        if cls.__declares_visibility__:
+            # Declared rules make the default hook a real filter, so every
+            # reader that asks "does this type scope its rows?" (the optimizer's
+            # select_related downgrade, the cascade) must hear yes.
+            has_custom_get_queryset = True
+            cls._is_default_get_queryset = False
         fields = _select_fields(model, validated.fields_spec, validated.exclude_spec)
         _validate_optimizer_hints(validated.optimizer_hints, fields, model=model)
 
@@ -921,10 +954,20 @@ class DjangoType:
         ``sync_to_async`` worker - its own per call, or the worker an optimizer
         plan build runs in - so it may read the database; an ``async def``
         override is awaited on the event loop.
+
+        With no declared rules (``Meta.visibility``, a model mixin's
+        ``visibility``, ``Meta.cascade``) and no schema-wide restriction this
+        is the identity. Otherwise it is the framework-owned enforcement body
+        (``rules/apply.py``): a restriction reaches every type, rules or not.
         """
-        # the identity default reads no ``info``, but the readers pass it to every override
-        del info
-        return queryset
+        from django_strawberry_framework.rules.apply import (
+            apply_declared_visibility,
+            schema_restrictions,
+        )
+
+        if not cls.__declares_visibility__ and not schema_restrictions(info):
+            return queryset
+        return apply_declared_visibility(cls, queryset, info)
 
     @classmethod
     def has_custom_get_queryset(cls) -> bool:
@@ -951,6 +994,83 @@ class DjangoType:
         this method reads the class's own stamp.
         """
         return not truth.static_attr(cls, "_is_default_get_queryset", default=True)
+
+
+def _validate_visibility(
+    cls: type[DjangoType],
+    meta: object,
+) -> tuple[tuple[object, ...], bool | None]:
+    """Validate ``Meta.visibility`` (a sequence of ``Rule``) and ``Meta.cascade`` (a bool)."""
+    from django_strawberry_framework.rules.fragment import Rule
+
+    declared = _meta_attr(meta, "visibility")
+    rules: tuple[object, ...] = ()
+    if declared is not None:
+        if isinstance(declared, (str, bytes)) or not isinstance(declared, (list, tuple)):
+            raise ConfigurationError(
+                f"{cls.__name__}.Meta.visibility must be a list or tuple of Rule",
+            )
+        for rule in declared:
+            if not isinstance(rule, Rule):
+                raise ConfigurationError(
+                    f"{cls.__name__}.Meta.visibility holds {rule!r}; every entry must be a Rule",
+                )
+        rules = tuple(declared)
+    cascade = _meta_attr(meta, "cascade")
+    if cascade is not None and not isinstance(cascade, bool):
+        raise ConfigurationError(f"{cls.__name__}.Meta.cascade must be a bool")
+    return rules, cascade
+
+
+def _validate_blessed(cls: type[DjangoType], meta: object, custom_hook: bool) -> str | None:
+    """Validate ``Meta.blessed``: a reason string, only on a type with a hand-written hook."""
+    reason = _meta_attr(meta, "blessed")
+    if reason is None:
+        return None
+    if not isinstance(reason, str) or not reason.strip():
+        raise ConfigurationError(f"{cls.__name__}.Meta.blessed must be a non-empty reason string")
+    if not custom_hook:
+        raise ConfigurationError(
+            f"{cls.__name__}.Meta.blessed names a reason for a hand-written get_queryset, "
+            "but the type does not override get_queryset",
+        )
+    return reason
+
+
+def _declares_visibility(cls: type[DjangoType], model: type[models.Model]) -> bool:
+    """Whether any declared rule (on the type or a model mixin) reaches ``cls``.
+
+    Every row term of every rule must name a field reachable from ``model``;
+    an unknown path is a configuration error here, not a silent no-op filter
+    at request time. ``Meta.cascade`` alone declares nothing: with no rule
+    there is nothing to cascade, and the hook stays the identity.
+    """
+    from django_strawberry_framework.rules.apply import model_rule_sites
+
+    rules = [(cls.__name__, rule) for rule in cls.__visibility_rules__]
+    rules += [(base.__name__, rule) for base, rule in model_rule_sites(model)]
+    for site, rule in rules:
+        _check_footprint(cls, site, rule, model)
+    return bool(rules)
+
+
+def _check_footprint(
+    cls: type[DjangoType],
+    site: str,
+    rule: object,
+    model: type[models.Model],
+) -> None:
+    """Raise ``ConfigurationError`` when ``rule`` reads a field ``model`` does not have."""
+    from django_strawberry_framework.rules.fragment import Rule, validate_footprint
+
+    assert isinstance(rule, Rule)
+    try:
+        validate_footprint(rule.predicate, model)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"{cls.__name__}: visibility rule {rule.name!r} declared on {site} "
+            f"does not fit {model.__name__}: {exc}",
+        ) from None
 
 
 def _normalize_fields_spec(value: object) -> tuple[str, ...] | Literal["__all__"] | None:
