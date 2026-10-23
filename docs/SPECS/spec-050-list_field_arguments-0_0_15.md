@@ -1388,7 +1388,10 @@ parent row more than Django's manager at every relation it is used on, and on th
 branch of the generated many-side resolver it would hand graphql-core an unevaluated rebuilt
 source that is iterated on the event loop under async, where Django raises
 `SynchronousOnlyOperation`. The rebuild therefore carries the fetched rows forward when the
-source it rebuilt held them, and drops nothing but the subclass's own methods. That carry
+source it rebuilt held them, and drops nothing but the subclass's own methods. A source whose
+query selects an annotation is served the same way: the row converter Django caches on the
+annotation's node at the fetch is a derived cache the rebuilt node recomputes, not state the
+rebuild carries (spec-045 Decision 8). That carry
 belongs to the raw-list seam alone, the one place where nothing is composed after the rebuild.
 No other seal carries it, and what the others do with an evaluated source is two rules, not one.
 `require_unevaluated` - the axis that refuses an evaluated candidate outright - is on for the
@@ -2285,7 +2288,8 @@ which are functions in `test_list_field_async_api.py`, or given with their modul
     and active arguments receive the shared visibility boundary's actionable
     `ConfigurationError` before the hook runs. Malformed public overrides are a matrix, one
     node per defect: `test_holder_branches_a_malformed_apply_sync_result_names_its_own_defect`
-    covers an evaluated, materialized-list, `None`, projection, wrong-model, sliced,
+    covers an evaluated, an evaluated annotated (its fetch ran a selected `Count`; still the
+    `evaluated` defect), materialized-list, `None`, projection, wrong-model, sliced,
     `union(all=True)`, awaitable, routing-rewritten-in-place, and malformed-deferred-filter
     `apply_sync` result, and
     `test_async_holder_branches_a_malformed_apply_async_result_names_its_own_defect` covers the
@@ -2915,6 +2919,18 @@ transport row asserts the same rows rather than a count
 capture opened on the event-loop thread cannot see work a `sync_to_async` worker thread does.
 No test mounts a manager by rewriting `_meta` or calls `_expire_cache()`, and the declared
 manager sets no `use_in_migrations`, so no library migration carries it.
+
+A source whose selected annotation's node already ran a row fetch (an evaluated `Prefetch`
+cache, or a hook result a sibling clone fetched) is pinned live in
+[`examples/fakeshop/test_query/test_library_api.py`][fakeshop-test-library]. A consumer
+`Prefetch("loans", queryset=Loan.objects.annotate(...))`, an aggregate and a non-aggregate
+expression, is served from the prefetch cache Django filled in one book statement plus one
+loan statement (`test_library_consumer_loans_prefetch_carrying_an_annotation_is_served`), and a
+`LoanType.get_queryset` returning an annotated queryset whose node a sibling clone already
+fetched answers the no-hook rows on the root connection, the per-parent nested list and
+connection, the node refetch, and the plain-list relation and nested connection planned
+under `allLibraryBooks`, at each case's fixed no-hook statement count plus the hook's own reads
+(`test_library_loan_get_queryset_returning_an_annotation_a_clone_fetched_is_served`).
 
 ### Assertions
 

@@ -2885,6 +2885,17 @@ def _override_evaluated(
     return queryset
 
 
+def _override_evaluated_annotated(
+    _cls: type[BranchOrder],
+    _order_input: object,
+    queryset: models.QuerySet[library_models.Branch],
+    _info: object,
+) -> models.QuerySet[library_models.Branch]:
+    annotated = queryset.annotate(rows=models.Count("pk"))
+    list(annotated)
+    return annotated
+
+
 def _override_untrusted(
     _cls: type[BranchOrder],
     _order_input: object,
@@ -2899,10 +2910,11 @@ def _override_untrusted(
     return candidate
 
 
-#: One row per defect class the post-``OrderSet`` seal can name live:
+#: One row per defect class the post-``OrderSet`` seal can name live, the evaluated class
+#: twice (plain rows, and rows whose fetch ran a selected ``Count`` annotation):
 #: ``(override, expected message start, required substrings, resolver queries)``.
 #: The query count is the must-not half - a defect the seal catches before the
-#: window is taken must leave the database untouched, and the two rows that do
+#: window is taken must leave the database untouched, and the three rows that do
 #: issue one prove the count is measured rather than assumed.
 _MALFORMED_APPLY_SYNC_ROWS: tuple[
     tuple[str, _ApplySyncOverride, str, tuple[str, ...], int],
@@ -2913,6 +2925,13 @@ _MALFORMED_APPLY_SYNC_ROWS: tuple[
         _override_evaluated,
         _BRANCH_ORDER_SHAPE_PREFIX + "evaluated defect",
         (),
+        1,
+    ),
+    (
+        "evaluated-annotated",
+        _override_evaluated_annotated,
+        _BRANCH_ORDER_SHAPE_PREFIX + "evaluated defect",
+        ("the result cache is populated",),
         1,
     ),
     (

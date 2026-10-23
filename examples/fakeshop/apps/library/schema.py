@@ -1,11 +1,20 @@
 """Library GraphQL relation, optimizer, Relay/keyset, and model/form/serializer mutation surface."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import strawberry
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
-from django.db.models import Manager, Prefetch, QuerySet, TextField, Value
+from django.db.models import (
+    Count,
+    Expression,
+    F,
+    Manager,
+    Prefetch,
+    QuerySet,
+    TextField,
+    Value,
+)
 from django.db.models.functions import Concat
 from django.forms import BaseForm
 from rest_framework.serializers import ModelSerializer as DRFModelSerializer
@@ -142,6 +151,14 @@ class Named:
     name: str
 
 
+#: The ``loans`` annotations ``FAKESHOP_TEST_LOAN_PREFETCH_ANNOTATION`` names: an aggregate
+#: and a non-aggregate expression, each built fresh per request.
+_LOAN_PREFETCH_ANNOTATIONS: Mapping[str, Callable[[], Expression]] = {
+    "aggregate": lambda: Count("pk"),
+    "combined": lambda: F("pk") + 1,
+}
+
+
 # The DjangoType declaration order is intentionally awkward. Several
 # relation targets are declared after their consumers so the example schema
 # keeps exercising pending-relation resolution through the real app import
@@ -170,6 +187,11 @@ class LoanType(DjangoType):
       narrows through the project ``LoanQuerySet.with_note()`` method, so live
       requests can pin that the hook receives the default manager's own queryset
       class. When absent, ``LoanType`` keeps the default pass-through hook.
+    - ``FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK``: define a ``get_queryset`` that
+      annotates every loan with a ``Count`` and reads the first annotated row before
+      returning the annotated queryset, so live requests can pin that a hook result
+      whose annotation a sibling clone already fetched is served. Ignored while
+      ``FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK`` is set.
     """
 
     if getattr(settings, "FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK", False):
@@ -186,6 +208,21 @@ class LoanType(DjangoType):
                 msg = f"LoanType.get_queryset expected a LoanQuerySet, got {type(queryset)!r}"
                 raise TypeError(msg)
             return queryset.with_note()
+
+    elif getattr(settings, "FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK", False):
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Loan],
+            info: Info,
+        ) -> QuerySet[models.Loan]:
+            """Annotate every loan and read the first annotated row before returning."""
+            annotated = queryset.annotate(checkouts=Count("pk"))
+            # ``first()`` fetches through a clone that shares the annotation node.
+            _ = annotated.first()
+            return annotated
 
     class Meta:
         model = models.Loan
@@ -1327,6 +1364,15 @@ class Query:
             models.Book.objects.select_related("shelf").prefetch_related("genres").order_by("id")
         )
 
+    def _all_library_annotated_loan_books(self) -> QuerySet[models.Book]:
+        """Return books whose loans the consumer prefetches through an annotated queryset."""
+        name: object = getattr(settings, "FAKESHOP_TEST_LOAN_PREFETCH_ANNOTATION", None)
+        annotation = _LOAN_PREFETCH_ANNOTATIONS[str(name)]
+        loans = models.Loan.objects.annotate(weight=annotation()).order_by("id")
+        return models.Book.objects.prefetch_related(Prefetch("loans", queryset=loans)).order_by(
+            "id",
+        )
+
     def _all_library_genres_consumer_descendant_prefetch(self) -> QuerySet[models.Genre]:
         """Return genres carrying a consumer descendant ``books__loans`` prefetch."""
         # Collision surface: a consumer descendant prefetch
@@ -1499,6 +1545,18 @@ class Query:
         resolver=_all_library_prefetched_books,
         graphql_type=list[BookType],
     )
+
+    # Default-OFF acceptance flag ``FAKESHOP_TEST_LOAN_PREFETCH_ANNOTATION``: when it names
+    # an entry of ``_LOAN_PREFETCH_ANNOTATIONS``, ``allLibraryAnnotatedLoanBooks`` serves books
+    # whose ``loans`` the consumer prefetches through ``Loan.objects.annotate(weight=...)``,
+    # so live requests can pin that the prefetched rows, fetched by Django with the
+    # annotation selected, are served from the relation. Read in the class body so a
+    # project-schema reload under ``override_settings`` re-executes it.
+    if getattr(settings, "FAKESHOP_TEST_LOAN_PREFETCH_ANNOTATION", None) is not None:
+        all_library_annotated_loan_books: QuerySet[models.Book] = strawberry.field(
+            resolver=_all_library_annotated_loan_books,
+            graphql_type=list[BookType],
+        )
 
     all_library_genres_consumer_descendant_prefetch: QuerySet[models.Genre] = strawberry.field(
         resolver=_all_library_genres_consumer_descendant_prefetch,

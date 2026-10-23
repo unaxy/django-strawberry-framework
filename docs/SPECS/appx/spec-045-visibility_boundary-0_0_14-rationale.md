@@ -226,9 +226,24 @@ Spec decision:
   point of the exercise ([`::_reconstructed_value`][querysets]).
 - *Rebuilding nodes through `deepcopy`.* A direct lookup right-hand side is consumer plain
   data whose `__deepcopy__` / `__reduce__` would dispatch consumer code while the seal is
-  still assembling the sealed query. Reconstruction uses `object.__new__` plus a raw
-  `__dict__` transfer, so the base allocator runs no `__new__` override, no `__init__`,
-  and no descriptor.
+  still assembling the sealed query. Reconstruction uses `object.__new__` plus an
+  instance-`__dict__` transfer, so the base allocator runs no `__new__` override, no
+  `__init__`, and no descriptor. The transfer leaves out the derived caches Django's own
+  copy leaves out (`convert_value`, plus `base_table` on an embedded `sql.Query`), named
+  in two constants pinned against the running Django
+  ([`::_EXPRESSION_COPY_DROPPED`][querysets], [`::_QUERY_CLONE_DROPPED`][querysets]).
+- *Reading a node's state through `BaseExpression.__getstate__` instead of naming the
+  dropped caches.* It needs a cast the suppression budget would have to grow for, it
+  silently adopts any change to the upstream body, and `base_table` would still be
+  dropped by name, since `sql.Query.clone` rather than `__getstate__` declares it.
+- *Dropping every `cached_property` name a node's class declares.* `output_field` is a
+  `cached_property` that shares its instance slot with the explicit `output_field=`
+  constructor argument, so dropping it would discard a value the consumer stated.
+- *Retaining a cached converter when it equals the one the rebuilt node would compute.*
+  It would admit a function into the sealed query on the strength of a comparison, an
+  exception the one admitted-bound-value rule of Decision 8 does not make, and it would
+  run the candidate's value through an equality test mid-seal; a dropped cache is
+  recomputed, never compared.
 - *Admitting a direct lookup right-hand side on exact type, as the inert-leaf rule does.*
   Real schemas bind `TextChoices` members and `Decimal` / `UUID` / date subclasses; an
   exact-type rule fails closed on ordinary consumer code, and the live example tier would

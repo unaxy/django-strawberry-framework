@@ -14,6 +14,7 @@ Visibility-boundary decision references below resolve to
 """
 
 import asyncio
+import copy
 import datetime
 import enum
 import threading
@@ -32,6 +33,7 @@ from apps.library.models import (
     Book,
     Branch,
     LendingDesk,
+    Loan,
     OpenVenue,
     Patron,
     PatronProfile,
@@ -64,7 +66,7 @@ from django.db.models import (
     sql,
 )
 from django.db.models.expressions import RawSQL
-from django.db.models.functions import Coalesce, Concat, Trunc, Upper
+from django.db.models.functions import Cast, Coalesce, Concat, Lower, RowNumber, Trunc, Upper
 from django.db.models.lookups import In, Lookup
 from django.db.models.sql import Query as SqlQuery
 from django.db.models.sql import query as sql_query_module
@@ -115,10 +117,12 @@ from django_strawberry_framework.utils.querysets import (
     _CASCADE_SEAL_POLICY,
     _COMBINED_WHAT,
     _DEFAULT_SEAL_POLICY,
+    _EXPRESSION_COPY_DROPPED,
     _INERT_VALUE_TYPES,
     _LIST_RELATION_CHILD_POLICY,
     _PLAIN_CONTAINER_TYPES,
     _PREFETCH_CHILD_POLICY,
+    _QUERY_CLONE_DROPPED,
     _RAW_LIST_SOURCE_POLICY,
     _RETAINED_TYPES,
     PROHIBITED_FILTER_KWARGS,
@@ -4844,6 +4848,114 @@ def test_value_payload_opaque_object_fails_closed() -> None:
     # The candidate keeps its own payload: the seal never mutates the candidate graph.
     assert isinstance(source.query.annotations["probe"], models.Value)
     assert read_attr(source.query.annotations["probe"], "value") is payload
+
+
+#: Expressions a selected annotation can be. Django caches a row converter on each one when
+#: a query selecting it fetches rows, an empty fetch included.
+_SELECTED_EXPRESSIONS: dict[str, Callable[[], object]] = {
+    "aggregate": lambda: models.Count("pk"),
+    "combined": lambda: F("pk") + 1,
+    "value": lambda: Value(1),
+    "case": lambda: models.Case(models.When(pk__gt=0, then=Value(1)), default=Value(0)),
+    "wrapper": lambda: models.ExpressionWrapper(F("pk") * 2, output_field=models.IntegerField()),
+    "cast": lambda: Cast("pk", output_field=models.TextField()),
+    "function": lambda: Lower("note"),
+    "concat": lambda: Concat("note", Value("x"), output_field=models.TextField()),
+    "window": lambda: models.Window(RowNumber(), order_by=F("pk").asc()),
+    "exists": lambda: models.Exists(Loan.objects.filter(pk=models.OuterRef("pk"))),
+    "subquery": lambda: Subquery(Loan.objects.filter(pk=models.OuterRef("pk")).values("pk")[:1]),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("expression", list(_SELECTED_EXPRESSIONS))
+def test_reconstruction_drops_exactly_the_caches_a_django_copy_drops(expression: str) -> None:
+    """A rebuilt node leaves out what Django's own copy of it leaves out, and nothing more.
+
+    ``_EXPRESSION_COPY_DROPPED`` restates ``BaseExpression.__getstate__``, which ``copy()``
+    reads, and ``_QUERY_CLONE_DROPPED`` adds what ``sql.Query.clone`` drops. Both are pinned
+    against the Django release under test, so a release that declares another cache fails
+    here instead of reaching the seal as a refused bound value.
+    """
+    queryset = Loan.objects.annotate(n=_SELECTED_EXPRESSIONS[expression]())
+    assert list(queryset) == []
+    node = queryset.query.annotations["n"]
+    copied = set(instance_dict(copy.copy(node)) or ())
+    assert set(instance_dict(node) or ()) - copied == _EXPRESSION_COPY_DROPPED
+    query = queryset.query
+    cloned = set(instance_dict(sql.Query.clone(query)) or ())
+    assert (
+        _EXPRESSION_COPY_DROPPED | (set(instance_dict(query) or ()) - cloned)
+        == _QUERY_CLONE_DROPPED
+    )
+
+
+def _planted_converter(value: object, expression: object, connection: object) -> object:
+    """A row converter planted on a candidate node, which the sealed query must never call."""
+    del value, expression, connection
+    raise AssertionError
+
+
+#: Where a selected annotation's node sits: an expression of the outer query, or a
+#: ``sql.Query`` embedded in the outer query's annotations, which a bare queryset
+#: annotation resolves to (``QuerySet.resolve_expression`` returns its query).
+_PLANTED_CONVERTER_SITES: dict[str, Callable[[], object]] = {
+    "expression": lambda: models.Count("pk"),
+    "embedded-query": lambda: Loan.objects.filter(pk=models.OuterRef("pk")).values("pk")[:1],
+}
+
+
+def _seed_two_loans() -> None:
+    shelf = Shelf.objects.create(code="S-1", branch=Branch.objects.create(name="Central"))
+    book = Book.objects.create(title="Kindred", shelf=shelf)
+    for name in ("Ada", "Grace"):
+        Loan.objects.create(book=book, patron=Patron.objects.create(name=name))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("fetch", ["unexecuted", "executed"])
+@pytest.mark.parametrize("site", list(_PLANTED_CONVERTER_SITES))
+def test_a_converter_planted_on_a_candidate_node_is_never_carried(site: str, fetch: str) -> None:
+    """Whatever the candidate holds under the cached converter's name stays behind.
+
+    The rebuilt node recomputes Django's own converter on its first fetch, so a function
+    planted under that name is dropped like the cache it impersonates, never retained and
+    never called, whether or not the candidate already fetched, on an expression node
+    and on an embedded query alike.
+    """
+    _seed_two_loans()
+    queryset = Loan.objects.annotate(n=_PLANTED_CONVERTER_SITES[site]()).order_by("pk")
+    if fetch == "executed":
+        assert len(queryset) == 2
+    node = queryset.query.annotations["n"]
+    assert (type(node) is sql.Query) is (site == "embedded-query")
+    planted = instance_dict(node)
+    assert planted is not None
+    planted["convert_value"] = _planted_converter
+    sealed, defect = _seal_or_defect(queryset, Loan, None)
+    assert defect is None
+    assert sealed is not None
+    assert "convert_value" not in (instance_dict(sealed.query.annotations["n"]) or {})
+    assert len(list(sealed.values_list("n", flat=True))) == 2
+    assert planted["convert_value"] is _planted_converter
+
+
+@pytest.mark.django_db
+def test_a_converter_planted_on_the_candidate_query_itself_is_refused() -> None:
+    """The outer query is not a rebuilt node, so a function planted on it stays refused.
+
+    Only a rebuilt node leaves the converter cache behind; the outer query is a
+    ``sql.Query.clone`` whose retained slots take the bound-value rule, and no query
+    Django builds holds a converter there.
+    """
+    _seed_two_loans()
+    queryset = Loan.objects.annotate(n=models.Count("pk"))
+    planted = instance_dict(queryset.query)
+    assert planted is not None
+    planted["convert_value"] = _planted_converter
+    sealed, defect = _seal_or_defect(queryset, Loan, None)
+    assert sealed is None
+    assert defect == ("untrusted", "LoanQuerySet binds a function bound value")
 
 
 def test_value_payload_mutable_container_subclass_fails_closed() -> None:
