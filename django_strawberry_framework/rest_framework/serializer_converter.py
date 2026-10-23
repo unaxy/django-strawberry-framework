@@ -72,7 +72,6 @@ from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import strawberry
 from django.core.exceptions import FieldDoesNotExist, ValidationError
-from django.db import models
 from rest_framework import serializers
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -116,7 +115,10 @@ from django_strawberry_framework.utils.inputs import RELATION_SINGLE as RELATION
 from django_strawberry_framework.utils.inputs import SCALAR as SCALAR  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import FieldConversionBase, InputFieldSpec
 from django_strawberry_framework.utils.querysets import to_python_value
-from django_strawberry_framework.utils.relations import non_pk_relation_key_attname
+from django_strawberry_framework.utils.relations import (
+    non_pk_relation_key_attname,
+    written_model_field,
+)
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
 from .accessors import (
@@ -130,6 +132,8 @@ from .accessors import (
 if TYPE_CHECKING:
     from enum import Enum
     from typing import TypeAlias
+
+    from django.db import models
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.utils.typing import (
@@ -885,27 +889,6 @@ def require_one_segment_source(field: DRFField, *, field_label: str, must_map_to
             f"({field.source!r}); {must_map_to} (omit source, or "
             "use a one-segment source).",
         )
-
-
-def written_model_field(model: type[models.Model], source: str) -> ConcreteField | None:
-    """Return the concrete model field a one-segment ``source`` writes, or ``None``.
-
-    DRF assigns ``validated_data[source]`` onto the instance by ``setattr`` (update) or as a
-    constructor kwarg (create), so every spelling Django accepts there names the field written:
-    the field's name, a forward relation's ``attname`` (``Options.get_field`` answers to both),
-    and ``pk``, the primary-key alias every model answers to (``Model.pk`` reads and writes
-    ``_meta.pk``, the parent link under multi-table inheritance). A source naming no concrete
-    field (a serializer-only key a custom ``create()`` reads, a reverse accessor) writes
-    nothing on the model and yields ``None``.
-    """
-    if source == "pk":
-        return model._meta.pk
-    try:
-        field = model._meta.get_field(source)
-    except FieldDoesNotExist:
-        return None
-    # A reverse relation (``ForeignObjectRel``) is no attribute DRF writes.
-    return field if isinstance(field, models.Field) else None
 
 
 def normalize_serializer_source(field: DRFField, field_name: str) -> str | None:

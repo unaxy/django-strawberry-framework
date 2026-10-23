@@ -1092,6 +1092,46 @@ def test_save_time_django_validation_error_uses_source_aware_wire_name() -> None
 
 
 @pytest.mark.django_db
+def test_save_time_django_validation_error_on_the_key_keys_to_a_field_declared_pk() -> None:
+    """A save-time Django error on the primary key surfaces under a field declared ``pk``.
+
+    ``pk = IntegerField()`` writes the key through Django's ``pk`` alias, which no
+    ``Options.get_field`` name spells. Django's own unique check names the key by its model
+    field, ``id``, so a ``create()`` raising ``{"id": [...]}`` surfaces as ``pk``, the field
+    the client sent.
+    """
+
+    class DeclaredPkSerializer(ModelSerializerBase[product_models.Item]):
+        pk = serializers.IntegerField()
+
+        class Meta:
+            model = product_models.Item
+            fields = ("pk", "name", "category")
+
+        @override
+        def create(self, validated_data: dict[str, object]) -> NoReturn:
+            raise DjangoValidationError({"id": ["Item with this ID already exists."]})
+
+    category = product_models.Category.objects.create(name="DjRaisePkCat")
+    mutation_cls = _bind_item_serializer_mutation(DeclaredPkSerializer)
+    request = HttpRequest()
+    request.user = User(username="u")
+    info = make_info(context=SimpleNamespace(request=request))
+
+    with write_pipeline("default", lock=False):
+        result = serializer_resolvers._serializer_write_step(
+            mutation_cls,
+            info,
+            None,
+            {"pk": 4242, "name": "OK", "category": saved_pk(category)},
+        )
+    assert isinstance(result, StepFailure)
+    assert [(fe.field, fe.messages) for fe in result.errors] == [
+        ("pk", ["Item with this ID already exists."]),
+    ]
+
+
+@pytest.mark.django_db
 def test_save_time_integrity_error_maps_to_all_sentinel_envelope() -> None:
     """A save-time `IntegrityError` (a race) maps to the `"__all__"` envelope via `save_or_field_errors`."""
 

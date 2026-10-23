@@ -571,3 +571,66 @@ def test_save_time_error_key_map_reads_the_backing_model_one_level() -> None:
         "name": ("title", None),
         "items": ("items", None),
     }
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "target_name",
+        "source",
+        "expected",
+    ),
+    [
+        pytest.param(
+            product_models.Item,
+            "key",
+            "pk",
+            {"pk": ("key", None), "id": ("key", None)},
+            id="source-pk-integer-key",
+        ),
+        pytest.param(
+            product_models.Item,
+            "pk",
+            None,
+            {"pk": ("pk", None), "id": ("pk", None)},
+            id="declared-pk",
+        ),
+        pytest.param(
+            library_models.Edition,
+            "key",
+            "pk",
+            {"pk": ("key", None), "isbn_13": ("key", None)},
+            id="source-pk-text-key",
+        ),
+        pytest.param(
+            library_models.LendingDesk,
+            "ptr",
+            "pk",
+            {"pk": ("ptr", None), "venue_ptr": ("ptr", None), "venue_ptr_id": ("ptr", None)},
+            id="source-pk-parent-link",
+        ),
+    ],
+)
+def test_save_time_error_key_map_reads_the_pk_alias_as_the_primary_key(
+    model: type[Model],
+    target_name: str,
+    source: str | None,
+    expected: dict[str, tuple[str, None]],
+) -> None:
+    """A spec writing Django's ``pk`` alias owns every name the primary key answers to.
+
+    ``pk`` is no ``Options.get_field`` name, yet it writes ``_meta.pk``: the integer
+    ``id``, ``Edition``'s ISBN text ``isbn_13``, or under multi-table inheritance
+    ``LendingDesk``'s parent link ``venue_ptr`` and its ``attname``. A Django save-time
+    error names the key by that model field, so it re-keys to the spec's input, whether
+    the field is renamed onto ``pk`` (``source="pk"``) or declared as ``pk``.
+    """
+    spec = InputFieldSpec(
+        input_attr=target_name,
+        graphql_name=target_name,
+        target_name=target_name,
+        kind=SCALAR,
+        source=source,
+    )
+
+    assert save_time_error_key_map([spec], model) == expected

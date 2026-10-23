@@ -17650,6 +17650,98 @@ def test_model_create_edition_takes_its_isbn_key_from_the_client_over_http(key: 
     assert stored == [("9780000000001", "Kept")]
 
 
+#: The flag-gated serializer creates whose key field is renamed onto Django's ``pk`` alias:
+#: shape -> (mutation, input type, the model's ``unique`` message for a taken key).
+_PK_SOURCE_CREATES: dict[str, tuple[str, str, str]] = {
+    "text_key": (
+        "createEditionByKeyViaSerializer",
+        "KeyedEditionSerializerInput",
+        "Edition with this Isbn 13 already exists.",
+    ),
+    "integer_key": (
+        "createPatronByKeyViaSerializer",
+        "KeyedPatronSerializerInput",
+        "Patron with this ID already exists.",
+    ),
+}
+
+
+def _pk_source_rows(shape: str) -> list[tuple[object, str]]:
+    """The stored rows of ``shape``'s model, as (primary key, the written text column)."""
+    if shape == "text_key":
+        return list(models.Edition.objects.order_by("isbn_13").values_list("isbn_13", "imprint"))
+    return list(models.Patron.objects.order_by("pk").values_list("pk", "name"))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_PK_SOURCE_CREATES))
+@pytest.mark.parametrize("key", ["free", "taken"])
+def test_serializer_create_keys_a_taken_pk_source_key_to_the_renamed_input_over_http(
+    project_schema_override: Callable[[], None],
+    shape: str,
+    key: str,
+) -> None:
+    """A save-time error on the key a ``source="pk"`` field writes arrives under that field.
+
+    ``key = CharField(source="pk")`` over ``Edition`` (the ISBN text key) and ``key =
+    IntegerField(source="pk")`` over ``Patron`` (an integer key) write the primary key
+    through Django's ``pk`` alias, and each serializer's ``create()`` runs ``full_clean()``.
+    A taken key is Django's ``unique`` error, which names the key by its model field
+    (``isbn_13``, ``id``); it arrives under the renamed ``key`` input with the stored row
+    untouched. A free key creates the row.
+    """
+    publisher = models.Publisher.objects.create(name="KeyedPress", house_code="KP")
+    models.Edition.objects.create(isbn_13="9780000000001", publisher=publisher, imprint="Kept")
+    kept_pk = saved_pk(models.Patron.objects.create(name="Kept").pk)
+    taken, free = {
+        "text_key": ("9780000000001", "9780000000002"),
+        "integer_key": (kept_pk, kept_pk + 1000),
+    }[shape]
+    value = taken if key == "taken" else free
+    mutation, input_type, message = _PK_SOURCE_CREATES[shape]
+    before = _pk_source_rows(shape)
+
+    with override_settings(FAKESHOP_TEST_PK_SOURCE_SERIALIZERS=True):
+        project_schema_override()
+        data: dict[str, object] = {"key": value, "name": "New"}
+        if shape == "text_key":
+            data = {
+                "key": value,
+                "imprint": "New",
+                "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
+            }
+        result = _post_keyed_create(mutation, input_type, data)
+
+    if key == "free":
+        assert result == {mutation: {"errors": []}}
+        assert _pk_source_rows(shape) == [*before, (free, "New")]
+        return
+    assert result == {
+        mutation: {
+            "errors": [
+                {
+                    "field": "key",
+                    "messages": [message],
+                    "codes": ["unique"],
+                    "path": ["key"],
+                },
+            ],
+        },
+    }
+    assert _pk_source_rows(shape) == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_PK_SOURCE_CREATES))
+def test_pk_source_serializer_creates_are_absent_by_default(shape: str) -> None:
+    """The ``pk``-sourced serializer creates exist only under their acceptance flag."""
+    mutation = _PK_SOURCE_CREATES[shape][0]
+    response = _post_graphql(f"mutation {{ {mutation} {{ __typename }} }}")
+    assert response.status_code == 200
+    message = json_str(response_json(response), "errors", 0, "message")
+    assert f"Cannot query field '{mutation}'" in message
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("key", ["free", "taken", "raced"])
 def test_form_create_patron_profile_names_its_patron_by_the_key_over_http(key: str) -> None:

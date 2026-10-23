@@ -28,6 +28,10 @@ consumer-visible behaviors end to end:
   chain, through DRF's generated ``PrimaryKeyRelatedField``.
 * ``InterlibraryLoanSerializer`` writes the ``to_field`` key ``InterlibraryLoan.lender``
   (``Branch.isil``, which may be ``NULL``) through a declared ``PrimaryKeyRelatedField``.
+* ``KeyedEditionSerializer`` / ``KeyedPatronSerializer`` write a client-assigned primary key
+  through a field renamed onto Django's ``pk`` alias (a text key and an integer one), and
+  their ``create()`` runs the model's ``full_clean()``, so a taken key is Django's own
+  save-time ``unique`` error on the primary key.
 
 ``Shelf`` is non-Relay (``ShelfType`` lists no ``relay.Node`` interface), so the ``branch``
 FK relation input is a raw pk and the payload object slot is ``result`` (not ``node``); the
@@ -62,6 +66,7 @@ from .models import (
     InterlibraryLoan,
     KioskFault,
     LendingDesk,
+    Patron,
     PatronProfile,
     Printing,
     Shelf,
@@ -963,3 +968,45 @@ class CirculationDeskHoldSerializer(ModelSerializerBase[CirculationDesk]):
     class Meta:
         model = CirculationDesk
         fields: tuple[str, ...] = ("name", "content_object")
+
+
+class KeyedEditionSerializer(ModelSerializerBase[Edition]):
+    """An ``Edition`` create whose ISBN key is the renamed ``key``, written through ``pk``.
+
+    ``create()`` validates the instance with ``full_clean()`` before saving it, so a taken
+    ISBN is the model's ``unique`` error on ``isbn_13``, raised at save time.
+    """
+
+    key = serializers.CharField(source="pk")
+
+    class Meta:
+        model = Edition
+        fields = ("key", "imprint", "publisher")
+
+    @override
+    def create(self, validated_data: dict[str, object]) -> Edition:
+        edition = Edition(**validated_data)
+        edition.full_clean()
+        edition.save()
+        return edition
+
+
+class KeyedPatronSerializer(ModelSerializerBase[Patron]):
+    """A ``Patron`` create whose integer key is the renamed ``key``, written through ``pk``.
+
+    ``create()`` validates the instance with ``full_clean()`` before saving it, so a taken
+    key is the model's ``unique`` error on ``id``, raised at save time.
+    """
+
+    key = serializers.IntegerField(source="pk")
+
+    class Meta:
+        model = Patron
+        fields = ("key", "name")
+
+    @override
+    def create(self, validated_data: dict[str, object]) -> Patron:
+        patron = Patron(**validated_data)
+        patron.full_clean()
+        patron.save()
+        return patron
