@@ -13,10 +13,13 @@ show:
   versus the windowed body (reverse-FK pagination shapes, count-free
   ``hasNextPage``, reverse-M2M through-once, depth-two, divergent aliases,
   ``last: 0`` as ``first: 0``, visibility-scoped lateral, request-varying
-  visibility on one extension instance, keyset seek/count/cursor parity);
+  visibility on one extension instance, keyset seek/count/cursor parity,
+  keyset and offset pages 1 and 2 over a reverse FK and an M2M whose target
+  ``get_queryset`` orders the relation, forward or ``.reverse()``d);
 - LATERAL SQL-shape pins a generic live capture does not uniquely show
   (through-table join once, visibility predicate once, in-branch keyset seek,
-  row-value comparison, JSONB field adapter);
+  row-value comparison, JSONB field adapter, the ``ROW_NUMBER`` order and the
+  seek columns and direction a hook order compiles to);
 - plan-time downgrades (multi-table visibility scope; counted keyset seek);
 - session-close tracking of stray executor-thread connections (no wire shape);
 - custom through FK targeting a unique non-PK column (unmanaged DDL; no
@@ -31,11 +34,12 @@ Everything here is ``@pytest.mark.pg``.
 
 import base64
 import datetime
+import re
 import threading
 import uuid
 from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import NamedTuple, Protocol, TypeVar, runtime_checkable
 
 import pytest
 import strawberry
@@ -1138,6 +1142,209 @@ def test_keyset_json_seek_uses_field_adapter_on_postgres(
     window = _prefetched_rows(loaded, "_dst_children_connection", ScalarSpecimen)
     assert [row.label for row in window] == expected_labels
     assert all(isinstance(row.payload, dict) for row in window)
+
+
+# =============================================================================
+# A target ``get_queryset`` order (or ``.reverse()``) is the window's order
+# =============================================================================
+
+
+class _HookShape(NamedTuple):
+    """One parent -> child relation a hook-ordered nested connection pages."""
+
+    child: type[Model]
+    parent: type[Model]
+    relation: str
+    #: The child field each edge selects: the row's rank in pk order (1, 2, 3).
+    label: str
+    #: The child table's quoted name inside the lateral branch.
+    alias: str
+
+
+_HOOK_SHAPES = {
+    "fk": _HookShape(Issue, Periodical, "issues", "number", '"library_issue"'),
+    "m2m": _HookShape(Book, Genre, "books", "subtitle", '"__dst_child"'),
+}
+
+
+def _hook_ordered_schemas(
+    shape: _HookShape,
+    hook_order: tuple[str, ...] | None,
+    *,
+    reverse: bool,
+    keyset: bool,
+) -> tuple[strawberry.Schema, strawberry.Schema]:
+    """A parent type whose child connection's ``get_queryset`` orders (and may reverse) it.
+
+    ``hook_order`` ``None`` leaves the hook unordered, so ``reverse`` flips the
+    fallback order. The keyset child declares ``cursor_field = ("id",)``, so the
+    hook's order, not the declared one, is what its window pages, seeks and
+    mints by; the offset child declares none.
+    """
+
+    @classmethod
+    def _ordered(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        _info: object,
+    ) -> QuerySet[Model]:
+        ordered = queryset if hook_order is None else queryset.order_by(*hook_order)
+        return ordered.reverse() if reverse else ordered
+
+    meta_extra: dict[str, object] = {"connection": {"total_count": True}}
+    if keyset:
+        meta_extra["cursor_field"] = ("id",)
+    make_django_type(
+        "HookOrderedChildType",
+        shape.child,
+        ("id", shape.label, "title"),
+        meta_extra=meta_extra,
+        namespace_extra={"get_queryset": _ordered},
+    )
+    parent_type = make_django_type(
+        "HookOrderedParentType",
+        shape.parent,
+        ("id", "name", shape.relation),
+        meta_extra={"relation_shapes": {shape.relation: "connection"}},
+    )
+    finalize_django_types()
+    query_cls = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"parents": list[parent_type]},
+                "parents": DjangoListField(parent_type),
+            },
+        ),
+    )
+    return (
+        build_strategy_schema(query_cls, "windowed"),
+        build_strategy_schema(query_cls, "lateral"),
+    )
+
+
+def _seed_hook_ordered_rows(shape: _HookShape) -> None:
+    """Parent ``A``: children ranked 1, 2, 3 in pk order, titled ``y``, ``x``, ``x``; ``B``: one.
+
+    The tied titles make the hook's ``title`` order lean on the pk tiebreaker;
+    ``B`` is a second partition in the same window query.
+    """
+    rows = [
+        ("A", 1, "y"),
+        ("A", 2, "x"),
+        ("A", 3, "x"),
+        ("B", 1, "a"),
+    ]
+    if shape.child is Issue:
+        periodicals = {name: Periodical.objects.create(name=name) for name in ("A", "B")}
+        for name, rank, title in rows:
+            Issue.objects.create(periodical=periodicals[name], number=rank, title=title)
+        return
+    genres = {name: Genre.objects.create(name=name) for name in ("A", "B")}
+    branch = Branch.objects.create(name="central")
+    for name, rank, title in rows:
+        # One shelf per book: a shelf holds one book per title.
+        shelf = Shelf.objects.create(code=f"{name}{rank}", branch=branch)
+        book = Book.objects.create(title=title, subtitle=str(rank), shelf=shelf)
+        book.genres.add(genres[name])
+
+
+def _hook_page(shape: _HookShape, arguments: str) -> str:
+    return (
+        f"{{ parents {{ id name {shape.relation}Connection({arguments}) {{ "
+        f"pageInfo {{ hasNextPage endCursor }} edges {{ cursor node {{ {shape.label} }} }} }} }} }}"
+    )
+
+
+def _connection_of_a(data: JSONObject | None, shape: _HookShape) -> object:
+    """Parent ``A``'s connection payload."""
+    assert data is not None
+    (parent,) = (row for row in json_list(data, "parents") if json_at(row, "name") == "A")
+    return json_at(parent, f"{shape.relation}Connection")
+
+
+def _window_order(captured: CaptureQueriesContext) -> str:
+    """The lateral branch's ``ROW_NUMBER()`` order with its table names dropped (``title ASC``)."""
+    lateral_sql = next(sql for sql in (e["sql"] for e in captured) if "LATERAL" in sql)
+    window = lateral_sql.split("ROW_NUMBER() OVER (ORDER BY ", 1)[1].split(")", 1)[0]
+    return re.sub(r'"[^"]+"\."([^"]+)"', r"\1", window)
+
+
+def _uniform_seek(shape: _HookShape, window_order: str) -> str:
+    """The keyset seek a uniform-direction ``window_order`` compiles to in the branch.
+
+    One column compares itself; several compare as a native row value. ``>``
+    follows an ascending order, ``<`` a descending one.
+    """
+    terms = [term.split() for term in window_order.split(", ")]
+    columns = ", ".join(f'{shape.alias}."{column}"' for column, _ in terms)
+    operator = ">" if terms[0][1] == "ASC" else "<"
+    return f"({columns}) {operator} (" if len(terms) > 1 else f"{columns} {operator} "
+
+
+@pytest.mark.parametrize("shape", list(_HOOK_SHAPES))
+@pytest.mark.parametrize("keyset", [True, False], ids=["keyset", "offset"])
+@pytest.mark.parametrize(
+    (
+        "hook_order",
+        "reverse",
+        "window_order",
+        "pages",
+    ),
+    [
+        pytest.param(("title",), False, "title ASC, id ASC", (["2", "3"], ["1"]), id="title"),
+        pytest.param(
+            ("title",),
+            True,
+            "title DESC, id DESC",
+            (["1", "3"], ["2"]),
+            id="title-reversed",
+        ),
+        pytest.param(("-id",), False, "id DESC", (["3", "2"], ["1"]), id="-id"),
+        pytest.param(("-id",), True, "id ASC", (["1", "2"], ["3"]), id="-id-reversed"),
+        pytest.param(None, True, "id DESC", (["3", "2"], ["1"]), id="unordered-reversed"),
+    ],
+)
+def test_hook_ordered_window_pages_in_branch_with_parity(
+    *,
+    shape: str,
+    keyset: bool,
+    hook_order: tuple[str, ...] | None,
+    reverse: bool,
+    window_order: str,
+    pages: tuple[list[str], list[str]],
+) -> None:
+    """A child ``get_queryset`` order, forward or ``.reverse()``d, is what the lateral window pages by.
+
+    Page 1 (``first: 2``) and page 2 (after page 1's ``endCursor``) each run
+    real ``CROSS JOIN LATERAL`` SQL whose data and cursors equal the windowed
+    body's, and number rows under the order Django compiles for the hook. A
+    keyset page 2 seeks inside the branch by that order's own columns in its
+    own direction; an offset page 2 carries no seek. ``A``'s three rows are
+    served once each across the two pages.
+    """
+    hook_shape = _HOOK_SHAPES[shape]
+    _seed_hook_ordered_rows(hook_shape)
+    schemas = _hook_ordered_schemas(hook_shape, hook_order, reverse=reverse, keyset=keyset)
+    first, first_captured = _assert_parity(_hook_page(hook_shape, "first: 2"), schemas=schemas)
+    cursor = json_at(_connection_of_a(first, hook_shape), "pageInfo", "endCursor")
+    assert isinstance(cursor, str)
+    second, second_captured = _assert_parity(
+        _hook_page(hook_shape, f'first: 2, after: "{cursor}"'),
+        schemas=schemas,
+    )
+    labels = tuple(
+        [
+            str(json_at(edge, "node", hook_shape.label))
+            for edge in json_list(_connection_of_a(data, hook_shape), "edges")
+        ]
+        for data in (first, second)
+    )
+    assert labels == pages
+    assert _window_order(first_captured) == _window_order(second_captured) == window_order
+    second_sql = " ".join(entry["sql"] for entry in second_captured)
+    assert (_uniform_seek(hook_shape, window_order) in second_sql) is keyset
 
 
 @pytest.mark.django_db(transaction=True)
