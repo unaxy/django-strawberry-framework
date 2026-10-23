@@ -807,9 +807,8 @@ def _inherits_framework_closure(type_cls: type[relay.Node]) -> bool:
 def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     """Return whether ``type_cls`` declares its own ``resolve_typename``.
 
-    MRO-aware identity test over ``truth.stored_function`` of the stored
-    attribute and of ``relay.Node``'s ``resolve_typename`` - the same
-    discriminator ``install_relay_node_resolvers`` uses for the four
+    ``utils/truth.py::overrides`` against ``relay.Node`` (MRO-aware identity of
+    the stored functions) - the same discriminator ``install_relay_node_resolvers`` uses for the four
     ``resolve_*`` defaults. Every declared shape counts: a ``classmethod``, a
     ``staticmethod`` and a plain function taking ``(root, info)`` are all
     overrides, since Strawberry reads ``resolve_typename`` off the class and
@@ -825,12 +824,12 @@ def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     lacks the marker, so it still classifies ``custom``.
     """
     existing_func = truth.stored_function(truth.static_attr(type_cls, "resolve_typename"))
-    if existing_func is None:
+    if (
+        existing_func is None
+        or truth.static_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER) is True
+    ):
         return False
-    if truth.static_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER) is True:
-        return False
-    node_func = truth.stored_function(truth.class_dict(relay.Node).get("resolve_typename"))
-    return existing_func is not node_func
+    return truth.overrides(type_cls, relay.Node, "resolve_typename")
 
 
 def install_globalid_typename_resolver(
@@ -1321,9 +1320,9 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
 
     - Look up the inherited method on ``type_cls`` (resolves through MRO
       to ``relay.Node``'s default if no consumer override exists).
-    - Compare ``truth.stored_function(existing)`` to the function
-      ``relay.Node``'s own ``<attr>`` wraps. When they match (or
-      ``existing`` is ``None``), the consumer has not overridden the
+    - Compare its stored function with ``relay.Node``'s
+      (``utils/truth.py::overrides``). When they match (or ``existing`` is
+      ``None``), the consumer has not overridden the
       method and the framework default is installed via
       ``setattr(type_cls, attr, classmethod(default))``.
     - When they differ, the consumer's override wins and is preserved.
@@ -1338,6 +1337,5 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
     _ = _stamp_relay_id_attr(type_cls)
     for attr, default_impl in _RELAY_RESOLVER_DEFAULTS:
         existing = truth.static_attr(type_cls, attr)
-        node_func = truth.stored_function(truth.class_dict(relay.Node).get(attr))
-        if existing is None or truth.stored_function(existing) is node_func:
+        if existing is None or not truth.overrides(type_cls, relay.Node, attr):
             setattr(type_cls, attr, classmethod(default_impl))

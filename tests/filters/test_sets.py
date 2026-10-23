@@ -152,6 +152,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import collect_related_declarations
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.relay import SyncMisuseError, apply_interfaces
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     class_dict,
@@ -11002,15 +11003,33 @@ def test_is_generation_capable_true_for_unmodified_subclass() -> None:
     assert PlainFilter.FILTER_DEFAULTS is FilterSet.FILTER_DEFAULTS
 
 
+@pytest.mark.parametrize("seam", ["filter_for_field", "filter_for_lookup"])
+def test_is_generation_capable_true_for_a_classmethod_rewrap_of_the_package_seam(
+    seam: str,
+) -> None:
+    """A subclass re-wrapping the package's own seam function in a ``classmethod`` overrides nothing."""
+    package_function = truth.stored_function(truth.class_dict(FilterSet)[seam])
+    assert callable(package_function)
+
+    class RewrappedFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    setattr(RewrappedFilter, seam, classmethod(package_function))
+
+    assert truth.class_dict(RewrappedFilter)[seam] is not truth.class_dict(FilterSet)[seam]
+    assert RewrappedFilter._is_generation_capable() is True
+
+
 def test_is_generation_capable_false_for_plain_function_seam_override() -> None:
     """A plain-function ``filter_for_field`` (no ``__func__``) -> False, never raises.
 
-    A consumer that shadows the generation seam with a plain function (or a
-    ``staticmethod``) yields a ``cls.filter_for_field`` that has no ``__func__``
-    attribute -- a plain function is not a bound method. ``_is_generation_capable``
-    reads it null-safely via ``getattr(..., "__func__", None)`` and returns
-    ``False`` cleanly instead of raising ``AttributeError``. Empty ``fields``
-    keeps class creation from invoking the shadowed seam during ``get_filters``.
+    A consumer that shadows the generation seam with a plain function stores no
+    wrapper to unwrap; that function is not the one ``FilterSet``'s
+    ``classmethod`` holds, so ``_is_generation_capable`` reports the seam
+    overridden without binding or calling it. Empty ``fields`` keeps class
+    creation from invoking the shadowed seam during ``get_filters``.
     """
 
     def _plain_seam(
@@ -11022,14 +11041,14 @@ def test_is_generation_capable_false_for_plain_function_seam_override() -> None:
 
     class PlainSeamFilter(FilterSet):
         # basedpyright: the seam is shadowed by a plain function on purpose; the test proves
-        # ``_is_generation_capable`` reads its missing ``__func__`` null-safely
+        # ``_is_generation_capable`` reads it as an override without calling it
         filter_for_field = _plain_seam  # pyright: ignore[reportAssignmentType]
 
         class Meta:
             model = library_models.Book
             fields = []
 
-    # No ``__func__`` on the plain-function attribute -- the missing-attr branch.
+    # A plain function carries no ``__func__``: there is no wrapper to unwrap.
     assert not hasattr(PlainSeamFilter.filter_for_field, "__func__")
     assert PlainSeamFilter._is_generation_capable() is False
 

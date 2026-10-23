@@ -374,10 +374,7 @@ def _validate_serializer_nested_fields(
     # DRF write method shares the operation's name, so the method IS the operation (DRF's
     # default asserts via ``raise_errors_on_nested_writes`` unless overridden - hence the check).
     write_method = operation
-    if truth.static_attr(serializer_class, write_method) is truth.static_attr(
-        serializers.ModelSerializer,
-        write_method,
-    ):
+    if not truth.overrides(serializer_class, serializers.ModelSerializer, write_method):
         raise ConfigurationError(
             f"SerializerMutation {name}.Meta.nested_fields is declared, but "
             f"{truth.name(serializer_class)} "
