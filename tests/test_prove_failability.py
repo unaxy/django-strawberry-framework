@@ -585,6 +585,60 @@ def test_a_state_home_that_is_not_an_absolute_path_falls_back_to_the_xdg_default
     assert prove_failability._state_home() == tmp_path / "home" / ".local" / "state"
 
 
+def test_the_state_directory_named_for_a_root_is_the_one_a_run_against_it_uses(
+    fake_repo: Path,
+    state_home: Path,
+    state_directory: Path,
+    tmp_path: Path,
+) -> None:
+    # ``scripts/workspace.py`` removes a copy's state directory by this name, so it must be
+    # the very directory a run against that root writes, and no other root's.
+    assert prove_failability.tree_state_directory(fake_repo) == state_directory
+    assert state_directory.parent == state_home.resolve() / prove_failability.STATE_DIRECTORY_NAME
+    assert prove_failability.tree_state_directory(tmp_path / "repo-b") != state_directory
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_scope_executable_missing_from_path_is_refused_before_anything_is_written(
+    state_home: Path,
+    system_tmp: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The scope is ``uv run pytest``: with no ``uv`` on PATH the baseline's Popen would raise
+    # a raw FileNotFoundError, so the run is refused first, before any directory is made.
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    target = prove_failability.REPO_ROOT / "package" / "views.py"
+    scratch = tmp_path / "scratch"
+
+    code = prove_failability.main([str(_manifest(tmp_path)), "--scratch-root", str(scratch)])
+
+    assert code == 1
+    assert capsys.readouterr().err == (
+        "scope refused: uv is not on PATH, so no entry's scope can run; nothing was mutated, "
+        "run or written\n"
+    )
+    assert target.read_text(encoding="utf-8") == SOURCE
+    assert not state_home.exists()
+    assert not scratch.exists()
+    assert list(system_tmp.iterdir()) == []
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_an_anchors_only_run_needs_no_scope_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    assert prove_failability.main([str(_manifest(tmp_path)), "--check-anchors-only"]) == 0
+
+
 def test_two_workspace_roots_under_one_scratch_root_never_share_pristine_marker_or_probe_paths(
     fake_repo: Path,
     tmp_path: Path,

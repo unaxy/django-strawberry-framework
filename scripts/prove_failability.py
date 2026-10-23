@@ -67,7 +67,14 @@ Deliberate properties, each one a hand-run failure mode this encodes away:
   run killed outside that window left. A restore that could not be proved
   leaves the copies and the markers in it. ``prove_failability`` must be a real
   directory owned by this user, or the run is refused. The run header, the
-  markdown record and ``--json`` all name the marker.
+  markdown record and ``--json`` all name the marker. ``scripts/workspace.py``
+  removes a copy's state directory (:func:`tree_state_directory`) when ``gc``
+  deletes the copy, and when it mirrors the copy back to the shared tree,
+  after restoring from the marker's pristine copies, byte compared, every
+  marked file under the ``.venv`` the mirror keeps. A marker it cannot read,
+  or a restore it cannot prove, leaves the state directory in place (with a
+  notice) while the resync completes, so this script's own refusal still
+  guards later runs against that copy.
 * **Scratch is per tree and holds what a run observed.** The probe plugin, the
   raw run logs and the pristine copies of proved restores go to
   ``<root>/tree-<digest>`` under ``--scratch-root`` (or the manifest's
@@ -239,7 +246,9 @@ at least one entry is weakly pinned, misses its declared ``expect_failing`` or
 ``isolates``, carries a collection/setup error or a pytest exit code outside
 ``{0, 1}`` (so its count is not a valid count), or its anchor did not match
 exactly once, or the manifest is unusable, or ``--output`` was asked for without
-a baseline, or ``--workspace`` refused the root, or another run holds this
+a baseline, or ``--workspace`` refused the root, or the scope's executable
+(``uv``) is not on ``PATH`` (refused before anything is mutated, run or written;
+``--check-anchors-only`` runs no scope and needs none), or another run holds this
 tree's lock, or a crashed run's marker is unresolved; ``3`` a restore could not
 be proved (the tree may still hold a mutation - read the marker files the run
 leaves in the tree's state directory; the partial report is still written to
@@ -261,6 +270,7 @@ import fcntl
 import filecmp
 import fnmatch
 import hashlib
+import io
 import json
 import operator
 import os
@@ -1169,10 +1179,20 @@ def _given_scratch_root(raw_root: str | None) -> Path | None:
     return Path(raw_root).expanduser().resolve() if raw_root else None
 
 
+def tree_namespace(repo_root: Path) -> str:
+    """Return the ``tree-<digest>`` directory name owned by ``repo_root``.
+
+    ``repo_root`` is the root as this script resolves it from its own location
+    (:data:`REPO_ROOT` of the copy of this script that runs there), so the name
+    a run uses and the name another tool computes for the same tree agree.
+    """
+    digest = hashlib.sha256(str(repo_root).encode("utf-8")).hexdigest()
+    return f"{TREE_NAMESPACE_PREFIX}{digest[:TREE_NAMESPACE_DIGEST_LENGTH]}"
+
+
 def _tree_namespace() -> str:
     """Return the scratch subdirectory name owned by the repository root this run mutates."""
-    digest = hashlib.sha256(str(REPO_ROOT).encode("utf-8")).hexdigest()
-    return f"{TREE_NAMESPACE_PREFIX}{digest[:TREE_NAMESPACE_DIGEST_LENGTH]}"
+    return tree_namespace(REPO_ROOT)
 
 
 def _refuse_inside_repository(directory: Path) -> None:
@@ -1192,6 +1212,17 @@ def _state_home() -> Path:
     return Path.home() / ".local" / "state"
 
 
+def tree_state_directory(repo_root: Path) -> Path:
+    """Return the state directory a run against ``repo_root`` uses, creating nothing.
+
+    It is ``<state home>/prove_failability/tree-<digest>``, the state home read
+    from this process's environment (:func:`_state_home`). ``scripts/workspace.py``
+    calls this for a copy it resets or deletes, so the path it removes is the
+    one a run in that copy wrote, never a re-derived one.
+    """
+    return _state_home().resolve() / STATE_DIRECTORY_NAME / tree_namespace(repo_root)
+
+
 def _tree_state_directory() -> Path:
     """Return the state directory of the repository root this run mutates, creating nothing.
 
@@ -1202,7 +1233,7 @@ def _tree_state_directory() -> Path:
     against one tree finds the marker a crashed run left there, whatever scratch
     root either run was given.
     """
-    directory = _state_home().resolve() / STATE_DIRECTORY_NAME / _tree_namespace()
+    directory = tree_state_directory(REPO_ROOT)
     _refuse_inside_repository(directory)
     return directory
 
@@ -3067,6 +3098,44 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def workspace_options_in(arguments: Sequence[str]) -> tuple[str, ...]:
+    """Return which of ``--workspace``, ``--scratch-root`` and ``--json`` ``arguments`` set.
+
+    ``arguments`` are read as this script's own parser reads them after the
+    manifest, so the exact spelling, ``--option=value`` and every abbreviation
+    the parser accepts all count. ``scripts/workspace.py`` passes these three
+    itself and refuses extra arguments that would replace them. Arguments the
+    parser rejects set nothing: the run given them stops at that same parse
+    error before it reads the manifest or writes anything.
+    """
+    sink = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            parsed, _ = _build_parser().parse_known_args(
+                ["manifest", *arguments],
+                namespace=_Args(),
+            )
+    except SystemExit:
+        return ()
+    values = {
+        "--workspace": parsed.workspace,
+        "--scratch-root": parsed.scratch_root,
+        "--json": parsed.json_output,
+    }
+    return tuple(option for option, value in values.items() if value is not None)
+
+
+def _missing_scope_executable() -> str | None:
+    """Return why no scope can run when its executable is not on ``PATH``, else ``None``."""
+    executable = PYTEST_COMMAND[0]
+    if shutil.which(executable) is not None:
+        return None
+    return (
+        f"{executable} is not on PATH, so no entry's scope can run; nothing was mutated, run "
+        "or written"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run every selected proof entry and emit the markdown (and optional JSON) report."""
     arguments = _build_parser().parse_args(argv, namespace=_Args())
@@ -3087,6 +3156,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"workspace refused: {refusal}", file=sys.stderr)
             return 1
         workspace = arguments.workspace.expanduser().resolve()
+    if not arguments.check_anchors_only:
+        refusal = _missing_scope_executable()
+        if refusal is not None:
+            print(f"scope refused: {refusal}", file=sys.stderr)
+            return 1
     try:
         entries, manifest_scratch_root = load_manifest(arguments.manifest)
         selected = select_entries(entries, arguments.only)
