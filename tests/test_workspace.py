@@ -1157,18 +1157,34 @@ def test_gc_cut_short_keeps_the_marker_so_the_next_gc_finishes(
     assert not layout.flow_dir.exists()
 
 
-def _purge(root: Path, keep: tuple[str, ...] = ()) -> None:
-    """Unlink every regular file under ``root`` but ``keep``, as the macOS ``$TMPDIR`` purge does.
+_DAY = 86400
 
-    Directories and symlinks stay; ``keep`` names paths relative to ``root``.
+
+def _purge(root: Path, keep: tuple[str, ...] = ()) -> None:
+    """Age everything under ``root`` but ``keep`` four days, then apply the macOS ``$TMPDIR`` purge.
+
+    The purge unlinks each regular file created and last read more than three
+    days ago, open or locked or not (where the platform reports no creation
+    time, the last write stands in for it); directories and symlinks stay.
+    ``keep`` names paths relative to ``root``.
     """
+    aged = time.time() - 4 * _DAY
+    for folder, dirs, files in os.walk(root):
+        for name in (*dirs, *files):
+            path = Path(folder) / name
+            if str(path.relative_to(root)) not in keep:
+                os.utime(path, (aged, aged), follow_symlinks=False)
+    cutoff = time.time() - 3 * _DAY
     for folder, _dirs, files in os.walk(root):
         for name in files:
             path = Path(folder) / name
+            facts = path.lstat()
+            created = getattr(facts, "st_birthtime", facts.st_mtime)
             if (
                 path.is_file()
                 and not path.is_symlink()
-                and str(path.relative_to(root)) not in keep
+                and facts.st_atime < cutoff
+                and created < cutoff
             ):
                 path.unlink()
 
@@ -1540,7 +1556,7 @@ def test_release_and_a_syncing_run_never_wait_on_each_other(
     assert _statuses(layout) == {"slot-1": "ready"}
 
 
-def test_a_lock_file_replaced_while_waited_on_never_admits_two_holders(
+def test_a_lock_replaced_while_waited_on_never_admits_two_holders(
     actors: _Actors,
     tmp_path: Path,
 ) -> None:
@@ -1549,7 +1565,7 @@ def test_a_lock_file_replaced_while_waited_on_never_admits_two_holders(
     assert actors.reached("first", "in")
     actors.start("waiter", "hold", pauses=("in",), path=str(lock))
     assert actors.reached("waiter", "opened")
-    lock.unlink()
+    lock.rmdir()
     actors.start("third", "hold", pauses=("in",), path=str(lock))
     assert actors.reached("third", "in")
 
@@ -1562,6 +1578,232 @@ def test_a_lock_file_replaced_while_waited_on_never_admits_two_holders(
     actors.go("waiter", "in")
     assert actors.finish("waiter")[0] == 0
     assert actors.finish("third")[0] == 0
+
+
+def _lock_of(layout: workspace.Layout, family: str) -> Path:
+    """Bind a copy and return the lock of ``family`` a command of the flow takes."""
+    binding = workspace.bind(layout, _address("perf-1"))
+    return {
+        "pool": layout.pool_lock,
+        "slot": layout.slot_lock(binding.slot),
+        "gate": layout.flow_dir / "gate.lock",
+    }[family]
+
+
+def _older_lock_file(lock: Path) -> Path:
+    """Put the regular lock file an older version of ``workspace.py`` made at ``lock``."""
+    if lock.is_dir():
+        lock.rmdir()
+    return _write(lock, "")
+
+
+_LOCK_FAMILIES = pytest.mark.parametrize("family", ["pool", "slot", "gate"])
+
+
+def _taken_within(
+    path: Path,
+    seconds: float,
+    until: threading.Event | None = None,
+) -> tuple[threading.Event, threading.Thread]:
+    """Start a blocking ``file_lock`` on ``path`` in a thread, held until ``until`` is set.
+
+    Returns after ``seconds`` or once the thread holds the lock, whichever is first.
+    """
+    taken = threading.Event()
+
+    def _take() -> None:
+        with workspace.file_lock(path):
+            taken.set()
+            if until is not None:
+                _ = until.wait(10)
+
+    taker = threading.Thread(target=_take)
+    taker.start()
+    _ = taken.wait(seconds)
+    return taken, taker
+
+
+def test_the_purge_removes_a_held_lock_file_and_keeps_a_held_lock_directory(
+    tmp_path: Path,
+) -> None:
+    lock_file = _write(tmp_path / "file.lock", "")
+    lock_dir = tmp_path / "dir.lock"
+    lock_dir.mkdir()
+    held = [os.open(lock_file, os.O_RDWR), os.open(lock_dir, os.O_RDONLY | os.O_DIRECTORY)]
+    try:
+        for descriptor in held:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        _purge(tmp_path)
+        assert not lock_file.exists()
+        assert lock_dir.is_dir()
+    finally:
+        for descriptor in held:
+            os.close(descriptor)
+
+
+@_LOCK_FAMILIES
+def test_a_held_lock_outlives_the_tmpdir_purge_and_admits_no_second_holder(
+    layout: workspace.Layout,
+    family: str,
+) -> None:
+    lock = _lock_of(layout, family)
+    with workspace.flow_lease(layout), workspace.file_lock(lock):
+        _purge(layout.flow_dir, keep=("state.json",))
+        assert lock.is_dir()
+        with pytest.raises(workspace.LockBusyError), workspace.file_lock(lock, blocking=False):
+            pass
+        taken, taker = _taken_within(lock, 0.3)
+        assert not taken.is_set()
+    taker.join()
+    assert taken.is_set()
+
+
+def test_release_refuses_a_copy_held_across_the_tmpdir_purge(layout: workspace.Layout) -> None:
+    binding = workspace.bind(layout, _address("perf-1"))
+    with workspace.flow_lease(layout), workspace.file_lock(layout.slot_lock(binding.slot)):
+        _purge(layout.flow_dir, keep=("state.json",))
+        with pytest.raises(workspace.LockBusyError, match="a command still runs in slot-1"):
+            _ = workspace.release(layout, "pkg/a.py")
+        assert workspace.running_slots(layout, [binding.slot]) == [binding.slot]
+    assert _bound_to(layout) == {"slot-1": "review/pkg/a.py/perf-1"}
+
+
+def test_binds_racing_across_the_tmpdir_purge_keep_both_bindings(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout.ensure_marked()
+    real_load_state = workspace._load_state
+    inside = threading.Event()
+    resume = threading.Event()
+    slots: dict[str, str] = {}
+
+    def _paused_load_state(lay: workspace.Layout) -> workspace._PoolState:
+        state = real_load_state(lay)
+        if threading.current_thread().name == "first":
+            inside.set()
+            _ = resume.wait(10)
+        return state
+
+    def _bind(role: str) -> None:
+        slots[role] = workspace.bind(layout, _address(role)).slot
+
+    monkeypatch.setattr(workspace, "_load_state", _paused_load_state)
+    first = threading.Thread(target=_bind, args=("perf-1",), name="first")
+    first.start()
+    assert inside.wait(10)
+    _purge(layout.flow_dir, keep=("state.json",))
+    second = threading.Thread(target=_bind, args=("mech-1",), name="second")
+    second.start()
+    second.join(timeout=0.3)
+    assert second.is_alive()
+    resume.set()
+    first.join()
+    second.join()
+
+    assert slots == {"perf-1": "slot-1", "mech-1": "slot-2"}
+    assert _bound_to(layout) == {
+        "slot-1": "review/pkg/a.py/perf-1",
+        "slot-2": "review/pkg/a.py/mech-1",
+    }
+
+
+@_LOCK_FAMILIES
+@pytest.mark.parametrize("create", [True, False])
+def test_a_lock_file_an_older_version_left_becomes_the_lock_directory(
+    layout: workspace.Layout,
+    family: str,
+    *,
+    create: bool,
+) -> None:
+    lock = _older_lock_file(_lock_of(layout, family))
+
+    with workspace.file_lock(lock, create=create):
+        assert lock.is_dir()
+        with pytest.raises(workspace.LockBusyError), workspace.file_lock(lock, blocking=False):
+            pass
+    with pytest.raises(IsADirectoryError):
+        os.close(workspace._flock(lock, os.O_RDWR | os.O_CREAT, fcntl.LOCK_EX | fcntl.LOCK_NB))
+
+
+@_LOCK_FAMILIES
+def test_a_held_lock_file_is_replaced_only_once_its_holder_lets_go(
+    layout: workspace.Layout,
+    family: str,
+) -> None:
+    lock = _older_lock_file(_lock_of(layout, family))
+    older = os.open(lock, os.O_RDWR)
+    let_go = threading.Event()
+    try:
+        fcntl.flock(older, fcntl.LOCK_EX)
+        with pytest.raises(workspace.LockBusyError), workspace.file_lock(lock, blocking=False):
+            pass
+        taken, taker = _taken_within(lock, 0.3, until=let_go)
+        assert not taken.is_set()
+        assert lock.is_file()
+    finally:
+        os.close(older)
+    try:
+        assert taken.wait(10)
+        assert lock.is_dir()
+        with pytest.raises(workspace.LockBusyError), workspace.file_lock(lock, blocking=False):
+            pass
+    finally:
+        let_go.set()
+        taker.join()
+
+
+@_LOCK_FAMILIES
+def test_two_commands_replacing_one_lock_file_hold_its_directory_in_turn(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+    family: str,
+) -> None:
+    lock = _older_lock_file(_lock_of(layout, family))
+    older = os.open(lock, os.O_RDWR)
+    fcntl.flock(older, fcntl.LOCK_EX)
+    real_flock = fcntl.flock
+    guard = threading.Lock()
+    parked: list[str] = []
+    errors: list[OSError] = []
+    holders = [0, 0]
+
+    def _flock(descriptor: int, operation: int) -> None:
+        if os.path.samestat(os.fstat(descriptor), os.fstat(older)):
+            with guard:
+                parked.append(threading.current_thread().name)
+        real_flock(descriptor, operation)
+
+    def _hold() -> None:
+        try:
+            with workspace.file_lock(lock):
+                with guard:
+                    holders[0] += 1
+                    holders[1] = max(holders)
+                time.sleep(0.05)
+                with guard:
+                    holders[0] -= 1
+        except OSError as error:
+            errors.append(error)
+
+    monkeypatch.setattr(fcntl, "flock", _flock)
+    commands = [threading.Thread(target=_hold, name=name) for name in ("one", "two")]
+    try:
+        for command in commands:
+            command.start()
+        deadline = time.monotonic() + 10
+        while len(parked) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.1)
+        assert sorted(parked) == ["one", "two"]
+    finally:
+        os.close(older)
+        for command in commands:
+            command.join()
+
+    assert errors == []
+    assert holders == [0, 1]
+    assert lock.is_dir()
 
 
 # --------------------------------------------------------------------------------------------

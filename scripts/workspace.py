@@ -104,11 +104,13 @@ its own), and is harness-agnostic. ``DSF_WS_ROOT`` replaces
 ``$TMPDIR/dsf-ws``; a root inside the repository is refused, since copies of
 a tree holding its own copies recurse. ``DSF_WS_SLOTS`` caps each flow's pool
 (default 4: three parallel roles and the pinned ``before``). New copies are
-refused below 6 GB free. macOS deletes, daily, files under ``$TMPDIR`` not
-read for three days and keeps every directory, so a copy left idle loses its
-files and evidence while ``state.json`` may still list it ``ready``. The
-flow's marker is a directory, so ``gc`` still owns the folder; ``gc`` the flow
-before reusing it after an idle stretch.
+refused below 6 GB free. macOS deletes, daily, files under ``$TMPDIR``
+created and not read for three days, open or locked or not, and keeps every
+directory, so a copy left idle loses its files and evidence while
+``state.json`` may still list it ``ready``. The flow's marker is a directory,
+so ``gc`` still owns the folder; ``gc`` the flow before reusing it after an
+idle stretch. Every lock is a directory too, so the purge never takes one
+from a command that holds it.
 
 Guarantees, each one a hand-run failure this encodes away:
 
@@ -164,10 +166,15 @@ Guarantees, each one a hand-run failure this encodes away:
   folder is gone. ``release`` takes each copy's lock and keeps it while it
   unbinds the copy. Locks are taken in one order, flow lease, then copy, then
   ``pool.lock`` (which guards ``state.json``); nothing waits for a copy's
-  lock while holding ``pool.lock``. ``release``, and the check that names a
-  copy ``RUNNING``, try a copy's lock under ``pool.lock`` without waiting, so
-  no two commands wait on each other and that check never makes a
-  ``release`` refuse. The command holds its run's locks too, on the same
+  lock while holding ``pool.lock``. Each lock is an ``flock`` on a
+  directory (the flow folder, ``slots/slot-N.lock``, ``pool.lock``,
+  ``gate.lock``): the ``$TMPDIR`` purge removes files, never directories, so
+  no second command locks a new file at a path whose held one the purge
+  removed. A lock file an older version of this script left is replaced by
+  its directory under that file's own lock. ``release``, and the check that
+  names a copy ``RUNNING``, try a copy's lock under ``pool.lock`` without
+  waiting, so no two commands wait on each other and that check never makes
+  a ``release`` refuse. The command holds its run's locks too, on the same
   open descriptions, so they last until the command and everything it
   started with them has ended, even when this script was killed first
   (``SIGKILL``); so do a copy's ``uv sync`` and the gate's floor installs. A
@@ -223,6 +230,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -580,7 +588,7 @@ def item_diff(repo_root: Path, baseline: str, paths: Sequence[str]) -> bytes:
 
 
 def _still_names(path: Path, descriptor: int) -> bool:
-    """Return whether ``path`` still names the file ``descriptor`` holds open."""
+    """Return whether ``path`` still names the file or directory ``descriptor`` holds open."""
     try:
         return os.path.samestat(os.fstat(descriptor), path.stat())
     except FileNotFoundError:
@@ -588,16 +596,18 @@ def _still_names(path: Path, descriptor: int) -> bool:
 
 
 def _flock(path: Path, flags: int, operation: int) -> int:
-    """Lock the file ``path`` names and return the descriptor holding it.
+    """Lock what ``path`` names and return the descriptor holding it.
 
-    A file unlinked or replaced while this call waited on it is opened again,
-    so a holder always sits on the file the path names now, never on an inode
-    the path no longer reaches.
+    A file or directory removed or replaced while this call waited on it is
+    opened again, so a holder always sits on what the path names now, never
+    on an inode the path no longer reaches.
 
     Raises:
         BlockingIOError: ``operation`` carries ``LOCK_NB`` and another
             descriptor holds a conflicting lock.
         FileNotFoundError: ``path`` is missing and ``flags`` cannot create it.
+        NotADirectoryError: ``flags`` carries ``O_DIRECTORY`` and ``path``
+            names a file.
 
     """
     while True:
@@ -612,6 +622,59 @@ def _flock(path: Path, flags: int, operation: int) -> int:
         os.close(descriptor)
 
 
+def _replace_lock_file(path: Path, operation: int) -> None:
+    """Replace a lock file an older version of this script left at ``path`` with its directory.
+
+    The file is locked first, with ``operation``, so a command still holding
+    it keeps it until it ends; the directory takes its place before that lock
+    is let go. A command of the older version waiting on the file then finds
+    the path naming a directory and fails, never holding a second lock beside
+    the directory's holder.
+
+    Raises:
+        BlockingIOError: ``operation`` carries ``LOCK_NB`` and the file is held.
+
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return
+    try:
+        fcntl.flock(descriptor, operation)
+        if _still_names(path, descriptor) and stat.S_ISREG(os.fstat(descriptor).st_mode):
+            path.unlink()
+            # A command of either version may make the path again first.
+            with contextlib.suppress(FileExistsError):
+                path.mkdir()
+    finally:
+        os.close(descriptor)
+
+
+def _lock_directory(path: Path, operation: int, *, create: bool) -> int:
+    """Lock the directory ``path``; return the descriptor holding it.
+
+    ``create`` makes the directory. A lock file found at ``path`` is replaced
+    by the directory (:func:`_replace_lock_file`) with or without ``create``:
+    that replaces a lock, it never brings back one ``gc`` removed.
+
+    Raises:
+        BlockingIOError: ``operation`` carries ``LOCK_NB`` and the lock is held.
+        FileNotFoundError: ``path`` is missing and ``create`` is false.
+
+    """
+    while True:
+        try:
+            return _flock(path, os.O_RDONLY | os.O_DIRECTORY, operation)
+        except NotADirectoryError:
+            _replace_lock_file(path, operation)
+        except FileNotFoundError:
+            if not create:
+                raise
+            # A file an older version made here is replaced on the next pass.
+            with contextlib.suppress(FileExistsError):
+                path.mkdir()
+
+
 @contextlib.contextmanager
 def file_lock(
     path: Path,
@@ -619,23 +682,29 @@ def file_lock(
     blocking: bool = True,
     create: bool = True,
 ) -> Generator[int, None, None]:
-    """Hold an exclusive ``flock`` on ``path``; yield the descriptor holding it.
+    """Hold an exclusive ``flock`` on the lock ``path``; yield the descriptor holding it.
+
+    The lock is an empty directory, never a file: the macOS ``$TMPDIR`` purge
+    deletes a file it finds old enough even while a command holds it, and a
+    later command would then lock a new file at the same path beside that
+    holder; it never deletes a directory. A lock file an older version of
+    this script left is replaced by the directory under that file's own lock.
 
     The kernel drops the lock once every descriptor sharing it is closed: when
     this block ends and no command it was handed to (:func:`stream`) runs.
 
-    ``create`` makes the file, and its folder, but never the folder above:
+    ``create`` makes the lock, and its folder, but never the folder above:
     only :func:`flow_lease` creates a flow folder, so a lock taken after
     ``gc`` removed one raises instead of bringing it back. Without ``create``
-    a missing file raises ``FileNotFoundError``.
+    a missing lock raises ``FileNotFoundError``.
     """
     if create:
         path.parent.mkdir(exist_ok=True)
     try:
-        descriptor = _flock(
+        descriptor = _lock_directory(
             path,
-            os.O_RDWR | (os.O_CREAT if create else 0),
             fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB),
+            create=create,
         )
     except BlockingIOError:
         msg = f"{path} is held: a command is still running there"
@@ -803,7 +872,10 @@ class Layout:
 
     @property
     def pool_lock(self) -> Path:
-        """Guards ``state.json`` and the upgrade of a marker file to the marker directory."""
+        """Guards ``state.json`` and the upgrade of a marker file to the marker directory.
+
+        A directory, as every lock :func:`file_lock` takes is.
+        """
         return self.flow_dir / "pool.lock"
 
     @property
@@ -831,7 +903,7 @@ class Layout:
         return self.flow_dir / "slots" / slot
 
     def slot_lock(self, slot: str) -> Path:
-        """Return the lock a run holds on its copy."""
+        """Return the lock a run holds on its copy, a directory beside it (:func:`file_lock`)."""
         return self.flow_dir / "slots" / f"{slot}.lock"
 
     def manifest_path(self, slot: str) -> Path:
@@ -2359,7 +2431,8 @@ def running_slots(layout: Layout, slots: Iterable[str]) -> list[str]:
     Each slot lock is tried without waiting, under ``pool.lock``: ``release``
     tries slot locks only under ``pool.lock`` too, so this check never makes
     it refuse, and a run waiting for its copy waits a moment longer. Nothing
-    is created; a lock file that is gone reads as free.
+    is created, though a lock file an older version left is replaced by its
+    directory; a lock that is gone reads as free.
     """
     busy: list[str] = []
     try:
