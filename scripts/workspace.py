@@ -24,7 +24,15 @@ Worker commands
     ``prove <address> <manifest> [--cell ...] [--fresh] [-- <extra args>]``
         ``run`` of ``scripts/prove_failability.py`` in its workspace form:
         ``--workspace`` is the copy; ``--scratch-root`` and ``--json`` sit
-        under this flow's evidence folder, never inside the copy.
+        under this flow's evidence folder, never inside the copy. An extra
+        argument that the proof script's own parser would read as one of
+        those three (the exact flag, ``--flag=value`` or any abbreviation it
+        accepts) is refused before a copy is bound: the parser keeps the last
+        value, so it would move the evidence out of the flow folder, where
+        ``gc`` never looks. Every other extra argument passes through. A
+        proof killed while its mutation was live (``SIGKILL``) leaves the
+        prover's marker, which refuses every later proof in that copy;
+        ``--fresh`` resyncs the copy and removes the marker with it.
     ``path <address>``
         Print the copy's directory, binding it first when unbound, so a
         worker can read or edit files there. A copy whose sync has not
@@ -94,11 +102,13 @@ Worker-0 commands
         Print copies, bindings, active runs and Postgres leases.
     ``gc <flow>``
         Delete everything the flow holds: copies, gate copy, run log, proof
-        scratch and its Postgres databases. The Postgres container is stopped
-        when this script started it and no database of any flow remains. Run
-        it after ``## Outcomes`` records what the evidence showed. It refuses
-        while any command of the flow runs, one waiting for a copy included;
-        stop that command, or wait for it, then run ``gc`` again.
+        scratch, the prover's state directory of each copy (a killed proof's
+        marker and pristine copies) and its Postgres databases. The Postgres
+        container is stopped when this script started it and no database of
+        any flow remains. Run it after ``## Outcomes`` records what the
+        evidence showed. It refuses while any command of the flow runs, one
+        waiting for a copy included; stop that command, or wait for it, then
+        run ``gc`` again.
 
 Every run prints a provenance header on stderr before its output and a footer
 after it. The header gives the run id, address, copy, the package file the
@@ -133,14 +143,27 @@ Guarantees, each one a hand-run failure this encodes away:
   never the caller's global or system config or XDG ignore file. Cycle
   scratch is left out: ``output/``, ``docs/shadow/``, ``temp-tests/``,
   ``worker-memory/`` and any ``*-ws`` folder a harness parked in the tree. A
-  resync mirrors that set byte for byte, deletes every other file except
-  ``.venv`` (caches included), runs ``uv sync --frozen --group pg`` and
-  asserts the copy's package digest equals the shared tree's. A shared file
-  that changes mid-copy restarts the sync.
+  resync (first bind, rebind to another address, ``--fresh``, a sync that
+  never finished) mirrors that set byte for byte, deletes every other file
+  except ``.venv`` (caches included), then removes the copy's
+  ``scripts/prove_failability.py`` state directory: a killed proof's
+  mutation of a file under ``.venv``, which the mirror keeps, is first
+  restored from its pristine copy and byte compared, and every other
+  mutation is gone with the mirror. A marker that cannot be read, or a file
+  that cannot be restored and proved, keeps the state directory with a notice
+  on stderr; the resync still completes, and the prover's own refusal keeps
+  guarding ``prove`` in that copy until the marker is resolved or ``gc``.
+  It then runs ``uv sync --frozen --group pg`` and asserts the copy's
+  package digest equals the shared tree's. A shared file that changes
+  mid-copy restarts the sync.
 * **Copies are reset in place, never cloned.** A virtualenv's entry scripts
   name their own interpreter by absolute path. A cloned ``.venv/bin/pytest``
   would therefore import the other copy's package. Reuse keeps each copy at
   its own path.
+* **A missing tool is a refusal.** ``git``, ``uv`` and ``docker`` are each
+  looked up on ``PATH`` before the first subprocess that needs them, so one
+  that is missing refuses (``<tool> is not on PATH``) before any header,
+  never as a traceback.
 * **A clean environment.** Every command runs without the caller's
   ``FAKESHOP_*``, ``DJANGO_*``, ``PYTEST_*``, ``COVERAGE_*`` and ``GIT_*``
   variables, ``PYTHONPATH``, ``VIRTUAL_ENV`` and the ``uv`` project
@@ -164,11 +187,15 @@ Guarantees, each one a hand-run failure this encodes away:
   the copies, not inside them, so resyncing a copy for the next address keeps
   the evidence the last one produced.
 * **Cleanup leaves nothing.** ``release`` unbinds copies and drops their
-  databases. ``gc`` removes the flow folder, its databases, and the empty
-  parent folders; a removal cut short keeps the folder's marker, so ``gc``
-  finishes it on the next run. A crashed run's locks last while its command
-  runs and die with it; a crashed sync, ``--fresh`` included, resyncs on the
-  address's next run.
+  databases; a released copy's next binding resyncs it. ``gc`` removes the
+  flow folder, each copy's prover state directory (once that copy is gone, so
+  no copy outlives the marker of a mutation it may hold), its databases, and
+  the empty parent folders; a removal cut short keeps the folder's marker, so
+  ``gc`` finishes it on the next run. The state directory is the one the
+  prover names (``scripts/prove_failability.py::tree_state_directory``) under
+  the state home this script sees, which every command inherits. A crashed
+  run's locks last while its command runs and die with it; a crashed sync,
+  ``--fresh`` included, resyncs on the address's next run.
 * **A copy is settled under its own lock.** A run holds its copy's lock
   from before it decides whether to sync until its command ends, and reads
   its binding and the copy's sync status from ``state.json`` only once it
@@ -221,7 +248,8 @@ for a command that died by signal ``N``. A run stopped by signal ``N``, and a
 for a stop signal ends the process by ``N``. ``125``
 means this script refused before the command ran (bad address, full pool,
 its copy was released while it waited, wrong provenance, Postgres
-unavailable), with the reason on stderr. The other
+unavailable, ``uv`` or ``git`` not on ``PATH``, a ``prove`` extra argument
+naming one of its own flags), with the reason on stderr. The other
 commands return ``0`` on success and ``1`` on a failed audit, a failed gate
 suite, a ``diff --check`` mismatch or a refusal.
 
@@ -261,8 +289,9 @@ from typing_extensions import NotRequired, override
 try:
     import _bench_common
     import _stop_signals
+    import prove_failability
 except ModuleNotFoundError:  # imported as ``scripts.workspace`` (repo root on path)
-    from scripts import _bench_common, _stop_signals
+    from scripts import _bench_common, _stop_signals, prove_failability
 
 if TYPE_CHECKING:
     import io
@@ -544,6 +573,21 @@ SCRATCH_IDENTITY: Mapping[str, str] = MappingProxyType(
 )
 
 
+def require_on_path(tool: str, consequence: str) -> None:
+    """Refuse, before any subprocess starts it, a ``tool`` that is not on ``PATH``.
+
+    Every command runs under :func:`clean_env`, which keeps the caller's
+    ``PATH``, so the lookup reads the ``PATH`` the subprocess would search.
+
+    Raises:
+        WorkspaceError: ``tool`` is not on ``PATH``; ``consequence`` says what cannot run.
+
+    """
+    if shutil.which(tool) is None:
+        msg = f"{tool} is not on PATH, so {consequence}"
+        raise WorkspaceError(msg)
+
+
 def _git(
     repo_root: Path,
     *args: str,
@@ -555,6 +599,7 @@ def _git(
     ``env`` adds variables on top (a private ``GIT_INDEX_FILE``, an identity); ``stdin`` feeds
     the command (``update-index -z --stdin``).
     """
+    require_on_path("git", "the shared tree cannot be listed, copied or diffed")
     completed = subprocess.run(
         [
             "git",
@@ -1373,6 +1418,7 @@ def _run_checked(command: Sequence[str], env: dict[str, str], holding: Sequence[
     The command holds the ``holding`` descriptors (the locks it builds
     under), so a lock lasts while the command runs, even past this process.
     """
+    require_on_path(command[0], "no copy can be synced")
     completed = subprocess.run(
         list(command),
         capture_output=True,
@@ -1584,6 +1630,9 @@ def sync_copy(
     (:func:`_run_checked`).
     """
     entries = mirror_tree(repo_root, destination, preserved=preserved)
+    # The mirror rewrote every file outside ``preserved``; a killed proof's mutation inside it is
+    # restored from the marker's pristine copy before the marker goes.
+    forget_proof_state(destination, preserved)
     _uv_sync(destination, holding)
     copy_digest = _bench_common.package_digest(destination / PACKAGE_DIR)
     shared_digest = _bench_common.package_digest(repo_root / PACKAGE_DIR)
@@ -1599,6 +1648,96 @@ def sync_copy(
         "package_digest": copy_digest,
         "entries": entries,
     }
+
+
+def forget_proof_state(copy: Path, preserved: frozenset[str]) -> None:
+    """Remove the ``scripts/prove_failability.py`` state directory of ``copy``, if any.
+
+    A proof run killed while its mutation was live leaves its pristine copies
+    and ``ACTIVE-MUTATION.json`` there, and that marker refuses every later
+    proof in the copy. The caller holds the lock that keeps any command out of
+    the copy and has just mirrored it from the shared tree or deleted it. The
+    mirror rewrites every file except the top-level ``preserved`` directories
+    (``.venv``), which a proof may also have mutated, so each marker file
+    under one of them is first restored from its pristine copy and byte
+    compared (:func:`_restore_preserved_mutations`); every other mutation is
+    gone with the mirror, and its restore command would only write stale bytes
+    over fresh ones. After a deletion ``preserved`` is empty: nothing is left
+    to restore. A marker that cannot be read, or a file it names that cannot
+    be restored and proved, keeps the whole state directory, with one notice
+    on stderr: the resync still completes, so ``run`` keeps working in the
+    copy, while the prover's own marker refusal keeps guarding ``prove``
+    there until the marker is resolved or ``gc`` deletes the copy. The path is
+    the prover's own (:func:`prove_failability.tree_state_directory`) for the
+    root a run in the copy resolves, under the state home this process sees,
+    which the clean environment hands every command unchanged. A
+    ``prove_failability`` directory that is not a real directory owned by this
+    user (a symlink, another user's) is left alone, as the prover refuses to
+    use it.
+    """
+    directory = prove_failability.tree_state_directory(copy.resolve())
+    parent = directory.parent
+    try:
+        status = parent.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
+        return
+    if directory.is_symlink() or directory.is_file():
+        directory.unlink()
+        return
+    if not directory.exists():
+        return
+    marker = directory / prove_failability.ACTIVE_MARKER_NAME
+    if preserved and marker.exists():
+        kept = _restore_preserved_mutations(copy.resolve(), marker, preserved)
+        if kept is not None:
+            _ = sys.stderr.write(f"workspace: kept live-mutation marker {marker}: {kept}\n")
+            return
+    shutil.rmtree(directory)
+
+
+def _restore_preserved_mutations(
+    copy: Path,
+    marker: Path,
+    preserved: frozenset[str],
+) -> str | None:
+    """Restore each file ``marker`` names under a ``preserved`` directory of ``copy``.
+
+    Every entry is parsed before any file is written. Returns ``None`` once each such file
+    is restored from its pristine copy and compares equal byte for byte, else why the
+    marker must be kept: it is unreadable or not the prover's shape, an entry names a path
+    outside the copy or the copy itself, or a pristine copy is missing or its restore does
+    not compare equal.
+    """
+    try:
+        document = _loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return f"it cannot be read ({error})"
+    files = document.get("files") if _is_json_object(document) else None
+    if not _is_json_array(files) or not files:
+        return "it names no files"
+    restores: list[tuple[Path, Path]] = []
+    for item in files:
+        mutated = item.get("mutated_file") if _is_json_object(item) else None
+        pristine = item.get("restore_from") if _is_json_object(item) else None
+        if not isinstance(mutated, str) or not isinstance(pristine, str):
+            return "an entry lacks its mutated_file or restore_from"
+        target = Path(mutated).resolve()
+        if not _is_within(target, copy) or target == copy:
+            return f"it names {target}, which is not a file inside {copy}"
+        if target.relative_to(copy).parts[0] in preserved:
+            restores.append((target, Path(pristine)))
+    for target, source in restores:
+        try:
+            original = source.read_bytes()
+            _ = target.write_bytes(original)
+            restored = target.read_bytes()
+        except OSError as error:
+            return f"{target} could not be restored from {source} ({error})"
+        if restored != original:
+            return f"{target} does not match {source} after its restore"
+    return None
 
 
 def _is_generated(relative: str) -> bool:
@@ -1667,9 +1806,7 @@ class Postgres:
         self._container: tuple[str, str, str] | None = None
 
     def _docker(self, *args: str, check: bool = True) -> str:
-        if shutil.which("docker") is None:
-            msg = "docker is not on PATH, so the Postgres cell cannot run"
-            raise WorkspaceError(msg)
+        require_on_path("docker", "the Postgres cell cannot run")
         completed = subprocess.run(
             ["docker", *args],
             capture_output=True,
@@ -2139,6 +2276,7 @@ class _ProbeResult(TypedDict):
 
 def probe(directory: Path, env: dict[str, str]) -> _ProbeResult:
     """Resolve, inside the copy, where the package imports from and each alias's database."""
+    require_on_path("uv", "nothing can run in a copy")
     command = [
         "uv",
         "run",
@@ -2319,6 +2457,7 @@ def stream(
     finished; an error out of the run first kills the command's process
     group, so the command never outlives the run holding its leases.
     """
+    require_on_path(command[0], "nothing can run in a copy")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     relay = _StopRelay()
     with log_path.open("wb") as log, _stop_signals.routed_to(relay, group=relay.group):
@@ -2635,6 +2774,20 @@ def _remove_flow_dir(flow_dir: Path) -> None:
     flow_dir.rmdir()
 
 
+def _copies(layout: Layout) -> list[Path]:
+    """Return every copy directory the flow folder holds: its slots and its gate copy."""
+    slots = layout.flow_dir / "slots"
+    found = [
+        path
+        for path in (slots.iterdir() if slots.is_dir() else ())
+        if path.is_dir() and not path.is_symlink() and not path.name.endswith(".lock")
+    ]
+    gate_dir = layout.gate_dir
+    if gate_dir.is_dir() and not gate_dir.is_symlink():
+        found.append(gate_dir)
+    return sorted(found)
+
+
 def gc(layout: Layout) -> list[str]:
     """Delete the flow folder and its databases; stop Postgres when this script owns it idle.
 
@@ -2671,6 +2824,12 @@ def gc(layout: Layout) -> list[str]:
                 for path in flow_dir.rglob("*")
                 if path.is_file() and not path.is_symlink()
             )
+            # Each copy goes before its proof state, so no copy outlives the marker of a
+            # mutation it may still hold, whichever removal is cut short.
+            for copy in _copies(layout):
+                resolved = copy.resolve()
+                shutil.rmtree(copy)
+                forget_proof_state(resolved, frozenset())
             _remove_flow_dir(flow_dir)
             report.append(f"removed {flow_dir} ({size / 1024**2:.0f} MB)")
     finally:
@@ -3135,6 +3294,14 @@ def _cmd_prove(args: _Args) -> int:
         msg = f"manifest {manifest} is not a file"
         raise WorkspaceError(msg)
     extra = list(args.tail)
+    overrides = prove_failability.workspace_options_in(extra)
+    if overrides:
+        msg = (
+            f"prove passes --workspace, --scratch-root and --json itself, so the proof's "
+            f"evidence stays in the flow folder; drop {', '.join(overrides)} from the "
+            "arguments after --"
+        )
+        raise WorkspaceError(msg)
     layout = Layout.for_flow(address.flow)
     scratch = layout.evidence / "proofs" / address.evidence_slug / address.role
 

@@ -37,7 +37,7 @@ import pytest
 import yaml
 
 from django_strawberry_framework.utils.typing import object_result
-from scripts import workspace
+from scripts import prove_failability, workspace
 from tests._idioms import json_at, json_list, json_loads, json_object
 
 PACKAGE = workspace.PACKAGE_DIR
@@ -100,6 +100,27 @@ def layout(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> works
     monkeypatch.setattr(workspace, "_running_postgres", _no_running_postgres)
     monkeypatch.setattr(workspace, "_free_bytes", _ample_free_bytes)
     return workspace.Layout(repo, tmp_path / "ws" / workspace.repo_key(repo), "review")
+
+
+@pytest.fixture(autouse=True)
+def state_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the proof state home into ``tmp_path``; the environment reaches child runs too."""
+    home = tmp_path / "state-home"
+    monkeypatch.setenv(prove_failability.STATE_HOME_ENV, str(home))
+    return home
+
+
+def _plant_proof_state(copy: Path) -> Path:
+    """Leave what a proof run killed mid-mutation leaves for ``copy``: marker and pristine copy."""
+    directory = prove_failability.tree_state_directory(copy.resolve())
+    pristine = _write(
+        directory / prove_failability.PRISTINE_DIRECTORY_NAME / "core.py.pristine",
+        "old\n",
+    )
+    mutated = copy.resolve() / PACKAGE / "core.py"
+    files = [{"mutated_file": str(mutated), "restore_from": str(pristine)}]
+    _write(directory / prove_failability.ACTIVE_MARKER_NAME, json.dumps({"files": files}))
+    return directory
 
 
 # --------------------------------------------------------------------------------------------
@@ -491,6 +512,141 @@ def test_lease_syncs_a_new_copy_once_reuses_it_with_its_edits_and_fresh_resyncs_
     assert wiped
     assert again.manifest == first.manifest
     assert _statuses(layout) == {"slot-1": "ready"}
+
+
+@pytest.mark.parametrize(
+    "how",
+    [
+        "first-bind",
+        "rebind",
+        "fresh",
+        "reuse",
+    ],
+)
+def test_a_resync_removes_its_copys_proof_state_and_leaves_every_other_copys(
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    how: str,
+) -> None:
+    # A proof killed mid-mutation leaves a marker that refuses every later proof in its copy;
+    # a resync mirrors the shared tree's bytes over that mutation, so the marker goes with it.
+    with workspace.lease(layout, _address("mech-1")) as other:
+        pass
+    kept = _plant_proof_state(other.directory)
+    target = layout.slot_dir("slot-2")
+    if how != "first-bind":
+        with workspace.lease(layout, _address("perf-1")):
+            pass
+    if how == "rebind":
+        assert workspace.release(layout, "pkg/a.py", roles=["perf-1"]) == [
+            "slot-2 review/pkg/a.py/perf-1",
+        ]
+    planted = _plant_proof_state(target)
+    role = "perf-2" if how == "rebind" else "perf-1"
+
+    with workspace.lease(layout, _address(role), fresh=how == "fresh") as held:
+        pass
+
+    assert held.directory == target
+    assert planted.exists() is (how == "reuse")
+    assert syncs.count(target) == (1 if how in {"first-bind", "reuse"} else 2)
+    assert (kept / prove_failability.ACTIVE_MARKER_NAME).is_file()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "restored",
+        "two-restored",
+        "pristine-missing",
+        "unreadable-marker",
+        "copy-root",
+    ],
+)
+def test_a_resync_restores_a_killed_proofs_venv_mutation_before_it_drops_the_marker(
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    case: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The mirror keeps ``.venv``, so a killed proof's mutation there survives the resync: the
+    # marker's pristine copy is its only restore source and goes only once every file it names
+    # there is restored. A marker that cannot be honoured is kept, never a failed resync.
+    del syncs
+    with workspace.lease(layout, _address("perf-1")) as held:
+        pass
+    copy = held.directory.resolve()
+    state = prove_failability.tree_state_directory(copy)
+    pristine = state / prove_failability.PRISTINE_DIRECTORY_NAME
+    venv_files = [
+        _write(copy / ".venv" / "lib" / "site" / f"mod{index}.py", "mutated\n")
+        for index in range(2 if case == "two-restored" else 1)
+    ]
+    package_file = _write(copy / PACKAGE / "core.py", "MUTATED\n")
+    files = [
+        {"mutated_file": str(path), "restore_from": str(pristine / f"{path.name}.pristine")}
+        for path in venv_files
+    ]
+    for path in venv_files:
+        if case != "pristine-missing":
+            _write(pristine / f"{path.name}.pristine", "original\n")
+    _write(pristine / "core.py.pristine", "CORE = 2\n")
+    files.append(
+        {"mutated_file": str(package_file), "restore_from": str(pristine / "core.py.pristine")},
+    )
+    if case == "copy-root":
+        files.append({"mutated_file": str(copy), "restore_from": str(pristine / "x")})
+    marker = state / prove_failability.ACTIVE_MARKER_NAME
+    _write(marker, "{not json" if case == "unreadable-marker" else json.dumps({"files": files}))
+    capsys.readouterr()
+
+    with workspace.lease(layout, _address("perf-1"), fresh=True):
+        pass
+
+    err = capsys.readouterr().err
+    assert package_file.read_text(encoding="utf-8") == "CORE = 2\n"
+    assert _statuses(layout) == {"slot-1": "ready"}
+    if case in {"restored", "two-restored"}:
+        assert [path.read_text(encoding="utf-8") for path in venv_files] == [
+            "original\n",
+        ] * len(venv_files)
+        assert not state.exists()
+        assert err == ""
+    else:
+        assert marker.is_file()
+        assert err.startswith(f"workspace: kept live-mutation marker {marker}: ")
+        assert err.count("\n") == 1
+        assert "Traceback" not in err
+        if case == "pristine-missing":
+            assert venv_files[0].read_text(encoding="utf-8") == "mutated\n"
+
+
+@pytest.mark.parametrize("how", ["resync", "gc"])
+def test_a_prove_failability_directory_that_is_a_symlink_is_never_followed(
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    state_home: Path,
+    tmp_path: Path,
+    how: str,
+) -> None:
+    # The prover refuses a ``prove_failability`` that is not a real directory of this user, so
+    # whatever lies behind such a link is no copy's state and is never removed.
+    del syncs
+    with workspace.lease(layout, _address("perf-1")) as held:
+        pass
+    foreign = tmp_path / "foreign"
+    state_home.mkdir()
+    (state_home / prove_failability.STATE_DIRECTORY_NAME).symlink_to(foreign)
+    behind = foreign / prove_failability.tree_namespace(held.directory.resolve())
+    _write(behind / prove_failability.ACTIVE_MARKER_NAME, "{}\n")
+
+    if how == "resync":
+        with workspace.lease(layout, _address("perf-1"), fresh=True):
+            pass
+    else:
+        workspace.gc(layout)
+
+    assert (behind / prove_failability.ACTIVE_MARKER_NAME).is_file()
 
 
 def _run_once_before_reading(
@@ -1114,6 +1270,31 @@ def test_gc_keeps_a_root_override_folder(
 
     assert not layout.base.exists()
     assert layout.base.parent.exists()
+
+
+def test_gc_removes_the_proof_state_of_every_copy_it_deletes_and_no_other_flows(
+    layout: workspace.Layout,
+    state_home: Path,
+) -> None:
+    copies = [
+        workspace.bind(layout, _address("perf-1")).directory,
+        workspace.bind(layout, _address("mech-1")).directory,
+        layout.gate_dir,
+    ]
+    other = workspace.Layout(layout.repo_root, layout.base, "hunt")
+    other_copy = workspace.bind(other, workspace.Address.parse("hunt/pkg/a.py/perf-1")).directory
+    for copy in (*copies, other_copy):
+        _write(copy / "file.txt", "x\n")
+    planted = [_plant_proof_state(copy) for copy in copies]
+    kept = _plant_proof_state(other_copy)
+
+    workspace.gc(layout)
+
+    assert not layout.flow_dir.exists()
+    assert [directory.exists() for directory in planted] == [False, False, False]
+    assert (kept / prove_failability.ACTIVE_MARKER_NAME).is_file()
+    assert kept.is_relative_to(state_home.resolve())
+    assert other_copy.is_dir()
 
 
 def test_gc_refuses_a_folder_it_did_not_create(layout: workspace.Layout) -> None:
@@ -3351,6 +3532,97 @@ def test_prove_refuses_a_manifest_that_is_not_a_file_before_it_binds_a_copy(
     assert capsys.readouterr().err == f"workspace: manifest {manifest} is not a file\n"
     assert started == []
     assert not layout.flow_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("extra", "option"),
+    [
+        (("--workspace", "/elsewhere"), "--workspace"),
+        (("--workspace=/elsewhere",), "--workspace"),
+        (("--work", "/elsewhere"), "--workspace"),
+        (("--scratch-root", "/elsewhere"), "--scratch-root"),
+        (("--scratch-root=/elsewhere",), "--scratch-root"),
+        (("--scr", "/elsewhere"), "--scratch-root"),
+        (("--json", "/elsewhere/proofs.json"), "--json"),
+        (("--json=/elsewhere/proofs.json",), "--json"),
+        (("--js", "/elsewhere/proofs.json"), "--json"),
+    ],
+    ids=[
+        "workspace",
+        "workspace-equals",
+        "workspace-prefix",
+        "scratch-root",
+        "scratch-root-equals",
+        "scratch-root-prefix",
+        "json",
+        "json-equals",
+        "json-prefix",
+    ],
+)
+def test_prove_refuses_an_extra_argument_that_would_replace_one_of_its_own_flags(
+    extra: tuple[str, ...],
+    option: str,
+    layout: workspace.Layout,
+    started: _StartedCommands,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The proof script's parser keeps the last value, so an extra ``--json`` (or its prefix)
+    # would move the proof's evidence out of the flow folder, where ``gc`` never looks.
+    manifest = _write(tmp_path / "proofs.json", "{}\n")
+
+    code = _prove(manifest, "--", "--only", "1", *extra)
+
+    assert code == workspace.REFUSED
+    assert capsys.readouterr().err == (
+        "workspace: prove passes --workspace, --scratch-root and --json itself, so the proof's "
+        f"evidence stays in the flow folder; drop {option} from the arguments after --\n"
+    )
+    assert started == []
+    assert not layout.flow_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("tools", "message"),
+    [
+        ((), "git is not on PATH, so the shared tree cannot be listed, copied or diffed"),
+        (("git",), "uv is not on PATH, so no copy can be synced"),
+    ],
+    ids=["no-git", "no-uv"],
+)
+def test_run_refuses_a_tool_missing_from_path_before_its_header(
+    tools: tuple[str, ...],
+    message: str,
+    layout: workspace.Layout,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    for tool in tools:
+        real = shutil.which(tool)
+        assert real is not None
+        _write(folder / tool, f'#!/bin/sh\nexec {real} "$@"\n').chmod(0o755)
+
+    def for_flow(flow: str) -> workspace.Layout:
+        return workspace.Layout(layout.repo_root, layout.base, flow)
+
+    monkeypatch.setattr(workspace.Layout, "for_flow", staticmethod(for_flow))
+    monkeypatch.setenv("PATH", str(folder))
+
+    code = workspace.main(
+        [
+            "run",
+            _ADDRESS,
+            "--",
+            "pytest",
+        ],
+    )
+
+    assert code == workspace.REFUSED
+    assert capsys.readouterr().err == f"workspace: {message}\n"
+    assert not layout.run_log.exists()
 
 
 def test_gc_refuses_while_a_prove_waits_for_its_copy(

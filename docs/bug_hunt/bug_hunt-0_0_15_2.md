@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 227 done, 138 to do.
+Progress: 228 done, 137 to do.
 
 ## Done
 
@@ -994,6 +994,13 @@ Progress: 227 done, 138 to do.
   `scripts/workspace.py::LINT_COMMANDS`; the item's "all 57 pass" was wrong: spec-034 failed (a `Meta.relation_shapes`
   CSV row and link definition left after its body link was dropped), so both are removed and DONE-034's glossary rows
   re-imported; START and CONTRIBUTING list the hook
+- [x] 378. A killed `workspace.py prove` no longer locks its copy: a resync (first bind, rebind, `--fresh`) and `gc`
+  remove the copy's `prove_failability.py` state directory (one function names it for both scripts), first restoring
+  a `.venv` mutation (which the mirror keeps) from its pristine copy with a byte compare; a marker that cannot be read
+  or restored is kept with a stderr notice and the resync completes; a `prove` extra that argparse would bind to
+  `--workspace` / `--scratch-root` / `--json` is refused; `uv`, `git` or `docker` missing from PATH is a refusal
+  before the header (it was a raw traceback, raised before the header, not after), and the prover refuses a missing
+  scope executable before writing anything
 
 ## Outside review of the fixes
 
@@ -1171,10 +1178,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   field's awaitable un-awaited when a later sync field raises on a non-null position, so Python warns "coroutine never
   awaited" (`filterwarnings = error` turns it into a session error in a failing run); upstream behaviour, but an async
   many-side resolver could avoid building a coroutine that may never run
-- [ ] 378. (robustness) `workspace.py prove`: a SIGKILLed prove leaves
-  `~/.local/state/prove_failability/tree-<digest>/ACTIVE-MUTATION.json`, which `release` / `gc` / `--fresh` never clear,
-  so the next prove on that slot refuses; arguments after `--` override `--workspace` / `--scratch-root` / `--json`;
-  `uv` missing from PATH raises `FileNotFoundError` after the header with no run-log entry
 - [ ] 379. A consumer `Prefetch(queryset=...)` on a forward relation the optimizer joins goes unused (the JOIN serves
   the row: a hook `prefetch_related(Prefetch("patron", queryset=Patron.objects.only("id")))` with `loans { note patron {
   name } }` runs one JOIN statement), so a consumer Prefetch queryset that filters rows is silently ignored on that
