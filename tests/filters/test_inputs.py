@@ -797,8 +797,8 @@ def test_normalize_input_value_unwraps_enum_member_with_none_value() -> None:
     assert normalize_input_value(ChoiceFilter(), Tri.UNKNOWN) is None
 
 
-def test_normalize_input_value_range_filter_emits_positional_keys() -> None:
-    """RangeFilter -> `{<field>_0: start, <field>_1: end}` positional patch."""
+def test_normalize_input_value_range_filter_emits_its_widget_keys() -> None:
+    """RangeFilter -> `{<field>_0: start, <field>_1: end}`, the keys its ``MultiWidget`` reads."""
     f = RangeFilter(field_name="lifetime_fines_cents")
 
     @dataclass
@@ -811,7 +811,7 @@ def test_normalize_input_value_range_filter_emits_positional_keys() -> None:
 
 
 def test_normalize_input_value_range_filter_drops_none_axes_partial_range() -> None:
-    """Partial-range inputs surface only the supplied positional key.
+    """Partial-range inputs surface only the supplied key.
 
     A ``None``-valued axis is "axis not supplied"; emitting ``{<name>_0: None}``
     to the form-data dict surfaces "axis supplied, value is None" to any
@@ -971,6 +971,39 @@ def test_normalize_input_value_range_filter_rejects_a_value_it_cannot_read(
         f"its 'price_span' input, but received {type(bad).__name__} {bad!r}; send a mapping "
         "or input object with 'start' / 'end' (the GraphQL schema already rejects this "
         "shape over the wire)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("widget", "keys"),
+    [
+        pytest.param(forms.TextInput(), "None", id="not-a-multi-widget"),
+        pytest.param(
+            forms.MultiWidget(widgets=(forms.TextInput, forms.TextInput, forms.TextInput)),
+            "['price_span_0', 'price_span_1', 'price_span_2']",
+            id="three-keys",
+        ),
+    ],
+)
+def test_range_filter_whose_widget_does_not_read_two_keys_is_refused_when_the_schema_is_built(
+    widget: forms.Widget,
+    keys: str,
+) -> None:
+    """A range filter whose widget does not read exactly two keys has no patch to send.
+
+    The refusal comes from the input conversion the schema build runs, never from a
+    request. Live: each upstream widget's keys,
+    ``test_scalars_filter_api.py::test_upstream_range_filter_reads_the_keys_its_widget_reads``.
+    """
+    with pytest.raises(ConfigurationError) as excinfo:
+        convert_filter_to_input_annotation(
+            DjangoRangeFilter(field_name="price_span", widget=widget),
+            None,
+        )
+    assert str(excinfo.value) == (
+        "RangeFilter consumes a range input for its 'price_span' input, but its form field's "
+        f"widget does not read exactly two form-data keys ({keys}); give it a two-widget "
+        "MultiWidget."
     )
 
 

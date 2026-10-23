@@ -163,6 +163,7 @@ from .base import (
     _relation_uses_non_pk_to_field,
     _RelationIdentityListField,
     membership_in_filter_class,
+    multi_widget_keys,
 )
 from .inputs import (
     LOGIC_OPERATORS,
@@ -1413,9 +1414,9 @@ def _absent_widget_value(widget: forms.Widget | type[forms.Widget], name: str) -
     Its data-reading methods must be Django's, django-filter's or the package's,
     the built widget must hold no attribute of its own in place of a method
     (``_shadows_a_method``), ``value_omitted_from_data({}, {}, name)`` must be
-    ``True``, and a multi-widget must name no sub-key with a ``__`` suffix
-    (``_named_flat_copies`` reads one as a relation path); ``_UNPROVEN``
-    otherwise, and on a raise.
+    ``True``, and a multi-widget must read no key whose part after ``name`` opens
+    with ``__`` (``filters/base.py::multi_widget_keys``; ``_named_flat_copies`` reads
+    one as a relation path); ``_UNPROVEN`` otherwise, and on a raise.
     """
     widget_class = widget if isinstance(widget, type) else type(widget)
     if not (
@@ -1427,11 +1428,8 @@ def _absent_widget_value(widget: forms.Widget | type[forms.Widget], name: str) -
         built = widget() if isinstance(widget, type) else widget
         if _shadows_a_method(built):
             return _UNPROVEN
-        # django-stubs declare no ``widgets_names``; ``MultiWidget.__init__`` sets it.
-        suffixes = cast("list[str]", getattr(built, "widgets_names", []))
-        if isinstance(built, forms.MultiWidget) and any(
-            suffix.startswith("__") for suffix in suffixes
-        ):
+        keys = multi_widget_keys(built, name) or []
+        if any(key[len(name) :].startswith("__") for key in keys):
             return _UNPROVEN
         no_files: MultiValueDict[str, UploadedFile[bytes] | UploadedFile[str]] = MultiValueDict()
         if built.value_omitted_from_data({}, no_files, name) is not True:
@@ -4187,7 +4185,7 @@ class FilterSet(
             ):
                 normalized = normalize_input_value(filter_instance, value, field_name=form_key)
                 if isinstance(normalized, _RangeFormPatch):
-                    # Range-filter patch: positional form keys for one lookup.
+                    # Range-filter patch: the two keys its widget reads, for one lookup.
                     data.update(normalized)
                 elif isinstance(normalized, dict):
                     cls._reject_dict_form_value(filter_instance, form_key, value)
@@ -4272,8 +4270,9 @@ class FilterSet(
         """Fail loud when a filter's normalized value is a dict other than the range patch.
 
         ``normalize_input_value`` returns a multi-key patch for exactly one
-        legitimate shape: the range family's positional
-        ``{<field>_0, <field>_1}`` patch, typed ``_RangeFormPatch``. A plain dict
+        legitimate shape: the range family's patch of the two keys its widget reads
+        (``{<field>_0, <field>_1}``, ``{<field>_min, <field>_max}``, ...), typed
+        ``_RangeFormPatch``. A plain dict
         coming back from a filter means the raw value was itself a dict-shaped garbage
         value that the catch-all normalization passed through verbatim --
         a partial operator bag with unknown keys
@@ -4352,8 +4351,8 @@ class FilterSet(
         #   * a multi-key filter VALUE - a ``RangeFilter``'s
         #     ``{"start": 1, "end": 5}`` - whose keys are NOT lookup attrs
         #     and which the scalar branch must hand to
-        #     ``normalize_input_value`` so it produces the positional
-        #     ``{<field>_0, <field>_1}`` patch.
+        #     ``normalize_input_value`` so it produces the patch of the two
+        #     keys the filter's widget reads.
         # Disambiguate by the keys: a dict is an operator bag only when
         # EVERY key names a known lookup attr (``_LOOKUP_PYTHON_ATTRS``
         # - ``start`` / ``end`` are absent). Strawberry-input dataclass

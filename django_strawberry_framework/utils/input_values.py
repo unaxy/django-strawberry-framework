@@ -18,7 +18,7 @@ This module owns the *traversal mechanics* only; the family-specific *leaf
 semantics* stay at the call sites:
 
 * the filter normalizer keeps its per-field operator-bag iteration and the
-  ``RangeFilter`` positional patch;
+  range filter's patch of the keys its widget reads;
 * the order normalizer keeps its ``Ordering`` direction handling and its
   recursion into child ordersets;
 * the permission walkers keep the per-class ``check_*`` dedup and the

@@ -73,6 +73,7 @@ from django_strawberry_framework.utils.strings import (
 )
 
 from .base import (
+    _RANGE_BOUNDS,
     ArrayFilter,
     EnumMemberValue,
     GlobalIDFilter,
@@ -87,7 +88,9 @@ from .base import (
     _EnumMemberFilterMixin,
     _filterset_model_field,
     model_choice_identity_column,
+    multi_widget_keys,
     relation_identity_column,
+    unkept_form_field,
 )
 
 # Domain-local aliases for the shared generated-input substrate (the mechanics
@@ -601,6 +604,8 @@ def convert_filter_to_input_annotation(
         return GenericAlias(list, (_element_annotation(matched, model_field, owner_definition),))
 
     def _range(matched: Filter) -> object:
+        # Refuse a widget the patch cannot address when the schema is built, not per request.
+        _ = range_form_keys(matched, matched.field_name or "range")
         inner = _scalar_from_model_field(model_field)
         return _build_range_input_class(matched, inner, filterset_cls)
 
@@ -678,8 +683,9 @@ def normalize_input_value(
       wire form (not pre-decoded to a bare ``node_id``) so the bound filter
       can validate its ``type_name`` before decoding;
     - a ``list`` when ``django-filter`` consumes a list;
-    - a ``_RangeFormPatch`` when the filter consumes more than one
-      positional form-data key (``RangeFilter`` -> ``{<field>_0, <field>_1}``).
+    - a ``_RangeFormPatch`` when the filter consumes the two form-data keys
+      its range widget reads (``RangeFilter`` -> ``{<field>_0, <field>_1}``,
+      django-filter's ``RangeFilter`` -> ``{<field>_min, <field>_max}``).
 
     Kind order is ``_FILTER_INPUT_KIND_TYPES``, the same table convert
     walks. ``TypedFilter`` is convert-only: normalize returns
@@ -885,7 +891,7 @@ _RANGE_AXES = frozenset({"start", "end"})
 
 
 class _RangeFormPatch(dict[str, object]):
-    """A range filter's positional form-data patch, ``{<name>_0, <name>_1}``.
+    """A range filter's form-data patch: the start and end keys its range widget reads.
 
     The one multi-key shape ``normalize_input_value`` returns, under its own type so
     the normalizer's caller (``filters/sets.py::FilterSet._normalize_input``) merges it
@@ -899,20 +905,25 @@ def _normalize_range_value(
     raw_value: object,
     field_name: str | None = None,
 ) -> _RangeFormPatch:
-    """Return the positional form-data patch ``{<name>_0, <name>_1}`` for a RangeFilter.
+    """Return the form-data patch of a range filter: its start and end under its widget's keys.
 
-    Per spec-027 Decision 4: Django's ``RangeWidget.value_from_datadict``
-    reads positional keys ``name_0`` / ``name_1`` (NOT named ``_from`` /
-    ``_to`` keys). The patch's key prefix is the form-data field name
-    (``filter_instance.field_name`` for direct filters; the caller may
-    override via ``field_name`` for the dataclass-attribute case where
-    the Strawberry attr differs from the django-filter form-key).
+    Per spec-027 Decision 4 the two keys are the ones the filter's own range widget
+    reads (``filters/base.py::multi_widget_keys``): ``<name>_0`` / ``<name>_1`` for the
+    package's ``RangeFilter`` (Django's ``MultiWidget``), ``<name>_min`` / ``<name>_max``
+    for django-filter's ``RangeFilter`` (``RangeWidget``), ``<name>_after`` /
+    ``<name>_before`` for its date and time families (``DateRangeWidget``), and a
+    consumer widget's own ``suffixes`` (``range_form_keys``, which the schema build already
+    ran, so a widget that does not read exactly two keys never reaches a request). The
+    patch's key prefix is the form-data field name
+    (``filter_instance.field_name`` for direct filters; the caller may override via
+    ``field_name`` for the dataclass-attribute case where the Strawberry attr differs
+    from the django-filter form-key).
 
-    Partial-range inputs surface only the supplied positional key
-    (``{<name>_0}`` for start-only, ``{<name>_1}`` for end-only, ``{}``
-    for neither). Omitting ``None``-valued axes preserves the form-data
-    "axis not supplied" convention ``django-filter`` consumes and keeps
-    the patch keys load-bearing for any caller walking ``data.keys()``.
+    Partial-range inputs surface only the supplied key (the start key for
+    start-only, the end key for end-only, ``{}`` for neither). Omitting
+    ``None``-valued axes preserves the form-data "axis not supplied" convention
+    ``django-filter`` consumes and keeps the patch keys load-bearing for any caller
+    walking ``data.keys()``.
 
     The value is read through ``utils/input_values.py::iter_input_items``, the
     package's one dict-or-input-dataclass walk. The schema types every range
@@ -939,19 +950,39 @@ def _normalize_range_value(
     axes = dict(items)
     start = axes.get("start")
     end = axes.get("end")
+    start_key, end_key = range_form_keys(filter_instance, base)
     # Drop ``None``- and ``UNSET``-valued axes so partial-range inputs surface only
-    # the supplied positional key. Django's ``RangeWidget.value_from_datadict``
-    # treats a missing key the same as a ``None``-valued one, but emitting
-    # ``{<name>_0: None}`` or ``{<name>_0: UNSET}`` to the form-data dict surfaces
-    # "axis supplied, value is inactive" to any caller walking ``data.keys()`` and
-    # leaks ``UNSET`` into form-field cleaning -- the same ``is_inactive_value``
-    # test as ``normalize_input_value``'s entry guard.
+    # the supplied key. A range widget treats a missing key the same as a
+    # ``None``-valued one, but emitting ``{<start key>: None}`` or
+    # ``{<start key>: UNSET}`` to the form-data dict surfaces "axis supplied, value
+    # is inactive" to any caller walking ``data.keys()`` and leaks ``UNSET`` into
+    # form-field cleaning -- the same ``is_inactive_value`` test as
+    # ``normalize_input_value``'s entry guard.
     patch = _RangeFormPatch()
     if not is_inactive_value(start, unset_sentinel=UNSET):
-        patch[f"{base}_0"] = _unwrap_enum_member(start)
+        patch[start_key] = _unwrap_enum_member(start)
     if not is_inactive_value(end, unset_sentinel=UNSET):
-        patch[f"{base}_1"] = _unwrap_enum_member(end)
+        patch[end_key] = _unwrap_enum_member(end)
     return patch
+
+
+def range_form_keys(filter_instance: Filter, base: str) -> tuple[str, str]:
+    """Return the start and end form-data keys a range filter's widget reads for ``base``.
+
+    The widget is the one the filter's form field builds (``filters/base.py::unkept_form_field``,
+    which writes nothing to a class-level declaration every request shares), asked for its
+    keys through ``filters/base.py::multi_widget_keys``. A widget that does not read exactly
+    two keys has no slot for a start and an end, so it is a ``ConfigurationError``;
+    ``convert_filter_to_input_annotation`` runs this when the schema is built.
+    """
+    keys = multi_widget_keys(read_attr(unkept_form_field(filter_instance), "widget"), base)
+    if keys is None or len(keys) != _RANGE_BOUNDS:
+        raise ConfigurationError(
+            f"{truth.kind(filter_instance)} consumes a range input for its {base!r} "
+            "input, but its form field's widget does not read exactly two form-data keys "
+            f"({truth.render(keys)}); give it a two-widget MultiWidget.",
+        )
+    return keys[0], keys[1]
 
 
 def _owner_type_name(owner_definition: DjangoTypeDefinition | None) -> str | None:

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 213 done, 142 to do.
+Progress: 214 done, 143 to do.
 
 ## Done
 
@@ -894,6 +894,12 @@ Progress: 213 done, 142 to do.
   (an ArrayField column's `base_field`), so a non-finite or past-1e50 element is `FILTER_INVALID` as on the generated
   `in`; relation elements, a non-list value and an unbound filter pass through; `_ElementField` joins
   `sets.py::_NONE_CLEANING_FIELDS` so a deferred flat copy stays deferred
+- [x] 161. `filters/inputs.py::_normalize_range_value` hardcoded `_0` / `_1`, so a declared django-filter `RangeFilter`
+  and its date / time families (widgets reading `_min` / `_max`, `_after` / `_before`) ignored every bound:
+  `filters/base.py::multi_widget_keys` reads the keys from the filter's own built widget (`SuffixedMultiWidget.suffixed`
+  per `suffixes`, else `widgets_names`; audited django-filter 21.1-26.2, Django 5.2.16-6.1.2),
+  `inputs.py::range_form_keys` refuses a widget not reading exactly two keys at schema build, and
+  `sets.py::_absent_widget_value` reads the same keys
 
 ## Outside review of the fixes
 
@@ -944,9 +950,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (non-QUERY never introduces, always widens); `plans.py::prune_unsupportable_select_related` then has no live caller and
   goes; live rows beside `test_query/test_library_api.py::_hooked_holder_schema`. Open for you: retracting the prune
   design in specs 004 and 035, and whether `types/resolvers.py::_FK_ELISION_UNSAFE` stays as a defensive check
-- [ ] 161. A declared `django_filters.RangeFilter` writes `_0` / `_1` keys while the installed django-filter widget may read
-  `_min` / `_max`, so its bounds are ignored (`filters/inputs.py` documents the positional keys on purpose); check the
-  installed django-filter's key names before fixing
 - [ ] 165. Item 12's deadline checks fail forward-FK and one-to-one hops inside a mutation payload (rolling back a write that
   used to commit) and error subscription frames past the budget; spec-047 Decision 9 states both (`8d4f66bd`) but no test
   pins either; the async deadline rows also cannot tell a head check from a check inside the `sync_to_async` closure
@@ -1108,6 +1111,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   under AGENTS rule 37 first
 - [ ] 376. A package `RangeFilter` / `ListFilter` under a plain `django_filters.FilterSet` (no package FilterSet parent,
   e.g. the DRF backend path) cleans nothing; check the reach under AGENTS rule 37 first
+- [ ] 373. `django_filters.LookupChoiceFilter` publishes a bare scalar input, so django-filter's `lookup_required`
+  refuses every request (`FILTER_INVALID` "Select a lookup."); its input needs a value + lookup pair. Feature card, not
+  a defect
+- [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the
+  value (all rows answered). Robustness row: PostgreSQL range columns are unsupported
 
 ## To do: holes found re-checking the fixes
 
