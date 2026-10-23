@@ -431,10 +431,10 @@ lines indented two spaces. `resume` writes a run's first `Drift:` line; drift fo
 run is appended by hand.
 
 Per item: `uv run python scripts/workspace.py baseline review/<item>` prints `ITEM_BASELINE`
-(`git stash create`; empty → the `git rev-parse HEAD` sha, since an empty value would send the diff
-tooling back to the latest tag) and takes the item's `before` copy ("Workspace"); Worker-0 records
-it + the same listings as `Item baseline:` fields on the plan item. Item-scoped diff =
-`workspace.py diff <item baseline> -- <paths touched>`, every file the item added included.
+(a commit of the item's `before` copy as synced, on `HEAD`, untracked files included) and takes
+that copy ("Workspace"); Worker-0 records it + the same listings as `Item baseline:` fields on the
+plan item. Item-scoped diff = `workspace.py diff <item baseline> -- <paths touched>`, every file
+the item added included.
 
 Each item landing tracked edits or new files appends to `## Owned changes`: path, item, axis,
 symbols changed. A later item may build on a ledgered path. Attribute by content, never by dirty
@@ -842,9 +842,9 @@ full default suite
 coverage; the `sharded` cell w/o coverage, since sharded-only tests skip by default
 and the default run owns the coverage floor; the `pg` cell, only the database-touching tests, on
 the gate copy's own database. It writes `gate-<run id>.json` to the evidence folder, bound to
-`git stash create` at gate time, the blob ids of `pyproject.toml` and `uv.lock`, each suite's
-cell and the floor pins, and prints per suite the run id, exit, summary and coverage lines; a cell that cannot run is
-`unverified` w/ the reason.
+a snapshot commit of the gate copy at gate time, the blob ids of `pyproject.toml` and `uv.lock`,
+each suite's cell and the floor pins, and prints per suite the run id, exit, summary and coverage
+lines; a cell that cannot run is `unverified` w/ the reason.
 
 Record, per suite, failures, coverage, skips, xfails, collected/selected counts and the cell. A
 change to package source, tests, fixtures, pytest or coverage config, dependencies or mode

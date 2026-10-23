@@ -2106,6 +2106,47 @@ def test_gate_copy_git_lists_what_the_shared_tree_lists_and_reports_its_changes(
     assert _git(gate_dir, "status", "--short") == _git(repo, "status", "--short")
 
 
+def test_gate_binds_its_result_to_a_snapshot_of_the_gate_copy_on_its_head(
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = layout.repo_root
+    for name in ("pyproject.toml", "uv.lock"):
+        _ = _write(repo / name, f"{name}\n")
+    _git(repo, "add", "pyproject.toml", "uv.lock")
+    _git(repo, "commit", "-q", "-m", "project files")
+    before_sync = _git(repo, "rev-parse", "HEAD").strip()
+    _write(repo / PACKAGE / "untracked.py", "NEW = 1\n")
+    real_mirror = workspace.mirror_tree
+
+    def mirror_after_a_landing(
+        root: Path,
+        destination: Path,
+        *,
+        preserved: frozenset[str],
+    ) -> dict[str, list[str | int]]:
+        _write(root / PACKAGE / "landed.py", "LANDED = 1\n")
+        _git(root, "add", f"{PACKAGE}/landed.py")
+        _git(root, "commit", "-q", "-m", "landed")
+        return real_mirror(root, destination, preserved=preserved)
+
+    monkeypatch.setattr(workspace, "mirror_tree", mirror_after_a_landing)
+
+    assert workspace.gate(layout, []) == 0
+
+    _ = capsys.readouterr()
+    assert syncs == [layout.gate_dir]
+    (result_path,) = layout.evidence.glob("gate-*.json")
+    result = json_object(json_loads(result_path.read_text(encoding="utf-8")))
+    snapshot = str(result["snapshot"])
+    assert result["head"] == _git(repo, "rev-parse", "HEAD").strip() != before_sync
+    assert _git(repo, "rev-parse", f"{snapshot}^").strip() == result["head"]
+    assert {".python-version", f"{PACKAGE}/untracked.py"} <= set(_tree_files(repo, snapshot))
+    assert _tree_files(repo, snapshot) == _copy_files(repo, layout.gate_dir)
+
+
 def test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order() -> None:
     """``gate``'s lint suite is the ``lint`` job of ``django.yml``, command for command.
 
@@ -2405,6 +2446,185 @@ def test_summarize_suite_reads_summary_collected_and_coverage() -> None:
 
 
 # --------------------------------------------------------------------------------------------
+# Snapshot baseline
+# --------------------------------------------------------------------------------------------
+
+
+def _tree_files(root: Path, commit: str) -> dict[str, str]:
+    """Return ``{name: blob id}`` of ``commit``'s tree."""
+    listing = _git(root, "ls-tree", "-r", "-z", commit).split("\0")
+    return {
+        record.split("\t", 1)[1]: record.split("\t", 1)[0].split()[2]
+        for record in listing
+        if record
+    }
+
+
+def _copy_files(root: Path, copy: Path) -> dict[str, str]:
+    """Return ``{name: blob id}`` of every file under ``copy``, its own ``.git`` left out."""
+    return {
+        path.relative_to(copy).as_posix(): _git(root, "hash-object", str(path)).strip()
+        for path in sorted(copy.rglob("*"))
+        if path.is_file() and path.relative_to(copy).parts[0] != ".git"
+    }
+
+
+def _manifest_of(entries: dict[str, list[str | int]]) -> workspace._Manifest:
+    return {
+        "synced_at": "now",
+        "tree_digest": workspace.tree_digest(entries),
+        "package_digest": "",
+        "entries": entries,
+    }
+
+
+def _snapshot_of_a_copy(repo: Path, tmp_path: Path) -> tuple[str, Path]:
+    copy = tmp_path / "copy"
+    manifest = _manifest_of(workspace.mirror_tree(repo, copy))
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    return workspace.snapshot_commit(repo, copy, manifest, head), copy
+
+
+def test_snapshot_commit_holds_the_copy_untracked_and_ignored_extras_included(
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+    _write(repo / PACKAGE / "pre_existing.py", "PRE = 1\n")
+    (repo / "examples" / "fakeshop" / "db.sqlite3").unlink()
+    _write(repo / "ignored.txt", "never copied\n")
+    index = (repo / ".git" / "index").read_bytes()
+    refs = _git(repo, "for-each-ref")
+
+    sha, copy = _snapshot_of_a_copy(repo, tmp_path)
+
+    assert _tree_files(repo, sha) == _copy_files(repo, copy)
+    assert {".python-version", f"{PACKAGE}/pre_existing.py"} <= set(_tree_files(repo, sha))
+    assert "ignored.txt" not in _tree_files(repo, sha)
+    assert _git(repo, "rev-parse", f"{sha}^").strip() == _git(repo, "rev-parse", "HEAD").strip()
+    assert (repo / ".git" / "index").read_bytes() == index
+    assert _git(repo, "for-each-ref") == refs
+
+
+def test_snapshot_commit_refuses_a_copy_edited_since_its_sync(repo: Path, tmp_path: Path) -> None:
+    copy = tmp_path / "copy"
+    manifest = _manifest_of(workspace.mirror_tree(repo, copy))
+    _write(copy / PACKAGE / "core.py", "EDITED = 1\n")
+
+    with pytest.raises(workspace.WorkspaceError, match="changed while it was snapshotted"):
+        _ = workspace.snapshot_commit(
+            repo,
+            copy,
+            manifest,
+            _git(repo, "rev-parse", "HEAD").strip(),
+        )
+
+
+def test_snapshot_commit_stores_the_bytes_on_disk_whatever_the_callers_line_endings(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ = (repo / PACKAGE / "core.py").write_bytes(b"CORE = 3\r\n")
+    home = tmp_path / "home"
+    _write(home / ".gitconfig", "[core]\n\tautocrlf = true\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
+    sha, _copy = _snapshot_of_a_copy(repo, tmp_path)
+
+    stored = workspace._git(repo, "cat-file", "blob", f"{sha}:{PACKAGE}/core.py")
+    assert stored == "CORE = 3\r\n"
+
+
+def test_snapshot_commit_needs_no_identity_from_the_callers_config(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _git(repo, "config", "user.useConfigOnly", "true")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+
+    sha, copy = _snapshot_of_a_copy(repo, tmp_path)
+
+    assert _tree_files(repo, sha) == _copy_files(repo, copy)
+
+
+def test_baseline_names_the_copy_whatever_landed_while_it_waited_for_its_lock(
+    layout: workspace.Layout,
+    syncs: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = layout.repo_root
+    _write(repo / PACKAGE / "pre_existing.py", "PRE = 1\n")
+    real_mirror = workspace.mirror_tree
+
+    def mirror_after_a_landing(
+        root: Path,
+        destination: Path,
+        *,
+        preserved: frozenset[str],
+    ) -> dict[str, list[str | int]]:
+        _write(root / PACKAGE / "landed.py", "LANDED = 1\n")
+        _git(root, "add", f"{PACKAGE}/landed.py")
+        _git(root, "commit", "-q", "-m", "landed")
+        _write(root / PACKAGE / "core.py", "CORE = 3\n")
+        _write(root / PACKAGE / "late.py", "LATE = 1\n")
+        return real_mirror(root, destination, preserved=preserved)
+
+    def for_flow(_flow: str) -> workspace.Layout:
+        return layout
+
+    monkeypatch.setattr(workspace, "mirror_tree", mirror_after_a_landing)
+    monkeypatch.setattr(workspace.Layout, "for_flow", staticmethod(for_flow))
+
+    assert workspace.main(["baseline", "review/pkg/a.py"]) == 0
+
+    sha = capsys.readouterr().out.splitlines()[0].removeprefix("ITEM_BASELINE=")
+    assert syncs == [layout.slot_dir("slot-1")]
+    assert _tree_files(repo, sha) == _copy_files(repo, layout.slot_dir("slot-1"))
+    assert _git(repo, "rev-parse", f"{sha}^").strip() == _git(repo, "rev-parse", "HEAD").strip()
+    assert workspace._load_state(layout)["items"]["pkg/a.py"]["item_baseline"] == sha
+    assert workspace.item_diff(repo, sha, (".",)).startswith(b"sha256 ")
+    _write(repo / PACKAGE / "core.py", "CORE = 4\n")
+    assert _headers(workspace.item_diff(repo, sha, (".",)).decode()) == [
+        f"diff --git a/{PACKAGE}/core.py b/{PACKAGE}/core.py",
+    ]
+
+
+def test_baseline_leaves_a_landing_during_the_copys_sync_out_of_its_snapshot(
+    layout: workspace.Layout,
+    syncs: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = layout.repo_root
+    database = repo / "examples" / "fakeshop" / "db.sqlite3"
+    recorded_sync = workspace._uv_sync
+
+    def sync_while_the_shared_tree_moves(destination: Path, holding: Sequence[int] = ()) -> None:
+        recorded_sync(destination, holding)
+        _write(database, "landed during the sync\n")
+
+    def for_flow(_flow: str) -> workspace.Layout:
+        return layout
+
+    monkeypatch.setattr(workspace, "_uv_sync", sync_while_the_shared_tree_moves)
+    monkeypatch.setattr(workspace.Layout, "for_flow", staticmethod(for_flow))
+
+    assert workspace.main(["baseline", "review/pkg/a.py"]) == 0
+
+    sha = capsys.readouterr().out.splitlines()[0].removeprefix("ITEM_BASELINE=")
+    assert syncs == [layout.slot_dir("slot-1")]
+    assert _tree_files(repo, sha) == _copy_files(repo, layout.slot_dir("slot-1"))
+    assert _headers(workspace.item_diff(repo, sha, (".",)).decode()) == [
+        "diff --git a/examples/fakeshop/db.sqlite3 b/examples/fakeshop/db.sqlite3",
+    ]
+
+
+# --------------------------------------------------------------------------------------------
 # Item diff
 # --------------------------------------------------------------------------------------------
 
@@ -2687,20 +2907,6 @@ def test_wanted_files_ignores_the_callers_global_ignore_files(
     _callers_home(tmp_path / "home", files, monkeypatch)
 
     assert f"{PACKAGE}/scratch.local.py" in workspace.wanted_files(repo)
-
-
-def test_baseline_sha_stores_the_bytes_on_disk_whatever_the_callers_line_endings(
-    repo: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _ = (repo / PACKAGE / "core.py").write_bytes(b"CORE = 3\r\n")
-    _callers_home(tmp_path / "home", {".gitconfig": "[core]\n\tautocrlf = true\n"}, monkeypatch)
-
-    baseline = workspace.baseline_sha(repo)
-
-    stored = workspace._git(repo, "cat-file", "blob", f"{baseline}:{PACKAGE}/core.py")
-    assert stored == "CORE = 3\r\n"
 
 
 def test_content_tree_is_the_baseline_overlaid_with_the_working_content(repo: Path) -> None:

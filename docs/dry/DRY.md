@@ -374,11 +374,11 @@ appends one `Drift: <date> HEAD <old>..<new>; dirty + <paths>` line under the cu
 heading (the header `Run:` line on the first run, `## Run <release> <date>-<n>` afterwards),
 continuation lines indented two spaces. A drifted path is concurrent work like the rest.
 
-Per item: `uv run python scripts/workspace.py baseline dry/<item>` prints `ITEM_BASELINE` (`git
-stash create`, or the `HEAD` sha) and takes the item's `before` copy; Worker-0 records it + the
-same listings, for the item-scoped comparison only. Item-scoped diff = `workspace.py diff <item
-baseline> -- <paths touched>`, every file the item added included: a new owner and its tests never
-drop out of review for being unstaged.
+Per item: `uv run python scripts/workspace.py baseline dry/<item>` prints `ITEM_BASELINE` (a
+commit of the item's `before` copy as synced, on `HEAD`, untracked files included) and takes that
+copy; Worker-0 records it + the same listings, for the item-scoped comparison only. Item-scoped
+diff = `workspace.py diff <item baseline> -- <paths touched>`, every file the item added included:
+a new owner and its tests never drop out of review for being unstaged.
 
 Dirty ≠ untouchable. Each item landing tracked edits or new files appends to the plan's
 `## Owned changes`: path, item, symbols changed. A later item may build on a path listed there.
@@ -515,9 +515,9 @@ carrying its own git index). The full suite, package coverage 100%, the floor ce
 push, `gh workflow run django.yml` for the full matrix, `postgres.yml`). Gate = lint + every
 `## Pending execution` command from every artifact, run as listed (a green unmutated suite
 discharges no failability proof). Record failures, skips, xfails, collected/selected counts and the
-Actions run that carried the full suite. The gate's result
-file binds it: `git stash create` at gate time + blob ids of `pyproject.toml` and `uv.lock` + each
-suite's cell + the floor pins. Change to package source, tests, fixtures, pytest/coverage config, dependencies or mode
+Actions run that carried the full suite. The gate's result file binds it: a snapshot commit of the
+gate copy at gate time + blob ids of `pyproject.toml` and `uv.lock` + each suite's cell + the floor
+pins. Change to package source, tests, fixtures, pytest/coverage config, dependencies or mode
 invalidates it; prose doesn't. Worker-2 completes the gate row by confirming the bound inputs still
 match the tree and each pending command ran. Failure in a path an item touched, or of a `proof:`
 command → that item back to Worker-1; a failing `gate:` command reopens no item; failure reproduced
