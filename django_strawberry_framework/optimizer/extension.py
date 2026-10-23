@@ -132,6 +132,7 @@ from .plans import (
     diff_plan_for_queryset,
     lookup_paths,
     runtime_path_from_info,
+    seals_consumer_prefetch,
 )
 from .selections import (
     ast_child_selections,
@@ -1256,7 +1257,11 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         build is built, applied and published in ONE sync boundary off the loop;
         a plan already cached (or memoized for this execution) is applied here,
         because applying a plan runs no consumer code. A plan that embeds a hook
-        result is never cached, so every request that plans one hops.
+        result is never cached, so every request that plans one hops. Reconciling
+        a memoized plan can run a hook too: a consumer ``Prefetch`` on a path whose
+        target type declares ``get_queryset`` is sealed through that hook
+        (``plans.py::diff_plan_for_queryset``), so such a reuse hops as well
+        (``_builds_plan``).
         """
         inner_result, _ = unwrap_async_queryset_adapter(result)
         normalized = normalize_query_source(inner_result)
@@ -1283,15 +1288,22 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         Mirrors ``apply_to``'s two pass-throughs (no root field nodes, a combined
         queryset), which plan nothing, then ``_get_or_build_plan``'s two lookups
         (the cross-request cache, then the execution memo), which reuse a plan.
-        Only the remaining case runs the walker and so consumer hooks.
+        The remaining case runs the walker and so consumer hooks; so does reusing a
+        plan whose reconciliation seals a consumer ``Prefetch`` of ``queryset``
+        through its target type's hook (``plans.py::seals_consumer_prefetch``).
         """
         if not info.field_nodes or queryset.query.combinator:
             return False
         cache_key = self._build_cache_key(info, target_model, origin)
-        if cache_key in self._plan_cache:
-            return False
-        exec_memo = _execution_plan_memo()
-        return exec_memo is None or cache_key not in exec_memo
+        reused = self._plan_cache.get(cache_key)
+        if reused is None:
+            exec_memo = _execution_plan_memo()
+            if exec_memo is None:
+                return True
+            reused = exec_memo.get(cache_key)
+            if reused is None:
+                return True
+        return seals_consumer_prefetch(reused, queryset)
 
     def apply_to(
         self,
@@ -1316,8 +1328,12 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
            ``_get_or_build_plan`` (passing ``target_type`` as ``origin`` so
            plans cache-separate by node type exactly as middleware plans do).
         2. Reconcile a non-empty plan against the consumer's existing queryset
-           optimizations (``diff_plan_for_queryset``), which strips the resolver
-           keys of every planned prefetch the consumer's own ``Prefetch`` wins.
+           optimizations (``diff_plan_for_queryset``): a consumer ``Prefetch``
+           carrying a queryset keeps the rows of its path, so the planned JOIN
+           or FK-id elision there and every planned prefetch it wins leave the
+           plan with their resolver keys, and on a target whose type declares
+           ``get_queryset`` the consumer's queryset is sealed through the hook
+           (with ``info``) in place of the planned ``Prefetch``.
         3. Publish the reconciled plan + strictness sentinels via
            ``_publish_plan_to_context``, so a relation the plan no longer loads
            is never published as optimizer-scoped.
@@ -1368,16 +1384,17 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             target_type,
         )
         # B8: reconcile against consumer queryset optimizations BEFORE
-        # publishing sentinels. Consumer-wins prefetch drops must strip
-        # coupled ``planned_resolver_keys`` / FK-id elisions (via
-        # ``prefetch_path_resolver_keys``) before ``_publish_plan_to_context``:
+        # publishing sentinels. Consumer-wins drops must strip coupled
+        # ``planned_resolver_keys`` / FK-id elisions (via
+        # ``select_path_resolver_keys`` / ``prefetch_path_resolver_keys``)
+        # before ``_publish_plan_to_context``:
         # a published key reads as optimizer-scoped, so the resolver would skip
         # the target type's ``get_queryset`` on rows the consumer's own
         # ``Prefetch`` loaded and ``_check_n1`` would stay silent for them.
         # Returns a fresh plan and (when an upgrade was applied) a
         # rewritten queryset; B1's cached plan is never mutated.
         if not plan.is_empty:
-            plan, queryset = diff_plan_for_queryset(plan, queryset)
+            plan, queryset = diff_plan_for_queryset(plan, queryset, info=info)
         self._publish_plan_to_context(plan, info)
         if plan.is_empty:
             return queryset

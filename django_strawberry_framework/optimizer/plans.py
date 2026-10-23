@@ -17,6 +17,13 @@ The plan is a simple data class carrying optimization directives and metadata:
   lazy-loading the related row.
 - ``planned_resolver_keys``: branch-sensitive resolver keys for relations
   covered by the plan, used by strictness checks.
+- ``select_path_resolver_keys`` / ``prefetch_path_resolver_keys``: the resolver
+  keys each planned join (or FK-id elision) and each planned prefetch lookup
+  satisfies, so a consumer ``Prefetch`` that takes a path over withdraws exactly
+  the keys the plan no longer serves.
+- ``prefetch_path_seals``: for each planned prefetch whose target type declares
+  ``get_queryset``, how a consumer queryset seeded on that path is scoped by the
+  hook (``PrefetchSeal``).
 - ``finalized_*`` metadata: immutable membership sets computed during
   ``finalize()`` so context publishing can reuse cache-hit metadata without
   rebuilding sets or lookup paths.
@@ -44,7 +51,7 @@ from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, cast
 
 from django.core.exceptions import FieldDoesNotExist, FieldError
-from django.db.models import Count, F, OrderBy, Q, QuerySet, Value, Window, sql
+from django.db.models import Count, F, OrderBy, Prefetch, Q, QuerySet, Value, Window, sql
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression, RawSQL
 from django.db.models.functions import Random, RowNumber
@@ -88,6 +95,7 @@ if TYPE_CHECKING:
     from django.db.models.expressions import Combinable, Expression
     from django.db.models.options import Options
     from django.db.models.sql.query import Query
+    from graphql import GraphQLResolveInfo
 
     from django_strawberry_framework.keyset import KeysetSeek
     from django_strawberry_framework.utils._queryset_private import PrefetchLookup
@@ -202,6 +210,43 @@ def _prefetch_indexed_list() -> _IndexedList[PrefetchLookup]:
     return _IndexedList(key=_lookup_path)
 
 
+@dataclass(frozen=True)
+class PrefetchSeal:
+    """How a planned prefetch's target type scopes a consumer queryset on the same path.
+
+    Written by the walker for every prefetch it plans onto a target type that
+    declares ``get_queryset``, beside the planned ``Prefetch`` itself. The walker
+    applies the hook to the generated child; a consumer ``Prefetch`` the
+    reconciliation lets win on that path (``diff_plan_for_queryset``) has never met
+    the hook, so it is sealed through ``seal`` - the walker's own child builder,
+    seeded with the consumer queryset (``None`` seeds the model's default manager)
+    - and the relation stays planned: its resolver trusts the rows instead of
+    re-reading each parent's relation through the hook.
+
+    ``model`` is the relation's target model: only a seed over exactly that model
+    is sealed, since the hook serves the rows of the queryset it narrows and the
+    target type resolves only its own model's instances (a seed over a proxy's
+    concrete model, or over an MTI child, is left to the consumer; an unresolved
+    target, ``None``, matches no seed).
+
+    ``own_keys`` are the resolver keys of the relation itself. They stay planned
+    when the consumer's rows are sealed; every other key the planned ``Prefetch``
+    satisfied (its child plan's nested relations, which the consumer queryset
+    does not carry) leaves the plan with it.
+
+    ``seal`` closes over the relation's static field and target metadata only;
+    the request's resolve info is handed to it per call, so the plan carries no
+    request state.
+    """
+
+    own_keys: tuple[str, ...]
+    model: type[models.Model] | None
+    seal: Callable[
+        [QuerySet[models.Model] | None, GraphQLResolveInfo | None],
+        QuerySet[models.Model],
+    ]
+
+
 @dataclass
 class OptimizationPlan:
     """Immutable-ish bag of optimizer directives for one root queryset.
@@ -247,6 +292,17 @@ class OptimizationPlan:
     """Resolver keys elided because the source row already carries the target id."""
     planned_resolver_keys: Sequence[str] = field(default_factory=_indexed_list)
     """Resolver keys for relations covered by this plan, used by B3 strictness."""
+    select_path_resolver_keys: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    """Resolver keys of the single-valued relation planned at each select path.
+
+    Written by ``walker.py::_plan_select_relation`` for both of its outcomes: a
+    ``select_related`` JOIN and an FK-id elision, keyed by the relation's field
+    path. ``diff_plan_for_queryset`` reads it when a consumer ``Prefetch`` carrying
+    a queryset owns the path: the JOIN or elision there leaves the plan, and these
+    keys leave the published strictness / elision sentinels with it, so
+    strictness sees whatever now loads per row. A JOIN through the path becomes
+    a prefetch lookup and keeps its keys. Excluded from ``is_empty``.
+    """
     prefetch_path_resolver_keys: dict[str, tuple[str, ...]] = field(default_factory=dict)
     """Resolver keys satisfied by each ``prefetch_related`` lookup (directive coupling).
 
@@ -256,7 +312,19 @@ class OptimizationPlan:
     ``diff_plan_for_queryset`` uses this when a consumer ``Prefetch`` wins and
     the optimizer entry is dropped: those keys (and matching FK-id elisions)
     must leave the published strictness / elision sentinels, or nested N+1s
-    under the dropped subtree are masked. Excluded from ``is_empty``.
+    under the dropped subtree are masked. When the consumer's queryset is sealed
+    through the target type's hook instead (``prefetch_path_seals``), the
+    relation's own keys stay planned and only the nested keys leave. Excluded
+    from ``is_empty``.
+    """
+    prefetch_path_seals: dict[str, PrefetchSeal] = field(default_factory=dict)
+    """Per planned prefetch lookup onto a hooked target type, its ``PrefetchSeal``.
+
+    Written by ``walker.py::_plan_prefetch_relation`` and the hinted-``Prefetch``
+    branch (on the relation's own path, for a relation the generated resolver
+    reads) for a target whose type declares ``get_queryset``; read by
+    ``diff_plan_for_queryset`` when a consumer ``Prefetch`` on that path would
+    otherwise win unscoped. Excluded from ``is_empty``.
     """
     window_cursor_states: dict[str, CursorState] = field(default_factory=dict)
     """Per planned keyset window, the cursor vocabulary it was built under.
@@ -281,7 +349,9 @@ class OptimizationPlan:
             "select_related",
             "prefetch_related",
             "only_fields",
+            "select_path_resolver_keys",
             "prefetch_path_resolver_keys",
+            "prefetch_path_seals",
         },
     )
     _METADATA_MERGE_FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -430,10 +500,16 @@ class OptimizationPlan:
             append_prefetch_unique(self.prefetch_related, prefetch)
         append_unique_many(self.only_fields, other.only_fields)
         self.merge_metadata_from(other)
-        for path, resolver_keys in other.prefetch_path_resolver_keys.items():
-            merged = list(self.prefetch_path_resolver_keys.get(path, ()))
-            append_unique_many(merged, resolver_keys)
-            self.prefetch_path_resolver_keys[path] = tuple(merged)
+        for ledger, other_ledger in (
+            (self.select_path_resolver_keys, other.select_path_resolver_keys),
+            (self.prefetch_path_resolver_keys, other.prefetch_path_resolver_keys),
+        ):
+            for path, resolver_keys in other_ledger.items():
+                merged = list(ledger.get(path, ()))
+                append_unique_many(merged, resolver_keys)
+                ledger[path] = tuple(merged)
+        for path, seal in other.prefetch_path_seals.items():
+            _ = self.prefetch_path_seals.setdefault(path, seal)
 
     def merge_metadata_from(self, other: OptimizationPlan) -> None:
         """Merge accepted child-queryset metadata without its query directives.
@@ -2004,24 +2080,40 @@ def _reverse_order_by(order_by: Sequence[OrderEntry]) -> list[OrderEntry]:
 def diff_plan_for_queryset(
     plan: OptimizationPlan,
     queryset: QuerySet[_M],
+    *,
+    info: GraphQLResolveInfo | None = None,
 ) -> tuple[OptimizationPlan, QuerySet[_M]]:
     """Reconcile ``plan`` against optimizations already on ``queryset``.
 
     Returns ``(delta_plan, queryset_to_apply_against)``. The plan is
     only ever copied (never mutated) so B1's cache stays intact. The
-    queryset is rewritten only when the consumer applied a plain
-    ``prefetch_related("path")`` string that the optimizer can replace
-    with a more specific ``Prefetch(path, queryset=...)`` carrying
-    nested chains or projection.
+    queryset is rewritten only when a consumer prefetch lookup moves into
+    the plan's prefetch list: a plain ``prefetch_related("path")`` string the
+    optimizer replaces with a more specific ``Prefetch(path, queryset=...)``,
+    or a consumer ``Prefetch`` sealed through its target type's hook.
 
-    Reconciliation rules:
+    One rule runs through every arm: a consumer ``Prefetch`` carrying a
+    queryset is the source of truth for the rows of its path, as it is
+    without the optimizer.
 
     ``select_related`` - compared as dotted lookup paths against the
     consumer's existing ``query.select_related`` dict. Exact matches
     are dropped from the plan; the wildcard form (``True``) is treated
-    as no overlap so explicit nullable-FK entries still apply.
+    as no overlap so explicit nullable-FK entries still apply. A path a
+    consumer ``Prefetch(queryset=...)`` owns (``_consumer_owned_paths``: the
+    consumer's own JOIN on a path keeps it, as without the optimizer) gives up
+    the planned JOIN there, with the ``only_fields`` under it, and an FK-id
+    elision there: Django skips a prefetch whose relation is already cached,
+    and an elision serves the source row's key without the consumer's rows, so
+    either would serve rows the consumer's queryset filters out and lose what
+    it annotates. Their resolver keys (``select_path_resolver_keys``) leave the
+    plan. Every planned JOIN extending through the path becomes a plain prefetch
+    lookup over the consumer's rows and stays planned; a planned prefetch under
+    the path and an FK-id elision below it stay as they are. None of them
+    widens the consumer's queryset: a column its ``.only()`` defers loads per
+    row, as it does without the optimizer.
 
-    ``only_fields`` - never diffed. A consumer ``.only(...)`` / ``.defer(...)``
+    ``only_fields`` - otherwise never diffed. A consumer ``.only(...)`` / ``.defer(...)``
     is reconciled where the projection is written
     (``apply_projection`` -> ``merged_projection``): the applied
     queryset loads the union of the consumer's columns and the
@@ -2045,6 +2137,15 @@ def diff_plan_for_queryset(
       ``Prefetch("items", queryset=...prefetch_related("entries"))``
       instead of raising ``ValueError: 'items' lookup was already seen
       with a different queryset``.
+    - **Consumer wins, sealed** - the target type declares ``get_queryset``
+      (``prefetch_path_seals``): the consumer's own queryset for the path (or
+      the default manager when it prefetches only beneath the path) is sealed
+      through the hook (``PrefetchSeal``) and replaces the optimizer entry,
+      followed by the consumer's lookups beneath the path. The relation's own
+      resolver keys stay planned, so its resolver trusts the sealed rows; the
+      keys of the optimizer entry's nested work, which the consumer queryset
+      does not carry, leave the plan. A sliced consumer queryset cannot be
+      narrowed by the hook and takes the next arm.
     - **Consumer wins** - for any other shape (consumer's own custom
       ``Prefetch`` somewhere on the subtree, plain-string-vs-
       plain-string match where the optimizer has no queryset, or a
@@ -2052,26 +2153,47 @@ def diff_plan_for_queryset(
       the optimizer entry is dropped to avoid the collision and to
       avoid silently stripping consumer prefetches the optimizer would
       not replace.
+
+    ``info`` is the resolve info of the field whose plan this is; a sealed arm
+    hands it to the hook.
     """
-    new_select = _diff_select_related(plan.select_related, queryset)
-    new_prefetch, new_queryset, dropped_prefetch_paths = _diff_prefetch_related(
-        plan.prefetch_related,
+    released_select, rerooted, select_keys, released_prefixes = _withdraw_owned_select_paths(
+        plan,
         queryset,
     )
-    # Consumer-wins (and other) prefetch drops: strip the planned resolver
-    # keys that were only satisfied by the dropped optimizer Prefetch
-    # (including nested planned keys absorbed from its child plan). Without
-    # this, strictness trusts keys for relations that will genuinely
-    # lazy-load. FK-id elisions are intentionally NOT recorded on the
-    # prefetch path (see ``walker._plan_prefetch_relation``), so they never
-    # enter ``dropped_keys`` and survive the drop - an elision reads a column
-    # on the already-materialised parent row and adds no query.
-    dropped_keys: set[str] = set()
+    new_select = [
+        name
+        for name in _diff_select_related(plan.select_related, queryset)
+        if name not in released_select
+    ]
+    new_prefetch, new_queryset, dropped_prefetch_paths, sealed_paths = _diff_prefetch_related(
+        plan.prefetch_related,
+        queryset,
+        plan.prefetch_path_seals,
+        info,
+    )
+    if rerooted:
+        # Ahead of the plan's own lookups, so a planned prefetch beneath a
+        # rerooted JOIN resolves through it.
+        new_prefetch = [*rerooted, *new_prefetch]
+    # Strip the planned resolver keys only the withdrawn work satisfied: an
+    # owned path's JOIN or elision, a dropped optimizer Prefetch (including
+    # nested planned keys absorbed from its child plan), and a sealed path's
+    # nested work. Without this, strictness trusts keys for relations that
+    # will genuinely lazy-load. FK-id elisions are intentionally NOT recorded
+    # on the prefetch path (see ``walker._plan_prefetch_relation``), so they
+    # never enter ``dropped_keys`` through a prefetch drop - an elision reads
+    # a column on the already-materialised parent row and adds no query.
+    dropped_keys: set[str] = set(select_keys)
     new_prefetch_path_keys = plan.prefetch_path_resolver_keys
-    if dropped_prefetch_paths:
+    if dropped_prefetch_paths or sealed_paths:
         new_prefetch_path_keys = dict(plan.prefetch_path_resolver_keys)
         for path in dropped_prefetch_paths:
             dropped_keys.update(new_prefetch_path_keys.pop(path, ()))
+        for path in sealed_paths:
+            own = plan.prefetch_path_seals[path].own_keys
+            dropped_keys.update(k for k in new_prefetch_path_keys.get(path, ()) if k not in own)
+            new_prefetch_path_keys[path] = own
 
     if (
         len(new_select) == len(plan.select_related)
@@ -2085,16 +2207,109 @@ def diff_plan_for_queryset(
         if dropped_keys
         else plan.planned_resolver_keys
     )
+    new_elisions = (
+        [k for k in plan.fk_id_elisions if k not in dropped_keys]
+        if dropped_keys
+        else plan.fk_id_elisions
+    )
+    new_only = (
+        [f for f in plan.only_fields if not f.startswith(released_prefixes)]
+        if released_prefixes
+        else plan.only_fields
+    )
     return (
         replace(
             plan,
             select_related=new_select,
             prefetch_related=new_prefetch,
+            only_fields=new_only,
+            fk_id_elisions=new_elisions,
             planned_resolver_keys=new_planned,
             prefetch_path_resolver_keys=new_prefetch_path_keys,
         ).finalize(),
         new_queryset,
     )
+
+
+def seals_consumer_prefetch(plan: OptimizationPlan, queryset: object) -> bool:
+    """Whether reconciling ``plan`` against ``queryset`` may run a target type's hook.
+
+    True when a consumer prefetch lookup on ``queryset`` lies on a path the plan
+    seals (``prefetch_path_seals``): ``diff_plan_for_queryset`` may then seal the
+    consumer's queryset through that hook, which is consumer code and may read the
+    database, so an async caller runs the reconciliation off the event loop.
+    """
+    if not plan.prefetch_path_seals:
+        return False
+    return any(
+        path == sealed or path.startswith(f"{sealed}{LOOKUP_SEP}")
+        for path in (_lookup_path(entry) for entry in _consumer_prefetch_lookups(queryset))
+        for sealed in plan.prefetch_path_seals
+    )
+
+
+def _consumer_owned_paths(queryset: QuerySet[models.Model]) -> frozenset[str]:
+    """Return the paths whose rows a consumer ``Prefetch(queryset=...)`` on ``queryset`` supplies.
+
+    A ``Prefetch`` carrying a queryset decides which rows its path holds and
+    what they carry. A plain string, or a ``Prefetch`` without a queryset, loads
+    the rows a JOIN on the same path would load, so neither takes a path over. A
+    ``to_attr`` lands the rows on another attribute (its ``prefetch_to``), so it
+    owns that attribute and never a relation the plan joins. A path the
+    queryset's own ``select_related`` joins is not owned either: that JOIN
+    caches the relation and Django skips the ``Prefetch``, as it does without
+    the optimizer.
+    """
+    joined = _flatten_select_related(queryset.query.select_related)
+    return frozenset(
+        path
+        for path in (
+            _lookup_path(entry)
+            for entry in _consumer_prefetch_lookups(queryset)
+            if not isinstance(entry, str) and entry.queryset is not None
+        )
+        if path not in joined
+    )
+
+
+def _withdraw_owned_select_paths(
+    plan: OptimizationPlan,
+    queryset: QuerySet[models.Model],
+) -> tuple[frozenset[str], list[str], set[str], tuple[str, ...]]:
+    """Return what the plan withdraws for the paths a consumer ``Prefetch`` owns.
+
+    ``(released_select_paths, rerooted_lookups, withdrawn_keys, released_only_prefixes)``:
+
+    - every planned JOIN at or through an owned path is released: Django skips
+      a prefetch whose relation a JOIN already cached;
+    - each released JOIN strictly beneath an owned path (and not owned itself)
+      becomes a plain prefetch lookup of the same path, which Django runs over
+      the consumer's rows in one query, so the relation it loads stays planned;
+    - the resolver keys of an owned path's own JOIN or FK-id elision
+      (``select_path_resolver_keys``) are withdrawn: the consumer's rows answer
+      that relation, and an elision would read the source row's key around them;
+    - the ``only_fields`` beneath a released JOIN at an owned path are dropped,
+      since no JOIN loads them. An FK-id elision below an owned path stays: it
+      reads the key on the consumer's own row.
+    """
+    owned = _consumer_owned_paths(queryset)
+    if not owned or not (plan.select_related or plan.fk_id_elisions):
+        return frozenset(), [], set(), ()
+    joined = frozenset(plan.select_related)
+    released = frozenset(
+        path
+        for path in joined
+        if any(path == o or path.startswith(f"{o}{LOOKUP_SEP}") for o in owned)
+    )
+    rerooted = sorted(
+        (path for path in released if path not in owned),
+        key=lambda path: (path.count(LOOKUP_SEP), path),
+    )
+    keys: set[str] = set()
+    for owned_path in owned:
+        keys.update(plan.select_path_resolver_keys.get(owned_path, ()))
+    prefixes = tuple(sorted(f"{path}{LOOKUP_SEP}" for path in owned if path in joined))
+    return released, rerooted, keys, prefixes
 
 
 def _diff_select_related(plan_select_related: Sequence[str], queryset: object) -> list[str]:
@@ -2116,13 +2331,18 @@ def _diff_select_related(plan_select_related: Sequence[str], queryset: object) -
 def _diff_prefetch_related(
     plan_prefetch_related: Sequence[PrefetchLookup],
     queryset: QuerySet[_M],
-) -> tuple[list[PrefetchLookup], QuerySet[_M], frozenset[str]]:
+    seals: Mapping[str, PrefetchSeal],
+    info: GraphQLResolveInfo | None,
+) -> tuple[list[PrefetchLookup], QuerySet[_M], frozenset[str], frozenset[str]]:
     """Reconcile optimizer ``prefetch_related`` against the queryset's existing lookups.
 
-    Returns ``(new_prefetch_list, queryset_to_apply_against, dropped_lookup_paths)``.
-    See ``diff_plan_for_queryset`` for the full reconciliation rules. Dropped
-    lookup paths are the optimizer Prefetch entries the consumer won over -
-    callers strip the coupled resolver keys for those paths.
+    Returns ``(new_prefetch_list, queryset_to_apply_against, dropped_lookup_paths,
+    sealed_lookup_paths)``. See ``diff_plan_for_queryset`` for the full
+    reconciliation rules. Dropped lookup paths are the optimizer Prefetch entries
+    the consumer won over - callers strip the coupled resolver keys for those
+    paths. Sealed lookup paths are those whose consumer queryset now runs through
+    the target type's hook in place of the optimizer entry - callers keep the
+    relation's own keys and strip the rest.
     """
     consumer_pf = _consumer_prefetch_lookups(queryset)
     # Preserve EVERY entry on a path. Django accepts a custom ``Prefetch``
@@ -2137,6 +2357,7 @@ def _diff_prefetch_related(
     new_prefetch: list[PrefetchLookup] = []
     paths_to_strip: set[str] = set()
     dropped_optimizer_paths: set[str] = set()
+    sealed_optimizer_paths: set[str] = set()
 
     for opt_entry in plan_prefetch_related:
         opt_path = _lookup_path(opt_entry)
@@ -2152,9 +2373,26 @@ def _diff_prefetch_related(
         if _optimizer_can_absorb(opt_entry, matching_paths, consumer_by_path):
             paths_to_strip.update(matching_paths)
             new_prefetch.append(opt_entry)
-        else:
+            continue
+        seal = seals.get(opt_path)
+        sealed = (
+            _sealed_consumer_prefetch(opt_path, seal, consumer_by_path.get(opt_path, []), info)
+            if seal is not None
+            else None
+        )
+        if sealed is None:
             # Consumer wins on this subtree; optimizer dropped.
             dropped_optimizer_paths.add(opt_path)
+            continue
+        # The sealed entry takes the path, then the consumer's own lookups beneath
+        # it, in their order: Django resolves a descendant lookup through the
+        # path's entry, so that entry must come first.
+        paths_to_strip.update(matching_paths)
+        sealed_optimizer_paths.add(opt_path)
+        new_prefetch.append(sealed)
+        new_prefetch.extend(
+            entry for entry in consumer_pf if _lookup_path(entry).startswith(descendant_prefix)
+        )
 
     new_queryset = queryset
     if paths_to_strip:
@@ -2167,7 +2405,43 @@ def _diff_prefetch_related(
         if keep:
             new_queryset = new_queryset.prefetch_related(*keep)
 
-    return new_prefetch, new_queryset, frozenset(dropped_optimizer_paths)
+    return (
+        new_prefetch,
+        new_queryset,
+        frozenset(dropped_optimizer_paths),
+        frozenset(sealed_optimizer_paths),
+    )
+
+
+def _sealed_consumer_prefetch(
+    path: str,
+    seal: PrefetchSeal,
+    exact_entries: Sequence[PrefetchLookup],
+    info: GraphQLResolveInfo | None,
+) -> PrefetchLookup | None:
+    """Return the consumer's rows for ``path`` sealed through the target type's hook.
+
+    The seed is the queryset of the consumer's first ``Prefetch`` on exactly
+    ``path`` (Django serves the first one), else the default manager: a consumer
+    that prefetches only beneath ``path`` still reads the relation's rows through
+    it. ``None`` when the seed is a sliced queryset, which the hook cannot narrow,
+    or a queryset over another model than the relation's target
+    (``PrefetchSeal.model``); the consumer entry then wins unsealed. (Django's
+    ``Prefetch`` refuses a queryset that is not a model-row ``QuerySet``.)
+    """
+    seed = next(
+        (
+            entry.queryset
+            for entry in exact_entries
+            if not isinstance(entry, str) and entry.queryset is not None
+        ),
+        None,
+    )
+    if seed is None:
+        return Prefetch(path, queryset=seal.seal(None, info))
+    if truth.instance_state(seed).get("model") is not seal.model or seed.query.is_sliced:
+        return None
+    return Prefetch(path, queryset=seal.seal(seed, info))
 
 
 def lookup_paths(plan: OptimizationPlan) -> set[str]:

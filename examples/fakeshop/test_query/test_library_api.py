@@ -31,7 +31,9 @@ from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connection, transaction
+from django.db.backends.utils import CursorWrapper
 from django.db.models import Model, Prefetch, QuerySet, Value
+from django.db.models.functions import Upper
 from django.db.models.signals import post_init, pre_save
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
@@ -90,13 +92,14 @@ from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import decode_global_id, global_id_for
-from django_strawberry_framework.utils._narrowing import pk_of, read_attr
+from django_strawberry_framework.utils._narrowing import is_list_or_tuple, pk_of, read_attr
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
+    from django.db.backends.utils import _ExecuteParameters, _ExecuteQuery
     from django.test.client import _MonkeyPatchedWSGIResponse
 
 
@@ -19312,12 +19315,13 @@ async def test_library_consumer_prefetch_deferring_a_selected_column_fails_on_as
 
     The book hook's own ``Prefetch("loans", queryset=Loan.objects.only("book"))``
     stays in place of the planned one. The loan type has its own
-    ``get_queryset``, so each book's loans are re-read through that hook from
-    the consumer's queryset, still projected to ``id`` and ``book``. Reading the
-    loaded ``id`` serves every loan; reading ``note``, which that queryset
-    deferred, loads it per loan after the re-read with a sync query on the event
-    loop, which Django refuses (``SynchronousOnlyOperation``): the field answers
-    the masked error at the ``note`` path, and the policy logs the original.
+    ``get_queryset``, so the consumer's queryset is sealed through that hook,
+    which narrows it without widening it: the loans arrive still projected to
+    ``id`` and ``book``. Reading the loaded ``id`` serves every loan; reading
+    ``note``, which that queryset deferred, loads it per loan with a sync query
+    on the event loop, which Django refuses (``SynchronousOnlyOperation``): the
+    field answers the masked error at the ``note`` path, and the policy logs the
+    original.
     """
     await sync_to_async(_seed_subtitled_books)()
     caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
@@ -19372,6 +19376,1014 @@ async def test_library_consumer_prefetch_deferring_a_selected_column_fails_on_as
     [record] = records
     assert record.exc_info is not None, record
     assert type(record.exc_info[1]) is SynchronousOnlyOperation, record.exc_info
+
+
+def _owned_prefetch_schema(
+    *,
+    patrons: Callable[[QuerySet[models.Patron]], QuerySet[models.Patron]] | None = None,
+    cards: Callable[[QuerySet[models.MembershipCard]], QuerySet[models.MembershipCard]]
+    | None = None,
+    loans: Callable[[QuerySet[models.Loan]], QuerySet[models.Loan]] | None = None,
+    books: Callable[[QuerySet[models.Book]], QuerySet[models.Book]] | None = None,
+    genres: Callable[[QuerySet[models.Genre]], QuerySet[models.Genre]] | None = None,
+    editions: Callable[[QuerySet[models.Edition]], QuerySet[models.Edition]] | None = None,
+    optimizer: bool = True,
+    strictness: str = "off",
+) -> strawberry.Schema:
+    """Types whose ``get_queryset`` exists only when its hook is passed, for consumer ``Prefetch`` rows.
+
+    A type without a hook is planned as the optimizer plans an unhooked target (a
+    forward relation onto it is a ``select_related`` JOIN); a type with one is a
+    hooked target (a relation onto it is a ``Prefetch`` through the hook) and, at
+    a root list or a planned prefetch child, the hook shapes the queryset the
+    optimizer receives, so a ``Prefetch`` it adds is the consumer's own.
+    ``shout`` reads an annotation a consumer queryset may carry. ``optimizer=False``
+    builds the same schema with no optimizer: the reference every answer below is
+    held to.
+    """
+
+    def _shout(row: object) -> str | None:
+        value = read_attr(row, "shout", None)
+        return value if isinstance(value, str) else None
+
+    class OwnedPatronType(DjangoType):
+        if patrons is not None:
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[models.Patron],
+                info: strawberry.Info,
+            ) -> QuerySet[models.Patron]:
+                assert patrons is not None
+                return patrons(queryset)
+
+        @strawberry.field
+        def shout(self) -> str | None:
+            return _shout(self)
+
+        class Meta:
+            model = models.Patron
+            fields = (
+                "id",
+                "name",
+                "card",
+                "loans",
+            )
+            name = "OwnedPatronType"
+
+    class OwnedCardType(DjangoType):
+        if cards is not None:
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[models.MembershipCard],
+                info: strawberry.Info,
+            ) -> QuerySet[models.MembershipCard]:
+                assert cards is not None
+                return cards(queryset)
+
+        class Meta:
+            model = models.MembershipCard
+            fields = ("id", "barcode", "patron")
+            name = "OwnedCardType"
+
+    class OwnedLoanType(DjangoType):
+        if loans is not None:
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[models.Loan],
+                info: strawberry.Info,
+            ) -> QuerySet[models.Loan]:
+                assert loans is not None
+                return loans(queryset)
+
+        class Meta:
+            model = models.Loan
+            fields = (
+                "id",
+                "note",
+                "book",
+                "patron",
+            )
+            name = "OwnedLoanType"
+
+    class OwnedShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "code")
+            name = "OwnedShelfType"
+
+    assert registry.get(models.Shelf) is OwnedShelfType
+
+    class OwnedBookType(DjangoType):
+        if books is not None:
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[models.Book],
+                info: strawberry.Info,
+            ) -> QuerySet[models.Book]:
+                assert books is not None
+                return books(queryset)
+
+        @strawberry.field
+        def shout(self) -> str | None:
+            return _shout(self)
+
+        class Meta:
+            model = models.Book
+            fields = (
+                "id",
+                "title",
+                "shelf",
+                "loans",
+                "genres",
+            )
+            name = "OwnedBookType"
+
+    class OwnedGenreType(DjangoType):
+        if genres is not None:
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[models.Genre],
+                info: strawberry.Info,
+            ) -> QuerySet[models.Genre]:
+                assert genres is not None
+                return genres(queryset)
+
+        class Meta:
+            model = models.Genre
+            fields = ("id", "name")
+            name = "OwnedGenreType"
+
+    assert registry.get(models.Genre) is OwnedGenreType
+
+    class OwnedPublisherType(DjangoType):
+        @strawberry.field
+        def shout(self) -> str | None:
+            return _shout(self)
+
+        class Meta:
+            model = models.Publisher
+            fields = ("id", "name")
+            name = "OwnedPublisherType"
+
+    assert registry.get(models.Publisher) is OwnedPublisherType
+
+    class OwnedEditionType(DjangoType):
+        if editions is not None:
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[models.Edition],
+                info: strawberry.Info,
+            ) -> QuerySet[models.Edition]:
+                assert editions is not None
+                return editions(queryset)
+
+        class Meta:
+            model = models.Edition
+            fields = ("isbn_13", "imprint", "publisher_2")
+            name = "OwnedEditionType"
+
+    @strawberry.type
+    class Query:
+        all_patrons: list[OwnedPatronType] = DjangoListField(OwnedPatronType)
+        all_cards: list[OwnedCardType] = DjangoListField(OwnedCardType)
+        all_loans: list[OwnedLoanType] = DjangoListField(OwnedLoanType)
+        all_books: list[OwnedBookType] = DjangoListField(OwnedBookType)
+        all_editions: list[OwnedEditionType] = DjangoListField(OwnedEditionType)
+
+    finalize_django_types()
+    if not optimizer:
+        return DjangoSchema(query=Query, config=strawberry_config())
+    extension = DjangoOptimizerExtension(strictness=strictness)
+    return DjangoSchema(query=Query, config=strawberry_config(), extensions=[lambda: extension])
+
+
+def _post_owned(
+    document: str,
+    build: Callable[[], strawberry.Schema],
+) -> tuple[JSONObject, list[str]]:
+    """POST ``document`` to the schema ``build`` returns; return the payload and its SQL.
+
+    Errors are kept, without the per-request ``extensions`` (a fresh correlation
+    id each time), so two payloads compare by data, messages and paths.
+    """
+    registry.clear()
+    try:
+        schema = build()
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_holder(schema, document)
+    finally:
+        registry.clear()
+    return _comparable(response_json(response)), [
+        entry["sql"] for entry in captured.captured_queries
+    ]
+
+
+def _comparable(payload: JSONObject) -> JSONObject:
+    """``payload`` with each error's per-request ``extensions`` dropped."""
+    if payload.get("errors") is None:
+        return payload
+    return {
+        **payload,
+        "errors": [
+            {key: value for key, value in json_object(error).items() if key != "extensions"}
+            for error in json_list(payload, "errors")
+        ],
+    }
+
+
+def _seed_owned_join_graph() -> None:
+    """Two loans, two cards and three editions, so each forward relation has one row to hide.
+
+    Bob (a loan's and a card's patron) and ``PB`` (an edition's nullable second
+    publisher) are the rows a consumer queryset excludes; the third edition has
+    no second publisher.
+    """
+    branch = models.Branch.objects.create(name="Central", city="Boston")
+    shelf = models.Shelf.objects.create(code="A-1", topic="Speculative fiction", branch=branch)
+    kindred = models.Book.objects.create(title="Kindred", shelf=shelf)
+    dawn = models.Book.objects.create(title="Dawn", shelf=shelf)
+    ada = models.Patron.objects.create(name="Ada")
+    bob = models.Patron.objects.create(name="Bob")
+    models.Loan.objects.create(book=kindred, patron=ada, note="la")
+    models.Loan.objects.create(book=dawn, patron=bob, note="lb")
+    models.MembershipCard.objects.create(patron=ada, barcode="CARD-A")
+    models.MembershipCard.objects.create(patron=bob, barcode="CARD-B")
+    pa = models.Publisher.objects.create(name="PA", house_code="pa")
+    pb = models.Publisher.objects.create(name="PB", house_code="pb")
+    for isbn, imprint, second in (("1", "ea", pa), ("2", "eb", pb), ("3", "ec", None)):
+        models.Edition.objects.create(
+            isbn_13=isbn,
+            imprint=imprint,
+            publisher=pa,
+            publisher_2=second,
+        )
+
+
+def _owned_patrons(mode: str) -> QuerySet[models.Patron]:
+    """The consumer's patron queryset: pk only, Bob excluded, or ``shout`` annotated."""
+    if mode == "only":
+        return models.Patron.objects.only("id")
+    if mode == "filter":
+        return models.Patron.objects.exclude(name="Bob")
+    return models.Patron.objects.annotate(shout=Upper("name"))
+
+
+def _owned_publishers(mode: str) -> QuerySet[models.Publisher]:
+    """The consumer's publisher queryset: pk only, ``PB`` excluded, or ``shout`` annotated."""
+    if mode == "only":
+        return models.Publisher.objects.only("id")
+    if mode == "filter":
+        return models.Publisher.objects.exclude(name="PB")
+    return models.Publisher.objects.annotate(shout=Upper("name"))
+
+
+def _owned_join_schema(shape: str, mode: str, *, optimizer: bool) -> strawberry.Schema:
+    """The schema whose hook adds the consumer ``Prefetch`` onto ``shape``'s forward relation.
+
+    ``fk`` / ``nested``: the loan hook prefetches ``patron`` (a non-null FK), at
+    the root list or on the planned ``loans`` child of each patron; ``o2o``: the
+    card hook prefetches ``patron`` (a forward one-to-one); ``fk_null``: the
+    edition hook prefetches ``publisher_2`` (a nullable FK).
+    """
+    if shape == "o2o":
+        return _owned_prefetch_schema(
+            cards=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch("patron", queryset=_owned_patrons(mode)),
+            ),
+            optimizer=optimizer,
+        )
+    if shape == "fk_null":
+        return _owned_prefetch_schema(
+            editions=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch("publisher_2", queryset=_owned_publishers(mode)),
+            ),
+            optimizer=optimizer,
+        )
+    return _owned_prefetch_schema(
+        loans=lambda queryset: queryset.order_by("pk").prefetch_related(
+            Prefetch("patron", queryset=_owned_patrons(mode)),
+        ),
+        optimizer=optimizer,
+    )
+
+
+_OWNED_JOIN_DOCUMENTS = {
+    "fk": "{ allLoans { note patron { name shout } } }",
+    "o2o": "{ allCards { barcode patron { name shout } } }",
+    "fk_null": "{ allEditions { imprint publisher2 { name shout } } }",
+    "nested": "{ allPatrons { name loans { note patron { name shout } } } }",
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("shape", "mode", "statements"),
+    [
+        pytest.param("fk", "filter", 2, id="fk-filter"),
+        pytest.param("fk", "annotate", 2, id="fk-annotate"),
+        pytest.param("fk", "only", 4, id="fk-only"),
+        pytest.param("o2o", "filter", 2, id="o2o-filter"),
+        pytest.param("o2o", "annotate", 2, id="o2o-annotate"),
+        pytest.param("o2o", "only", 4, id="o2o-only"),
+        pytest.param("fk_null", "filter", 2, id="fk-null-filter"),
+        pytest.param("fk_null", "annotate", 2, id="fk-null-annotate"),
+        pytest.param("fk_null", "only", 4, id="fk-null-only"),
+        pytest.param("nested", "filter", 3, id="nested-filter"),
+        pytest.param("nested", "annotate", 3, id="nested-annotate"),
+        pytest.param("nested", "only", 5, id="nested-only"),
+    ],
+)
+def test_library_consumer_prefetch_owns_a_forward_relation_the_optimizer_would_join(
+    shape: str,
+    mode: str,
+    statements: int,
+) -> None:
+    """A hook's ``Prefetch(queryset=...)`` on a forward relation supplies its rows, not a JOIN.
+
+    The target type declares no ``get_queryset``, so the optimizer would JOIN the
+    relation, and Django skips a ``Prefetch`` whose relation a JOIN already
+    cached: the row the consumer queryset excludes would be served and its
+    annotation lost. The consumer ``Prefetch`` owns the path instead, at a root
+    hook and at a planned child's hook alike, so every answer is the one the same
+    schema gives without the optimizer: the excluded row is absent (a non-null
+    relation fails at that row, a nullable one is null), ``shout`` carries the
+    annotation, and the queryset is never widened, so a column its ``.only()``
+    defers loads per row exactly as it does without the optimizer.
+    """
+    _seed_owned_join_graph()
+    document = _OWNED_JOIN_DOCUMENTS[shape]
+
+    payload, sql = _post_owned(document, lambda: _owned_join_schema(shape, mode, optimizer=True))
+    reference, reference_sql = _post_owned(
+        document,
+        lambda: _owned_join_schema(shape, mode, optimizer=False),
+    )
+
+    assert payload == reference, (payload, reference)
+    assert len(sql) == statements, sql
+    if mode == "only" and shape != "nested":
+        assert len(sql) == len(reference_sql), (sql, reference_sql)
+    if mode == "annotate":
+        assert '"shout": null' not in json.dumps(payload), payload
+    if mode == "filter" and shape != "nested":
+        hidden = "PB" if shape == "fk_null" else "Bob"
+        assert hidden not in json.dumps(payload), payload
+
+
+@pytest.mark.django_db
+def test_library_consumer_prefetch_owns_an_fk_id_the_optimizer_would_elide() -> None:
+    """``patron { id }`` under a consumer ``Prefetch`` reads the consumer's rows, not the source key.
+
+    The selection reads only the target pk, which the optimizer serves from the
+    loan's own ``patron_id`` without loading the patron. The loan hook's
+    ``Prefetch("patron", queryset=<Bob excluded>)`` owns the relation, so the
+    elision gives way: Bob's loan fails at its non-null ``patron`` instead of
+    serving Bob's id, as it does without the optimizer, in the same two
+    statements.
+    """
+    _seed_owned_join_graph()
+    document = "{ allLoans { note patron { id } } }"
+
+    payload, sql = _post_owned(
+        document,
+        lambda: _owned_join_schema("fk", "filter", optimizer=True),
+    )
+    reference, reference_sql = _post_owned(
+        document,
+        lambda: _owned_join_schema("fk", "filter", optimizer=False),
+    )
+
+    assert payload == reference, (payload, reference)
+    assert payload["data"] is None, payload
+    assert [json_at(error, "path") for error in json_list(payload, "errors")] == [
+        ["allLoans", 1, "patron"],
+    ]
+    assert len(sql) == len(reference_sql) == 2, sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mode", "statements", "reference_statements"),
+    [pytest.param("filter", 3, 3, id="filter"), pytest.param("annotate", 3, 4, id="annotate")],
+)
+def test_library_consumer_prefetch_reroots_the_joins_beneath_its_path(
+    mode: str,
+    statements: int,
+    reference_statements: int,
+) -> None:
+    """A JOIN the plan extends through an owned path becomes a prefetch over the consumer's rows.
+
+    ``patron { card { barcode } }`` plans ``patron`` and ``patron__card`` as JOINs;
+    the loan hook's ``Prefetch("patron", ...)`` owns ``patron``, so the card
+    relation is loaded by one plain prefetch through the consumer's patrons
+    (loans, patrons, cards: three statements for any number of loans) and stays
+    planned, so ``strictness="raise"`` has nothing to report.
+    """
+    _seed_owned_join_graph()
+    document = "{ allLoans { note patron { name shout card { barcode } } } }"
+
+    def _build(*, optimizer: bool) -> strawberry.Schema:
+        return _owned_prefetch_schema(
+            loans=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch("patron", queryset=_owned_patrons(mode)),
+            ),
+            optimizer=optimizer,
+            strictness="raise",
+        )
+
+    payload, sql = _post_owned(document, lambda: _build(optimizer=True))
+    reference, reference_sql = _post_owned(document, lambda: _build(optimizer=False))
+
+    assert payload == reference, (payload, reference)
+    assert len(sql) == statements, sql
+    assert len(reference_sql) == reference_statements, reference_sql
+    assert not any("JOIN" in statement for statement in sql), sql
+
+
+@pytest.mark.django_db
+def test_library_consumer_prefetch_keeps_an_elision_beneath_its_path_loud(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An FK-id elision below an owned path reads the consumer's row, so a deferred key warns.
+
+    The loan hook's ``Prefetch("book", queryset=Book.objects.only("title"))`` owns
+    ``book``; ``book { shelf { id } }`` stays an FK-id elision reading each
+    consumer book's ``shelf_id``, which that queryset deferred. The elision
+    refuses the deferred key and the relation access it falls back to is
+    strictness-visible: ``strictness="warn"`` reports it once per book, and the
+    answer is the one the schema gives without the optimizer.
+    """
+    _seed_owned_join_graph()
+    caplog.set_level(logging.WARNING, logger="django_strawberry_framework")
+    document = "{ allLoans { note book { title shelf { id } } } }"
+
+    def _build(*, optimizer: bool) -> strawberry.Schema:
+        return _owned_prefetch_schema(
+            loans=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch("book", queryset=models.Book.objects.only("title")),
+            ),
+            optimizer=optimizer,
+            strictness="warn",
+        )
+
+    payload, _sql = _post_owned(document, lambda: _build(optimizer=True))
+    warnings = [record for record in caplog.records if "Potential N+1 on shelf" in record.message]
+    reference, _reference_sql = _post_owned(document, lambda: _build(optimizer=False))
+
+    assert payload == reference, (payload, reference)
+    assert len(warnings) == 2, [record.message for record in caplog.records]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("lookup", "statements"),
+    [
+        pytest.param("string", 1, id="string"),
+        pytest.param("bare-prefetch", 1, id="bare-prefetch"),
+        pytest.param("to-attr", 2, id="to-attr"),
+        pytest.param("consumer-join", 1, id="consumer-join"),
+    ],
+)
+def test_library_consumer_lookup_without_rows_of_its_own_keeps_the_join(
+    lookup: str,
+    statements: int,
+) -> None:
+    """Only a ``Prefetch`` carrying a queryset, on the relation itself, owns a joined path.
+
+    A plain ``"patron"`` lookup and a ``Prefetch("patron")`` without a queryset
+    load the rows the JOIN loads, a ``to_attr`` ``Prefetch`` lands its rows on
+    another attribute, and a consumer that JOINs ``patron`` itself serves it
+    through that JOIN, as Django does without the optimizer: each keeps the
+    planned JOIN on ``patron`` and on the card beneath it, so Bob's patron is
+    served with every loan.
+    """
+    _seed_owned_join_graph()
+    consumer: dict[str, Callable[[QuerySet[models.Loan]], QuerySet[models.Loan]]] = {
+        "string": lambda queryset: queryset.prefetch_related("patron"),
+        "bare-prefetch": lambda queryset: queryset.prefetch_related(Prefetch("patron")),
+        "to-attr": lambda queryset: queryset.prefetch_related(
+            Prefetch("patron", queryset=_owned_patrons("filter"), to_attr="kept_patron"),
+        ),
+        "consumer-join": lambda queryset: queryset.select_related("patron").prefetch_related(
+            Prefetch("patron", queryset=_owned_patrons("filter")),
+        ),
+    }
+
+    payload, sql = _post_owned(
+        "{ allLoans { note patron { name card { barcode } } } }",
+        lambda: _owned_prefetch_schema(
+            loans=lambda queryset: consumer[lookup](queryset.order_by("pk")),
+        ),
+    )
+
+    assert json_list(payload, "data", "allLoans") == [
+        {"note": "la", "patron": {"name": "Ada", "card": {"barcode": "CARD-A"}}},
+        {"note": "lb", "patron": {"name": "Bob", "card": {"barcode": "CARD-B"}}},
+    ]
+    assert len(sql) == statements, sql
+    assert 'JOIN "library_membershipcard"' in sql[0], sql[0]
+
+
+def _seed_sealed_relation(shape: str, parents: int) -> None:
+    """``parents`` root rows, each with visible related rows, and one row the target hook hides.
+
+    The last parent's ``hidden`` row (a loan note, a genre name, a book title, a
+    patron name or a card barcode) is the one the target type's hook excludes.
+    """
+    branch = models.Branch.objects.create(name="Central", city="Boston")
+    shelf = models.Shelf.objects.create(code="A-1", topic="Speculative fiction", branch=branch)
+    patron = models.Patron.objects.create(name="Ada")
+    other = models.Patron.objects.create(name="Hal")
+    genres = [models.Genre.objects.create(name=f"g{index}") for index in range(2)]
+    hidden_genre = models.Genre.objects.create(name="hidden")
+    for index in range(parents):
+        last = index == parents - 1
+        if shape == "rfk":
+            book = models.Book.objects.create(title=f"b{index}", shelf=shelf)
+            models.Loan.objects.create(book=book, patron=patron, note=f"n{index}")
+            if last:
+                models.Loan.objects.create(book=book, patron=other, note="hidden")
+        elif shape == "m2m":
+            book = models.Book.objects.create(title=f"b{index}", shelf=shelf)
+            book.genres.set([*genres, hidden_genre] if last else genres)
+        elif shape == "fk":
+            book = models.Book.objects.create(title="hidden" if last else f"b{index}", shelf=shelf)
+            models.Loan.objects.create(book=book, patron=patron, note=f"n{index}")
+        elif shape == "o2o_fwd":
+            owner = models.Patron.objects.create(name="hidden" if last else f"p{index}")
+            models.MembershipCard.objects.create(patron=owner, barcode=f"c{index}")
+        else:
+            owner = models.Patron.objects.create(name=f"p{index}")
+            models.MembershipCard.objects.create(
+                patron=owner,
+                barcode="hidden" if last else f"c{index}",
+            )
+
+
+def _sealed_relation_schema(
+    shape: str,
+    *,
+    optimizer: bool = True,
+    strictness: str = "off",
+) -> strawberry.Schema:
+    """The root hook's consumer ``Prefetch`` onto ``shape``'s relation, whose target type hides ``hidden``.
+
+    The consumer queryset orders its rows and annotates ``consumer_marker``; the
+    target type's own hook excludes the ``hidden`` row.
+    """
+    marker = Value(1)
+    if shape == "rfk":
+        return _owned_prefetch_schema(
+            books=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch(
+                    "loans",
+                    queryset=models.Loan.objects.order_by("pk").annotate(consumer_marker=marker),
+                ),
+            ),
+            loans=lambda queryset: queryset.exclude(note="hidden"),
+            optimizer=optimizer,
+            strictness=strictness,
+        )
+    if shape == "m2m":
+        return _owned_prefetch_schema(
+            books=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch(
+                    "genres",
+                    queryset=models.Genre.objects.order_by("pk").annotate(consumer_marker=marker),
+                ),
+            ),
+            genres=lambda queryset: queryset.exclude(name="hidden"),
+            optimizer=optimizer,
+            strictness=strictness,
+        )
+    if shape == "fk":
+        return _owned_prefetch_schema(
+            loans=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch(
+                    "book",
+                    queryset=models.Book.objects.order_by("pk").annotate(consumer_marker=marker),
+                ),
+            ),
+            books=lambda queryset: queryset.exclude(title="hidden"),
+            optimizer=optimizer,
+            strictness=strictness,
+        )
+    if shape == "o2o_fwd":
+        return _owned_prefetch_schema(
+            cards=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch(
+                    "patron",
+                    queryset=models.Patron.objects.order_by("pk").annotate(consumer_marker=marker),
+                ),
+            ),
+            patrons=lambda queryset: queryset.exclude(name="hidden"),
+            optimizer=optimizer,
+            strictness=strictness,
+        )
+    return _owned_prefetch_schema(
+        patrons=lambda queryset: queryset.order_by("pk").prefetch_related(
+            Prefetch(
+                "card",
+                queryset=models.MembershipCard.objects.order_by("pk").annotate(
+                    consumer_marker=marker,
+                ),
+            ),
+        ),
+        cards=lambda queryset: queryset.exclude(barcode="hidden"),
+        optimizer=optimizer,
+        strictness=strictness,
+    )
+
+
+_SEALED_RELATION_DOCUMENTS = {
+    "rfk": "{ allBooks { title loans { note } } }",
+    "m2m": "{ allBooks { title genres { name } } }",
+    "fk": "{ allLoans { note book { title } } }",
+    "o2o_fwd": "{ allCards { barcode patron { name } } }",
+    "o2o_rev": "{ allPatrons { name card { barcode } } }",
+}
+
+_SEALED_RELATION_TABLES = {
+    "rfk": '"library_loan"',
+    "m2m": '"library_genre"',
+    "fk": '"library_book"',
+    "o2o_fwd": '"library_patron"',
+    "o2o_rev": '"library_membershipcard"',
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parents", [1, 3, 10])
+@pytest.mark.parametrize("shape", sorted(_SEALED_RELATION_DOCUMENTS))
+def test_library_consumer_prefetch_onto_a_hooked_target_is_sealed_through_its_hook(
+    shape: str,
+    parents: int,
+) -> None:
+    """A consumer ``Prefetch`` onto a hooked target is narrowed by the hook in one batch.
+
+    The root hook's ``Prefetch`` wins over the planned one, and the target type
+    declares ``get_queryset``, so its queryset is sealed through that hook: one
+    statement carries the consumer's annotation and the hook's exclusion, the
+    relation stays planned, and the page is two statements for 1, 3 or 10
+    parents under ``strictness="raise"``, with the answer the schema gives
+    without the optimizer (the hidden row absent).
+    """
+    _seed_sealed_relation(shape, parents)
+    document = _SEALED_RELATION_DOCUMENTS[shape]
+
+    payload, sql = _post_owned(
+        document,
+        lambda: _sealed_relation_schema(shape, strictness="raise"),
+    )
+    reference, _reference_sql = _post_owned(
+        document,
+        lambda: _sealed_relation_schema(shape, optimizer=False),
+    )
+
+    assert payload == reference, (payload, reference)
+    assert len(sql) == 2, sql
+    [related_sql] = [
+        statement
+        for statement in sql
+        if f"FROM {_SEALED_RELATION_TABLES[shape]}" in statement and "consumer_marker" in statement
+    ]
+    assert "hidden" in related_sql, related_sql
+    assert "hidden" not in json.dumps(payload), payload
+
+
+async def _post_owned_async(
+    document: str,
+    build: Callable[[], strawberry.Schema],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[JSONObject, list[str]]:
+    """POST ``document`` over ``/graphql-async-test/``; return the payload and its SQL.
+
+    The async view runs its sync work on a worker thread whose connection may
+    already be open, so neither ``CaptureQueriesContext`` on the test thread nor
+    a wrapper on a new connection sees it; recording at the cursor class counts
+    the request's statements on whichever thread runs them.
+    """
+    recorded: list[str] = []
+    execute = CursorWrapper.execute
+
+    def _recording_execute(
+        cursor: CursorWrapper,
+        sql: "_ExecuteQuery",
+        params: "_ExecuteParameters" = None,
+    ) -> None:
+        # The ORM reads rows from the cursor, never this call's return value.
+        recorded.append(str(sql))
+        execute(cursor, sql, params)
+
+    monkeypatch.setattr(CursorWrapper, "execute", _recording_execute)
+    registry.clear()
+    try:
+        _CURRENT["schema"] = build()
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await AsyncTestClient().query(
+                document,
+                assert_no_errors=False,
+                url="/graphql-async-test/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+        registry.clear()
+        monkeypatch.undo()
+    return _comparable(response_json(result.response)), recorded
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("parents", [1, 3, 10])
+@pytest.mark.parametrize("shape", sorted(_SEALED_RELATION_DOCUMENTS))
+async def test_library_consumer_prefetch_onto_a_hooked_target_is_sealed_on_async(
+    shape: str,
+    parents: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The async color: the sealed consumer ``Prefetch`` is one batch on the async view too.
+
+    Sealing runs the target type's hook, which the reconciliation does inside the
+    one sync boundary the async optimizer plans in, so the page is two statements
+    for 1, 3 or 10 parents under ``strictness="raise"``, with the hidden row
+    absent.
+    """
+    await sync_to_async(_seed_sealed_relation)(shape, parents)
+    document = _SEALED_RELATION_DOCUMENTS[shape]
+
+    payload, sql = await _post_owned_async(
+        document,
+        lambda: _sealed_relation_schema(shape, strictness="raise"),
+        monkeypatch,
+    )
+    reference, _reference_sql = await sync_to_async(_post_owned)(
+        document,
+        lambda: _sealed_relation_schema(shape, optimizer=False),
+    )
+
+    assert payload == reference, (payload, reference)
+    assert "hidden" not in json.dumps(payload), payload
+    assert len([statement for statement in sql if statement.startswith("SELECT")]) == 2, sql
+
+
+@pytest.mark.django_db
+def test_library_sealed_consumer_prefetch_leaves_the_planned_nested_work_strictness_visible(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Planned work beneath a sealed path is not placed into the consumer's queryset.
+
+    ``loans { patron { name } }`` plans the loan child with a JOIN on ``patron``;
+    the root hook's ``Prefetch("loans", ...)`` replaces that child, sealed through
+    the loan hook, and carries no JOIN, so each loan reads its patron on access.
+    The JOIN's resolver key leaves the plan with the child, so ``strictness="warn"``
+    reports every one of those reads, and the answer is the one the schema gives
+    without the optimizer.
+    """
+    _seed_sealed_relation("rfk", 3)
+    caplog.set_level(logging.WARNING, logger="django_strawberry_framework")
+    document = "{ allBooks { title loans { note patron { name } } } }"
+
+    payload, sql = _post_owned(
+        document,
+        lambda: _sealed_relation_schema("rfk", strictness="warn"),
+    )
+    warnings = [record for record in caplog.records if "Potential N+1 on patron" in record.message]
+    reference, _reference_sql = _post_owned(
+        document,
+        lambda: _sealed_relation_schema("rfk", optimizer=False),
+    )
+
+    assert payload == reference, (payload, reference)
+    assert len(warnings) == 3, [record.message for record in caplog.records]
+    assert len(sql) == 5, sql
+
+
+def _books_prefetching_beneath_loans(*, optimizer: bool = True) -> strawberry.Schema:
+    """The book hook prefetches only ``loans__patron``; the loan type hides ``hidden`` loans."""
+    return _owned_prefetch_schema(
+        books=lambda queryset: queryset.order_by("pk").prefetch_related(
+            Prefetch("loans__patron", queryset=models.Patron.objects.order_by("pk")),
+        ),
+        loans=lambda queryset: queryset.exclude(note="hidden"),
+        optimizer=optimizer,
+        strictness="raise",
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parents", [1, 3, 10])
+def test_library_consumer_prefetch_beneath_a_hooked_path_reads_it_through_the_hook(
+    parents: int,
+) -> None:
+    """A consumer lookup only beneath a planned hooked path seals that path's default rows.
+
+    ``Prefetch("loans__patron", ...)`` reads each book's loans before their
+    patrons, but carries no queryset for ``loans`` itself. The path is sealed
+    from the loan model's default manager through the loan hook, followed by the
+    consumer's patron lookup: books, loans, patrons, three statements for 1, 3 or
+    10 books, with the hidden loan absent as without the optimizer.
+    """
+    _seed_sealed_relation("rfk", parents)
+    document = "{ allBooks { title loans { note patron { name } } } }"
+
+    payload, sql = _post_owned(document, _books_prefetching_beneath_loans)
+    reference, _reference_sql = _post_owned(
+        document,
+        lambda: _books_prefetching_beneath_loans(optimizer=False),
+    )
+
+    assert payload == reference, (payload, reference)
+    assert "hidden" not in json.dumps(payload), payload
+    assert len(sql) == 3, sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parents", [1, 10])
+def test_library_consumer_to_attr_prefetch_onto_a_hooked_target_stays_beside_the_plan(
+    parents: int,
+) -> None:
+    """A ``to_attr`` ``Prefetch`` owns its attribute, so the planned hooked ``Prefetch`` still runs.
+
+    The book hook's ``Prefetch("loans", ..., to_attr="kept_loans")`` lands its rows
+    on another attribute; the relation the selection reads is the planned
+    ``Prefetch`` through the loan hook. Three statements for 1 or 10 books.
+    """
+    _seed_sealed_relation("rfk", parents)
+
+    payload, sql = _post_owned(
+        "{ allBooks { title loans { note } } }",
+        lambda: _owned_prefetch_schema(
+            books=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch("loans", queryset=models.Loan.objects.all(), to_attr="kept_loans"),
+            ),
+            loans=lambda queryset: queryset.exclude(note="hidden"),
+            strictness="raise",
+        ),
+    )
+
+    assert "hidden" not in json.dumps(payload), payload
+    assert len(json_list(payload, "data", "allBooks")) == parents, payload
+    assert len(sql) == 3, sql
+
+
+def _hinted_loans_schema(resolver: str, *, optimizer: bool) -> strawberry.Schema:
+    """Books whose ``loans`` hint and hook carry the same consumer ``Prefetch``; loans hide ``hidden``.
+
+    ``resolver`` picks who reads the relation: ``generated`` (the package's
+    relation resolver), ``assigned`` (a consumer-assigned resolver reading the
+    relation) or ``assigned-to-attr`` (one reading the ``kept`` attribute both
+    ``Prefetch`` objects land on).
+    """
+    to_attr = "kept" if resolver == "assigned-to-attr" else None
+
+    def _consumer_loans() -> Prefetch[str]:
+        return Prefetch("loans", queryset=models.Loan.objects.order_by("pk"), to_attr=to_attr)
+
+    class HintedLoanType(DjangoType):
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Loan],
+            info: strawberry.Info,
+        ) -> QuerySet[models.Loan]:
+            return queryset.exclude(note="hidden")
+
+        class Meta:
+            model = models.Loan
+            fields = ("id", "note")
+            name = "HintedLoanType"
+
+    def _consumer_read_loans(root: models.Book) -> list[models.Loan]:
+        if not to_attr:
+            return list(root.loans.all())
+        rows = read_attr(root, "kept", None)
+        assert is_list_or_tuple(rows)
+        return [row for row in rows if isinstance(row, models.Loan)]
+
+    class HintedBookType(DjangoType):
+        if resolver != "generated":
+            loans: list[models.Loan] = strawberry.field(
+                resolver=_consumer_read_loans,
+                graphql_type=list[HintedLoanType],
+            )
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Book],
+            info: strawberry.Info,
+        ) -> QuerySet[models.Book]:
+            return queryset.order_by("pk").prefetch_related(_consumer_loans())
+
+        class Meta:
+            model = models.Book
+            fields = ("id", "title", "loans")
+            name = "HintedBookType"
+            optimizer_hints = {"loans": OptimizerHint.prefetch(_consumer_loans())}
+
+    @strawberry.type
+    class Query:
+        all_books: list[HintedBookType] = DjangoListField(HintedBookType)
+
+    finalize_django_types()
+    if not optimizer:
+        return DjangoSchema(query=Query, config=strawberry_config())
+    extension = DjangoOptimizerExtension(strictness="off")
+    return DjangoSchema(query=Query, config=strawberry_config(), extensions=[lambda: extension])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("resolver", "statements"),
+    [
+        pytest.param("generated", 2, id="generated"),
+        pytest.param("assigned", 2, id="assigned"),
+        pytest.param("assigned-to-attr", 2, id="assigned-to-attr"),
+    ],
+)
+def test_library_consumer_prefetch_over_a_hinted_path_is_sealed_only_for_the_generated_resolver(
+    resolver: str,
+    statements: int,
+) -> None:
+    """A hook's ``Prefetch`` winning over a hinted one is sealed only where the package reads it.
+
+    The book hint ``OptimizerHint.prefetch(Prefetch("loans", ...))`` and the book
+    hook carry the same consumer ``Prefetch``; the loan type hides ``hidden``.
+    Read by the generated relation resolver, the winning queryset is sealed
+    through the loan hook: one batch, the hidden loan absent. Read by a
+    consumer-assigned resolver, the relation (or the ``to_attr`` it reads) is
+    the consumer's own, so its rows are served as written, the hidden loan
+    included, exactly as the schema serves them without the optimizer.
+    """
+    _seed_sealed_relation("rfk", 3)
+    document = "{ allBooks { title loans { note } } }"
+
+    payload, sql = _post_owned(document, lambda: _hinted_loans_schema(resolver, optimizer=True))
+    reference, _reference_sql = _post_owned(
+        document,
+        lambda: _hinted_loans_schema(resolver, optimizer=False),
+    )
+
+    assert payload == reference, (payload, reference)
+    assert ("hidden" in json.dumps(payload)) is (resolver != "generated"), payload
+    assert len(sql) == statements, sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("notes", [1, 3])
+@pytest.mark.parametrize(
+    ("field", "per_note"),
+    [
+        pytest.param("allLibraryBranchNotesOverProxyChild", 0, id="proxy-seed"),
+        pytest.param("allLibraryBranchNotesOverConcreteChild", 1, id="concrete-seed"),
+    ],
+)
+def test_library_consumer_prefetch_seals_only_a_seed_over_the_target_model(
+    field: str,
+    notes: int,
+    per_note: int,
+) -> None:
+    """Only a consumer queryset over the relation's own target model is sealed.
+
+    ``BranchNote.branch`` targets ``ProxyBranch``, whose type declares
+    ``get_queryset``. A consumer ``Prefetch`` over ``ProxyBranch`` itself is sealed
+    through that hook: two statements for any number of notes. One over the
+    concrete ``Branch`` serves rows of another class than the type resolves, so it
+    is left to the consumer and each note's branch is re-read through the hook,
+    one statement per note.
+    """
+    for index in range(notes):
+        branch = models.ProxyBranch.objects.create(name=f"Proxy {index}", city="Boston")
+        models.BranchNote.objects.create(branch=branch, body=f"note {index}")
+
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_graphql(f"query {{ {field} {{ body branch {{ name }} }} }}")
+
+    payload = response_json(response)
+    assert payload.get("errors") is None, payload
+    assert [json_str(note, "branch", "name") for note in json_list(payload, "data", field)] == [
+        f"Proxy {index}" for index in range(notes)
+    ]
+    assert len(_library_sql(captured)) == 2 + per_note * notes, _library_sql(captured)
 
 
 _UPDATE_HOLDER_SHELF = (
@@ -20016,12 +21028,14 @@ def test_library_consumer_prefetched_relation_keeps_target_visibility_over_http(
 ) -> None:
     """A consumer ``Prefetch`` the optimizer yields to still reads the target's visibility.
 
-    The consumer's own ``Prefetch("branch", ...)`` wins over the planned one, so
-    ``branch`` is no longer optimizer-scoped: the published resolver keys must not
-    name it, and each note's branch is re-read through ``ProxyBranchType.get_queryset``.
-    The anonymous request cannot see the ``city="restricted"`` branch, so its note's
-    non-null ``branch`` resolves to null and the field fails at that row without the
-    hidden branch on the wire; staff see both branches.
+    The consumer's own ``Prefetch("branch", ...)`` wins over the planned one. Over
+    the ``ProxyBranch`` target itself it is sealed through
+    ``ProxyBranchType.get_queryset``; over the concrete ``Branch`` it serves rows of
+    another class, so it is left unsealed, ``branch`` is no longer optimizer-scoped,
+    and each note's branch is re-read through the hook. Either way the anonymous
+    request cannot see the ``city="restricted"`` branch, so its note's non-null
+    ``branch`` resolves to null and the field fails at that row without the hidden
+    branch on the wire; staff see both branches.
     """
     visible = models.ProxyBranch.objects.create(name="Proxy Central", city="Boston")
     hidden = models.ProxyBranch.objects.create(name="Proxy Vault", city="restricted")

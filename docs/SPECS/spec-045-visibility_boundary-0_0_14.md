@@ -392,7 +392,15 @@ target overrides `get_queryset` takes the plain-list path with the hinted
 queryset as the seed the hook narrows
 (`django_strawberry_framework/optimizer/walker.py::_scoped_hint_prefetch`): the
 seal adopts the seed's explicit `.using(...)` as the alias the hook must keep,
-serves a combined seed as its primary-key set and refuses a sliced one.
+serves a combined seed as its primary-key set and refuses a sliced one. A
+consumer `Prefetch(queryset=...)` in a root or hook `prefetch_related` that wins
+over such a planned `Prefetch` is sealed the same way, its queryset the seed
+(`django_strawberry_framework/optimizer/plans.py::PrefetchSeal`, invoked by
+`django_strawberry_framework/optimizer/plans.py::diff_plan_for_queryset`), and the
+relation's own resolver key stays planned. A seed over another model than the
+relation's exact target is not sealed, and the relation is then re-read through
+the hook per parent; a sliced seed is not sealed either and fails as it does
+without the optimizer (Django's `TypeError` when the hook filters it).
 
 **Enforcing symbols.**
 [`utils/querysets.py::_prefetch_path_or_defect`][querysets];

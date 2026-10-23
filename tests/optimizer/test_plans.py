@@ -35,6 +35,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER_REVERSED,
     WINDOW_TOTAL_COUNT,
     OptimizationPlan,
+    PrefetchSeal,
     _consumer_prefetch_lookups,
     _consumer_projection,
     _flatten_select_related,
@@ -60,6 +61,7 @@ from django_strawberry_framework.optimizer.plans import (
     order_entry_has_explicit_nulls,
     resolver_key,
     runtime_path_from_path,
+    seals_consumer_prefetch,
 )
 from django_strawberry_framework.utils._queryset_private import (
     queryset_prefetch_lookups,
@@ -195,13 +197,17 @@ class TestOptimizationPlanMerge:
     """Construction-time merge operations commit complete accepted plans."""
 
     def test_full_merge_covers_every_directive_and_metadata_field_once(self) -> None:
+        existing_seal = PrefetchSeal(own_keys=("existing-key",), model=Item, seal=_seal_as_is)
+        new_seal = PrefetchSeal(own_keys=("new-key",), model=Item, seal=_seal_as_is)
         target = OptimizationPlan(
             select_related=["category"],
             prefetch_related=["items"],
             only_fields=["name"],
             fk_id_elisions=["existing-elision"],
             planned_resolver_keys=["existing-key"],
+            select_path_resolver_keys={"category": ("existing-key",)},
             prefetch_path_resolver_keys={"items": ("existing-key",)},
+            prefetch_path_seals={"items": existing_seal},
         )
         source = OptimizationPlan(
             select_related=["category", "owner", "owner"],
@@ -209,7 +215,9 @@ class TestOptimizationPlanMerge:
             only_fields=["name", "description", "description"],
             fk_id_elisions=["existing-elision", "new-elision", "new-elision"],
             planned_resolver_keys=["existing-key", "new-key", "new-key"],
+            select_path_resolver_keys={"category": ("existing-key", "new-key", "new-key")},
             prefetch_path_resolver_keys={"items": ("existing-key", "new-key", "new-key")},
+            prefetch_path_seals={"items": new_seal, "properties": new_seal},
             cacheable=False,
         )
 
@@ -220,9 +228,12 @@ class TestOptimizationPlanMerge:
         assert target.only_fields == ["name", "description"]
         assert target.fk_id_elisions == ["existing-elision", "new-elision"]
         assert target.planned_resolver_keys == ["existing-key", "new-key"]
+        assert target.select_path_resolver_keys == {"category": ("existing-key", "new-key")}
         assert target.prefetch_path_resolver_keys == {
             "items": ("existing-key", "new-key"),
         }
+        # The first seal recorded for a path is the one the plan keeps.
+        assert target.prefetch_path_seals == {"items": existing_seal, "properties": new_seal}
         assert target.cacheable is False
 
     def test_metadata_merge_excludes_child_queryset_directives(self) -> None:
@@ -804,6 +815,71 @@ class TestDiffPlanForQueryset:
         assert delta_plan.prefetch_related == ()
         assert delta_qs is qs
         assert queryset_prefetch_lookups(delta_qs) == (consumer_pf, "items")
+
+
+def _seal_as_is(seed: QuerySet[Model] | None, _info: object) -> QuerySet[Model]:
+    """A target hook that admits every row of the seed (the default manager without one)."""
+    return seed if seed is not None else Item.objects.all()
+
+
+def _sealed_items_plan(seal: PrefetchSeal) -> OptimizationPlan:
+    """A category plan prefetching ``items`` through a hooked target, its child planning ``nested``."""
+    return OptimizationPlan(
+        prefetch_related=[Prefetch("items", queryset=Item.objects.all())],
+        planned_resolver_keys=["items-key", "nested-key"],
+        prefetch_path_resolver_keys={"items": ("items-key", "nested-key")},
+        prefetch_path_seals={"items": seal},
+    ).finalize()
+
+
+class TestConsumerPrefetchSeal:
+    """A consumer ``Prefetch`` onto a sealed path that the hook cannot narrow wins unsealed."""
+
+    def test_sliced_seed_is_not_sealed(self) -> None:
+        seeds: list[QuerySet[Model] | None] = []
+
+        def _recording_seal(seed: QuerySet[Model] | None, info: object) -> QuerySet[Model]:
+            seeds.append(seed)
+            return _seal_as_is(seed, info)
+
+        plan = _sealed_items_plan(
+            PrefetchSeal(own_keys=("items-key",), model=Item, seal=_recording_seal),
+        )
+        consumer = Prefetch("items", queryset=Item.objects.order_by("pk")[:2])
+        queryset = Category.objects.prefetch_related(consumer)
+
+        delta_plan, delta_qs = diff_plan_for_queryset(plan, queryset)
+
+        assert seeds == []
+        assert delta_plan.prefetch_related == ()
+        assert delta_plan.planned_resolver_keys == ()
+        assert queryset_prefetch_lookups(delta_qs) == (consumer,)
+
+    @pytest.mark.parametrize(
+        ("seals", "lookups", "expected"),
+        [
+            pytest.param(False, ("items__entries",), False, id="no-seals"),
+            pytest.param(True, ("items__entries",), True, id="beneath-sealed-path"),
+            pytest.param(True, ("items",), True, id="on-sealed-path"),
+            pytest.param(True, ("properties",), False, id="elsewhere"),
+        ],
+    )
+    def test_seals_consumer_prefetch_reads_the_consumer_lookups(
+        self,
+        lookups: tuple[str, ...],
+        *,
+        seals: bool,
+        expected: bool,
+    ) -> None:
+        plan = (
+            _sealed_items_plan(PrefetchSeal(own_keys=("items-key",), model=Item, seal=_seal_as_is))
+            if seals
+            else OptimizationPlan(prefetch_related=["items"]).finalize()
+        )
+
+        assert (
+            seals_consumer_prefetch(plan, Category.objects.prefetch_related(*lookups)) is expected
+        )
 
 
 def _linked_path(*keys: str | int) -> SimpleNamespace | None:
