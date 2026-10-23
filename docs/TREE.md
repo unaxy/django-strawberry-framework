@@ -752,7 +752,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_optimizer_auto_api.py    # Live ``/graphql/`` coverage for routed nested-fetch strategy selection.
 ├── test_products_api.py          # Live GraphQL HTTP tests for products reads, mutations, permissions, optimization, and request parsing.
 ├── test_products_visibility_api.py  # Live GraphQL proof that generated relations enforce target visibility themselves.
-├── test_relation_deadline_api.py # Live pins: the execution deadline stops nested single-object resolvers.
+├── test_relation_deadline_api.py # Live pins: the execution deadline stops nested relation resolvers.
 ├── test_relations_async_api.py   # Live GraphQL proof that generated relations lazy-load and read prefetches in async.
 ├── test_resource_policy_api.py   # Live ``/graphql/`` execution-resource-policy acceptance tests.
 ├── test_scalars_api.py           # Live GraphQL HTTP tests for scalar wire formats, filtering, relations, and optimizer behavior.

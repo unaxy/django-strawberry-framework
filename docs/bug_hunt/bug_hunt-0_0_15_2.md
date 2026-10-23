@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 216 done, 142 to do.
+Progress: 217 done, 141 to do.
 
 ## Done
 
@@ -915,6 +915,14 @@ Progress: 216 done, 142 to do.
   projecting hook loads its connector with the hook's columns (27 statements -> 2, query and mutation); the hook-free
   child SQL is unchanged; live row `test_library_child_reading_no_column_keeps_the_attach_connector` (sync; the async
   per-row load runs inside the sync evaluation thread and never raised)
+- [x] 165. no defect: a payload relation hop past a deadline that ends after the write failing and rolling the mutation
+  back, and every later subscription frame's relation hop failing once the stream's budget is spent, are spec-047
+  Decision 9's contract; pinned by live sync / async rows in `test_query/test_relation_deadline_api.py` (the budget
+  narrowed after the write by a resolve hook per Decision 2; each hop rejects at its own path past the written node and
+  0 rows remain, the hop-free selection commits), live async rows with an already-loaded forward / reverse one-to-one
+  hop that tell the head `check_deadline` from one inside the `_resolve_async` body, and
+  `tests/test_resource_policy.py::test_a_budget_spent_between_frames_fails_every_later_frames_relation_hop`; the
+  GLOSSARY `check_deadline` entry states both
 
 ## Outside review of the fixes
 
@@ -955,9 +963,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 165. Item 12's deadline checks fail forward-FK and one-to-one hops inside a mutation payload (rolling back a write that
-  used to commit) and error subscription frames past the budget; spec-047 Decision 9 states both (`8d4f66bd`) but no test
-  pins either; the async deadline rows also cannot tell a head check from a check inside the `sync_to_async` closure
 - [ ] 166. Fixture gap: the async many-side tests miss a broken prefetch-cache lookup in
   `types/resolvers.py::many_resolver` (gaps (b)-(d) are optional fixture work, not defects: the
   reverse many-to-many without `related_name`, the window resolver-key collision (pinned by a two-root-field row) and
@@ -1382,25 +1387,27 @@ tracker number are recorded there; open remainders and new defects are filed as 
   serializer `MultipleChoiceField` over a single-value choice column is refused at build), 38 (a `Choices.__empty__` enum
   no longer carries a `_None` member), 58 (a fragment spread is charged against `max_selections`, and only the selected
   operation's walk expands) and 60 (one `OrderSet` on two types is refused when either hides rows)
-- [ ] 196. CHANGELOG entries for items 6 (combined querysets served as their pk set), 12 (the deadline message reads "before
-  this field reached the database"; login, logout, me and `relay.node()` reject past the deadline), 50 and 83 (planned
-  `.only()` writers no longer drop selected columns), 74 (a consumer `select_related` the selection never reads no
-  longer errors), 15 (a hand-built range filter value that is not a `start` / `end` mapping or input object raises
-  `ConfigurationError` instead of filtering nothing), 16 (a form field basis value whose `__class__` raises is reported
-  as an invalid field in `ConfigurationError`) and 17 (`register_mutation()` names a protected field declared as a `str`
-  subclass by its value; `DjangoMutationField` refuses a class drained by `registry.clear()` even when it compares equal
-  to its redeclaration) and 18 (`OptimizerHint` prefetch and strategy values, `nested_connection_strategy=`,
-  `NESTED_CONNECTION_STRATEGY` and `strictness=` values whose `__class__` raises or claims `str`, and lazy proxies of a
-  strategy or strictness name, raise the typed error instead of a raw `RuntimeError` / `TypeError`) and 19 (a kept
-  serializer input field named by a non-identifier or a keyword is refused at class creation instead of a raw `SyntaxError`
-  at finalize; serializer hook values whose `__class__` raises are typed; lazy proxies and `__class__` spoofs in hook data
-  fail the frozen view closed; a non-`str` `context["write_alias"]` is a conflict) and 21-23 (field targets, factory
-  returns, `Meta` values, set `Meta.fields`, input and policy helpers whose `__class__` raises or claims a type now raise
-  the typed error instead of a raw `RuntimeError` / `TypeError`; `Meta.name` / `Meta.description`, a string-helper input
-  and a `SESSION_ENGINE` that is a lazy proxy of a `str` are typed rejections; a lazy proxy of a class as a field target
-  now reads "requires a DjangoType class") and 221 (`register_mutation()` refuses a protected field declared as a `str`
-  subclass whatever its `__eq__`, and a `REQUIRED_FIELDS` that is not a list or tuple or holds a non-string entry, with a
-  `ConfigurationError` naming the model instead of a raw `TypeError` / consumer exception)
+- [ ] 196. CHANGELOG entries for items 6 (combined querysets served as their pk set), 12 (the deadline message reads
+  "before this field reached the database"; login, logout, me and `relay.node()` reject past the deadline; a forward FK
+  / one-to-one payload hop past a spent deadline fails and rolls the mutation back, and every later subscription frame's
+  relation hop fails once the stream's budget is spent), 50 and 83 (planned `.only()` writers no longer drop selected
+  columns), 74 (a consumer `select_related` the selection never reads no longer errors), 15 (a hand-built range filter
+  value that is not a `start` / `end` mapping or input object raises `ConfigurationError` instead of filtering nothing),
+  16 (a form field basis value whose `__class__` raises is reported as an invalid field in `ConfigurationError`) and 17
+  (`register_mutation()` names a protected field declared as a `str` subclass by its value; `DjangoMutationField`
+  refuses a class drained by `registry.clear()` even when it compares equal to its redeclaration) and 18
+  (`OptimizerHint` prefetch and strategy values, `nested_connection_strategy=`, `NESTED_CONNECTION_STRATEGY` and
+  `strictness=` values whose `__class__` raises or claims `str`, and lazy proxies of a strategy or strictness name,
+  raise the typed error instead of a raw `RuntimeError` / `TypeError`) and 19 (a kept serializer input field named by a
+  non-identifier or a keyword is refused at class creation instead of a raw `SyntaxError` at finalize; serializer hook
+  values whose `__class__` raises are typed; lazy proxies and `__class__` spoofs in hook data fail the frozen view
+  closed; a non-`str` `context["write_alias"]` is a conflict) and 21-23 (field targets, factory returns, `Meta` values,
+  set `Meta.fields`, input and policy helpers whose `__class__` raises or claims a type now raise the typed error
+  instead of a raw `RuntimeError` / `TypeError`; `Meta.name` / `Meta.description`, a string-helper input and a
+  `SESSION_ENGINE` that is a lazy proxy of a `str` are typed rejections; a lazy proxy of a class as a field target now
+  reads "requires a DjangoType class") and 221 (`register_mutation()` refuses a protected field declared as a `str`
+  subclass whatever its `__eq__`, and a `REQUIRED_FIELDS` that is not a list or tuple or holds a non-string entry, with
+  a `ConfigurationError` naming the model instead of a raw `TypeError` / consumer exception)
 - [ ] 197. The per-parent visibility paths (`types/resolvers.py::_visible_many_rows`, `_visible_related_object`, relation
   connections, `resolver=`) never narrow the hook's result to the source's rows, so a hook that ignores its input shows other
   parents' rows or the wrong to-one object. Decide the contract (narrow at the five seams, with a live row for an
