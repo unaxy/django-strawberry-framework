@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 238 done, 178 to do.
+Progress: 239 done, 178 to do.
 
 ## Done
 
@@ -1073,6 +1073,13 @@ Progress: 238 done, 178 to do.
   that registered a driver adapter for it. The `utils/querysets.py` retention and raw-parameter docstrings and
   spec-045 state that a model instance in a raw-SQL parameter is retained and reaches the driver as is, and
   `tests/utils/test_querysets.py::test_raw_sql_parameter_model_instance_is_retained_by_reference` pins the admission
+- [x] 409. not a defect: a `check_<field>_permission` gate is application Python (GOAL "Trust boundary") and no wire
+  input produces its slot; a non-callable non-`None` slot already fails closed, since
+  `utils/permissions.py::invoke_permission_method` raises `ConfigurationError` on every request that names the gated
+  input (masked to the client, never recorded in `fired`), pinned by
+  `tests/utils/test_permissions.py::test_invoke_permission_method_rejects_a_non_callable_gate_slot`; a class-creation
+  `callable()` check would refuse the shipped `classmethod` gate and a `property` gate and cannot see a slot set after
+  creation, and DRF and django-graphene-filters check at call time too
 
 ## Outside review of the fixes
 
@@ -1351,8 +1358,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `consumers.py::_actor_is_current` (strict `<`)
 - [ ] 408. `rest_framework/resolvers.py::_hook_mapping`'s exact-`str` key gate refuses `StrEnum` keys Python accepts
   (the `str`-subclass family of 224)
-- [ ] 409. `utils/permissions.py::invoke_permission_method` rejects a non-callable `check_<field>_permission` at first
-  use, not at class creation
 - [ ] 410. `write_mixins.py::_ValidatedMutationMeta.__delattr__` still says the configuration "is immutable", which
   `object.__setattr__` bypasses; the docstrings were narrowed in `a5e41a20`, the runtime message was left because a
   test may pin it
@@ -1362,6 +1367,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   hook, on main before 323; no async test posts one, so the async root-list rows of 323's live grid are left out
   (`_LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES`). Say whether such roots should evaluate or become async resolvers, or
   whether the package should serve a sync resolver's lazy QuerySet on the async executor. Found implementing 323
+- [ ] 580. (robustness) A FilterSet / OrderSet `check_<name>_permission` whose name matches no gated input (a typo, a
+  wrong case, or a model field the set does not expose) never fires and never errors: neither set metaclass nor
+  finalize audits gate names, and names are knowable only after expansion (`types/finalizer.py::_bind_sidecar_sets`'s
+  `post_expand_audit` sees them for wired sets; unwired `RelatedFilter` targets never finalize). Found fact-finding
+  409
 
 ## To do: holes found re-checking the fixes
 
