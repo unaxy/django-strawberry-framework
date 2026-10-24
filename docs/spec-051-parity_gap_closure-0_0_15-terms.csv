@@ -1,0 +1,43 @@
+term,anchor,notes
+ConfigurationError,configurationerror,the raise type of every declaration-time refusal here (through guard; GeneratedField file / unsupported / choice-element output; non-text help_text; consumer-enum blank admission and member names); the fail-loud doctrine itself
+Structural error classification,structural-error-classification,the production masking rule's shape test; PaginationArgumentError is a GraphQLError so PAGINATION_INVALID travels untouched (item 6)
+FieldError envelope,fielderror-envelope,item 5's contract; today a required through extra surfaces as its generic __all__ constraint leaf on every write
+PaginationArgumentError,paginationargumenterror,item 6 (shipped) carries PAGINATION_INVALID on every instance
+Production error policy,production-error-policy,the masking rule whose pass-through table lists PAGINATION_INVALID
+DjangoType,djangotype,read-side type; never refused by the through guard; __init_subclass__ runs the help_text refusal
+finalize_django_types,finalize_django_types,Phase 2 / 2.5 attach windows and the input bind carry the help_text descriptions; form and serializer through guards raise at bind
+Meta.model,metamodel,the mutation's model whose selected many-to-many the model-flavor guard reads; named in the guard message
+Meta.fields,metafields,"the ""__all__"" path that raised on a GeneratedField today; on a mutation, the narrowing the guard runs over"
+Meta.exclude,metaexclude,one of three escapes today for a GeneratedField (beside an annotation-only override and a consumer SCALAR_MAP entry); the documented escape for the through guard on the mutation (builds without raising)
+Meta.description,metadescription,precedent for the str / Promise / refuse rule help_text follows (rendering point differs: help_text renders at each field build site)
+Meta.nullable_overrides,metanullable_overrides,widens a non-null GeneratedField like any column
+Meta.required_overrides,metarequired_overrides,asserts non-null over a GeneratedField that either null flag makes optional
+Meta.filesystem_path_fields,metafilesystem_path_fields,never targets a GeneratedField: a file / image output_field is refused in the shared unwrap
+Meta.relation_shapes,metarelation_shapes,the synthesized <field>Connection sibling that takes the relation column's help_text in Phase 2.5
+Scalar field override semantics,scalar-field-override-semantics,consumer_authored_fields; the annotation-only corner is the per-field help_text opt-out on scalars and relations alike
+Relay Node integration,relay-node-integration,the suppressed Relay pk the scalar description attach must skip
+Scalar field conversion,scalar-field-conversion,scalar_route / SCALAR_MAP; the GeneratedField arm and shared unwrap land here
+Specialized scalar conversions,specialized-scalar-conversions,the container arms a GeneratedField's output_field recurses through
+Choice enum generation,choice-enum-generation,convert_choices_to_enum; the choices_enum reuse short-circuits it; GeneratedField blank admission reads output_field.empty_strings_allowed
+Meta.choice_enum_names,metachoice_enum_names,naming override; card 065 owns naming on the far side
+DjangoFileType,djangofiletype,file wrapper whose generated resolver gains a description; refused as a GeneratedField output
+DjangoImageType,djangoimagetype,image wrapper; same as DjangoFileType
+Relation handling,relation-handling,forward relation fields get the column help_text via _attach_relation_resolvers (description skip set consumer_authored_fields)
+DjangoConnectionField,djangoconnectionfield,the synthesized connection sibling takes the same help_text
+Input type generation,input-type-generation,the write inputs whose mutation class the through guard refuses and whose fields gain help_text descriptions
+DjangoMutation,djangomutation,model flavor; guard in DjangoMutation._validate_meta over the selected list
+DjangoModelFormMutation,djangomodelformmutation,form flavor over a ModelForm; guard in build_form_input_class over effective unless _save_m2m is overridden
+DjangoFormMutation,djangoformmutation,model-less plain form; no through column to inspect
+SerializerMutation,serializermutation,serializer flavor; guard in resolve_serializer_field's model-backed multi arm unless create() / update() is overridden
+Auth mutations,auth-mutations,register is a DjangoMutation and rides the model-flavor guard; RegisterInput.username gains auth.User's help_text
+Soft dependency,soft-dependency,django-choices-field joins as an observation-only soft dependency; dev group pin only; no extra
+Hard dependency,hard-dependency,contrast: never enters [project].dependencies
+require_optional_module,require_optional_module,"deliberately NOT used for django-choices-field (absence is the plain generated path, not an error)"
+Eviction-simulated absence,eviction-simulated-absence,tests/_soft_dependency.py::simulated_absence proves absence changes nothing
+FilterSet,filterset,filters over a GeneratedField unwrap to the output field in filter_for_lookup / filter_for_field; no help_text threading into filter inputs (non-goal)
+OrderSet,orderset,a generated column is a real column so it orders; no help_text threading (non-goal)
+auto-typed annotations,auto-typed-annotations,an auto field routes through synthesis and gets the help_text
+Schema introspection management command,schema-introspection-management-command,inspect_django_type label gains a GeneratedField row (in-process call_command test)
+Schema export management command,schema-export-management-command,the Slice 3 SDL check runs export_schema over the fakeshop schema
+Joint version cut,joint-version-cut,card 053 owns the 0.0.15 bump; this card moves nothing
+Live-first coverage mandate,live-first-coverage-mandate,every reachable behavior pinned through the fakeshop schema first; import-time refusals stay package tier
