@@ -1861,10 +1861,12 @@ def _assert_cursor_rejected(payload: JSONObject, argument: str) -> None:
 
 #: ``(id, argument the cursor rides on, variables)``. ``before:-2, first:3``
 #: would slice ``rows[0:-1]`` (39 of 40 rows past a three-row cap);
+#: ``before:-2, last:2`` would serve the same 39 rows for a two-row ``last``;
 #: ``after:-2`` decodes to start -1, which slices from the last row and mints
 #: an ``arrayconnection:-1`` cursor for it.
 _NEGATIVE_CURSOR_ROWS = [
     ("before-first", "before", {"before": _cursor("-2"), "first": 3}),
+    ("before-last", "before", {"before": _cursor("-2"), "last": 2}),
     ("after-no-page", "after", {"after": _cursor("-2")}),
     ("after-last", "after", {"after": _cursor("-2"), "last": 2}),
 ]
@@ -2417,15 +2419,28 @@ def test_page_bound_of_sys_maxsize_serves_every_row(field: str, after: str | Non
     assert len(queries.captured_queries) == 1, queries.captured_queries
 
 
-def _root_genre_page(variables: JSONObject) -> JSONObject:
-    payload = _root_genre_payload(variables)
-    assert "errors" not in payload, payload
-    return json_object(payload, "data", "allLibraryGenresConnection")
+_MINTED_PAGE_QUERY = (
+    "query($after: String, $first: Int) {"
+    " %s(after: $after, first: $first) {"
+    " edges { cursor node { name } } pageInfo { hasPreviousPage endCursor } } }"
+)
+
+#: The source shapes a minted cursor pages: the shipped root ``QuerySet`` (SQL
+#: ``OFFSET``) and the cursor mounts' list and tuple resolvers (Python slicing).
+_MINTED_SOURCES: dict[str, Callable[[JSONObject], JSONObject]] = {
+    "root-queryset": lambda v: graphql_payload(
+        _MINTED_PAGE_QUERY % "allLibraryGenresConnection",
+        variables=v,
+    ),
+    "list-resolver": lambda v: _post_local_sync(_MINTED_PAGE_QUERY % "listGenres", v),
+    "tuple-resolver": lambda v: _post_local_sync(_MINTED_PAGE_QUERY % "tupleGenres", v),
+}
 
 
 @pytest.mark.django_db
-def test_minted_offset_cursors_still_page() -> None:
-    """The positive controls: index 0, a cursor the connection minted, and an empty cursor.
+@pytest.mark.parametrize("source", list(_MINTED_SOURCES))
+def test_minted_offset_cursors_still_page(source: str) -> None:
+    """The positive controls on each source shape: index 0, a minted cursor, an empty cursor.
 
     ``arrayconnection:0`` is canonical and pages past the first row; the
     ``endCursor`` the first page mints opens the second page; ``after: ""`` is
@@ -2439,12 +2454,13 @@ def test_minted_offset_cursors_still_page() -> None:
     ):
         library_models.Genre.objects.create(name=name)
 
-    first_page = _root_genre_page({"first": 2})
-    after_zero = _root_genre_page({"after": _cursor("0"), "first": 2})
-    second_page = _root_genre_page(
-        {"after": json_at(first_page, "pageInfo", "endCursor"), "first": 2},
+    post = _MINTED_SOURCES[source]
+    first_page = _page_of(post({"first": 2}))
+    after_zero = _page_of(post({"after": _cursor("0"), "first": 2}))
+    second_page = _page_of(
+        post({"after": json_at(first_page, "pageInfo", "endCursor"), "first": 2}),
     )
-    empty_after = _root_genre_page({"after": "", "first": 2})
+    empty_after = _page_of(post({"after": "", "first": 2}))
 
     names = [json_at(edge, "node", "name") for edge in json_list(first_page, "edges")]
     assert names == ["Alpha", "Bravo"]

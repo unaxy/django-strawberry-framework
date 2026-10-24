@@ -918,56 +918,6 @@ def test_consumer_resolver_non_iterable_source_raises_graphql_error(bad_source: 
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("make_source", [list, tuple])
-@pytest.mark.parametrize("argument", ["after", "before"])
-def test_consumer_resolver_sequence_negative_cursor_raises_graphql_error(
-    make_source: Callable[[list[Category]], Iterable[Category]],
-    argument: str,
-) -> None:
-    """A forged negative offset cursor fails closed over a sequence source.
-
-    A re-sliceable plain sequence would wrap a negative position silently
-    (``rows[-1:2]`` an empty page with false flags, ``rows[0:-1]`` all-but-last
-    for a ``last: 2`` request). The offset fallback validates the cursor
-    (``utils/connections.py::decode_offset_cursor``) before delegating, so every
-    source shape answers the field's own error. The bound cursor mints no row:
-    the page is never served, so no count or flag is asserted beyond the
-    rejection itself.
-    """
-    services.seed_data(1)
-    rows = list(Category.objects.order_by("pk"))
-    assert len(rows) >= 2
-
-    def resolver(_root: object, _info: object) -> Iterable[Category]:
-        return make_source(rows)
-
-    schema = _field_schema(_make_sidecar_node_type("NegativeCursorNode"), resolver=resolver)
-    cursor = relay.to_base64("arrayconnection", "-2")
-    tail = "first: 2" if argument == "after" else "last: 2"
-    result = schema.execute_sync(
-        f'{{ items({tail}, {argument}: "{cursor}") {{ edges {{ node {{ id }} }} }} }}',
-    )
-
-    assert result.errors is not None
-    assert result.data is None
-    messages = [str(err.message) for err in result.errors]
-    assert any("non-existing value" in m for m in messages)
-    assert not any("Traceback" in m for m in messages)
-
-    # Positive control: a minted cursor on the same source pages normally.
-    first_page = schema.execute_sync("{ items(first: 1) { edges { cursor node { id } } } }")
-    assert first_page.errors is None
-    assert first_page.data is not None
-    [edge] = json_list(first_page.data, "items", "edges")
-    second_page = schema.execute_sync(
-        f'{{ items(first: 1, after: "{json_at(edge, "cursor")}") {{ edges {{ node {{ id }} }} }} }}',
-    )
-    assert second_page.errors is None
-    assert second_page.data is not None
-    assert len(json_list(second_page.data, "items", "edges")) == 1
-
-
-@pytest.mark.django_db
 def test_guard_non_queryset_iterable_admits_getitem_only_sequence() -> None:
     """A ``__getitem__``-only legacy sequence stays admitted by the shape gate.
 
