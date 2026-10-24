@@ -22,6 +22,8 @@ consumer-visible behaviors end to end:
 * ``PrintingSerializer`` writes the ``edition`` FK and the ``bound_with`` M2M into the
   text-keyed ``Edition``, so both raw-pk relation inputs carry ISBN text;
   ``EditionImprintSerializer`` updates an ``Edition`` located by that text.
+* ``BranchShelvesSerializer`` writes the reverse foreign key ``Branch.shelves`` through a
+  declared ``PrimaryKeyRelatedField(many=True)``, so its input is a list of shelf ids.
 * ``LendingDeskSerializer`` updates a multi-table ``LendingDesk`` through a column of its
   ``Venue`` parent table and one of its own.
 * ``KioskFaultSerializer`` names a ``SelfServeDesk``, whose primary key is a parent-link
@@ -772,6 +774,32 @@ class BranchWithShelvesSerializer(ModelSerializerBase[Branch]):
             if alt_branches:
                 shelf.alt_branches.set(alt_branches)
         return branch
+
+
+class BranchShelvesSerializer(ModelSerializerBase[Branch]):
+    """A ``Branch`` serializer writing its reverse foreign key ``shelves`` as a list of shelf ids.
+
+    ``Branch.shelves`` is the reverse side of ``Shelf.branch`` (a ``ManyToOneRel``, not a
+    many-to-many), declared as a ``PrimaryKeyRelatedField(many=True)``, so the generated input
+    is a raw-pk list over the non-Relay ``ShelfType``. The decode confirms the whole list's
+    visibility in one batched ``pk__in`` query (through ``ShelfType.get_queryset``, which hides
+    ``topic="secret"`` from non-staff), and DRF's default ``create()`` / ``update()`` re-point
+    each named shelf's ``branch`` at this branch. ``Shelf.branch`` is not nullable, so a write
+    attaches shelves and never detaches one; ``required=False``, so a write may omit the list.
+    """
+
+    # DRF's stubs type the constructor as returning either a single or a many relation.
+    shelves: serializers.RelatedField[Shelf, Shelf, object] | serializers.ManyRelatedField = (
+        serializers.PrimaryKeyRelatedField(
+            many=True,
+            queryset=Shelf.objects.all(),
+            required=False,
+        )
+    )
+
+    class Meta:
+        model = Branch
+        fields = ("name", "shelves")
 
 
 class PatronProfileSerializer(ModelSerializerBase[PatronProfile]):

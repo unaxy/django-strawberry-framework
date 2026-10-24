@@ -16433,21 +16433,18 @@ def test_serializer_m2m_relation_visibility_over_http() -> None:
     assert not models.Shelf.objects.filter(code="M2MBadShelf").exists()
 
 
-def _branch_batched_visibility_queries(captured: CaptureQueriesContext) -> list[str]:
-    """``FROM "library_branch"`` queries that are a set check, not a per-pk ``id =``.
+def _batched_visibility_queries(captured: CaptureQueriesContext, table: str) -> list[str]:
+    """Return the captured ``FROM "<table>"`` set checks (``IN (``), not per-pk ``id =`` lookups.
 
-    Decode uses ``pk__in`` (SQLite emits ``IN (SELECT ...)``). DRF re-validation
-    then ``get()``s each member (``id =``). Counting only the non-equality
-    queries isolates the batched decode from the per-member DRF lookups. Where rows
-    lock, each relation decode that found a branch adds its post-lock re-read, a
-    ``pk__in`` too: the ``altBranches`` batch's and the ``branchId`` decode's.
+    The decode reads the list with one ``pk__in`` (SQLite emits ``IN (SELECT ...)``) and DRF
+    re-validation then ``get()``s each member (``id =``), so counting the set checks alone
+    isolates the batched decode. Where rows lock, each relation decode that found a row adds
+    its post-lock re-read, a ``pk__in`` too.
     """
     return [
         sql
-        for sql in _sql_from_table(captured, "library_branch")
-        if " IN (" in sql
-        and '"library_branch"."id" =' not in sql
-        and '"library_branch"."id"=' not in sql
+        for sql in _sql_from_table(captured, table)
+        if " IN (" in sql and f'"{table}"."id" =' not in sql and f'"{table}"."id"=' not in sql
     ]
 
 
@@ -16480,12 +16477,13 @@ def test_serializer_m2m_alt_branches_visibility_is_one_batched_query_over_http()
         payload = response_json(response)
         assert "errors" not in payload, payload
         assert json_at(payload, "data", "createShelfViaAltBranchesSerializer", "errors") == []
-        in_sql = _branch_batched_visibility_queries(captured)
+        in_sql = _batched_visibility_queries(captured, "library_branch")
         assert in_sql, captured.captured_queries
         return in_sql
 
     two = _create("BatchShelf2", alts[:2])
     five = _create("BatchShelf5", alts)
+    # Where rows lock, the ``altBranches`` batch and the ``branchId`` decode each add a post-lock re-read.
     assert len(two) == len(five) == 1 + post_lock_rereads(2), (two, five)
 
 
@@ -16513,7 +16511,8 @@ def test_serializer_m2m_duplicate_alt_branch_pks_still_one_visibility_query() ->
     payload = response_json(response)
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "createShelfViaAltBranchesSerializer", "errors") == []
-    assert len(_branch_batched_visibility_queries(captured)) == 1 + post_lock_rereads(2)
+    # Where rows lock, the ``altBranches`` batch and the ``branchId`` decode each add a post-lock re-read.
+    assert len(_batched_visibility_queries(captured, "library_branch")) == 1 + post_lock_rereads(2)
     shelf = models.Shelf.objects.get(code="BatchShelfDupes")
     assert set(shelf.alt_branches.values_list("pk", flat=True)) == {alt1.pk, alt2.pk}
 
@@ -16537,9 +16536,135 @@ def test_serializer_m2m_empty_alt_branches_issues_no_visibility_in_query() -> No
     payload = response_json(response)
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "createShelfViaAltBranchesSerializer", "errors") == []
-    assert len(_branch_batched_visibility_queries(captured)) == post_lock_rereads(1)
+    assert len(_batched_visibility_queries(captured, "library_branch")) == post_lock_rereads(1)
     shelf = models.Shelf.objects.get(code="EmptyAlts")
     assert list(shelf.alt_branches.all()) == []
+
+
+# ``BranchShelvesSerializer`` declares the reverse side of ``Shelf.branch`` as a
+# ``PrimaryKeyRelatedField(many=True)``. Each operation's mutation and input type.
+_BRANCH_SHELVES_MUTATIONS = {
+    "create": ("createBranchViaShelvesSerializer", "BranchShelvesSerializerInput"),
+    "update": ("updateBranchViaShelvesSerializer", "BranchShelvesSerializerPartialInput"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", list(_BRANCH_SHELVES_MUTATIONS))
+def test_serializer_reverse_fk_shelves_input_is_a_shelf_id_list_over_http(operation: str) -> None:
+    """A many relation over a reverse foreign key is the list input ``[Int!]``, not one id.
+
+    ``Branch.shelves`` is collection-shaped but not a many-to-many; the runtime
+    ``ManyRelatedField`` validates a list of shelf pks, and the generated input describes
+    that list (``ShelfType`` is non-Relay, so each member is the raw ``Int`` pk) under the
+    plain declared name.
+    """
+    _mutation, input_type = _BRANCH_SHELVES_MUTATIONS[operation]
+    rendered = {name: typ for name, typ, _ in _input_fields_sdl(input_type)}
+    assert rendered["shelves"] == "[Int!]"
+
+
+def _post_branch_shelves(
+    operation: str,
+    branch_pk: int | None,
+    data: dict[str, object],
+) -> tuple[object, list[str]]:
+    """Write ``data`` through the ``operation`` branch-shelves mutation.
+
+    Returns the mutation's payload and its batched ``library_shelf`` visibility queries.
+    """
+    mutation, input_type = _BRANCH_SHELVES_MUTATIONS[operation]
+    if operation == "create":
+        query = f"mutation($d: {input_type}!) {{ {mutation}(data: $d) {{ "
+        variables: dict[str, object] = {"d": data}
+    else:
+        query = f"mutation($id: ID!, $d: {input_type}!) {{ {mutation}(id: $id, data: $d) {{ "
+        variables = {"id": branch_pk, "d": data}
+    with CaptureQueriesContext(connection) as captured:
+        payload = _graphql_payload(
+            query + "result { name } errors { field messages codes } } }",
+            variables=variables,
+        )
+    assert "errors" not in payload, payload
+    batched = _batched_visibility_queries(captured, "library_shelf")
+    return json_at(payload, "data", mutation), batched
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", list(_BRANCH_SHELVES_MUTATIONS))
+def test_serializer_reverse_fk_shelves_write_attaches_the_named_shelves_over_http(
+    operation: str,
+) -> None:
+    """The named shelves are re-pointed at the written branch after one batched visibility read.
+
+    The decode checks the whole ``shelves`` list in one ``pk__in`` query through
+    ``ShelfType.get_queryset``; DRF's default ``create()`` / ``update()`` then sets each
+    shelf's ``branch``. ``Shelf.branch`` is not nullable, so an update attaches: the shelf the
+    branch already holds stays on it.
+    """
+    origin = models.Branch.objects.create(name="Shelves Origin", city="Boston")
+    moved = [
+        models.Shelf.objects.create(code=f"Moved{index}", branch=origin) for index in range(2)
+    ]
+    left = models.Shelf.objects.create(code="Left", branch=origin)
+    target = None
+    kept = None
+    if operation == "update":
+        target = models.Branch.objects.create(name="Shelves Target", city="Boston")
+        kept = models.Shelf.objects.create(code="Kept", branch=target)
+
+    result, batched = _post_branch_shelves(
+        operation,
+        None if target is None else target.pk,
+        {"name": "Shelves Written", "shelves": [shelf.pk for shelf in moved]},
+    )
+
+    assert result == {"result": {"name": "Shelves Written"}, "errors": []}
+    assert len(batched) == 1 + post_lock_rereads(1), batched
+    written = models.Branch.objects.get(name="Shelves Written")
+    expected = {shelf.pk for shelf in moved}
+    if kept is not None:
+        expected.add(kept.pk)
+    assert set(written.shelves.values_list("pk", flat=True)) == expected
+    assert list(origin.shelves.values_list("pk", flat=True)) == [left.pk]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", list(_BRANCH_SHELVES_MUTATIONS))
+def test_serializer_reverse_fk_hidden_shelf_is_the_shelves_relation_error_over_http(
+    operation: str,
+) -> None:
+    """A shelf hidden from the caller fails the ``shelves`` field and nothing is written.
+
+    ``ShelfType.get_queryset`` hides ``topic="secret"`` from the anonymous client, so a list
+    naming one visible and one hidden shelf is the field-keyed ``invalid`` relation error:
+    no branch is created or renamed and neither shelf moves.
+    """
+    origin = models.Branch.objects.create(name="Hidden Origin", city="Boston")
+    visible = models.Shelf.objects.create(code="Visible", branch=origin)
+    hidden = models.Shelf.objects.create(code="Hidden", topic="secret", branch=origin)
+    target = None
+    if operation == "update":
+        target = models.Branch.objects.create(name="Hidden Target", city="Boston")
+
+    result, _batched = _post_branch_shelves(
+        operation,
+        None if target is None else target.pk,
+        {"name": "Hidden Written", "shelves": [visible.pk, hidden.pk]},
+    )
+
+    assert result == {
+        "result": None,
+        "errors": [
+            {
+                "field": "shelves",
+                "messages": ["Invalid id for relation 'shelves'."],
+                "codes": ["invalid"],
+            },
+        ],
+    }
+    assert not models.Branch.objects.filter(name="Hidden Written").exists()
+    assert set(origin.shelves.values_list("pk", flat=True)) == {visible.pk, hidden.pk}
 
 
 @pytest.mark.django_db
@@ -18551,7 +18676,7 @@ def test_nested_shelf_alt_branches_visibility_is_one_batched_query_over_http() -
         payload = response_json(response)
         assert "errors" not in payload, payload
         assert json_at(payload, "data", "createBranchWithNestedShelves", "errors") == []
-        in_sql = _branch_batched_visibility_queries(captured)
+        in_sql = _batched_visibility_queries(captured, "library_branch")
         assert in_sql, captured.captured_queries
         return in_sql
 

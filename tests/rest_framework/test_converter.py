@@ -1269,16 +1269,6 @@ def test_relation_bound_by_name_keeps_its_graphql_name(
     assert spec.kind == RELATION_SINGLE
 
 
-def _register_relay_shelf_primary() -> None:
-    class ShelfProbeType(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Shelf
-            fields = ("id", "code")
-            primary = True
-
-    assert registry.get(library_models.Shelf) is ShelfProbeType
-
-
 def _register_tagged_item_primary() -> None:
     class TaggedItemProbeType(DjangoType):
         class Meta:
@@ -1299,46 +1289,12 @@ def _register_membership_card_primary() -> None:
     assert registry.get(library_models.MembershipCard) is MembershipCardProbeType
 
 
-def test_many_pk_related_field_over_reverse_fk_column_emits_multi() -> None:
-    """A many relation over a one_to_many column emits a list id input, not one scalar id.
-
-    ``Branch.shelves`` is a ``ManyToOneRel``: collection-shaped (``one_to_many=True``)
-    but ``many_to_many=False``, so the column classifier alone would emit a single id.
-    The runtime ``ManyRelatedField`` validates a LIST of pks, and the generated input
-    must describe the same shape the runtime serializer validates - so after the
-    cardinality guard aligns the two sides, the emitted kind follows the serializer
-    field's cardinality (``relation_multi`` / a list annotation / the plain name).
-    """
-    _register_relay_shelf_primary()
-
-    class BranchSer(ModelSerializerBase[library_models.Branch]):
-        shelves: _PkRelation[library_models.Shelf] = serializers.PrimaryKeyRelatedField(
-            many=True,
-            queryset=library_models.Shelf.objects.all(),
-        )
-
-        class Meta:
-            model = library_models.Branch
-            fields = ("name", "shelves")
-
-    field = bound_fields(BranchSer())["shelves"]
-    assert isinstance(field, serializers.ManyRelatedField)
-    _python_attr, annotation, spec = resolve_serializer_field(
-        field,
-        library_models.Branch,
-        "ProbeInput",
-    )
-    assert spec.kind == RELATION_MULTI
-    assert _python_attr == "shelves"  # a multi relation keeps the plain declared name
-    assert spec.input_attr == "shelves"
-    assert spec.graphql_name == "shelves"
-    assert spec.related_model is library_models.Shelf
-    assert get_origin(annotation) is list
-    assert strawberry.ID in _type_args(annotation)
-
-
 def test_many_pk_related_field_over_generic_relation_column_emits_multi() -> None:
-    """The same alignment over a ``GenericRelation`` column (also one_to_many, not m2m)."""
+    """A many relation over a ``GenericRelation`` column emits a list id input, not one id.
+
+    ``Branch.tags`` is collection-shaped (``one_to_many=True``) but not a many-to-many; the
+    runtime ``ManyRelatedField`` validates a list of pks, so the generated input is a list.
+    """
     _register_tagged_item_primary()
     tags_rel = library_models.Branch._meta.get_field("tags")
     assert tags_rel.one_to_many is True
