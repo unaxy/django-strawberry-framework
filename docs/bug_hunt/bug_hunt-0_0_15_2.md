@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 237 done, 179 to do.
+Progress: 238 done, 178 to do.
 
 ## Done
 
@@ -1066,6 +1066,13 @@ Progress: 237 done, 179 to do.
   README, spec-034, spec-045 Decision 1, the module docstring and the `apply_cascade_permissions` and
   sealed-execution-queryset glossary entries say so (live under `FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD`, every
   shape including the sync root list)
+- [x] 314. Not a defect: only application Python (a `get_queryset` hook, a project `QuerySet` method) puts a value in
+  `extra(params=)` / `RawSQL` params, and a model instance there fails in the driver exactly as in plain Django; the
+  seal admits a raw-SQL parameter by plain-data ancestry, never by driver adaptability (an exact `UUID`, `time` or
+  `timedelta` passes it and fails in the driver, as before 272), and refusing a model instance would break a project
+  that registered a driver adapter for it. The `utils/querysets.py` retention and raw-parameter docstrings and
+  spec-045 state that a model instance in a raw-SQL parameter is retained and reaches the driver as is, and
+  `tests/utils/test_querysets.py::test_raw_sql_parameter_model_instance_is_retained_by_reference` pins the admission
 
 ## Outside review of the fixes
 
@@ -1123,10 +1130,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   are fine except gate's floor-suite `ensure_floor_venv(layout, holding)` wiring, which no row executes: add a
   `gate(layout, ["floor"])` row with spies. Touches `scripts/workspace.py` and `tests/test_workspace.py` (coordinate
   with floor work there)
-- [ ] 314. Under 272's raw-param leaf rule a model instance in `extra(where=..., params=[obj])` now passes the
-  visibility seal and fails in the database adapter ("Error binding parameter") instead of the typed
-  `ConfigurationError`; Django fails the same way, so decide whether the seal should keep refusing non-adaptable leaves
-  with its own message. Found landing 294
 - [ ] 318. `tests/filters/test_sets.py::test_an_unordered_meta_fields_expands_in_canonical_order[set of lookups in a
   dict]` fails under `PYTHONHASHSEED=28` ("no set over ('exact', 'icontains', 'istartswith', 'iendswith') iterates out
   of canonical order"): its `_scrambled` helper cannot build an out-of-order set for every seed, so the row flakes with
