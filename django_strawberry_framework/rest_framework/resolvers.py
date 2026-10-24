@@ -768,12 +768,17 @@ def _hook_mapping(
     ``dict(...)`` into GraphQL; reject it at the hook boundary with the same
     ``ConfigurationError`` used for other reserved-key violations. A mapping's own
     iteration is its behaviour and runs untouched. A mapping whose keys are not strings is
-    malformed too: non-string keys would escape the typed boundary as a raw ``TypeError``
-    later (``keywords must be strings`` from ``serializer_class(**kwargs)`` /
-    ``serializer.save(**save_kwargs)``), so they are rejected here with every other
-    malformed shape; the exact-``str`` key gate also keeps every downstream key-hashing
-    consumer (the exact-match injection comparison, the shadow/model-field save-kwarg
-    checks) operating on ``str``'s own hash and equality.
+    malformed too: non-string keys (``int``, ``bytes``, a lazy translation proxy) would
+    escape the typed boundary as a raw ``TypeError`` later (``keywords must be strings``
+    from ``serializer_class(**kwargs)`` / ``serializer.save(**save_kwargs)``), so they are
+    rejected here with every other malformed shape.
+
+    A ``str`` subclass key (a ``TextChoices`` or ``StrEnum`` member) is a string to Python's
+    ``**`` and to DRF, so it is admitted and read as its exact text (``truth.text``): the
+    returned mapping is keyed by plain ``str``, and every downstream key-hashing consumer
+    (the reserved-name checks, the exact-match injection comparison, the
+    shadow/model-field save-kwarg checks) operates on ``str``'s own hash and equality, so a
+    member spelling a refused name is refused like the plain name.
 
     The mapping test is ``isinstance``, so a ``Mapping`` subclass and a faithful proxy pass.
     Each non-string key is rendered once (``truth.render``) before the offender list is
@@ -786,15 +791,16 @@ def _hook_mapping(
             f"got {truth.kind(value)}.",
         )
     materialized: dict[object, object] = dict(value)
-    offenders = sorted(truth.render(key) for key in materialized if type(key) is not str)
+    offenders = sorted(
+        truth.render(key) for key in materialized if not truth.is_instance(key, str)
+    )
     if offenders:
         raise ConfigurationError(
             f"SerializerMutation {truth.name(mutation_cls)}.{hook_name} returned a mapping with "
             f"non-string key(s) {offenders!r}; hook mappings become "
-            "serializer kwargs / data keys, so every key must be a plain string.",
+            "serializer kwargs / data keys, so every key must be a string.",
         )
-    # Every key is exactly ``str`` once the offender check passed; the filter states it.
-    return {key: item for key, item in materialized.items() if type(key) is str}
+    return {truth.text(key): item for key, item in materialized.items()}
 
 
 # Leaf value types the frozen hook view may expose BY REFERENCE: each cannot be
@@ -1733,7 +1739,7 @@ def _assert_save_kwargs_no_shadow(
     validated payload.
 
     The shadowed names are read from the save-kwargs side, whose keys ``_hook_mapping`` already
-    proved plain ``str``, so the message never renders a key a custom ``validate()`` returned.
+    made plain ``str``, so the message never renders a key a custom ``validate()`` returned.
     """
     validated_keys = set(list_of(validated_data_of(serializer)))
     shadowed = sorted(key for key in save_kwargs if key in validated_keys)
