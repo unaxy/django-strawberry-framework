@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 254 done, 172 to do.
+Progress: 255 done, 171 to do.
 
 ## Done
 
@@ -1175,6 +1175,13 @@ Progress: 254 done, 172 to do.
   as not the same, so it is copied), and the `_copy_entry` / `_remove_unwanted` unlinks (`missing_ok`); only a
   missing entry is absorbed. One row per window (`_run_once_before_reading` / `_run_once_after_checking`), each red
   with its fix reverted
+- [x] 406. not a defect: the README "Single-parent fast path" paragraph promises the fast path for exactly one parent
+  and calls every other shape "a performance downgrade, never a wrong page"; a root `first: N` page's probe row
+  (Strawberry's `ListConnection` overfetch, the keyset `NEXT_PAGE_PROBE_ROWS`) is a fetched parent, so its pk joins
+  the nested prefetch's parent `IN` list and the planned window runs. Every page is correct and the statement count
+  is unchanged; a plain list relation prefetches the probe parent's children too. Upstream strawberry-django
+  prefetches the probe row the same way. Prefetching only the page rows touches every root connection path (offset,
+  keyset, async, `hasNextPage`); that is a new card, not a fix
 
 ## Outside review of the fixes
 
@@ -1385,8 +1392,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   stand-in left behind when the row was promoted to
   `examples/fakeshop/test_query/test_connection_pagination_api.py::test_negative_offset_cursor_on_a_sequence_resolver_is_a_cursor_error`:
   prove it redundant and delete it, or keep it
-- [ ] 406. Performance: a root `first: N` probe row's sentinel parent also gets the nested prefetch (`... IN (1, 2) ...
-  _dst_row_number <= 3`), so the single-parent fast path never engages once two parents exist
 - [ ] 407. `utils/sessions.py` test gaps: no row for a custom client-side session store that does not subclass the
   signed-cookie store (treated as server-side, as `docs/README.md` documents), and no row for the exact window edge of
   `consumers.py::_actor_is_current` (strict `<`)
