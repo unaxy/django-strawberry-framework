@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 245 done, 177 to do.
+Progress: 248 done, 176 to do.
 
 ## Done
 
@@ -1121,6 +1121,20 @@ Progress: 245 done, 177 to do.
   exact text, so the member answers like its plain-`str` twin and a member spelling a reserved, undeclared or
   model-field name is refused with the plain name's message. The library member-key live rows pin it; spec-039 says so.
   The `rest_framework/sets.py` Meta-map key gates stay exact-`str` (dry-0_0_15_3 item 44)
+- [x] 429. fixed: under the async executor a plain sync root or nested resolver that returns a lazy `QuerySet` to a list
+  field answers with the sync view's rows and SQL: the dependency-owned `_graphql_core_patches` list-completion arm wraps
+  a Django `QuerySet` in the async completion adapter so it is fetched through `__aiter__` off the loop (a sentinel
+  retires it once graphql-core completes async-first), and `DjangoOptimizerExtension.resolve` builds a sync root's plan
+  in one `sync_to_async` worker, so planned targets' `get_queryset` hooks never run on the loop. The library loan grid
+  (all 15 cases), the fetched-annotation twin and the scalars, kanban and generic-connection async rows pin it; the
+  README, spec-002, 035, 050 and the glossary say so
+- [x] 390. fixed with 429: `allScalarSpecimens` and `allCards` answer on the async view with the sync view's rows and SQL.
+  A plain `def` resolver still runs on the loop, so code that evaluates a queryset, and an `apply_sync` call's
+  validation, permission gates and related `get_queryset` hooks, belong in an `async def` resolver awaiting
+  `apply_async`; the README and the `djangographqlview` and `get_queryset` glossary terms say so, and the
+  eager-evaluation library root pins the raise
+- [x] 53. superseded by 429: a hand-written `@strawberry.field` returning a lazy QuerySet completes off the loop on the
+  async executor, and the README async paragraph under `DjangoListField` says so
 
 ## Outside review of the fixes
 
@@ -1307,9 +1321,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   override owns its value like `method=` and document it
 - [ ] 389. Unprobed: a PostgreSQL `ArrayField` of datetimes or times as a filter leaf; the unbindable-temporal refusal
   does not read its elements; probe whether PostgreSQL refuses any element value the scalar accepts
-- [ ] 390. Under `AsyncDjangoGraphQLView` over the fakeshop schema, a plain `def` root that calls `apply_sync`
-  (`allScalarSpecimens`, `allCards`) answers a valid query with `SynchronousOnlyOperation` ("An unexpected error
-  occurred."); decide whether sync roots under the async view are supported, and document or fix
 - [ ] 427. (robustness)
   `tests/test_ci_governance.py::test_every_floor_literal_in_the_django_workflow_is_its_pyproject_lower_bound` checks
   the floor literals and the step's `if` but not the step's position: moving the soft-floor step (or the strawberry
@@ -1363,12 +1374,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 407. `utils/sessions.py` test gaps: no row for a custom client-side session store that does not subclass the
   signed-cookie store (treated as server-side, as `docs/README.md` documents), and no row for the exact window edge of
   `consumers.py::_actor_is_current` (strict `<`)
-- [ ] 429. Every fakeshop root list served by a plain sync `strawberry.field(resolver=...)` that returns a lazy
-  QuerySet (`allLibraryLoans`, `allLibraryBooks`, `allLibraryPatrons`, ...) raises `SynchronousOnlyOperation` on the
-  async executor (`asyncio.run(config.schema.schema.execute(...))`, the schema the async view mounts), hook or no
-  hook, on main before 323; no async test posts one, so the async root-list rows of 323's live grid are left out
-  (`_LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES`). Say whether such roots should evaluate or become async resolvers, or
-  whether the package should serve a sync resolver's lazy QuerySet on the async executor. Found implementing 323
 - [ ] 580. (robustness) A FilterSet / OrderSet `check_<name>_permission` whose name matches no gated input (a typo, a
   wrong case, or a model field the set does not expose) never fires and never errors: neither set metaclass nor
   finalize audits gate names, and names are knowable only after expansion (`types/finalizer.py::_bind_sidecar_sets`'s
@@ -1383,12 +1388,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 583. (robustness) `rest_framework/resolvers.py::_hook_mapping`'s non-string-key refusal renders a lazy
   translation key (`gettext_lazy("a")`) as `'a'` in its offender list, which reads as a string; naming each offender's
   kind (`truth.kind`) would say why it was refused. Same output before 408. Found verifying 408
+- [ ] 585. (robustness) A plain root returning `Model.objects.raw(...)` to a list field still raises
+  `SynchronousOnlyOperation` on the async executor: the completion arm adapts only `QuerySet`, though
+  `RawQuerySet.__aiter__` is the same `sync_to_async(_fetch_all)` generator and graphql-core 3.3 completes it; no
+  contract row names `RawQuerySet`. Found verifying 429
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 584. CHANGELOG entry for item 429: under `AsyncDjangoGraphQLView` (or `await schema.execute`) a plain sync resolver
+  returning a lazy `QuerySet` or `Manager` to a list field answers instead of raising `SynchronousOnlyOperation` (the
+  masked "An unexpected error occurred."), and the optimizer builds a sync root's plan in a `sync_to_async` worker;
+  code that evaluates a queryset, or calls `apply_sync`, in a plain `def` resolver still runs on the event loop
 - [ ] 327. Design call: should `node(id:)` / `nodes(ids:)` roots be optimizer-planned, in this hunt or as a card?
   `types/relay.py::_resolve_node_default` / `_resolve_nodes_default` (and the async twins) return model rows the
   optimizer never plans (`optimizer/extension.py::DjangoOptimizerExtension._optimize` passes a non-`QuerySet` through),
@@ -1613,8 +1626,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   result is a bool (the request user's class name in `DjangoModelPermission.has_permission` likewise), and the conflict
   message in `auth/mutations.py` renders permission-class names raw. Read the label only on the failure branch, reject at
   declaration, or keep?
-- [ ] 53. Docs (parked): docs/README.md, the async paragraph under `DjangoListField`:
-  a hand-written `@strawberry.field` returning a QuerySet runs synchronously
 - [ ] 54. Docs (parked): glossary, a sliced combinator branch on SQLite raises Django's own `DatabaseError`
 - [ ] 57. CHANGELOG entry for item 11: model, ModelForm, plain-form and register errors, and a `ValidationError` raised
   during a serializer save, now use the input name (`categoryId`, not `category`)

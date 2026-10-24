@@ -20,7 +20,9 @@ directly (not via the importer, so assertions stay independent of how the real
   model ordered by a single non-pk column (``Decision.decided_at``).
 * the same connection under the async ``node`` root (a module-local
   ``/graphql-async/`` mount), whose filter refuses a ``decidedAt`` bound the
-  database cannot bind as ``FILTER_INVALID``.
+  database cannot bind as ``FILTER_INVALID``;
+* the plain ``def`` root ``allCards`` on that mount, its ``apply_sync`` calls run on
+  the event loop, answering the sync view's rows in its statements.
 """
 
 from datetime import timedelta
@@ -40,9 +42,9 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django.utils import timezone
 from graphql import GraphQLError
-from graphql_client import assert_graphql_data as _assert_graphql_data
-from graphql_client import assert_graphql_success as _graphql_data
 from graphql_client import (
+    JSONObject,
+    RecordCompiledSql,
     json_at,
     json_list,
     json_object,
@@ -51,6 +53,8 @@ from graphql_client import (
     post_graphql,
     response_json,
 )
+from graphql_client import assert_graphql_data as _assert_graphql_data
+from graphql_client import assert_graphql_success as _graphql_data
 from strawberry import relay
 from typing_extensions import TypedDict
 
@@ -1410,6 +1414,69 @@ async def test_async_decisions_connection_refuses_an_unbindable_temporal_filter(
             ],
         },
     }
+
+
+#: ``allCards``, a plain ``def`` root whose resolver calls ``CardFilter.apply_sync`` /
+#: ``CardOrder.apply_sync`` and returns the lazy queryset, as (document, response,
+#: statements): bare with a planned forward relation, with a related filter, and ordered.
+_PLAIN_CARD_ROOT_CASES = [
+    pytest.param(
+        "{ allCards { number status { key } } }",
+        {
+            "allCards": [
+                {"number": 21, "status": {"key": "done"}},
+                {"number": 24, "status": {"key": "todo"}},
+            ],
+        },
+        1,
+        id="planned-relation",
+    ),
+    pytest.param(
+        '{ allCards(filter: { status: { key: { exact: "done" } } }) { number title } }',
+        {"allCards": [{"number": 21, "title": "Filtering subsystem"}]},
+        1,
+        id="related-filter",
+    ),
+    pytest.param(
+        "{ allCards(orderBy: [{ number: DESC }]) { number } }",
+        {"allCards": [{"number": 24}, {"number": 21}]},
+        1,
+        id="order",
+    ),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("document", "expected", "statements"), _PLAIN_CARD_ROOT_CASES)
+async def test_async_all_cards_answers_as_the_sync_view(
+    record_compiled_sql: RecordCompiledSql,
+    document: str,
+    expected: JSONObject,
+    statements: int,
+) -> None:
+    """``allCards`` answers on the async view as on the sync one, statement for statement.
+
+    The resolver runs on the event loop under ``AsyncDjangoGraphQLView``, its
+    ``apply_sync`` calls included, and returns its queryset unevaluated: neither call
+    reads the database for these arguments, and list completion fetches the rows off
+    the loop. The async request goes first, so it is the one that builds the plan.
+    """
+    await sync_to_async(_seed_board)()
+    recorded = record_compiled_sql()
+    with override_settings(ROOT_URLCONF=__name__):
+        result = await AsyncTestClient().query(
+            document,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+    async_sql = list(recorded)
+    recorded.clear()
+    sync_payload = await sync_to_async(lambda: response_json(post_graphql(document)))()
+    assert result.response.status_code == 200
+    assert response_json(result.response) == {"data": expected}
+    assert sync_payload == {"data": expected}
+    assert len(recorded) == statements, recorded
+    assert async_sql == recorded
 
 
 def test_kanban_card_order_input_type_exposes_only_column_backed_all_fields() -> None:

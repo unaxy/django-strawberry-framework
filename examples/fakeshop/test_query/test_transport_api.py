@@ -143,8 +143,8 @@ _HookR = TypeVar("_HookR")
 
 # ---------------------------------------------------------------------------
 # Operations. ``__typename`` is deliberately DB-free so a row whose subject is a
-# header or a status code never depends on seeded data (and so the async probe
-# never touches the ORM from the event loop). The catalog read and the category
+# header or a status code never depends on seeded data (and so the un-marked async
+# probes need no database). The catalog read and the category
 # write are shipped fakeshop surfaces already driven by sibling live suites.
 # ---------------------------------------------------------------------------
 
@@ -1335,9 +1335,8 @@ async def test_the_async_package_view_runs_inside_djangos_middleware_chain() -> 
     The async colour of rows 1-2: Django dispatches the coroutine view directly
     (upstream's ``as_view`` marks it), and ``SecurityMiddleware`` still decorates
     the response, so the middleware chain demonstrably ran on the async path. The
-    operation is deliberately DB-free - a query touching the ORM from the event
-    loop would raise ``SynchronousOnlyOperation`` and prove nothing about the
-    transport.
+    operation is deliberately DB-free: the subject is the transport, so the row
+    carries no database.
     """
     with override_settings(ROOT_URLCONF=__name__):
         response = await _post_bytes(
@@ -1370,8 +1369,7 @@ async def test_the_async_package_view_enforces_the_same_utf8_wire_contract() -> 
 
     The valid-UTF-8 control shares the request sequence so the two rejections
     cannot be a broken-mount artifact. DB-free for the same reason as the
-    sibling async rows: an ORM read from the event loop would raise
-    ``SynchronousOnlyOperation``.
+    sibling async rows: the subject is the transport.
     """
     document = json.dumps({"query": _TYPENAME})
     with override_settings(ROOT_URLCONF=__name__):
@@ -1591,8 +1589,8 @@ def test_on_asgi_an_absent_or_lying_content_length_cannot_buy_a_larger_body(
     owns is that the real handler, with the real middleware chain, produces the
     package's ``413`` for both undeclarable shapes.
 
-    Deliberately DB-free and un-marked: an ORM read from the event loop would
-    raise ``SynchronousOnlyOperation`` and prove nothing about the transport.
+    Deliberately DB-free and un-marked: the subject is the transport, so the row
+    carries no database.
     ``DATA_UPLOAD_MAX_MEMORY_SIZE`` is left alone here on purpose - it is the one
     cell where the two supported Django versions diverge, so no ASGI row lowers
     it.
@@ -2018,8 +2016,7 @@ async def test_the_async_package_view_enforces_the_same_body_cap() -> None:
     The two ``run`` overrides differ only in ``async`` / ``await``, which is the
     same irreducible split upstream carries in its own ``dispatch`` pair - so the
     contract needs proving on both. DB-free for the same reason as the sibling
-    async row: an ORM read from the event loop would raise
-    ``SynchronousOnlyOperation``.
+    async row: the subject is the transport.
     """
     with override_settings(ROOT_URLCONF=__name__):
         client = AsyncClient()
@@ -2128,8 +2125,8 @@ async def test_the_async_view_keeps_the_utf8_wire_contract_with_the_patch_opted_
     the bytes reach ``parse_json`` raw with or without any patch. If the wire
     contract were still gated, this is the transport where a UTF-16 body would
     silently *succeed* - ``json.loads`` auto-detects raw bytes - rather than
-    merely 500. DB-free like its sibling async rows: an ORM read from the event
-    loop would raise ``SynchronousOnlyOperation``.
+    merely 500. DB-free like its sibling async rows: the subject is the
+    transport.
     """
     with _strawberry_patch_opted_out():
         client = AsyncClient()
@@ -2745,8 +2742,8 @@ async def test_the_async_view_refuses_the_same_lossy_control_documents(
     Upstream's ``parse_multipart`` is a coroutine on the async base view and a plain
     method on the sync one, so the package needs one override per transport - which
     is exactly the seam where a policy silently applies to one transport only. DB
-    free for the same reason as the other async rows: an ORM read from the event
-    loop would raise ``SynchronousOnlyOperation``.
+    free for the same reason as the other async rows: the subject is the
+    transport.
     """
     with override_settings(ROOT_URLCONF=__name__):
         response = await _post_multipart(

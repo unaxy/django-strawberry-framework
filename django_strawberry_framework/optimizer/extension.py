@@ -63,6 +63,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_str,
     read_attr,
 )
+from django_strawberry_framework.utils.execution_mode import operation_is_async
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.querysets import (
     normalize_query_source,
@@ -1152,7 +1153,15 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         the result before running ``_optimize_async``, which builds a plan off
         the event loop. Strawberry's
         ``SchemaExtension.resolve`` returns ``AwaitableOrValue`` for
-        exactly this reason.
+        exactly this reason. Which thread builds a plan follows the executor,
+        not the resolver's color: under the asynchronous executor a plain
+        ``def`` root runs on the event loop too, so a plan its queryset needs
+        is built in the same sync boundary, and a cached plan is applied on the
+        loop, by the one predicate both colors ask (``_needs_sync_boundary``).
+        The synchronous executor never hops. Either way this hook returns the
+        planned queryset unevaluated; under the asynchronous executor list
+        completion fetches its rows off the loop
+        (``_graphql_core_patches.py::_patched_complete_list_value``).
         """
         result = _next(root, info, *args, **kwargs)
         if read_attr(info.path, "prev") is not None:
@@ -1163,6 +1172,8 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
                 return await self._optimize_async(await result, info)
 
             return _async_optimize()
+        if operation_is_async() and self._needs_sync_boundary(result, info):
+            return run_in_one_sync_boundary(self._optimize, result, info)
         return self._optimize(result, info)
 
     def _optimize(self, result: object, info: "GraphQLResolveInfo") -> object:
@@ -1260,18 +1271,30 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         (``plans.py::diff_plan_for_queryset``), so such a reuse hops as well
         (``_builds_plan``).
         """
+        if self._needs_sync_boundary(result, info):
+            return await run_in_one_sync_boundary(self._optimize, result, info)
+        return self._optimize(result, info)
+
+    def _needs_sync_boundary(self, result: object, info: "GraphQLResolveInfo") -> bool:
+        """Whether ``_optimize(result, info)`` would build a plan and so must leave the loop.
+
+        Reads the same steps ``_optimize`` takes before planning - the adapter
+        unwrap, the ``Manager`` coercion, the evaluated-queryset pass-through and
+        the return-type resolution - then asks ``_builds_plan``. Reading the
+        coerced ``Manager`` here never fetches a row: ``.all()`` builds a fresh
+        unevaluated queryset.
+        """
         inner_result, _ = unwrap_async_queryset_adapter(result)
         normalized = normalize_query_source(inner_result)
-        if normalized[1] is True and normalized[0]._result_cache is None:
-            resolved = _resolve_model_from_return_type(info)
-            if resolved is not None and self._builds_plan(
-                info,
-                resolved.model,
-                resolved.origin,
-                normalized[0],
-            ):
-                return await run_in_one_sync_boundary(self._optimize, result, info)
-        return self._optimize(result, info)
+        if normalized[1] is False or normalized[0]._result_cache is not None:
+            return False
+        resolved = _resolve_model_from_return_type(info)
+        return resolved is not None and self._builds_plan(
+            info,
+            resolved.model,
+            resolved.origin,
+            normalized[0],
+        )
 
     def _builds_plan(
         self,

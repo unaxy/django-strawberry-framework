@@ -7,6 +7,9 @@ exercised with values past the JS safe-integer boundary (``2**53 - 1 ==
 9007199254740991``) so the decimal-string serialization is genuinely
 verified, not accidentally satisfied by an in-range value that would also
 round-trip as a JSON number.
+
+The plain ``def`` roots also answer on a module-local ``/graphql-async/`` mount of
+the shipped schema, with the sync view's rows in its statements.
 """
 
 import datetime
@@ -15,11 +18,16 @@ from uuid import UUID
 
 import pytest
 from apps.scalars import models
+from asgiref.sync import sync_to_async
+from config import schema as config_schema
 from django.db import connection
+from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
+from django.urls import path
 from graphql_client import (
     JSONObject,
+    RecordCompiledSql,
     json_at,
     json_list,
     json_object,
@@ -28,6 +36,9 @@ from graphql_client import (
     response_json,
 )
 from graphql_client import post_graphql as _post_graphql
+
+from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 # The production error policy masks any error carrying an originating
 # exception, and graphql-core reports a custom scalar's literal rejection that
@@ -1667,3 +1678,98 @@ def test_override_specimen_consumer_field_overrides_resolve_over_http() -> None:
     note_type = sdl["note"]
     assert note_type["kind"] == "NON_NULL"
     assert note_type["ofType"] == {"name": "String", "kind": "SCALAR"}
+
+
+async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    """The shipped schema behind ``AsyncDjangoGraphQLView``, mounted for this module only."""
+    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
+
+
+urlpatterns = [path("graphql-async/", _async_shipped_graphql_view)]
+
+
+def _seed_tagged_specimens() -> None:
+    """Seed three specimens: two on an active tag, one on an inactive tag."""
+    red = _seed_tag("red")
+    hidden = _seed_tag("hidden", active=False)
+    _seed_specimen(label="alpha", tag=red)
+    _seed_specimen(label="beta", tag=hidden)
+    _seed_specimen(label="gamma", tag=red)
+
+
+#: Plain ``def`` scalar roots returning a lazy ``QuerySet`` (or the bare ``Manager``), as
+#: (document, response, statements). The tag relation's type declares ``get_queryset``,
+#: so the optimizer plans it as a ``Prefetch`` and the first request builds the plan; the
+#: filter and order arguments run the root's ``apply_sync`` calls on the resolver's thread.
+_PLAIN_SCALAR_ROOT_CASES = [
+    pytest.param(
+        "{ allScalarSpecimens { label tag { label } } }",
+        {
+            "allScalarSpecimens": [
+                {"label": "alpha", "tag": {"label": "red"}},
+                {"label": "beta", "tag": None},
+                {"label": "gamma", "tag": {"label": "red"}},
+            ],
+        },
+        2,
+        id="queryset-planned-prefetch",
+    ),
+    pytest.param(
+        '{ allScalarSpecimens(filter: { tag: { label: { exact: "red" } } }) { label } }',
+        {"allScalarSpecimens": [{"label": "alpha"}, {"label": "gamma"}]},
+        1,
+        id="queryset-related-filter",
+    ),
+    pytest.param(
+        "{ allScalarSpecimens(orderBy: [{ label: DESC }]) { label } }",
+        {"allScalarSpecimens": [{"label": "gamma"}, {"label": "beta"}, {"label": "alpha"}]},
+        1,
+        id="queryset-order",
+    ),
+    pytest.param(
+        "{ allScalarSpecimensViaManager { label tag { label } } }",
+        {
+            "allScalarSpecimensViaManager": [
+                {"label": "alpha", "tag": {"label": "red"}},
+                {"label": "beta", "tag": None},
+                {"label": "gamma", "tag": {"label": "red"}},
+            ],
+        },
+        2,
+        id="manager-planned-prefetch",
+    ),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("document", "expected", "statements"), _PLAIN_SCALAR_ROOT_CASES)
+async def test_async_plain_scalar_root_answers_as_the_sync_view(
+    record_compiled_sql: RecordCompiledSql,
+    document: str,
+    expected: JSONObject,
+    statements: int,
+) -> None:
+    """A plain ``def`` root's lazy queryset answers on the async view as on the sync one.
+
+    Under ``AsyncDjangoGraphQLView`` the resolver runs on the event loop and returns
+    its queryset unevaluated (a bare ``Manager`` included); the optimizer builds the
+    plan off the loop and list completion fetches the rows off it, so the async
+    response and its statements are the sync view's, statement for statement. The
+    async request goes first, so it is the one that builds the plan.
+    """
+    await sync_to_async(_seed_tagged_specimens)()
+    recorded = record_compiled_sql()
+    with override_settings(ROOT_URLCONF=__name__):
+        result = await AsyncTestClient().query(
+            document,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+    async_sql = list(recorded)
+    recorded.clear()
+    sync_payload = await sync_to_async(lambda: response_json(_post_graphql(document)))()
+    assert result.response.status_code == 200
+    assert response_json(result.response) == {"data": expected}
+    assert sync_payload == {"data": expected}
+    assert len(recorded) == statements, recorded
+    assert async_sql == recorded

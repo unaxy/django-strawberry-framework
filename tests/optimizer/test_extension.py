@@ -135,6 +135,7 @@ from django_strawberry_framework.utils._queryset_private import (
 )
 from django_strawberry_framework.utils.querysets import (
     _AsyncQuerySetRows,
+    run_in_one_sync_boundary,
     unwrap_async_queryset_adapter,
     wrap_async_queryset_adapter,
 )
@@ -830,6 +831,67 @@ def test_resolve_async_passes_through_evaluated_queryset(monkeypatch: pytest.Mon
     resolved = _run_coroutine(result)
     assert resolved is qs  # same instance, no clone
     assert ext.cache_info().misses == 0  # guard fired before plan build
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_hops_a_sync_root_under_the_async_executor_only_to_build_a_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the asynchronous executor a plain ``def`` root's plan is built off the loop.
+
+    The plan hop follows the executor, not the resolver's color: the first async
+    request builds the plan in one sync boundary, the second reuses the cached plan
+    on the loop with no hop, and the synchronous executor never hops. Every request
+    answers the same rows, which list completion fetches.
+    """
+    await sync_to_async(services.seed_data)(1)
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    assert registry.get(Category) is CategoryType
+
+    @strawberry.type
+    class Query:
+        def _all_categories(self) -> QuerySet[Category]:
+            return Category.objects.order_by("id")
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[CategoryType],
+        )
+
+    finalize_django_types()
+    optimizer = DjangoOptimizerExtension()
+    schema = DjangoSchema(query=Query, extensions=[lambda: optimizer])
+    hopped: list[object] = []
+
+    async def _counting_boundary(
+        fn: Callable[..., object],
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        hopped.append(fn)
+        return await run_in_one_sync_boundary(fn, *args, **kwargs)
+
+    monkeypatch.setattr(extension_module, "run_in_one_sync_boundary", _counting_boundary)
+    names = [{"name": category.name} async for category in Category.objects.order_by("id")]
+    document = "{ allCategories { name } }"
+
+    first = await schema.execute(document)
+    assert first.errors is None, first.errors
+    assert first.data == {"allCategories": names}
+    assert hopped == [optimizer._optimize]
+    second = await schema.execute(document)
+    assert second.errors is None, second.errors
+    assert second.data == {"allCategories": names}
+    assert len(hopped) == 1
+    synchronous = await sync_to_async(schema.execute_sync)(document)
+    assert synchronous.errors is None, synchronous.errors
+    assert synchronous.data == {"allCategories": names}
+    assert len(hopped) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -1,15 +1,29 @@
-"""Defensive patch for graphql-core async-iterable list completion.
+"""Defensive patches for graphql-core list completion.
 
 ``graphql-core``'s ``ExecutionContext.complete_list_value`` materializes an
 ``AsyncIterable`` and recursively completes the resulting list, but the installed
 upstream implementation does not await a residual completion awaitable. Awaitable
 child fields can therefore escape as an unawaited coroutine. The delegating wrapper
-below awaits that residual value and otherwise preserves upstream behavior.
+below awaits that residual value.
+
+The same method checks the synchronous ``Iterable`` protocol before the asynchronous
+one, so a Django ``QuerySet`` (which implements both) a resolver hands to a list field
+is iterated synchronously on the event-loop thread under the asynchronous executor,
+and Django refuses that ORM work. graphql-core 3.3 completes any value exposing
+``__aiter__`` through it, and Strawberry turns that off for its synchronous executor
+only; under the asynchronous executor the wrapper therefore completes a ``QuerySet``
+through the async-only queryset completion adapter, so Django's own
+``QuerySet.__aiter__`` fetches the rows off the loop. The arm reads the executor
+(``utils/execution_mode.py::operation_is_async``), never the ambient loop, and
+wraps a ``QuerySet`` only: Django's async protocol is the one this package vouches
+for, so any other value offering both protocols completes as upstream completes it.
+The synchronous executor keeps upstream behavior. The arm moves the row fetch only:
+a resolver body that evaluates a queryset still runs on the loop.
 
 The patch has its own ``APPLY_UPSTREAM_PATCHES`` dependency key,
-``"graphql_core"``. It can be retired independently when the captured upstream
-implementation no longer exhibits the bug pinned by
-``tests/test_graphql_core_patches.py``.
+``"graphql_core"``; switched off, both upstream behaviors return. Each arm can be
+retired independently when the captured upstream implementation no longer exhibits
+the behavior its sentinel in ``tests/test_graphql_core_patches.py`` pins.
 """
 
 import inspect
@@ -18,6 +32,8 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 
 from .conf import upstream_patches_enabled
 from .utils import truth
+from .utils.execution_mode import operation_is_async
+from .utils.querysets import wrap_async_queryset_adapter
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -168,6 +184,8 @@ def _patched_complete_list_value(
     result: "AsyncIterable[object] | Iterable[object]",
 ) -> "AwaitableOrValue[list[object]]":
     upstream = _upstream_captures()
+    if operation_is_async():
+        result = wrap_async_queryset_adapter(result)
     res = upstream.complete_list_value(
         self,
         return_type,

@@ -311,9 +311,9 @@ Django. Decision 19 names that shape as standard application code the package an
 
 *Rejected — re-querying the relation instead of carrying its rows:* The cached rows are already
 in memory. Re-fetching them costs one query per parent row, and on the prefetched branch of the
-generated many-side resolver it returns an unevaluated rebuilt source that graphql-core iterates
-on the event loop under async, where Django raises `SynchronousOnlyOperation`. The alternative is
-therefore not only a cost: it breaks the async relation outright.
+generated many-side resolver it returns an unevaluated rebuilt source that list completion
+fetches once per parent row, under async through one worker hop each. The alternative is
+therefore a statement and a hop on every parent row the cache already answered.
 
 *Rejected — mounting the live proof on a shape that never reaches the branch:* replacing the
 reverse relation manager's queryset class. The optimizer seeds the generated `Prefetch` child
@@ -374,6 +374,25 @@ dependency keeps disabling or retiring either workaround from silently changing 
 *Rejected:* Keeping the executor wrapper in `_strawberry_patches.py` because graphql-core is a
 transitive Strawberry dependency. That makes dependency topology decide lifecycle ownership,
 couples unrelated escape hatches, and lets an HTTP-view opt-out restore an executor bug.
+
+*Why the asynchronous executor's queryset adaptation is an arm of this wrapper:* the defect is
+graphql-core's completion order, so its fix belongs to the owner of that completion, and
+graphql-core 3.3 ships the same order (async iteration first under the asynchronous executor),
+so the arm retires with the pin bump through its own sentinel. It reads the bound operation mode,
+so a synchronous operation nested inside an asynchronous one keeps synchronous completion. It
+adapts a Django `QuerySet` only, because Django's async iteration protocol is the one the package
+vouches for; any other value offering both protocols completes as upstream completes it.
+
+*Rejected - the optimizer as the completion owner:* wrapping the planned root queryset in
+`DjangoOptimizerExtension` serves only roots the optimizer sees, so a schema without the
+extension and every nested resolver keep the defect, and a second completion owner beside the
+list field's would split one rule across two modules.
+
+*Rejected - running a plain `def` root resolver in a worker thread:* the resolver is application
+code whose color the consumer chose; moving it off the loop changes which thread its
+thread-locals and connection belong to for every resolver, not only the ones returning a
+queryset, and contradicts Decision 5's callable-color rule. The package completes what a
+resolver returns; what its body does stays where the executor runs it.
 
 ### Decision 13 — configuration authority is schema state; everything per-request is operation state
 

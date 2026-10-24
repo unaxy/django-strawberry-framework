@@ -1,7 +1,8 @@
 """Live GraphQL HTTP tests for the library app's read/write, Relay, keyset, and optimizer surface.
 
-Async ``node`` / ``nodes`` rows on ``/graphql-async/`` drive ``AsyncTestClient``
-(``graphql_client.py`` is sync-only) with ``django_db(transaction=True)``. Typed
+Async rows on ``/graphql-async/`` (``node`` / ``nodes``, connections, and plain ``def``
+root lists) drive ``AsyncTestClient`` (``graphql_client.py`` is sync-only) with
+``django_db(transaction=True)``. Typed
 ``DjangoNodesField`` rows ride a holder at ``/graphql-test/`` because the shipped
 query exposes typed ``genre(id:)`` only.
 """
@@ -45,6 +46,7 @@ from django_filters import CharFilter, Filter, TypedChoiceFilter
 from graphql_client import (
     DeleteAfterAuthorization,
     JSONObject,
+    RecordCompiledSql,
     json_at,
     json_int,
     json_list,
@@ -559,6 +561,34 @@ def test_library_evaluated_queryset_not_re_executed_over_http() -> None:
     assert len(branch_sql) == 1, captured.captured_queries
     assert 'FROM "library_branch"' in branch_sql[0]
     assert "JOIN" not in branch_sql[0].upper()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_library_root_evaluating_in_its_body_is_refused_on_the_loop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A plain ``def`` root that evaluates its queryset itself fails on the async view.
+
+    Under ``AsyncDjangoGraphQLView`` a plain ``def`` resolver body runs on the event
+    loop, and the package does not move it to a worker: it completes a returned lazy
+    queryset off the loop, but ``all_library_branches_eager_eval``'s own
+    ``bool(queryset)`` is a database read on the loop, which Django refuses, answered
+    as the masked unexpected error. Code that must evaluate belongs in an ``async def``
+    resolver using Django's async API or in ``sync_to_async``.
+    """
+    await sync_to_async(_seed_library_graph)()
+    payload = await _post_async_shipped("query { allLibraryBranchesEagerEval { name } }")
+    assert payload["data"] is None, payload
+    [error] = json_list(payload, "errors")
+    assert json_at(error, "path") == ["allLibraryBranchesEagerEval"]
+    assert json_at(error, "message") == "An unexpected error occurred."
+    [record] = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.levelno == logging.ERROR
+    ]
+    assert record.exc_info is not None, record
+    assert type(record.exc_info[1]) is SynchronousOnlyOperation, record.exc_info
 
 
 @pytest.mark.django_db
@@ -1140,9 +1170,8 @@ _LOAN_QUERYSET_METHOD_HOOK_CASES = [
         id="root-list",
     ),
 ]
-#: The cases above that a seal rebuilds the hook's result on, which the async executor serves
-#: too: ``allLibraryLoans``' sync resolver returns its queryset unevaluated, so the async view
-#: refuses to evaluate it (``SynchronousOnlyOperation``) with or without the hook.
+#: The cases above that a seal rebuilds the hook's result on: ``allLibraryLoans``' resolver
+#: calls the hook itself and returns the hook's queryset, which no seal rebuilds.
 _LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES = [
     case for case in _LOAN_QUERYSET_METHOD_HOOK_CASES if case.id != "root-list"
 ]
@@ -1240,10 +1269,11 @@ def test_library_loan_get_queryset_calls_a_project_queryset_method(
         "expected_with_hook",
         "loan_statements",
     ),
-    _LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES,
+    _LOAN_QUERYSET_METHOD_HOOK_CASES,
 )
 async def test_async_library_loan_get_queryset_calls_a_project_queryset_method(
     project_schema_override: Callable[[], None],
+    record_compiled_sql: RecordCompiledSql,
     flags: dict[str, bool],
     document: str,
     expected: JSONObject,
@@ -1254,12 +1284,14 @@ async def test_async_library_loan_get_queryset_calls_a_project_queryset_method(
 ) -> None:
     """The async executor hands ``LoanType.get_queryset`` a ``LoanQuerySet`` too.
 
-    The sealed documents over ``/graphql-async/``: the sync hook runs in a worker
-    thread and its ``with_note()`` call, on its input or on the cascade's return,
-    narrows every path as it does on the sync view.
+    Every document over ``/graphql-async/``: the sync hook runs in a worker thread
+    and its ``with_note()`` call, on its input or on the cascade's return, narrows
+    every path as it does on the sync view, in the sync view's loan statements.
+    ``allLibraryLoans``' plain ``def`` resolver returns its queryset unevaluated, and
+    the list completes it off the event loop.
     """
-    # The no-hook control, the statement counts and the cascade SQL run on the sync twin.
-    del expected, loan_statements, cascade_tables
+    # The no-hook control runs on the sync twin.
+    del expected
     pks = await sync_to_async(_seed_loan_note_graph)()
     with override_settings(
         **flags,
@@ -1267,8 +1299,16 @@ async def test_async_library_loan_get_queryset_calls_a_project_queryset_method(
         FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD=cascade,
     ):
         project_schema_override()
-        payload = await _post_async_shipped(_loan_note_document(document, pks))
+        filled = _loan_note_document(document, pks)
+        loan_sql = record_compiled_sql('FROM "library_loan"')
+        payload = await _post_async_shipped(filled)
     assert payload == {"data": expected_with_hook}
+    assert len(loan_sql) == loan_statements, loan_sql
+    assert all('"note"' in sql.partition(" WHERE ")[2] for sql in loan_sql), loan_sql
+    for table in ('"library_book"', '"library_patron"'):
+        assert all(
+            (table in sql.partition(" WHERE ")[2]) is (table in cascade_tables) for sql in loan_sql
+        ), loan_sql
 
 
 #: Every framework path that hands ``LoanType.get_queryset`` its source, as (extra
@@ -1378,6 +1418,49 @@ def test_library_loan_get_queryset_returning_an_annotation_a_clone_fetched_is_se
     assert all("COUNT(" in sql for sql in hooked_loan_sql), hooked_loan_sql
     assert queries == statements
     assert hooked_queries == statements + hook_calls
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "flags",
+        "document",
+        "expected",
+        "loan_statements",
+        "hook_calls",
+        "statements",
+    ),
+    _LOAN_FETCHED_ANNOTATION_HOOK_CASES,
+)
+async def test_async_library_loan_get_queryset_returning_an_annotation_a_clone_fetched_is_served(
+    project_schema_override: Callable[[], None],
+    record_compiled_sql: RecordCompiledSql,
+    flags: dict[str, bool],
+    document: str,
+    expected: JSONObject,
+    loan_statements: int,
+    hook_calls: int,
+    statements: int,
+) -> None:
+    """The async executor serves every document whose loan hook reads a row first.
+
+    The hook's ``first()`` is a database read, so it must run off the event loop on
+    every path, including the planned plain-list relation and nested connection under
+    ``allLibraryBooks``, whose plain ``def`` resolver runs on the loop: the optimizer
+    builds that plan, and runs the hook, in a worker thread. The rows and the
+    statements are the sync view's.
+    """
+    pks = await sync_to_async(_seed_loan_note_graph)()
+    with override_settings(**flags, FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK=True):
+        project_schema_override()
+        filled = _loan_note_document(document, pks)
+        all_sql = record_compiled_sql()
+        payload = await _post_async_shipped(filled)
+    loan_sql = [sql for sql in all_sql if 'FROM "library_loan"' in sql]
+    assert payload == {"data": expected}
+    assert len(loan_sql) == loan_statements + hook_calls, loan_sql
+    assert all("COUNT(" in sql for sql in loan_sql), loan_sql
+    assert len(all_sql) == statements + hook_calls, all_sql
 
 
 def _seed_loan_patron_graph() -> None:
