@@ -42,7 +42,7 @@ Spec text: [Decision 3][spec-027-d3].
 - The cookbook's architecture is proven (the working reference per [`START.md`][start]); reinventing it would burn schedule for no architectural gain.
 - Layers 1–4 are library-agnostic Python on top of the shared `django_filters.filterset.BaseFilterSet` (per [Decision 5](#decision-5--django-filter-as-the-foundation)), so the port is mechanical, not creative.
 - Layer 5's adaptation follows the actual Strawberry API (`Annotated["Name", strawberry.lazy("module")]` over module globals). A lazy reference on an object path (`module.path.ClassName`) or on a dict registry (`module._registry.Name`) cannot work, because Strawberry neither traverses object paths nor looks into dicts.
-- Narrowing `Meta.fields = "__all__"` keeps the [Non-goals][spec-027-non-goals] "no implicit `FilterSet` generation from `Meta.fields`" rule self-consistent — `"__all__"` would otherwise need to invent target filtersets for every relation, which IS auto-generation.
+- Narrowing the whole-set sweep (`Meta.fields = "__all__"`, or `Meta.exclude` with no `Meta.fields`) keeps the [Non-goals][spec-027-non-goals] "no implicit `FilterSet` generation from `Meta.fields`" rule self-consistent — `"__all__"` would otherwise need to invent target filtersets for every relation, which IS auto-generation.
 
 ### Alternatives considered (and rejected)
 

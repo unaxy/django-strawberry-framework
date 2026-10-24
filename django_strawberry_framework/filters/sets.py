@@ -2854,7 +2854,7 @@ class FilterSet(
     @classmethod
     @override
     def get_fields(cls) -> OrderedDict[str, object]:  # pyright: ignore[reportIncompatibleMethodOverride]
-        """Expand per-field ``"__all__"`` and narrow the top-level ``"__all__"`` sweep.
+        """Expand per-field ``"__all__"`` and narrow the whole-set sweep.
 
         These are two DISTINCT features that happen to share the ``"__all__"``
         spelling; each acts on a different shape of ``cls._meta.fields`` and
@@ -2869,11 +2869,14 @@ class FilterSet(
           via `_lookups_for_field` (transforms excluded; see that helper). This
           is the cookbook / ``graphene-django``
           ``filter_fields = {"field": "__all__"}`` parity.
-        - **Top-level ``"__all__"`` sweep narrowing** (when ``fields`` is the
-          STRING ``"__all__"`` itself): ``django-filter`` treats the
-          PK as a non-filterable column and includes M2M in the ``"__all__"``
-          sweep; the package's preferred shape is the opposite (PK is a
-          canonical filter; M2M needs an explicit `RelatedFilter`).
+        - **Whole-set sweep narrowing** (when ``fields`` is the STRING
+          ``"__all__"`` itself, or is unset while ``Meta.exclude`` is set, an
+          empty ``exclude`` included, which ``django-filter`` resolves to the
+          same sweep): ``django-filter`` treats the PK as a non-filterable
+          column and includes M2M in the sweep; the package's preferred shape
+          is the opposite (PK is a canonical filter; M2M needs an explicit
+          `RelatedFilter`). A name ``Meta.exclude`` lists stays out, the PK
+          included, so both spellings publish the same filters.
 
         A third duty gates the declaration SHAPE before any consumption:
         ``FilterSetOptions`` stores ``Meta.fields`` verbatim and upstream
@@ -2989,20 +2992,25 @@ class FilterSet(
                         lookups = [lk for lk in lookups if lk in ("exact", "in", "isnull")]
                     fields[field_name] = lookups
 
-        if meta_fields != "__all__":
+        # The whole-set sweep: ``fields = "__all__"``, or ``Meta.exclude`` with no
+        # ``Meta.fields``, which upstream resolves to the same sweep ("exclude with no fields
+        # implies all other fields"). Both narrow alike; any other declaration names its fields.
+        exclude = options.exclude
+        if meta_fields != "__all__" and not (meta_fields is None and exclude is not None):
             return fields
 
         if model is None:  # pragma: no cover - unreachable defensive guard.
             # ``super().get_fields()`` above already dereferences
-            # ``self._meta.model._meta`` for the ``"__all__"`` shorthand and
+            # ``self._meta.model._meta`` for the whole-set sweep and
             # raises ``AttributeError`` when the model is ``None``; control
             # never reaches this guard for that field shape. Kept as a
             # forward-defensive no-op in case the upstream contract changes.
             return fields
 
-        # ADD the PK if upstream excluded it (typically the auto-id column).
+        # ADD the PK if upstream excluded it (typically the auto-id column), unless
+        # ``Meta.exclude`` names it: an excluded name is never a filter key.
         pk_field = model._meta.pk
-        if pk_field.name not in fields:
+        if pk_field.name not in fields and (exclude is None or pk_field.name not in exclude):
             fields[pk_field.name] = ["exact"]
 
         # REMOVE every ManyToManyField from the swept dict.

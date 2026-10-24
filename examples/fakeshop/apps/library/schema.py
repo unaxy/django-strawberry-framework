@@ -1082,6 +1082,9 @@ class CirculationDeskType(DjangoType):
 
     class Meta:
         model = models.CirculationDesk
+        # ``primary = True`` keeps this type the relation target for ``library.CirculationDesk``
+        # beside the secondary ``DeskDirectoryType``.
+        primary = True
         fields = (
             "id",
             "name",
@@ -1093,6 +1096,57 @@ class CirculationDeskType(DjangoType):
         )
         filterset_class = filters.CirculationDeskFilter
         orderset_class = orders.CirculationDeskOrder
+
+
+class CatalogueBookType(DjangoType):
+    """Secondary ``primary=False`` Book view whose filterset declares only ``Meta.exclude``.
+
+    Publishes the catalogue columns and hides ``subtitle``; ``CatalogueBookFilter``
+    excludes that column and sweeps the rest, so every filter key is a published
+    column. The visibility rule is ``BookType``'s.
+    """
+
+    @classmethod
+    @override
+    def get_queryset(cls, queryset: QuerySet[models.Book], info: Info) -> QuerySet[models.Book]:
+        """Hide the rows ``BookType`` hides."""
+        return BookType.get_queryset(queryset, info)
+
+    class Meta:
+        model = models.Book
+        primary = False
+        fields = (
+            "id",
+            "title",
+            "circulation_status",
+            "shelf",
+        )
+        filterset_class = filters.CatalogueBookFilter
+
+
+class DeskDirectoryType(DjangoType):
+    """Secondary ``primary=False`` circulation-desk view that hides the desk's ``id``.
+
+    ``DeskDirectoryFilter`` sweeps the whole model with ``Meta.exclude`` naming the
+    primary key, so the filter publishes no key on the hidden column. The visibility rule
+    is ``CirculationDeskType``'s.
+    """
+
+    @classmethod
+    @override
+    def get_queryset(
+        cls,
+        queryset: QuerySet[models.CirculationDesk],
+        info: Info,
+    ) -> QuerySet[models.CirculationDesk]:
+        """Hide the rows ``CirculationDeskType`` hides."""
+        return CirculationDeskType.get_queryset(queryset, info)
+
+    class Meta:
+        model = models.CirculationDesk
+        primary = False
+        fields = ("name", "branch", "shelf")
+        filterset_class = filters.DeskDirectoryFilter
 
 
 class DeskShiftType(DjangoType):
@@ -1389,6 +1443,39 @@ class Query:
             queryset = filters.CirculationDeskFilter.apply_sync(filter, queryset, info)
         return queryset
 
+    def _all_library_catalogue_books(
+        self,
+        info: strawberry.Info,
+        filter: FilterInput[filters.CatalogueBookFilter] | None = None,  # noqa: A002
+    ) -> QuerySet[models.Book]:
+        """Acceptance surface for a filterset declaring only ``Meta.exclude``.
+
+        ``CatalogueBookFilter`` publishes what ``fields = "__all__"`` with that exclude
+        publishes, the ``id`` key included and no many-to-many key. The type's own
+        ``get_queryset`` runs first.
+        """
+        queryset = CatalogueBookType.get_queryset(models.Book.objects.order_by("id"), info)
+        if filter is not None:
+            queryset = filters.CatalogueBookFilter.apply_sync(filter, queryset, info)
+        return queryset
+
+    def _all_library_desk_directory(
+        self,
+        info: strawberry.Info,
+        filter: FilterInput[filters.DeskDirectoryFilter] | None = None,  # noqa: A002
+    ) -> QuerySet[models.CirculationDesk]:
+        """Acceptance surface for a whole-set filterset whose ``Meta.exclude`` names the pk.
+
+        ``DeskDirectoryFilter`` publishes no ``id`` key. The type's own cascade runs first.
+        """
+        queryset = DeskDirectoryType.get_queryset(
+            models.CirculationDesk.objects.order_by("id"),
+            info,
+        )
+        if filter is not None:
+            queryset = filters.DeskDirectoryFilter.apply_sync(filter, queryset, info)
+        return queryset
+
     def _all_library_shelf_labels_filtered(
         self,
         info: strawberry.Info,
@@ -1590,6 +1677,16 @@ class Query:
     all_library_circulation_desks_filtered: QuerySet[models.CirculationDesk] = strawberry.field(
         resolver=_all_library_circulation_desks_filtered,
         graphql_type=list[CirculationDeskType],
+    )
+
+    all_library_catalogue_books: QuerySet[models.Book] = strawberry.field(
+        resolver=_all_library_catalogue_books,
+        graphql_type=list[CatalogueBookType],
+    )
+
+    all_library_desk_directory: QuerySet[models.CirculationDesk] = strawberry.field(
+        resolver=_all_library_desk_directory,
+        graphql_type=list[DeskDirectoryType],
     )
 
     all_library_shelf_labels_filtered: QuerySet[models.ShelfLabel] = strawberry.field(

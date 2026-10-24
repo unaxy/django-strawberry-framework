@@ -1,6 +1,6 @@
 """FilterSet declarations for the library acceptance app.
 
-Twenty-nine filtersets mirror the relation shape ``apps.library.schema`` exposes
+The filtersets mirror the relation shape ``apps.library.schema`` exposes
 through the live ``/graphql/`` endpoint. Inter-filterset references use
 the same-module unqualified-name form (e.g. ``RelatedFilter("ShelfFilter")``)
 so the lazy-resolution Layer-2 prefix-with-owner branch is exercised end
@@ -585,6 +585,37 @@ class CirculationDeskFilter(FilterSet):
         exclude = ("content_type", "object_id")
 
 
+class CatalogueBookFilter(FilterSet):
+    """Catalogue-book filterset bound to ``CatalogueBookType`` at finalize phase 2.5.
+
+    Declares only ``Meta.exclude``, which sweeps the whole model exactly as
+    ``fields = "__all__"`` with that exclude does: the primary key is a filter
+    key, the forward single-column relation ``shelf`` is a primary-key ``exact``
+    leaf, and neither many-to-many (``genres``, nor the ``editable=False``
+    ``archive_genres``) is. ``subtitle``, which ``CatalogueBookType`` hides, stays
+    out.
+    """
+
+    class Meta:
+        model = models.Book
+        exclude = ("subtitle",)
+
+
+class DeskDirectoryFilter(FilterSet):
+    """Desk-directory filterset bound to ``DeskDirectoryType`` at finalize phase 2.5.
+
+    The whole-set ``"__all__"`` sweep with a ``Meta.exclude`` naming the primary
+    key: ``DeskDirectoryType`` hides ``id``, so the sweep adds no ``id`` key, and
+    the generic foreign key's columns stay out as they do on
+    ``CirculationDeskFilter``.
+    """
+
+    class Meta:
+        model = models.CirculationDesk
+        fields = "__all__"
+        exclude = ("id", "content_type", "object_id")
+
+
 class DeskShiftFilter(FilterSet):
     """Desk-shift filterset bound to ``DeskShiftType`` at finalize phase 2.5."""
 
@@ -628,8 +659,10 @@ __all__ = (
     "BookFilter",
     "BranchFilter",
     "BranchSignageFilter",
+    "CatalogueBookFilter",
     "CirculationDeskFilter",
     "ConsignmentFilter",
+    "DeskDirectoryFilter",
     "DeskProfileFilter",
     "DeskShiftFilter",
     "DistributorFilter",

@@ -3245,6 +3245,143 @@ def test_library_all_fields_filterset_filters_by_forward_relation_pks_over_http(
 
 
 @pytest.mark.django_db
+def test_library_exclude_only_filterset_sweeps_like_all_fields_over_http() -> None:
+    """``Meta.exclude`` with no ``Meta.fields`` publishes the ``"__all__"`` sweep minus the exclude.
+
+    ``CatalogueBookFilter`` excludes ``subtitle``: the primary key is a key, ``shelf`` is a
+    primary-key ``exact`` leaf, and neither many-to-many (``genres``, the ``editable=False``
+    ``archiveGenres``) is.
+    """
+    assert _input_field_names("CatalogueBookFilterInputType") == {
+        "id",
+        "title",
+        "circulationStatus",
+        "shelf",
+        "and",
+        "or",
+        "not",
+    }
+    assert _input_field_names("CatalogueBookFilterIdFilterInputType") == {"exact"}
+    assert _input_field_type("CatalogueBookFilterIdFilterInputType", "exact") == {
+        "kind": "SCALAR",
+        "name": "Int",
+        "ofType": None,
+    }
+
+
+@pytest.mark.django_db
+def test_library_exclude_only_filterset_filters_by_its_primary_key_over_http() -> None:
+    """The swept ``id`` key filters an exclude-only set's rows by primary key."""
+    branch = models.Branch.objects.create(name="Home", city="Boston")
+    shelf = models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
+    dune = models.Book.objects.create(title="Dune", shelf=shelf)
+    models.Book.objects.create(title="Emma", shelf=shelf)
+    query = """
+    query ($filter: CatalogueBookFilterInputType) {
+      allLibraryCatalogueBooks(filter: $filter) {
+        title
+      }
+    }
+    """
+
+    for filter_input, titles in (
+        ({"id": {"exact": dune.pk}}, ["Dune"]),
+        ({"not": {"id": {"exact": dune.pk}}}, ["Emma"]),
+        ({"id": {"exact": saved_pk(dune.pk) + 1000}}, []),
+    ):
+        _assert_graphql_data(
+            query,
+            {"allLibraryCatalogueBooks": [{"title": title} for title in titles]},
+            variables={"filter": filter_input},
+        )
+
+
+@pytest.mark.django_db
+def test_library_whole_set_filterset_honours_a_primary_key_exclude_over_http() -> None:
+    """A ``Meta.exclude`` naming the primary key keeps the sweep from adding it back.
+
+    ``DeskDirectoryFilter`` is ``fields = "__all__"`` excluding ``id``; the type hides the
+    column, so the filter input has no key on it.
+    """
+    assert _input_field_names("DeskDirectoryFilterInputType") == {
+        "name",
+        "branch",
+        "shelf",
+        "and",
+        "or",
+        "not",
+    }
+
+
+@pytest.mark.django_db
+def test_library_whole_set_filterset_without_its_primary_key_filters_over_http() -> None:
+    """The remaining swept keys filter; an ``id`` key is refused as undefined."""
+    branch = models.Branch.objects.create(name="Home", city="Boston")
+    front_shelf = models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
+    back_shelf = models.Shelf.objects.create(code="B-2", topic="general", branch=branch)
+    front = models.CirculationDesk.objects.create(name="Front", branch=branch, shelf=front_shelf)
+    models.CirculationDesk.objects.create(name="Back", branch=branch, shelf=back_shelf)
+    query = """
+    query ($filter: DeskDirectoryFilterInputType) {
+      allLibraryDeskDirectory(filter: $filter) {
+        name
+      }
+    }
+    """
+
+    _assert_graphql_data(
+        query,
+        {"allLibraryDeskDirectory": [{"name": "Front"}]},
+        variables={"filter": {"shelf": {"exact": front_shelf.pk}}},
+    )
+    response = _post_graphql(query, variables={"filter": {"id": {"exact": front.pk}}})
+    payload = response_json(response)
+    assert payload.get("data") is None, payload
+    (error,) = json_list(payload, "errors")
+    assert "Field 'id' is not defined by type 'DeskDirectoryFilterInputType'." in json_str(
+        error,
+        "message",
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("staff", [False, True], ids=["anonymous", "staff"])
+def test_library_secondary_sweep_types_keep_their_primary_types_visibility_over_http(
+    staff: bool,  # noqa: FBT001
+) -> None:
+    """``CatalogueBookType`` and ``DeskDirectoryType`` hide what ``BookType`` / ``CirculationDeskType`` hide.
+
+    A ``repair`` book and a desk on a ``topic="secret"`` shelf are absent for an anonymous
+    request and present for staff.
+    """
+    branch = models.Branch.objects.create(name="Home", city="Boston")
+    open_shelf = models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
+    secret_shelf = models.Shelf.objects.create(code="C-3", topic="secret", branch=branch)
+    models.Book.objects.create(title="Dune", shelf=open_shelf)
+    models.Book.objects.create(
+        title="Torn",
+        shelf=open_shelf,
+        circulation_status=models.Book.CirculationStatus.REPAIR,
+    )
+    models.CirculationDesk.objects.create(name="Front", branch=branch, shelf=open_shelf)
+    models.CirculationDesk.objects.create(name="Vault", branch=branch, shelf=secret_shelf)
+    query = "{ allLibraryCatalogueBooks { title } allLibraryDeskDirectory { name } }"
+
+    response = _post_graphql_as_staff(query) if staff else _post_graphql(query)
+
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    titles = [
+        json_str(row, "title") for row in json_list(payload, "data", "allLibraryCatalogueBooks")
+    ]
+    names = [
+        json_str(row, "name") for row in json_list(payload, "data", "allLibraryDeskDirectory")
+    ]
+    assert titles == (["Dune", "Torn"] if staff else ["Dune"])
+    assert names == (["Front", "Vault"] if staff else ["Front"])
+
+
+@pytest.mark.django_db
 def test_library_books_filter_by_choice_enum() -> None:
     """Spec-027: choice-enum filter clause coerces via Strawberry enum."""
     branch = models.Branch.objects.create(name="Branch", city="Boston")
