@@ -17,7 +17,13 @@ from django_strawberry_framework.exceptions import (
     LookupValidationError,
     PathResolutionError,
 )
-from django_strawberry_framework.utils._narrowing import is_class, is_list_or_tuple, read_attr
+from django_strawberry_framework.utils._narrowing import (
+    is_class,
+    is_list_or_tuple,
+    is_str,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.typing import MISSING_ATTRIBUTE
 
 from . import truth
@@ -805,6 +811,11 @@ def m2m_through_model(field: object) -> type[models.Model] | None:
     return cast("type[models.Model] | None", through)
 
 
+def _is_foreign_key(value: object) -> TypeIs[ForeignKeyField]:
+    """Return whether ``value`` is a ``ForeignKey`` (a ``OneToOneField`` included)."""
+    return isinstance(value, models.ForeignKey)
+
+
 def m2m_through_link_fields(
     field: object,
 ) -> tuple[ForeignKeyField | None, ForeignKeyField | None]:
@@ -830,8 +841,8 @@ def m2m_through_link_fields(
     through_meta = through._meta
     # ``m2m_field_name`` / ``m2m_reverse_field_name`` name the through table's
     # two ``ForeignKey`` columns.
-    source_fk = cast("ForeignKeyField", through_meta.get_field(cast("str", source_name())))
-    target_fk = cast("ForeignKeyField", through_meta.get_field(cast("str", target_name())))
+    source_fk = require(through_meta.get_field(require(source_name(), is_str)), _is_foreign_key)
+    target_fk = require(through_meta.get_field(require(target_name(), is_str)), _is_foreign_key)
     if forward_field is field:
         return source_fk, target_fk
     return target_fk, source_fk

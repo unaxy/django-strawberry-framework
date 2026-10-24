@@ -92,7 +92,13 @@ from django_strawberry_framework.types.converters import (
     scalar_for_field,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import enum_value
+from django_strawberry_framework.utils._narrowing import (
+    enum_value,
+    is_concrete_field,
+    optional_annotation,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils.converters import (
     convert_with_mro,
     finish_field_conversion,
@@ -136,11 +142,7 @@ if TYPE_CHECKING:
     from django.db import models
 
     from django_strawberry_framework.types.base import DjangoType
-    from django_strawberry_framework.utils.typing import (
-        ConcreteField,
-        ModelField,
-        OptionalWidenable,
-    )
+    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
     # DRF's stub generics are invariant in every parameter, so the all-``Any``
     # parametrization is the stub's universal form for a field and a serializer
@@ -496,7 +498,7 @@ def _list_annotation(field: serializers.ListField, element: object) -> object:
     annotation or a generated enum is a runtime annotation.
     """
     if list_child_of(field).allow_null:
-        element = cast("OptionalWidenable", element) | None
+        element = optional_annotation(element)
     return GenericAlias(list, (element,))
 
 
@@ -1003,7 +1005,7 @@ def serializer_only_relation_annotation(
     # ``convert_serializer_field`` classifies only a ``ManyRelatedField`` as ``RELATION_MULTI``,
     # and a bound field (read off a serializer's ``.fields``) always carries its name.
     related_field = (
-        child_relation_of(cast("serializers.ManyRelatedField", field))
+        child_relation_of(require_instance(field, serializers.ManyRelatedField))
         if kind == RELATION_MULTI
         else field
     )
@@ -1283,8 +1285,9 @@ def _model_backed_scalar_annotation(
     if _writes_choice_list(field):
         choice_column = _multiple_choice_element_column(field, column)
     _reject_choice_values_the_column_does_not_list(field, choice_column)
-    if _is_consumer_declared(field) and _is_enumerable_serializer_choice(field):
-        return _serializer_choice_annotation(field, type_name)
+    choice = _enumerable_choice_source(field)
+    if choice is not None and _is_consumer_declared(field):
+        return _serializer_choice_annotation(field, choice, type_name)
     _reject_read_enum_over_grouped_column(field, column)
     model_annotation = convert_scalar(column, type_name, force_nullable=False)
     if not _is_consumer_declared(field):
@@ -1313,8 +1316,8 @@ def _model_backed_scalar_annotation(
     return model_annotation
 
 
-def _is_enumerable_serializer_choice(field: DRFField) -> bool:
-    """Return whether a serializer field's declared choices generate a GraphQL enum.
+def _enumerable_choice_source(field: DRFField) -> serializers.ChoiceField | None:
+    """Return the ``ChoiceField`` whose declared choices generate a GraphQL enum, else ``None``.
 
     A ``ChoiceField`` / ``MultipleChoiceField`` / ``ListField(child=ChoiceField)`` with static
     choices maps to a generated enum (schema precision over the graphene-django ``str``):
@@ -1325,7 +1328,7 @@ def _is_enumerable_serializer_choice(field: DRFField) -> bool:
     model-backed choice field never reaches here (it takes the read-side column enum).
     """
     choice = serializer_choice_source(field)
-    return choice is not None and not isinstance(choice, serializers.FilePathField)
+    return None if isinstance(choice, serializers.FilePathField) else choice
 
 
 def _enum_member_map(enum_cls: type[Enum]) -> dict[str, object]:
@@ -1333,7 +1336,11 @@ def _enum_member_map(enum_cls: type[Enum]) -> dict[str, object]:
     return {member.name: enum_value(member) for member in enum_cls}
 
 
-def _serializer_choice_enum(field: DRFField, type_name: str) -> type[Enum]:
+def _serializer_choice_enum(
+    field: DRFField,
+    choice: serializers.ChoiceField,
+    type_name: str,
+) -> type[Enum]:
     """Build (or dedupe) the generated enum for a serializer field's declared choices.
 
     The choices come from the field's choice source (``serializer_choice_source``: the
@@ -1362,8 +1369,6 @@ def _serializer_choice_enum(field: DRFField, type_name: str) -> type[Enum]:
     """
     field_name = _bound_field_name(field)
     enum_name = choice_enum_name(type_name, field_name)
-    # Callers reach this only through ``_is_enumerable_serializer_choice``.
-    choice = cast("serializers.ChoiceField", serializer_choice_source(field))
     choices = choices_of(choice)
     enum_cls = build_enum_from_choices(
         list(choices.items()),
@@ -1384,7 +1389,11 @@ def _serializer_choice_enum(field: DRFField, type_name: str) -> type[Enum]:
     return enum_cls
 
 
-def _serializer_choice_annotation(field: DRFField, type_name: str) -> object:
+def _serializer_choice_annotation(
+    field: DRFField,
+    choice: serializers.ChoiceField,
+    type_name: str,
+) -> object:
     """Return the generated enum annotation for an enumerable choice-sourced field.
 
     A ``ChoiceField`` -> a single generated enum; a ``MultipleChoiceField`` (a ``ChoiceField``
@@ -1395,7 +1404,7 @@ def _serializer_choice_annotation(field: DRFField, type_name: str) -> object:
     (``_model_backed_scalar_annotation``), so a declared choice field emits the SAME generated
     enum whether or not it maps to a model column.
     """
-    enum_cls = _serializer_choice_enum(field, type_name)
+    enum_cls = _serializer_choice_enum(field, choice, type_name)
     if isinstance(field, serializers.ListField):
         return _list_annotation(field, enum_cls)
     if isinstance(field, serializers.MultipleChoiceField):
@@ -1415,9 +1424,10 @@ def _serializer_only_scalar_annotation(
     ``ListField(child=ChoiceField)`` (base ``list[str]`` through the scalar registry) become
     ``list[<enum>]``. Every other scalar keeps its converter annotation.
     """
-    if not _is_enumerable_serializer_choice(field):
+    choice = _enumerable_choice_source(field)
+    if choice is None:
         return conversion.annotation
-    return _serializer_choice_annotation(field, type_name)
+    return _serializer_choice_annotation(field, choice, type_name)
 
 
 def resolve_serializer_field(
@@ -1521,7 +1531,7 @@ def resolve_serializer_field(
             # as a relation, so a SCALAR column is a concrete ``Field``.
             annotation = _model_backed_scalar_annotation(
                 field,
-                cast("ConcreteField", column),
+                require(column, is_concrete_field),
                 type_name,
             )
         python_attr, graphql_name = serializer_field_graphql_name(field_name, kind)

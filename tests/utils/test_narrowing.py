@@ -7,18 +7,29 @@ value, not a GraphQL request, so there is no live sibling in
 ``examples/fakeshop/test_query/``.
 """
 
-from collections.abc import Callable
+from collections import UserDict
+from collections.abc import Callable, Collection, Mapping
 
 import pytest
+from django.db import models
 from typing_extensions import override
 
 from django_strawberry_framework.utils._narrowing import (
+    del_item,
+    get_item,
     is_char_wise,
+    is_concrete_field,
     is_exact_list_or_tuple,
     is_exact_set_or_frozenset,
+    is_queryset,
+    is_real_collection,
+    is_real_mapping,
     is_str,
+    iter_of,
+    optional_annotation,
     require,
     require_instance,
+    set_item,
 )
 from tests._idioms import ClaimsClassBase
 
@@ -122,3 +133,84 @@ def test_exact_container_predicate_refuses_a_class_whose_metaclass_eq_claims_a_b
 
     assert predicate(_ClaimsEveryClass()) is False
     assert _ClaimsEveryClassMeta.eq_calls == []
+
+
+def test_is_concrete_field_accepts_a_model_field_and_refuses_a_reverse_relation() -> None:
+    """A model ``Field`` passes; a reverse ``ForeignObjectRel`` and a non-field do not."""
+    forward: models.TextField[str, str] = models.TextField()
+    reverse = models.ManyToOneRel(models.ForeignKey("self", models.CASCADE), models.Model, "id")
+
+    assert is_concrete_field(forward) is True
+    assert is_concrete_field(reverse) is False
+    assert is_concrete_field("text") is False
+
+
+def test_is_queryset_accepts_a_queryset_and_refuses_a_manager_and_a_list() -> None:
+    """A ``QuerySet`` passes whatever its rows; a manager or a list does not."""
+    queryset: models.QuerySet[models.Model, object] = models.QuerySet(models.Model)
+
+    assert is_queryset(queryset) is True
+    manager: models.Manager[models.Model] = models.Manager()
+    assert is_queryset(manager) is False
+    assert is_queryset([]) is False
+
+
+class _ClaimsMapping(ClaimsClassBase):
+    """A value whose ``__class__`` claims ``Mapping``; its real class is not one."""
+
+    __slots__ = ()
+    claimed: type = Mapping
+
+
+class _ClaimsCollection(ClaimsClassBase):
+    """A value whose ``__class__`` claims ``Collection``; its real class is not one."""
+
+    __slots__ = ()
+    claimed: type = Collection
+
+
+def test_is_real_mapping_asks_the_real_class() -> None:
+    """A ``Mapping`` (a virtual subclass included) passes; a ``__class__`` claim does not."""
+    assert is_real_mapping({"a": 1}) is True
+    mapping: UserDict[str, int] = UserDict()
+    assert is_real_mapping(mapping) is True
+    assert is_real_mapping([("a", 1)]) is False
+    assert is_real_mapping(_ClaimsMapping()) is False
+
+
+def test_is_real_collection_asks_the_real_class() -> None:
+    """A ``Collection`` passes; an iterator, a plain object and a ``__class__`` claim do not."""
+    assert is_real_collection([1]) is True
+    assert is_real_collection({1}) is True
+    assert is_real_collection(iter([1])) is False
+    assert is_real_collection(1) is False
+    assert is_real_collection(_ClaimsCollection()) is False
+
+
+def test_optional_annotation_widens_an_annotation_with_none() -> None:
+    """A class widens to ``class | None``; a value with no ``|`` raises what the expression raises."""
+    assert optional_annotation(int) == int | None
+    with pytest.raises(TypeError):
+        _ = optional_annotation(1)
+
+
+def test_item_slots_run_the_subscript_operations() -> None:
+    """``get_item`` / ``set_item`` / ``del_item`` are ``container[key]``, ``= value`` and ``del``."""
+    container: dict[str, int] = {}
+
+    set_item(container, "a", 1)
+
+    assert get_item(container, "a") == 1
+    del_item(container, "a")
+    assert container == {}
+    with pytest.raises(KeyError):
+        _ = get_item(container, "a")
+    with pytest.raises(TypeError):
+        _ = get_item(object(), "a")
+
+
+def test_iter_of_iterates_an_iterable_and_refuses_a_value_that_is_not() -> None:
+    """``iter_of`` is ``iter``: an iterable yields its members, a bare value raises ``TypeError``."""
+    assert list(iter_of([1, 2])) == [1, 2]
+    with pytest.raises(TypeError):
+        _ = iter_of(1)

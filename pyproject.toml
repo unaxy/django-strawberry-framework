@@ -531,7 +531,7 @@ reportPrivateUsage = "none"
 reportUnusedFunction = "none"
 reportImportCycles = "none"
 reportUninitializedInstanceVariable = "none"
-# On everywhere; its remaining ignores are counted in `[tool.type-suppressions]` below.
+# On everywhere; its remaining ignores are held per site by scripts/type_suppressions.toml.
 reportAny = "error"
 # Off by design for tests/ and the example project, on in the scripts/, root-file and package
 # environments below: `reportUnannotatedClassAttribute` (the flagged attributes are declarative
@@ -613,41 +613,6 @@ root = "examples/fakeshop/apps/scalars/tests"
 [[tool.basedpyright.executionEnvironments]]
 root = "examples/fakeshop"
 reportUnusedCallResult = "error"
-
-# The suppression budget scripts/check_type_suppressions.py holds the tree to: `cast` counts
-# `typing.cast` calls, `ignores` the ignore comments naming each unlocked rule (a rule not
-# listed has none). A count may only fall: one above its budget is a new suppression (fix the
-# diagnostic instead); one below it fails until the budget is lowered to match, and a rule at
-# zero leaves `ignores` (marked `# Locked` above once it is on in every environment).
-[tool.type-suppressions]
-cast = 399
-
-[tool.type-suppressions.ignores]
-reportArgumentType = 273
-reportAssignmentType = 28
-reportAttributeAccessIssue = 113
-reportCallIssue = 11
-reportDeprecated = 2
-reportAny = 39
-reportExplicitAny = 36
-reportFunctionMemberAccess = 4
-reportGeneralTypeIssues = 5
-reportIncompatibleMethodOverride = 59
-reportIncompatibleUnannotatedOverride = 1
-reportIncompatibleVariableOverride = 68
-reportIndexIssue = 10
-reportInvalidTypeArguments = 5
-reportMissingSuperCall = 3
-reportOptionalMemberAccess = 3
-reportPropertyTypeMismatch = 5
-reportReturnType = 23
-reportUndefinedVariable = 5
-reportUnknownArgumentType = 14
-reportUnknownMemberType = 33
-reportUnknownVariableType = 21
-reportUnnecessaryIsInstance = 2
-reportUnsafeMultipleInheritance = 12
-reportUntypedFunctionDecorator = 2
 
 [tool.truthful_reads]
 # Read by scripts/check_truthful_reads.py (the `truthful-reads` hook and CI

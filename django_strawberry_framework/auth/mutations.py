@@ -39,6 +39,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.http import HttpRequest
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -74,6 +75,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_tuple,
     list_iter,
     read_attr,
+    require_instance,
     tuple_iter,
 )
 from django_strawberry_framework.utils.directives import validated_field_directives
@@ -84,7 +86,7 @@ from django_strawberry_framework.utils.errors import (
 )
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.input_values import UNSET
-from django_strawberry_framework.utils.permissions import request_from_info
+from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter, request_from_info
 from django_strawberry_framework.utils.querysets import (
     _disposed_awaitable,
     run_in_one_sync_boundary,
@@ -100,14 +102,13 @@ from django_strawberry_framework.write_mixins import (
 from . import sessions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable, MutableMapping, Sequence
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
     from typing import Protocol
 
     from django.contrib.auth.base_user import AbstractBaseUser
     from django.contrib.auth.models import _User
     from django.contrib.sessions.backends.base import SessionBase
     from django.db import models
-    from django.http import HttpRequest
     from strawberry.types import Info
     from strawberry.types.base import WithStrawberryObjectDefinition
 
@@ -118,7 +119,6 @@ if TYPE_CHECKING:
         _M2MAssignments,
     )
     from django_strawberry_framework.types.base import DjangoType
-    from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
     from django_strawberry_framework.write_mixins import (
         DeclarationRegistry,
         _ValidatedMutationMeta,
@@ -755,8 +755,8 @@ async def _channels_http_login_establish(
 
     async with sessions.scope_session_lock(request):
         # ``scope_session_lock`` rejects a scope that is not a ``MutableMapping``
-        # (``sessions._require_mutable_scope``) before the lock is held.
-        scope = cast("MutableMapping[str, object]", request.scope)
+        # (``sessions.require_mutable_scope``) before the lock is held.
+        scope = sessions.require_mutable_scope(request)
         try:
             # basedpyright: channels-stubs types ``login``'s scope as its private ``_ChannelScope``
             # (a WebSocket scope); ``login`` only reads the ``session`` / ``user`` keys and writes
@@ -807,10 +807,10 @@ def _login_resolve_body(
     # ``ChannelsRequestAdapter`` and ``DJANGO_HTTP`` only for an ``HttpRequest``;
     # ``sessions.login_supported`` already rejected ``CHANNELS_WEBSOCKET``.
     if transport is sessions.Transport.CHANNELS_HTTP:
-        channels_request = cast("ChannelsRequestAdapter", request)
+        channels_request = require_instance(request, ChannelsRequestAdapter)
         async_to_sync(_channels_http_login_establish)(channels_request, session, user)
     else:
-        _django_http_login_establish(cast("HttpRequest", request), user)
+        _django_http_login_establish(require_instance(request, HttpRequest), user)
     return payload
 
 
@@ -853,7 +853,11 @@ async def _login_resolve_body_async(
         return payload
     # The same ``info`` classified as ``CHANNELS_HTTP`` above, and
     # ``sessions.classify_transport`` returns that only for a ``ChannelsRequestAdapter``.
-    await _channels_http_login_establish(cast("ChannelsRequestAdapter", request), session, user)
+    await _channels_http_login_establish(
+        require_instance(request, ChannelsRequestAdapter),
+        session,
+        user,
+    )
     return payload
 
 
@@ -992,8 +996,8 @@ async def _channels_logout(
     async with sessions.scope_session_lock(request):
         ok, payload = _logout_observation(request, payload_cls)
         # ``scope_session_lock`` rejects a scope that is not a ``MutableMapping``
-        # (``sessions._require_mutable_scope``) before the lock is held.
-        scope = cast("MutableMapping[str, object]", request.scope)
+        # (``sessions.require_mutable_scope``) before the lock is held.
+        scope = sessions.require_mutable_scope(request)
         async with actor_transition(scope, was_authenticated=ok):
             try:
                 # basedpyright: channels-stubs types ``logout``'s scope as its private
@@ -1027,9 +1031,9 @@ def _logout_resolve_body(holder_cls: _SealedAuthHolderMeta, info: Info[object, o
     # ``sessions.classify_transport`` returns ``DJANGO_HTTP`` only for an ``HttpRequest``
     # and a Channels transport only for a ``ChannelsRequestAdapter``.
     if transport is sessions.Transport.DJANGO_HTTP:
-        return _django_http_logout(cast("HttpRequest", request), payload_cls)
+        return _django_http_logout(require_instance(request, HttpRequest), payload_cls)
 
-    channels_request = cast("ChannelsRequestAdapter", request)
+    channels_request = require_instance(request, ChannelsRequestAdapter)
     return async_to_sync(_channels_logout)(channels_request, payload_cls)
 
 
@@ -1058,7 +1062,7 @@ async def _logout_resolve_body_async(
     )
     # The same ``info`` classified as a Channels transport above, and
     # ``sessions.classify_transport`` returns that only for a ``ChannelsRequestAdapter``.
-    return await _channels_logout(cast("ChannelsRequestAdapter", request), payload_cls)
+    return await _channels_logout(require_instance(request, ChannelsRequestAdapter), payload_cls)
 
 
 def login_mutation(

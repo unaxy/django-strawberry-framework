@@ -85,7 +85,11 @@ from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import BigInt
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_iterable, is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import (
+    is_iterable,
+    is_list_or_tuple,
+    optional_annotation,
+)
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.strings import pascal_case
 
@@ -98,7 +102,6 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import (
         ConcreteField,
         ModelField,
-        OptionalWidenable,
     )
 
     from .base import DjangoType
@@ -562,8 +565,7 @@ def convert_scalar(
     if route.choices:
         py_type = convert_choices_to_enum(field, type_name)
     if effective_null:
-        # A ``SCALAR_MAP`` value or generated enum is a runtime annotation.
-        py_type = cast("OptionalWidenable", py_type) | None
+        py_type = optional_annotation(py_type)
     return py_type
 
 

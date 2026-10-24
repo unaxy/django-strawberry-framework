@@ -53,12 +53,13 @@ from strawberry.types.base import StrawberryList, StrawberryObjectDefinition
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr, require_instance
+from django_strawberry_framework.utils._narrowing import read_attr, require, require_instance
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     get_or_store_shape_build,
     make_shape_build_cache,
 )
+from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.typing import unwrap_return_type
 from django_strawberry_framework.write_mixins import (
     MODEL_BACKED_WRITE_META_KEYS,
@@ -782,15 +783,15 @@ def _materialize_input_for(
     if operation_kind is None:
         return None  # delete: id-only, no input.
 
-    consumer_input = read_attr(meta, _OPERATION_INPUT_OVERRIDE_ATTR[meta.operation])
+    # The snapshot holds a validated input class or ``None`` per operation kind.
+    consumer_input = meta.input_class if operation_kind == CREATE else meta.partial_input_class
     if consumer_input is not None:
-        # The snapshot holds a validated input class or ``None``.
         return _materialize_merged_input(
             mutation_name,
             meta,
             primary_type,
             operation_kind,
-            cast("type[WithStrawberryObjectDefinition]", consumer_input),
+            consumer_input,
         )
 
     # Derive the shape ONCE: ``mutation_input_shape`` single-sources the
@@ -960,7 +961,7 @@ def _validate_relation_override_types(
         python_attr, _graphql_name, annotation = relation_input_annotation(
             field,
             # A relation field's ``related_model`` is its resolved target model class.
-            related_primary_type=registry.get(cast("type[models.Model]", field.related_model)),
+            related_primary_type=registry.get(require(field.related_model, is_model_class)),
         )
         if not _annotation_core_is_global_id(annotation):
             continue  # raw-pk relation (non-Relay target): no GlobalID decode to bypass.

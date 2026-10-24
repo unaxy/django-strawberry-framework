@@ -39,7 +39,7 @@ from .mutations.operations import NON_DELETE_WRITE_OPERATIONS, non_delete_operat
 from .mutations.permissions import DjangoModelPermission, is_permission_class
 from .registry import registry
 from .utils import truth
-from .utils._narrowing import list_of, optional_instance, read_attr
+from .utils._narrowing import list_of, optional_instance, read_attr, require
 from .utils.imports import import_attr
 from .utils.inputs import get_or_store_shape_build, normalize_field_name_sequence
 
@@ -451,7 +451,7 @@ def dispatch_resolver_entry(
     flavor's ``sets`` and ``resolvers`` modules; its signature is the seam's
     (``(cls, info, *, data[, id])``).
     """
-    entry = cast("Callable[..., object]", import_attr(module_path, entry_name))
+    entry = require(import_attr(module_path, entry_name), callable)
     return entry(cls, info, **kwargs)
 
 

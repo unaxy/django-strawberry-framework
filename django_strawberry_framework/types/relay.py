@@ -358,8 +358,8 @@ def _resolve_id_default(
     root = cast("models.Model", unwrap_lazy_object(root))
     id_attr = cls.resolve_id_attr()
     if id_attr == "pk":
-        # The row's real class, read without asking the row; a model class.
-        id_attr = cast("type[models.Model]", truth.class_of(root))._meta.pk.attname
+        # The row's real class, read without asking the row.
+        id_attr = type(root)._meta.pk.attname
     # The cache is the row's real instance namespace, read without asking the
     # row for it; ``dict.get`` never runs a namespace subclass's ``__missing__``.
     # A root with no instance namespace is refused the way reading its

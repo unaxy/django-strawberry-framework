@@ -9,17 +9,21 @@ from django.db import models
 from django.db.models import Prefetch
 from graphql import OperationType
 from strawberry import relay
+from strawberry.schema.config import StrawberryConfig
 from strawberry.schema.schema_converter import GraphQLCoreConverter
+from strawberry.types.field import StrawberryField
 from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
+    get_item,
     is_list,
     list_of,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
@@ -39,6 +43,7 @@ from django_strawberry_framework.utils.querysets import (
 from django_strawberry_framework.utils.relations import (
     instance_accessor,
     is_many_side_relation_kind,
+    is_model_class,
     relation_kind,
 )
 from django_strawberry_framework.utils.strings import snake_case
@@ -78,10 +83,8 @@ if TYPE_CHECKING:
 
     from django.db.models import QuerySet
     from graphql.type.definition import GraphQLResolveInfo
-    from strawberry.schema.config import StrawberryConfig
     from strawberry.schema.name_converter import NameConverter
     from strawberry.types import Info
-    from strawberry.types.field import StrawberryField
     from strawberry.types.nodes import Arguments
 
     from django_strawberry_framework.types.base import DjangoType
@@ -355,8 +358,11 @@ def _forward_names(
     builds the maps uncached.
     """
     converter = _schema_name_converter(info)
-    cacheable = converter is not None and getattr(definition, "finalized", False) is True
-    if not cacheable:
+    if (
+        converter is None
+        or definition is None
+        or getattr(definition, "finalized", False) is not True
+    ):
         return _build_forward_names(
             field_map,
             relation_connections,
@@ -369,8 +375,7 @@ def _forward_names(
         return cached
     built = _build_forward_names(
         field_map,
-        # ``cacheable`` read ``finalized`` off a present definition.
-        cast("DjangoTypeDefinition", definition).relation_connections or {},
+        definition.relation_connections or {},
         _graphql_names_by_python_name(type_cls, info),
         converter=converter,
     )
@@ -544,15 +549,14 @@ def _hook_info(info: GraphQLResolveInfo | None, target_type: type[DjangoType]) -
             f"{truth.name(target_type)}.get_queryset runs under an executing operation; a "
             f"relation to it cannot be planned without that operation's resolve info.",
         )
-    strawberry_field = cast(
-        "StrawberryField",
-        graphql_fields(info.parent_type)[info.field_name].extensions[
-            GraphQLCoreConverter.DEFINITION_BACKREF
-        ],
+    strawberry_field = require_instance(
+        get_item(
+            graphql_fields(info.parent_type)[info.field_name].extensions,
+            GraphQLCoreConverter.DEFINITION_BACKREF,
+        ),
+        StrawberryField,
     )
-    # A field carrying Strawberry's definition backref belongs to a schema
-    # Strawberry built, and that schema files itself on the graphql-core schema.
-    config = cast("StrawberryConfig", schema_config_from_info(info))
+    config = require_instance(schema_config_from_info(info), StrawberryConfig)
     return config.info_class(_raw_info=info, _field=strawberry_field)
 
 
@@ -619,11 +623,8 @@ def _build_child_queryset(
     the seed's explicit ``.using(...)`` as the alias the hook must keep, and a
     hinted plan is never cached, so a routed seed answers to that one request.
     """
-    # Every caller plans only a relation whose related model resolved.
     queryset = (
-        seed
-        if seed is not None
-        else base_queryset(cast("type[models.Model]", field.related_model))
+        seed if seed is not None else base_queryset(require(field.related_model, is_model_class))
     )
     if has_custom_qs:
         # The slice axis is the one axis the two child policies differ on, and it
@@ -1302,8 +1303,7 @@ def _build_prefetch_child_queryset_from_base(
     child_plan = OptimizationPlan(introduce_projection=parent_plan.introduce_projection)
     _walk_selections(
         sel.selections,
-        # Every caller plans only a relation whose related model resolved.
-        cast("type[models.Model]", django_field.related_model),
+        require(django_field.related_model, is_model_class),
         child_plan,
         prefix="",
         info=info,
@@ -1429,16 +1429,7 @@ def _apply_hint(
         plan.cacheable = False
         # B8 coupling: attribute the relation's resolver keys to the rebased
         # lookup so a later consumer-wins drop strips them from strictness.
-        # ``rebased_prefetch`` is a ``Prefetch``, whose lookups are strings.
-        hinted_lookup = cast(
-            "str",
-            getattr(rebased_prefetch, "prefetch_to", None)
-            or getattr(
-                rebased_prefetch,
-                "prefetch_through",
-                "",
-            ),
-        )
+        hinted_lookup = rebased_prefetch.prefetch_to or rebased_prefetch.prefetch_through
         _record_prefetch_path_keys(plan, hinted_lookup, resolver_identities)
         # A consumer ``Prefetch`` that wins on this path is sealed through the
         # target's hook only when the generated resolver reads the relation
@@ -1749,6 +1740,12 @@ def _ensure_connector_only_fields(
         append_unique(plan.only_fields, attname)
 
 
+class _MergedSelection(SimpleNamespace):
+    """A field selection merged across duplicate response names, carrying per-key payloads."""
+
+    _optimizer_response_key_arguments: dict[str, Arguments]
+
+
 def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[FieldSelection]:
     """Merge same-field selections while preserving all represented response keys.
 
@@ -1776,7 +1773,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
         seen_names.add(key)
     else:
         return selections
-    seen: dict[str, SimpleNamespace] = {}
+    seen: dict[str, _MergedSelection] = {}
     result: list[FieldSelection] = []
     for sel in selections:
         if _is_fragment(sel):
@@ -1811,7 +1808,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
             # reads to select the scheme and derive each key's window.
             _record_response_key_arguments(merged, sel)
         else:
-            merged = SimpleNamespace(
+            merged = _MergedSelection(
                 name=sel.name,
                 alias=getattr(sel, "alias", None),
                 directives=getattr(sel, "directives", None) or {},
@@ -1830,7 +1827,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
     return result
 
 
-def _record_response_key_arguments(merged: SimpleNamespace, selection: FieldSelection) -> None:
+def _record_response_key_arguments(merged: _MergedSelection, selection: FieldSelection) -> None:
     """Record a duplicate selection's arguments under its response key.
 
     The merged selection carries ``_optimizer_response_key_arguments``: a map
@@ -1854,12 +1851,7 @@ def _record_response_key_arguments(merged: SimpleNamespace, selection: FieldSele
     """
     response_key = _response_key(selection)
     payload: Arguments = getattr(selection, "arguments", None) or {}
-    # ``_merge_aliased_selections`` built this map from response keys to payloads; the cast
-    # restates that, where re-validating the whole map on every merge would cost O(keys).
-    per_key = cast(
-        "dict[str, Arguments]",
-        read_attr(merged, "_optimizer_response_key_arguments"),
-    )
+    per_key = merged._optimizer_response_key_arguments
     if response_key in per_key and _normalized_alias_payload(
         per_key[response_key],
     ) != _normalized_alias_payload(payload):

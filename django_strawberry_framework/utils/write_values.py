@@ -400,9 +400,9 @@ def decode_visible_relation_ids(
     The ``relay`` imports are function-local for the same cycle dodge the
     ``type_check_relation_id`` docstring documents.
     """
-    provided_values, container_error = materialize_relation_id_container(values, graphql_name)
-    if container_error is not None:
-        return None, container_error
+    container = materialize_relation_id_container(values, graphql_name)
+    if container[1] is not None:
+        return None, container[1]
 
     from django_strawberry_framework.relay import (  # noqa: PLC0415 - import cycle
         GlobalIDDecode,
@@ -410,8 +410,7 @@ def decode_visible_relation_ids(
         _resolve_real_pks_batched,
     )
 
-    # A ``None`` error means the container materialized into a list.
-    members = cast("list[object]", provided_values)
+    members = container[0]
     slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]] = {}
     pks: list[object] = [None] * len(members)
     pending: list[tuple[int, type[_RelayDjangoType], object]] = []

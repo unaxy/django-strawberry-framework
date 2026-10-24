@@ -49,14 +49,20 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, TypeGuard, TypeVar, cast
 
 from django.db.models.constants import LOOKUP_SEP
 from django.utils.module_loading import import_string
 
 from .exceptions import ConfigurationError
 from .utils import truth
-from .utils._narrowing import is_char_wise, is_mapping, read_attr, require
+from .utils._narrowing import (
+    is_char_wise,
+    is_mapping,
+    read_attr,
+    require,
+    require_instance,
+)
 from .utils.input_values import SetInputTraversal, is_inactive_value
 from .utils.permissions import (
     active_permission_targets,
@@ -79,6 +85,7 @@ if TYPE_CHECKING:
     from .utils.input_values import RelatedBranch
 
 _T = TypeVar("_T")
+_FamilyT = TypeVar("_FamilyT")
 _D = TypeVar("_D", bound="RelatedSetTargetMixin")
 
 
@@ -291,6 +298,19 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
         setattr(self, self._target_attr, value)
 
 
+def declaration_map(stored: object, declaration_type: type[_D], /) -> dict[str, _D]:
+    """Return a set class's stored declaration map as a name-keyed ``dict`` of ``declaration_type``.
+
+    The set metaclasses store the map ``collect_related_declarations`` builds under a class
+    attribute the type system cannot see; a value that is not a mapping of names to
+    ``declaration_type`` instances raises ``TypeError``.
+    """
+    return {
+        require_instance(name, str): require_instance(declaration, declaration_type)
+        for name, declaration in require(stored, is_mapping).items()
+    }
+
+
 def collect_related_declarations(
     new_class: FilterSetMetaclass | OrderSetMetaclass,
     bases: tuple[type[object], ...],
@@ -340,7 +360,10 @@ def collect_related_declarations(
     if inherit_from_bases:
         for base in reversed(bases):
             # Every family class's ``collection_attr`` is the map this function stores below.
-            inherited = cast("Mapping[str, _D]", truth.static_attr(base, collection_attr, {}))
+            inherited = declaration_map(
+                truth.static_attr(base, collection_attr, {}),
+                declaration_type,
+            )
             for name, inherited_declaration in inherited.items():
                 collected[name] = inherited_declaration
     for name, declaration in own_items:
@@ -431,9 +454,10 @@ def reject_captured_branches(
     set_cls: type[object],
     related: Mapping[str, object],
     *,
+    family: type[_FamilyT],
     related_attr: str,
     target_attr: str,
-    reached_paths: Callable[[type[object]], Iterable[str]],
+    reached_paths: Callable[[type[_FamilyT]], Iterable[str]],
 ) -> None:
     """Raise when a longer declaration's relation captures paths through a shorter branch.
 
@@ -448,7 +472,8 @@ def reject_captured_branches(
     never reaches (kanban's ``target_version`` beside
     ``target_version__milestone``) reads unambiguously and stays allowed. Runs
     when the set expands, since it reads resolved targets; ``related`` is the
-    set's own declarations, the targets' are read under ``related_attr``.
+    set's own declarations, the targets' are read under ``related_attr``. A target that
+    is not a ``family`` class generates no input, so no path runs through it.
     """
     relations = [
         (name, declaration, relation)
@@ -464,9 +489,10 @@ def reject_captured_branches(
                 continue
             target = read_attr(short, target_attr)
             remainder = long_relation[len(short_relation) :]
-            if not truth.is_type(target) or not _target_reaches(
+            if not truth.is_subclass(target, family) or not _target_reaches(
                 target,
                 remainder,
+                family=family,
                 related_attr=related_attr,
                 target_attr=target_attr,
                 reached_paths=reached_paths,
@@ -484,12 +510,13 @@ def reject_captured_branches(
 
 
 def _target_reaches(
-    target: type[object],
+    target: type[_FamilyT],
     remainder: tuple[str, ...],
     *,
+    family: type[_FamilyT],
     related_attr: str,
     target_attr: str,
-    reached_paths: Callable[[type[object]], Iterable[str]],
+    reached_paths: Callable[[type[_FamilyT]], Iterable[str]],
 ) -> bool:
     """Return whether a path ``target`` exposes starts with the ``remainder`` segments.
 
@@ -510,11 +537,12 @@ def _target_reaches(
             continue
         child = read_attr(declaration, target_attr)
         # A ``None`` placeholder target generates no input, so no path runs through it.
-        if not truth.is_type(child):
+        if not truth.is_subclass(child, family):
             continue
         if len(relation) >= len(remainder) or _target_reaches(
             child,
             remainder[len(relation) :],
+            family=family,
             related_attr=related_attr,
             target_attr=target_attr,
             reached_paths=reached_paths,
@@ -614,7 +642,7 @@ RE_READABLE_FIELDS_HELP = (
 )
 
 
-def is_re_readable_field_declaration(value: object) -> bool:
+def is_re_readable_field_declaration(value: object) -> TypeGuard[Collection[object]]:
     """Return whether ``value`` is a container a set expansion may walk repeatedly.
 
     ``collections.abc.Collection`` IS the contract: ``__len__`` + ``__iter__`` +
@@ -646,8 +674,10 @@ def require_re_readable_field_declaration(
     subject: str,
     accepted: str,
     meta_attr: str = "fields",
-) -> None:
-    """Fail closed when a family's ``Meta.fields`` / ``Meta.exclude`` cannot be walked twice.
+) -> Collection[object]:
+    """Return a family's ``Meta.fields`` / ``Meta.exclude`` collection, or fail closed.
+
+    Fails closed when the declaration cannot be walked twice.
 
     Both set families re-run their expansion: ``FilterSetOptions`` stores
     ``Meta.fields`` verbatim and upstream ``get_fields`` consumes it into a
@@ -669,7 +699,7 @@ def require_re_readable_field_declaration(
     the contract sentence itself is shared.
     """
     if is_re_readable_field_declaration(value):
-        return
+        return value
     raise ConfigurationError(
         f"{subject} {truth.qualname(set_cls)}.Meta.{meta_attr} must be {accepted}; got "
         f"{truth.kind(value)} ({truth.render(value)}). {RE_READABLE_FIELDS_HELP}",
@@ -962,6 +992,7 @@ __all__ = (
     "RelatedSetTargetMixin",
     "SetLifecycleAttrs",
     "collect_related_declarations",
+    "declaration_map",
     "expanded_once",
     "is_re_readable_field_declaration",
     "reject_captured_branches",

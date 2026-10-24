@@ -24,7 +24,7 @@ top-level ``__init__.py`` so the import path stays short.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from django.db.models import Prefetch
 
@@ -116,9 +116,10 @@ def _require_strategy(name: object) -> StrategySelection:
             "OptimizerHint.strategy(name) requires a strategy name ('windowed' | 'lateral' | 'auto') "
             f"or a NestedConnectionStrategy instance; got {truth.kind(name)}.",
         )
-    _ = resolve_strategy(name)
-    # ``resolve_strategy`` raises for anything that is not a strategy selection.
-    return cast("StrategySelection", name)
+    # ``resolve_strategy`` raises for anything that is not a strategy selection and hands a
+    # non-name selection back unchanged.
+    strategy = resolve_strategy(name)
+    return name if truth.is_instance(name, str) else strategy
 
 
 @dataclass(frozen=True)

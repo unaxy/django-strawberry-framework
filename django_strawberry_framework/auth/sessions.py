@@ -195,7 +195,7 @@ def require_session(request: object, transport: Transport) -> SessionBase:
     return cast("SessionBase", session)
 
 
-def _require_mutable_scope(adapter: ChannelsRequestAdapter) -> MutableChannelsScope:
+def require_mutable_scope(adapter: ChannelsRequestAdapter) -> MutableChannelsScope:
     """Return the adapter's scope as a ``MutableMapping``, or raise loudly.
 
     ``ChannelsRequestAdapter.scope`` is typed as a read-only ``Mapping``, but
@@ -239,7 +239,7 @@ async def scope_session_lock(
     bridge loop and never crosses loops. Long-lived multiplexed scopes (WebSocket)
     only ever reach the native async body, never the bridge.
     """
-    scope = _require_mutable_scope(adapter)
+    scope = require_mutable_scope(adapter)
     lock = scope_singleton(
         scope,
         _SCOPE_LOCK_KEY,

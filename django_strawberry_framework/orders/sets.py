@@ -38,7 +38,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Iterable
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
@@ -52,6 +52,7 @@ from django_strawberry_framework.sets_mixins import (
     ClassBasedTypeNameMixin,
     SetLifecycleAttrs,
     collect_related_declarations,
+    declaration_map,
     expanded_once,
     reject_captured_branches,
     require_re_readable_field_declaration,
@@ -95,7 +96,6 @@ from .inputs import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
     from typing import TypeGuard
 
     from django.db.models.expressions import OrderBy
@@ -358,10 +358,9 @@ def _validate_normalized_terms(
     )
 
 
-def _order_paths(orderset: type[object]) -> Iterable[str]:
+def _order_paths(orderset: type[OrderSet]) -> Iterable[str]:
     """Return the ``Meta.fields`` paths a target order set exposes (its branches are walked apart)."""
-    # ``reject_captured_branches`` hands back a ``RelatedOrder`` target, an ``OrderSet``.
-    return cast("type[OrderSet]", orderset)._expand_meta_fields().keys()
+    return orderset._expand_meta_fields().keys()
 
 
 def _classify_declared_path(model: object, field_path: str) -> None:
@@ -520,15 +519,16 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             fields = cls._expand_meta_fields()
             # The metaclass stores ``related_orders`` from
             # ``sets_mixins.py::collect_related_declarations`` (``RelatedOrder`` only).
-            related_orders = cast(
-                "Mapping[str, RelatedOrder]",
+            related_orders = declaration_map(
                 truth.static_attr(cls, "related_orders", {}),
+                RelatedOrder,
             )
             for k, v in related_orders.items():
                 fields[k] = v
             reject_captured_branches(
                 cls,
                 related_orders,
+                family=OrderSet,
                 related_attr="related_orders",
                 target_attr="orderset",
                 reached_paths=_order_paths,
@@ -625,15 +625,14 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         # rebuild to an EMPTY or partial field set. Dict-shaped fields iterate
         # their keys (the django-filter lookup-bag shape degrades to its field
         # names).
-        require_re_readable_field_declaration(
+        names = require_re_readable_field_declaration(
             cls,
             meta_fields,
             subject="OrderSet",
             accepted="'__all__' or a re-readable collection of field names",
         )
         model = truth.static_attr(meta, "model", None)
-        # ``require_re_readable_field_declaration`` refused anything but a collection.
-        for field_path in cast("Collection[object]", meta_fields):
+        for field_path in names:
             # Entry-TYPE validation is unconditional: a model-less related-only
             # set defers path validation to the concrete ``queryset.model`` at
             # apply time, but every entry is a path TOKEN here regardless, so a

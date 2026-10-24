@@ -70,7 +70,12 @@ from django_strawberry_framework.types.converters import (
     scalar_route,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_str, optional_instance, require
+from django_strawberry_framework.utils._narrowing import (
+    is_concrete_field,
+    is_str,
+    optional_instance,
+    require,
+)
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 
 if typing.TYPE_CHECKING:
@@ -298,7 +303,7 @@ class Command(BaseCommand):
         if field_meta.is_relation:
             return self._relation_row(definition, field, field_meta, scalar_namer)
         # Not a relation, so a concrete column: reverse ``ForeignObjectRel``s are relations.
-        return self._scalar_row(definition, typing.cast("ConcreteField", field), scalar_namer)
+        return self._scalar_row(definition, require(field, is_concrete_field), scalar_namer)
 
     @classmethod
     def _relation_row(

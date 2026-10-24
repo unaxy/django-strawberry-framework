@@ -47,7 +47,7 @@ Two verified corrections to the original idea:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from django.db.models import QuerySet
 from typing_extensions import override
@@ -157,7 +157,9 @@ def single_parent_spec(request: NestedConnectionRequest) -> SingleParentWindowSp
         reverse=request.reverse,
         next_page_probe=request.next_page_probe,
     )
-    if not range_plan.plain_first_page:
+    # ``plain_first_page`` implies a bounded ``limit``, so the fetch limit is set.
+    fetch_limit = range_plan.fetch_limit
+    if not range_plan.plain_first_page or fetch_limit is None:
         return None
     parent_link_field = join.parent_link_field
     return SingleParentWindowSpec(
@@ -166,8 +168,7 @@ def single_parent_spec(request: NestedConnectionRequest) -> SingleParentWindowSp
         parent_link_attname=parent_link_field.attname,
         parent_link_column=parent_link_field.column,
         parent_link_table=request.child_queryset.model._meta.db_table,
-        # ``plain_first_page`` implies a bounded ``limit``, so the fetch limit is set.
-        fetch_limit=cast("int", range_plan.fetch_limit),
+        fetch_limit=fetch_limit,
         select_related=request.child_queryset.query.select_related,
         select_columns=_select_columns(
             request.child_queryset,

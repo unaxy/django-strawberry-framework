@@ -58,14 +58,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import Case, Exists, F, OuterRef, Q, When
+from django.db.models import Case, Exists, F, ForeignKey, OuterRef, Q, When
 from django.db.models.constants import LOOKUP_SEP
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils._narrowing import call_method, list_of, read_attr, require
 from django_strawberry_framework.utils.querysets import VisibleRowExists
 from django_strawberry_framework.utils.relations import (
+    is_model_class,
     m2m_through_link_fields,
     relation_bool,
     relation_kind,
@@ -80,7 +81,7 @@ if TYPE_CHECKING:
     from django.db.models import QuerySet
 
     from django_strawberry_framework.utils.relations import RelationLink
-    from django_strawberry_framework.utils.typing import ConcreteField, ForeignKeyField, ModelField
+    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
 _M = TypeVar("_M", bound="models.Model")
 
@@ -267,7 +268,7 @@ def _correlation_steps(
     steps: list[_CorrelationStep] = []
     current = model
     for index, segment in enumerate(relation_path.split(LOOKUP_SEP)):
-        field = cast("ModelField", current._meta.get_field(segment))
+        field = current._meta.get_field(segment)
         kind = relation_kind(field)
         if kind == "many":
             source_fk, target_fk = m2m_through_link_fields(field)
@@ -315,14 +316,14 @@ def _correlation_steps(
                 content_type_field = generic.content_type_field_name
                 declaring = generic.model
                 if generic.for_concrete_model:
-                    declaring = cast("type[models.Model]", declaring._meta.concrete_model)
+                    declaring = require(declaring._meta.concrete_model, is_model_class)
                 restriction = (
                     (f"{content_type_field}__app_label", declaring._meta.app_label),
                     (f"{content_type_field}__model", declaring._meta.model_name),
                 )
             steps.append(
                 _CorrelationStep(
-                    cast("type[models.Model]", link_model),
+                    link_model,
                     pairs,
                     restriction,
                     link_segment,
@@ -402,9 +403,8 @@ def correlates_related_rows(
       target declares below it).
     """
     last = _correlation_steps(model, relation_path)[-1]
-    # ``ModelBase.__new__`` sets ``_meta.concrete_model`` on every model class.
-    rows = cast("type[models.Model]", rows_model._meta.concrete_model)
-    target = cast("type[models.Model]", last.model._meta.concrete_model)
+    rows = require(rows_model._meta.concrete_model, is_model_class)
+    target = require(last.model._meta.concrete_model, is_model_class)
     if not issubclass(rows, target) and not (last.referenced and issubclass(target, rows)):
         return False
     return all(
@@ -417,8 +417,12 @@ def correlates_related_rows(
 
 def _stored_column(field: ConcreteField | None) -> ConcreteField | None:
     """Return the field whose column stores ``field``'s value, following parent links upward."""
-    while field is not None and relation_bool(field.remote_field, "parent_link"):
-        field = cast("ForeignKeyField", field).target_field
+    while (
+        field is not None
+        and isinstance(field, ForeignKey)
+        and relation_bool(field.remote_field, "parent_link")
+    ):
+        field = field.target_field
     return field
 
 
@@ -501,6 +505,6 @@ def visible_value_path(expression: object) -> str | None:
                 path = name
         sources = getattr(node, "get_source_expressions", None)
         if callable(sources):
-            children = cast("Sequence[object | None]", sources())
+            children = list_of(call_method(node, "get_source_expressions"))
             stack.extend(source for source in children if source is not None)
     return path if guarded else None

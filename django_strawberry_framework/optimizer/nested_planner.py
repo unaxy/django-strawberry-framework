@@ -335,8 +335,7 @@ def _window_column(related_model: type[models.Model], ref: str) -> ConcreteField
         return None
     if not isinstance(resolved, Col) or resolved.alias != query.get_initial_alias():
         return None
-    # A ``Col`` resolved from a model field path targets that concrete field.
-    return cast("ConcreteField", resolved.target)
+    return resolved.target
 
 
 def _index_leading_terms(
@@ -795,8 +794,7 @@ def _project_scalar_only_window(
     carries the plan's ``introduce_projection`` itself: under a non-``QUERY``
     operation it only widens a projection the child queryset already carries.
     """
-    # ``plan_connection_relation`` refused a relation without a related model.
-    related_model = cast("type[models.Model]", django_field.related_model)
+    related_model = require(django_field.related_model, is_model_class)
     fields: list[str] = []
     append_unique(fields, related_model._meta.pk.attname)
     # Attach-complete set from one classify (connector + GenericRelation morph).

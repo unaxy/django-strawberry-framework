@@ -715,8 +715,7 @@ def resolved_revalidation_window(value: object) -> float:
     if type(value) is not int and type(value) is not float:
         raise _unusable_window_error(value)
     try:
-        # Exactly an ``int`` or a ``float`` per the type check above.
-        window = float(cast("float", value))
+        window = float(value)
     except OverflowError as exc:
         # Chained, not swallowed: the cause names WHY the number is unusable
         # ("int too large to convert to float") under the package's own error.

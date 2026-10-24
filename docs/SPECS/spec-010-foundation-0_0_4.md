@@ -228,7 +228,7 @@ def __init_subclass__(cls, **kwargs):
     # 4. Validate Meta, select Django fields once, validate the hints.
     validated = _validate_meta(cls, meta)
     fields = _select_fields(meta.model, validated.fields_spec, validated.exclude_spec)
-    _validate_optimizer_hints(validated.optimizer_hints, fields, model=meta.model)
+    optimizer_hints = _validate_optimizer_hints(validated.optimizer_hints, fields, model=meta.model)
     # 5. Pre-compute the field map, keyed by the raw Django field.name.
     field_map = {f.name: FieldMeta.from_django_field(f) for f in fields}
     # 6. Snapshot consumer-authored fields BEFORE synthesizing anything:
@@ -266,7 +266,7 @@ def __init_subclass__(cls, **kwargs):
         exclude_spec=validated.exclude_spec,
         selected_fields=tuple(fields),
         field_map=field_map,
-        optimizer_hints=validated.optimizer_hints,
+        optimizer_hints=optimizer_hints,
         has_custom_get_queryset=has_custom_get_queryset,
         consumer_authored_fields=consumer_authored_fields,
         ...,  # the four split sets, then the later specs' slots

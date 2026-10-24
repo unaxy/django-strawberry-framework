@@ -21,11 +21,12 @@ the distinct-class collision guard.
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from django_strawberry_framework.mutations import resolvers
 from django_strawberry_framework.mutations.fields import _lazy_ref
 from django_strawberry_framework.registry import register_subsystem_clear
+from django_strawberry_framework.utils._narrowing import optional_annotation
 from django_strawberry_framework.utils.inputs import make_input_namespace
 from django_strawberry_framework.utils.permissions import request_from_info
 
@@ -44,7 +45,6 @@ if TYPE_CHECKING:
     from strawberry.types import Info
 
     from django_strawberry_framework.types.base import DjangoType
-    from django_strawberry_framework.utils.typing import OptionalWidenable
 
     from .mutations import _SealedAuthHolderMeta
 
@@ -136,12 +136,8 @@ def current_user(
         arguments=[],
         # ``_lazy_ref`` builds an ``Annotated[...]`` typing alias, whose ``__or__``
         # builds the ``Optional`` at runtime.
-        return_annotation=(
-            cast(
-                "OptionalWidenable",
-                _lazy_ref(CURRENT_USER_ALIAS_NAME, AUTH_QUERIES_MODULE_PATH),
-            )
-            | None
+        return_annotation=optional_annotation(
+            _lazy_ref(CURRENT_USER_ALIAS_NAME, AUTH_QUERIES_MODULE_PATH),
         ),
         description=description,
         deprecation_reason=deprecation_reason,

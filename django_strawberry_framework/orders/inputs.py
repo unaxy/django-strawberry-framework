@@ -31,7 +31,13 @@ from django.db.models import F
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_str, list_of, read_attr, require
+from django_strawberry_framework.utils._narrowing import (
+    is_str,
+    list_of,
+    read_attr,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils.input_values import RELATED, iter_active_fields
 from django_strawberry_framework.utils.inputs import (
     GeneratedInputFieldSpec,
@@ -44,13 +50,14 @@ from django_strawberry_framework.utils.inputs import (
 from django_strawberry_framework.utils.relations import carrier_backed_link, relation_bool
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
+from .base import RelatedOrder
+
 if TYPE_CHECKING:
     from django.db.models.expressions import Expression, OrderBy
 
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.inputs import SetInputNamespace
 
-    from .base import RelatedOrder
     from .sets import OrderSet
 
 # Domain-local aliases for the shared generated-input substrate (the mechanics
@@ -341,7 +348,7 @@ def normalize_input_value(
             # prefix every child path with this branch's django source path.
             # ``related_orders`` holds only the ``RelatedOrder`` declarations the
             # metaclass collected (``sets_mixins.py::collect_related_declarations``).
-            child_orderset = cast("RelatedOrder", field.related_obj).orderset
+            child_orderset = require_instance(field.related_obj, RelatedOrder).orderset
             if child_orderset is None:
                 continue
             prefix = field.spec.django_source_path

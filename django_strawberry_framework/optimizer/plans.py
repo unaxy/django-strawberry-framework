@@ -69,6 +69,7 @@ from django_strawberry_framework.keyset import (
 )
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
+    is_concrete_field,
     is_dict,
     is_str,
     list_of,
@@ -127,7 +128,7 @@ def _lookup_path(entry: PrefetchLookup) -> str:
     returned as-is (they double as their own path).
     """
     # A ``Prefetch`` carries its ``str`` ``prefetch_to``; a string is its own path.
-    return cast("str", getattr(entry, "prefetch_to", entry))
+    return entry if isinstance(entry, str) else entry.prefetch_to
 
 
 class _IndexedList(list[_T]):
@@ -1035,7 +1036,8 @@ def _prefetch_carrier_attnames(queryset: QuerySet[_M]) -> list[str]:
     attnames: list[str] = []
     for entry in _consumer_prefetch_lookups(queryset):
         # A ``Prefetch`` walks ``prefetch_through``; a string is its own path.
-        first = cast("str", getattr(entry, "prefetch_through", entry)).split("__", 1)[0]
+        lookup = entry if isinstance(entry, str) else entry.prefetch_through
+        first = lookup.split("__", 1)[0]
         for field_obj in model._meta.get_fields():
             if instance_accessor(field_obj) != first:
                 continue
@@ -1559,8 +1561,7 @@ def _is_random_term(term: object, query: Query) -> bool:
     if isinstance(term, Node):
         # A ``When`` condition: a ``Q`` / ``WhereNode`` whose children are nested nodes,
         # expressions, or ``(lookup, value)`` pairs whose lookup names its left side.
-        children = cast("list[object]", term.children)
-        return any(_is_random_condition_child(child, query) for child in children)
+        return any(_is_random_condition_child(child, query) for child in term.children)
     if isinstance(term, BaseExpression):
         return isinstance(term, Random) or any(
             _is_random_term(source, query) for source in list_of(term.get_source_expressions())
@@ -1634,12 +1635,9 @@ def _resolve_order_path_field(model: type[models.Model], path: str) -> ConcreteF
             if relation_kind(field) != "forward_single" or getattr(field, "null", False):
                 return None
         current = getattr(field, "related_model", None)
-    if field is None or getattr(field, "is_relation", False):
+    if not is_concrete_field(field) or field.is_relation or not field.concrete:
         return None
-    if not getattr(field, "concrete", False):
-        return None
-    # Every ``ForeignObjectRel`` is a relation, which the ``is_relation`` gate refused.
-    return cast("ConcreteField", field)
+    return field
 
 
 def effective_cursor_state(
@@ -1891,13 +1889,12 @@ def apply_window_pagination(
     )
     assert_window_fetch_mode(range_plan, with_total_count=with_total_count)
     queryset = queryset.order_by(*order_by)
-    if keyset_counted:
+    if keyset_seek is not None and keyset_counted:
         return _apply_keyset_counted_window(
             queryset,
             partition_by=partition_by,
             order_by=order_by,
-            # ``keyset_counted`` is only set for a present seek.
-            seek_q=cast("KeysetSeek", keyset_seek).q(),
+            seek_q=keyset_seek.q(),
             range_plan=range_plan,
         )
     if keyset_seek is not None:

@@ -81,7 +81,7 @@ The hooks in `.pre-commit-config.yaml` run in this order, and CI's lint job runs
 - **ruff-check** and **ruff-format**.
 - **basedpyright** type-checks every Python file in the scope `[tool.basedpyright]` sets, not only the staged ones, so a signature change that breaks a caller fails here.
 - **basedpyright-floor** re-runs the same scope at the Python floor (`pyrightconfig.floor.json`), catching a newer stdlib or `typing` name.
-- **check-type-suppressions** refuses an ignore on a locked rule and any file-level directive, and holds the ignore and `typing.cast` counts to the exact budget in `[tool.type-suppressions]`.
+- **check-type-suppressions** refuses an ignore on a locked rule and any file-level directive, and holds the ignore and `typing.cast` counts of every site (`path::QualifiedName`) to the generated ledger `scripts/type_suppressions.toml`: `--write` lowers it after a fix, `--write --allow-new` records a deliberate new or moved suppression.
 - **check-public-types** builds the package into its own environment and requires `basedpyright --verifytypes` at 100% on the public API.
 - **truthful-reads** keeps identity reads of consumer objects off dunder attribute lookups and refuses a handler that swallows `BaseException`.
 - **check-kanban-anchors** refuses colliding card and glossary anchors.

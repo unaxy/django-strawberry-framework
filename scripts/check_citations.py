@@ -175,6 +175,7 @@ SYNTHETIC_SOURCES = frozenset(
         "scripts/check_citations.py",
         "scripts/prove_failability.py",
         "tests/test_check_citations.py",
+        "tests/test_check_type_suppressions.py",
         "tests/test_export_dry_review.py",
         "tests/test_prove_failability.py",
         "tests/test_review_changed_python_diffs.py",
@@ -857,21 +858,28 @@ def _symbol_outcome(
     )
 
 
+def enclosing_symbol(path: Path, line: int) -> str | None:
+    """Return the qualified name of the innermost symbol whose lines hold ``line``.
+
+    ``None`` for a module-level line no symbol spans. The name is the one a
+    ``path::QualifiedName`` citation of that symbol uses.
+    """
+    spans = {span for found in module_spans(path).values() for span in found}
+    holding = sorted(
+        (span for span in spans if span[0] <= line <= span[1]),
+        key=lambda span: (-span[0], span[1]),
+    )
+    return holding[0][2] if holding else None
+
+
 def _enclosing_symbols(path: Path, substring: str) -> tuple[str, ...]:
     """Return ``path::Qualified`` for the innermost symbol holding ``substring``."""
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     offset = text.find(substring)
     if offset < 0 or path.suffix != ".py":
         return ()
-    line = _line_of(text, offset)
-    spans = {span for found in module_spans(path).values() for span in found}
-    holding = sorted(
-        (span for span in spans if span[0] <= line <= span[1]),
-        key=lambda span: (-span[0], span[1]),
-    )
-    if not holding:
-        return (_relative(path),)
-    return (f"{_relative(path)}::{holding[0][2]}",)
+    symbol = enclosing_symbol(path, _line_of(text, offset))
+    return (_relative(path) if symbol is None else f"{_relative(path)}::{symbol}",)
 
 
 def _substring_outcome(

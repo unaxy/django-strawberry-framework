@@ -103,7 +103,7 @@ from strawberry.relay.utils import from_base64, to_base64
 
 from .exceptions import ConfigurationError
 from .utils import truth
-from .utils._narrowing import is_dict, is_list, list_of, read_attr
+from .utils._narrowing import is_concrete_field, is_dict, is_list, list_of, read_attr
 from .utils.connections import PaginationArgumentError
 from .utils.imports import require_optional_module
 from .utils.relations import _resolve_segment_field
@@ -327,14 +327,14 @@ def declared_cursor_state_for_definition(
     own through ``optimizer/plans.py::effective_cursor_state`` from this one, so
     plan-time decode and resolve-time mint still share columns and fingerprint
     by construction (the cross-strategy byte-parity invariant). ``None`` when
-    the definition carries no declaration (or is not one) - the offset
+    the definition carries no declaration - the offset
     vocabulary applies.
     """
-    cursor_field: tuple[str, ...] | None = getattr(definition, "cursor_field", None)
+    if definition is None:
+        return None
+    cursor_field = definition.cursor_field
     if cursor_field is None:
         return None
-    # A declared ``cursor_field`` was just read off it, so it is a definition.
-    definition = cast("DjangoTypeDefinition", definition)
     return CursorState(
         definition=definition,
         cursor_field=cursor_field,
@@ -359,6 +359,7 @@ def validate_cursor_field_columns(
     """
     lead = f"{type_name}.Meta.cursor_field"
     parsed = validate_cursor_field_references(cursor_field, owner=lead)
+    resolved_columns: list[ConcreteField] = []
     for order_ref, (name, _descending) in zip(cursor_field, parsed, strict=True):
         try:
             field = _resolve_cursor_field_column(model, name)
@@ -366,30 +367,28 @@ def validate_cursor_field_columns(
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} does not resolve to a field on {truth.name(model)}.",
             ) from None
-        if getattr(field, "is_relation", False) or not getattr(field, "concrete", False):
+        if not is_concrete_field(field) or field.is_relation or not field.concrete:
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} must be a local concrete column; "
                 "relation and reverse fields cannot anchor a keyset cursor.",
             )
-        if getattr(field, "null", False):
+        if field.null:
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} is nullable. Keyset cursor columns "
                 "must be non-nullable: NULL placement diverges across database "
                 "backends and poisons tuple comparisons. Use a non-nullable "
                 "column (or a defaulted denormalization of the nullable one).",
             )
-        # The relation / non-concrete check above leaves only a local concrete column.
-        if not _is_supported_cursor_field(cast("ConcreteField", field)):
+        if not _is_supported_cursor_field(field):
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} uses JSONField. Keyset cursor columns "
                 "must have portable ordering semantics across database backends; "
                 "JSON ordering differs between SQLite and PostgreSQL. Use a scalar "
                 "column containing the intended ordering key.",
             )
-    terminal_name, _ = parsed[-1]
-    # Every entry passed the local-concrete-column check above.
-    terminal = cast("ConcreteField", _resolve_cursor_field_column(model, terminal_name))
-    if not (terminal.primary_key or getattr(terminal, "unique", False)):
+        resolved_columns.append(field)
+    terminal = resolved_columns[-1]
+    if not (terminal.primary_key or terminal.unique):
         raise ConfigurationError(
             f"{lead} must end in a unique column so the cursor order is a total "
             f"order; got {truth.render(cursor_field[-1])}. Append the pk (e.g. "

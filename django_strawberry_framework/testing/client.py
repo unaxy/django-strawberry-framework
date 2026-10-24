@@ -151,6 +151,9 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
     # same guard.
     __test__: ClassVar[bool] = False
 
+    # The base stores the client untyped; ``__init__`` hands it a ``_ClientT``.
+    _client: _ClientT
+
     def __init__(self, path: str | None, client: _ClientT) -> None:
         resolved = path if path is not None else testing_endpoint_setting()
         self.path: str = resolved
@@ -162,8 +165,7 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
     @property
     def client(self) -> _ClientT:
         """The wrapped Django test client (the base stores it as ``self._client``)."""
-        # The base stores its client untyped; ``__init__`` handed it a ``_ClientT``.
-        return cast("_ClientT", self._client)
+        return self._client
 
     def _finish_response(
         self,

@@ -51,7 +51,6 @@ from typing import (
     Literal,
     NamedTuple,
     TypeVar,
-    cast,
 )
 
 from django.db import models
@@ -86,7 +85,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.filters.sets import FilterSet
     from django_strawberry_framework.orders.sets import OrderSet
-    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+    from django_strawberry_framework.utils.typing import ModelField
 
     from .definition import GlobalIDStrategy
 
@@ -689,7 +688,7 @@ class DjangoType:
         validated = _validate_meta(cls, meta)
         model = validated.model
         fields = _select_fields(model, validated.fields_spec, validated.exclude_spec)
-        _validate_optimizer_hints(validated.optimizer_hints, fields, model=model)
+        optimizer_hints = _validate_optimizer_hints(validated.optimizer_hints, fields, model=model)
 
         field_map = {f.name: FieldMeta.from_django_field(f) for f in fields}
         consumer_annotations = dict(cls.__annotations__)
@@ -857,8 +856,7 @@ class DjangoType:
             exclude_spec=validated.exclude_spec,
             selected_fields=tuple(fields),
             field_map=field_map,
-            # ``_validate_optimizer_hints`` above rejected every non-``OptimizerHint`` value.
-            optimizer_hints=cast("dict[str, OptimizerHint]", validated.optimizer_hints),
+            optimizer_hints=optimizer_hints,
             has_custom_get_queryset=has_custom_get_queryset,
             consumer_authored_fields=consumer_authored_fields,
             consumer_annotated_relation_fields=consumer_annotated_relation_fields,
@@ -1531,7 +1529,7 @@ def _validate_optimizer_hints(
     hints: dict[str, object],
     fields: "tuple[ModelField, ...]",
     model: type[models.Model],
-) -> None:
+) -> dict[str, OptimizerHint]:
     """Validate ``Meta.optimizer_hints`` keys and values in one pass.
 
     Combines the field-surface and value checks in one place:
@@ -1561,9 +1559,12 @@ def _validate_optimizer_hints(
             field) is not fatal - earlier shapes inferred the model from
             ``fields[0].model`` and ``IndexError``'d here.
 
+    Returns:
+        The validated hints, every value an ``OptimizerHint``.
+
     """
     if not hints:
-        return
+        return {}
     valid_field_names = {f.name for f in model._meta.get_fields()}
     selected_relation_names = {f.name for f in fields if f.is_relation}
 
@@ -1587,12 +1588,19 @@ def _validate_optimizer_hints(
                 available=selected_relation_names,
             ),
         )
-    bad_values = sorted(k for k, v in hints.items() if not truth.is_instance(v, OptimizerHint))
+    validated: dict[str, OptimizerHint] = {}
+    bad_values: list[str] = []
+    for key, value in hints.items():
+        if truth.is_instance(value, OptimizerHint):
+            validated[key] = value
+        else:
+            bad_values.append(key)
     if bad_values:
         raise ConfigurationError(
             "optimizer_hints values must be OptimizerHint instances, "
-            f"got non-OptimizerHint for: {bad_values}",
+            f"got non-OptimizerHint for: {sorted(bad_values)}",
         )
+    return validated
 
 
 def _selected_meta_targets(
@@ -1923,7 +1931,7 @@ def _select_fields(
     all_names = [f.name for f in all_fields]
     valid_names = set(all_names)
 
-    if fields_spec == "__all__" or (fields_spec is None and exclude_spec is None):
+    if fields_spec == "__all__":
         selected_names = valid_names
     elif fields_spec is not None:
         unknown = sorted(set(fields_spec) - valid_names)
@@ -1937,9 +1945,8 @@ def _select_fields(
                 ),
             )
         selected_names = set(fields_spec)
-    else:
-        # ``fields_spec`` is ``None`` here, so the first branch leaves ``exclude_spec`` set.
-        excluded = cast("tuple[str, ...]", exclude_spec)
+    elif exclude_spec is not None:
+        excluded = exclude_spec
         unknown = sorted(set(excluded) - valid_names)
         if unknown:
             raise ConfigurationError(
@@ -1951,6 +1958,8 @@ def _select_fields(
                 ),
             )
         selected_names = valid_names - set(excluded)
+    else:
+        selected_names = valid_names
 
     return tuple(f for f in all_fields if f.name in selected_names)
 
@@ -2096,10 +2105,12 @@ def _build_annotations(
     annotations: dict[str, object] = {}
     pending: list[PendingRelation] = []
     for field in fields:
-        if field.is_relation:
+        # Every ``ForeignObjectRel`` is a relation, so the ``else`` branch is a column.
+        if isinstance(field, models.ForeignObjectRel) or field.is_relation:
             if field.name in consumer_authored_fields:
                 continue
-            if getattr(field, "related_model", None) is None:
+            related_model = field.related_model
+            if related_model is None:
                 raise ConfigurationError(
                     f"{truth.name(source_model)}.{field.name} is a GenericForeignKey or other "
                     "relation without a concrete related model. It cannot be auto-mapped to "
@@ -2122,8 +2133,7 @@ def _build_annotations(
                     source_model=source_model,
                     field_name=field.name,
                     django_field=field,
-                    # The ``related_model is None`` gate above raised for this field.
-                    related_model=cast("type[models.Model]", field.related_model),
+                    related_model=related_model,
                 ),
             )
             annotations[field.name] = PendingRelationAnnotation
@@ -2174,8 +2184,7 @@ def _build_annotations(
             # ``consumer_authored_fields`` short-circuit above, so it receives
             # no generated object type (spec-037 Decision 3 / Decision 4).
             annotations[field.name] = convert_field_output(
-                # Every ``ForeignObjectRel`` is a relation, so a non-relation entry is a column.
-                cast("ConcreteField", field),
+                field,
                 truth.name(cls),
                 force_nullable=force_nullable,
                 expose_filesystem_path=field.name in filesystem_path_fields,

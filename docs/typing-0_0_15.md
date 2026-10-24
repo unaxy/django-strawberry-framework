@@ -6,12 +6,14 @@ Each item is fixed at the root, gated (both passes 0 errors, full suite in one p
 A split suite run on a tree other sessions are editing can drop modules from every part, so it is not a coverage gate.
 Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit and the CI lint job) refuses a
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
-suppression left), every file-level `# pyright:` directive, and any count off `[tool.type-suppressions]`: the ignore
-comments per unlocked rule and the `typing.cast` calls (410) may only fall, and the budget falls with them. A rule
-whose last ignore is cleared leaves the budget and gains the marker.
+suppression left), every file-level `# pyright:` directive, and any per-site count off the generated ledger
+`scripts/type_suppressions.toml`: each site (`path::QualifiedName`) holds its `typing.cast` calls and its ignore
+comments per unlocked rule (239 casts in all), every count may only fall, and a suppression cannot move to new code by
+giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger and gains the marker.
 
-Progress: 27 done, 6 closed (survey verdicts), 2 open (one waits on upstream, one is a behavior change outside
-typing). Ignore comments: 782 lines (1897 at the start of 0.0.15's ignore sweep).
+Progress: 28 done, 6 closed (survey verdicts), 3 open (one waits on upstream, one is the cast sweep's second
+phase, one is a behavior change outside typing). Ignore comments: 708 lines (1897 at the start of 0.0.15's ignore
+sweep); `typing.cast` calls: 239 (432 at the start of the cast work).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -148,6 +150,14 @@ typing). Ignore comments: 782 lines (1897 at the start of 0.0.15's ignore sweep)
 - [x] 32. `testing/client.py`'s `Response` is generic in its raw `response` field (no default): `TestClient.query()`
   and the mixin return `Response[_MonkeyPatchedWSGIResponse]`, `AsyncTestClient.query()`
   `Response[_MonkeyPatchedASGIResponse]` (spec-043 Decision 6)
+- [x] 36. Cast sweep, phase 1: 160 package casts retired (399 to 239) with no new branch and no behavior change. Shared
+  typed helpers in `utils/_narrowing.py` (`is_concrete_field`, `is_queryset` claiming `QuerySet[Model, object]`,
+  `optional_annotation` in place of the `OptionalWidenable` cast target, `get_item` / `set_item` / `del_item`,
+  `iter_of`, `is_real_mapping` / `is_real_collection`); value-or-defect producers typed
+  `tuple[X, None] | tuple[None, Defect]` and narrowed by index; an existing raising helper (`require`,
+  `require_instance`) where the value's source proves the class; a raising validator returns what it proved. Kept:
+  a cast on a line a KANBAN row quotes, and two casts on security paths (`consumers.py::_ConnectionRevocation.close`,
+  `schema.py::_consumer_extension_entries`) where the replacement would be a dead `is not None` that fails silently
 
 ## Rules off
 
@@ -235,8 +245,19 @@ Survey verdicts recorded so nothing is re-tried blind:
 - [ ] 23. Waits on upstream: drf-stubs declares a stub-only `ModelSerializer.Meta`
   (typeddjango/djangorestframework-stubs#689, open; the fix, #1069, closed unmerged; a comment asking whether a fresh
   PR would be accepted is the maintainer's to post). Once a release drops it: bump the lock, retire
-  `tests/_idioms.py::ModelSerializerBase` and the 25 example-serializer ignores (`library/serializers.py` 23,
-  `products/serializers.py` 2), and lower `reportIncompatibleVariableOverride` 93 to 67
+  `tests/_idioms.py::ModelSerializerBase`, `examples/fakeshop/apps/library/serializers.py::ModelSerializerBase` (which
+  every library serializer derives from) and the two `products/serializers.py` `Meta` ignores, and lower
+  `reportIncompatibleVariableOverride` by 4
+- [ ] 37. Cast sweep, phase 2: the fixes phase 1 left because each writes a new raise or branch (with its test),
+  changes a public annotation, changes behavior for an input accepted today, or sits on a per-row path that needs a
+  benchmark. The largest groups: the generic `RelationHop` split (`utils/relations.py`, about 14 casts across
+  `filters/sets.py` and `utils/permissions.py`), the `mutations/resolvers.py` write pipeline (8, its statement order
+  is a security invariant), raising readers for slots filled at bind (`write_mixins.py::backing_model_of`, the
+  serializer-class reads, about 7), `types/finalizer.py`'s registry reads (8), `utils/querysets.py::_reconstructed_value`
+  (5, hot), a generic `convert_with_mro` (3) and a generic `RelatedSetTargetMixin` (2). Three upstream-only groups:
+  types-django-filter (`FilterSetMetaclass.__new__` returning `Self`, `get_fields`, `FilterSetOptions.fields`),
+  django-stubs (`Options.concrete_model` optional, `QuerySet(hints=)`, `Window(order_by=)`), Strawberry
+  (`SliceMetadata.from_arguments` reading `info` only without `max_results`)
 - [ ] 35. Behavior, not typing (item 6's open question): on the prefetch path a `get_queryset` hook reads the planning
   resolver's `info.field_name` / `selected_fields`; run by the relation's own resolver it reads the relation's. The
   optimizer should not change what a hook observes: build a per-relation raw info, as strawberry_django's
@@ -252,7 +273,7 @@ drf-stubs, a comment on PR #1069 (item 23):
 ```text
 #1069 looks like the right fix for #689, and it was closed ten minutes after it opened with the downside question
 unanswered. Under pyright/basedpyright every `class Meta:` on a `ModelSerializer` subclass reports
-`reportIncompatibleVariableOverride` against the stub-only nested `Meta`; we carry 26 suppressions for that alone.
+`reportIncompatibleVariableOverride` against the stub-only nested `Meta`; every project carries a suppression for it.
 
 If the author does not return, would a fresh PR with the same change be accepted (drop the stub-only
 `ModelSerializer.Meta` and its stubtest allowlist entry; assert a subclass's own `Meta` attributes keep their
@@ -283,8 +304,8 @@ Checked against django-stubs 6.1.2 and master. Happy to send a PR if this is wel
 
 ## Ignore breakdown
 
-Lines carrying a `# pyright: ignore[...]` comment: 782 (851 rule hits): tests 572, package 131, examples 78,
-scripts 1. By rule and by file are measured at 782 lines; by cause at 881 (47 lines carry an Unknown rule at 782).
+Lines carrying a `# pyright: ignore[...]` comment: 708 (774 rule hits): tests 524, package 125, examples 56,
+scripts 3. By rule and by file are measured at 708 lines; by cause at 881.
 
 ### By cause
 
@@ -307,21 +328,20 @@ another rule evaluates to Unknown.
 
 | Rule | Hits | Package | Tests | Examples | Scripts | Root |
 | --- | --- | --- | --- | --- | --- | --- |
-| `reportArgumentType` | 307 | 24 | 271 | 12 | 0 | 0 |
-| `reportAttributeAccessIssue` | 119 | 25 | 93 | 1 | 0 | 0 |
-| `reportIncompatibleVariableOverride` | 93 | 6 | 58 | 29 | 0 | 0 |
+| `reportArgumentType` | 273 | 24 | 237 | 12 | 0 | 0 |
+| `reportAttributeAccessIssue` | 113 | 25 | 87 | 1 | 0 | 0 |
+| `reportIncompatibleVariableOverride` | 68 | 6 | 55 | 7 | 0 | 0 |
 | `reportIncompatibleMethodOverride` | 59 | 7 | 47 | 5 | 0 | 0 |
 | `reportAny` | 39 | 10 | 14 | 15 | 0 | 0 |
-| `reportExplicitAny` | 36 | 27 | 6 | 2 | 1 | 0 |
-| `reportUnknownMemberType` | 33 | 27 | 4 | 2 | 0 | 0 |
-| `reportAssignmentType` | 30 | 0 | 29 | 1 | 0 | 0 |
-| `reportReturnType` | 24 | 1 | 22 | 1 | 0 | 0 |
-| `reportUnknownVariableType` | 21 | 19 | 2 | 0 | 0 | 0 |
+| `reportExplicitAny` | 35 | 26 | 6 | 2 | 1 | 0 |
+| `reportUnknownMemberType` | 32 | 26 | 4 | 2 | 0 | 0 |
+| `reportAssignmentType` | 28 | 0 | 25 | 1 | 2 | 0 |
+| `reportReturnType` | 23 | 1 | 21 | 1 | 0 | 0 |
+| `reportUnknownVariableType` | 20 | 18 | 2 | 0 | 0 | 0 |
 | `reportUnknownArgumentType` | 14 | 5 | 2 | 7 | 0 | 0 |
-| `reportCallIssue` | 13 | 1 | 11 | 1 | 0 | 0 |
 | `reportUnsafeMultipleInheritance` | 12 | 6 | 4 | 2 | 0 | 0 |
+| `reportCallIssue` | 11 | 1 | 9 | 1 | 0 | 0 |
 | `reportIndexIssue` | 10 | 0 | 10 | 0 | 0 | 0 |
-| `reportUnnecessaryIsInstance` | 6 | 6 | 0 | 0 | 0 | 0 |
 | `reportGeneralTypeIssues` | 5 | 0 | 5 | 0 | 0 | 0 |
 | `reportInvalidTypeArguments` | 5 | 1 | 4 | 0 | 0 | 0 |
 | `reportPropertyTypeMismatch` | 5 | 5 | 0 | 0 | 0 | 0 |
@@ -330,6 +350,7 @@ another rule evaluates to Unknown.
 | `reportMissingSuperCall` | 3 | 2 | 1 | 0 | 0 | 0 |
 | `reportOptionalMemberAccess` | 3 | 3 | 0 | 0 | 0 | 0 |
 | `reportDeprecated` | 2 | 1 | 1 | 0 | 0 | 0 |
+| `reportUnnecessaryIsInstance` | 2 | 2 | 0 | 0 | 0 | 0 |
 | `reportUntypedFunctionDecorator` | 2 | 2 | 0 | 0 | 0 | 0 |
 | `reportIncompatibleUnannotatedOverride` | 1 | 1 | 0 | 0 | 0 | 0 |
 
@@ -337,16 +358,16 @@ another rule evaluates to Unknown.
 
 | File | Lines |
 | --- | --- |
-| `tests/utils/test_querysets.py` | 52 |
-| `examples/fakeshop/apps/library/serializers.py` | 28 |
-| `tests/test_resource_policy.py` | 21 |
-| `tests/test_list_field.py` | 20 |
-| `tests/optimizer/test_hints.py` | 18 |
-| `tests/utils/test_relations.py` | 18 |
-| `tests/filters/test_inputs.py` | 16 |
-| `tests/filters/test_sets.py` | 16 |
-| `tests/optimizer/test_extension.py` | 16 |
-| `tests/rest_framework/test_resolvers.py` | 16 |
+| `tests/utils/test_querysets.py` | 51 |
+| `tests/test_resource_policy.py` | 20 |
+| `tests/filters/test_sets.py` | 17 |
+| `tests/optimizer/test_hints.py` | 17 |
+| `tests/rest_framework/test_resolvers.py` | 17 |
+| `tests/test_list_field.py` | 16 |
+| `tests/types/test_relay_interfaces.py` | 16 |
+| `django_strawberry_framework/utils/_queryset_private.py` | 15 |
+| `django_strawberry_framework/filters/sets.py` | 14 |
+| `tests/filters/test_inputs.py` | 14 |
 
 <!-- LINK DEFINITIONS -->
 

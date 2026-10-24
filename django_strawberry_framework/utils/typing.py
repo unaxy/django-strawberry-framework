@@ -52,7 +52,7 @@ from ._narrowing import read_attr
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
-    from typing import Protocol, TypeAlias
+    from typing import TypeAlias
 
     from django.db import models
     from graphql import (
@@ -97,17 +97,6 @@ if TYPE_CHECKING:
     #: Both resolver ``info`` flavors: the resolve-time Strawberry ``Info`` and the
     #: plan-time graphql-core ``GraphQLResolveInfo``.
     EitherInfo: TypeAlias = Info[object, object] | GraphQLResolveInfo
-
-    class _NoneWidenable(Protocol):
-        """A value whose own ``|`` takes ``None``: an alias or special form (``Annotated[...]``)."""
-
-        def __or__(self, other: None, /) -> object: ...
-
-    #: A runtime annotation that ``| None`` widens: a class (``NewType`` scalars included, which
-    #: the checker models as classes) or an alias or special form with its own ``|``. A
-    #: ``TypeForm[object]`` value is cast to it at the widening site; the type forms it leaves
-    #: out (a string forward reference) are no ``SCALAR_MAP`` entry or generated annotation.
-    OptionalWidenable: TypeAlias = type[object] | _NoneWidenable
 
     #: What a ``GraphQLNonNull`` wraps: graphql-core's ``GraphQLNullableType``, with
     #: the list member it leaves bare parametrized by ``GraphQLList``'s own bound.

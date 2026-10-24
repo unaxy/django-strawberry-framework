@@ -780,10 +780,9 @@ def _collect_schema_reachable_types(schema: object) -> "truth.IdentitySet[type[D
         lookup = read_attr(strawberry_schema, "get_type_by_name", MISSING_ATTRIBUTE)
         definition = lookup(type_name) if callable(lookup) else None
         if definition is not None:
-            origin = read_attr(definition, "origin", None)
-            if registry.get_definition(origin) is not None:
-                # The registry's definitions are keyed by ``DjangoType`` classes.
-                reachable.add(cast("type[DjangoType]", origin))
+            registered = registry.get_definition(read_attr(definition, "origin", None))
+            if registered is not None:
+                reachable.add(registered.origin)
         # Recurse into fields.
         # A graphql-core object / interface / input type's ``fields`` map names to fields.
         fields: Mapping[str, object] | None = getattr(gql_type, "fields", None)
@@ -868,12 +867,10 @@ def _resolve_model_from_return_type(info: "GraphQLResolveInfo") -> _OriginAndMod
     definition = strawberry_schema.get_type_by_name(type_name)
     if definition is None:
         return None
-    origin = read_attr(definition, "origin", None)
-    model = registry.model_for_type(origin)
-    if model is None:
+    registered = registry.get_definition(read_attr(definition, "origin", None))
+    if registered is None:
         return None
-    # The registry maps only ``DjangoType`` classes to models.
-    return _OriginAndModel(origin=cast("type[DjangoType]", origin), model=model)
+    return _OriginAndModel(origin=registered.origin, model=registered.model)
 
 
 class _OptimizerOperationState(OperationState):
