@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 260 done, 169 to do.
+Progress: 261 done, 168 to do.
 
 ## Done
 
@@ -1227,6 +1227,13 @@ Progress: 260 done, 169 to do.
   Package rows pin the grid, the gate and async paths and the exact naming; fakeshop gains `IssueFilter`
   (`embargoed`, a `CheckboxInput` `BooleanFilter`) and `PeriodicalFilter` (`issues = RelatedFilter`) with live
   rows, sync and async. README, the `filterset` glossary term and spec-027 say so. Breaking (pre-1.0)
+- [x] 332. fixed: `scripts/workspace.py::_remove_flow_dir` clears the marker's contents before `marker.rmdir()`, through
+  the one per-entry loop it empties the flow folder with (`_empty_folder`: a real directory through `rmtree`, anything
+  else unlinked, a symlink never followed), so a Finder `.DS_Store`, a stray folder or a symlink inside `.dsf-ws` no
+  longer makes `gc` raise `OSError` (Errno 66) on every rerun; the marker proves ownership by existing, never by being
+  empty. A `.dsf-ws` that is itself a symlink is unlinked, never emptied through. The marker still goes last (a new
+  row pins it: a `gc` cut short inside the flow folder keeps the marker and the next one finishes), and the parametrized
+  litter row covers a file, a folder, a symlink inside and a symlinked marker, outside targets intact
 
 ## Outside review of the fixes
 
@@ -1267,10 +1274,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 332. `scripts/workspace.py::_remove_flow_dir` removes the marker with `marker.rmdir()` and no handling: a
-  non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
-  rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script
-  writes there): refuse with a `WorkspaceError` naming the contents, or remove them
 - [ ] 345. `workspace.py`'s `state.json` is a regular file the macOS `$TMPDIR` purge removes once its birth and access
   times pass 3 days (`_write_json` replaces it, so each write renews it): a command holding its copy past 3 days with
   no state write in between loses every binding of the flow while the copy's lock (a directory since 301) survives.
