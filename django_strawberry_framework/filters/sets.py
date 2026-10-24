@@ -170,6 +170,7 @@ from .base import (
     TextPatternFilter,
     _bound_field_name,
     _relation_uses_non_pk_to_field,
+    copied_form_field,
     membership_in_filter_class,
     multi_widget_keys,
     unkept_form_field,
@@ -1599,10 +1600,14 @@ class ProjectedChildFilter(Filter):
     @property
     @override
     def field(self) -> FormField:
-        """The child filter's form field: the child instance's once bound, the child class's before."""
+        """The child filter's form field: the child instance's once bound, the child class's before.
+
+        Before binding, the child class's filter is a class-level declaration every
+        request shares, so its field is read on a copy (``filters/base.py::copied_form_field``).
+        """
         projection = self._projection
         if getattr(self, "parent", None) is None:
-            return projection.filterset.base_filters[projection.name].field
+            return copied_form_field(projection.filterset.base_filters[projection.name])
         return self._child()._filter_named(projection.name).field
 
     @override

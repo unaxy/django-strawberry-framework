@@ -525,6 +525,20 @@ def unkept_form_field(filter_instance: Filter) -> Field:
     return require_instance(field_class(label=filter_instance.label, **field_kwargs), Field)
 
 
+def copied_form_field(filter_instance: Filter) -> Field:
+    """Return the form field the filter's own class builds, read on a copy of the filter.
+
+    ``Filter.field`` caches the field in the filter's ``_field`` (and a subclass may
+    write more: a ``queryset`` into ``extra``, a field half built before it raises); a
+    class-level declaration is shared by every request and deep-copied into each one, so
+    a read of it must not write to it. The read runs on a deep copy, the copy
+    django-filter itself makes per request, so the filter class's own ``field``,
+    a consumer subclass's override included, builds it and the declaration keeps
+    nothing. ``unkept_form_field`` rebuilds only the base ``Filter.field``.
+    """
+    return copy.deepcopy(filter_instance).field
+
+
 def _built_filter(
     filter_class: Callable[..., Filter],
     field_name: str | None,

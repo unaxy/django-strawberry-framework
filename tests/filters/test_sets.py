@@ -13930,8 +13930,9 @@ def test_projected_leaf_form_field_is_the_child_instance_field() -> None:
     ``email_must_have_at_sign`` form field. Bound, the flat
     ``patron__email_must_have_at_sign`` on ``LoanFilter`` answers through that
     field, under the flat form key; unbound (the class-level template the input
-    builder types), it answers the child's class-level field, which the
-    ``__init__`` never touched.
+    builder types), it answers a field the child's filter class builds on a copy
+    of the child's declaration (``filters/base.py::copied_form_field``), which the
+    ``__init__`` never touched and which neither declaration keeps.
     """
     LoanFilter.get_filters()
     bound = LoanFilter(
@@ -13952,7 +13953,8 @@ def test_projected_leaf_form_field_is_the_child_instance_field() -> None:
     )
     template = LoanFilter.base_filters["patron__email_must_have_at_sign"]
     assert isinstance(template, ProjectedChildFilter)
-    assert template.field is PatronFilter.base_filters["email_must_have_at_sign"].field
+    assert template.field is not template.field
+    assert template.field.clean("no-at") == "no-at"
     assert "parent" not in vars(template)
 
 

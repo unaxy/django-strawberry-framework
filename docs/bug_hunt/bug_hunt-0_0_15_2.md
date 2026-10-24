@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 277 done, 187 to do.
+Progress: 278 done, 194 to do.
 
 ## Done
 
@@ -1370,6 +1370,15 @@ Progress: 277 done, 187 to do.
   explicit field list or dict with `Meta.exclude` is unchanged. The library example gains an exclude-only and a
   pk-excluding whole-set filterset on secondary types; live rows plus package rows over the shape grid; spec-027, its
   rationale, the README and the `FilterSet` glossary term say so
+- [x] 373. A declared `django_filters.LookupChoiceFilter` filters by a value plus a `<name>_lookup` key, which no
+  GraphQL input carries, so it refused every non-empty value; declared without `lookup_choices` it was worse: building
+  the schema read `.field` on the class-level declaration (`filters/inputs.py` catch-all and `method=` fallback, and an
+  unbound projected child leaf in `filters/sets.py::ProjectedChildFilter.field`), which cached a half-built field there,
+  so every later request raised an unmasked `AttributeError` and a `DjangoFilterBackend` view on the same `FilterSet`
+  broke too. Those reads now run on a deep copy (`filters/base.py::copied_form_field`), so building the schema writes
+  nothing to any declaration, and a `LookupChoiceFilter` (or subclass) on a served `FilterSet` is refused with
+  `ConfigurationError` at schema build, before its field is read; the declaration still filters under django-filter
+  and DRF
 
 ## Outside review of the fixes
 
@@ -1428,9 +1437,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   row (not this setup)
 - [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
   row
-- [ ] 373. `django_filters.LookupChoiceFilter` publishes a bare scalar input, so django-filter's `lookup_required`
-  refuses every request (`FILTER_INVALID` "Select a lookup."); its input needs a value + lookup pair. Feature card, not
-  a defect
 - [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the
   value (all rows answered). Robustness row: PostgreSQL range columns are unsupported
 - [ ] 377. (robustness) graphql-core 3.2 `ExecutionContext.execute_fields` leaves an already-created async sibling
@@ -1615,12 +1621,39 @@ tracker number are recorded there; open remainders and new defects are filed as 
   explicit list with `exclude`) still orders by the excluded column, and an exclude-only `OrderSet` has no fields and
   fails at schema build; say whether the order family honours `Meta.exclude` like the filter family or refuses it at
   class creation. Found fact-finding 400
+- [ ] 515. A declared `MultipleChoiceFilter` / `AllValuesMultipleFilter` / `TypedMultipleChoiceFilter` reaches the
+  scalar catch-all and publishes `exact: String` while its form field cleans a list, so every non-empty value answers
+  `FILTER_INVALID` "Enter a list of values."; probed on a text column only (a `Choices` column not probed). Found
+  fact-finding 373
+- [ ] 516. A bare `BaseCSVFilter` declared with the `exact` lookup (no `in` / `range`) publishes `[String!]` and
+  matches no row for a value a row holds (`["aa"]` and `"aa"` both answer 0 rows). Found fact-finding 373
+- [ ] 517. The catch-all's `ConfigurationError` for a `method=` filter with no form field
+  (`filters/inputs.py::convert_filter_to_input_annotation`) advises `Filter(method=..., field_class=...)`, but
+  django-filter's base `Filter` puts `field_class` into `extra`, so that spelling's `.field` raises `TypeError`
+  (unexpected keyword `field_class`); the working spelling is a `Filter` subclass with a class-level `field_class`.
+  Found implementing 373
+- [ ] 518. (robustness) The non-enum choice refusal names "ChoiceFilter" for a `DateRangeFilter` or
+  `AllValuesFilter`, which are not choice filters to the consumer who declared them. Found fact-finding 373
+- [ ] 519. (robustness) A declared filter that cannot be deep-copied (`CharFilter(method=svc.by_code)` where `svc`
+  holds a `threading.Lock`) now fails the schema build with a raw `TypeError` from
+  `filters/base.py::copied_form_field`; at 6f0575c6 the schema built but every filtered request failed the same way.
+  A `ConfigurationError` naming the filter would read better. Found verifying 373
+- [ ] 520. (robustness) The `LookupChoiceFilter` refusal for a leaf projected through a `RelatedFilter` names the
+  internal `ProjectedLookupChoiceFilter` class, the parent set and the `field_name` (`shelf__code_l`), not the
+  declared attribute on the child set. Found verifying 373
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 521. CHANGELOG entry for item 373: a `django_filters.LookupChoiceFilter` on a `FilterSet` the schema serves is
+  refused with `ConfigurationError` when the schema is built (no GraphQL input carries its value plus lookup), and
+  building the schema no longer writes a cached form field into any class-level declared filter. GOAL.md (the
+  `BaseFilterSet` line saying every django-filter primitive carries over unchanged) may want the same qualification.
+- [ ] 522. Feature card? A value plus lookup input for `LookupChoiceFilter` (lookup as an enum of its
+  `lookup_choices`), so it filters over GraphQL instead of being refused at build; no upstream (graphene-django,
+  django-graphene-filters, strawberry-django) publishes one.
 - [ ] 559. CHANGELOG entry for item 400: a `FilterSet` declaring only `Meta.exclude` now publishes the same sweep as
   `fields = "__all__"`: it gains the primary key filter and loses its forward many-to-many filter keys (declare them in
   a dict `Meta.fields` or through a `RelatedFilter` instead); and a primary key named in `Meta.exclude` is no longer
