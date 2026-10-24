@@ -22,6 +22,12 @@ rule downgrades any forward-FK select_related into that type to a
 ``Prefetch(queryset=cls.get_queryset(...))`` so the consumer's filter
 survives plan execution. Visible in the live HTTP test by an inactive
 tag resolving to ``null`` on the source specimen.
+
+The ``ScalarSpecimen`` create / update mutations write the ``occurred_at`` /
+``occurred_time`` columns through all three write flavors (``DjangoMutation``,
+``DjangoModelFormMutation`` over ``forms.ScalarSpecimenTemporalForm``,
+``SerializerMutation`` over ``serializers.ScalarSpecimenTemporalSerializer``), so a
+datetime or time the database cannot store is refused live on each.
 """
 
 import strawberry
@@ -29,13 +35,17 @@ from django.db.models import Manager, QuerySet
 from strawberry.types import Info
 from typing_extensions import override
 
-from apps.scalars import filters, forms, models, orders
+from apps.scalars import filters, forms, models, orders, serializers
+
+# ``SerializerMutation`` is imported BY NAME (never via star import): the root ``__all__``
+# omits it while DRF is a soft dependency, so the root ``__getattr__`` resolves it on demand.
 from django_strawberry_framework import (
     BigInt,
     DjangoModelFormMutation,
     DjangoMutation,
     DjangoMutationField,
     DjangoType,
+    SerializerMutation,
     auto,
 )
 from django_strawberry_framework.filters import FilterInput
@@ -415,13 +425,84 @@ class CreateMediaSpecimenImageViaForm(DjangoModelFormMutation):
         permission_classes = []
 
 
+class CreateScalarSpecimen(DjangoMutation):
+    """Create a ``ScalarSpecimen`` through the model flavor: the temporal write surface.
+
+    ``occurredAt`` (``DateTime``) and ``occurredTime`` (``Time``) are written as parsed,
+    a naive datetime made aware under ``USE_TZ``; a value the database cannot store (an
+    aware datetime whose projection onto the connection's time zone leaves years
+    1..9999, an aware time on SQLite) is the field's ``invalid`` error with nothing
+    written. ``permission_classes = []`` keeps write-auth out of the path under test.
+    """
+
+    class Meta:
+        model = models.ScalarSpecimen
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateScalarSpecimen(DjangoMutation):
+    """Update a ``ScalarSpecimen`` through the model flavor, located by its raw pk ``id:``."""
+
+    class Meta:
+        model = models.ScalarSpecimen
+        operation = "update"
+        permission_classes = []
+
+
+class CreateScalarSpecimenViaForm(DjangoModelFormMutation):
+    """Create a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalForm`` (the form flavor)."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenTemporalForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateScalarSpecimenViaForm(DjangoModelFormMutation):
+    """Update a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalForm`` (the form flavor)."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenTemporalForm
+        operation = "update"
+        permission_classes = []
+
+
+class CreateScalarSpecimenViaSerializer(SerializerMutation):
+    """Create a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalSerializer``."""
+
+    class Meta:
+        serializer_class = serializers.ScalarSpecimenTemporalSerializer
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateScalarSpecimenViaSerializer(SerializerMutation):
+    """Update a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalSerializer``."""
+
+    class Meta:
+        serializer_class = serializers.ScalarSpecimenTemporalSerializer
+        operation = "update"
+        permission_classes = []
+
+
 @strawberry.type
 class Mutation:
-    """Scalars coverage write surface - the live ``Upload`` mutation path (spec-037)."""
+    """Scalars coverage write surface: the live ``Upload`` path (spec-037) and temporal writes.
+
+    The ``ScalarSpecimen`` create / update pairs write the temporal columns through each
+    flavor (model, ``ModelForm``, serializer).
+    """
 
     create_media_specimen = DjangoMutationField(CreateMediaSpecimen)
     update_media_specimen = DjangoMutationField(UpdateMediaSpecimen)
     create_media_specimen_image_via_form = DjangoMutationField(CreateMediaSpecimenImageViaForm)
+    create_scalar_specimen = DjangoMutationField(CreateScalarSpecimen)
+    update_scalar_specimen = DjangoMutationField(UpdateScalarSpecimen)
+    create_scalar_specimen_via_form = DjangoMutationField(CreateScalarSpecimenViaForm)
+    update_scalar_specimen_via_form = DjangoMutationField(UpdateScalarSpecimenViaForm)
+    create_scalar_specimen_via_serializer = DjangoMutationField(CreateScalarSpecimenViaSerializer)
+    update_scalar_specimen_via_serializer = DjangoMutationField(UpdateScalarSpecimenViaSerializer)
 
 
 __all__ = ("Mutation", "Query")

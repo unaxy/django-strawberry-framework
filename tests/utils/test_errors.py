@@ -7,9 +7,19 @@ mapping read Python values no wire request can shape. Consumer envelopes
 primitives (``build_error_key_map``, ``rekey_error_segment``,
 ``model_field_error_names``) are pinned here directly; the per-flavor keying matrix
 is ``tests/utils/test_error_keys.py``.
+
+``unstorable_temporal`` is pinned live per flavor on SQLite and PostgreSQL in
+``examples/fakeshop/test_query/test_scalars_mutation_api.py``; the rows here hold the
+lines no live SQLite request reaches: a stand-in alias whose backend stores aware
+datetimes itself (the PostgreSQL rule), an ``ArrayField`` column (a PostgreSQL-only
+column, stood in for by ``tests/_postgres_fields.py::FakeArrayField``), MySQL's own
+operations, and, on the Postgres tier, the real connection and ``ArrayField``.
 """
 
 import ast
+import datetime
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,7 +27,11 @@ import pytest
 from apps.library import models as library_models
 from apps.products import models as product_models
 from django.core.exceptions import ValidationError
+from django.db import DEFAULT_DB_ALIAS, connections, models
+from django.db.backends.base.operations import BaseDatabaseOperations
+from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
 from django.db.models import Model
+from django.test import override_settings
 from django.utils.translation import gettext_lazy as _
 from typing_extensions import override
 
@@ -45,9 +59,11 @@ from django_strawberry_framework.utils.errors import (
     rekey_error_segment,
     relation_field_error,
     save_time_error_key_map,
+    unstorable_temporal,
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR, InputFieldSpec
+from tests._postgres_fields import FakeArrayField
 
 if TYPE_CHECKING:
     from django_strawberry_framework.utils.errors import ErrorKeyMap
@@ -634,3 +650,297 @@ def test_save_time_error_key_map_reads_the_pk_alias_as_the_primary_key(
     )
 
     assert save_time_error_key_map([spec], model) == expected
+
+
+_UTC = datetime.timezone.utc
+_IN_RANGE = datetime.datetime(2021, 6, 15, 9, 30, tzinfo=_UTC)
+_BEFORE_YEAR_ONE = datetime.datetime(
+    1,
+    1,
+    1,
+    tzinfo=datetime.timezone(datetime.timedelta(hours=1)),
+)
+_PAST_YEAR_9999 = datetime.datetime(
+    9999,
+    12,
+    31,
+    23,
+    tzinfo=datetime.timezone(datetime.timedelta(hours=-1)),
+)
+_AWARE_TIME = datetime.time(9, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+
+
+#: Unbound columns, typed as the ``object``-valued fields ``unstorable_temporal`` reads.
+_TEXT: models.Field[object, object] = models.TextField()
+_DATE: models.Field[object, object] = models.DateField()
+_STAMP: models.Field[object, object] = models.DateTimeField()
+_TIME: models.Field[object, object] = models.TimeField()
+_INTEGERS: models.Field[object, object] = FakeArrayField(models.IntegerField())
+_NESTED_STAMPS: models.Field[object, object] = FakeArrayField(
+    FakeArrayField(models.DateTimeField()),
+)
+_STAMPS: models.Field[object, object] = FakeArrayField(models.DateTimeField())
+_TIMES: models.Field[object, object] = FakeArrayField(models.TimeField())
+
+
+class _StoringOperations(BaseDatabaseOperations):
+    """Operations whose adapters pass aware datetimes and times through, as PostgreSQL's do."""
+
+    @override
+    def adapt_datetimefield_value(self, value: datetime.datetime | None) -> str | None:
+        return None if value is None else value.isoformat()
+
+    @override
+    def adapt_timefield_value(self, value: datetime.datetime | datetime.time | None) -> str | None:
+        return None if value is None else value.isoformat()
+
+
+@contextmanager
+def _stand_in_alias(
+    operations: type[BaseDatabaseOperations],
+    *,
+    supports_timezones: bool,
+) -> Generator[str, None, None]:
+    """Register a ``default``-shaped alias with ``operations`` and the time-zone feature given."""
+    alias = "temporal_write_stand_in"
+    wrapper = connections.create_connection(DEFAULT_DB_ALIAS)
+    wrapper.ops = operations(wrapper)
+    wrapper.features.supports_timezones = supports_timezones
+    connections[alias] = wrapper
+    try:
+        yield alias
+    finally:
+        del connections[alias]
+
+
+def _unresolvable_alias() -> str:
+    raise AssertionError("a non-temporal column must not resolve the alias")
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param(_TEXT, "text", id="text"),
+        pytest.param(_DATE, datetime.date(1, 1, 1), id="date"),
+        pytest.param(_INTEGERS, [1, 2], id="array-of-integers"),
+    ],
+)
+def test_unstorable_temporal_leaves_a_non_temporal_column_without_resolving_the_alias(
+    column: models.Field[object, object],
+    value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A column that stores no datetime or time answers ``False`` before ``using`` is called."""
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+
+    assert unstorable_temporal(column, value, _unresolvable_alias) is False
+
+
+@pytest.mark.parametrize(
+    (
+        "settings",
+        "column",
+        "value",
+        "refused",
+    ),
+    [
+        pytest.param({}, _STAMP, _BEFORE_YEAR_ONE, True, id="before-year-one"),
+        pytest.param({}, _STAMP, _PAST_YEAR_9999, True, id="past-year-9999"),
+        pytest.param({}, _STAMP, _IN_RANGE, False, id="in-range"),
+        pytest.param(
+            {},
+            _STAMP,
+            datetime.datetime(1, 1, 1),  # noqa: DTZ001 - the naive value under test
+            False,
+            id="naive",
+        ),
+        pytest.param({}, _TIME, _AWARE_TIME, False, id="aware-time"),
+        pytest.param(
+            {"USE_TZ": False, "TIME_ZONE": "Asia/Tokyo"},
+            _STAMP,
+            _BEFORE_YEAR_ONE,
+            False,
+            id="session-wall-clock-in-range",
+        ),
+        pytest.param(
+            {"USE_TZ": False, "TIME_ZONE": "Asia/Tokyo"},
+            _STAMP,
+            datetime.datetime(1, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=9.5))),
+            True,
+            id="session-wall-clock-before-year-one",
+        ),
+        pytest.param(
+            {},
+            _NESTED_STAMPS,
+            [[_IN_RANGE, None], [_BEFORE_YEAR_ONE]],
+            True,
+            id="array-element",
+        ),
+    ],
+)
+def test_unstorable_temporal_holds_a_stored_instant_to_its_session_wall_clock(
+    settings: dict[str, object],
+    column: models.Field[object, object],
+    value: object,
+    refused: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a backend storing aware datetimes, the session wall clock must stay in years 1..9999.
+
+    The stand-in's adapters pass every datetime and time through, as PostgreSQL's do, and
+    it stores the instant itself (``supports_timezones``): the driver then loads it back
+    on the session time zone (``UTC`` under ``USE_TZ``, else ``TIME_ZONE``, whose year-1
+    offset in ``Asia/Tokyo`` is its local mean time, +09:18:59), so only a wall clock
+    there leaving years 1..9999 is refused. A naive datetime and an aware time store.
+    Every element of an ``ArrayField`` is held to the rule, at any depth.
+    """
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    with (
+        override_settings(**settings),
+        _stand_in_alias(_StoringOperations, supports_timezones=True) as alias,
+    ):
+        assert unstorable_temporal(column, value, lambda: alias) is refused
+
+
+@pytest.mark.parametrize(
+    (
+        "operations",
+        "column",
+        "value",
+        "refused",
+    ),
+    [
+        pytest.param(
+            MySQLOperations,
+            _TIME,
+            _AWARE_TIME,
+            True,
+            id="mysql-aware-time",
+        ),
+        pytest.param(
+            MySQLOperations,
+            _STAMP,
+            _PAST_YEAR_9999,
+            True,
+            id="mysql-past-year-9999",
+        ),
+        pytest.param(
+            MySQLOperations,
+            _STAMP,
+            _IN_RANGE,
+            False,
+            id="mysql-in-range",
+        ),
+        pytest.param(
+            _StoringOperations,
+            _STAMP,
+            _BEFORE_YEAR_ONE,
+            False,
+            id="adapter-binding-without-time-zone-support",
+        ),
+    ],
+)
+def test_unstorable_temporal_asks_the_write_alias_own_operations(
+    operations: type[BaseDatabaseOperations],
+    column: models.Field[object, object],
+    value: object,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A backend that does not store aware instants is held to its own adapter alone.
+
+    MySQL's operations refuse an aware time and a datetime whose projection onto the
+    connection's time zone leaves years 1..9999; a backend whose adapter binds the value
+    and stores no aware instant (no session projection on load) stores it.
+    """
+    with _stand_in_alias(operations, supports_timezones=False) as alias:
+        assert unstorable_temporal(column, value, lambda: alias) is refused
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "refused"),
+    [
+        pytest.param(_NESTED_STAMPS, None, False, id="null"),
+        pytest.param(_NESTED_STAMPS, [[_IN_RANGE, None]], False, id="in-range"),
+        pytest.param(
+            _NESTED_STAMPS,
+            [[_IN_RANGE], [_PAST_YEAR_9999]],
+            True,
+            id="nested-element-past-year-9999",
+        ),
+        pytest.param(_STAMPS, [_BEFORE_YEAR_ONE], True, id="element-before-year-one"),
+        pytest.param(_TIMES, [datetime.time(9, 30), _AWARE_TIME], True, id="aware-time-element"),
+        pytest.param(_TIMES, [datetime.time(9, 30)], False, id="naive-time-elements"),
+    ],
+)
+def test_unstorable_temporal_holds_each_array_element_on_the_adapter(
+    column: models.Field[object, object],
+    value: object,
+    refused: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every element of an ``ArrayField`` of datetimes or times, at any depth, meets the adapter.
+
+    Held to MySQL's operations, which refuse an aware time and a datetime whose projection
+    leaves years 1..9999, so the rows answer the same on every test tier.
+    """
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    with _stand_in_alias(MySQLOperations, supports_timezones=False) as alias:
+        assert unstorable_temporal(column, value, lambda: alias) is refused
+
+
+def _real_array_of(base_field: models.Field[object, object]) -> models.Field[object, object]:
+    pytest.importorskip("django.contrib.postgres.fields")
+    from django.contrib.postgres.fields import ArrayField  # noqa: PLC0415 - after the skip guard
+
+    return ArrayField(base_field)
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize(
+    (
+        "settings",
+        "column",
+        "value",
+        "refused",
+    ),
+    [
+        pytest.param(
+            {},
+            models.DateTimeField,
+            _BEFORE_YEAR_ONE,
+            True,
+            id="utc-before-year-one",
+        ),
+        pytest.param({}, models.TimeField, _AWARE_TIME, False, id="aware-time"),
+        pytest.param(
+            {"USE_TZ": False, "TIME_ZONE": "Asia/Tokyo"},
+            models.DateTimeField,
+            _BEFORE_YEAR_ONE,
+            False,
+            id="tokyo-wall-clock-in-range",
+        ),
+        pytest.param(
+            {},
+            lambda: _real_array_of(models.DateTimeField()),
+            [_IN_RANGE, _PAST_YEAR_9999],
+            True,
+            id="array-element",
+        ),
+        pytest.param(
+            {},
+            lambda: _real_array_of(models.DateTimeField()),
+            [_IN_RANGE, None],
+            False,
+            id="array-in-range",
+        ),
+    ],
+)
+def test_unstorable_temporal_on_postgresql(
+    settings: dict[str, object],
+    column: Callable[[], models.Field[object, object]],
+    value: object,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """The real PostgreSQL connection stores the instant and is held to its session wall clock."""
+    with override_settings(**settings):
+        assert unstorable_temporal(column(), value, lambda: DEFAULT_DB_ALIAS) is refused

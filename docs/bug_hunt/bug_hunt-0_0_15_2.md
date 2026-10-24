@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 264 done, 167 to do.
+Progress: 265 done, 171 to do.
 
 ## Done
 
@@ -1256,6 +1256,15 @@ Progress: 264 done, 167 to do.
   `Meta.fields` / `filter_fields` / `Meta.exclude` is a `ConfigurationError`: a FilterSet's at class creation, an
   OrderSet's at the first `get_fields()` expansion (finalize); a `SimpleLazyObject` is judged as the object it stands
   for and `filter_fields` is reported as `Meta.fields`. No code
+- [x] 381. fixed: a write input datetime or time the target database cannot store (on SQLite / MySQL / Oracle the
+  values `unbindable_temporal` refuses; on PostgreSQL also an aware datetime whose wall clock in the connection's zone
+  leaves years 1..9999, stored but not loadable at the re-fetch; each element of an `ArrayField` of either) is the
+  field-keyed `FieldError` "Enter a value the database can represent." code `invalid` in the payload, nothing
+  written, in the model, ModelForm and serializer flavors, checked on the value each flavor will store after its own
+  validation (`utils/errors.py::unstorable_temporal`, `utils/write_values.py::unstorable_temporal_error`) against the
+  pinned write alias; the serializer cells where DRF itself raises a raw `OverflowError` stay masked (540). A new
+  fakeshop scalars write surface and its live rows pin it, with package rows for PostgreSQL and the MySQL / Oracle
+  adapters; the README, spec-036, 038, 039 and the `fielderror-envelope` glossary term say so
 
 ## Outside review of the fixes
 
@@ -1362,9 +1371,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   input while `ChoiceField.clean` refuses a list, so every create and update through it fails; the mirror of 305 (a
   list-writing field over a single-value column); say whether the form flavor types it by the form field (a scalar) or
   refuses at build. Found verifying 305
-- [ ] 381. The write path does not hold a temporal input to the database: a mutation / serializer / form input datetime
-  or time the target connection cannot bind (the populations `utils/errors.py::unbindable_temporal` refuses on reads)
-  raises at save as the masked uncoded error; probe each write family and reuse the read helper if it reproduces
 - [ ] 382. PostgreSQL refuses a datetime or time whose UTC offset is +-16:00..+-23:59 (`time zone displacement out of
   range`), which Python and the Strawberry `DateTime` / `Time` scalars accept: a filter bound or write value with such
   an offset raises the masked uncoded error on PostgreSQL only
@@ -1456,12 +1462,32 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `sets_mixins.py::require_re_readable_field_declaration` (its real class is not `str`) and excludes by substring:
   `lazy("title")` drops `title`, `lazy("titl")` excludes nothing with no error, against the spec-027 row that a
   string `Meta.exclude` is refused. Found fact-finding 403
+- [ ] 540. (robustness) A `SerializerMutation` temporal input DRF's `DateTimeField.enforce_timezone` cannot place
+  escapes `is_valid()` as a raw `OverflowError`, the masked uncoded error: a naive datetime near year 1 or 9999 under
+  a non-UTC `TIME_ZONE` (`valid_datetime`) and an aware out-of-range one under `USE_TZ=False` (`make_naive`), where
+  DRF answers its own `overflow` for the other cells; upstream behaviour, decide whether the flavor maps it. Found
+  fixing 381
+- [ ] 543. (robustness) `utils/errors.py` and `types/converters.py::array_element_field` each soft-import
+  `django.contrib.postgres`'s `ArrayField` and unwrap `base_field` their own way; one owner would keep the two
+  in step. Found fixing 381
+- [ ] 545. (robustness) `scripts/prove_failability.py::_pattern_matches`: an `expect_failing` glob over a parametrized
+  id (`test_x[*]`) never matches, since `fnmatch` reads `[*]` as a character class; only an exact id or a `[[]`
+  escape works, and the module docstring offers "node id or glob" without saying so. Found implementing 424
+- [ ] 547. A `DjangoModelFormMutation` or `SerializerMutation` field that cleans to a `date` over a `DateTimeField`
+  column (a `forms.DateField` / DRF `DateField` declared on it) hands the model a date, which Django makes an aware
+  midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
+  `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
+  whether the check covers it. Found verifying 381
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 546. CHANGELOG entry for item 381: a write input datetime or time the database cannot store (out of the
+  backend's range, an aware time on SQLite, an aware stamp PostgreSQL stores but cannot read back) is now the
+  field-keyed `FieldError` "Enter a value the database can represent." code `invalid` in every write flavor, nothing
+  written, instead of the masked top-level error; DRF's own `overflow` answers are unchanged
 - [ ] 504. CHANGELOG entry for item 319 (breaking): a `RelatedFilter`'s flat copy of a child leaf is applied, and is
   on the parent's form, only when the request names it. A child leaf whose absence acts (`required`, a checkbox,
   `empty_value`, `null_value`, a disabled `initial`, a project `filter` that does not skip the empty value) no longer

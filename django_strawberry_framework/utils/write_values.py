@@ -5,6 +5,8 @@ runs at decode time (promoted from ``mutations/resolvers.py`` so the model
 mutation resolver is not the utility module for the other write flavors):
 
 - ``unstorable_text_error`` - the text storability preflight (lone surrogate, NUL);
+- ``unstorable_temporal_error`` - the temporal storability preflight (a datetime or
+  time the write alias cannot store, or cannot read back);
 - ``raw_choice_value`` - choice-enum member unwrapping;
 - ``coerce_relation_pk_or_none`` - raw relation-pk coercion;
 - ``relation_takes_global_id`` - whether a relation's id is a Relay GlobalID;
@@ -39,9 +41,12 @@ from ._narrowing import (
     list_of,
 )
 from .errors import (
+    FIELD_ERROR_CODE_INVALID,
+    UNBINDABLE_TEMPORAL_MESSAGE,
     field_error,
     join_error_path,
     relation_field_error,
+    unstorable_temporal,
     unstorable_text,
 )
 from .inputs import FILE, RELATION_MULTI, RELATION_SINGLE, iter_provided_input_fields
@@ -106,6 +111,32 @@ def unstorable_text_error(field_name: str, value: object) -> FieldError | None:
     if refusal is None:
         return None
     return field_error(refusal.path, refusal.message, codes=refusal.code)
+
+
+def unstorable_temporal_error(
+    field_name: str,
+    column: object,
+    value: object,
+    using: Callable[[], str],
+) -> FieldError | None:
+    """Reject a datetime or time the write alias ``using()`` names cannot store in ``column``.
+
+    The write decode's envelope for the shared rule
+    (``utils/errors.py::unstorable_temporal``): a value the backend's adapter cannot bind
+    (an aware datetime whose projection onto the connection's time zone leaves years
+    1..9999, an aware time, any aware datetime under ``USE_TZ = False``) would raise its
+    ``OverflowError`` / ``ValueError`` at ``save()``, and an aware datetime PostgreSQL
+    stores but cannot load back would raise at the post-write re-fetch; neither is an
+    error the save mappers own, so it would escape as a masked top-level error. It is the
+    ``invalid`` ``FieldError`` keyed to ``field_name`` instead, carrying the message a
+    filter answers for the same value (``UNBINDABLE_TEMPORAL_MESSAGE``), before any
+    database-bound work. ``value`` is what the write stores (the model flavor's value
+    after the naive-datetime coercion), and a non-temporal column answers ``None``
+    without resolving the alias.
+    """
+    if not unstorable_temporal(column, value, using):
+        return None
+    return field_error(field_name, UNBINDABLE_TEMPORAL_MESSAGE, codes=FIELD_ERROR_CODE_INVALID)
 
 
 def raw_choice_value(value: object) -> object:
@@ -278,7 +309,10 @@ def decode_scalar_leaf(graphql_name: str, value: object) -> tuple[object, FieldE
     miss an unstorable choice value. This owns the compose so a fourth flavor cannot
     mis-order it. Returns ``(decoded, None)`` on success or ``(None, FieldError)``.
     Flavor-specific scalar steps (the model path's explicit-null rejection and
-    naive-datetime coercion) stay at the call site, composed around this leaf.
+    naive-datetime coercion) stay at the call site, composed around this leaf, and so
+    does the temporal storability check (``unstorable_temporal_error``): it reads the
+    value each flavor stores, which on the form and serializer flavors exists only once
+    their own validation has cleaned it.
     """
     decoded = raw_choice_value(value)
     error = unstorable_text_error(graphql_name, decoded)

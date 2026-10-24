@@ -144,7 +144,9 @@ class ScalarSpecimen(models.Model):
 
     Field names match the scalar they target (``flag`` -> ``BooleanField``,
     ``score`` -> ``FloatField``, ...) so the GraphQL response key reads as the
-    target scalar in test assertions.
+    target scalar in test assertions. Its required ``occurred_at`` / ``occurred_time``
+    columns are also the temporal write surface ``apps/scalars/schema.py`` exposes
+    through every write flavor.
     """
 
     # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.

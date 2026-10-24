@@ -759,6 +759,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_resource_policy_api.py   # Live ``/graphql/`` execution-resource-policy acceptance tests.
 ├── test_scalars_api.py           # Live GraphQL HTTP tests for scalar wire formats, filtering, relations, and optimizer behavior.
 ├── test_scalars_filter_api.py    # Live GraphQL HTTP tests for scalar filtering, ordering, and related-queryset behavior.
+├── test_scalars_mutation_api.py  # Live GraphQL HTTP tests for temporal writes the database cannot store.
 ├── test_schema_composition_api.py  # Live ``/graphql/`` proof that fakeshop's composed project schema publishes every app's surface.
 ├── test_single_parent_fastpath_api.py  # Live GraphQL HTTP tests for the single-parent windowed-prefetch fast path.
 ├── test_transport_api.py         # Live ``/graphql/`` transport-boundary acceptance tests.
@@ -983,6 +984,7 @@ Source: `examples/fakeshop/`
 
 ```text
 examples/fakeshop/    # A Django project that exercises the shipped surface of django-strawberry-framework end to end, and the tutorial that walks through it.
+├── drf_serializers.py            # Shared DRF ``ModelSerializer`` base for the fakeshop apps' serializer-mutation surfaces.
 ├── graphql_client.py             # Shared live-``/graphql/`` HTTP helpers for the fakeshop acceptance suites.
 ├── manage.py                     # Django command-line entry point for the fakeshop example project.
 ├── schema_reload.py              # Shared complete-reload helper for fakeshop tests that rebuild ``config.schema``.
@@ -1057,7 +1059,8 @@ examples/fakeshop/    # A Django project that exercises the shipped surface of d
         ├── forms.py              # Consumer Django forms for the scalars app's live form-mutation surface.
         ├── models.py             # Models for scalar conversion, optimizer visibility, consumer overrides, and file/image uploads.
         ├── orders.py             # OrderSet declarations for the scalars acceptance app.
-        └── schema.py             # GraphQL schema for scalar conversion, overrides, optimizer visibility, and file/image uploads.
+        ├── schema.py             # GraphQL schema for scalar conversion, overrides, optimizer visibility, and file/image uploads.
+        └── serializers.py        # DRF serializers for the scalars app's live serializer-mutation surface.
 ```
 
 ### App roles

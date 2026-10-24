@@ -1,7 +1,8 @@
 """DRF serializers for library mutation hooks, input shapes, visibility, locking, and nested writes.
 
-Plain DRF ``ModelSerializer``s declared the standard DRF way (over ``ModelSerializerBase``,
-which only types the ``Meta`` the DRF stubs declare);
+Plain DRF ``ModelSerializer``s declared the standard DRF way, over the shared
+``examples/fakeshop/drf_serializers.py::ModelSerializerBase`` (which only types the
+``Meta`` the DRF stubs declare);
 ``apps/library/schema.py`` wraps them in the shipped ``SerializerMutation`` base so the
 live ``/graphql/`` tests in ``test_query/test_library_api.py`` exercise two
 consumer-visible behaviors end to end:
@@ -42,10 +43,11 @@ model's ``unique_shelf_code_per_branch`` constraint surfaces through DRF's
 """
 
 import json
-from typing import Any, ClassVar, NoReturn, TypeAlias, TypeVar
+from typing import Any, NoReturn, TypeAlias
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Model
+from drf_serializers import ModelSerializerBase
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from typing_extensions import NotRequired, TypedDict, override
@@ -78,22 +80,6 @@ from .models import (
 #: no single binding fits across a heterogeneous map.
 # basedpyright: drf-stubs' Field TypeVars are invariant; no other argument takes every field
 FieldMap: TypeAlias = dict[str, serializers.Field[Any, Any, Any, Any]]  # pyright: ignore[reportExplicitAny]
-
-_ModelT = TypeVar("_ModelT", bound=Model)
-
-
-class ModelSerializerBase(serializers.ModelSerializer[_ModelT]):
-    """``ModelSerializer`` carrying the ``Meta`` the stubs declare and the runtime class lacks.
-
-    ``djangorestframework-stubs`` types ``ModelSerializer.Meta``, but DRF's class has no such
-    attribute to subclass, so every serializer here that declares ``class Meta:`` derives from
-    this base and the one override of the stub's attribute is declared once. The annotation
-    creates no class attribute, so DRF's metaclass and ``__class_getitem__`` see the same class
-    body and the same ``ModelSerializer`` they see without it.
-    """
-
-    # basedpyright: the DRF stubs declare ModelSerializer.Meta; the runtime class has none
-    Meta: ClassVar[type[object]]  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class TenantShelfSerializer(ModelSerializerBase[Shelf]):
