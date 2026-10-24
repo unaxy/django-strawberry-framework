@@ -25,6 +25,7 @@ import re
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -675,7 +676,8 @@ def test_a_prove_failability_directory_that_is_a_symlink_is_never_followed(
     with workspace.lease(layout, _address("perf-1")) as held:
         pass
     foreign = tmp_path / "foreign"
-    state_home.mkdir()
+    # The workspace's own state already made the state home.
+    state_home.mkdir(exist_ok=True)
     (state_home / prove_failability.STATE_DIRECTORY_NAME).symlink_to(foreign)
     behind = foreign / prove_failability.tree_namespace(held.directory.resolve())
     _write(behind / prove_failability.ACTIVE_MARKER_NAME, "{}\n")
@@ -1468,7 +1470,7 @@ def test_gc_reads_a_file_the_purge_removes_after_its_check_as_already_gone(
         victim = _write(binding.directory / "file.txt", "x\n")
         _run_once_after_checking(monkeypatch, Path, "is_file", victim, victim.unlink)
     elif window == "remove":
-        victim = layout.state_path
+        victim = _write(layout.legacy_state_path, "{}\n")
         _run_once_after_checking(monkeypatch, Path, "is_dir", victim, victim.unlink)
     else:
         victim = layout.flow_dir / workspace.MARKER_NAME
@@ -1482,7 +1484,7 @@ def test_gc_reads_a_file_the_purge_removes_after_its_check_as_already_gone(
     assert not layout.flow_dir.exists()
 
 
-def test_a_purge_that_spares_state_json_keeps_the_flow_releasable_and_listed(
+def test_a_purge_of_every_file_keeps_the_flow_releasable_and_listed(
     layout: workspace.Layout,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1490,10 +1492,158 @@ def test_a_purge_that_spares_state_json_keeps_the_flow_releasable_and_listed(
     binding = workspace.bind(layout, _address("perf-1"))
     _write(binding.directory / "file.txt", "x\n")
 
-    _purge(layout.flow_dir, keep=("state.json",))
+    _purge(layout.flow_dir)
 
     assert "review: 1 of 4 copies" in workspace.status(layout.repo_root, None)
     assert workspace.release(layout, "pkg/a.py") == ["slot-1 review/pkg/a.py/perf-1"]
+
+
+def test_state_is_written_under_the_state_home_never_under_the_temporary_base(
+    layout: workspace.Layout,
+    state_home: Path,
+) -> None:
+    workspace.bind(layout, _address("perf-1"))
+
+    assert layout.state_path.is_file()
+    assert layout.state_path.is_relative_to(state_home.resolve())
+    folders = (layout.state_dir, layout.state_dir.parent, layout.state_dir.parent.parent)
+    assert [stat.S_IMODE(folder.stat().st_mode) for folder in folders] == [0o700] * 3
+    assert [path.name for path in layout.base.rglob("*") if path.is_file()] == []
+
+
+def test_bindings_survive_a_purge_of_every_file_and_keep_their_slots(
+    layout: workspace.Layout,
+    syncs: list[Path],
+) -> None:
+    with workspace.lease(layout, _address("perf-1")) as first:
+        edit = _write(first.directory / "edit.txt", "kept\n")
+    with workspace.lease(layout, _address("mech-1")) as second:
+        pass
+    del syncs[:]
+
+    _purge(layout.base, keep=(str(edit.relative_to(layout.base)),))
+    with workspace.lease(layout, _address("mech-1")) as again:
+        pass
+
+    assert (first.slot, second.slot, again.slot) == ("slot-1", "slot-2", "slot-2")
+    assert syncs == [second.directory]
+    assert edit.read_text(encoding="utf-8") == "kept\n"
+    assert _bound_to(layout) == {
+        "slot-1": "review/pkg/a.py/perf-1",
+        "slot-2": "review/pkg/a.py/mech-1",
+    }
+
+
+def test_a_binding_whose_copy_a_reboot_removed_resyncs_into_the_same_slot(
+    layout: workspace.Layout,
+    syncs: list[Path],
+) -> None:
+    with workspace.lease(layout, _address("perf-1")):
+        pass
+    with workspace.lease(layout, _address("mech-1")) as second:
+        pass
+    del syncs[:]
+
+    shutil.rmtree(layout.base)
+    with workspace.lease(layout, _address("mech-1")) as again:
+        synced = (again.directory / workspace.PACKAGE_DIR / "__init__.py").is_file()
+
+    assert again.slot == second.slot == "slot-2"
+    assert syncs == [second.directory]
+    assert synced
+    assert _statuses(layout) == {"slot-1": "ready", "slot-2": "ready"}
+
+
+def test_release_and_gc_reach_the_state_of_a_flow_a_reboot_removed(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(workspace.ROOT_ENV, str(layout.base.parent))
+    workspace.bind(layout, _address("perf-1"))
+    workspace.bind(layout, _address("mech-1", item="pkg/b.py"))
+    shutil.rmtree(layout.base)
+
+    assert "review: 2 of 4 copies" in workspace.status(layout.repo_root, None)
+    assert workspace.release(layout, "pkg/a.py") == ["slot-1 review/pkg/a.py/perf-1"]
+    assert _bound_to(layout) == {"slot-1": None, "slot-2": "review/pkg/b.py/mech-1"}
+    shutil.rmtree(layout.base)
+    _ = workspace.gc(layout)
+
+    assert not layout.state_dir.exists()
+    assert not layout.flow_dir.exists()
+    assert workspace.status(layout.repo_root, None)[1:] == ["postgres: no fakeshop container runs"]
+
+
+def test_gc_removes_an_empty_state_folder_a_crash_left_for_a_flow_with_no_folder(
+    layout: workspace.Layout,
+) -> None:
+    layout.state_dir.mkdir(parents=True)
+
+    _ = workspace.gc(layout)
+
+    assert not layout.state_dir.exists()
+    assert not layout.flow_dir.exists()
+
+
+def test_a_state_moved_between_the_two_reads_is_read_from_the_state_home(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace.bind(layout, _address("perf-1"))
+    moved = layout.state_path.read_text(encoding="utf-8")
+    layout.state_path.unlink()
+    legacy = _write(layout.legacy_state_path, moved)
+
+    def _move() -> None:
+        _write(layout.state_path, moved)
+        legacy.unlink()
+
+    _run_once_before_reading(monkeypatch, legacy, _move)
+
+    assert _bound_to(layout) == {"slot-1": "review/pkg/a.py/perf-1"}
+
+
+def test_gc_and_release_of_a_bound_flow_remove_or_rewrite_its_state(
+    layout: workspace.Layout,
+) -> None:
+    workspace.bind(layout, _address("perf-1"))
+    assert workspace.release(layout, "pkg/a.py") == ["slot-1 review/pkg/a.py/perf-1"]
+    assert workspace._load_state(layout)["slots"] == {"slot-1": None}
+    assert layout.state_path.is_relative_to(workspace.state_root(layout.base))
+
+    _ = workspace.gc(layout)
+
+    assert not layout.state_dir.exists()
+    assert not layout.state_dir.parent.exists()
+
+
+def test_a_state_file_an_older_version_left_moves_to_the_state_home_with_its_slots(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(workspace.ROOT_ENV, str(layout.base.parent))
+    layout.ensure_marked()
+    bound = {"address": "review/pkg/a.py/perf-1", "item": "pkg/a.py", "role": "perf-1"}
+    legacy = {
+        "version": 1,
+        "repo_root": str(layout.repo_root),
+        "slots": {"slot-1": None, "slot-2": {**bound, "bound_at": "t", "status": "syncing"}},
+        "items": {"pkg/a.py": {"item_baseline": "abc", "at": "t"}},
+    }
+    _write(layout.legacy_state_path, json.dumps(legacy))
+
+    assert "  slot-2  review/pkg/a.py/perf-1 (syncing)" in workspace.status(layout.repo_root, None)
+    assert workspace.bind(layout, _address("perf-1")).slot == "slot-2"
+    assert not layout.legacy_state_path.exists()
+    assert workspace.bind(layout, _address("mech-1")).slot == "slot-1"
+
+    assert not layout.legacy_state_path.exists()
+    moved = workspace._load_state(layout)
+    assert moved["items"] == legacy["items"]
+    assert _bound_to(layout) == {
+        "slot-1": "review/pkg/a.py/mech-1",
+        "slot-2": "review/pkg/a.py/perf-1",
+    }
 
 
 @pytest.mark.parametrize("run_first", [True, False])
@@ -1552,7 +1702,7 @@ def test_gc_cut_short_inside_the_flow_folder_keeps_the_marker_so_the_next_gc_fin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace.bind(layout, _address("perf-1"))
-    victim = layout.state_path
+    victim = _write(layout.legacy_state_path, "{}\n")
     real_unlink = Path.unlink
 
     def _fails_once(path: Path, *, missing_ok: bool = False) -> None:
@@ -1980,7 +2130,7 @@ def test_a_held_lock_outlives_the_tmpdir_purge_and_admits_no_second_holder(
 ) -> None:
     lock = _lock_of(layout, family)
     with workspace.flow_lease(layout), workspace.file_lock(lock):
-        _purge(layout.flow_dir, keep=("state.json",))
+        _purge(layout.flow_dir)
         assert lock.is_dir()
         with pytest.raises(workspace.LockBusyError), workspace.file_lock(lock, blocking=False):
             pass
@@ -1993,7 +2143,7 @@ def test_a_held_lock_outlives_the_tmpdir_purge_and_admits_no_second_holder(
 def test_release_refuses_a_copy_held_across_the_tmpdir_purge(layout: workspace.Layout) -> None:
     binding = workspace.bind(layout, _address("perf-1"))
     with workspace.flow_lease(layout), workspace.file_lock(layout.slot_lock(binding.slot)):
-        _purge(layout.flow_dir, keep=("state.json",))
+        _purge(layout.flow_dir)
         with pytest.raises(workspace.LockBusyError, match="a command still runs in slot-1"):
             _ = workspace.release(layout, "pkg/a.py")
         assert workspace.running_slots(layout, [binding.slot]) == [binding.slot]
@@ -2024,7 +2174,7 @@ def test_binds_racing_across_the_tmpdir_purge_keep_both_bindings(
     first = threading.Thread(target=_bind, args=("perf-1",), name="first")
     first.start()
     assert inside.wait(10)
-    _purge(layout.flow_dir, keep=("state.json",))
+    _purge(layout.flow_dir)
     second = threading.Thread(target=_bind, args=("mech-1",), name="second")
     second.start()
     second.join(timeout=0.3)

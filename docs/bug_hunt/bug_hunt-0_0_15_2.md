@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 261 done, 168 to do.
+Progress: 262 done, 168 to do.
 
 ## Done
 
@@ -1234,6 +1234,16 @@ Progress: 261 done, 168 to do.
   empty. A `.dsf-ws` that is itself a symlink is unlinked, never emptied through. The marker still goes last (a new
   row pins it: a `gc` cut short inside the flow folder keeps the marker and the next one finishes), and the parametrized
   litter row covers a file, a folder, a symlink inside and a symlinked marker, outside targets intact
+- [x] 345. fixed: `scripts/workspace.py` keeps a flow's bindings in the XDG state home
+  (`<state home>/dsf-ws/<sha16 of the workspace base>/<flow>/state.json`, through the prover's `state_home`, folders
+  at `0o700`), never in the system temporary directory, so neither the macOS `$TMPDIR` purge (birth time and atime
+  both over 3 days; a read does not renew atime on APFS, so a flow used only through `run` aged out) nor a Linux
+  `/tmp` that a reboot empties (tmpfs) or systemd-tmpfiles cleans loses them: the next command no longer renumbers
+  slots, resyncs other slots over their edits or runs a duplicate of a held address. `gc` and `release` remove or
+  rewrite the state, also for a flow whose temporary folder is gone, and `status` lists flows from both; a state file
+  an older version left in the flow folder moves to the state home under `pool.lock`. The module docstring and
+  START.md say what survives where on macOS and Linux. Rows pin the location and mode, a purge of every file, a
+  removed base, the lifecycle, the migration and its read race
 
 ## Outside review of the fixes
 
@@ -1274,11 +1284,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 345. `workspace.py`'s `state.json` is a regular file the macOS `$TMPDIR` purge removes once its birth and access
-  times pass 3 days (`_write_json` replaces it, so each write renews it): a command holding its copy past 3 days with
-  no state write in between loses every binding of the flow while the copy's lock (a directory since 301) survives.
-  Robustness row, not a defect under rule 37 (the module docstring documents the purge for idle stretches and asks for
-  `gc` after one); found implementing 301
 - [ ] 346. Git calls outside `scripts/workspace.py` still read the caller's global and system config and the XDG ignore
   and attributes files, unlike `workspace.py::_git`'s `REPOSITORY_CONFIG_ONLY`:
   `check_trailing_commas.py::git_visible_scope`, `review_plan.py::_untracked_python` and `::_worktree_blobs`, the
@@ -1437,6 +1442,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `required` sibling answers `FILTER_INVALID` `{"probe": ...}`), so two branches sharing a leaf name report the same
   key and the wire cannot tell which branch failed; a flat copy's error is keyed `books__probe`. Decide whether a
   nested error carries its branch path. Found fixing 319
+- [ ] 505. (robustness) `scripts/workspace.py`: a copy's manifest is written when the copy syncs and ages with it in
+  the temporary directory, so a copy only `run` for 3+ days (no sync) loses its manifest to the macOS purge, or to a
+  Linux reboot with its files, and the next run resyncs it, dropping its uncommitted edits, against the `run`
+  docstring's "later runs reuse that copy as it stands, edits included". Found verifying 345
 
 ## To do: holes found re-checking the fixes
 
