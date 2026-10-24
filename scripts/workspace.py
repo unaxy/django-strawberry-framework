@@ -2915,20 +2915,28 @@ def running_slots(layout: Layout, slots: Iterable[str]) -> list[str]:
     return busy
 
 
-def _remove_flow_dir(flow_dir: Path) -> None:
-    """Remove the flow folder, its marker last, so a removal that fails can be run again.
-
-    The marker is a directory, or a file nothing has upgraded yet.
-    """
-    for entry in flow_dir.iterdir():
-        if entry.name == MARKER_NAME:
+def _empty_folder(folder: Path, keep: str | None = None) -> None:
+    """Remove every entry of ``folder`` but ``keep``; a symlink is unlinked, never followed."""
+    for entry in folder.iterdir():
+        if entry.name == keep:
             continue
         if entry.is_dir() and not entry.is_symlink():
             shutil.rmtree(entry)
         else:
             entry.unlink(missing_ok=True)
+
+
+def _remove_flow_dir(flow_dir: Path) -> None:
+    """Remove the flow folder, its marker last, so a removal that fails can be run again.
+
+    The marker is a directory, or a file nothing has upgraded yet. Its existence
+    proves ownership, so whatever another program left inside it (a Finder
+    ``.DS_Store``) is cleared with it.
+    """
+    _empty_folder(flow_dir, keep=MARKER_NAME)
     marker = flow_dir / MARKER_NAME
-    if marker.is_dir():
+    if marker.is_dir() and not marker.is_symlink():
+        _empty_folder(marker)
         marker.rmdir()
     else:
         marker.unlink(missing_ok=True)

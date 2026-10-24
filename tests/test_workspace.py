@@ -1513,6 +1513,63 @@ def test_a_marker_file_becomes_the_directory_and_gc_removes_either(
     assert not layout.flow_dir.exists()
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "file",
+        "folder",
+        "symlink",
+        "marker symlink",
+    ],
+)
+def test_gc_clears_what_another_program_left_inside_the_marker(
+    layout: workspace.Layout,
+    tmp_path: Path,
+    content: str,
+) -> None:
+    workspace.bind(layout, _address("perf-1"))
+    marker = layout.flow_dir / workspace.MARKER_NAME
+    outside = _write(tmp_path / "outside" / "kept.txt", "x\n")
+    if content == "file":
+        _write(marker / ".DS_Store", "x\n")
+    elif content == "folder":
+        _write(marker / "nested" / "file.txt", "x\n")
+    elif content == "symlink":
+        (marker / "link").symlink_to(outside.parent, target_is_directory=True)
+    else:
+        marker.rmdir()
+        marker.symlink_to(outside.parent, target_is_directory=True)
+
+    report = workspace.gc(layout)
+
+    assert not layout.flow_dir.exists()
+    assert report[0].startswith(f"removed {layout.flow_dir}")
+    assert outside.read_text(encoding="utf-8") == "x\n"
+
+
+def test_gc_cut_short_inside_the_flow_folder_keeps_the_marker_so_the_next_gc_finishes(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace.bind(layout, _address("perf-1"))
+    victim = layout.state_path
+    real_unlink = Path.unlink
+
+    def _fails_once(path: Path, *, missing_ok: bool = False) -> None:
+        if path == victim:
+            monkeypatch.setattr(Path, "unlink", real_unlink)
+            raise OSError(1, "Operation not permitted", str(path))
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", _fails_once)
+
+    with pytest.raises(OSError, match="not permitted"):
+        workspace.gc(layout)
+    assert (layout.flow_dir / workspace.MARKER_NAME).is_dir()
+    workspace.gc(layout)
+    assert not layout.flow_dir.exists()
+
+
 def test_a_marker_file_is_upgraded_under_the_pool_lock(layout: workspace.Layout) -> None:
     marker = _write(layout.flow_dir / workspace.MARKER_NAME, "{}")
     upgrade = threading.Thread(target=layout.ensure_marked)
