@@ -1742,6 +1742,148 @@ def test_library_loan_get_queryset_project_fetch_mode_is_refused(
     assert _sql_from_table(captured, "library_loan") == []
 
 
+def _loan_nodes_document(positions: tuple[int, ...]) -> str:
+    """Return a ``nodes(ids:)`` document over the seeded loans at ``positions``, in order.
+
+    The loans are read in ``pk`` order, one per ``_LOAN_FETCH_MODE_PATRONS`` name, and
+    their GlobalIDs minted against the current project schema (``LoanType`` is a Relay
+    Node only under ``FAKESHOP_TEST_LOAN_CONNECTION``).
+    """
+    pks = [pk_of(loan) for loan in models.Loan.objects.order_by("pk")]
+    ids = ", ".join(
+        f'"{global_id_for(library_schema.LoanType, pks[position])}"' for position in positions
+    )
+    return f"query {{ nodes(ids: [{ids}]) {{ ... on LoanType {{ note patron {{ name }} }} }} }}"
+
+
+#: Every seeded loan's position in ``pk`` order, as ``_loan_nodes_document`` reads them.
+_EVERY_LOAN_POSITION = tuple(range(len(_LOAN_FETCH_MODE_PATRONS)))
+
+#: The ``nodes(ids:)`` refetches of the seeded loans, as (loan positions requested, the
+#: patron statements under ``FETCH_ONE``): every loan once, and the first loan twice.
+#: Each requested position resolves to its own row, so ``FETCH_ONE`` loads one patron per
+#: position; ``FETCH_PEERS`` loads every position's patron in one statement.
+_LOAN_NODES_FETCH_MODE_CASES = [
+    pytest.param(_EVERY_LOAN_POSITION, 3, id="each-loan"),
+    pytest.param((*_EVERY_LOAN_POSITION, 0), 4, id="duplicate-id"),
+]
+
+
+@_REQUIRES_FETCH_MODES
+@pytest.mark.django_db
+@pytest.mark.parametrize(("positions", "fetch_one_statements"), _LOAN_NODES_FETCH_MODE_CASES)
+@pytest.mark.parametrize("fetch_mode", [None, "FETCH_PEERS"], ids=["fetch-one", "fetch-peers"])
+def test_library_loan_nodes_refetch_keeps_the_get_queryset_fetch_mode(
+    project_schema_override: Callable[[], None],
+    positions: tuple[int, ...],
+    fetch_one_statements: int,
+    fetch_mode: str | None,
+) -> None:
+    """``nodes(ids:)`` serves the hook's ``FETCH_PEERS`` rows as peers of each other.
+
+    The field stamps a copy of each row ``resolve_nodes`` returns; the copies of one
+    loan statement's rows share one peers list, so the first position's lazy
+    ``patron`` load fetches every position's patron in one statement, a repeated id
+    included. Without the hook (Django's default ``FETCH_ONE``, the control) each
+    position loads its own patron.
+    """
+    _seed_loan_patron_graph()
+    with override_settings(
+        FAKESHOP_TEST_LOAN_CONNECTION=True,
+        FAKESHOP_TEST_LOAN_FETCH_MODE=fetch_mode,
+    ):
+        project_schema_override()
+        document = _loan_nodes_document(positions)
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql(document)
+    assert response.status_code == 200
+    assert response_json(response) == {
+        "data": {"nodes": [_LOAN_FETCH_MODE_LOANS[position] for position in positions]},
+    }
+    patron_sql = _sql_from_table(captured, "library_patron")
+    patron_statements = 1 if fetch_mode == "FETCH_PEERS" else fetch_one_statements
+    assert len(patron_sql) == patron_statements, patron_sql
+    assert len(captured) == 1 + patron_statements, captured.captured_queries
+
+
+@_REQUIRES_FETCH_MODES
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("positions", "fetch_one_statements"), _LOAN_NODES_FETCH_MODE_CASES)
+@pytest.mark.parametrize("fetch_mode", [None, "FETCH_PEERS"], ids=["fetch-one", "fetch-peers"])
+async def test_async_library_loan_nodes_refetch_keeps_the_get_queryset_fetch_mode(
+    project_schema_override: Callable[[], None],
+    record_compiled_sql: RecordCompiledSql,
+    positions: tuple[int, ...],
+    fetch_one_statements: int,
+    fetch_mode: str | None,
+) -> None:
+    """The async executor's ``nodes(ids:)`` serves the hook's rows as peers too.
+
+    Over ``/graphql-async/`` the gathering coroutine stamps each ``resolve_nodes``
+    group as the sync field does, so ``FETCH_PEERS`` loads every position's patron in
+    one statement and ``FETCH_ONE`` one per position.
+    """
+    await sync_to_async(_seed_loan_patron_graph)()
+    with override_settings(
+        FAKESHOP_TEST_LOAN_CONNECTION=True,
+        FAKESHOP_TEST_LOAN_FETCH_MODE=fetch_mode,
+    ):
+        project_schema_override()
+        document = await sync_to_async(_loan_nodes_document)(positions)
+        patron_sql = record_compiled_sql('FROM "library_patron"')
+        payload = await _post_async_shipped(document)
+    assert payload == {
+        "data": {"nodes": [_LOAN_FETCH_MODE_LOANS[position] for position in positions]},
+    }
+    patron_statements = 1 if fetch_mode == "FETCH_PEERS" else fetch_one_statements
+    assert len(patron_sql) == patron_statements, patron_sql
+
+
+@_REQUIRES_FETCH_MODES
+@pytest.mark.django_db
+def test_library_loan_nodes_refetch_fetch_raise_blocks_every_position(
+    project_schema_override: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A hook's ``FETCH_RAISE`` refuses each refetched row's lazy relation load.
+
+    The stamped copies keep the rows' fetch mode, so every position's unplanned
+    ``patron`` read raises Django's ``FieldFetchBlocked``: the client gets one masked
+    error per position, the server log carries each original exception, and no
+    patron statement runs.
+    """
+    _seed_loan_patron_graph()
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    with override_settings(
+        FAKESHOP_TEST_LOAN_CONNECTION=True,
+        FAKESHOP_TEST_LOAN_FETCH_MODE="FETCH_RAISE",
+    ):
+        project_schema_override()
+        document = _loan_nodes_document(_EVERY_LOAN_POSITION)
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql(document)
+    assert response.status_code == 200
+    payload = response_json(response)
+    errors = [json_object(error) for error in json_list(payload, "errors")]
+    assert [error["message"] for error in errors] == ["An unexpected error occurred."] * 3
+    assert sorted(json.dumps(error["path"]) for error in errors) == [
+        json.dumps(["nodes", position, "patron"]) for position in _EVERY_LOAN_POSITION
+    ]
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert len(records) == 3, caplog.records
+    for record in records:
+        exc_info = record.exc_info
+        assert exc_info is not None
+        assert type(exc_info[1]).__name__ == "FieldFetchBlocked"
+        assert str(exc_info[1]) == "Fetching of Loan.patron blocked."
+    assert _sql_from_table(captured, "library_patron") == []
+    assert len(captured) == 1, captured.captured_queries
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("annotation", ["aggregate", "combined"])
 def test_library_consumer_loans_prefetch_carrying_an_annotation_is_served(

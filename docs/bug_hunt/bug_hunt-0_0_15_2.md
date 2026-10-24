@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 267 done, 171 to do.
+Progress: 268 done, 171 to do.
 
 ## Done
 
@@ -1279,6 +1279,12 @@ Progress: 267 done, 171 to do.
   rows pin the predicate over auto, one-to-one, text, multi-table and composite keys, each flavor's input and a sync
   and async update over a real composite table; the live row waits on a fakeshop composite model
   (`docs/builder/TODO.md` item 27). The README, spec-036, 038, 039 and three glossary terms say so
+- [x] 353. fixed: `nodes(ids:)` keeps Django 6.1 peer batching. `relay.py::_stamp_nodes` stamps each `resolve_nodes`
+  group, then gives the copies whose originals shared one `_state.peers` list a fresh list of weak references to the
+  copies, so a lazy FK across 3 loans under `FETCH_PEERS` costs 1 query instead of 3 (sync and async, a repeated id
+  included), as the connection and list roots already did; a consumer `resolve_nodes` override's rows batch the same
+  way, a row with no peers is left alone, and the shallow copy that keeps a shared row free of the routing hint
+  stays. The `_state.peers` read and write live in `utils/_queryset_private.py`. Found verifying 353: row 506
 
 ## Outside review of the fixes
 
@@ -1337,9 +1343,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   row (not this setup)
 - [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
   row
-- [ ] 353. Relay `nodes(ids:)` loses `FETCH_PEERS` batching after 343: `relay.py::_stamp_node_type` `copy.copy`s each
-  resolved node and Django's `ModelState.__getstate__` drops `peers`, so a lazy FK across 3 loans costs 3 queries
-  instead of 1 (`FETCH_RAISE` is carried). Found landing 343
 - [ ] 372. A declared package `RangeFilter` with both bounds on an integer column passes an out-of-int64 bound to
   `BETWEEN` and the backend raises a masked `OverflowError` (`range: {start: "0", end: "18446744073709551616"}` on a
   BigInt column); `filters/base.py::IntegerRangeFilter` decomposes into `gte` + `lte`, the declared primitive does not
@@ -1484,6 +1487,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
+- [ ] 506. On the Python 3.10 / Django 5.2.16 floor,
+  `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch` fails with `'type' object is not
+  subscriptable` on annotations in `forms/resolvers.py` (`_unstorable_cleaned_fields`, `_is_unstorable_blank`,
+  `_coerced_null_fields`, `_column_null_errors`) and `utils/querysets.py::_built_queryset`; it fails identically at
+  c9bdcd2b and b007a47b. Found verifying 353
 
 ## To do: holes found re-checking the fixes
 
@@ -1589,8 +1597,8 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (it asks only the instance cache); reporting them under `strictness="raise"` would error queries that answer today
 - [ ] 352. CHANGELOG entry for item 343: on Django 6.1, a `get_queryset` hook or default manager returning
   `.fetch_mode(FETCH_PEERS)` or `.fetch_mode(FETCH_RAISE)` keeps that mode through the visibility seal (root lists,
-  connections, nested relations, prefetch children, `node(id:)`, the mutation locate), so lazy loads batch or raise as
-  the project set; a fetch mode object other than Django's three is refused as an unsealable queryset
+  connections, nested relations, prefetch children, `node(id:)` and `nodes(ids:)`, the mutation locate), so lazy loads
+  batch or raise as the project set; a fetch mode object other than Django's three is refused as an unsealable queryset
 - [ ] 351. A column-backed `ModelChoiceField` / `ModelMultipleChoiceField` declared with a class-level `queryset=None`
   that no `__init__` or `get_form` assigns builds, and every request binding it fails with Django's raw
   `AttributeError` (`'NoneType' object has no attribute 'model'` / `'filter'`) inside `is_valid()`, because
