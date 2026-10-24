@@ -1188,18 +1188,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_apply_flat_leaves`, a `<branch>__...` copy whose branch is active and whose key it does not name; document what an
   own `filter` receives (raw wire text for a GlobalID; the cleaned empty value on absence); decide whether a nested
   supply satisfies a `required` copy
-- [ ] 327. Relay refetch plans nothing: `types/relay.py::_resolve_nodes_default` / `_resolve_node_default` return model
-  instances, `optimizer/extension.py::DjangoOptimizerExtension._optimize` passes a non-`QuerySet` through unchanged and
-  `relay.py::DjangoNodesField` / `DjangoNodeField` never call `DjangoOptimizerExtension.apply_to`, so every nested
-  relation under `node(id:)` / `nodes(ids:)` lazy-loads per parent: `nodes(ids: [b1..bN]) { ... on BookType { loans { id
-  } } }` is 1 + N statements (same for `loansConnection`, `genresConnection`; a forward `shelf` costs 1 + 2N) against 2
-  under `allLibraryBooks` or a root connection, the root SELECT is unprojected, and under `strictness="raise"` every
-  nested relation under `node` / `nodes` raises `Unplanned N+1`. A documented limit (spec-015 Decision 3 "not wired ...
-  the seam stays open"; glossary "Relay Node integration"; pinned by
-  `test_library_api.py::_LOAN_QUERYSET_METHOD_HOOK_CASES`), but GOAL.md's `astronomy` paragraph (`strictness="raise"`
-  with `DjangoNodeField` roots) cannot run as written and no board card owns it. Fix shape if taken: plan the per-type
-  queryset before `list()` through the connection field's plan application, re-order over it, and rewrite spec-015
-  Decision 3, the glossary sentence and the pinned statement counts (card candidate)
 - [ ] 329. `scripts/prove_failability.py` forwards the first stop signal to the scope's whole process group, which holds
   `uv` as well as pytest, so `uv run` hands pytest the Ctrl-C a second time and a `-n 0` scope whose teardown takes
   longer than about 0.2 s loses it, while the module docstring says the forwarded signal "lets pytest tear down".
@@ -1401,6 +1389,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 327. Design call: should `node(id:)` / `nodes(ids:)` roots be optimizer-planned, in this hunt or as a card?
+  `types/relay.py::_resolve_node_default` / `_resolve_nodes_default` (and the async twins) return model rows the
+  optimizer never plans (`optimizer/extension.py::DjangoOptimizerExtension._optimize` passes a non-`QuerySet` through),
+  so every nested relation lazy-loads per parent: `nodes(ids: [5 books]) { ... on BookType { loans { id } } }` is 6
+  statements against 2 under `allLibraryBooks` (a forward `shelf` 11 against 2), the root SELECT is unprojected, the
+  async path is the same, and under `strictness="raise"` every nested relation raises `Unplanned N+1: <field>`, one
+  parent included. Documented as a limit (spec-015 "not wired ... the seam stays open", GLOSSARY "a single-node
+  refetch receives no optimizer plan", pinned by
+  `examples/fakeshop/test_query/test_library_api.py::_LOAN_QUERYSET_METHOD_HOOK_CASES`), and no card owns it, while
+  GOAL.md's `astronomy` paragraph pairs `DjangoNodeField` roots with "N+1-safe planning across every nested selection,
+  with `strictness="raise"`". Fix shape: plan through `optimizer/extension.py::apply_connection_optimization` /
+  `_async` (the seam `mutations/resolvers.py::refetch_optimized` uses). The typed `DjangoNodeField(T)` /
+  `DjangoNodesField(T)` roots need about 70-120 source lines; the bare `relay.Node` form needs the per-type fragment
+  narrowing (`optimizer/selections.py` G3) that spec-035 Decisions 6/7 defer to BACKLOG
+  `polymorphic_interface_connections`, about 400-800 lines across three test trees in all. AGENTS rule 5 bars landing the
+  typed form alone ahead of the bare one. Row 353 (`_stamp_node_type`) lands first either way. Fact-found at `116b57f6`
 - [ ] 582. CHANGELOG entry for item 408: a `SerializerMutation` hook may return a mapping keyed by `TextChoices` or
   `StrEnum` members, each read as its exact text; before, any key that was not exactly `str` was a
   `ConfigurationError`. The non-string-key refusal now says "every key must be a string"
