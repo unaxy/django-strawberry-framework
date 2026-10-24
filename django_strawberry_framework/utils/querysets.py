@@ -40,11 +40,12 @@ consumer code (every read comes from the real instance ``__dict__`` via
 ``truth.instance_dict``, so a custom ``__getattribute__``, a class-level
 ``__dict__`` override or an instance-shadowed attribute cannot lie or run code),
 validates it, then rebuilds a fresh queryset from the validated state. It NEVER
-returns the consumer object. Every rebuild the framework composes onto or hands
-back is a plain ``django.db.models.QuerySet``; the one rebuild that keeps the
-source's own ``QuerySet`` class is the hook's input, so a hook can call the
-project methods of the class that supplied it (the framework seeds each read from
-the model's default manager), and the hook's result is sealed plain again.
+returns the consumer object. Every rebuild the framework composes onto is a plain
+``django.db.models.QuerySet``. Two rebuilds keep the source's own ``QuerySet``
+class, so a hook can call the project methods of the class that supplied it (the
+framework seeds each read from the model's default manager): the hook's input, and
+the cascade's narrowed output, which ``_restated_as_source_class`` restates after
+the plain seal and walk; the hook's result is sealed plain again.
 
 What the seal preserves: the SQL query state (filters, annotations, joins,
 ordering, values projection), database routing / hints, the prefetch metadata
@@ -55,12 +56,13 @@ A combinator is preserved as the set of primary keys it selects, rebuilt as a
 ``pk__in`` membership test the recomposing surfaces can narrow (the raw-list row
 source keeps it as it is), and a combinator whose rows that rewrite would change
 fails closed (``combined``). What it deliberately drops on every rebuild the
-framework composes onto or returns: the consumer's executable override dispatch
-(the subclass identity itself), because that is precisely the leak vector. A
-seal rebuilds only state made of Django's own objects, so anything else in it -- a
-consumer-defined query, expression, lookup or join class, a method assigned onto a
-query instance, a foreign row iterable, a fetch mode that is not one of Django's own,
-deferred-filter state Django never writes -- fails closed (``untrusted``).
+framework composes onto and on the hook result it returns: the consumer's
+executable override dispatch (the subclass identity itself), because that is
+precisely the leak vector. A seal rebuilds only state made of Django's own objects,
+so anything else in it -- a consumer-defined query, expression, lookup or join
+class, a method assigned onto a query instance, a foreign row iterable, a fetch
+mode that is not one of Django's own, deferred-filter state Django never writes --
+fails closed (``untrusted``).
 
 Caller-specific tails stay with their caller: the connection field keeps its
 GraphQL non-queryset error (it calls ``normalize_query_source`` then guards),
@@ -137,6 +139,9 @@ from ._narrowing import (
 from ._queryset_private import (
     is_django_fetch_mode,
     queryset_db,
+    queryset_fetch_mode,
+    queryset_fields,
+    queryset_prefetch_lookups,
     set_queryset_fetch_mode,
     set_queryset_fields,
     set_queryset_for_write,
@@ -250,6 +255,7 @@ _P = ParamSpec("_P")
 _ModelT = TypeVar("_ModelT", bound=models.Model)
 _RowT = TypeVar("_RowT")
 _RowT_co = TypeVar("_RowT_co", covariant=True)
+_QuerySetT = TypeVar("_QuerySetT", bound=models.QuerySet[models.Model, object])
 
 
 class SyncMisuseError(ConfigurationError, RuntimeError):
@@ -4526,42 +4532,28 @@ def _seal_or_defect(
     elif required_alias is not None and db is not None and db != required_alias:
         return None, ("alias", str(db))
     using = required_alias if required_alias is not None else db
-    # ``_hints`` is proven ``None`` or an exact ``dict`` by ``_queryset_state_defect``,
-    # so ``dict(...)`` copies it without dispatching a consumer ``__iter__`` / ``keys``.
-    # A fresh dict, never the candidate's own ``_hints`` object: sharing it would leave
-    # the sealed queryset holding a mutable dict the untrusted object can still write to
-    # (a routing-control surface when a custom router consults hints on an unrouted read).
-    # django-stubs types ``QuerySet`` hint values as model instances (the ``instance`` hint
-    # Django itself writes); the proof above covers the dict shape and its ``str`` keys.
-    hints = cast("dict[str, models.Model] | None", state.get("_hints"))
     queryset_class: type[models.QuerySet[models.Model, object]] = (
         candidate_class if keep_class else models.QuerySet
     )
-    sealed: models.QuerySet[models.Model, object] = queryset_class(
+    # Every slot is read without dispatch and proven exact-shape by
+    # ``_queryset_state_defect`` (``_hints`` ``None`` or an exact ``dict`` with ``str``
+    # keys, so the copy dispatches no consumer ``__iter__`` / ``keys``). The fetch mode
+    # is Django 6.1's, proved one of Django's own when present; absent below 6.1, where
+    # the rebuilt queryset has none either.
+    sealed = _built_queryset(
+        queryset_class,
         model=qmodel,
         query=rebuilt_query,
         using=using,
-        hints=dict(hints) if hints is not None else {},
+        hints=state.get("_hints"),
+        iterable=iterable,
+        fields=fields,
+        fetch_mode=state.get("_fetch_mode"),
+        # The prefetch seal returns lookups exactly when it returns no defect.
+        prefetch_lookups=cast("tuple[str | _SealedPrefetch, ...]", sealed_prefetch),
+        sticky_filter=state.get("_sticky_filter") is True,
+        for_write=state.get("_for_write") is True,
     )
-    # Reproduce exactly what ``QuerySet._clone`` copies forward -- from state read
-    # without dispatch and proven exact-shape by ``_queryset_state_defect`` -- MINUS
-    # ``_known_related_objects`` (an optional related-object cache we deliberately drop:
-    # a fresh fetch is always correct, whereas copying an untrusted cache could pre-seed
-    # synthetic related instances that bypass the related type's own visibility hook).
-    sealed._iterable_class = iterable
-    set_queryset_fields(sealed, fields)
-    # Django 6.1's fetch mode, which ``_queryset_state_defect`` proved one of Django's
-    # own when present; absent below 6.1, where the rebuilt queryset has none either.
-    fetch_mode = state.get("_fetch_mode")
-    if is_django_fetch_mode(fetch_mode):
-        set_queryset_fetch_mode(sealed, fetch_mode)
-    # The prefetch seal returns lookups exactly when it returns no defect.
-    set_queryset_prefetch_lookups(
-        sealed,
-        cast("tuple[str | _SealedPrefetch, ...]", sealed_prefetch),
-    )
-    set_queryset_sticky_filter(sealed, sticky=state.get("_sticky_filter") is True)
-    set_queryset_for_write(sealed, for_write=state.get("_for_write") is True)
     if policy.carry_result_cache:
         # The rows the source already fetched travel onto the rebuild, so a surface
         # that only windows them re-queries nothing. The list object is taken as it
@@ -4573,6 +4565,85 @@ def _seal_or_defect(
         # refused every populated cache that is not an exact ``list``.
         sealed._result_cache = cast("list[object] | None", result_cache)
     return sealed, None
+
+
+def _built_queryset(
+    queryset_class: type[_QuerySetT],
+    *,
+    model: type[models.Model],
+    query: sql.Query,
+    using: str | None,
+    hints: object,
+    iterable: type[BaseIterable[object]],
+    fields: tuple[str, ...] | None,
+    fetch_mode: object,
+    prefetch_lookups: tuple[str | Prefetch[str], ...],
+    sticky_filter: bool,
+    for_write: bool,
+) -> _QuerySetT:
+    """Construct ``queryset_class`` over ``query`` the way ``QuerySet._clone`` constructs one.
+
+    The one constructor path a framework-built queryset takes: the ``model`` / ``query``
+    / ``using`` / ``hints`` constructor arguments (``hints`` copied into a fresh dict,
+    never shared: the source could otherwise keep writing to a routing-control surface a
+    custom router consults on an unrouted read), then exactly the state ``_clone`` copies
+    forward MINUS ``_known_related_objects`` (an optional related-object cache dropped on
+    purpose: a fresh fetch is always correct, whereas a copied cache could pre-seed
+    related instances that bypass the related type's own visibility hook). A
+    ``fetch_mode`` that is not one of Django's own is not carried. Attributes a class
+    sets on an instance outside the constructor arguments are not carried either.
+    ``query`` is used as given, so a caller hands over a query no other queryset will
+    mutate.
+    """
+    built = queryset_class(
+        model=model,
+        query=query,
+        using=using,
+        # Every caller hands over ``None`` or an exact ``dict`` with ``str`` keys (the
+        # seal proves it; the cascade's restatement reads the dict a seal wrote);
+        # django-stubs types hint values as the model instances Django itself writes.
+        hints=dict(cast("dict[str, models.Model]", hints)) if hints is not None else {},
+    )
+    built._iterable_class = iterable
+    set_queryset_fields(built, fields)
+    if is_django_fetch_mode(fetch_mode):
+        set_queryset_fetch_mode(built, fetch_mode)
+    set_queryset_prefetch_lookups(built, prefetch_lookups)
+    set_queryset_sticky_filter(built, sticky=sticky_filter)
+    set_queryset_for_write(built, for_write=for_write)
+    return built
+
+
+def _restated_as_source_class(
+    narrowed: models.QuerySet[models.Model, object],
+    source_class: type[_QuerySetT],
+) -> _QuerySetT:
+    """Hand a framework-built queryset back as an instance of ``source_class``.
+
+    ``permissions.py::apply_cascade_permissions`` seals its source plain and narrows that
+    plain rebuild, so no consumer ``filter`` override ever sees the cascade predicate;
+    it then returns the narrowed state as the caller's own class through this
+    restatement, so a project method chains after the cascade. ``narrowed`` is the
+    cascade's own object, read by attribute and then dropped, so its ``query`` travels
+    without a second clone and no SQL runs. A ``narrowed`` already of exactly
+    ``source_class`` (a plain source) is returned as is.
+    """
+    if truth.is_exact(narrowed, source_class):
+        return narrowed
+    state = truth.instance_state(narrowed)
+    return _built_queryset(
+        source_class,
+        model=narrowed.model,
+        query=narrowed.query,
+        using=queryset_db(narrowed),
+        hints=state.get("_hints"),
+        iterable=narrowed._iterable_class,
+        fields=queryset_fields(narrowed),
+        fetch_mode=queryset_fetch_mode(narrowed),
+        prefetch_lookups=queryset_prefetch_lookups(narrowed),
+        sticky_filter=state.get("_sticky_filter") is True,
+        for_write=state.get("_for_write") is True,
+    )
 
 
 def _row_source_model(state: Mapping[str, object], origin: str) -> type[models.Model]:
@@ -4964,7 +5035,9 @@ def _prepared_visibility_source(
     state rebuilt from it. It is a plain ``QuerySet`` by default; ``keep_class``
     rebuilds it as the source's own class instead (``_seal_or_defect``), which the
     visibility runners ask for so a hook can call its project ``QuerySet``
-    methods, and which the cascade, recomposing onto the sealed source, leaves off.
+    methods, and which the cascade, recomposing onto the sealed source, leaves off
+    and then restates its narrowed result as the source's class
+    (``_restated_as_source_class``).
     An already-evaluated source seals to a fresh, unevaluated queryset (this
     seal's policies do not carry ``_result_cache`` forward), so cached rows never
     reach the hook. The required alias is then

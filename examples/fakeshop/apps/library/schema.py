@@ -215,6 +215,11 @@ class LoanType(DjangoType):
       narrows through the project ``LoanQuerySet.with_note()`` method, so live
       requests can pin that the hook receives the default manager's own queryset
       class. When absent, ``LoanType`` keeps the default pass-through hook.
+    - ``FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD``: under the hook above, run
+      ``apply_cascade_permissions`` first and call ``with_note()`` on what it returns,
+      so live requests can pin that the cascade hands back the hook's own queryset
+      class: ``"every_edge"`` walks every edge, ``"no_edge"`` passes ``fields=[]``.
+      When absent, the hook calls ``with_note()`` on its input.
     - ``FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK``: define a ``get_queryset`` that
       annotates every loan with a ``Count`` and reads the first annotated row before
       returning the annotated queryset, so live requests can pin that a hook result
@@ -242,6 +247,11 @@ class LoanType(DjangoType):
             if not isinstance(queryset, models.LoanQuerySet):
                 msg = f"LoanType.get_queryset expected a LoanQuerySet, got {type(queryset)!r}"
                 raise TypeError(msg)
+            cascade = getattr(settings, "FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD", None)
+            if cascade == "every_edge":
+                return apply_cascade_permissions(cls, queryset, info).with_note()
+            if cascade == "no_edge":
+                return apply_cascade_permissions(cls, queryset, info, fields=[]).with_note()
             return queryset.with_note()
 
     elif getattr(settings, "FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK", False):

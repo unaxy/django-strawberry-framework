@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 236 done, 178 to do.
+Progress: 237 done, 179 to do.
 
 ## Done
 
@@ -1056,6 +1056,16 @@ Progress: 236 done, 178 to do.
   alias was refused with `ConfigurationError` on an `orderBy` read through the sidecar);
   `utils/querysets.py::_snapshot_routing_intent` admits a member and keeps its exact text as the routed alias, a
   non-string answer is still refused; spec-050 states it
+- [x] 323. Inside a `get_queryset` hook, `apply_cascade_permissions` / `aapply_cascade_permissions` return a fresh
+  instance of the source's own `QuerySet` class, so a project method chains after the cascade (it raised
+  `AttributeError`): the source is still sealed plain and narrowed plain, so no consumer `filter` override sees the
+  cascade predicate (the FilterEraser pin unedited), and the walked result is restated as the source's class at both
+  exits (the walk and the re-entrant `fields=[]` return) by `utils/querysets.py::_restated_as_source_class`, sharing
+  the walked `sql.Query` (no clone, no SQL, about 2.5 us; a plain source is returned as is) through `_built_queryset`,
+  now the one constructor path `_seal_or_defect` uses too; both signatures take and return a QuerySet-bound TypeVar;
+  README, spec-034, spec-045 Decision 1, the module docstring and the `apply_cascade_permissions` and
+  sealed-execution-queryset glossary entries say so (live under `FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD`, every
+  shape including the sync root list)
 
 ## Outside review of the fixes
 
@@ -1144,11 +1154,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_apply_flat_leaves`, a `<branch>__...` copy whose branch is active and whose key it does not name; document what an
   own `filter` receives (raw wire text for a GlobalID; the cleaned empty value on absence); decide whether a nested
   supply satisfies a `required` copy
-- [ ] 323. Inside a `get_queryset` hook, `apply_cascade_permissions(cls, queryset, info)` returns a plain `QuerySet`
-  even when handed the project `QuerySet` class the hook receives (the cascade seals its source with the recomposing
-  policy), so a project method chained after the cascade raises `AttributeError`; README says the cascade returns "a
-  queryset of the same model and row type it was given". Decide whether the cascade's output keeps the class, or the
-  docs say it does not
 - [ ] 324. `tests/utils/test_querysets.py::test_additive_only_subclass_result_is_sealed_to_plain_queryset`'s docstring
   carries process provenance ("now", "The old contract"); restate it as behaviour
 - [ ] 327. Relay refetch plans nothing: `types/relay.py::_resolve_nodes_default` / `_resolve_node_default` return model
@@ -1348,12 +1353,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 410. `write_mixins.py::_ValidatedMutationMeta.__delattr__` still says the configuration "is immutable", which
   `object.__setattr__` bypasses; the docstrings were narrowed in `a5e41a20`, the runtime message was left because a
   test may pin it
+- [ ] 429. Every fakeshop root list served by a plain sync `strawberry.field(resolver=...)` that returns a lazy
+  QuerySet (`allLibraryLoans`, `allLibraryBooks`, `allLibraryPatrons`, ...) raises `SynchronousOnlyOperation` on the
+  async executor (`asyncio.run(config.schema.schema.execute(...))`, the schema the async view mounts), hook or no
+  hook, on main before 323; no async test posts one, so the async root-list rows of 323's live grid are left out
+  (`_LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES`). Say whether such roots should evaluate or become async resolvers, or
+  whether the package should serve a sync resolver's lazy QuerySet on the async executor. Found implementing 323
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 430. CHANGELOG entry for item 323: inside a `get_queryset` hook, `apply_cascade_permissions` /
+  `aapply_cascade_permissions` now return the queryset's own `QuerySet` class (a fresh instance, same model and row
+  type), so project methods chain after the cascade; the permission filter is still applied on a framework-owned plain
+  rebuild, and attributes set outside Django's constructor arguments are not carried
 - [ ] 411. Design call: should `types/base.py::_is_auto_annotation` recognize aliased `auto` spellings under
   `from __future__ import annotations` by resolving a Name / Attribute annotation against the defining module's
   globals? Today they fail loud with a raw Strawberry `TypeError`; the documented policy (here and for `NodeID`) is

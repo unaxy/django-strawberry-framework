@@ -131,6 +131,7 @@ from .utils.querysets import (
     SyncMisuseError,
     _defect_message,
     _prepared_visibility_source,
+    _restated_as_source_class,
     apply_type_visibility_sync,
     base_queryset,
     model_for,
@@ -153,6 +154,7 @@ __all__ = ("SyncMisuseError", "aapply_cascade_permissions", "apply_cascade_permi
 
 _M = TypeVar("_M", bound=models.Model)
 _R = TypeVar("_R")
+_QS = TypeVar("_QS", bound=models.QuerySet[models.Model, object])
 
 _ASYNC_RECOURSE = (
     "apply_cascade_permissions walks target hooks synchronously and "
@@ -576,10 +578,10 @@ def _cycle_error(state: _TraversalState, cls: type[DjangoType]) -> Configuration
 
 def apply_cascade_permissions(
     cls: type[DjangoType],
-    queryset: models.QuerySet[_M, _R],
+    queryset: _QS,
     info: object,
     fields: Iterable[str] | None = None,
-) -> models.QuerySet[_M, _R]:
+) -> _QS:
     """Narrow ``queryset`` so each forward relation respects its target visibility.
 
     Call from inside a ``DjangoType.get_queryset`` (spec-034 Decision 5). Walks ``cls``'s
@@ -592,8 +594,12 @@ def apply_cascade_permissions(
     intersects ``Q(<edge>__in=<visible>)`` (plus ``| Q(<edge>__isnull=True)``
     when the edge is nullable) into ``queryset``. Edges whose target model has
     no registered type are skipped -- there is no visibility policy to apply.
-    Returns a narrowed queryset of the same model and row type as ``queryset``
-    (``QuerySet[M, R]`` in, ``QuerySet[M, R]`` out); never evaluates, reorders,
+    Returns a fresh instance of ``queryset``'s own class, same model and row type
+    (a project ``QuerySet`` subclass in, that subclass out), so a project ``QuerySet``
+    method chains after the cascade; the source is sealed and narrowed as a
+    framework-owned plain rebuild first, so the class's own ``filter`` never sees
+    the cascade predicate, and attributes the class sets on an instance outside
+    Django's constructor arguments are not carried. It never evaluates, reorders,
     or projects the caller's queryset -- pure ``.filter(...)`` composition, so
     the ``__in`` subqueries compile into the caller's single ``SELECT`` and add
     zero query round-trips (spec-034 Decision 7).
@@ -633,6 +639,10 @@ def apply_cascade_permissions(
 
     """
     model = model_for(cls)
+    # The caller's class, read once before the seal: the seal and the walk below stay
+    # plain, so no consumer ``filter`` override is ever dispatched on the cascade
+    # predicate, and the narrowed result is restated as this class at each exit.
+    source_class: type[_QS] = truth.class_of(queryset)
     # The helper is called from inside a consumer-owned ``get_queryset`` hook,
     # so its root argument is untrusted query state even when it claims to be a
     # ``QuerySet``. Validate and rebuild it through the shared visibility
@@ -645,7 +655,7 @@ def apply_cascade_permissions(
     # a ``.values()`` root is supported input, a sliced root (which ``.filter(...)``
     # cannot narrow) is rejected by the seal itself rather than by a second battery
     # after it, and a combined root arrives as its primary-key set, which it can.
-    queryset, root_alias = _prepared_visibility_source(
+    sealed, root_alias = _prepared_visibility_source(
         cls,
         queryset,
         render_error=_root_error_renderer(cls, model),
@@ -687,14 +697,15 @@ def apply_cascade_permissions(
                 # the enclosing edge's subquery carries exactly the hook's own
                 # direct narrowing. Any re-entry that would walk an edge (a
                 # full walk or a non-empty subset) stays fail-closed below.
-                return queryset
+                return _restated_as_source_class(sealed, source_class)
             raise _cycle_error(state, cls)
         state = dataclasses.replace(state, active=(*state.active, cls))
     token = _cascade_state.set(state)
     try:
-        return _walk(cls, model, queryset, info, names_to_walk, state)
+        narrowed = _walk(cls, model, sealed, info, names_to_walk, state)
     finally:
         _cascade_state.reset(token)
+    return _restated_as_source_class(narrowed, source_class)
 
 
 def _walk(
@@ -761,10 +772,10 @@ def _walk(
 
 async def aapply_cascade_permissions(
     cls: type[DjangoType],
-    queryset: models.QuerySet[_M, _R],
+    queryset: _QS,
     info: object,
     fields: Iterable[str] | None = None,
-) -> models.QuerySet[_M, _R]:
+) -> _QS:
     """Run the ``apply_cascade_permissions`` walk off the event loop.
 
     Wraps the single sync walk in ``run_in_one_sync_boundary`` so blocking

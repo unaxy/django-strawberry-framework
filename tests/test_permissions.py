@@ -91,12 +91,12 @@ from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelatio
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection as db_connection
 from django.db import models
-from django.db.models import Manager, sql
+from django.db.models import Manager, Prefetch, sql
 from django.db.models.expressions import Combinable
 from django.http import HttpRequest
 from graphql import GraphQLError
 from strategy_schemas import make_django_type
-from typing_extensions import override
+from typing_extensions import Self, override
 
 from django_strawberry_framework import (
     DjangoType,
@@ -119,10 +119,21 @@ from django_strawberry_framework.permissions import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import call_method, is_tuple, read_attr
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_tuple,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
+    queryset_fetch_mode,
+    queryset_fields,
+    queryset_hints,
+    queryset_prefetch_lookups,
+    set_queryset_hints,
     set_queryset_query,
+    set_queryset_sticky_filter,
 )
 from django_strawberry_framework.utils.typing import object_result
 from tests._django_private import has_values_method
@@ -1203,6 +1214,221 @@ def _register_ct_pair(hook: _Hook | None) -> type[DjangoType]:
     parent_type = _make_type("CtParentType", _CtParent, primary=False)
     finalize_django_types()
     return parent_type
+
+
+class _CtParentQuerySet(models.QuerySet[_CtParent]):
+    """A project queryset class over the fixture parent, with one method of its own."""
+
+    def named(self, name: str) -> Self:
+        """Narrow to the parents called ``name``."""
+        return self.filter(name=name)
+
+
+class _CtFilterEraser(models.QuerySet[_CtParent]):
+    """A project queryset class whose ``filter`` drops every predicate it is given."""
+
+    @override
+    def filter(self, *args: object, **kwargs: object) -> models.QuerySet[_CtParent]:
+        return _CtParent.objects.all()
+
+
+def _cascade_sync(
+    parent_type: type[DjangoType],
+    source: models.QuerySet[_CtParent, object],
+) -> models.QuerySet[_CtParent, object]:
+    return apply_cascade_permissions(parent_type, source, _INFO)
+
+
+def _cascade_async(
+    parent_type: type[DjangoType],
+    source: models.QuerySet[_CtParent, object],
+) -> models.QuerySet[_CtParent, object]:
+    return asyncio.run(aapply_cascade_permissions(parent_type, source, _INFO))
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "cascade",
+    [pytest.param(_cascade_sync, id="sync"), pytest.param(_cascade_async, id="async")],
+)
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(lambda: _CtParentQuerySet(model=_CtParent), id="project-class"),
+        pytest.param(
+            lambda: _CtParentQuerySet(model=_CtParent).using("default").values("name"),
+            id="project-class-values",
+        ),
+        pytest.param(lambda: models.QuerySet[_CtParent](model=_CtParent), id="plain"),
+        pytest.param(lambda: _CtFilterEraser(model=_CtParent), id="filter-eraser"),
+    ],
+)
+def test_cascade_returns_the_sources_queryset_class(
+    cascade: Callable[
+        [type[DjangoType], models.QuerySet[_CtParent, object]],
+        models.QuerySet[_CtParent, object],
+    ],
+    source: Callable[[], models.QuerySet[_CtParent, object]],
+) -> None:
+    """The cascade's return is a fresh instance of the source's own class, narrowed.
+
+    The source is sealed and narrowed as a plain rebuild, then restated as its class,
+    so a project method chains after the cascade (a plain source stays plain), a
+    ``.values()`` source keeps its projection and routing, and a class whose
+    ``filter`` erases predicates still comes back narrowed, since its ``filter`` never
+    ran on the cascade predicate. The sync walk and its async twin agree.
+    """
+    with _tables(_CtTarget, _CtParent):
+        parent_type = _register_ct_pair(lambda _cls, qs, _info: qs.exclude(name="hidden"))
+        visible = _CtTarget.objects.create(name="visible")
+        hidden = _CtTarget.objects.create(name="hidden")
+        _CtParent.objects.create(name="keeps", target=visible)
+        _CtParent.objects.create(name="drops", target=hidden)
+        root = source()
+
+        result = cascade(parent_type, root)
+
+        assert truth.class_of(result) is truth.class_of(root)
+        assert result is not root
+        assert queryset_db(result) == queryset_db(root)
+        assert sorted(result.values_list("name", flat=True)) == ["keeps"]
+        assert list(root.values_list("name", flat=True).order_by("name")) == ["drops", "keeps"]
+        if truth.class_of(root) is _CtParentQuerySet:
+            assert list(require_instance(result, _CtParentQuerySet).named("keeps")) != []
+        if queryset_fields(root) is not None:
+            assert list(result) == [{"name": "keeps"}]
+
+
+class _ReNodeQuerySet(models.QuerySet["_ReNode"]):
+    """The re-entrant fixture's default-manager class, with one method of its own."""
+
+    def visible(self) -> Self:
+        """Exclude the nodes called ``hidden``."""
+        return self.exclude(name="hidden")
+
+
+class _ReNode(models.Model):
+    """A self-referential fixture whose default manager is a project queryset class."""
+
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+    parent: "models.ForeignKey[_ReNode | Combinable | None, _ReNode | None]" = models.ForeignKey(
+        "self",
+        null=True,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+
+    objects = _ReNodeQuerySet.as_manager()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reentrant_zero_edge_cascade_returns_the_sources_queryset_class() -> None:
+    """The re-entrant ``fields=[]`` exit hands back the hook input's own class too.
+
+    The root walk reaches ``parent`` and runs the type's own hook, which re-enters
+    the cascade with ``fields=[]`` (the cycle-breaking recourse) and calls the
+    project ``visible()`` method on what it returns, so the class does not depend on
+    the depth the cascade returns from.
+    """
+    seen: list[type] = []
+
+    def hook(cls: type[DjangoType], qs: models.QuerySet[models.Model], info: object) -> object:
+        narrowed = apply_cascade_permissions(cls, qs, info, fields=[])
+        seen.append(truth.class_of(narrowed))
+        return require_instance(narrowed, _ReNodeQuerySet).visible()
+
+    with _tables(_ReNode):
+        node_type = _make_type("ReNodeType", _ReNode, get_queryset=hook)
+        finalize_django_types()
+        hidden = _ReNode.objects.create(name="hidden")
+        shown = _ReNode.objects.create(name="shown")
+        _ReNode.objects.create(name="keeps", parent=shown)
+        _ReNode.objects.create(name="drops", parent=hidden)
+
+        result = apply_cascade_permissions(node_type, _ReNode.objects.all(), _INFO)
+
+        assert seen == [_ReNodeQuerySet]
+        assert truth.class_of(result) is _ReNodeQuerySet
+        assert sorted(result.values_list("name", flat=True)) == ["hidden", "keeps", "shown"]
+
+
+def _restatement_state(queryset: models.QuerySet[_CtParent, object]) -> dict[str, object]:
+    """The query and ``QuerySet`` state a restatement must carry, read as plain data."""
+    state = truth.instance_state(queryset)
+    return {
+        "sql": str(queryset.query),
+        "db": queryset_db(queryset),
+        "hints": queryset_hints(queryset),
+        "for_write": state.get("_for_write"),
+        "sticky_filter": state.get("_sticky_filter"),
+        "fields": queryset_fields(queryset),
+        "iterable": queryset._iterable_class,
+        "prefetch": [
+            (
+                truth.class_of(lookup),
+                lookup.prefetch_to if isinstance(lookup, Prefetch) else lookup,
+            )
+            for lookup in queryset_prefetch_lookups(queryset)
+        ],
+        "fetch_mode": queryset_fetch_mode(queryset),
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "fields",
+    [pytest.param(None, id="every-edge"), pytest.param([], id="no-edge")],
+)
+def test_cascade_restatement_carries_the_plain_outputs_state(fields: list[str] | None) -> None:
+    """The project-class output carries exactly the state the plain output does.
+
+    A plain source's output is the walked rebuild itself, so it is the exact oracle for
+    what the restatement must carry onto the project class: the query, routing, hints,
+    ``select_for_update``'s write routing, the next-filter stickiness (which only the
+    zero-edge scope leaves standing, since the walk's own ``filter`` consumes it), the
+    projection, the row iterable, the prefetch lookups as exact ``Prefetch`` objects, and
+    the fetch mode where Django has one. The oracle's own values are pinned too, so a
+    slot the seal itself dropped could not pass by both sides losing it.
+    """
+    # Only the zero-edge scope keeps a sticky source sticky: a walked edge's filter consumes it.
+    sticky = fields is not None
+
+    def source(
+        queryset_class: type[models.QuerySet[_CtParent, object]],
+    ) -> models.QuerySet[_CtParent, object]:
+        queryset = (
+            queryset_class(model=_CtParent)
+            .using("default")
+            .select_for_update()
+            .prefetch_related(Prefetch("target", queryset=_CtTarget.objects.all()))
+        )
+        if FETCH_MODES:
+            queryset = queryset.fetch_mode(FETCH_MODES["FETCH_PEERS"])
+        set_queryset_hints(queryset, {"tenant": 2})
+        if sticky:
+            set_queryset_sticky_filter(queryset, sticky=True)
+        return queryset
+
+    with _tables(_CtTarget, _CtParent):
+        parent_type = _register_ct_pair(lambda _cls, qs, _info: qs.exclude(name="hidden"))
+
+        plain = apply_cascade_permissions(parent_type, source(models.QuerySet), _INFO, fields)
+        project = apply_cascade_permissions(parent_type, source(_CtParentQuerySet), _INFO, fields)
+
+        assert truth.class_of(plain) is models.QuerySet
+        assert truth.class_of(project) is _CtParentQuerySet
+        oracle = _restatement_state(plain)
+        assert _restatement_state(project) == oracle
+        assert oracle["db"] == "default"
+        assert oracle["hints"] == {"tenant": 2}
+        assert oracle["for_write"] is True
+        assert oracle["sticky_filter"] is sticky
+        assert oracle["prefetch"] == [(Prefetch, "target")]
+        assert oracle["fetch_mode"] is (FETCH_MODES["FETCH_PEERS"] if FETCH_MODES else None)
 
 
 def _values_projection(

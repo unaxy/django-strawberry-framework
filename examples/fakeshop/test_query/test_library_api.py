@@ -1047,8 +1047,9 @@ def _loan_note_document(document: str, pks: Mapping[str, int]) -> str:
     }
 
 
-#: The framework-owned paths that hand ``LoanType.get_queryset`` its source, each as
-#: (extra settings, document, response without the hook, response with it, loan
+#: The framework-owned paths that hand ``LoanType.get_queryset`` its source, plus the
+#: root list, whose resolver calls the hook itself and returns its queryset unsealed,
+#: each as (extra settings, document, response without the hook, response with it, loan
 #: statements per request). The ``%(...)s`` slots take GlobalIDs
 #: (``_loan_note_document``); the nested rows start from ``nodes(ids:)``, a root
 #: both executors serve, which resolves each book's loans with its own statement.
@@ -1130,10 +1131,37 @@ _LOAN_QUERYSET_METHOD_HOOK_CASES = [
         2,
         id="node",
     ),
+    pytest.param(
+        {},
+        "query { allLibraryLoans { note } }",
+        {"allLibraryLoans": [{"note": "first checkout"}, {"note": ""}]},
+        {"allLibraryLoans": [{"note": "first checkout"}]},
+        1,
+        id="root-list",
+    ),
+]
+#: The cases above that a seal rebuilds the hook's result on, which the async executor serves
+#: too: ``allLibraryLoans``' sync resolver returns its queryset unevaluated, so the async view
+#: refuses to evaluate it (``SynchronousOnlyOperation``) with or without the hook.
+_LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES = [
+    case for case in _LOAN_QUERYSET_METHOD_HOOK_CASES if case.id != "root-list"
+]
+
+
+#: What ``LoanType.get_queryset`` calls ``with_note()`` on, as the
+#: ``FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD`` value and the cascade subquery tables
+#: the hooked loan statements' ``WHERE`` carries: its input, or what
+#: ``apply_cascade_permissions`` returns walking every edge (``book`` and ``patron``)
+#: or none (``fields=[]``).
+_LOAN_CASCADE_BEFORE_METHOD_CASES = [
+    pytest.param(None, (), id="input"),
+    pytest.param("every_edge", ('"library_book"', '"library_patron"'), id="cascade-every-edge"),
+    pytest.param("no_edge", (), id="cascade-no-edge"),
 ]
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(("cascade", "cascade_tables"), _LOAN_CASCADE_BEFORE_METHOD_CASES)
 @pytest.mark.parametrize(
     (
         "flags",
@@ -1151,6 +1179,8 @@ def test_library_loan_get_queryset_calls_a_project_queryset_method(
     expected: JSONObject,
     expected_with_hook: JSONObject,
     loan_statements: int,
+    cascade: str | None,
+    cascade_tables: tuple[str, ...],
 ) -> None:
     """``LoanType.get_queryset`` narrows through a ``LoanQuerySet`` method on every path.
 
@@ -1159,15 +1189,22 @@ def test_library_loan_get_queryset_calls_a_project_queryset_method(
     ``FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK`` the hook returns
     ``queryset.with_note()``, a method plain ``QuerySet`` does not have, and the
     note-less loan drops out of the root connection, the nested list, the nested
-    connection and the node refetch alike. The same document without the hook is
-    the control: it returns the note-less loan, and the hook's narrowing rides in
-    the loan statements' ``WHERE`` at the same query count and the case's fixed
-    number of loan statements.
+    connection, the node refetch and the root list alike. ``apply_cascade_permissions`` hands the
+    hook's own class back, so the same holds when the hook calls ``with_note()`` on
+    the cascade's return, whether it walks every edge (its ``book`` and ``patron``
+    subqueries ride in the same loan statements) or none (``fields=[]``). The same
+    document without the hook is the control: it returns the note-less loan, and the
+    hook's narrowing rides in the loan statements' ``WHERE`` at the same query count
+    and the case's fixed number of loan statements.
     """
     pks = _seed_loan_note_graph()
 
     def _post(*, hook: bool) -> tuple[JSONObject, int, list[str]]:
-        with override_settings(**flags, FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK=hook):
+        with override_settings(
+            **flags,
+            FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK=hook,
+            FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD=cascade,
+        ):
             project_schema_override()
             filled = _loan_note_document(document, pks)
             with CaptureQueriesContext(connection) as captured:
@@ -1186,9 +1223,15 @@ def test_library_loan_get_queryset_calls_a_project_queryset_method(
     assert len(hooked_loan_sql) == loan_statements, hooked_loan_sql
     assert all('"note"' not in sql.partition(" WHERE ")[2] for sql in loan_sql), loan_sql
     assert all('"note"' in sql.partition(" WHERE ")[2] for sql in hooked_loan_sql), hooked_loan_sql
+    for table in ('"library_book"', '"library_patron"'):
+        assert all(
+            (table in sql.partition(" WHERE ")[2]) is (table in cascade_tables)
+            for sql in hooked_loan_sql
+        ), hooked_loan_sql
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("cascade", "cascade_tables"), _LOAN_CASCADE_BEFORE_METHOD_CASES)
 @pytest.mark.parametrize(
     (
         "flags",
@@ -1197,7 +1240,7 @@ def test_library_loan_get_queryset_calls_a_project_queryset_method(
         "expected_with_hook",
         "loan_statements",
     ),
-    _LOAN_QUERYSET_METHOD_HOOK_CASES,
+    _LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES,
 )
 async def test_async_library_loan_get_queryset_calls_a_project_queryset_method(
     project_schema_override: Callable[[], None],
@@ -1206,17 +1249,23 @@ async def test_async_library_loan_get_queryset_calls_a_project_queryset_method(
     expected: JSONObject,
     expected_with_hook: JSONObject,
     loan_statements: int,
+    cascade: str | None,
+    cascade_tables: tuple[str, ...],
 ) -> None:
     """The async executor hands ``LoanType.get_queryset`` a ``LoanQuerySet`` too.
 
-    The same documents over ``/graphql-async/``: the sync hook runs in a worker
-    thread and its ``with_note()`` call narrows every path as it does on the sync
-    view.
+    The sealed documents over ``/graphql-async/``: the sync hook runs in a worker
+    thread and its ``with_note()`` call, on its input or on the cascade's return,
+    narrows every path as it does on the sync view.
     """
-    # The no-hook control and the statement counts run on the sync twin.
-    del expected, loan_statements
+    # The no-hook control, the statement counts and the cascade SQL run on the sync twin.
+    del expected, loan_statements, cascade_tables
     pks = await sync_to_async(_seed_loan_note_graph)()
-    with override_settings(**flags, FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK=True):
+    with override_settings(
+        **flags,
+        FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK=True,
+        FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD=cascade,
+    ):
         project_schema_override()
         payload = await _post_async_shipped(_loan_note_document(document, pks))
     assert payload == {"data": expected_with_hook}
@@ -1224,15 +1273,15 @@ async def test_async_library_loan_get_queryset_calls_a_project_queryset_method(
 
 #: Every framework path that hands ``LoanType.get_queryset`` its source, as (extra
 #: settings, document, response, loan statements without the hook, hook calls, statements
-#: without the hook): the four paths of ``_LOAN_QUERYSET_METHOD_HOOK_CASES`` (the default
-#: seal), plus a plain-list relation and a nested connection planned under
+#: without the hook): the four paths of ``_LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES`` (the
+#: default seal), plus a plain-list relation and a nested connection planned under
 #: ``allLibraryBooks`` (the list-relation-child and prefetch-child seals). Under
 #: ``FAKESHOP_TEST_LOAN_FETCHED_ANNOTATION_HOOK`` each hook
 #: call reads one annotated row before returning, one loan statement per call.
 _LOAN_FETCHED_ANNOTATION_HOOK_CASES = [
     pytest.param(*case.values[:3], case.values[4], hook_calls, queries, id=case.id)
     for case, (hook_calls, queries) in zip(
-        _LOAN_QUERYSET_METHOD_HOOK_CASES,
+        _LOAN_QUERYSET_METHOD_HOOK_SEALED_CASES,
         (
             (1, 1),
             (2, 3),
