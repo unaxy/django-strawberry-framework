@@ -3970,6 +3970,31 @@ def test_library_globalid_filter_into_a_custom_node_id_compares_the_house_code(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", list(_HOUSE_SHAPES))
+def test_library_globalid_filter_matches_a_house_code_the_column_validator_refuses(
+    shape: str,
+) -> None:
+    """A GlobalID filter finds a house whose stored code the column's validator refuses.
+
+    ``Publisher.house_code`` refuses a ``RETIRED-`` code on a validated write, while
+    ``QuerySet.update`` stores one without it. The id carrying Orbit's retired code
+    returns Orbit through every shape (the ``not:`` arms every other house), at the
+    statements the root issues under any filter: the id is decoded against what the
+    column stores, never the validators a write runs.
+    """
+    _seed_houses()
+    house_shape = _HOUSE_SHAPES[shape]
+    models.Publisher.objects.filter(name="Orbit").update(house_code="RETIRED-O")
+    global_id = global_id_for(library_schema.PublisherType, "RETIRED-O")
+    with CaptureQueriesContext(connection) as captured:
+        data = _assert_graphql_success(_house_document(house_shape, global_id))
+    matched = ["Orbit"]
+    expected = sorted(set(_HOUSE_RUN_SIZES) - set(matched)) if house_shape.negated else matched
+    assert _house_names(house_shape.root, data) == expected
+    assert len(captured.captured_queries) == _HOUSE_ROOT_QUERIES[house_shape.root]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_HOUSE_SHAPES))
 def test_library_globalid_filter_into_a_custom_node_id_refuses_an_uncoercible_code(
     shape: str,
 ) -> None:
@@ -16688,6 +16713,38 @@ def test_model_create_edition_with_a_nul_is_refused_before_any_write_over_http(
 
 
 @pytest.mark.django_db
+def test_model_create_edition_relates_a_retired_house_code_over_http() -> None:
+    """A model-flavor create relates a publisher whose stored house code the validator refuses.
+
+    ``Publisher.house_code`` refuses a ``RETIRED-`` code on a validated write, while
+    ``objects.create`` stores one without it. ``publisherId`` is a ``GlobalID`` carrying
+    that code as ``PublisherType``'s node id; the decode coerces it against what the
+    column stores, so the edition is written against the publisher. ``Publisher`` is
+    read three times, as for any house code: the node id mapped to the primary key, the
+    relation's visibility check, and the foreign key's own validation in ``full_clean``.
+    """
+    publisher = models.Publisher.objects.create(name="Retired Press", house_code="RETIRED-9")
+
+    with CaptureQueriesContext(connection) as captured:
+        result = _post_keyed_create(
+            "createEdition",
+            "EditionInput",
+            {
+                "isbn_13": "9780000000009",
+                "imprint": "New",
+                "publisherId": global_id_for(library_schema.PublisherType, "RETIRED-9"),
+            },
+        )
+
+    assert result == {"createEdition": {"errors": []}}
+    reads = sum('FROM "library_publisher"' in q["sql"] for q in captured.captured_queries)
+    assert reads == 3
+    assert list(models.Edition.objects.values_list("isbn_13", "publisher_id")) == [
+        ("9780000000009", publisher.pk),
+    ]
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     ("house_code", "node", "publisher_reads"),
     [("NP", {"__typename": "PublisherType", "name": "NulPress"}, 1), ("NP\x00", None, 0)],
@@ -16720,6 +16777,32 @@ def test_node_id_holding_a_nul_resolves_to_null_without_a_query_over_http(
     assert many == {"data": {"nodes": [node]}}
     reads = sum('FROM "library_publisher"' in q["sql"] for q in captured.captured_queries)
     assert reads == 2 * publisher_reads
+
+
+@pytest.mark.django_db
+def test_node_id_holding_a_code_the_column_validator_refuses_resolves_over_http() -> None:
+    """``node`` and ``nodes`` resolve a publisher whose stored house code the validator refuses.
+
+    ``Publisher.house_code`` refuses a ``RETIRED-`` code on a validated write, while
+    ``objects.create`` stores one without it. ``PublisherType`` publishes the house code
+    as its node id, and the id is coerced against what the column stores, so both
+    roots resolve the row with one ``Publisher`` read each.
+    """
+    models.Publisher.objects.create(name="Retired Press", house_code="RETIRED-7")
+    global_id = global_id_for(library_schema.PublisherType, "RETIRED-7")
+    selection = "__typename ... on PublisherType { name }"
+    node = {"__typename": "PublisherType", "name": "Retired Press"}
+
+    with CaptureQueriesContext(connection) as captured:
+        single = _post_node(global_id, selection)
+        many = response_json(
+            _post_graphql(f'query {{ nodes(ids: ["{global_id}"]) {{ {selection} }} }}'),
+        )
+
+    assert single == {"data": {"node": node}}
+    assert many == {"data": {"nodes": [node]}}
+    reads = sum('FROM "library_publisher"' in q["sql"] for q in captured.captured_queries)
+    assert reads == 2
 
 
 @pytest.mark.django_db

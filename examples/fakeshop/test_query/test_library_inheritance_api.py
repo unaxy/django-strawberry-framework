@@ -1243,9 +1243,9 @@ def test_lending_desk_update_out_of_range_id_is_not_found_over_http(mutation: st
     """A desk update ``id`` past ``Venue.id``'s range is the not-found error; the desk is kept.
 
     ``LendingDeskType`` is non-Relay, so the ``id`` is the raw primary key, the
-    ``venue_ptr`` parent link. The link carries no range validator of its own: the id is
-    held to the range of ``Venue.id``, the column the link stores, before the locate
-    query runs, never reaching it as a backend ``OverflowError``.
+    ``venue_ptr`` parent link. The id is held to the integer range the database stores
+    for ``Venue.id``, the column the link stores, before the locate query runs, never
+    reaching it as a backend ``OverflowError``.
     """
     desk = models.LendingDesk.objects.create(name="Desk", window_count=2)
     before = _stored_desk(desk.pk)

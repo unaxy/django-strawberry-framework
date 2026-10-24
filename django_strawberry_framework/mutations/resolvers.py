@@ -1992,22 +1992,23 @@ def coerce_lookup_id(
     ``type``-strategy id carries the name that schema published for its type,
     so the decode resolves it through that schema's own type map.
 
-    **Non-Relay primary** - no GlobalID names such a type, so the wire value is the
-    raw pk, coerced through the target model's pk field by the same
-    ``utils/write_values.py::coerce_relation_pk_or_none`` primitive a raw-pk
-    relation id uses (``to_python`` then ``run_validators``). An uncoercible or
-    out-of-range literal is the **not-found** ``FieldError`` on ``id`` before any
-    query, never a raw ``ValueError`` / backend ``OverflowError``; a coerced pk
-    still meets ``locate_instance``'s visibility ``get_queryset``, so a hidden row
-    and a missing row stay indistinguishable. A GlobalID string sent here is just
-    an uncoercible literal. A coerced pk holding unencodable text (a lone surrogate in
-    the id of a text-keyed primary, which coerces cleanly through its text pk field) is
-    the text preflight's ``invalid`` ``FieldError`` on ``id`` (``unstorable_text_error``)
-    before the locate query, which would otherwise raise a raw backend
-    ``UnicodeEncodeError``. A text id holding an embedded NUL, raw or a ``GlobalID``'s
-    decoded node id, is the **not-found** ``FieldError`` on ``id`` before any query: the
-    coercion (``utils/querysets.py::coerce_field_value_or_none``) answers it as naming no
-    row, since no write stores a NUL and PostgreSQL refuses to bind one.
+    **Non-Relay primary** - no GlobalID names such a type, so the wire value is the raw
+    pk, coerced through the target model's pk field by the same
+    ``utils/write_values.py::coerce_relation_pk_or_none`` primitive a raw-pk relation id
+    uses (``to_python``, then the bind and the column's storage domain; the pk field's own
+    validators are not run, so an id they would refuse still locates a row that holds
+    it). An uncoercible or out-of-range literal is the **not-found** ``FieldError`` on
+    ``id`` before any query, never a raw ``ValueError`` / backend ``OverflowError``; a
+    coerced pk still meets ``locate_instance``'s visibility ``get_queryset``, so a
+    hidden row and a missing row stay indistinguishable. A GlobalID string sent here is
+    just an uncoercible literal. A coerced pk holding unencodable text (a lone surrogate
+    in the id of a text-keyed primary, which coerces cleanly through its text pk field)
+    is the text preflight's ``invalid`` ``FieldError`` on ``id``
+    (``unstorable_text_error``) before the locate query, which would otherwise raise a
+    raw backend ``UnicodeEncodeError``. A text id holding an embedded NUL, raw or a
+    ``GlobalID``'s decoded node id, is the **not-found** ``FieldError`` on ``id`` before
+    any query: the coercion (``utils/querysets.py::coerce_field_value_or_none``) answers
+    it as naming no row, since no write stores a NUL and PostgreSQL refuses to bind one.
 
     Returns ``(pk, None)`` on success or ``(None, FieldError)`` otherwise.
     """

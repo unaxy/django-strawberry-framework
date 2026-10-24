@@ -55,6 +55,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
+from django.core.validators import MinValueValidator
 from django.db import models
 from typing_extensions import override
 
@@ -171,8 +172,13 @@ class ScalarSpecimen(models.Model):
     # Signed 64-bit; exercises the ``BigIntegerField -> BigInt`` converter
     # entry directly (the library app's ``Patron.lifetime_fines_cents`` hits
     # the same entry; both stay because the scalar coverage app is the place
-    # that pins every entry in one query).
-    signed_big: _BigInt = models.BigIntegerField(default=0)
+    # that pins every entry in one query). The validator refuses a negative
+    # value a validated write sends, while a row ``objects.create`` stores
+    # below zero stays matchable by every filter on the column.
+    signed_big: _BigInt = models.BigIntegerField(
+        default=0,
+        validators=[MinValueValidator(0)],
+    )
     # Unsigned 64-bit; exercises the ``PositiveBigIntegerField -> BigInt``
     # converter entry. Wire scalar is the same ``BigInt`` as the signed entry
     # but the converter table row is distinct.

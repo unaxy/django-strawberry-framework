@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
+from django.core.validators import RegexValidator
 from django.db import models
 from typing_extensions import Self, override
 
@@ -499,6 +500,14 @@ class Loan(models.Model):
         return f"{self.book} to {self.patron}"
 
 
+#: Refuses a house code under the ``RETIRED-`` prefix.
+_RETIRED_HOUSE_CODE = RegexValidator(
+    r"^RETIRED-",
+    inverse_match=True,
+    message="A retired house code is not issued.",
+)
+
+
 class Publisher(models.Model):
     """A publishing house whose wire identity is its stable house code.
 
@@ -512,7 +521,12 @@ class Publisher(models.Model):
     pk: int | None
 
     name: _Text = models.TextField(unique=True)
-    house_code: _Text = models.TextField(unique=True)
+    # A retired code is never issued to a validated write, while a row that
+    # already holds one keeps its node id.
+    house_code: _Text = models.TextField(
+        unique=True,
+        validators=[_RETIRED_HOUSE_CODE],
+    )
 
     @override
     def __str__(self) -> str:

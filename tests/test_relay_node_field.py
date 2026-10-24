@@ -22,7 +22,7 @@ import strawberry
 from apps.products import services
 from apps.products.models import Category
 from asgiref.sync import sync_to_async
-from django.db import connection
+from django.db import DEFAULT_DB_ALIAS, connection
 from django.db.models import Model, QuerySet
 from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
@@ -584,7 +584,7 @@ def test_coerce_pk_or_none_passes_raw_string_for_non_field_node_id() -> None:
 
     finalize_django_types()
     assert implements_relay_node(SlugNode)
-    assert _coerce_pk_or_none(SlugNode, "abc-123") == "abc-123"
+    assert _coerce_pk_or_none(SlugNode, "abc-123", alias=DEFAULT_DB_ALIAS) == "abc-123"
 
 
 @pytest.mark.django_db

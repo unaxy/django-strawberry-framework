@@ -335,11 +335,11 @@ def test_filter_specimens_explicit_empty_in_is_the_empty_set_on_every_column(
 
 @pytest.mark.django_db
 def test_filter_specimens_by_unsigned_bigint_in_drops_below_zero_members() -> None:
-    """A negative ``in`` member on a ``PositiveBigIntegerField`` is dropped by the LOWER-bound validator.
+    """A negative ``in`` member on a ``PositiveBigIntegerField`` is dropped by the column's LOWER bound.
 
-    ``unsigned_big`` is a ``PositiveBigIntegerField`` whose range validators reject
-    any value below 0, so ``IntegerInFilter``'s per-member coercion (``to_python`` +
-    ``run_validators``) drops a negative member through the MIN-value path - the
+    ``unsigned_big`` is a ``PositiveBigIntegerField`` whose integer range on the
+    database starts at 0, so ``IntegerInFilter``'s per-member coercion (``to_python``,
+    then the column's range) drops a negative member through the lower bound - the
     unsigned counterpart to the signed upper-bound overflow drop above. The in-range
     member still filters; a NON-empty list whose members ALL drop matches NOTHING
     (``qs.none()``), not every row. Pins ``IntegerInFilter``'s application to
@@ -349,8 +349,8 @@ def test_filter_specimens_by_unsigned_bigint_in_drops_below_zero_members() -> No
     _seed_specimen(label="keep", unsigned_big=7)
     _seed_specimen(label="other", unsigned_big=3)
 
-    # -1 is below the PositiveBigIntegerField minimum (0) and is dropped by the
-    # lower-bound validator; 7 still selects its row, proving only the bad member
+    # -1 is below the PositiveBigIntegerField minimum (0) and is dropped as outside
+    # the column's range; 7 still selects its row, proving only the bad member
     # was dropped (not the whole filter).
     mixed = _post_graphql(
         """
@@ -579,6 +579,44 @@ def test_filter_specimens_by_declared_bigint_list_drops_out_of_range_members(
 
     assert _filtered_labels({f"{column}Among": {"in": values}}, negate=negate) == rows
     assert _filtered_labels({column: {"in": values}}, negate=negate) == rows
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("negate", [False, True], ids=["flat", "not"])
+@pytest.mark.parametrize(
+    ("filter_input", "expected"),
+    [
+        pytest.param({"signedBig": {"in": ["-5"]}}, ["low"], id="generated-in"),
+        pytest.param({"signedBig": {"in": ["-5", "7"]}}, ["low", "mid"], id="generated-in-mixed"),
+        pytest.param({"signedBig": {"exact": "-5"}}, ["low"], id="generated-exact"),
+        pytest.param({"signedBig": {"range": ["-5", "-5"]}}, ["low"], id="generated-range"),
+        pytest.param({"signedBigAmong": {"in": ["-5"]}}, ["low"], id="declared-list"),
+        pytest.param(
+            {"signedBigSpan": {"range": {"start": "-5", "end": "-5"}}},
+            ["low"],
+            id="declared-range",
+        ),
+    ],
+)
+def test_filter_specimens_match_a_stored_value_the_column_validator_refuses(
+    filter_input: dict[str, object],
+    expected: list[str],
+    *,
+    negate: bool,
+) -> None:
+    """A stored ``signed_big`` the column's validator refuses is matched by every filter on it.
+
+    ``ScalarSpecimen.signed_big`` declares ``MinValueValidator(0)``, which a validated write
+    runs, while ``objects.create`` stores the ``low`` row's ``-5`` without it. Each filter
+    identifies a row by what the column stores: the generated ``in`` keeps the ``-5``
+    member (``filters/base.py::IntegerInFilter``), matching the row exactly as ``exact``,
+    ``range``, the declared ``signedBigAmong`` ``ListFilter`` and ``signedBigSpan``
+    ``RangeFilter`` do, flat and as the exact complement under ``not``.
+    """
+    _seed_declared_bigint_rows()
+    rows = sorted(set(_DECLARED_BIGINT_ROWS) - set(expected)) if negate else expected
+
+    assert _filtered_labels(filter_input, negate=negate) == rows
 
 
 @pytest.mark.django_db

@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast, final
 
 from django.core.exceptions import ValidationError
-from django.db import connections, models
+from django.db import models
 from django.db.models.options import Options
 from django.forms import (
     CharField,
@@ -968,39 +968,26 @@ class RangeFilter(_ColumnCleanedFilter):
         return super().filter(qs, value)
 
 
-def _backend_storable_int_members(
-    model_field: models.IntegerField[object, object],
+def _identifying_members(
+    model_field: ModelField,
     members: list[object],
     alias: str,
 ) -> list[object]:
-    """Return the members ``model_field`` converts to an integer inside its backend range.
+    """Return each member coerced through ``model_field``, dropping one that names no row.
 
-    The range is the one the database ``alias`` stores for the column's internal type
-    (``DatabaseOperations.integer_field_range``), the range Django's integer comparison
-    lookups test a bound against before binding it. A member ``to_python`` refuses, or
-    one outside that range, identifies no row and is dropped; the column's own validators
-    are not run, since a row holding a value they would refuse can still be stored.
+    The coercion is the shared ``utils/querysets.py::coerce_field_value_or_none``
+    primitive against the queryset's database ``alias``: a member ``to_python`` refuses,
+    that database cannot bind, or outside the column's integer range there identifies no
+    row. The column's own
+    validators are not run, so a member they would refuse still matches a row that holds
+    it.
     """
-    bounds = connections[alias].ops.integer_field_range(model_field.get_internal_type())
     kept: list[object] = []
     for member in members:
-        try:
-            number = object_result(model_field.to_python, member)
-        except ValidationError:
-            continue
-        if isinstance(number, int) and _within_integer_range(number, bounds):
-            kept.append(number)
+        coerced = coerce_field_value_or_none(model_field, member, alias=alias)
+        if coerced is not None:
+            kept.append(coerced)
     return kept
-
-
-def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:
-    """Whether ``number`` lies inside ``bounds``, either end of which a backend may leave open.
-
-    ``None`` at an end is no limit there, as Django's range-aware integer lookups read it
-    (``django.db.models.lookups.IntegerFieldOverflow``).
-    """
-    low, high = bounds
-    return (low is None or number >= low) and (high is None or number <= high)
 
 
 class ListFilterMethod(_EmptyListAwareFilterMethod):
@@ -1046,7 +1033,7 @@ class ListFilter(_ElementCleanedFilter):
         shapes the form contract delivers are meaningful; everything else is
         a coded reject. An ``in`` over an integer column then keeps only the elements inside
         the column's integer range on the queryset's database
-        (``_backend_storable_int_members``); a list with none left matches nothing, or every
+        (``_identifying_members``); a list with none left matches nothing, or every
         row under ``exclude`` (``_match_none_queryset``).
         """
         if value is None:
@@ -1060,7 +1047,7 @@ class ListFilter(_ElementCleanedFilter):
             return _match_none_queryset(self, qs)
         model_field = _bound_model_field(self) if self.lookup_expr == "in" else None
         if isinstance(model_field, models.IntegerField):
-            kept = _backend_storable_int_members(model_field, value, qs.db)
+            kept = _identifying_members(model_field, value, qs.db)
             if not kept:
                 return _match_none_queryset(self, qs)
             return super().filter(qs, kept)
@@ -1152,32 +1139,6 @@ def membership_in_filter_class(in_filter_class: type[BaseInFilter]) -> type[Memb
     return ConcreteInFilter
 
 
-def _coerce_int_in_members(model_field: ModelField | None, values: list[object]) -> list[object]:
-    """Drop ``__in`` members an integer column cannot store (range coercion).
-
-    A scalar ``__in`` lookup (`BaseInFilter`) binds each member directly as a query
-    parameter, so a value past the column's signed-64-bit range reaches the backend
-    as a raw ``OverflowError`` (`Python int too large to convert to SQLite INTEGER`)
-    escaping as a top-level error - unlike a scalar `exact` / comparison, which
-    Django's range-aware integer lookups resolve to "matches nothing" BEFORE binding.
-    Each element is coerced through the shared
-    `utils/querysets.py::coerce_field_value_or_none` primitive and an uncoercible /
-    out-of-range element is DROPPED - it can identify no row - so the common case
-    (some valid members) still filters and never overflows the backend. Sibling of
-    `utils/write_values.py::coerce_relation_pk_or_none` (the raw-pk M2M coercion)
-    and `relay.py::_coerce_pk_or_none` (the GlobalID id-attr coercion) - same
-    coercion mechanics, a different field.
-    """
-    if model_field is None:
-        return values
-    kept: list[object] = []
-    for value in values:
-        coerced = coerce_field_value_or_none(model_field, value)
-        if coerced is not None:
-            kept.append(coerced)
-    return kept
-
-
 class IntegerInFilter(MembershipInFilter, NumberFilter):
     """Integer ``__in`` filter that drops out-of-range members and is empty-aware.
 
@@ -1185,9 +1146,11 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
     instead of django-filter's plain `BaseInFilter`. Two behaviours layer onto the
     default element-binding `__in`:
 
-    - **Range coercion** (the original overflow fix): each member is coerced through
-      the column and an out-of-range one is dropped, so it never reaches the backend
-      as a raw `OverflowError`.
+    - **Range coercion**: each member is coerced through the column against the
+      queryset's database (`_identifying_members`) and one that database cannot bind or
+      outside the column's integer range there is dropped, so it never reaches the backend
+      as a raw `OverflowError`. The column's own validators are not run, so a member they
+      would refuse still matches a row that holds it, as `exact` matches it.
     - **Empty-aware match-nothing**: a NON-empty input whose members ALL
       drop - every value is out of range and can identify no row - matches NOTHING,
       so it short-circuits to `qs.none()` rather than degrading to django-filter's
@@ -1217,7 +1180,7 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
         )
         model_field = _bound_model_field(self)
         if model_field is not None:
-            kept = _coerce_int_in_members(model_field, value)
+            kept = _identifying_members(model_field, value, qs.db)
             if not kept:
                 # An empty membership list, or one whose every value is out of range,
                 # matches no row; never the empty-value skip that would return all rows.
@@ -1562,6 +1525,7 @@ def _decode_and_validate_global_id(
     *,
     index: int | None = None,
     target: _GlobalIDTarget | None = None,
+    alias: str,
 ) -> object:
     """Decode `value` to a node id and validate its type and target id per strategy.
 
@@ -1611,7 +1575,10 @@ def _decode_and_validate_global_id(
     column a consumer ``relay.NodeID[...]`` annotation names. An ID with a
     correctly typed wire payload but an invalid integer / UUID / range / text
     value is rejected as ``GLOBALID_INVALID`` before Django can raise while
-    compiling the queryset; a valid value no row carries matches nothing.
+    compiling the queryset; a valid value no row carries matches nothing. The bind
+    and the column's storage domain are the filtered queryset's database ``alias``'s,
+    and the column's own validators are not run, so an id they would refuse still matches
+    a row that holds it.
     Unbound unit-test filters retain the node-id-only fallback because they have
     no model field against which to coerce. ``target`` threads the filter's
     ``_globalid_target`` through a list so it resolves once per call; when
@@ -1725,6 +1692,7 @@ def _decode_and_validate_global_id(
             slot.node_type,
             decoded.node_id,
             slot=(slot.id_attr, slot.field),
+            alias=alias,
         )
         if coerced_slot_value is None:
             suffix = "" if index is None else f" at index {index}"
@@ -1736,7 +1704,7 @@ def _decode_and_validate_global_id(
         return coerced_slot_value
     target_pk = getattr(truth.static_attr(target_model, "_meta", None), "pk", None)
     if isinstance(target_pk, models.Field):
-        coerced_node_id = coerce_field_value_or_none(target_pk, decoded.node_id)
+        coerced_node_id = coerce_field_value_or_none(target_pk, decoded.node_id, alias=alias)
         if coerced_node_id is None:
             suffix = "" if index is None else f" at index {index}"
             raise GraphQLError(
@@ -1815,7 +1783,7 @@ class GlobalIDFilter(Filter):
         if value is None:
             return super().filter(qs, None)
         target = _globalid_target(self)
-        node_id = _decode_and_validate_global_id(value, self, target=target)
+        node_id = _decode_and_validate_global_id(value, self, target=target, alias=qs.db)
         path = _globalid_predicate_path(self, target)
         if path is not None:
             return _apply_lookup_predicate(self, qs, node_id, field_name=path)
@@ -1956,7 +1924,7 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
             return _match_none_queryset(self, qs)
         target = _globalid_target(self)
         node_ids = [
-            _decode_and_validate_global_id(item, self, index=idx, target=target)
+            _decode_and_validate_global_id(item, self, index=idx, target=target, alias=qs.db)
             for idx, item in enumerate(value)
         ]
         path = _globalid_predicate_path(self, target)
@@ -2032,18 +2000,20 @@ def model_choice_identity_column(
     return _model_identity_column(model, filter_instance.extra.get("to_field_name"))
 
 
-def _coerce_relation_identity(filter_instance: Filter, value: object) -> object:
+def _coerce_relation_identity(filter_instance: Filter, value: object, alias: str) -> object:
     """Coerce one raw identity value through the target key column; ``None`` if it names no row.
 
-    A value the column cannot hold (out of range, wrong shape) identifies no row, the
-    same verdict ``_coerce_int_in_members`` gives an integer ``in`` member. A filter
+    A value the column cannot hold (one the queryset's database ``alias`` cannot bind,
+    out of the column's range there, wrong shape) identifies no row, the same verdict
+    ``_identifying_members`` gives an integer ``in`` member; the column's own validators
+    are not run, so a key they would refuse still matches a row that holds it. A filter
     with no model to walk (``_bound_model_field``) has no column and passes the value
     through unchanged.
     """
     column = relation_identity_column(_bound_model_field(filter_instance))
     if column is None:
         return value
-    return coerce_field_value_or_none(column, value)
+    return coerce_field_value_or_none(column, value, alias=alias)
 
 
 @final
@@ -2099,7 +2069,7 @@ class RelationPkFilter(Filter):
         """
         if value is None:
             return qs
-        coerced = _coerce_relation_identity(self, value)
+        coerced = _coerce_relation_identity(self, value, qs.db)
         if coerced is None:
             return _match_none_queryset(self, qs)
         return _apply_lookup_predicate(self, qs, coerced, field_name=_marked_pk_field_name(self))
@@ -2135,7 +2105,7 @@ class RelationPkMultipleFilter(Filter):
         )
         kept = [
             coerced
-            for coerced in (_coerce_relation_identity(self, member) for member in members)
+            for coerced in (_coerce_relation_identity(self, member, qs.db) for member in members)
             if coerced is not None
         ]
         if not kept:
